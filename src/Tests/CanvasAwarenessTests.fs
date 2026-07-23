@@ -85,7 +85,11 @@ let private defaultModel : Model =
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
-      SelectedOverviewGroup = None }
+      SelectedOverviewGroup = None
+      OverviewHistoryWindow = None
+      OverviewHistory = None
+      OverviewHistoryRequestedAt = System.DateTimeOffset.Now
+      OverviewHistoryRequestInFlight = None }
 
 /// Calls update and returns the model, ignoring the Cmd. Tolerates the
 /// Fable.Remoting.Client proxy build failing under .NET, which surfaces as a

@@ -178,6 +178,15 @@
            box/title bar or hairlines (the toggle button is the header); the category columns wrap to
            the next line when the pane is too narrow (overview-drilldown). */
         .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
+        /* History cycle button toolbar (spec: docs/spec/overview-activity-history.md). Pinned top-right,
+           styled like the band's controls; aria-pressed=true tints it while a window is open. */
+        .overview-toolbar { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+        .history-toggle {
+            font-size: 11px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+            background: #313244; color: #a6adc8; border: 1px solid #45475a;
+        }
+        .history-toggle:hover { background: #3b3f52; color: #cdd6f4; }
+        .history-toggle[aria-pressed="true"] { background: #2e3245; color: #cba6f7; border-color: #585b70; }
         .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
         .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
         /* Shared column layout — identical for both sections; only the visual row differs. The
@@ -276,6 +285,33 @@
         .overview-task-name { font-size: 12.5px; color: #cdd6f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .overview-task-track { display: block; }
         .overview-task-bar { display: block; height: 6px; border-radius: 3px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
+
+        /* In-band history chart (spec: docs/spec/overview-activity-history.md). Each stacked stepped-area
+           chart hangs directly under its live section, split off by a dashed rule; the areas reuse the
+           band's task and activity accent classes (fill = currentColor). Geometry mirrors the prototype
+           .agents/canvas/overview-chart-prototype.html. Empty series are omitted (chart + legend). */
+        .history-charts { margin-top: 14px; padding-top: 14px; border-top: 1px dashed #45475a; }
+        /* Keep the tasks section's own dashed divider even when the agents chart block sits before it. */
+        .history-charts + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
+        .history-charts figure { background: #181825; padding: 12px 14px 6px; border-radius: 10px; margin: 10px 0 0; }
+        .history-charts .chart-stage { position: relative; }
+        .history-charts svg { display: block; width: 100%; height: auto; }
+        .chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 0 0; font-size: 11.5px; color: #a6adc8; }
+        .chart-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+        .chart-legend .swatch { width: 10px; height: 10px; border-radius: 2px; background: currentColor; flex: none; }
+        .chart-legend .chart-legend-label { color: #a6adc8; }
+        .history-charts .axis-label { fill: #6c7086; font: 10px system-ui; }
+        .history-charts .grid-line { stroke: #313244; stroke-width: 1; }
+        /* Crosshair tooltip (task tm-activity-history-zx6): dashed guide line + a snapped HTML tooltip
+           positioned in the same unpadded stage as the SVG. */
+        .history-charts .cursor-line { stroke: #7f849c; stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+        .chart-tip { position: absolute; pointer-events: none; z-index: 5; background: #11111b; border: 1px solid #45475a; border-radius: 7px; padding: 7px 9px; font-size: 11.5px; color: #cdd6f4; white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
+        .chart-tip .tip-time { color: #6c7086; margin-bottom: 4px; font-size: 10.5px; }
+        .chart-tip .tip-row { display: flex; align-items: center; gap: 6px; line-height: 1.55; }
+        .chart-tip .tip-row .tip-label { color: #a6adc8; }
+        .chart-tip .tip-row b { color: #cdd6f4; font-weight: 600; }
+        .chart-tip .tip-total { margin-top: 4px; padding-top: 4px; border-top: 1px solid #313244; color: #a6adc8; }
+        .chart-tip .swatch { width: 10px; height: 10px; border-radius: 2px; background: currentColor; flex: none; }
 
         .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
         .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }

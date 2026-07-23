@@ -4,6 +4,7 @@ open System
 open System.Diagnostics
 open System.IO
 open System.Threading
+open System.Threading.Tasks
 open Shared
 open Shared.EventUtils
 
@@ -42,6 +43,10 @@ type DashboardState =
       ExpeditedRepos: Set<RepoId>
       ClientActivity: ActivityLevel
       ClientActivityAt: DateTimeOffset
+      /// True only after the durable live-session rebuild has been applied, including an empty seed.
+      /// Overview capture uses this to distinguish "no live sessions" from "startup has not loaded
+      /// session state yet".
+      SessionStatusesHydrated: bool
       // Push-model live session status, keyed by SessionId. Fed by the SessionActivity mailbox
       // (single writer) via UpdateSessionStatus and rebuilt from SQLite on restart. Kept bounded by
       // evicting entries older than the idle window (relative to the newest LastSeen) on each update
@@ -67,10 +72,12 @@ module DashboardState =
           ExpeditedRepos = Set.empty
           ClientActivity = ActivityLevel.Idle
           ClientActivityAt = DateTimeOffset.MinValue
+          SessionStatusesHydrated = false
           SessionStatuses = Map.empty
           CodingToolSinceByWorktree = Map.empty }
 
 type StateMsg =
+    | InitializeRepo of repoId: RepoId
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary * BeadsPlanning
@@ -179,6 +186,12 @@ let internal codingToolPushEvent (stored: SessionActivityStore.StoredStatus) : C
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
+    | InitializeRepo repoId ->
+        if Map.containsKey repoId state.Repos then
+            state
+        else
+            updateRepo repoId PerRepoState.empty state
+
     | UpdateWorktreeList(repoId, worktrees) ->
         let repo = getRepo repoId state
         let newPaths = worktrees |> List.map _.Path |> Set.ofList
@@ -334,6 +347,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
                 state.LatestByCategory |> Map.add "CodingToolRefresh" (codingToolPushEvent newest)
 
         { state with
+            SessionStatusesHydrated = true
             SessionStatuses = seeded
             LatestByCategory = latestByCategory
             CodingToolSinceByWorktree = idleSince }
@@ -804,7 +818,11 @@ module CanvasWatchers =
         watchers |> Map.iter (fun _ watcher ->
             try watcher.Dispose() with _ -> ())
 
-let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: CancellationToken) =
+let start
+    (agent: MailboxProcessor<StateMsg>)
+    (worktreeRoots: string list)
+    (ct: CancellationToken)
+    =
     let rootPaths = buildRootPaths worktreeRoots
 
     let initialRepos =
@@ -813,53 +831,107 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
     rootPaths
     |> Map.iter (fun repoId _ ->
-        agent.Post(UpdateWorktreeList(repoId, [])))
+        agent.Post(InitializeRepo repoId))
 
-    /// Mutable ref for the latest canvas file watchers, shared between the reconcile
-    /// callback and the main scheduler loop so watcher updates are visible across iterations.
-    let rec loop (latestWatchers: Map<string, FileSystemWatcher> ref) (lastRuns: Map<RefreshTask, DateTimeOffset>) (watchers: Map<string, FileSystemWatcher>) =
+    // The registration owns the watcher set for the current recursive state. Reconciliation replaces
+    // the registration immutably, so cancellation always disposes the latest set without a shared cell.
+    let registerWatcherCleanup watchers =
+        ct.Register(fun () -> CanvasWatchers.disposeAll watchers)
+
+    let recoverIteration (ex: exn) =
         async {
-            let! state = agent.PostAndAsyncReply(GetState)
+            Log.log "Scheduler" $"Refresh iteration failed, continuing with last snapshot: {ex.Message}"
+            do! Async.Sleep 5000
+        }
 
-            let repos =
-                if Map.isEmpty state.Repos then initialRepos
-                else state.Repos
+    let prepareIteration
+        (watchers: Map<string, FileSystemWatcher>)
+        (watcherCleanup: CancellationTokenRegistration)
+        =
+        async {
+            try
+                let! state = agent.PostAndAsyncReply(GetState)
 
-            let! watchers = CanvasWatchers.reconcile agent repos watchers
-            latestWatchers.Value <- watchers
+                let repos =
+                    if Map.isEmpty state.Repos then initialRepos
+                    else state.Repos
 
-            let archivedBranchSets = readArchivedBranchSets rootPaths
-            let archivedPaths = resolveArchivedPaths archivedBranchSets repos
-            let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
-            let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
-            let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
-            let now = DateTimeOffset.UtcNow
-            let activity = effectiveActivity now state
+                let! nextWatchers = CanvasWatchers.reconcile agent repos watchers
+                watcherCleanup.Dispose()
+                let nextCleanup = registerWatcherCleanup nextWatchers
+                return Some(state, repos, nextWatchers, nextCleanup)
+            with ex ->
+                do! recoverIteration ex
+                return None
+        }
 
-            let effectiveLastRuns =
-                tasks
-                |> List.fold (fun runs task ->
+    let runPreparedIteration
+        state
+        repos
+        watchers
+        watcherCleanup
+        lastRuns
+        =
+        async {
+            try
+                let archivedBranchSets = readArchivedBranchSets rootPaths
+                let archivedPaths = resolveArchivedPaths archivedBranchSets repos
+                let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
+                let ignoredPaths = resolveIgnoredPaths ignorePredicate repos
+                let tasks = buildTaskList { Archived = archivedPaths; Ignored = ignoredPaths } repos
+                let now = DateTimeOffset.UtcNow
+                let activity = effectiveActivity now state
+
+                let effectiveLastRuns =
+                    tasks
+                    |> List.fold (fun runs task ->
+                        match task with
+                        | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
+                            runs |> Map.remove task
+                        | _ -> runs) lastRuns
+
+                match pickMostOverdue activity now effectiveLastRuns tasks with
+                | Some task ->
+                    let! result = executeWithTimeout agent rootPaths task
+                    logTaskResult agent task result
+
                     match task with
                     | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
-                        runs |> Map.remove task
-                    | _ -> runs) lastRuns
+                        agent.Post(ClearExpedite repoId)
+                    | _ -> ()
 
-            match pickMostOverdue activity now effectiveLastRuns tasks with
-            | Some task ->
-                let! result = executeWithTimeout agent rootPaths task
-                logTaskResult agent task result
+                    let updatedRuns = lastRuns |> Map.add task now
+                    return updatedRuns, watchers, watcherCleanup
+                | None ->
+                    let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
+                    do! Async.Sleep sleepMs
+                    return lastRuns, watchers, watcherCleanup
+            with ex ->
+                do! recoverIteration ex
+                return lastRuns, watchers, watcherCleanup
+        }
 
-                match task with
-                | RefreshWorktreeList repoId when Set.contains repoId state.ExpeditedRepos ->
-                    agent.Post(ClearExpedite repoId)
-                | _ -> ()
+    let rec loop
+        (lastRuns: Map<RefreshTask, DateTimeOffset>)
+        (watchers: Map<string, FileSystemWatcher>)
+        (watcherCleanup: CancellationTokenRegistration)
+        =
+        async {
+            let! prepared = prepareIteration watchers watcherCleanup
 
-                let updatedRuns = lastRuns |> Map.add task now
-                return! loop latestWatchers updatedRuns watchers
+            match prepared with
             | None ->
-                let sleepMs = computeSleepMs activity now effectiveLastRuns tasks
-                do! Async.Sleep sleepMs
-                return! loop latestWatchers lastRuns watchers
+                return! loop lastRuns watchers watcherCleanup
+            | Some(state, repos, nextWatchers, nextCleanup) ->
+                let! nextRuns, nextWatchers, nextCleanup =
+                    runPreparedIteration
+                        state
+                        repos
+                        nextWatchers
+                        nextCleanup
+                        lastRuns
+
+                return! loop nextRuns nextWatchers nextCleanup
         }
 
     let startup =
@@ -867,11 +939,8 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
             let! lastRuns = runInitialBurst agent rootPaths
             let! state = agent.PostAndAsyncReply(GetState)
             let! initialWatchers = CanvasWatchers.reconcile agent state.Repos Map.empty
-            let latestWatchers = ref initialWatchers
-            try
-                return! loop latestWatchers lastRuns latestWatchers.Value
-            finally
-                CanvasWatchers.disposeAll latestWatchers.Value
+            let watcherCleanup = registerWatcherCleanup initialWatchers
+            return! loop lastRuns initialWatchers watcherCleanup
         }
 
-    Async.Start(startup, ct)
+    Async.StartAsTask(startup, cancellationToken = ct) :> Task

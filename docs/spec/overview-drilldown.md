@@ -5,9 +5,7 @@ detail panel — directly below that group's row — listing the worktrees that 
 Each listed worktree is clickable and, when clicked, selects it in the dashboard exactly as
 arrow-key navigation would (focus its card, uncollapse its repo, scroll it into view).
 
-Builds on the read-only band from `docs/spec/beads-overview-band.md` (which explicitly deferred
-"hover, click, or greenlight interactions"). Investigation: `.agents/overview-drilldown-investigation.md`.
-Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html`.
+Builds on the Overview band from `docs/spec/beads-overview-band.md`.
 
 ## Goals
 
@@ -17,7 +15,8 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
   focus/expand/scroll behavior as arrow-key navigation.
 - Keep the roll-up counts and the drill-down member lists derived from **one set of predicates** so
   they can never diverge.
-- Stay client-only: no `Shared`/server/API changes for the core feature.
+- Keep membership in the shared Overview aggregate so the live band, drill-down, and history use the
+  same task and agent predicates.
 
 ## Expected Behavior
 
@@ -48,8 +47,9 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
 - Member worktrees are **grouped by repo**, each repo introduced by a small uppercase muted repo
   name (matching the band's section-header style).
 - **Agent-group breakdown**: per repo, borderless inline **chips**, each `[● branch-name]` with the
-  dot in the group's activity color. One chip per member worktree (agent groups are one agent per
-  worktree, so chip count == the group count).
+  dot in the group's activity color. One chip is rendered per member worktree; a chip can contribute
+  multiple matching sessions, so the group count is the sum of member contributions rather than the
+  number of chips.
 - **Task-bucket breakdown**: per repo, one row per member worktree: the branch name followed by a
   **bar** in the bucket's color, sized on the **same linear scale as the overview bars**. One task is
   the same pixel width here as in the band above (`barMaxPx / Overview.Scale` px per task), so a
@@ -68,9 +68,8 @@ Clicking a member worktree selects it in the dashboard, identical to arrow-key n
 It does **not** open the Canvas pane (this is the deliberate difference from the existing
 `FocusOverviewCard`, which force-opens the pane on a doc).
 
-`SelectOverviewWorktree` guards against archived breakdown rows: non-`Done` buckets keep archived
-worktrees as members, but archived worktrees have no focusable card (`visibleFocusTargets` scans only
-`repo.Worktrees`). A `scopedKey` that does not resolve to a focusable card via
+Archived worktrees are excluded from the shared aggregate and never appear in a breakdown. A stale
+`scopedKey` that no longer resolves to a focusable card via
 `Navigation.resolvesToFocusableCard` is a **no-op** — it never sets an invalid `FocusedElement`
 (which would produce no visible focus/scroll and be reset by `adjustFocusForVisibility`).
 
@@ -84,9 +83,9 @@ worktrees as members, but archived worktrees have no focusable card (`visibleFoc
 
 ## Technical Approach
 
-Three client layers, plus tests.
+One shared data layer, two client layers, plus tests.
 
-### 1. Data — expose group membership (`src/Client/OverviewData.fs`)
+### 1. Data — expose group membership (`src/Shared/OverviewData.fs`)
 
 Extend the roll-up so each group carries its member worktrees, built from the **same predicates**
 that already compute the counts (single source of truth):
@@ -97,22 +96,22 @@ type GroupMember =
       Branch: string
       RepoId: RepoId         // stable repo identity — keeps two same-named repos separable
       RepoName: string
-      Contribution: int }    // agent group: 1; task bucket: this worktree's task count in the bucket
+      Sessions: SessionDot list
+      Contribution: int }    // agent group: matching sessions; task bucket: task count in the bucket
 
 type TaskBucket = { Kind: TaskBucketKind; Count: int; Members: GroupMember list }
 type AgentGroup = { Kind: AgentGroupKind; Count: int; Members: GroupMember list }
 ```
 
-- `aggregate` currently flattens `repos |> List.collect _.Worktrees`, discarding repo identity.
-  Build membership **before flattening** (or thread `RepoWorktrees.RootFolderName` onto each worktree)
-  so each `GroupMember` carries its `RepoName`.
-- Invariants (assert in tests): agent group `Count = Members.Length`; task bucket
-  `Count = Members |> List.sumBy _.Contribution`. Members preserve the repo order and the canonical
-  group order.
-- Task-bucket membership follows the existing per-bucket predicates exactly (e.g. `InProgress` counts
-  `Beads.InProgress` only where `isActive`; `Done` excludes archived; `Planned` folds `Loose`;
-  `Unattended` = inactive worktrees' `InProgress + Queued`). A worktree is a member iff its
-  contribution to that bucket is > 0.
+- Build membership before flattening so each `GroupMember` carries its stable repo identity and
+  display name.
+- Invariants (assert in tests): both agent-group and task-bucket counts equal
+  `Members |> List.sumBy _.Contribution`. For agents, one worktree can appear in several groups and
+  contributes the number of its sessions matching that group. Members preserve repo and group order.
+- Archived worktrees are removed before any grouping. Task-bucket membership then follows the
+  per-bucket predicates exactly (for example, `InProgress` counts `Beads.InProgress` only where
+  `isActive`; `Planned` folds `Loose`; `Unattended` is inactive worktrees' `InProgress + Queued`).
+  A worktree is a member iff its contribution to that bucket is greater than zero.
 
 ### 2. State + messages (`src/Client/AppTypes.fs`, `src/Client/App.fs`)
 
@@ -153,15 +152,13 @@ type OverviewSelection =
 ### 4. Tests
 
 - **Unit** (`src/Tests/OverviewDataTests.fs`): membership correctness per bucket/group — the right
-  worktrees, correct `Contribution`, `Count` == list length / Σ contributions, respects
+  worktrees, correct `Contribution`, `Count` equals the sum of member contributions, respects
   `isActive`/`IsArchived`, and repo names populated.
 - **E2E**: **no new E2E tests are added** for this feature (project decision). Verification instead
   proves the existing E2E suite (`Category=E2E`, incl. the read-only `OverviewBandE2ETests`) still
   passes with zero regressions, alongside the `OverviewData` membership unit tests above.
 
 ## Decisions
-
-Locked during prototyping (see the canvas prototype doc):
 
 - **Worktree click = arrow-nav parity, no Canvas pane.** Distinguishes it from `FocusOverviewCard`.
 - **Panel placement: inside the band**, directly under the selected group's section row.
@@ -175,4 +172,4 @@ Locked during prototyping (see the canvas prototype doc):
 
 ## Related Specs
 
-- `docs/spec/beads-overview-band.md` — the read-only band this extends.
+- `docs/spec/beads-overview-band.md` — the canonical live Overview band this extends.

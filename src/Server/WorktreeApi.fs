@@ -10,6 +10,7 @@ open Shared.PathUtils
 open Newtonsoft.Json
 open FsToolkit.ErrorHandling
 open Server.GlobalConfig
+open Server.SessionActivityStore
 
 let private canvasSpawnInFlight = ConcurrentDictionary<string, bool>()
 
@@ -80,7 +81,16 @@ let readOnlyApi
       // Root management is unavailable in demo/fixture modes (roots stay []); getRoots is just empty.
       addRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
       removeRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
-      getRoots = fun () -> async { return [] } }
+      getRoots = fun () -> async { return [] }
+      // No durable activity history in demo/fixture modes, but preserve the anchored wire contract.
+      getOverviewHistory =
+        fun _ ->
+            async {
+                return
+                    { OverviewData.OverviewHistoryResponse.Anchor =
+                        OverviewSnapshotBoundary.floor DateTimeOffset.UtcNow
+                      Snapshots = [] }
+            } }
 
 let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     let path = WorktreePath.value request.WorktreePath
@@ -129,6 +139,50 @@ let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<C
               Title = Server.CanvasExport.resolveTitle html request.Filename }
     }
 
+type private OverviewWorktreeFields =
+    { Beads: BeadsSummary
+      Planning: BeadsPlanning
+      CodingToolData: CodingToolStatus.CodingToolResult
+      CodingTool: CodingToolStatus
+      CodingToolSince: DateTimeOffset option
+      IsArchived: bool }
+
+let private overviewWorktreeFields
+    (now: DateTimeOffset)
+    (archivedBranches: Set<string>)
+    (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
+    (codingToolSince: Map<string, DateTimeOffset>)
+    (repo: RefreshScheduler.PerRepoState)
+    (wt: GitWorktree.WorktreeInfo)
+    =
+    let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
+    let planning = repo.PlanningData |> Map.tryFind wt.Path |> Option.defaultValue BeadsPlanning.zero
+    let codingToolData =
+        pushByWorktree
+        |> Map.tryFind wt.Path
+        |> Option.defaultValue CodingToolStatus.noSessionPushResult
+    let displayStatus =
+        SessionActivity.debounceIdle
+            SessionActivity.idleDebounceWindow
+            now
+            (codingToolSince |> Map.tryFind wt.Path)
+            codingToolData.Status
+
+    { Beads = beads
+      Planning = planning
+      CodingToolData = codingToolData
+      CodingTool = displayStatus
+      CodingToolSince =
+        match displayStatus with
+        | Idle -> codingToolSince |> Map.tryFind wt.Path
+        | Working
+        | WaitingForUser
+        | NoSession -> None
+      IsArchived =
+        wt.Branch
+        |> Option.map (fun b -> Set.contains b archivedBranches)
+        |> Option.defaultValue false }
+
 let internal assembleFromState
     (now: DateTimeOffset)
     (activeSessions: Set<string>)
@@ -139,25 +193,9 @@ let internal assembleFromState
     (repo: RefreshScheduler.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
+    let fields =
+        overviewWorktreeFields now archivedBranches pushByWorktree codingToolSince repo wt
     let gitData = repo.GitData |> Map.tryFind wt.Path
-    let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
-    let planning = repo.PlanningData |> Map.tryFind wt.Path |> Option.defaultValue BeadsPlanning.zero
-    // Card coding-tool fields now come from the push live state (SessionActivity), collapsed per
-    // worktree via pickActive — NOT the log-parsing detectors (repointed here; detectors deleted next
-    // task). An unknown/quiet worktree falls back to the same blank Idle card as before.
-    let codingToolData =
-        pushByWorktree
-        |> Map.tryFind wt.Path
-        |> Option.defaultValue CodingToolStatus.noSessionPushResult
-    // Debounce the Working→Idle edge so a brief inter-turn idle doesn't flicker the dot blue: hold
-    // Working until the worktree has been Idle for idleDebounceWindow (per the frozen entered-Idle
-    // stamp). The classified activity is unaffected — it derives from the retained skill below.
-    let displayStatus =
-        SessionActivity.debounceIdle
-            SessionActivity.idleDebounceWindow
-            now
-            (codingToolSince |> Map.tryFind wt.Path)
-            codingToolData.Status
     let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
     let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
 
@@ -165,25 +203,16 @@ let internal assembleFromState
       Branch = wt.Branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
       LastCommitMessage = gitData |> Option.map (_.LastCommitMessage) |> Option.defaultValue ""
       LastCommitTime = gitData |> Option.map (_.LastCommitTime) |> Option.defaultValue DateTimeOffset.MinValue
-      Beads = beads
-      Planning = planning
-      CodingTool = displayStatus
-      CodingToolProvider = codingToolData.Provider
-      // Time-since-idle: the frozen "entered Idle" timestamp for this worktree, surfaced ONLY while
-      // its DISPLAYED status is still Idle (past the debounce window). A stale stamp for a worktree
-      // that has since decayed to NoSession/Working — or is still inside the debounce hold — is not
-      // surfaced.
-      CodingToolSince =
-        match displayStatus with
-        | Idle -> codingToolSince |> Map.tryFind wt.Path
-        | Working
-        | WaitingForUser
-        | NoSession -> None
-      CurrentSkill = codingToolData.CurrentSkill
-      AgentActivity = codingToolData.AgentActivity
-      Sessions = codingToolData.SessionStatuses
-      LastUserMessage = codingToolData.LastUserMessage
-      LastAssistantMessage = codingToolData.LastAssistantMessage
+      Beads = fields.Beads
+      Planning = fields.Planning
+      CodingTool = fields.CodingTool
+      CodingToolProvider = fields.CodingToolData.Provider
+      CodingToolSince = fields.CodingToolSince
+      CurrentSkill = fields.CodingToolData.CurrentSkill
+      AgentActivity = fields.CodingToolData.AgentActivity
+      Sessions = fields.CodingToolData.SessionStatuses
+      LastUserMessage = fields.CodingToolData.LastUserMessage
+      LastAssistantMessage = fields.CodingToolData.LastAssistantMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
@@ -191,10 +220,7 @@ let internal assembleFromState
       HasActiveSession = Set.contains wt.Path activeSessions
       HasTestFailureLog = hasTestFailureLog
       IsMainWorktree = Directory.Exists(Path.Combine(wt.Path, ".git"))
-      IsArchived =
-        wt.Branch
-        |> Option.map (fun b -> Set.contains b archivedBranches)
-        |> Option.defaultValue false
+      IsArchived = fields.IsArchived
       CanvasDocs = repo.CanvasData |> Map.tryFind wt.Path |> Option.defaultValue [] }
 
 type WorktreeContext =
@@ -232,6 +258,203 @@ let internal scopedBranchKey (repoId: RepoId) (branch: string) = $"{RepoId.value
 
 let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 
+type RepoAssemblyInputs =
+    { Now: DateTimeOffset
+      IgnorePredicate: string -> bool
+      RetainedByWorktree: Map<string, SessionActivityStore.StoredStatus>
+      ArchivedBranches: Map<RepoId, Set<string>>
+      TestFailureLogPaths: Set<string> }
+
+type OverviewAssemblyInputs =
+    { Now: DateTimeOffset
+      IgnorePredicate: string -> bool
+      ArchivedBranches: Map<RepoId, Set<string>> }
+
+let loadOverviewAssemblyInputs
+    (now: DateTimeOffset)
+    (rootPaths: Map<RepoId, string>)
+    =
+    { Now = now
+      IgnorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
+      ArchivedBranches =
+        rootPaths
+        |> Map.map (fun _ root -> TreemonConfig.readArchivedBranchSet (Some root)) }
+
+let internal isOverviewCaptureReady
+    (rootPaths: Map<RepoId, string>)
+    (inputs: OverviewAssemblyInputs option)
+    (state: RefreshScheduler.DashboardState)
+    =
+    let repoReady inputs repoId =
+        match state.Repos |> Map.tryFind repoId with
+        | Some repo when repo.IsReady ->
+            let archivedBranches =
+                inputs.ArchivedBranches
+                |> Map.tryFind repoId
+                |> Option.defaultValue Set.empty
+
+            repo.WorktreeList
+            |> List.filter (RefreshScheduler.isWorktreeIgnored inputs.IgnorePredicate >> not)
+            |> List.filter (fun wt ->
+                wt.Branch
+                |> Option.exists (fun branch -> Set.contains branch archivedBranches)
+                |> not)
+            |> List.forall (fun wt ->
+                Map.containsKey wt.Path repo.BeadsData
+                && Map.containsKey wt.Path repo.PlanningData)
+        | _ -> false
+
+    state.SessionStatusesHydrated
+    && (match inputs with
+        | Some inputs -> rootPaths |> Map.forall (fun repoId _ -> repoReady inputs repoId)
+        | None -> Map.isEmpty rootPaths)
+
+let loadRepoAssemblyInputs
+    (now: DateTimeOffset)
+    (activityStore: SessionActivityStore.SessionActivityStore option)
+    (rootPaths: Map<RepoId, string>)
+    (state: RefreshScheduler.DashboardState)
+    =
+    let overviewInputs = loadOverviewAssemblyInputs now rootPaths
+    let testFailureLogPaths =
+        state.Repos
+        |> Map.values
+        |> Seq.collect _.WorktreeList
+        |> Seq.map _.Path
+        |> Seq.filter (SyncEngine.testFailureLogPath >> File.Exists)
+        |> Set.ofSeq
+
+    { Now = overviewInputs.Now
+      IgnorePredicate = overviewInputs.IgnorePredicate
+      RetainedByWorktree =
+        activityStore
+        |> Option.map _.RetainedByWorktree()
+        |> Option.defaultValue Map.empty
+      ArchivedBranches = overviewInputs.ArchivedBranches
+      TestFailureLogPaths = testFailureLogPaths }
+
+let private assembleReposCore
+    (ignorePredicate: string -> bool)
+    (archivedBranchesByRepo: Map<RepoId, Set<string>>)
+    (rootPaths: Map<RepoId, string>)
+    (state: RefreshScheduler.DashboardState)
+    (assembleStatus:
+        Set<string> ->
+            RefreshScheduler.PerRepoState ->
+            GitWorktree.WorktreeInfo ->
+            WorktreeStatus)
+    : RepoWorktrees list =
+    state.Repos
+    |> Map.toList
+    |> List.map (fun (repoId, repo) ->
+        let archivedBranches =
+            archivedBranchesByRepo
+            |> Map.tryFind repoId
+            |> Option.defaultValue Set.empty
+
+        let statuses =
+            repo.WorktreeList
+            |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
+            |> List.map (assembleStatus archivedBranches repo)
+
+        let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
+
+        { RepoId = repoId
+          RootFolderName = Path.GetFileName(originalPath)
+          Worktrees = statuses
+          IsReady = repo.IsReady
+          Provider = repo.Provider
+          BaseBranch = repo.BaseBranch })
+
+/// Complete RepoWorktrees assembly for the dashboard response.
+let assembleRepos
+    (inputs: RepoAssemblyInputs)
+    (rootPaths: Map<RepoId, string>)
+    (activeSessionPaths: Set<string>)
+    (state: RefreshScheduler.DashboardState)
+    : RepoWorktrees list =
+    let pushByWorktree =
+        state.SessionStatuses
+        |> Map.values
+        |> CodingToolStatus.includeRetainedSessions inputs.RetainedByWorktree
+        |> CodingToolStatus.collapseByWorktree inputs.Now
+
+    assembleReposCore
+        inputs.IgnorePredicate
+        inputs.ArchivedBranches
+        rootPaths
+        state
+        (fun archivedBranches repo wt ->
+            assembleFromState
+                inputs.Now
+                activeSessionPaths
+                archivedBranches
+                (Set.contains wt.Path inputs.TestFailureLogPaths)
+                pushByWorktree
+                state.CodingToolSinceByWorktree
+                repo
+                wt)
+
+let internal assembleOverviewFromState
+    (now: DateTimeOffset)
+    (archivedBranches: Set<string>)
+    (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
+    (codingToolSince: Map<string, DateTimeOffset>)
+    (repo: RefreshScheduler.PerRepoState)
+    (wt: GitWorktree.WorktreeInfo)
+    =
+    let fields =
+        overviewWorktreeFields now archivedBranches pushByWorktree codingToolSince repo wt
+
+    { Path = PathUtils.toWorktreePath wt.Path
+      Branch = wt.Branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
+      LastCommitMessage = ""
+      LastCommitTime = DateTimeOffset.MinValue
+      Beads = fields.Beads
+      Planning = fields.Planning
+      CodingTool = fields.CodingTool
+      CodingToolProvider = fields.CodingToolData.Provider
+      CodingToolSince = fields.CodingToolSince
+      CurrentSkill = fields.CodingToolData.CurrentSkill
+      AgentActivity = fields.CodingToolData.AgentActivity
+      Sessions = fields.CodingToolData.SessionStatuses
+      LastUserMessage = fields.CodingToolData.LastUserMessage
+      LastAssistantMessage = fields.CodingToolData.LastAssistantMessage
+      Pr = NoPr
+      MainBehindCount = 0
+      IsDirty = false
+      WorkMetrics = None
+      HasActiveSession = false
+      HasTestFailureLog = false
+      IsMainWorktree = false
+      IsArchived = fields.IsArchived
+      CanvasDocs = [] }
+
+/// Lean canonical-Overview assembly for snapshot capture. It shares the live task/session/archive
+/// projection while omitting card-only retained footers, terminal decoration, test-log probes,
+/// Git/PR fields, and canvas data.
+let assembleOverviewRepos
+    (inputs: OverviewAssemblyInputs)
+    (rootPaths: Map<RepoId, string>)
+    (state: RefreshScheduler.DashboardState)
+    : RepoWorktrees list =
+    let pushByWorktree =
+        CodingToolStatus.collapseByWorktree inputs.Now (state.SessionStatuses |> Map.values)
+
+    assembleReposCore
+        inputs.IgnorePredicate
+        inputs.ArchivedBranches
+        rootPaths
+        state
+        (fun archivedBranches repo wt ->
+            assembleOverviewFromState
+                inputs.Now
+                archivedBranches
+                pushByWorktree
+                state.CodingToolSinceByWorktree
+                repo
+                wt)
+
 let getWorktrees
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
@@ -245,52 +468,8 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let ignorePredicate = GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
-
-        // Collapse the push live state (all live sessions, keyed by SessionId) to one coding-tool
-        // result per worktree once, up front: each worktree's sessions → openness-driven status +
-        // decoupled footer. Shared across every repo/worktree assembly below (SessionStatuses is
-        // global, not per-repo). CodingToolSinceByWorktree carries the frozen time-since-idle stamps.
-        // Each worktree's durable representative joins the live candidate set before collapse. Its
-        // own LastSeen still controls openness, while its UpdatedAt can supply the footer and resume
-        // affordance when a heartbeat-kept live sibling is not the representative session.
-        // One `now` for the whole assembly so the collapse and the idle-display debounce agree.
-        let now = DateTimeOffset.UtcNow
-        let retainedByWorktree =
-            activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
-
-        let pushByWorktree =
-            state.SessionStatuses
-            |> Map.values
-            |> CodingToolStatus.includeRetainedSessions retainedByWorktree
-            |> CodingToolStatus.collapseByWorktree now
-
-        let codingToolSince = state.CodingToolSinceByWorktree
-
-        let repos =
-            state.Repos
-            |> Map.toList
-            |> List.map (fun (repoId, repo) ->
-                let archivedBranches =
-                    rootPaths
-                    |> Map.tryFind repoId
-                    |> TreemonConfig.readArchivedBranchSet
-
-                let statuses =
-                    repo.WorktreeList
-                    |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
-                    |> List.map (fun wt ->
-                        let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                        assembleFromState now activeSessionPaths archivedBranches hasLog pushByWorktree codingToolSince repo wt)
-
-                let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
-
-                { RepoId = repoId
-                  RootFolderName = Path.GetFileName(originalPath)
-                  Worktrees = statuses
-                  IsReady = repo.IsReady
-                  Provider = repo.Provider
-                  BaseBranch = repo.BaseBranch })
+        let inputs = loadRepoAssemblyInputs DateTimeOffset.UtcNow activityStore rootPaths state
+        let repos = assembleRepos inputs rootPaths activeSessionPaths state
 
         return
             { Repos = repos
@@ -409,6 +588,7 @@ let worktreeApi
     (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (activityStore: SessionActivityStore.SessionActivityStore option)
+    (snapshotStore: OverviewSnapshotStore.OverviewSnapshotStore option)
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
@@ -755,4 +935,24 @@ let worktreeApi
           // (re)starts (the treemon.ps1 add/remove shims trigger the restart).
           addRoot = fun path -> async { return addRootToConfig path }
           removeRoot = fun path -> async { return removeRootFromConfig path }
-          getRoots = fun () -> async { return readWorktreeRootsConfig () } }
+          getRoots = fun () -> async { return readWorktreeRootsConfig () }
+          getOverviewHistory =
+            fun requestedWindow ->
+                match snapshotStore with
+                | Some store ->
+                    async {
+                        return
+                            store.ReadLatestWindow(
+                                DateTimeOffset.UtcNow,
+                                requestedWindow
+                            )
+                    }
+                | None ->
+                    async {
+                        return
+                            raise (
+                                InvalidOperationException(
+                                    "Overview history store is required outside demo and fixture modes."
+                                )
+                            )
+                    } }

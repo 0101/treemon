@@ -2,6 +2,7 @@ module App
 
 open Shared
 open Shared.EventUtils
+open OverviewData
 open Navigation
 open Elmish
 open Feliz
@@ -12,6 +13,7 @@ open ActionButtons
 open CanvasAwareness
 open CardViews
 open AppTypes
+open OverviewPresentation
 
 let fetchWorktrees () =
     Cmd.OfAsync.either worktreeApi.Value.getWorktrees () (fun r -> DataLoaded (r, System.DateTimeOffset.Now)) DataFailed
@@ -19,15 +21,50 @@ let fetchWorktrees () =
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
+let fetchOverviewHistory request =
+    let loaded response = OverviewHistoryLoaded(request, Some response)
+    Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory request.Window loaded (fun _ -> OverviewHistoryLoaded(request, None))
+
+// The in-band history chart is refreshed no more often than this while open. Snapshot capture itself
+// advances on a 30-second grid, so more frequent request attempts cannot reveal newer history.
+let overviewHistoryRefreshInterval = System.TimeSpan.FromSeconds 30.0
+
+let shouldRefreshOverviewHistory
+    panelOpen
+    historyWindow
+    requestInFlight
+    lastRequestedAt
+    now
+    =
+    panelOpen
+    && Option.isSome historyWindow
+    && Option.isNone requestInFlight
+    && now - lastRequestedAt >= overviewHistoryRefreshInterval
+
+let installOverviewHistory
+    selectedWindow
+    requestedWindow
+    (response: OverviewHistoryResponse option)
+    (current: InstalledOverviewHistory option)
+    =
+    match selectedWindow, response, current with
+    | Some selected, Some loaded, Some installed
+        when selected = requestedWindow
+             && installed.Window = requestedWindow
+             && loaded.Anchor <= installed.Response.Anchor ->
+        current
+    | Some selected, Some loaded, _ when selected = requestedWindow ->
+        Some
+            { Window = requestedWindow
+              Response = loaded }
+    | _ -> current
+
 let hasSyncRunning (events: Map<string, CardEvent list>) =
     events
     |> Map.exists (fun _ evts ->
         evts
         |> List.exists (fun e ->
             e.Status = Some StepStatus.Running))
-
-// Whether an Overview drill-down selection still maps to a present (non-empty) group lives in
-// OverviewBand.overviewSelectionPresent (same pure roll-up pipeline as the band view).
 
 let init () =
     { Repos = []
@@ -53,7 +90,11 @@ let init () =
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
-      SelectedOverviewGroup = None },
+      SelectedOverviewGroup = None
+      OverviewHistoryWindow = None
+      OverviewHistory = None
+      OverviewHistoryRequestedAt = System.DateTimeOffset.Now
+      OverviewHistoryRequestInFlight = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -206,8 +247,10 @@ let update msg model =
                 // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
                 // the selected group (its count fell to 0), clear it so the panel closes.
                 match m.SelectedOverviewGroup with
-                | Some selection when not (OverviewBand.overviewSelectionPresent selection m.Repos) ->
-                    { m with SelectedOverviewGroup = None }
+                | Some selection ->
+                    let overview = m.Repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+                    if OverviewPresentation.selectionPresent selection overview then m
+                    else { m with SelectedOverviewGroup = None }
                 | _ -> m)
             |> (fun m ->
                 if isFirstLoad then
@@ -291,14 +334,46 @@ let update msg model =
         // Tick stays in the root update because it also expires canvas events and drives the
         // worktree/sync poll; only the activity-recompute delegates to ActivityUpdate.
         let activity, reportCmd = ActivityUpdate.tickActivity now model.Activity
-        let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.Canvas.CanvasEvents
+        let nowDto = System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)
+        let expiredEvents = expireCanvasEvents nowDto model.Canvas.CanvasEvents
 
         // A queued canvas message is honestly pending, not failed: it is delivered to the
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
+        // Refresh the in-band history chart while it is open. The in-flight request identity prevents
+        // overlapping polls, and RequestedAt throttles every attempt whether it succeeds or fails.
+        let shouldRefreshHistory =
+            shouldRefreshOverviewHistory
+                model.OverviewPanelOpen
+                model.OverviewHistoryWindow
+                model.OverviewHistoryRequestInFlight
+                model.OverviewHistoryRequestedAt
+                nowDto
+
+        let historyRequest =
+            match shouldRefreshHistory, model.OverviewHistoryWindow with
+            | true, Some window ->
+                Some
+                    { Window = window
+                      RequestedAt = nowDto }
+            | _ -> None
+
+        let historyCmd =
+            historyRequest
+            |> Option.map fetchOverviewHistory
+            |> Option.defaultValue Cmd.none
+
+        let model =
+            match historyRequest with
+            | Some request ->
+                { model with
+                    OverviewHistoryRequestedAt = request.RequestedAt
+                    OverviewHistoryRequestInFlight = Some request }
+            | None -> model
+
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
-        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
+        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd ]
 
     | UserActivity now -> ActivityUpdate.userActivity now model
 
@@ -502,7 +577,53 @@ let update msg model =
     | SelectOverviewGroup selection ->
         // Toggle: re-selecting the already-selected group clears it (closes the panel).
         let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
-        { model with SelectedOverviewGroup = next }, Cmd.none
+        // Mutual exclusivity: opening a drill-down group hides the history chart.
+        let historyWindow = if Option.isSome next then None else model.OverviewHistoryWindow
+        { model with
+            SelectedOverviewGroup = next
+            OverviewHistoryWindow = historyWindow
+            OverviewHistory = if Option.isSome next then None else model.OverviewHistory
+            OverviewHistoryRequestInFlight = if Option.isSome next then None else model.OverviewHistoryRequestInFlight },
+        Cmd.none
+
+    | CycleOverviewChart now ->
+        let next = nextHistoryWindow model.OverviewHistoryWindow
+
+        match next with
+        | None ->
+            { model with
+                OverviewHistoryWindow = None
+                OverviewHistory = None
+                OverviewHistoryRequestInFlight = None },
+            Cmd.none
+        | Some window ->
+            let request =
+                { Window = window
+                  RequestedAt = now }
+
+            // Keep the installed chart mounted while the newly selected window loads. The installed
+            // value carries its own window, so it continues rendering with the old axis/geometry until
+            // this identified request succeeds and replaces it in one model update.
+            { model with
+                OverviewHistoryWindow = next
+                SelectedOverviewGroup = None
+                OverviewHistoryRequestedAt = now
+                OverviewHistoryRequestInFlight = Some request },
+            fetchOverviewHistory request
+
+    | OverviewHistoryLoaded (request, response) ->
+        if model.OverviewHistoryRequestInFlight = Some request then
+            { model with
+                OverviewHistory =
+                    installOverviewHistory
+                        model.OverviewHistoryWindow
+                        request.Window
+                        response
+                        model.OverviewHistory
+                OverviewHistoryRequestInFlight = None },
+            Cmd.none
+        else
+            model, Cmd.none
 
     | SelectOverviewWorktree scopedKey ->
         // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
@@ -879,6 +1000,9 @@ let view model dispatch =
                         model.SelectedOverviewGroup
                         (SelectOverviewGroup >> dispatch)
                         (SelectOverviewWorktree >> dispatch)
+                        model.OverviewHistoryWindow
+                        (fun () -> dispatch (CycleOverviewChart System.DateTimeOffset.Now))
+                        model.OverviewHistory
                         model.Repos
 
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then

@@ -26,6 +26,9 @@
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
+    <Compile Include="SqliteStorage.fs" />
+    <Compile Include="OverviewSnapshotBoundary.fs" />
+    <Compile Include="OverviewSnapshotStore.fs" />
     <Compile Include="SessionActivityStore.fs" />
     <Compile Include="CodingToolStatus.fs" />
     <Compile Include="CodingToolCli.fs" />
@@ -45,6 +48,7 @@
     <Compile Include="SyncEngine.fs" />
     <Compile Include="DemoFixture.fs" />
     <Compile Include="WorktreeApi.fs" />
+    <Compile Include="OverviewSnapshotCapture.fs" />
     <Compile Include="IdiomorphScript.fs" />
     <Compile Include="CanvasSendScript.fs" />
     <Compile Include="CanvasSelectionScript.fs" />

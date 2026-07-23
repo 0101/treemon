@@ -2,23 +2,23 @@ module Server.SessionActivityStore
 
 open System
 open System.IO
-open System.Globalization
 open Microsoft.Data.Sqlite
 open Shared
 open Server.SessionActivity
+open Server.SqliteStorage
 
 // The durable mirror behind the push-model live state. The SessionActivity mailbox (single writer)
-// upserts the per-session fold result and appends the raw event to two tables:
+// upserts the per-session fold result and appends accepted lifecycle events:
 //
 //   session_status  — one row per session: the latest fold state. Read back on restart to rebuild the
 //                     live Map before serving (loadLiveStatuses), so cards are correct immediately.
-//   activity_events — the append-only raw stream: the substrate the Overview history aggregates on
-//                     read (queryWindow), and the source of INSERT OR IGNORE idempotency (event_id PK).
+//   activity_events — accepted lifecycle events keyed by event_id. INSERT OR IGNORE makes a replay a
+//                     full no-op while retention bounds the durable idempotency window.
 //
-// WAL journalling lets queryWindow / loadLiveStatuses read concurrently with the mailbox writer with
-// no lock contention; the writer being single means status upserts never race each other. The SQLite
-// file path is instance-specific (keyed by the server's data dir / port) so a side-by-side validation
-// instance never collides with main.
+// WAL journalling lets restart/resume reads run concurrently with the mailbox writer with no lock
+// contention; the writer being single means status upserts never race each other. The SQLite file
+// path is instance-specific (keyed by the server's data dir / port) so a side-by-side validation
+// instance never collides with main. Overview history is stored independently in overview_snapshots.
 
 // --- Row shapes -------------------------------------------------------------------------------
 
@@ -49,9 +49,8 @@ module StoredStatus =
         |> List.sortByDescending activityOrderKey
         |> List.tryHead
 
-/// One activity_events row: a single pushed event, already classified. `Status`/`Skill` are the fold
-/// result *after* applying this event, so the Overview history can read a bucket's state without
-/// re-folding.
+/// One activity_events row: a single accepted event. `Status`/`Skill` retain the fold result after
+/// applying it, preserving the existing durable event shape while event_id supplies idempotency.
 type ActivityEventRow =
     { EventId: EventId
       SessionId: SessionId
@@ -63,15 +62,6 @@ type ActivityEventRow =
       Ts: DateTimeOffset }
 
 // --- Serialisation helpers --------------------------------------------------------------------
-
-// Timestamps are stored as UTC round-trip ("O") strings. Normalising to UTC gives every value the
-// same fixed-width "+00:00" suffix, so lexical string comparison equals chronological order — which
-// is what the `ts >= $start` window query and the `last_seen >= $cutoff` live filter rely on.
-let private isoUtc (dto: DateTimeOffset) =
-    dto.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)
-
-let private parseIso (s: string) =
-    DateTimeOffset.Parse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)
 
 let private statusText =
     function
@@ -160,16 +150,6 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
       LastSeen = parseIso (r.GetString 14)
       ContextUsageAt = contextUsageAt }
 
-let private readEventRow (r: SqliteDataReader) : ActivityEventRow =
-    { EventId = EventId(r.GetString 0)
-      SessionId = SessionId(r.GetString 1)
-      WorktreePath = WorktreePath(r.GetString 2)
-      Provider = parseProvider (r.GetString 3)
-      Kind = r.GetString 4
-      Status = parseStatus (r.GetString 5)
-      Skill = readOptStr r 6
-      Ts = parseIso (r.GetString 7) }
-
 // --- SQL --------------------------------------------------------------------------------------
 
 let private schemaSql =
@@ -209,6 +189,7 @@ CREATE TABLE IF NOT EXISTS activity_events (
     ts            TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
+CREATE INDEX IF NOT EXISTS ix_events_session_ts ON activity_events(session_id, ts);
 """
 
 let private additiveColumnMigrations =
@@ -305,8 +286,7 @@ VALUES ($eid, $sid, $wt, $prov, $kind, $status, $skill, $ts);
 
 // Liveness-only bump: advance a session's last_seen (openness) without touching updated_at, status,
 // or any message/skill field, and only ever forward. Heartbeats take this path instead of
-// upsert+append, so they refresh openness without moving the last-write-wins clock or polluting the
-// event history.
+// upsert+append, so they refresh openness without moving the last-write-wins clock.
 let private touchSql =
     """
 UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_seen < $seen;
@@ -364,19 +344,30 @@ WHERE worktree_path = $wt
 ORDER BY updated_at DESC, session_id DESC;
 """
 
-let private queryWindowSql =
-    """
-SELECT event_id, session_id, worktree_path, provider, kind, status, skill, ts
-FROM activity_events
-WHERE ts >= $start AND ts <= $end
-ORDER BY ts;
-"""
-
-// pruneOld trims both tables past the retention cutoff: the append-only event stream (the unbounded
-// one) plus long-dead session rows well outside any live window.
+// Preserve the established retention behavior: events older than the cutoff are deleted except for
+// the latest old event belonging to a session row that is itself still retained.
 let private pruneSql =
     """
-DELETE FROM activity_events WHERE ts < $cutoff;
+WITH retained_event_baselines AS (
+    SELECT event.rowid
+    FROM activity_events AS event
+    JOIN session_status AS status
+      ON status.session_id = event.session_id
+     AND status.last_seen >= $cutoff
+    WHERE event.ts < $cutoff
+      AND event.rowid = (
+          SELECT baseline.rowid
+          FROM activity_events AS baseline
+          WHERE baseline.session_id = event.session_id
+            AND baseline.ts < $cutoff
+          ORDER BY baseline.ts DESC, baseline.rowid DESC
+          LIMIT 1
+      )
+)
+DELETE FROM activity_events
+WHERE ts < $cutoff
+  AND rowid NOT IN (SELECT rowid FROM retained_event_baselines);
+
 DELETE FROM session_status WHERE last_seen < $cutoff;
 """
 
@@ -406,13 +397,7 @@ LIMIT 1;
 
 // --- Reader / binder helpers ------------------------------------------------------------------
 
-// Drain the reader through an immutable recursive accumulator instead of a mutable list-building
-// loop, then restore source order.
-let rec private readRows (reader: SqliteDataReader) (map: SqliteDataReader -> 'T) (acc: 'T list) : 'T list =
-    if reader.Read() then readRows reader map (map reader :: acc) else List.rev acc
-
-// Bind an activity_events row's parameters onto a prepared command — shared by AppendEvent and the
-// transactional AppendAndUpsert so the two paths can never drift.
+// Bind an activity_events row's parameters for the transactional AppendAndUpsert path.
 let private bindAppend (cmd: SqliteCommand) (row: ActivityEventRow) =
     cmd.Parameters.AddWithValue("$eid", EventId.value row.EventId) |> ignore
     cmd.Parameters.AddWithValue("$sid", SessionId.value row.SessionId) |> ignore
@@ -470,19 +455,34 @@ let private readStoredBySession
     else
         failwith $"{nameof StoredStatus}: persisted session row missing"
 
+let private appendEvent (conn: SqliteConnection) (tx: SqliteTransaction) row =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- appendSql
+    bindAppend cmd row
+    cmd.ExecuteNonQuery() = 1
+
 // --- Store ------------------------------------------------------------------------------------
 
 /// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
 /// an instance-specific `dbPath` (created if its directory is missing). Thread-safe: every operation
 /// runs on its own short-lived connection, so the single-writer mailbox and concurrent WAL readers
-/// (restart rebuild, Overview history, prune timer) never share a connection. Dispose on shutdown.
-type SessionActivityStore(dbPath: string) =
+/// (restart rebuild, resume lookup, prune timer) never share a connection. The optional observer runs
+/// after connection-local PRAGMAs and before store SQL so diagnostics can attach per connection
+/// without changing production callers. Dispose on shutdown.
+type SessionActivityStore
+    (
+        dbPath: string,
+        ?connectionOpened: SqliteConnection -> unit
+    ) =
 
     do
         let dir = Path.GetDirectoryName dbPath
 
         if not (String.IsNullOrEmpty dir) then
             Directory.CreateDirectory dir |> ignore
+
+    let connectionOpened = defaultArg connectionOpened ignore
 
     // Pooling is off so each connection fully releases its file handle on close — reliable teardown on
     // Windows (which locks open DB files) and no pooled-connection surprises. The keep-alive below
@@ -499,7 +499,13 @@ type SessionActivityStore(dbPath: string) =
         use cmd = c.CreateCommand()
         cmd.CommandText <- "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;"
         cmd.ExecuteNonQuery() |> ignore
-        c
+
+        try
+            connectionOpened c
+            c
+        with _ ->
+            c.Dispose()
+            reraise ()
 
     // Held open for the store's lifetime: keeps the DB file (and its WAL) live between operations and
     // owns schema creation. Never used for queries (that would share one connection across threads).
@@ -522,29 +528,17 @@ type SessionActivityStore(dbPath: string) =
         bindUpsert cmd stored
         cmd.ExecuteNonQuery() |> ignore
 
-    /// Append a raw event. Returns true if inserted, false if the event_id already existed
-    /// (INSERT OR IGNORE dedupe).
-    member _.AppendEvent(row: ActivityEventRow) : bool =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- appendSql
-        bindAppend cmd row
-        cmd.ExecuteNonQuery() = 1
-
-    /// Atomically append the raw event AND upsert the session's live row in ONE transaction on ONE
-    /// connection, so the durable status can never diverge from the appended history. With the two on
-    /// separate connections a failed upsert AFTER a committed append left the event_id permanently
-    /// deduped on replay while the status never recovered; here a mid-pair failure rolls both back.
+    /// Atomically append the accepted event AND upsert the session's live row in ONE transaction on
+    /// ONE connection, so the durable status can never diverge from the idempotency record. With the
+    /// two on separate connections a failed upsert AFTER a committed append left the event_id
+    /// permanently deduped on replay while the status never recovered; here a mid-pair failure rolls
+    /// both back.
     /// Returns the authoritative persisted status when the event was newly inserted, or None when
     /// the event_id already existed (a full idempotent no-op — nothing appended or upserted).
     member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredStatus) : StoredStatus option =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
-        use appendCmd = conn.CreateCommand()
-        appendCmd.Transaction <- tx
-        appendCmd.CommandText <- appendSql
-        bindAppend appendCmd row
-        let inserted = appendCmd.ExecuteNonQuery() = 1
+        let inserted = appendEvent conn tx row
 
         let persisted =
             if inserted then
@@ -560,9 +554,9 @@ type SessionActivityStore(dbPath: string) =
         tx.Commit()
         persisted
 
-    /// Advance a session's `last_seen` (openness heartbeat) without touching status/updated_at or the
-    /// message fields. Only moves it forward; a no-op if the row is absent or already fresher.
-    member _.TouchLastSeen(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
+    /// Advance `last_seen` for openness without moving the lifecycle ordering clock. Stale or equal
+    /// observations are a full no-op.
+    member _.RecordLiveness(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
         cmd.CommandText <- touchSql
@@ -570,9 +564,9 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
         cmd.ExecuteNonQuery() |> ignore
 
-    /// Persist the latest accepted context-window gauge, inserting the full session snapshot when a
-    /// retained in-memory session outlives its pruned row. Returns the authoritative persisted state,
-    /// including a newer gauge that may already have won the independent usage clock.
+    /// Persist the latest accepted context-window gauge and last_seen, inserting the full session
+    /// snapshot when a retained in-memory session outlives its pruned row. Returns the authoritative
+    /// persisted state, including a newer gauge that may already have won the independent usage clock.
     member _.UpsertContextUsage(stored: StoredStatus) : StoredStatus =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
@@ -581,6 +575,7 @@ type SessionActivityStore(dbPath: string) =
         cmd.CommandText <- upsertContextUsageSql
         bindUpsert cmd stored
         cmd.ExecuteNonQuery() |> ignore
+
         let persisted = readStoredBySession conn tx stored.SessionId
         tx.Commit()
         persisted
@@ -644,22 +639,14 @@ type SessionActivityStore(dbPath: string) =
     /// total number of rows deleted across both tables.
     member _.PruneOld(cutoff: DateTimeOffset) : int =
         use conn = openConn ()
+        use tx = conn.BeginTransaction()
         use cmd = conn.CreateCommand()
+        cmd.Transaction <- tx
         cmd.CommandText <- pruneSql
         cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-        cmd.ExecuteNonQuery()
-
-    /// History substrate: raw events with `ts` in [startTime, endTime], oldest first. WAL lets this
-    /// run concurrently with the mailbox writer.
-    member _.QueryWindow(startTime: DateTimeOffset, endTime: DateTimeOffset) : ActivityEventRow list =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- queryWindowSql
-        cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
-        cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
-        use reader = cmd.ExecuteReader()
-
-        readRows reader readEventRow []
+        let deleted = cmd.ExecuteNonQuery()
+        tx.Commit()
+        deleted
 
     interface IDisposable with
         member _.Dispose() = keepAlive.Dispose()

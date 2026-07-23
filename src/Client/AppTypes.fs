@@ -11,8 +11,17 @@ open Shared
 open Shared.EventUtils
 open Navigation
 open OverviewData
+open OverviewPresentation
 open Elmish
 open Fable.Remoting.Client
+
+type OverviewHistoryRequest =
+    { Window: HistoryWindow
+      RequestedAt: System.DateTimeOffset }
+
+type InstalledOverviewHistory =
+    { Window: HistoryWindow
+      Response: OverviewHistoryResponse }
 
 type Model =
     { Repos: RepoModel list
@@ -38,7 +47,14 @@ type Model =
       Mascot: MascotState.MascotState
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
-      SelectedOverviewGroup: OverviewSelection option }
+      SelectedOverviewGroup: OverviewSelection option
+      // None is the client-only Hidden state; only a concrete shared HistoryWindow can cross the API.
+      // RequestedAt throttles every request attempt, while the request identity prevents overlapping
+      // polls and stale completions.
+      OverviewHistoryWindow: HistoryWindow option
+      OverviewHistory: InstalledOverviewHistory option
+      OverviewHistoryRequestedAt: System.DateTimeOffset
+      OverviewHistoryRequestInFlight: OverviewHistoryRequest option }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -81,6 +97,12 @@ type Msg =
     // opening the Canvas pane (the deliberate difference from FocusOverviewCard).
     | SelectOverviewGroup of OverviewSelection
     | SelectOverviewWorktree of scopedKey: string
+    // In-band history chart (spec: docs/spec/overview-activity-history.md). CycleOverviewChart advances
+    // Hidden -> 12h -> 24h -> 72h -> Hidden. The requested window travels with the response so a slower
+    // request for a previous selection can be ignored. The request identity also distinguishes
+    // separate requests for the same window when the user cycles away and back.
+    | CycleOverviewChart of now: System.DateTimeOffset
+    | OverviewHistoryLoaded of request: OverviewHistoryRequest * response: OverviewHistoryResponse option
     | SetCanvasPosition of CanvasPosition
     | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string

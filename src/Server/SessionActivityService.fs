@@ -12,12 +12,12 @@ open Server.SessionActivityStore
 // Ingestion for the push status model: the POST /api/session/activity endpoint plus the single
 // mutable boundary behind it. A dedicated MailboxProcessor is the ONLY writer of live status and
 // of the SQLite mirror, so status upserts never race. Per report it: folds the event onto that
-// session's prior state → updates the in-memory Map → persists (append raw event + upsert status)
+// session's prior state → updates the in-memory Map → persists (append accepted event + upsert status)
 // → feeds RefreshScheduler (UpdateSessionStatus) so the card path can read it. The handler mirrors
 // CanvasDocServer.canvasRegisterHandler (JSON DTO → domain, validate, known-worktree guard); the
 // csrfGuard is composed in front of it in the route (Program.fs). The service owns its lifecycle:
 // on Start it rebuilds live state from the store and arms a retention timer; on Dispose it stops
-// the timer, the mailbox, and the store.
+// the timer and drains the mailbox. Program owns and disposes the shared store.
 
 // --- Wire contract DTO ------------------------------------------------------------------------
 
@@ -234,11 +234,10 @@ let tryAcceptReport (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (req: S
 
 // --- Retention ---------------------------------------------------------------------------------
 
-/// How long the append-only event stream (and any long-dead session rows) is kept before the
-/// retention timer trims it. Well beyond the 2h idle window, so a live session is never pruned,
-/// while still bounding the unbounded activity_events table. The Overview history reads events
-/// within this window (see the overview-history unification task).
-let internal retentionPeriod = TimeSpan.FromDays 14.0
+/// How long accepted activity_events and long-dead session rows are kept before the retention timer
+/// trims them. Well beyond the 2h idle window, so a live session is never pruned while durable
+/// idempotency and resume state remain bounded.
+let internal retentionPeriod = TimeSpan.FromDays 60.0
 
 /// How often the retention timer fires.
 let internal pruneInterval = TimeSpan.FromHours 1.0
@@ -249,13 +248,23 @@ type private ServiceMsg =
     | Ingest of SessionActivityReport
     | Seed of StoredStatus list
     | Snapshot of AsyncReplyChannel<Map<SessionId, StoredStatus>>
+    | Stop of AsyncReplyChannel<unit>
 
 /// The SessionActivity ingestion service: the single-writer mailbox, the POST handler, and the
 /// start/stop lifecycle (restart rebuild + retention timer). Construct with an instance-specific
 /// store (its dbPath keyed to the server's port/data dir so a side-by-side validation instance
 /// never collides) and the scheduler agent it feeds. Call Start once before serving; Dispose on
-/// shutdown. Owns the store's lifetime — Dispose disposes it.
+/// shutdown. The store is borrowed from Program; Dispose stops only this service.
 type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProcessor<RefreshScheduler.StateMsg>) =
+
+    let dispositionGate = obj ()
+    // Service disposal is a lifetime boundary: mark it once so no work can be queued behind Stop.
+    let mutable disposed = false
+
+    let ensureActive () =
+        lock dispositionGate (fun () ->
+            if disposed then
+                raise (ObjectDisposedException(nameof SessionActivityService)))
 
     // Apply one report on the single writer. State-only reports have independent persistence/order
     // paths; lifecycle events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed
@@ -290,16 +299,23 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
         match report.Event with
         | Heartbeat ->
             // Liveness-only: bump the session's last_seen (the openness signal that keeps an idle-but-open
-            // CLI blue) WITHOUT moving updated_at, re-folding status, or appending a history row. Keeping
+            // CLI blue) WITHOUT moving updated_at, re-folding status, or appending an activity event. Keeping
             // it off the ordering/append path is what stops a heartbeat from overtaking a slightly-earlier
             // real event and dropping it (F20), and from inflating activity_events with synthetic rows
-            // (F14). A heartbeat for a session with no prior event is ignored — there is nothing live to
-            // keep alive.
-            match live |> Map.tryFind report.SessionId with
+            // (F14), or from changing representative-session selection. After a restart, an older but
+            // still-open session can be absent from the idle-window live rebuild; lazily rehydrate its
+            // durable status when its next heartbeat proves it is open. A heartbeat with no prior durable
+            // event is still ignored.
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+
+            match prior with
             | None -> live
             | Some prior ->
                 let bumped = { prior with LastSeen = max prior.LastSeen report.OccurredAt }
-                store.TouchLastSeen(report.SessionId, bumped.LastSeen)
+                store.RecordLiveness(report.SessionId, bumped.LastSeen)
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
                 live |> Map.add report.SessionId bumped
         | UsageInfo(currentTokens, tokenLimit) ->
@@ -307,10 +323,15 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // last-write-wins clock (UpdatedAt). Sharing that clock let a usage report's timestamp
             // block a slightly-earlier status transition (turn stuck Working), and in the reverse
             // arrival order let the status out-of-order guard discard the usage snapshot. So, like a
-            // heartbeat, it never moves UpdatedAt and never appends a history row; it is ordered only
-            // against prior usage via its own ContextUsageAt clock. It needs a live session to attach
-            // to — a usage report for a session with no prior status is dropped (nothing to gauge).
-            match live |> Map.tryFind report.SessionId with
+            // heartbeat, it never moves UpdatedAt and never appends an activity event; it is ordered only
+            // against prior usage via its own ContextUsageAt clock. Like a heartbeat, it can revive
+            // retained durable state after restart; only a session with no prior status is dropped.
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+
+            match prior with
             | None -> live
             | Some prior ->
                 // Usage LWW: a snapshot older than the one already held is ignored, so an out-of-order
@@ -334,7 +355,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                     live |> Map.add report.SessionId persisted
         | TitleBootstrap _ ->
             // Metadata hydration is current state, not a source event. Persist the title without
-            // appending history or advancing the lifecycle UpdatedAt clock. A bootstrap that arrives
+            // appending an activity event or advancing the lifecycle UpdatedAt clock. A bootstrap that arrives
             // before delayed replay creates an Idle shell with the minimum ordering timestamp, so
             // every real SDK event can still fold onto it; its join timestamp seeds LastSeen only
             // until a real event/heartbeat takes over.
@@ -386,9 +407,9 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 | Some p -> report.OccurredAt < p.UpdatedAt
                 | None -> false
 
-            // The history row records the fold state AFTER this event. For an out-of-order (older) event
+            // The durable event row records the fold state AFTER this event. For an out-of-order (older) event
             // that must be the event's OWN direct effect (fold onto empty), never the current newest live
-            // status — which never held at this event's point in history (F19). In-order events fold onto
+            // status — which never held when the event occurred (F19). In-order events fold onto
             // the running state as usual.
             let rowState = if isOutOfOrder then SessionActivity.fold emptyStatus report.Event else newStatus
 
@@ -424,15 +445,15 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                   // gauge, and `fold` already preserves ContextUsage, so its ordering stamp survives too.
                   ContextUsageAt = prior |> Option.bind _.ContextUsageAt }
 
-            // Append + durable upsert (last-write-wins) in ONE transaction so the history and the
-            // status can never diverge on a mid-pair failure. A duplicate event_id returns None
+            // Append + durable upsert (last-write-wins) in ONE transaction so the event and status
+            // records can never diverge on a mid-pair failure. A duplicate event_id returns None
             // (nothing appended or upserted), while a new event returns the authoritative persisted
             // row so retained context cannot diverge from the live maps.
             match store.AppendAndUpsert(eventRow, stored) with
             | None -> live
             | Some _ when isOutOfOrder ->
-                // Mirror the ordering guard in memory: an out-of-order (older) event is recorded in the
-                // history substrate but must not regress the live fold state or the shown card.
+                // Mirror the ordering guard in memory: an out-of-order (older) event is recorded for
+                // idempotency but must not regress the live fold state or the shown card.
                 live
             | Some persisted ->
                 scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
@@ -460,6 +481,8 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 | Snapshot reply ->
                     reply.Reply live
                     return! loop live
+                | Stop reply ->
+                    reply.Reply()
             }
 
             loop Map.empty)
@@ -507,12 +530,15 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
 
     /// Hand an already-validated + monitored report to the single-writer mailbox. Used by the
     /// handler and by tests (which drive the fold/persist/feed path without HTTP plumbing).
-    member internal _.Submit(report: SessionActivityReport) = mailbox.Post(Ingest report)
+    member internal _.Submit(report: SessionActivityReport) =
+        ensureActive ()
+        mailbox.Post(Ingest report)
 
     /// Restart rebuild + retention timer. Loads every still-live session (last_seen within the idle
     /// window) from the store, feeds it to the scheduler and primes the in-memory fold map, so cards
     /// are correct before any new event arrives; then arms the retention timer.
     member _.Start() =
+        ensureActive ()
         let loaded = store.LoadLiveStatuses DateTimeOffset.UtcNow
         // Seed the scheduler in ONE batch so the time-since-idle chip is stamped from each worktree's
         // NEWEST session rather than the oldest-replayed row (LoadLiveStatuses is ordered oldest-first);
@@ -523,10 +549,23 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
         pruneTimer.Change(pruneInterval, pruneInterval) |> ignore
 
     /// The current in-memory live map (test seam; live reads for cards go via the scheduler).
-    member _.LiveSnapshot() : Map<SessionId, StoredStatus> = mailbox.PostAndReply Snapshot
+    member _.LiveSnapshot() : Map<SessionId, StoredStatus> =
+        ensureActive ()
+        mailbox.PostAndReply Snapshot
+
+    member internal _.Store = store
 
     interface IDisposable with
         member _.Dispose() =
-            pruneTimer.Dispose()
-            (mailbox :> IDisposable).Dispose()
-            (store :> IDisposable).Dispose()
+            let shouldStop =
+                lock dispositionGate (fun () ->
+                    if disposed then
+                        false
+                    else
+                        disposed <- true
+                        true)
+
+            if shouldStop then
+                pruneTimer.DisposeAsync().AsTask().GetAwaiter().GetResult()
+                mailbox.PostAndReply Stop
+                (mailbox :> IDisposable).Dispose()

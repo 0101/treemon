@@ -14,6 +14,8 @@ open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 open Newtonsoft.Json.Linq
+open Shared
+open OverviewData
 
 let private repoRoot =
     Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
@@ -242,6 +244,7 @@ type OverviewBandE2ETests() =
     [<SetUp>]
     member this.OpenOverview() =
         task {
+            do! this.Page.Clock.InstallAsync()
             let! _ = this.Page.GotoAsync(viteUrl)
             do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
 
@@ -421,4 +424,402 @@ type OverviewBandE2ETests() =
             let bd = JObject.Parse(json)
             Assert.That(bd.Value<int>("chipCount"), Is.EqualTo(3), "the Investigating breakdown lists its three member worktrees")
             Assert.That(bd.Value<float>("maxUsed"), Is.GreaterThan(0.0), "a member's most-loaded session drives a non-zero --ctx-used chip fill")
+        }
+
+    [<Test>]
+    member this.``History cycle includes 12h and remains mutually exclusive with drill-down``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let charts = this.Page.Locator(".overview-band .history-charts")
+            let breakdown = this.Page.Locator(".overview-band .overview-breakdown")
+            let investigating =
+                this.Page.Locator(".overview-band .overview-section .overview-item", PageLocatorOptions(HasText = "Investigating"))
+
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 History")
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+
+            let! axisLabels = charts.First.Locator(".axis-label-x").AllTextContentsAsync()
+            Assert.That(
+                axisLabels |> List.ofSeq,
+                Is.EqualTo([ "-12h"; "-9h"; "-6h"; "-3h"; "now" ])
+            )
+
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 24h")
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 72h")
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 History")
+            do! Assertions.Expect(charts).ToHaveCountAsync(0)
+
+            do! investigating.ClickAsync()
+            do! Assertions.Expect(breakdown).ToHaveCountAsync(1)
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(breakdown).ToHaveCountAsync(0)
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+
+            do! investigating.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 History")
+            do! Assertions.Expect(charts).ToHaveCountAsync(0)
+            do! Assertions.Expect(breakdown).ToHaveCountAsync(1)
+        }
+
+    [<Test>]
+    member this.``History chart skips an unrelated dashboard poll``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let charts = this.Page.Locator(".overview-band .history-charts")
+
+            do! toggle.ClickAsync()
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+
+            let firstChart = charts.First
+            let! beforePoll = firstChart.GetAttributeAsync("data-geometry-build-count")
+            let! rendersBeforePoll = firstChart.GetAttributeAsync("data-render-count")
+            Assert.That(beforePoll, Is.EqualTo "1")
+            Assert.That(rendersBeforePoll, Is.EqualTo "1")
+
+            let isDashboardPoll (response: IResponse) =
+                response.Url.Contains("/IWorktreeApi/getWorktrees")
+
+            let! pollResponse =
+                this.Page.WaitForResponseAsync(
+                    isDashboardPoll,
+                    PageWaitForResponseOptions(Timeout = 5000.0f)
+                )
+            let! _ = pollResponse.FinishedAsync()
+            let! _ =
+                this.Page.EvaluateAsync<bool>(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))"
+                )
+
+            let! afterPoll = firstChart.GetAttributeAsync("data-geometry-build-count")
+            let! rendersAfterPoll = firstChart.GetAttributeAsync("data-render-count")
+            Assert.That(afterPoll, Is.EqualTo "1")
+            Assert.That(rendersAfterPoll, Is.EqualTo "1")
+        }
+
+    [<Test>]
+    member this.``History window switches keep the old chart mounted and reject stale responses``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let charts = this.Page.Locator(".overview-band .history-charts")
+            let firstAxisLabel = charts.First.Locator(".axis-label-x").First
+            let anchor = DateTimeOffset.UtcNow
+
+            let historyBody count =
+                let response: OverviewHistoryResponse =
+                    { Anchor = anchor
+                      Snapshots =
+                        [ { Timestamp = anchor - TimeSpan.FromHours 72.0
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = count } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = count } ] }
+                          { Timestamp = anchor
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = count + 1 } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = count + 1 } ] } ] }
+
+                Newtonsoft.Json.JsonConvert.SerializeObject(
+                    response,
+                    Fable.Remoting.Json.FableJsonConverter()
+                )
+
+            // Playwright invokes this route callback repeatedly, so the request sequence is callback-local mutation.
+            let mutable requestCount = 0
+            let delayed24 = System.Threading.Tasks.TaskCompletionSource<IRoute>()
+            let delayed72 = System.Threading.Tasks.TaskCompletionSource<IRoute>()
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getOverviewHistory",
+                    fun route ->
+                        requestCount <- requestCount + 1
+
+                        match requestCount with
+                        | 1 ->
+                            route.FulfillAsync(
+                                RouteFulfillOptions(
+                                    ContentType = "application/json",
+                                    Body = historyBody 1
+                                )
+                            )
+                        | 2 ->
+                            delayed24.TrySetResult(route) |> ignore
+                            System.Threading.Tasks.Task.CompletedTask
+                        | 3 ->
+                            delayed72.TrySetResult(route) |> ignore
+                            System.Threading.Tasks.Task.CompletedTask
+                        | _ -> route.AbortAsync()
+                )
+
+            let firstResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do! toggle.ClickAsync()
+            let! _ = firstResponse
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-12h")
+
+            let firstChart = charts.First
+            let! _ = firstChart.EvaluateAsync<string>("chart => chart.dataset.switchSentinel = 'mounted'")
+            let! beforeSwitch = firstChart.BoundingBoxAsync()
+            Assert.That(beforeSwitch, Is.Not.Null)
+
+            do! toggle.ClickAsync()
+            let! staleRoute = delayed24.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 24h")
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-12h")
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-switch-sentinel", "mounted")
+
+            let! during24 = firstChart.BoundingBoxAsync()
+            Assert.That(during24, Is.Not.Null)
+            Assert.That(during24.Height, Is.EqualTo(beforeSwitch.Height).Within(0.5), "chart height stays stable while 24h is pending")
+
+            do! toggle.ClickAsync()
+            let! currentRoute = delayed72.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 72h")
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-12h")
+
+            let! during72 = firstChart.BoundingBoxAsync()
+            Assert.That(during72, Is.Not.Null)
+            Assert.That(during72.Height, Is.EqualTo(beforeSwitch.Height).Within(0.5), "chart height stays stable during rapid switching")
+
+            let staleResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do!
+                staleRoute.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = historyBody 24
+                    )
+                )
+
+            let! _ = staleResponse
+            let! _ =
+                this.Page.EvaluateAsync<bool>(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))"
+                )
+
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-12h")
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-switch-sentinel", "mounted")
+
+            let currentResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do!
+                currentRoute.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = historyBody 72
+                    )
+                )
+
+            let! _ = currentResponse
+            do! Assertions.Expect(firstAxisLabel).ToHaveTextAsync("-72h")
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-switch-sentinel", "mounted")
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-geometry-build-count", "2")
+        }
+
+    [<Test>]
+    member this.``History refresh preserves and re-samples the visible hover``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let charts = this.Page.Locator(".overview-band .history-charts")
+            let firstChart = charts.First
+            let svg = firstChart.Locator("svg")
+            let cursor = firstChart.Locator(".cursor-line")
+            let total = firstChart.Locator(".tip-total")
+            let initialAnchor = DateTimeOffset.UtcNow - TimeSpan.FromSeconds 31.0
+            let refreshedAnchor = DateTimeOffset.UtcNow
+
+            let historyBody anchor changeAgo beforeCount changeCount latestCount =
+                let response: OverviewHistoryResponse =
+                    { Anchor = anchor
+                      Snapshots =
+                        [ { Timestamp = anchor - TimeSpan.FromHours 12.0
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = beforeCount } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = beforeCount } ] }
+                          { Timestamp = anchor - changeAgo
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = changeCount } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = changeCount } ] }
+                          { Timestamp = anchor
+                            Tasks = [ { Kind = TaskBucketKind.Done; Count = latestCount } ]
+                            Agents = [ { Kind = AgentGroupKind.Idle; Count = latestCount } ] } ] }
+
+                Newtonsoft.Json.JsonConvert.SerializeObject(
+                    response,
+                    Fable.Remoting.Json.FableJsonConverter()
+                )
+
+            // Playwright invokes this route callback repeatedly, so the request sequence is callback-local mutation.
+            let mutable requestCount = 0
+            let delayedRefresh = System.Threading.Tasks.TaskCompletionSource<IRoute>()
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getOverviewHistory",
+                    fun route ->
+                        requestCount <- requestCount + 1
+
+                        match requestCount with
+                        | 1 ->
+                            route.FulfillAsync(
+                                RouteFulfillOptions(
+                                    ContentType = "application/json",
+                                    Body = historyBody initialAnchor (TimeSpan.FromHours 6.0) 1 2 3
+                                )
+                            )
+                        | 2 ->
+                            delayedRefresh.TrySetResult(route) |> ignore
+                            System.Threading.Tasks.Task.CompletedTask
+                        | _ -> route.AbortAsync()
+                )
+
+            let initialResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do! toggle.ClickAsync()
+            let! _ = initialResponse
+            do! Assertions.Expect(charts).ToHaveCountAsync(2)
+            do! this.Page.Clock.FastForwardAsync(31_000L)
+            let! refreshRoute = delayedRefresh.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            do! svg.ScrollIntoViewIfNeededAsync()
+            let! svgBox = svg.BoundingBoxAsync()
+            Assert.That(svgBox, Is.Not.Null)
+
+            do!
+                svg.HoverAsync(
+                    LocatorHoverOptions(
+                        Position =
+                            Microsoft.Playwright.Position(
+                                X = svgBox.Width * 0.65f,
+                                Y = svgBox.Height / 2.0f
+                            )
+                    )
+                )
+
+            do! Assertions.Expect(cursor).ToHaveAttributeAsync("x1", "393")
+            do! Assertions.Expect(total).ToHaveTextAsync("Total: 2")
+
+            let refreshedResponse =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+
+            do!
+                refreshRoute.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = historyBody refreshedAnchor (TimeSpan.FromHours 4.8) 4 8 9
+                    )
+                )
+
+            let! _ = refreshedResponse
+            do! Assertions.Expect(firstChart).ToHaveAttributeAsync("data-geometry-build-count", "2")
+            do! Assertions.Expect(cursor).ToHaveAttributeAsync("x1", "465")
+            do! Assertions.Expect(total).ToHaveTextAsync("Total: 8")
+        }
+
+    [<Test>]
+    member this.``History tooltip stays aligned with the crosshair at both plot edges``() =
+        task {
+            let toggle = this.Page.Locator(".overview-band .history-toggle")
+            let firstChart = this.Page.Locator(".overview-band .history-charts").First
+            let svg = firstChart.Locator("svg")
+            let cursor = firstChart.Locator(".cursor-line")
+            let anchor = DateTimeOffset.UtcNow
+
+            let historyResponse: OverviewHistoryResponse =
+                { Anchor = anchor
+                  Snapshots =
+                    [ { Timestamp = anchor - TimeSpan.FromHours 12.0
+                        Tasks = [ { Kind = TaskBucketKind.Done; Count = 1 } ]
+                        Agents = [ { Kind = AgentGroupKind.Idle; Count = 1 } ] }
+                      { Timestamp = anchor
+                        Tasks = [ { Kind = TaskBucketKind.Done; Count = 2 } ]
+                        Agents = [ { Kind = AgentGroupKind.Idle; Count = 2 } ] } ] }
+
+            let historyBody =
+                Newtonsoft.Json.JsonConvert.SerializeObject(
+                    historyResponse,
+                    Fable.Remoting.Json.FableJsonConverter()
+                )
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getOverviewHistory",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(ContentType = "application/json", Body = historyBody)
+                        )
+                )
+
+            let historyRequest =
+                this.Page.WaitForResponseAsync(fun response ->
+                    response.Url.Contains("/IWorktreeApi/getOverviewHistory"))
+            do! toggle.ClickAsync()
+            let! _ = historyRequest
+            do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
+            do! Assertions.Expect(firstChart).ToHaveCountAsync(1)
+
+            do! svg.ScrollIntoViewIfNeededAsync()
+            let! svgBox = svg.BoundingBoxAsync()
+            Assert.That(svgBox, Is.Not.Null)
+
+            let probeAlignment () =
+                task {
+                    let! json =
+                        firstChart.EvaluateAsync<string>(
+                            """chart => {
+                              const stage = chart.querySelector('.chart-stage').getBoundingClientRect();
+                              const svg = chart.querySelector('svg');
+                              const svgRect = svg.getBoundingClientRect();
+                              const viewBox = svg.viewBox.baseVal;
+                              const cursorX = Number(chart.querySelector('.cursor-line').getAttribute('x1'));
+                              const crosshairX = svgRect.left + (cursorX - viewBox.x) / viewBox.width * svgRect.width;
+                              const tip = chart.querySelector('.chart-tip').getBoundingClientRect();
+                              return JSON.stringify({
+                                leftDelta: Math.abs(tip.left - crosshairX),
+                                rightDelta: Math.abs(tip.right - crosshairX),
+                                contained: tip.left >= stage.left - 1 && tip.right <= stage.right + 1
+                              });
+                            }""")
+
+                    return JObject.Parse(json)
+                }
+
+            do!
+                svg.HoverAsync(
+                    LocatorHoverOptions(
+                        Position = Microsoft.Playwright.Position(X = 1.0f, Y = svgBox.Height / 2.0f)
+                    )
+                )
+            do! Assertions.Expect(cursor).ToHaveAttributeAsync("x1", "34")
+            let! left = probeAlignment ()
+            Assert.That(left.Value<float>("leftDelta"), Is.LessThanOrEqualTo(1.5))
+            Assert.That(left.Value<bool>("contained"), Is.True)
+
+            do!
+                svg.HoverAsync(
+                    LocatorHoverOptions(
+                        Position =
+                            Microsoft.Playwright.Position(
+                                X = svgBox.Width - 1.0f,
+                                Y = svgBox.Height / 2.0f
+                            )
+                    )
+                )
+            do! Assertions.Expect(cursor).ToHaveAttributeAsync("x1", "752")
+            let! right = probeAlignment ()
+            Assert.That(right.Value<float>("rightDelta"), Is.LessThanOrEqualTo(1.5))
+            Assert.That(right.Value<bool>("contained"), Is.True)
         }

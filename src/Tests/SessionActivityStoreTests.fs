@@ -10,26 +10,8 @@ open Shared
 open Tests.TestUtils
 
 // These exercise the SQLite (WAL) durable mirror behind the push-model live state: last-write-wins
-// upserts, INSERT OR IGNORE event dedupe, the restart rebuild (loadLiveStatuses within the idle
-// window), the history-substrate window query, and retention pruning. Each test runs against a fresh
-// temp .db file that is disposed + deleted in teardown.
-
-/// A fresh store over a throwaway temp .db, disposed (releasing the file handle) and its dir deleted
-/// afterwards. Store construction creates the schema, so the DB is ready to use inside `action`.
-let private withStore (action: SessionActivityStore -> unit) =
-    let dir = Path.Combine(Path.GetTempPath(), $"treemon-store-test-{Guid.NewGuid()}")
-    Directory.CreateDirectory dir |> ignore
-    let store = new SessionActivityStore(Path.Combine(dir, "activity.db"))
-
-    try
-        action store
-    finally
-        (store :> IDisposable).Dispose()
-
-        try
-            Directory.Delete(dir, true)
-        with _ ->
-            ()
+// upserts, INSERT OR IGNORE event dedupe, restart rebuild, durable resume lookup, and retention.
+// Each test runs against a fresh temp .db file that is disposed + deleted in teardown.
 
 /// Like withStore but hands the raw db path to the test so it can construct + dispose multiple store
 /// instances over the SAME file — the shape of a server restart.
@@ -47,6 +29,51 @@ let private withDbPath (action: string -> unit) =
 
 let private connStr (dbPath: string) =
     SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
+
+let private withStoreAndPath (action: string -> SessionActivityStore -> unit) =
+    withDbPath (fun dbPath ->
+        use store = new SessionActivityStore(dbPath)
+        action dbPath store)
+
+/// A fresh store over a throwaway temp .db, disposed (releasing the file handle) and its dir deleted
+/// afterwards. Store construction creates the schema, so the DB is ready to use inside `action`.
+let private withStore action =
+    withStoreAndPath (fun _ store -> action store)
+
+let private eventCount dbPath =
+    Tests.SqliteTestDatabase.scalarInt dbPath "SELECT count(*) FROM activity_events;"
+
+let private eventCountById dbPath eventId =
+    use conn = Tests.SqliteTestDatabase.openConnection dbPath
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <- "SELECT count(*) FROM activity_events WHERE event_id = $eventId;"
+    cmd.Parameters.AddWithValue("$eventId", eventId) |> ignore
+    Convert.ToInt32(cmd.ExecuteScalar())
+
+let private insertEvent dbPath (row: ActivityEventRow) =
+    let status =
+        match row.Status with
+        | SessionLevelStatus.Working -> "working"
+        | SessionLevelStatus.WaitingForUser -> "waiting_for_user"
+        | SessionLevelStatus.Idle -> "idle"
+
+    use conn = new SqliteConnection(connStr dbPath)
+    conn.Open()
+    use cmd = conn.CreateCommand()
+    cmd.CommandText <-
+        """
+INSERT INTO activity_events
+    (event_id, session_id, worktree_path, provider, kind, status, skill, ts)
+VALUES ($eventId, $sessionId, $worktreePath, 'copilot_cli', $kind, $status, $skill, $ts);
+"""
+    cmd.Parameters.AddWithValue("$eventId", EventId.value row.EventId) |> ignore
+    cmd.Parameters.AddWithValue("$sessionId", SessionId.value row.SessionId) |> ignore
+    cmd.Parameters.AddWithValue("$worktreePath", WorktreePath.value row.WorktreePath) |> ignore
+    cmd.Parameters.AddWithValue("$kind", row.Kind) |> ignore
+    cmd.Parameters.AddWithValue("$status", status) |> ignore
+    cmd.Parameters.AddWithValue("$skill", row.Skill |> Option.map box |> Option.defaultValue DBNull.Value) |> ignore
+    cmd.Parameters.AddWithValue("$ts", row.Ts.ToUniversalTime().ToString("O")) |> ignore
+    cmd.ExecuteNonQuery() |> ignore
 
 let private contextWorktree = Path.Combine(Path.GetTempPath(), "treemon-context-worktree")
 
@@ -240,65 +267,24 @@ type ContextUsagePersistenceTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type AppendEventTests() =
-
-    [<Test>]
-    member _.``A duplicate event_id is ignored (dedupe) and the row count is unchanged``() =
-        withStore (fun store ->
-            let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"
-
-            Assert.That(store.AppendEvent e, Is.True, "first insert should report inserted")
-            Assert.That(store.AppendEvent e, Is.False, "duplicate event_id should report ignored")
-
-            let rows = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
-            Assert.That(rows.Length, Is.EqualTo(1), "duplicate must not add a second row"))
-
-    [<Test>]
-    member _.``Distinct event_ids are all appended``() =
-        withStore (fun store ->
-            Assert.That(store.AppendEvent(eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"), Is.True)
-            Assert.That(
-                store.AppendEvent(eventOf "e2" "s1" "skill_invoked" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:01Z"),
-                Is.True
-            )
-
-            let rows = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
-            Assert.That(rows.Length, Is.EqualTo(2)))
-
-    [<Test>]
-    member _.``An appended event round-trips its fields``() =
-        withStore (fun store ->
-            let e = eventOf "e1" "s1" "skill_invoked" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:00Z"
-            store.AppendEvent e |> ignore
-
-            let row =
-                store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z") |> List.exactlyOne
-
-            Assert.That(row, Is.EqualTo(e)))
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
 type AppendAndUpsertTests() =
 
     [<Test>]
     member _.``A new event is appended and the live status upserted in one call``() =
-        withStore (fun store ->
+        withStoreAndPath (fun dbPath store ->
             let status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "review" }
             let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:00Z"
             let stored = storedOf "s1" "C:/wt/a" status "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
 
             Assert.That(store.AppendAndUpsert(e, stored), Is.EqualTo(Some stored), "a new event returns the persisted row")
 
-            let events = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
-            Assert.That(events.Length, Is.EqualTo 1, "the event was appended")
+            Assert.That(eventCount dbPath, Is.EqualTo 1, "the event was appended")
             let row = store.LoadLiveStatuses(ts "2026-03-01T10:00:00Z") |> find "s1"
             Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Working, "the status was upserted in the same call"))
 
     [<Test>]
     member _.``A duplicate event_id skips BOTH the append and the upsert (coupled idempotency)``() =
-        withStore (fun store ->
+        withStoreAndPath (fun dbPath store ->
             let first = { emptyStatus with Status = SessionLevelStatus.Working }
             let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"
             Assert.That(
@@ -317,8 +303,7 @@ type AppendAndUpsertTests() =
                 "a duplicate event_id reports ignored"
             )
 
-            let events = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
-            Assert.That(events.Length, Is.EqualTo 1, "no second event row")
+            Assert.That(eventCount dbPath, Is.EqualTo 1, "no second event row")
             let row = store.LoadLiveStatuses(ts "2026-03-01T10:05:00Z") |> find "s1"
             Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Working, "the upsert was skipped with the append")
             Assert.That(row.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z")))
@@ -445,52 +430,14 @@ type RetainedByWorktreeTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type QueryWindowTests() =
-
-    let seed (store: SessionActivityStore) =
-        [ "e0", "2026-03-01T09:00:00Z"
-          "e1", "2026-03-01T10:00:00Z"
-          "e2", "2026-03-01T11:00:00Z"
-          "e3", "2026-03-01T12:00:00Z" ]
-        |> List.iter (fun (eid, t) -> store.AppendEvent(eventOf eid "s1" "turn_started" SessionLevelStatus.Working None t) |> ignore)
-
-    [<Test>]
-    member _.``Only events inside the window are returned, oldest first``() =
-        withStore (fun store ->
-            seed store
-            let rows = store.QueryWindow(ts "2026-03-01T09:30:00Z", ts "2026-03-01T11:30:00Z")
-
-            Assert.That(
-                rows |> List.map (_.EventId >> EventId.value),
-                Is.EqualTo([ "e1"; "e2" ]),
-                "window should drop out-of-range events and stay ordered by ts"
-            ))
-
-    [<Test>]
-    member _.``Window boundaries are inclusive on both ends``() =
-        withStore (fun store ->
-            seed store
-            let rows = store.QueryWindow(ts "2026-03-01T10:00:00Z", ts "2026-03-01T11:00:00Z")
-            Assert.That(rows |> List.map (_.EventId >> EventId.value), Is.EqualTo([ "e1"; "e2" ])))
-
-    [<Test>]
-    member _.``A window covering nothing yields an empty list``() =
-        withStore (fun store ->
-            seed store
-            Assert.That(store.QueryWindow(ts "2026-03-01T13:00:00Z", ts "2026-03-01T14:00:00Z"), Is.Empty))
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
 type PruneOldTests() =
 
     [<Test>]
     member _.``pruneOld drops events and session rows older than the cutoff and returns the count``() =
-        withStore (fun store ->
-            store.AppendEvent(eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T01:00:00Z") |> ignore
-            store.AppendEvent(eventOf "e2" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T02:00:00Z") |> ignore
-            store.AppendEvent(eventOf "e3" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T03:00:00Z") |> ignore
+        withStoreAndPath (fun dbPath store ->
+            insertEvent dbPath (eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T01:00:00Z")
+            insertEvent dbPath (eventOf "e2" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T02:00:00Z")
+            insertEvent dbPath (eventOf "e3" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T03:00:00Z")
 
             store.UpsertStatus(storedOf "old" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
             store.UpsertStatus(storedOf "recent" "C:/wt/a" emptyStatus "2026-03-01T03:00:00Z" "2026-03-01T03:00:00Z")
@@ -499,11 +446,8 @@ type PruneOldTests() =
             let deleted = store.PruneOld(ts "2026-03-01T02:30:00Z")
             Assert.That(deleted, Is.EqualTo(3))
 
-            let remainingEvents =
-                store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-01T23:59:59Z")
-                |> List.map (_.EventId >> EventId.value)
-
-            Assert.That(remainingEvents, Is.EqualTo([ "e3" ]))
+            Assert.That(eventCount dbPath, Is.EqualTo 1)
+            Assert.That(eventCountById dbPath "e3", Is.EqualTo 1)
 
             let remainingSessions =
                 store.LoadLiveStatuses(ts "2026-03-01T03:30:00Z")
@@ -514,6 +458,55 @@ type PruneOldTests() =
     [<Test>]
     member _.``pruneOld on an empty store deletes nothing``() =
         withStore (fun store -> Assert.That(store.PruneOld(ts "2026-03-01T12:00:00Z"), Is.EqualTo(0)))
+
+    [<Test>]
+    member _.``pruneOld rolls back every delete when a later statement fails``() =
+        withDbPath (fun dbPath ->
+            use store = new SessionActivityStore(dbPath)
+            let cutoff = ts "2026-03-02T00:00:00Z"
+            let oldEvent = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T01:00:00Z"
+
+            insertEvent dbPath oldEvent
+            store.UpsertStatus(storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
+
+            let connectionString =
+                SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
+
+            use conn = new SqliteConnection(connectionString)
+            conn.Open()
+            use cmd = conn.CreateCommand()
+            cmd.CommandText <-
+                """
+CREATE TRIGGER fail_status_prune
+BEFORE DELETE ON session_status
+BEGIN
+    SELECT RAISE(ABORT, 'forced prune failure');
+END;
+"""
+            cmd.ExecuteNonQuery() |> ignore
+
+            Assert.Throws<SqliteException>(fun () -> store.PruneOld cutoff |> ignore) |> ignore
+            Assert.That(eventCountById dbPath "e1", Is.EqualTo 1)
+            Assert.That(store.StatusBySession(SessionId "s1").IsSome, Is.True))
+
+    [<Test>]
+    member _.``pruneOld keeps the latest old event for a retained session``() =
+        withStoreAndPath (fun dbPath store ->
+            let oldEvent = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2025-12-01T10:00:00Z"
+            insertEvent dbPath oldEvent
+            store.UpsertStatus(
+                storedOf
+                    "s1"
+                    "C:/wt/a"
+                    { emptyStatus with Status = SessionLevelStatus.Working }
+                    "2025-12-01T10:00:00Z"
+                    "2025-12-01T10:00:00Z"
+            )
+            store.RecordLiveness(SessionId "s1", ts "2026-03-01T11:59:00Z")
+
+            store.PruneOld(ts "2026-01-01T00:00:00Z") |> ignore
+
+            Assert.That(eventCountById dbPath "e1", Is.EqualTo 1))
 
 
 [<TestFixture>]

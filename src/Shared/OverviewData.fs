@@ -22,6 +22,7 @@ module OverviewData
 // it excludes IsArchived worktrees from the whole roll-up, so callers can hand it the un-split list
 // (archived flagged) and let aggregate drop them.
 
+open System
 open Shared
 
 /// A cross-worktree task status bucket. RequireQualifiedAccess keeps Done/InProgress/Blocked from
@@ -95,13 +96,43 @@ type Overview =
       Agents: AgentGroup list
       Scale: int }
 
-/// Which Overview-band group the drill-down panel is currently showing. Single-select across both
-/// sections (at most one is set): an agent group (Active agents section) or a task bucket (Tasks
-/// section). Ephemeral session state — never persisted (unlike OverviewPanelOpen).
+/// One task bucket reduced to just its kind and cross-worktree count — the COUNT-ONLY shape the
+/// activity-history log persists. Deliberately NOT `TaskBucket`, which now carries the drill-down
+/// `Members` list: the history log stays lean (spec decision #10) and change-detection tracks count
+/// transitions, not per-worktree membership churn.
+type TaskCount = { Kind: TaskBucketKind; Count: int }
+
+/// One agent group reduced to its kind and count — the count-only companion to `TaskCount` (see it
+/// for why this is distinct from the `Members`-carrying `AgentGroup`).
+type AgentCount = { Kind: AgentGroupKind; Count: int }
+
+/// One canonical point in the Overview band's history: its UTC capture boundary plus the count-only
+/// task-bucket and agent-group rolls from the same live aggregate. Members are dropped and Scale is
+/// re-derived by the view.
+type OverviewSnapshot =
+    { Timestamp: DateTimeOffset
+      Tasks: TaskCount list
+      Agents: AgentCount list }
+
+/// A server-requestable Overview history window. Hidden is deliberately represented only by the
+/// client's `HistoryWindow option`, so it cannot cross the API boundary.
 [<RequireQualifiedAccess>]
-type OverviewSelection =
-    | Agents of AgentGroupKind
-    | Tasks of TaskBucketKind
+type HistoryWindow =
+    | Hours12
+    | Hours24
+    | Hours72
+
+module HistoryWindow =
+    let duration =
+        function
+        | HistoryWindow.Hours12 -> TimeSpan.FromHours 12.0
+        | HistoryWindow.Hours24 -> TimeSpan.FromHours 24.0
+        | HistoryWindow.Hours72 -> TimeSpan.FromHours 72.0
+
+/// The sampled Overview history plus the server instant used to compute its window edges.
+type OverviewHistoryResponse =
+    { Anchor: DateTimeOffset
+      Snapshots: OverviewSnapshot list }
 
 // Canonical left-to-right order of the task bars. Unattended trails Done: it is the muted
 // catch-all for In-progress/Queued tasks whose worktree has no active agent.
@@ -128,16 +159,13 @@ let private activityOrder =
 let private agentGroupOrder =
     (activityOrder |> List.map AgentGroupKind.Activity) @ [ AgentGroupKind.Waiting; AgentGroupKind.Idle ]
 
-/// The agent group a single live session belongs to, from its OWN status and skill: a Working session
-/// is classified by the skill IT is running (Activity.classify — absent skill → Working, matching the
-/// spec's "red-dot agent, no recognized skill → generic Working group"), a WaitingForUser session
-/// joins the Waiting group, an Idle session the Idle group. NoSession is never a per-session status
-/// (the empty-session worktree collapse), so it maps to no group. This replaces the old per-worktree
-/// classification: grouping is now per session, so a worktree's sessions split across groups by what
-/// each is actually doing rather than clumping under the worktree's single collapsed skill.
-let private sessionGroupKind (s: SessionDot) : AgentGroupKind option =
-    match s.Status with
-    | CodingToolStatus.Working -> Some(AgentGroupKind.Activity(Activity.classify (s.Skill |> Option.defaultValue "")))
+/// The agent group a worktree's collapsed coding-tool status + skill maps to, or None when it is not
+/// a live agent (NoSession — grey, no open session). This is the single source of truth for the live
+/// aggregate's status-to-group mapping:
+///   Working -> the skill-classified Activity group · WaitingForUser -> Waiting · Idle -> Idle.
+let agentGroupOf (codingTool: CodingToolStatus) (skill: string option) : AgentGroupKind option =
+    match codingTool with
+    | CodingToolStatus.Working -> Some(AgentGroupKind.Activity(Activity.classify (skill |> Option.defaultValue "")))
     | CodingToolStatus.WaitingForUser -> Some AgentGroupKind.Waiting
     | CodingToolStatus.Idle -> Some AgentGroupKind.Idle
     | CodingToolStatus.NoSession -> None
@@ -211,7 +239,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let scale = taskGroups |> List.map (fun (_, _, count) -> count) |> List.max
 
     // Agent groups, now split per SESSION (not per worktree): each open session lands in the group its
-    // OWN status/skill classifies to (sessionGroupKind) — a red-dot Working session by its running
+    // OWN status/skill classifies via agentGroupOf — a red-dot Working session by its running
     // skill, a WaitingForUser session in Waiting, an Idle session in Idle. A worktree therefore
     // appears in every group its sessions span, carrying only the matching subset, and contributes
     // that subset's size (so Count = Σ Contribution = total sessions in the group). NoSession sessions
@@ -221,7 +249,7 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let agentMembersFor kind =
         taggedWorktrees
         |> List.choose (fun (repoId, repoName, w) ->
-            match w.Sessions |> List.filter (fun s -> sessionGroupKind s = Some kind) with
+            match w.Sessions |> List.filter (fun s -> agentGroupOf s.Status s.Skill = Some kind) with
             | [] -> None
             | matched -> Some(memberOf repoId repoName w.CodingToolSince matched w (List.length matched)))
 

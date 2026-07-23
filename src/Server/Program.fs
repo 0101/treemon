@@ -2,7 +2,10 @@ open Saturn
 open Giraffe
 open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
+open System
 open System.Threading
+open System.Threading.Tasks
+open Microsoft.Extensions.Hosting
 open Shared
 open Server
 
@@ -225,6 +228,126 @@ let internal persistResolvedRoots (resolution: RootsResolution) =
         | Error msg ->
             Log.log "Startup" $"Failed to persist worktree roots: {msg}"
 
+type internal BackgroundLoop =
+    { Cancellation: CancellationTokenSource
+      Completion: Task }
+
+type internal SessionActivityComponents =
+    { Store: SessionActivityStore.SessionActivityStore
+      Service: SessionActivityService.SessionActivityService }
+
+type internal SessionActivityRuntime =
+    { Components: SessionActivityComponents
+      SnapshotStore: OverviewSnapshotStore.OverviewSnapshotStore
+      Capture: OverviewSnapshotCapture.SnapshotCapture }
+
+let internal usesSessionActivity (config: ServerConfig) =
+    not config.Demo && config.TestFixtures.IsNone
+
+let internal createSessionActivityComponents
+    (dbPath: string)
+    (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
+    =
+    let store = new SessionActivityStore.SessionActivityStore(dbPath)
+
+    try
+        { Store = store
+          Service = new SessionActivityService.SessionActivityService(store, scheduler) }
+    with _ ->
+        (store :> System.IDisposable).Dispose()
+        reraise ()
+
+let internal startBackgroundLoop (workflow: CancellationToken -> Async<unit>) =
+    let cancellation = new CancellationTokenSource()
+
+    { Cancellation = cancellation
+      Completion =
+        Async.StartAsTask(
+            workflow cancellation.Token,
+            cancellationToken = CancellationToken.None
+        )
+        :> Task }
+
+let internal stopBackgroundLoop name (loop: BackgroundLoop) =
+    try
+        loop.Cancellation.Cancel()
+
+        try
+            loop.Completion.GetAwaiter().GetResult()
+        with
+        | :? OperationCanceledException -> ()
+        | ex -> Log.log "Shutdown" $"{name} stopped with an error: {ex.Message}"
+    finally
+        loop.Cancellation.Dispose()
+
+let internal createSessionActivityRuntime
+    (dbPath: string)
+    (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (rootPaths: Map<RepoId, string>)
+    =
+    let snapshotStore = OverviewSnapshotStore.OverviewSnapshotStore(dbPath)
+    let components = createSessionActivityComponents dbPath scheduler
+
+    try
+        { Components = components
+          SnapshotStore = snapshotStore
+          Capture =
+            OverviewSnapshotCapture.create
+                scheduler
+                rootPaths
+                snapshotStore }
+    with _ ->
+        (components.Service :> System.IDisposable).Dispose()
+        (components.Store :> System.IDisposable).Dispose()
+        reraise ()
+
+let internal shutdownStoreUsers
+    (disposeIngestion: unit -> unit)
+    (stopScheduler: unit -> unit)
+    (disposeStore: unit -> unit)
+    =
+    try
+        disposeIngestion ()
+    finally
+        try
+            stopScheduler ()
+        finally
+            disposeStore ()
+
+let internal shutdownSessionActivityRuntime
+    (runtime: SessionActivityRuntime)
+    (schedulerLoop: BackgroundLoop option)
+    =
+    shutdownStoreUsers
+        (fun () -> (runtime.Components.Service :> System.IDisposable).Dispose())
+        (fun () ->
+            schedulerLoop
+            |> Option.iter (stopBackgroundLoop "Refresh scheduler"))
+        (fun () -> (runtime.Components.Store :> System.IDisposable).Dispose())
+
+let internal runHostWithCapture
+    (startHost: unit -> unit)
+    (waitForShutdown: unit -> unit)
+    (stopping: CancellationToken)
+    (capture: (CancellationToken -> Async<unit>) option)
+    =
+    match capture with
+    | None ->
+        startHost ()
+        waitForShutdown ()
+    | Some workflow ->
+        let loop = startBackgroundLoop workflow
+        let stoppingRegistration =
+            stopping.Register(fun () -> loop.Cancellation.Cancel())
+        Log.log "Startup" "Overview snapshot capture started"
+
+        try
+            startHost ()
+            waitForShutdown ()
+        finally
+            stoppingRegistration.Dispose()
+            stopBackgroundLoop "Overview snapshot capture" loop
+
 [<EntryPoint>]
 let main args =
     let config = parseArgs args
@@ -238,7 +361,7 @@ let main args =
     // this startup boundary. Demo and fixture modes bypass resolution entirely — they serve
     // synthetic data, so roots stay [].
     let worktreeRoots =
-        if config.Demo || config.TestFixtures.IsSome then
+        if not (usesSessionActivity config) then
             []
         else
             let resolution = resolveWorktreeRoots config.WorktreeRoots
@@ -259,26 +382,10 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
-    let cts = new CancellationTokenSource()
-
-    // The push-model durable store, created up front (real monitoring path only — not demo/fixture)
-    // so it can back BOTH the resume-identity lookup in the worktree API (getLastSessionId reads the
-    // durable store, not the idle-window live cache — see F10/C-02) AND the activity ingestion
-    // service below. Instance-specific SQLite path keyed by the server's port so a side-by-side
-    // validation instance never collides on the DB file. The service (below) owns disposal on
-    // shutdown; when no service is started (demo/fixture) there is no store to dispose.
-    let sessionActivityStore =
-        if not config.Demo && config.TestFixtures.IsNone then
-            let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
-            Log.log "Startup" $"Session activity store db: {dbPath}"
-            Some(new SessionActivityStore.SessionActivityStore(dbPath))
-        else
-            None
-
-    let remotingApi, schedulerAgent =
+    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
-            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None
         else
             let agent = RefreshScheduler.createAgent ()
             let syncAgent = SyncEngine.createSyncAgent ()
@@ -295,36 +402,68 @@ let main args =
                 | Error msg ->
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
+
+                WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent None None worktreeRoots config.TestFixtures appVersion deployBranch
+                |> buildRemotingHandler,
+                Some agent,
+                None,
+                None
             | None ->
-                RefreshScheduler.start agent worktreeRoots cts.Token
-                Log.log "Startup" "Scheduler background loop started"
+                let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
+                Log.log "Startup" $"Session activity store db: {dbPath}"
+                let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
+                let activity =
+                    createSessionActivityRuntime
+                        dbPath
+                        agent
+                        rootPaths
+                let store = activity.Components.Store
 
-            WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch
-            |> buildRemotingHandler, Some agent
+                let schedulerCancellation = new CancellationTokenSource()
 
-    // Push-model status ingestion. Reuses the durable store created above (shared with the worktree
-    // API's resume-identity lookup). The service owns that store: it rebuilds live status from SQLite
-    // on Start and arms the retention timer, and disposes the store on shutdown. Started only in the
-    // real monitoring path — demo mode has no scheduler agent (and no store), and fixture mode serves
-    // synthetic data and receives no activity posts (mirrors skipping the scheduler background loop).
+                let scheduler =
+                    try
+                        { Cancellation = schedulerCancellation
+                          Completion =
+                            RefreshScheduler.start
+                                agent
+                                worktreeRoots
+                                schedulerCancellation.Token }
+                    with _ ->
+                        schedulerCancellation.Dispose()
+                        shutdownSessionActivityRuntime activity None
+                        reraise ()
+
+                try
+                    activity.Components.Service.Start()
+                    Log.log "Startup" "Session activity ingestion started"
+                    Log.log "Startup" "Scheduler background loop started"
+
+                    WorktreeApi.worktreeApi
+                        agent
+                        syncAgent
+                        cardLog
+                        sessionAgent
+                        (Some store)
+                        (Some activity.SnapshotStore)
+                        worktreeRoots
+                        config.TestFixtures
+                        appVersion
+                        deployBranch
+                    |> buildRemotingHandler,
+                    Some agent,
+                    Some activity,
+                    Some scheduler
+                with _ ->
+                    shutdownSessionActivityRuntime activity (Some scheduler)
+                    reraise ()
+
     let sessionActivityService =
-        match schedulerAgent, sessionActivityStore with
-        | Some agent, Some store when config.TestFixtures.IsNone ->
-            let svc = new SessionActivityService.SessionActivityService(store, agent)
-            svc.Start()
-            Log.log "Startup" "Session activity ingestion started"
-            Some svc
-        | _ -> None
+        activityRuntime |> Option.map _.Components.Service
 
-    System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
-        Log.log "Shutdown" "Cancelling scheduler"
-        cts.Cancel()
-        cts.Dispose()
-        sessionActivityService |> Option.iter (fun svc -> (svc :> System.IDisposable).Dispose()))
-
-    match schedulerAgent, config.CanvasPort with
-    | Some agent, Some canvasPort -> CanvasDocServer.start agent canvasPort cts.Token
-    | _ -> ()
+    let capture =
+        activityRuntime
+        |> Option.map _.Capture.Run
 
     // The register/attribute routes need the scheduler agent for their known-worktree guard. In
     // demo mode there is no agent (and the canvas doc server is never started — see above), so
@@ -372,5 +511,34 @@ let main args =
             use_gzip
         }
 
-    run app
+    try
+        let canvasHost =
+            match schedulerAgent, config.CanvasPort with
+            | Some agent, Some canvasPort -> Some(CanvasDocServer.start agent canvasPort)
+            | _ -> None
+
+        try
+            use host = app.Build()
+            let applicationLifetime =
+                host.Services.GetService(typeof<IHostApplicationLifetime>)
+                :?> IHostApplicationLifetime
+
+            runHostWithCapture
+                (fun () -> host.Start())
+                (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
+                applicationLifetime.ApplicationStopping
+                capture
+        finally
+            canvasHost
+            |> Option.iter (fun host ->
+                try
+                    host.StopAsync().GetAwaiter().GetResult()
+                finally
+                    host.Dispose())
+    finally
+        activityRuntime
+        |> Option.iter (fun runtime ->
+            Log.log "Shutdown" "Stopping session activity"
+            shutdownSessionActivityRuntime runtime schedulerLoop)
+
     0
