@@ -25,7 +25,7 @@ The session-document machinery exists for an interactive document authored and o
 |---|---|---|
 | Iframe, docking/position, pane real-estate | yes | yes |
 | Link interception + scrollbar styling | yes | yes |
-| Tab-strip entry | normal tab | distinct far-left `.canvas-system-tab` (BD glyph + issue count), no liveness dot |
+| Tab-strip entry | normal tab | distinct far-left `.canvas-system-tab` with a view-specific glyph (BD + issue count for Beadspace; inline diff SVG for the diff viewer), no liveness dot |
 | Liveness dot | yes | no |
 | `▶ Start session` button | yes | no |
 | Author heartbeat bridge | yes | no |

@@ -1,11 +1,13 @@
 module Tests.CanvasPaneTests
 
 open System
+open System.Threading.Tasks
 open NUnit.Framework
 open Newtonsoft.Json
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 open Tests.CanvasTestHelpers
+open Shared
 
 /// Branch name of the fixture worktree that has a CanvasDoc defined in
 /// src/Tests/fixtures/worktrees.json.  Tests target this known branch
@@ -835,6 +837,85 @@ type CanvasPaneTests() =
             do! countBadge.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! countText = countBadge.TextContentAsync()
             Assert.That(countText.Trim(), Is.EqualTo("2"), "SystemView badge should show the worktree's total beads issue count (Open+InProgress+Blocked+Closed)")
+        }
+
+    [<Test>]
+    member this.``Diff SystemView entry reuses the accessible inline diff SVG while beads keeps its count``() =
+        task {
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let diffDoc: CanvasDoc =
+                { Filename = "diff.html"
+                  ContentHash = "diff-tab"
+                  LastModified = DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero)
+                  OwnerSessionId = None
+                  Kind = CanvasDocKind.SystemView }
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getWorktrees",
+                    Func<IRoute, Task>(fun route ->
+                        task {
+                            let! upstream = route.FetchAsync()
+                            let! json = upstream.TextAsync()
+                            let response =
+                                JsonConvert.DeserializeObject<DashboardResponse>(json, converter)
+                            let transformed =
+                                { response with
+                                    Repos =
+                                        response.Repos
+                                        |> List.map (fun repo ->
+                                            { repo with
+                                                Worktrees =
+                                                    repo.Worktrees
+                                                    |> List.map (fun wt ->
+                                                        if wt.Branch = FixtureSystemViewBranch then
+                                                            { wt with CanvasDocs = wt.CanvasDocs @ [ diffDoc ] }
+                                                        else
+                                                            wt) }) }
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = JsonConvert.SerializeObject(transformed, converter)
+                                    )
+                                )
+                        } :> Task)
+                )
+
+            let! _ = this.Page.ReloadAsync()
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! ensureCanvasPaneOpen this.Page
+
+            let diffTab =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-system-tab",
+                    PageLocatorOptions(Has = this.Page.Locator("svg")))
+            do! diffTab.WaitForAsync()
+            let! semantics =
+                diffTab.EvaluateAsync<string array>(
+                    """button => [
+                        button.getAttribute('title'),
+                        String(button.querySelectorAll('.canvas-system-tab-glyph > svg').length),
+                        button.querySelector('svg')?.getAttribute('aria-hidden') || '',
+                        button.querySelector('.canvas-system-tab-glyph')?.textContent.trim() || '',
+                        String(button.querySelectorAll('.canvas-system-tab-count').length)
+                    ]"""
+                )
+            let! beadsCount =
+                this.Page.Locator(".canvas-system-tab-count").TextContentAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    semantics,
+                    Is.EqualTo(
+                        [| "Worktree diff — double-click to open in a browser tab"
+                           "1"
+                           "true"
+                           ""
+                           "0" |]
+                    )
+                )
+                Assert.That(beadsCount.Trim(), Is.EqualTo("2")))
         }
 
     [<Test>]

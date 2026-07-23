@@ -46,10 +46,10 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Per-Worktree Card
 
-- Branch name header with work metrics (commit grid + diff stats)
+- Branch name header with work metrics (commit grid + diff stats) only when committed history has a net diff from the base
 - Coding tool status dots — one per live session (Working / WaitingForUser / Idle), each a context-usage donut (arc = remaining context) when that session has reported usage, else a plain dot; the last known gauge survives server restart for sessions restored from the durable live window. A worktree with no live session shows the single grey NoSession dot. Tooltip shows the status.
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
-- "N behind main" with sync button; dirty indicator
+- "N behind main" with sync button when the configured remote-tracking base exists; local-base fallback still supplies committed diff metrics but never offers a Sync target. The dirty guard reflects tracked staged/unstaged changes only, so untracked files do not block Sync.
 - Beads counts (open / in-progress / done) with progress bar
 - PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
@@ -166,10 +166,10 @@ For fork workflows (push to fork, PRs in upstream repo), treemon auto-detects an
 
 ### Base Branch Resolution
 
-Each repo can configure which branch is considered the "base" for ahead/behind counts, diff stats, fetch, fast-forward, and sync operations:
+Each repo can configure which branch is considered the "base" for committed diff stats, fetch, fast-forward, and sync operations:
 
 - **Resolution**: `.treemon.json` `"baseBranch"` field → default `"main"`
-- **Affects**: `git rev-list` behind/commit counts, `git diff --shortstat`, `git fetch`, fast-forward, merge/rebase targets, branch sort priority
+- **Affects**: committed `git rev-list`/`git diff --shortstat` metrics use the remote-tracking ref when available and otherwise the local branch. Behind count is computed only against the remote-tracking ref because Sync fetches and targets that remote; a local fallback or missing base reports zero behind. Missing-base refreshes retain last-commit, upstream, tracked-dirty, and local/untracked diff data while omitting committed metrics.
 - **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh
 - **Config example**: `{ "baseBranch": "dev" }` in `.treemon.json` at repo root
 

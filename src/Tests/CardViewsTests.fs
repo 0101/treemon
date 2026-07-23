@@ -209,10 +209,42 @@ let private diffCanvasDoc =
       OwnerSessionId = None
       Kind = CanvasDocKind.SystemView }
 
+let private committedWorkMetrics =
+    { CommitCount = 2
+      LinesAdded = 12
+      LinesRemoved = 3 }
+
 let private withDiffDocs (response: DashboardResponse) =
     let addDiff wt =
-        if wt.CanvasDocs |> List.exists (fun doc -> doc.Filename = diffCanvasDoc.Filename) then wt
-        else { wt with CanvasDocs = wt.CanvasDocs @ [ diffCanvasDoc ] }
+        let withFixtureState =
+            match wt.Branch with
+            | "feature-active" ->
+                { wt with
+                    IsDirty = true
+                    HasDiff = true
+                    WorkMetrics = None }
+            | "feature-recent" ->
+                { wt with
+                    IsDirty = false
+                    HasDiff = true
+                    WorkMetrics = Some committedWorkMetrics }
+            | "feature-stale" ->
+                { wt with
+                    IsDirty = true
+                    HasDiff = true
+                    WorkMetrics = None }
+            | "feature-idle" ->
+                { wt with
+                    IsDirty = false
+                    HasDiff = false
+                    WorkMetrics = None }
+            | _ -> wt
+
+        if withFixtureState.CanvasDocs |> List.exists (fun doc -> doc.Filename = diffCanvasDoc.Filename) then
+            withFixtureState
+        else
+            { withFixtureState with
+                CanvasDocs = withFixtureState.CanvasDocs @ [ diffCanvasDoc ] }
 
     { response with
         Repos =
@@ -247,6 +279,27 @@ let private routeDashboard (transform: DashboardResponse -> DashboardResponse) (
     page.RouteAsync("**/IWorktreeApi/getWorktrees", routeHandler)
 
 let private routeDashboardWithDiffDocs = routeDashboard withDiffDocs
+
+let private routeDashboardWithSyncCounts =
+    routeDashboard (fun response ->
+        let setSyncCount wt =
+            match wt.Branch with
+            | "feature-active" ->
+                { wt with
+                    MainBehindCount = 0
+                    IsDirty = false }
+            | "feature-recent" ->
+                { wt with
+                    MainBehindCount = 2
+                    IsDirty = false }
+            | _ -> wt
+
+        { response with
+            Repos =
+                response.Repos
+                |> List.map (fun repo ->
+                    { repo with
+                        Worktrees = repo.Worktrees |> List.map setSyncCount }) })
 
 let private routeDashboardWithoutDiffDocs =
     routeDashboard (fun response ->
@@ -286,19 +339,34 @@ type WorktreeDiffActionTests() =
         }
 
     [<Test>]
+    member this.``Sync action is hidden at zero behind and visible when the remote base is behind``() =
+        task {
+            do! routeDashboardWithSyncCounts this.Page
+            let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
+            do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+
+            let! localFallbackSync = (cardByBranch this.Page "feature-active").Locator(".sync-btn").CountAsync()
+            let! remoteBehindSync = (cardByBranch this.Page "feature-recent").Locator(".sync-btn").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(localFallbackSync, Is.Zero)
+                Assert.That(remoteBehindSync, Is.EqualTo(1)))
+        }
+
+    [<Test>]
     member this.``Pointer Diff opens and switches the scoped view without changing card focus``() =
         task {
             do! this.NavigateWithDiffDocs()
 
             let focusedCard = cardByBranch this.Page "feature-active"
             let firstTarget = cardByBranch this.Page "feature-recent"
-            let secondTarget = cardByBranch this.Page "feature-idle"
+            let secondTarget = cardByBranch this.Page "feature-stale"
             do! focusedCard.ClickAsync()
 
             let! closedCount = this.Page.Locator(".canvas-pane.open").CountAsync()
             Assert.That(closedCount, Is.EqualTo(0), "Canvas pane should start closed")
 
-            do! firstTarget.Locator(".diff-btn").ClickAsync()
+            do! firstTarget.Locator(".diff-action-btn").ClickAsync()
             do! this.Page.Locator(".canvas-pane.open").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let activeIframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             do! activeIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
@@ -311,7 +379,7 @@ type WorktreeDiffActionTests() =
                 Assert.That(focusedAfterFirst, Does.Contain("focused"), "Diff click must not move card focus")
                 Assert.That(targetAfterFirst, Does.Not.Contain("focused"), "Stopped click propagation must keep the target card unfocused"))
 
-            do! secondTarget.Locator(".diff-btn").ClickAsync()
+            do! secondTarget.Locator(".diff-action-btn").ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     "src => document.querySelector('.canvas-iframe-active')?.getAttribute('src') !== src",
@@ -321,7 +389,7 @@ type WorktreeDiffActionTests() =
             let! focusedAfterSecond = focusedCard.GetAttributeAsync("class")
 
             Assert.Multiple(fun () ->
-                Assert.That(secondSrc, Does.Contain("feature-idle").And.EndWith("/diff.html"))
+                Assert.That(secondSrc, Does.Contain("feature-stale").And.EndWith("/diff.html"))
                 Assert.That(secondSrc, Is.Not.EqualTo(firstSrc), "An already-open pane should switch worktree scope")
                 Assert.That(focusedAfterSecond, Does.Contain("focused"), "Switching diff targets must preserve the focused card"))
         }
@@ -336,7 +404,7 @@ type WorktreeDiffActionTests() =
             let targetCard = cardByBranch this.Page "feature-stale"
             do! focusedCard.ClickAsync()
 
-            let diffButton = targetCard.Locator(".diff-btn")
+            let diffButton = targetCard.Locator(".diff-action-btn")
             do! diffButton.FocusAsync()
             do! this.Page.Keyboard.PressAsync(key)
 
@@ -353,27 +421,35 @@ type WorktreeDiffActionTests() =
         }
 
     [<Test>]
-    member this.``Diff action is present on normal and compact worktree cards but absent from archived cards``() =
+    member this.``Diff action visibility follows comparison content readiness and archive state in both layouts``() =
         task {
             do! this.NavigateWithDiffDocs()
 
-            let normalCards = this.Page.Locator(".wt-card:not(.compact)")
-            let! normalCount = normalCards.CountAsync()
-            let! normalDiffCount = normalCards.Locator(".diff-btn").CountAsync()
             let! archivedCount = this.Page.Locator(".archive-card").CountAsync()
-            let! archivedDiffCount = this.Page.Locator(".archive-card .diff-btn").CountAsync()
+            let! archivedDiffCount = this.Page.Locator(".archive-card .diff-action-btn").CountAsync()
+            let! untrackedOnly = (cardByBranch this.Page "feature-active").Locator(".diff-action-btn").CountAsync()
+            let! committedOnly = (cardByBranch this.Page "feature-recent").Locator(".diff-action-btn").CountAsync()
+            let! localOnly = (cardByBranch this.Page "feature-stale").Locator(".diff-action-btn").CountAsync()
+            let! netZeroCommits = (cardByBranch this.Page "feature-idle").Locator(".diff-action-btn").CountAsync()
             Assert.Multiple(fun () ->
                 Assert.That(archivedCount, Is.GreaterThan(0), "Fixture must exercise an archived card")
-                Assert.That(normalDiffCount, Is.EqualTo(normalCount))
-                Assert.That(archivedDiffCount, Is.EqualTo(0)))
+                Assert.That(untrackedOnly, Is.EqualTo(1), "Untracked-only content should be actionable")
+                Assert.That(committedOnly, Is.EqualTo(1), "Committed-only content should be actionable")
+                Assert.That(localOnly, Is.EqualTo(1), "Local-only content should be actionable")
+                Assert.That(netZeroCommits, Is.Zero, "Net-zero committed history should not render Diff")
+                Assert.That(archivedDiffCount, Is.Zero))
 
             let compactButton = this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
             do! compactButton.ClickAsync()
-            let compactCards = this.Page.Locator(".wt-card.compact")
-            do! compactCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! compactCount = compactCards.CountAsync()
-            let! compactDiffCount = compactCards.Locator(".diff-btn").CountAsync()
-            Assert.That(compactDiffCount, Is.EqualTo(compactCount))
+            do! this.Page.Locator(".wt-card.compact").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! compactUntracked = (cardByBranch this.Page "feature-active").Locator(".diff-action-btn").CountAsync()
+            let! compactCommitted = (cardByBranch this.Page "feature-recent").Locator(".diff-action-btn").CountAsync()
+            let! compactLocal = (cardByBranch this.Page "feature-stale").Locator(".diff-action-btn").CountAsync()
+            let! compactNetZero = (cardByBranch this.Page "feature-idle").Locator(".diff-action-btn").CountAsync()
+            Assert.That(
+                [| compactUntracked; compactCommitted; compactLocal; compactNetZero |],
+                Is.EqualTo([| 1; 1; 1; 0 |])
+            )
         }
 
     [<Test>]
@@ -389,16 +465,22 @@ type WorktreeDiffActionTests() =
                         button.firstElementChild?.tagName.toLowerCase() || '',
                         button.firstElementChild?.getAttribute('aria-hidden') || '',
                         String(button.querySelectorAll(':scope > svg').length),
-                        button.textContent.trim()
+                        button.textContent.trim(),
+                        button.className,
+                        getComputedStyle(button).width,
+                        getComputedStyle(button).height,
+                        getComputedStyle(button).color,
+                        getComputedStyle(button).borderTopColor,
+                        getComputedStyle(button).backgroundColor
                     ]"""
                 )
 
             let! normal =
-                semantics (this.Page.Locator(".wt-card:not(.compact) .diff-btn").First)
+                semantics (this.Page.Locator(".wt-card:not(.compact) .diff-action-btn").First)
 
             let compactButton = this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
             do! compactButton.ClickAsync()
-            let compactDiff = this.Page.Locator(".wt-card.compact .diff-btn").First
+            let compactDiff = this.Page.Locator(".wt-card.compact .diff-action-btn").First
             do! compactDiff.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! compact = semantics compactDiff
 
@@ -408,7 +490,13 @@ type WorktreeDiffActionTests() =
                    "svg"
                    "true"
                    "1"
-                   "" |]
+                   ""
+                   "action-btn diff-action-btn"
+                   "23px"
+                   "21px"
+                   "rgb(127, 132, 156)"
+                   "rgb(69, 71, 90)"
+                   "rgba(0, 0, 0, 0)" |]
 
             Assert.Multiple(fun () ->
                 Assert.That(normal, Is.EqualTo(expected))
@@ -416,58 +504,22 @@ type WorktreeDiffActionTests() =
         }
 
     [<Test>]
-    member this.``Diff action is disabled on normal and compact cards until the SystemView is scanned``() =
+    member this.``Diff action is absent on normal and compact cards until the SystemView is scanned``() =
         task {
             do! routeDashboardWithoutDiffDocs this.Page
             let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
             do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
 
             let normalCards = this.Page.Locator(".wt-card:not(.compact)")
-            let! normalCount = normalCards.CountAsync()
-            let! disabledNormalCount = normalCards.Locator(".diff-btn:disabled").CountAsync()
-            let normalButton = normalCards.First.Locator(".diff-btn")
-            let! normalSemantics =
-                normalButton.EvaluateAsync<string array>(
-                    """button => [
-                        button.getAttribute('aria-label'),
-                        button.getAttribute('title'),
-                        String(button.disabled),
-                        String(button.querySelectorAll(':scope > svg').length),
-                        button.textContent.trim()
-                    ]"""
-                )
-            Assert.Multiple(fun () ->
-                Assert.That(disabledNormalCount, Is.EqualTo(normalCount))
-                Assert.That(
-                    normalSemantics,
-                    Is.EqualTo(
-                        [| "Open worktree diff"
-                           "Diff view not ready"
-                           "true"
-                           "1"
-                           "" |]
-                    )
-                ))
+            let! normalCount = normalCards.Locator(".diff-action-btn").CountAsync()
+            Assert.That(normalCount, Is.Zero)
 
             let compactButton = this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Compact"))
             do! compactButton.ClickAsync()
             let compactCards = this.Page.Locator(".wt-card.compact")
             do! compactCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! compactCount = compactCards.CountAsync()
-            let! disabledCompactCount = compactCards.Locator(".diff-btn:disabled").CountAsync()
-            let! compactSemantics =
-                compactCards.First.Locator(".diff-btn").EvaluateAsync<string array>(
-                    """button => [
-                        button.getAttribute('aria-label'),
-                        button.getAttribute('title'),
-                        String(button.disabled),
-                        String(button.querySelectorAll(':scope > svg').length),
-                        button.textContent.trim()
-                    ]"""
-                )
-            Assert.Multiple(fun () ->
-                Assert.That(disabledCompactCount, Is.EqualTo(compactCount))
-                Assert.That(compactSemantics, Is.EqualTo(normalSemantics)))
+            let! compactCount = compactCards.Locator(".diff-action-btn").CountAsync()
+            Assert.That(compactCount, Is.Zero)
         }
 
     [<Test>]
@@ -476,15 +528,14 @@ type WorktreeDiffActionTests() =
             do! this.NavigateWithDiffDocs()
 
             let targetCard = cardByBranch this.Page "feature-active"
-            do! targetCard.Locator(".diff-btn").ClickAsync()
+            do! targetCard.Locator(".diff-action-btn").ClickAsync()
 
             let activeIframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             do! activeIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! expectedUrl = activeIframe.GetAttributeAsync("src")
             let diffTab =
                 this.Page.Locator(
-                    ".canvas-pane .canvas-system-tab",
-                    PageLocatorOptions(HasText = "Diff"))
+                    ".canvas-pane .canvas-system-tab[title^='Worktree diff']")
             do! diffTab.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let popupReady =

@@ -24,6 +24,7 @@ type GitData =
       UpstreamBranch: string option
       MainBehindCount: int
       IsDirty: bool
+      HasDiff: bool
       WorkMetrics: Shared.WorkMetrics option }
 
 /// Result of a successful worktree creation: the path of the new worktree (so
@@ -136,9 +137,9 @@ let fetchUpstream (repoRoot: string) (upstreamRemote: string) (baseBranch: strin
         do! tryFastForwardMain repoRoot baseBranch (mainRef upstreamRemote baseBranch)
     }
 
-let getMainBehindCount (worktreePath: string) (mainRef: string) =
+let getMainBehindCount (worktreePath: string) (baseRef: string) =
     async {
-        let! output = runGit worktreePath $"rev-list --count HEAD..{mainRef}"
+        let! output = runGit worktreePath $"rev-list --count HEAD..{baseRef}"
 
         return
             output
@@ -160,19 +161,47 @@ let getUpstreamBranch (worktreePath: string) =
                 if String.IsNullOrEmpty(trimmed) then None else Some trimmed)
     }
 
+let parseDirtyStatus (output: string option) =
+    output
+    |> Option.exists (String.IsNullOrWhiteSpace >> not)
+
+let private generatedDiffViewerExclusionPathspec =
+    ":(top,exclude).agents/canvas/diff.html"
+
 let isDirty (worktreePath: string) =
     async {
         let! output = runGit worktreePath "status --porcelain -uno"
-
-        return
-            output
-            |> Option.map (fun s -> s.Trim().Length > 0)
-            |> Option.defaultValue false
+        return parseDirtyStatus output
     }
 
-let getCommitCount (worktreePath: string) (mainRef: string) =
+let hasLocalDiff (worktreePath: string) =
     async {
-        let! output = runGit worktreePath $"rev-list --count --no-merges {mainRef}..HEAD"
+        let! result =
+            ProcessRunner.runArgumentList
+                1024
+                1024
+                "Git"
+                "git"
+                [ "-C"
+                  worktreePath
+                  "status"
+                  "--porcelain"
+                  "--untracked-files=all"
+                  "--"
+                  "."
+                  generatedDiffViewerExclusionPathspec ]
+                None
+
+        return
+            match result with
+            | Ok output -> output.ExitCode = 0 && output.Stdout.Length > 0
+            | Error(ProcessRunner.CaptureLimitExceeded ProcessRunner.StandardOutput) -> true
+            | Error _ -> false
+    }
+
+let getCommitCount (worktreePath: string) (baseRef: string) =
+    async {
+        let! output = runGit worktreePath $"rev-list --count --no-merges {baseRef}..HEAD"
 
         return
             output
@@ -194,59 +223,30 @@ let parseDiffStats (output: string option) =
         | "" -> None
         | trimmed ->
             Some(
+                true,
                 extractRegexInt @"(\d+) insertion" trimmed,
                 extractRegexInt @"(\d+) deletion" trimmed
             ))
-    |> Option.defaultValue (0, 0)
+    |> Option.defaultValue (false, 0, 0)
 
-let getDiffStats (worktreePath: string) (mainRef: string) =
+let getDiffStats (worktreePath: string) (baseRef: string) =
     async {
-        let! output = runGit worktreePath $"diff --shortstat {mainRef}...HEAD"
+        let! output =
+            runGit
+                worktreePath
+                $"diff --no-ext-diff --no-textconv --shortstat {baseRef}...HEAD -- . \"{generatedDiffViewerExclusionPathspec}\""
+
         return parseDiffStats output
     }
 
-let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainRef: string) =
-    async {
-        let! commitChild = Async.StartChild(getLastCommit worktreePath)
-        let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
-        let! dirtyChild = Async.StartChild(isDirty worktreePath)
-        let! commitCountChild = Async.StartChild(getCommitCount worktreePath mainRef)
-        let! diffStatsChild = Async.StartChild(getDiffStats worktreePath mainRef)
-        let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath mainRef)
-
-        let! commit = commitChild
-        let! upstream = upstreamChild
-        let! mainBehind = mainBehindChild
-        let! dirty = dirtyChild
-        let! commitCount = commitCountChild
-        let! (linesAdded, linesRemoved) = diffStatsChild
-
-        let upstreamBranch =
-            upstream
-            |> Option.map (fun u ->
-                match u.IndexOf('/') with
-                | -1 -> u
-                | i -> u[(i + 1)..])
-
-        let workMetrics : Shared.WorkMetrics option =
-            match commitCount with
-            | 0 -> None
-            | _ ->
-                Some
-                    { CommitCount = commitCount
-                      LinesAdded = linesAdded
-                      LinesRemoved = linesRemoved }
-
-        return
-            { Path = worktreePath
-              Branch = branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
-              LastCommitMessage = commit |> Option.map _.Message |> Option.defaultValue ""
-              LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
-              UpstreamBranch = upstreamBranch
-              MainBehindCount = mainBehind
-              IsDirty = dirty
-              WorkMetrics = workMetrics }
-    }
+let createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved =
+    if hasCommittedDiff then
+        Some
+            { CommitCount = commitCount
+              LinesAdded = linesAdded
+              LinesRemoved = linesRemoved }
+    else
+        None
 
 let internal selectUpstreamRemote
     (configuredRemote: string option)
@@ -392,6 +392,106 @@ let resolveBaseRef (repoRoot: string) (upstreamRemote: string) (baseBranch: stri
             selectBaseRef upstreamRemote baseBranch remoteExists localExists
             |> Result.requireSome
                 $"Base branch '{baseBranch}' not found as '{remoteRef}' or as a local branch"
+    }
+
+type private CommonGitData =
+    { LastCommit: CommitInfo option
+      UpstreamBranch: string option
+      IsDirty: bool
+      HasLocalDiff: bool }
+
+let private collectCommonGitData (worktreePath: string) =
+    async {
+        let! commitChild = Async.StartChild(getLastCommit worktreePath)
+        let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
+        let! dirtyChild = Async.StartChild(isDirty worktreePath)
+        let! localDiffChild = Async.StartChild(hasLocalDiff worktreePath)
+
+        let! commit = commitChild
+        let! upstream = upstreamChild
+        let! dirty = dirtyChild
+        let! localDiff = localDiffChild
+
+        let upstreamBranch =
+            upstream
+            |> Option.map (fun u ->
+                match u.IndexOf('/') with
+                | -1 -> u
+                | i -> u[(i + 1)..])
+
+        return
+            { LastCommit = commit
+              UpstreamBranch = upstreamBranch
+              IsDirty = dirty
+              HasLocalDiff = localDiff }
+    }
+
+let private collectWorktreeGitDataForBaseRef
+    (worktreePath: string)
+    (branch: string option)
+    (remoteRef: string)
+    (baseRef: string)
+    (common: CommonGitData)
+    =
+    async {
+        let! commitCountChild = Async.StartChild(getCommitCount worktreePath baseRef)
+        let! diffStatsChild = Async.StartChild(getDiffStats worktreePath baseRef)
+        let! mainBehindChild =
+            if baseRef = remoteRef then
+                Async.StartChild(getMainBehindCount worktreePath baseRef)
+            else
+                Async.StartChild(async.Return 0)
+
+        let! commitCount = commitCountChild
+        let! hasCommittedDiff, linesAdded, linesRemoved = diffStatsChild
+        let! mainBehind = mainBehindChild
+
+        return
+            { Path = worktreePath
+              Branch = branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
+              LastCommitMessage = common.LastCommit |> Option.map _.Message |> Option.defaultValue ""
+              LastCommitTime = common.LastCommit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
+              UpstreamBranch = common.UpstreamBranch
+              MainBehindCount = mainBehind
+              IsDirty = common.IsDirty
+              HasDiff = hasCommittedDiff || common.HasLocalDiff
+              WorkMetrics = createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved }
+    }
+
+let collectWorktreeGitData
+    (worktreePath: string)
+    (branch: string option)
+    (upstreamRemote: string)
+    (baseBranch: string)
+    =
+    async {
+        let remoteRef = mainRef upstreamRemote baseBranch
+        let! baseRefChild = Async.StartChild(resolveBaseRef worktreePath upstreamRemote baseBranch)
+        let! common = collectCommonGitData worktreePath
+        let! baseRef = baseRefChild
+
+        match baseRef with
+        | Error error ->
+            Log.log "GitMetrics" error
+
+            return
+                { Path = worktreePath
+                  Branch = branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
+                  LastCommitMessage = common.LastCommit |> Option.map _.Message |> Option.defaultValue ""
+                  LastCommitTime = common.LastCommit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
+                  UpstreamBranch = common.UpstreamBranch
+                  MainBehindCount = 0
+                  IsDirty = common.IsDirty
+                  HasDiff = common.HasLocalDiff
+                  WorkMetrics = None }
+        | Ok baseRef ->
+            return!
+                collectWorktreeGitDataForBaseRef
+                    worktreePath
+                    branch
+                    remoteRef
+                    baseRef
+                    common
     }
 
 /// Best-effort fetch of the base branch from upstream so the remote-tracking ref

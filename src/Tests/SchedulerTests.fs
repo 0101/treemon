@@ -1,12 +1,14 @@
 module Tests.SchedulerTests
 
 open System
+open System.IO
 open NUnit.Framework
 open Server.GitWorktree
 open Server.RefreshScheduler
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Shared
+open Tests.GitTestHelpers
 
 let private testRepoId = RepoId "TestRepo"
 let private noFilters: PathFilters = { Archived = Map.empty; Ignored = Map.empty }
@@ -18,6 +20,63 @@ let private makeRepo worktrees : PerRepoState =
     { PerRepoState.empty with
         WorktreeList = worktrees
         KnownPaths = worktrees |> List.map _.Path |> Set.ofList }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type RefreshGitTaskTests() =
+
+    let mutable tempDir = "" // NUnit lifecycle shares the per-test directory between setup and teardown.
+
+    [<SetUp>]
+    member _.Setup() =
+        tempDir <- Path.Combine(Path.GetTempPath(), $"treemon-refresh-git-{Guid.NewGuid():N}")
+        Directory.CreateDirectory(tempDir) |> ignore
+
+    [<TearDown>]
+    member _.TearDown() =
+        if Directory.Exists(tempDir) then
+            try
+                Directory.Delete(tempDir, recursive = true)
+            with _ ->
+                ()
+
+    [<Test>]
+    member _.``Missing base still refreshes Git data and provisions scanned canvas docs``() =
+        async {
+            let repoDir = Path.Combine(tempDir, "repo")
+            initRepoOnMain repoDir
+            let canvasDir = Path.Combine(repoDir, ".agents", "canvas")
+            Directory.CreateDirectory(canvasDir) |> ignore
+            File.WriteAllText(Path.Combine(canvasDir, "notes.html"), "<html></html>")
+
+            let agent = createAgent ()
+            let worktree = { Path = repoDir; Head = "abc123"; Branch = Some "main" }
+            agent.Post(UpdateWorktreeList(testRepoId, [ worktree ]))
+            agent.Post(UpdateBaseBranch(testRepoId, "missing"))
+
+            do!
+                executeTask
+                    agent
+                    (Map.ofList [ testRepoId, repoDir ])
+                    (RefreshGit(testRepoId, repoDir))
+
+            let! state = agent.PostAndAsyncReply(GetState)
+            let repo = state.Repos |> Map.find testRepoId
+            let canvasDocs = repo.CanvasData |> Map.find repoDir
+
+            Assert.Multiple(fun () ->
+                Assert.That(repo.GitData.ContainsKey(repoDir), Is.True)
+                Assert.That(
+                    File.ReadAllText(Path.Combine(canvasDir, "diff.html")),
+                    Is.EqualTo(Server.DiffTemplate.html)
+                )
+                Assert.That(
+                    canvasDocs |> List.map _.Filename,
+                    Is.EqualTo([ "diff.html"; "notes.html" ])
+                ))
+        }
+        |> Async.RunSynchronously
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -206,6 +265,7 @@ type StateAgentTests() =
                   UpstreamBranch = None
                   MainBehindCount = 0
                   IsDirty = false
+                  HasDiff = false
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/main", gitData))
@@ -220,6 +280,45 @@ type StateAgentTests() =
             Assert.That(repo.IsReady, Is.True)
         }
         |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``HasDiff_mapping stays independent from IsDirty and WorkMetrics``() =
+        let path = "/repo/untracked"
+        let gitData : GitData =
+            { Path = path
+              Branch = "untracked"
+              LastCommitMessage = "initial"
+              LastCommitTime = DateTimeOffset.UtcNow
+              UpstreamBranch = None
+              MainBehindCount = 0
+              IsDirty = false
+              HasDiff = true
+              WorkMetrics = None }
+
+        let repo =
+            { PerRepoState.empty with
+                GitData = Map.ofList [ path, gitData ] }
+
+        let worktree =
+            { WorktreeInfo.Path = path
+              Head = "abc123"
+              Branch = Some "untracked" }
+
+        let status =
+            Server.WorktreeApi.assembleFromState
+                DateTimeOffset.UtcNow
+                Set.empty
+                Set.empty
+                false
+                Map.empty
+                Map.empty
+                repo
+                worktree
+
+        Assert.Multiple(fun () ->
+            Assert.That(status.HasDiff, Is.True)
+            Assert.That(status.IsDirty, Is.False)
+            Assert.That(status.WorkMetrics, Is.EqualTo(None)))
 
     [<Test>]
     member _.``RemoveWorktree cleans up all maps``() =
@@ -245,6 +344,7 @@ type StateAgentTests() =
                   UpstreamBranch = None
                   MainBehindCount = 0
                   IsDirty = false
+                  HasDiff = false
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/feature", gitData))
@@ -340,6 +440,7 @@ type StateAgentTests() =
                   UpstreamBranch = None
                   MainBehindCount = 0
                   IsDirty = false
+                  HasDiff = false
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/unknown", gitData))
@@ -410,6 +511,7 @@ type StateAgentTests() =
                   UpstreamBranch = None
                   MainBehindCount = 0
                   IsDirty = false
+                  HasDiff = false
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/old", gitData))

@@ -25,6 +25,7 @@ let baseWt: WorktreeStatus =
       Pr = PrStatus.NoPr
       MainBehindCount = 0
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
       HasTestFailureLog = false

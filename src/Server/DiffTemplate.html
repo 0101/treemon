@@ -24,6 +24,8 @@
     --modified: #f9e2af;
     --renamed: #89b4fa;
     --untracked: #94e2d5;
+    --diff-code-size: .72rem;
+    --diff-code-line-height: 1.45;
 }
 
 * { box-sizing: border-box; }
@@ -51,11 +53,11 @@ button { font: inherit; }
 .toolbar {
     display: flex;
     align-items: center;
-    gap: .75rem;
-    min-height: 52px;
-    padding: .65rem .8rem;
+    gap: .4rem;
+    min-height: 46px;
+    padding: .5rem .75rem;
     border-bottom: 1px solid var(--border);
-    background: var(--bg-surface);
+    background: var(--bg-deep);
 }
 
 .title {
@@ -80,10 +82,7 @@ button { font: inherit; }
 
 .view-toggle {
     display: inline-flex;
-    padding: 2px;
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    background: var(--bg-deep);
+    gap: .35rem;
 }
 
 .view-toggle button,
@@ -93,21 +92,17 @@ button { font: inherit; }
     height: 2rem;
     place-items: center;
     padding: 0;
-    border: 0;
-    border-radius: 5px;
-    color: var(--text-secondary);
-    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-muted);
+    background: var(--bg-surface);
     cursor: pointer;
 }
 
 .view-toggle button[aria-pressed="true"] {
-    color: var(--bg-deep);
-    background: var(--accent);
-}
-
-.refresh-button {
-    border: 1px solid var(--border);
-    background: var(--bg-elevated);
+    border-color: var(--border-bright);
+    color: var(--text-primary);
+    background: var(--bg-hover);
 }
 
 .toolbar-icon {
@@ -120,9 +115,14 @@ button { font: inherit; }
 .view-toggle button:focus-visible,
 .refresh-button:hover,
 .refresh-button:focus-visible {
-    outline: none;
-    border-color: var(--accent);
+    border-color: var(--border-bright);
     color: var(--text-primary);
+}
+
+.view-toggle button:focus-visible,
+.refresh-button:focus-visible {
+    outline: 2px solid var(--accent-bright);
+    outline-offset: 2px;
 }
 
 .workspace {
@@ -138,11 +138,10 @@ button { font: inherit; }
     flex-wrap: wrap;
     gap: .55rem 1rem;
     margin: 0;
-    padding: .65rem .8rem;
+    padding: .65rem .8rem .45rem;
     border: 0;
-    border-bottom: 1px solid var(--border);
     color: var(--text-secondary);
-    background: var(--bg-surface);
+    background: var(--bg-deep);
 }
 
 .layer-filters legend {
@@ -163,6 +162,12 @@ button { font: inherit; }
     cursor: pointer;
 }
 
+.layer-filter:has(input:disabled) {
+    color: var(--text-muted);
+    cursor: not-allowed;
+    opacity: .58;
+}
+
 .layer-filter input {
     width: 1rem;
     height: 1rem;
@@ -170,31 +175,47 @@ button { font: inherit; }
     accent-color: var(--accent);
 }
 
-.navigator-heading {
+.layer-count {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.change-summary {
     position: sticky;
     top: 0;
     z-index: 4;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: .75rem .8rem;
+    gap: .85rem;
+    min-height: 2.15rem;
+    padding: .4rem .8rem;
     border-bottom: 1px solid var(--border);
-    color: var(--text-muted);
-    background: var(--bg-surface);
-    font-size: .68rem;
+    color: var(--text-secondary);
+    background: var(--bg-deep);
+    font-size: .7rem;
     font-weight: 700;
-    letter-spacing: .06em;
-    text-transform: uppercase;
+}
+
+.change-summary:empty {
+    display: none;
+}
+
+.change-summary-added { color: var(--added); }
+.change-summary-modified { color: var(--modified); }
+.change-summary-removed { color: var(--deleted); }
+
+.change-summary span {
+    white-space: nowrap;
 }
 
 .file-list {
     min-height: 0;
-    padding: .55rem;
+    padding: 0 .8rem .8rem;
 }
 
 .file-item {
     min-width: 0;
-    margin: .35rem 0;
+    border-bottom: 1px solid var(--border);
 }
 
 .file-heading {
@@ -208,12 +229,12 @@ button { font: inherit; }
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: .3rem .5rem;
     align-items: center;
-    padding: .55rem .58rem;
-    border: 1px solid var(--border);
-    border-radius: 7px;
+    padding: .52rem .15rem;
+    border: 0;
+    border-radius: 0;
     text-align: left;
     color: var(--text-secondary);
-    background: var(--bg-surface);
+    background: transparent;
     cursor: pointer;
 }
 
@@ -227,16 +248,17 @@ button { font: inherit; }
 
 .file-entry:hover,
 .file-entry:focus-visible {
-    outline: none;
-    border-color: var(--accent);
     background: var(--bg-elevated);
 }
 
+.file-entry:focus-visible {
+    outline: 2px solid var(--accent-bright);
+    outline-offset: 2px;
+}
+
 .file-entry.active {
-    border-color: var(--accent);
-    border-bottom-right-radius: 0;
-    border-bottom-left-radius: 0;
-    background: rgba(203, 166, 247, .12);
+    color: var(--text-primary);
+    background: var(--bg-surface);
 }
 
 .file-entry.active::before { transform: rotate(90deg); }
@@ -261,21 +283,19 @@ button { font: inherit; }
 
 .change-badge {
     display: inline-grid;
-    min-width: 1.45rem;
-    height: 1.25rem;
+    min-width: 1.2rem;
     place-items: center;
-    padding: 0 .25rem;
-    border-radius: 999px;
+    padding: 0;
     font-family: Consolas, "Courier New", monospace;
     font-size: .76rem;
     font-weight: 800;
 }
 
-.change-badge.added { color: var(--added); background: rgba(166, 227, 161, .12); }
-.change-badge.untracked { color: var(--untracked); background: rgba(148, 226, 213, .12); }
-.change-badge.deleted { color: var(--deleted); background: rgba(243, 139, 168, .12); }
-.change-badge.modified { color: var(--modified); background: rgba(249, 226, 175, .12); }
-.change-badge.renamed { color: var(--renamed); background: rgba(137, 180, 250, .12); }
+.change-badge.added { color: var(--added); }
+.change-badge.untracked { color: var(--untracked); }
+.change-badge.deleted { color: var(--deleted); }
+.change-badge.modified { color: var(--modified); }
+.change-badge.renamed { color: var(--renamed); }
 
 .content {
     min-width: 0;
@@ -287,10 +307,6 @@ button { font: inherit; }
 .file-panel {
     min-width: 0;
     overflow: hidden;
-    border: 1px solid var(--accent);
-    border-top: 0;
-    border-bottom-right-radius: 7px;
-    border-bottom-left-radius: 7px;
     background: var(--bg-deep);
 }
 
@@ -342,10 +358,8 @@ button { font: inherit; }
     display: grid;
     gap: .3rem;
     margin-top: .75rem;
-    padding: .85rem 1rem;
-    border: 1px solid var(--border);
-    border-radius: 7px;
-    background: var(--bg-elevated);
+    padding: .7rem .9rem;
+    border-left: 2px solid var(--border-bright);
 }
 
 .replacement-marker .replacement-title {
@@ -362,7 +376,7 @@ button { font: inherit; }
 #patch {
     min-width: 0;
     width: 100%;
-    padding: .75rem;
+    padding: .45rem 0 .75rem;
     overflow-x: hidden;
 }
 
@@ -373,16 +387,12 @@ button { font: inherit; }
 }
 #patch .d2h-file-wrapper {
     margin: 0;
-    border-color: var(--border);
-    border-radius: 7px;
+    border: 0;
+    border-radius: 0;
     overflow: hidden;
 }
 #patch .d2h-file-header {
-    position: sticky;
-    top: -.75rem;
-    z-index: 2;
-    border-color: var(--border);
-    background: var(--bg-elevated);
+    display: none;
 }
 #patch .d2h-file-name,
 #patch .d2h-file-stats,
@@ -418,8 +428,8 @@ button { font: inherit; }
     width: auto;
     padding: 0 .6em;
     align-items: flex-start;
-    font-size: .72rem;
-    line-height: 1.45;
+    font-size: var(--diff-code-size);
+    line-height: var(--diff-code-line-height);
     white-space: pre-wrap;
 }
 #patch .d2h-code-line-prefix {
@@ -443,6 +453,9 @@ button { font: inherit; }
     border-color: var(--border);
     color: var(--text-muted);
     background: var(--bg-surface);
+    font-family: Consolas, "Courier New", monospace;
+    font-size: var(--diff-code-size);
+    line-height: var(--diff-code-line-height);
 }
 #patch .d2h-code-linenumber {
     width: 7.5em;
@@ -540,20 +553,20 @@ button { font: inherit; }
                 <label class="layer-filter">
                     <input id="filter-committed" type="checkbox">
                     <span>Already committed</span>
+                    <span id="count-committed" class="layer-count" aria-live="polite">…</span>
                 </label>
                 <label class="layer-filter">
                     <input id="filter-local" type="checkbox">
                     <span>Local changes</span>
+                    <span id="count-local" class="layer-count" aria-live="polite">…</span>
                 </label>
                 <label class="layer-filter">
                     <input id="filter-untracked" type="checkbox">
                     <span>Untracked</span>
+                    <span id="count-untracked" class="layer-count" aria-live="polite">…</span>
                 </label>
             </fieldset>
-            <div class="navigator-heading">
-                <span>Changed files</span>
-                <span id="file-count">0</span>
-            </div>
+            <div id="change-summary" class="change-summary" aria-live="polite"></div>
             <div id="file-list" class="file-list"></div>
             <div id="summary-state" aria-live="polite">
                 <div class="state-card" data-state="loading-summary">
@@ -626,6 +639,38 @@ function updateFilterInputs() {
     document.getElementById('filter-committed').checked = state.filters.committed;
     document.getElementById('filter-local').checked = state.filters.local;
     document.getElementById('filter-untracked').checked = state.filters.untracked;
+}
+
+function layerCountPresentation(result) {
+    if (!result || result.status === 'git-error') {
+        return { text: 'unavailable', title: 'File count unavailable because Git failed.' };
+    }
+    if (result.status === 'base-error') {
+        return { text: 'unavailable', title: 'File count unavailable because the comparison base could not be resolved.' };
+    }
+    if (result.status === 'timeout') {
+        return { text: 'unavailable', title: 'File count unavailable because Git timed out.' };
+    }
+    return {
+        text: String(result.fileCount),
+        title: result.fileCount + (result.fileCount === 1 ? ' file' : ' files')
+    };
+}
+
+function applyLayerCount(name, result) {
+    var input = document.getElementById('filter-' + name);
+    var count = document.getElementById('count-' + name);
+    var presentation = layerCountPresentation(result);
+    count.textContent = '(' + presentation.text + ')';
+    count.title = presentation.title;
+    input.disabled = Boolean(result && result.status === 'ready' && result.fileCount === 0);
+}
+
+function applyLayerCounts(counts) {
+    counts = counts || {};
+    applyLayerCount('committed', counts.committed);
+    applyLayerCount('local', counts.local);
+    applyLayerCount('untracked', counts.untracked);
 }
 
 function summaryUrl() {
@@ -712,7 +757,8 @@ function clearNavigator() {
     state.panel = null;
     document.getElementById('file-list').replaceChildren();
     document.getElementById('summary-state').replaceChildren();
-    document.getElementById('file-count').textContent = '0';
+    document.getElementById('change-summary').replaceChildren();
+    document.getElementById('change-summary').removeAttribute('aria-label');
 }
 
 function changePresentation(change) {
@@ -808,11 +854,56 @@ function mountFilePanel(button, item) {
     state.panel = panel;
 }
 
+function collapseFilePanel() {
+    if (state.fileAbort) state.fileAbort.abort();
+    state.fileAbort = null;
+    state.fileRequest += 1;
+    state.currentResult = null;
+    state.currentPatch = null;
+    state.selected = null;
+    if (state.selectedButton) {
+        state.selectedButton.classList.remove('active');
+        state.selectedButton.setAttribute('aria-expanded', 'false');
+    }
+    if (state.panel) state.panel.remove();
+    state.selectedButton = null;
+    state.panel = null;
+}
+
 function selectFile(file, button, item) {
-    if (state.selectedButton !== button) mountFilePanel(button, item);
+    if (state.selectedButton === button) {
+        collapseFilePanel();
+        return;
+    }
+    mountFilePanel(button, item);
     state.selected = file;
     writeStorage(SELECTION_KEY, fileSelectionKey(file));
     loadFile(file);
+}
+
+function renderChangeSummary(files) {
+    var counts = files.reduce(function(result, file) {
+        if (file.change === 'added' || file.change === 'untracked') result.added += 1;
+        else if (file.change === 'deleted') result.removed += 1;
+        else result.modified += 1;
+        return result;
+    }, { added: 0, modified: 0, removed: 0 });
+    var summary = document.getElementById('change-summary');
+    var parts = [
+        ['added', 'Added', counts.added],
+        ['modified', 'Modified', counts.modified],
+        ['removed', 'Removed', counts.removed]
+    ].filter(function(part) { return part[2] > 0; });
+    summary.replaceChildren.apply(summary, parts.map(function(part) {
+        var item = document.createElement('span');
+        item.className = 'change-summary-' + part[0];
+        item.textContent = part[1] + ' ' + part[2];
+        return item;
+    }));
+    summary.setAttribute(
+        'aria-label',
+        parts.map(function(part) { return part[1] + ' ' + part[2]; }).join(', ')
+    );
 }
 
 function isRenderablePatch(result) {
@@ -1075,10 +1166,12 @@ async function loadFile(file) {
             { cache: 'no-store', signal: controller.signal }
         );
         if (request !== state.fileRequest) return;
+        state.fileAbort = null;
         renderFileResult(result);
     } catch (error) {
         if (error && error.name === 'AbortError') return;
         if (request !== state.fileRequest) return;
+        state.fileAbort = null;
         renderState('git-error', 'Could not load file diff', 'The selected patch request failed.', false);
     }
 }
@@ -1155,7 +1248,8 @@ function renderReadySummary(summary) {
 
     state.summary = summary;
     document.getElementById('base-label').textContent = comparisonLabel(summary.baseRef);
-    document.getElementById('file-count').textContent = String(summary.fileCount);
+    document.getElementById('summary-state').replaceChildren();
+    renderChangeSummary(files);
     renderFileList(files);
 
     var stored = readStorage(SELECTION_KEY);
@@ -1176,6 +1270,7 @@ async function loadSummary() {
     try {
         var summary = await fetchJson(summaryUrl(), { cache: 'no-store' });
         if (request !== state.summaryRequest) return;
+        applyLayerCounts(summary.layerCounts);
         if (summary.status === 'ready') renderReadySummary(summary);
         else renderSummaryState(summary);
     } catch (_) {

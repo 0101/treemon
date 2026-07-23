@@ -486,7 +486,7 @@ let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, Dat
     |> Option.map (fun t -> t + intervalOf activity task)
     |> Option.defaultValue DateTimeOffset.MinValue
 
-let private executeTask
+let internal executeTask
     (agent: MailboxProcessor<StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (task: RefreshTask)
@@ -511,14 +511,19 @@ let private executeTask
         | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-            let mainRef = GitWorktree.mainRef repo.UpstreamRemote repo.BaseBranch
 
             let branch =
                 repo.WorktreeList
                 |> List.tryFind (fun wt -> wt.Path = path)
                 |> Option.bind _.Branch
 
-            let! gitData = GitWorktree.collectWorktreeGitData path branch mainRef
+            let! gitData =
+                GitWorktree.collectWorktreeGitData
+                    path
+                    branch
+                    repo.UpstreamRemote
+                    repo.BaseBranch
+
             agent.Post(UpdateGit(repoId, path, gitData))
 
             DiffProvisioner.provisionViewer path

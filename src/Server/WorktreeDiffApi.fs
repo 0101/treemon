@@ -15,6 +15,10 @@ type internal Service =
                     WorktreeDiff.WorktreeDiffError
                  >
              >
+      GetLayerCounts:
+        ProcessRunner.ResponseDeadline
+            -> string
+            -> Async<WorktreeDiff.WorktreeDiffLayerCounts>
       GetFile:
         ProcessRunner.ResponseDeadline
             -> string
@@ -431,6 +435,8 @@ let prune knownWorktrees =
 
 let internal liveService =
     { GetSummary = WorktreeDiff.getWorktreeDiffSummaryWithinDeadline
+      GetLayerCounts =
+        WorktreeDiff.getWorktreeDiffLayerCountsWithinDeadline
       GetFile = WorktreeDiff.getWorktreeDiffFileWithinDeadline }
 
 let internal newOpaqueIdentity (_: WorktreeDiff.WorktreeDiffEntry) =
@@ -464,40 +470,86 @@ let private diffReplacementName =
     | DiffReplacementKind.Binary -> "binary"
     | DiffReplacementKind.Symlink -> "symlink"
 
-let internal serializeSummaryResult =
+let private layerCountResult =
+    function
+    | Ok count -> DiffLayerCountResult.Available count
+    | Error(WorktreeDiff.BaseNotFound _) -> DiffLayerCountResult.BaseError
+    | Error(WorktreeDiff.GitTimedOut _) -> DiffLayerCountResult.TimedOut
+    | Error _ -> DiffLayerCountResult.GitError
+
+let private layerCounts (counts: WorktreeDiff.WorktreeDiffLayerCounts) =
+    { AlreadyCommitted = layerCountResult counts.CommittedCount
+      LocalChanges = layerCountResult counts.LocalCount
+      Untracked = layerCountResult counts.UntrackedCount }
+
+let private layerCountJson =
+    function
+    | DiffLayerCountResult.Available count ->
+        {| status = "ready"
+           fileCount = Some count |}
+    | DiffLayerCountResult.BaseError ->
+        {| status = "base-error"
+           fileCount = None |}
+    | DiffLayerCountResult.TimedOut ->
+        {| status = "timeout"
+           fileCount = None |}
+    | DiffLayerCountResult.GitError ->
+        {| status = "git-error"
+           fileCount = None |}
+
+let private layerCountsJson (counts: DiffLayerCounts) =
+    {| committed = layerCountJson counts.AlreadyCommitted
+       local = layerCountJson counts.LocalChanges
+       untracked = layerCountJson counts.Untracked |}
+
+let internal serializeSummaryResult counts =
+    let countsJson = layerCountsJson counts
+
     function
     | DiffSummaryResult.Ready details ->
         JsonSerializer.Serialize(
             {| status = "ready"
                baseRef = details.BaseRef
                fileCount = details.FileCount
-               files = details.Files |> List.map diffFileJson |}
+               files = details.Files |> List.map diffFileJson
+               layerCounts = countsJson |}
         )
     | DiffSummaryResult.Clean baseRef ->
         JsonSerializer.Serialize(
             {| status = "clean"
                baseRef = baseRef
                fileCount = 0
-               files = List.empty |}
+               files = List.empty
+               layerCounts = countsJson |}
         )
     | DiffSummaryResult.FilteredEmpty ->
         JsonSerializer.Serialize(
             {| status = "filtered-empty"
                fileCount = 0
-               files = List.empty |}
+               files = List.empty
+               layerCounts = countsJson |}
         )
     | DiffSummaryResult.Stale ->
-        JsonSerializer.Serialize {| status = "stale" |}
+        JsonSerializer.Serialize
+            {| status = "stale"
+               layerCounts = countsJson |}
     | DiffSummaryResult.BaseError ->
-        JsonSerializer.Serialize {| status = "base-error" |}
+        JsonSerializer.Serialize
+            {| status = "base-error"
+               layerCounts = countsJson |}
     | DiffSummaryResult.TimedOut ->
-        JsonSerializer.Serialize {| status = "timeout" |}
+        JsonSerializer.Serialize
+            {| status = "timeout"
+               layerCounts = countsJson |}
     | DiffSummaryResult.GitError ->
-        JsonSerializer.Serialize {| status = "git-error" |}
+        JsonSerializer.Serialize
+            {| status = "git-error"
+               layerCounts = countsJson |}
     | DiffSummaryResult.TooManyFiles minimumFileCount ->
         JsonSerializer.Serialize(
             {| status = "too-many-files"
-               minimumFileCount = minimumFileCount |}
+               minimumFileCount = minimumFileCount
+               layerCounts = countsJson |}
         )
 
 let internal serializeFileResult =
@@ -773,6 +825,10 @@ let private handleSummary
                     store.BeginSummary(worktreePath, viewer)
                     |> Async.StartAsTask
 
+                let! counts =
+                    service.GetLayerCounts deadline worktreePath
+                    |> Async.StartAsTask
+
                 let! isCurrent =
                     store.ClearCurrent(
                         worktreePath,
@@ -784,16 +840,23 @@ let private handleSummary
                 do!
                     DiffSummaryResult.FilteredEmpty
                     |> summaryResultIfCurrent isCurrent
-                    |> serializeSummaryResult
+                    |> serializeSummaryResult (layerCounts counts)
                     |> writeJson deadline ctx
             | Some viewer, Some layers ->
                 let! generation =
                     store.BeginSummary(worktreePath, viewer)
                     |> Async.StartAsTask
 
-                let! result =
+                let countsTask =
+                    service.GetLayerCounts deadline worktreePath
+                    |> Async.StartAsTask
+
+                let summaryTask =
                     service.GetSummary deadline worktreePath layers
                     |> Async.StartAsTask
+
+                let! result = summaryTask
+                let! counts = countsTask
 
                 let! response =
                     async {
@@ -863,7 +926,7 @@ let private handleSummary
 
                 do!
                     response
-                    |> serializeSummaryResult
+                    |> serializeSummaryResult (layerCounts counts)
                     |> writeJson deadline ctx
     }
 

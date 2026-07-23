@@ -30,6 +30,7 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       Pr = PrStatus.NoPr
       MainBehindCount = 0
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
       HasTestFailureLog = false

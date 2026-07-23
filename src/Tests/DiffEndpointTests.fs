@@ -23,6 +23,39 @@ let private assertJson (expected: string) (actual: string) =
         $"Expected:{Environment.NewLine}{expected}{Environment.NewLine}Actual:{Environment.NewLine}{actual}"
     )
 
+[<RequireQualifiedAccess>]
+type private ExpectedLayerCount =
+    | Available of int
+    | Error of string
+
+let private withLayerCounts committed local untracked (json: string) =
+    let countJson =
+        function
+        | ExpectedLayerCount.Available count ->
+            JsonNode.Parse($"""{{"status":"ready","fileCount":{count}}}""")
+        | ExpectedLayerCount.Error status ->
+            JsonNode.Parse($"""{{"status":"{status}","fileCount":null}}""")
+
+    let root = JsonNode.Parse(json).AsObject()
+    let counts = JsonObject()
+    counts["committed"] <- countJson committed
+    counts["local"] <- countJson local
+    counts["untracked"] <- countJson untracked
+    root["layerCounts"] <- counts
+    root.ToJsonString()
+
+let private withUniformLayerCount count =
+    withLayerCounts
+        (ExpectedLayerCount.Available count)
+        (ExpectedLayerCount.Available count)
+        (ExpectedLayerCount.Available count)
+
+let private withUniformLayerError status =
+    withLayerCounts
+        (ExpectedLayerCount.Error status)
+        (ExpectedLayerCount.Error status)
+        (ExpectedLayerCount.Error status)
+
 let private getResponseBody (response: HttpResponseMessage) : string =
     response.Content.ReadAsStringAsync()
     |> Async.AwaitTask
@@ -148,7 +181,19 @@ let private fakeService
                 WorktreeDiff.WorktreeDiffError
              >)
     : WorktreeDiffApi.Service =
+    let counts: WorktreeDiff.WorktreeDiffLayerCounts =
+        match summary with
+        | Ok value ->
+            { CommittedCount = Ok value.Files.Length
+              LocalCount = Ok value.Files.Length
+              UntrackedCount = Ok value.Files.Length }
+        | Error error ->
+            { CommittedCount = Error error
+              LocalCount = Error error
+              UntrackedCount = Error error }
+
     { GetSummary = fun _ _ _ -> async.Return summary
+      GetLayerCounts = fun _ _ -> async.Return counts
       GetFile = fun _ _ _ _ entry -> async.Return(file entry) }
 
 let private summaryIdentity
@@ -191,6 +236,19 @@ let private summary
     { BaseRef = "origin/main"
       MergeBase = "merge-base"
       Files = files }
+
+let private availableLayerCounts committed local untracked : WorktreeDiff.WorktreeDiffLayerCounts =
+    { CommittedCount = Ok committed
+      LocalCount = Ok local
+      UntrackedCount = Ok untracked }
+
+let private uniformLayerCounts count =
+    availableLayerCounts count count count
+
+let private serializedLayerCounts =
+    { AlreadyCommitted = DiffLayerCountResult.Available 2
+      LocalChanges = DiffLayerCountResult.Available 3
+      Untracked = DiffLayerCountResult.BaseError }
 
 let private fileSummary
     (identity: string)
@@ -366,30 +424,30 @@ type DiffSerializationTests() =
     [<Test>]
     member _.``summary results serialize as a stable tagged renderer-neutral contract``() =
         let cases =
-            [ DiffSummaryResult.Ready
-                  { BaseRef = "origin/main"
-                    FileCount = 1
-                    Files = [ file ] },
-              """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}]}"""
-              DiffSummaryResult.Clean "main",
-              """{"status":"clean","baseRef":"main","fileCount":0,"files":[]}"""
-              DiffSummaryResult.FilteredEmpty,
-              """{"status":"filtered-empty","fileCount":0,"files":[]}"""
-              DiffSummaryResult.Stale,
-              """{"status":"stale"}"""
-              DiffSummaryResult.BaseError,
-              """{"status":"base-error"}"""
-              DiffSummaryResult.TimedOut,
-              """{"status":"timeout"}"""
-              DiffSummaryResult.GitError,
-              """{"status":"git-error"}"""
-              DiffSummaryResult.TooManyFiles 1001,
-              """{"status":"too-many-files","minimumFileCount":1001}""" ]
+            [ (DiffSummaryResult.Ready
+                   { BaseRef = "origin/main"
+                     FileCount = 1
+                     Files = [ file ] },
+               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.Clean "main",
+               """{"status":"clean","baseRef":"main","fileCount":0,"files":[],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.FilteredEmpty,
+               """{"status":"filtered-empty","fileCount":0,"files":[],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.Stale,
+               """{"status":"stale","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.BaseError,
+               """{"status":"base-error","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.TimedOut,
+               """{"status":"timeout","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.GitError,
+               """{"status":"git-error","layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+              (DiffSummaryResult.TooManyFiles 1001,
+               """{"status":"too-many-files","minimumFileCount":1001,"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""") ]
 
         cases
         |> List.iter (fun (result, expected) ->
             result
-            |> WorktreeDiffApi.serializeSummaryResult
+            |> WorktreeDiffApi.serializeSummaryResult serializedLayerCounts
             |> assertJson expected)
 
     [<Test>]
@@ -454,6 +512,8 @@ type DiffEndpointHttpTests() =
             { GetSummary =
                 fun _ _ layers ->
                     async.Return(Ok(summary (filesFor layers)))
+              GetLayerCounts =
+                fun _ _ -> async.Return(availableLayerCounts 1 1 1)
               GetFile =
                 fun _ _ _ _ _ ->
                     failwith "Layer summary test does not load files" }
@@ -508,7 +568,8 @@ type DiffEndpointHttpTests() =
                     then
                         body
                         |> assertJson
-                            """{"status":"filtered-empty","fileCount":0,"files":[]}"""
+                            ("""{"status":"filtered-empty","fileCount":0,"files":[]}"""
+                             |> withUniformLayerCount 1)
                     else
                         let expected =
                             filesFor
@@ -519,6 +580,52 @@ type DiffEndpointHttpTests() =
                             |> Set.ofList
 
                         Assert.That(summaryPaths body, Is.EqualTo(expected))))
+
+    [<Test>]
+    member _.``summary exposes independent layer counts while a local-only comparison survives a missing base``() =
+        let worktree = fakePath "layer-count-errors"
+        let local = entry "local.txt" None WorktreeDiff.Modified
+        let expectedSelection: WorktreeDiff.WorktreeDiffLayers =
+            { AlreadyCommitted = false
+              LocalChanges = true
+              Untracked = false }
+        let counts: WorktreeDiff.WorktreeDiffLayerCounts =
+            { CommittedCount =
+                Error(WorktreeDiff.BaseNotFound("main", "origin/main"))
+              LocalCount = Ok 2
+              UntrackedCount = Ok 1 }
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary =
+                fun _ _ selected ->
+                    Assert.That(selected, Is.EqualTo(expectedSelection))
+                    async.Return(Ok(summary [ local ]))
+              GetLayerCounts =
+                fun _ _ -> async.Return counts
+              GetFile =
+                fun _ _ _ _ _ ->
+                    failwith "Layer count summary test does not load files" }
+
+        withDiffServer
+            [ worktree ]
+            service
+            _.Path
+            (fun client baseUrl ->
+                use response =
+                    get
+                        client
+                        (worktreeUrl baseUrl worktree "diff-summary"
+                         + layerQuery false true false)
+
+                Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                response
+                |> getResponseBody
+                |> assertJson
+                    ("""{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"local.txt","displayPath":"local.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                     |> withLayerCounts
+                         (ExpectedLayerCount.Error "base-error")
+                         (ExpectedLayerCount.Available 2)
+                         (ExpectedLayerCount.Available 1)))
 
     [<Test>]
     member _.``no-query summary does not report an untracked-only worktree as clean``() =
@@ -545,7 +652,11 @@ type DiffEndpointHttpTests() =
                     response
                     |> getResponseBody
                     |> assertJson
-                        """{"status":"ready","baseRef":"main","fileCount":1,"files":[{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"}]}""")
+                        ("""{"status":"ready","baseRef":"main","fileCount":1,"files":[{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"}]}"""
+                         |> withLayerCounts
+                             (ExpectedLayerCount.Available 0)
+                             (ExpectedLayerCount.Available 0)
+                             (ExpectedLayerCount.Available 1)))
         finally
             if Directory.Exists(tempDir) then
                 try
@@ -562,6 +673,8 @@ type DiffEndpointHttpTests() =
             { GetSummary =
                 fun _ _ _ ->
                     async.Return(Ok(summary [ changed ]))
+              GetLayerCounts =
+                fun _ _ -> async.Return(uniformLayerCounts 1)
               GetFile =
                 fun _ _ _ layers _ ->
                     let patch =
@@ -639,6 +752,8 @@ type DiffEndpointHttpTests() =
 
                         return Ok(summary [ changed ])
                     }
+              GetLayerCounts =
+                fun _ _ -> async.Return(uniformLayerCounts 1)
               GetFile =
                 fun _ _ _ layers _ ->
                     let patch =
@@ -680,7 +795,7 @@ type DiffEndpointHttpTests() =
                     Assert.That(firstResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                     firstResponse
                     |> getResponseBody
-                    |> assertJson """{"status":"stale"}"""
+                    |> assertJson ("""{"status":"stale"}""" |> withUniformLayerCount 1)
                     Assert.That(secondResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                     Assert.That(currentResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK)))
 
@@ -690,6 +805,89 @@ type DiffEndpointHttpTests() =
                     DiffFileResult.Text(
                         fileSummary
                             secondIdentity
+                            changed.Path
+                            None
+                            DiffChangeKind.Modified,
+                        "False,True,False"
+                    )
+                    |> WorktreeDiffApi.serializeFileResult
+                ))
+
+    [<Test>]
+    member _.``older filtered-empty request delayed in layer counts cannot clear newer identities``() =
+        let worktree = fakePath "filtered-empty-layer-count-race"
+        let changed = entry "changed.txt" None WorktreeDiff.Modified
+        let firstLayerCountsStarted =
+            TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let releaseFirstLayerCounts =
+            TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let service: WorktreeDiffApi.Service =
+            { GetSummary =
+                fun _ _ _ -> async.Return(Ok(summary [ changed ]))
+              GetLayerCounts =
+                fun _ _ ->
+                    async {
+                        if firstLayerCountsStarted.TrySetResult(true) then
+                            let! _ =
+                                releaseFirstLayerCounts.Task
+                                |> Async.AwaitTask
+                            ()
+
+                        return uniformLayerCounts 1
+                    }
+              GetFile =
+                fun _ _ _ layers _ ->
+                    let patch =
+                        $"{layers.AlreadyCommitted},{layers.LocalChanges},{layers.Untracked}"
+
+                    async.Return(Ok(WorktreeDiff.Text patch)) }
+
+        withDiffServer
+            [ worktree ]
+            service
+            (fun _ -> Guid.NewGuid().ToString("N"))
+            (fun client baseUrl ->
+                let summaryUrl = worktreeUrl baseUrl worktree "diff-summary"
+                let fileUrl = worktreeUrl baseUrl worktree "diff-file"
+
+                let filteredEmptyTask =
+                    client.GetAsync(summaryUrl + layerQuery false false false)
+
+                firstLayerCountsStarted.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+                |> Async.AwaitTask
+                |> TestUtils.runAsync
+                |> ignore
+
+                use selectedResponse =
+                    get client (summaryUrl + layerQuery false true false)
+
+                let selectedIdentity =
+                    selectedResponse
+                    |> getResponseBody
+                    |> summaryIdentity changed.Path
+
+                releaseFirstLayerCounts.TrySetResult(true) |> ignore
+                use filteredEmptyResponse =
+                    filteredEmptyTask.GetAwaiter().GetResult()
+
+                use currentFileResponse =
+                    get client $"{fileUrl}?identity={selectedIdentity}"
+
+                Assert.Multiple(fun () ->
+                    Assert.That(filteredEmptyResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    filteredEmptyResponse
+                    |> getResponseBody
+                    |> assertJson ("""{"status":"stale"}""" |> withUniformLayerCount 1)
+                    Assert.That(selectedResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                    Assert.That(currentFileResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK)))
+
+                currentFileResponse
+                |> getResponseBody
+                |> assertJson (
+                    DiffFileResult.Text(
+                        fileSummary
+                            selectedIdentity
                             changed.Path
                             None
                             DiffChangeKind.Modified,
@@ -718,6 +916,8 @@ type DiffEndpointHttpTests() =
                         else
                             return Ok(summary [ changed ])
                     }
+              GetLayerCounts =
+                fun _ _ -> async.Return(uniformLayerCounts 1)
               GetFile =
                 fun _ _ _ layers _ ->
                     let patch =
@@ -758,7 +958,7 @@ type DiffEndpointHttpTests() =
                     Assert.That(firstResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                     firstResponse
                     |> getResponseBody
-                    |> assertJson """{"status":"stale"}"""
+                    |> assertJson ("""{"status":"stale"}""" |> withUniformLayerCount 1)
                     Assert.That(secondResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                     Assert.That(currentResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK)))
 
@@ -784,6 +984,9 @@ type DiffEndpointHttpTests() =
             { GetSummary =
                 fun _ _ _ ->
                     failwith "Invalid filters reached diff summary"
+              GetLayerCounts =
+                fun _ _ ->
+                    failwith "Invalid filters reached diff layer counts"
               GetFile =
                 fun _ _ _ _ _ ->
                     failwith "Invalid filters reached diff file" }
@@ -848,6 +1051,8 @@ type DiffEndpointHttpTests() =
                             return
                                 failwith $"Expected earlier Git success, got {other}"
                     }
+              GetLayerCounts =
+                fun _ _ -> async.Return(uniformLayerCounts 0)
               GetFile =
                 fun _ _ _ _ _ ->
                     failwith "File endpoint was not expected" }
@@ -867,7 +1072,8 @@ type DiffEndpointHttpTests() =
                 stopwatch.Stop()
 
                 Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
-                body |> assertJson """{"status":"timeout"}"""
+                body
+                |> assertJson ("""{"status":"timeout"}""" |> withUniformLayerCount 0)
 
                 Assert.That(
                     stopwatch.ElapsedMilliseconds,
@@ -918,7 +1124,8 @@ type DiffEndpointHttpTests() =
                         summaryResponse
                         |> getResponseBody
                         |> assertJson
-                            """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                            ("""{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                             |> withUniformLayerCount 1)
 
                         use fileResponse = getWithHost client host $"{fileUrl}?identity=issued-id"
                         Assert.That(fileResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
@@ -948,6 +1155,9 @@ type DiffEndpointHttpTests() =
             { GetSummary =
                 fun _ _ _ ->
                     failwith "Attacker Host reached diff-summary"
+              GetLayerCounts =
+                fun _ _ ->
+                    failwith "Attacker Host reached diff layer counts"
               GetFile =
                 fun _ _ _ _ _ ->
                     failwith "Attacker Host reached diff-file" }
@@ -1036,7 +1246,8 @@ type DiffEndpointHttpTests() =
                 Assert.That(summaryResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
 
                 assertJson
-                    """{"status":"ready","baseRef":"origin/main","fileCount":3,"files":[{"identity":"rename-id","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},{"identity":"replacement-id","displayPath":"replaced.txt","oldDisplayPath":null,"change":"modified"},{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"}]}"""
+                    ("""{"status":"ready","baseRef":"origin/main","fileCount":3,"files":[{"identity":"rename-id","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},{"identity":"replacement-id","displayPath":"replaced.txt","oldDisplayPath":null,"change":"modified"},{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"}]}"""
+                     |> withUniformLayerCount 3)
                     summaryBody
 
                 use renameResponse =
@@ -1067,33 +1278,35 @@ type DiffEndpointHttpTests() =
     member _.``clean and summary error states replace the identity map without partial files``() =
         let cases =
             [ Ok(summary []),
-              """{"status":"clean","baseRef":"origin/main","fileCount":0,"files":[]}"""
+              ("""{"status":"clean","baseRef":"origin/main","fileCount":0,"files":[]}"""
+               |> withUniformLayerCount 0)
               Error(
                   WorktreeDiff.BaseNotFound(
                       "main",
                       "origin/main"
                   )
               ),
-              """{"status":"base-error"}"""
+              ("""{"status":"base-error"}""" |> withUniformLayerError "base-error")
               Error(
                   WorktreeDiff.GitFailed(
                       WorktreeDiff.ResolveMergeBase,
                       1
                   )
               ),
-              """{"status":"git-error"}"""
+              ("""{"status":"git-error"}""" |> withUniformLayerError "git-error")
               Error(WorktreeDiff.GitTimedOut WorktreeDiff.ResolveRemote),
-              """{"status":"timeout"}"""
+              ("""{"status":"timeout"}""" |> withUniformLayerError "timeout")
               Error(WorktreeDiff.GitTimedOut WorktreeDiff.ResolveBase),
-              """{"status":"timeout"}"""
+              ("""{"status":"timeout"}""" |> withUniformLayerError "timeout")
               Error(WorktreeDiff.GitTimedOut WorktreeDiff.ResolveMergeBase),
-              """{"status":"timeout"}"""
+              ("""{"status":"timeout"}""" |> withUniformLayerError "timeout")
               Error(WorktreeDiff.GitTimedOut WorktreeDiff.EnumerateTracked),
-              """{"status":"timeout"}"""
+              ("""{"status":"timeout"}""" |> withUniformLayerError "timeout")
               Error(WorktreeDiff.GitTimedOut WorktreeDiff.EnumerateUntracked),
-              """{"status":"timeout"}"""
+              ("""{"status":"timeout"}""" |> withUniformLayerError "timeout")
               Error(WorktreeDiff.TooManyFiles 1001),
-              """{"status":"too-many-files","minimumFileCount":1001}""" ]
+              ("""{"status":"too-many-files","minimumFileCount":1001}"""
+               |> withUniformLayerError "git-error") ]
 
         cases
         |> List.iter (fun (result, expected) ->
@@ -1155,7 +1368,8 @@ type DiffEndpointHttpTests() =
                 response
                 |> getResponseBody
                 |> assertJson
-                    """{"status":"too-many-files","minimumFileCount":1001}""")
+                    ("""{"status":"too-many-files","minimumFileCount":1001}"""
+                     |> withUniformLayerCount 1001))
 
     [<Test>]
     member _.``file route maps deleted binary oversized truncated symlink unavailable and Git error states``() =
@@ -1507,6 +1721,9 @@ type DiffEndpointHttpTests() =
             { GetSummary =
                 fun _ _ _ ->
                     failwith "Unknown worktree reached diff summary"
+              GetLayerCounts =
+                fun _ _ ->
+                    failwith "Unknown worktree reached diff layer counts"
               GetFile =
                 fun _ _ _ _ _ ->
                     failwith "Unknown identity reached diff file" }
@@ -1569,7 +1786,8 @@ type DiffEndpointHttpTests() =
                 summaryResponse
                 |> getResponseBody
                 |> assertJson
-                    """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                    ("""{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                     |> withUniformLayerCount 1)
 
                 [ $"?identity=issued-id&path={Uri.EscapeDataString(unknown)}",
                   HttpStatusCode.BadRequest,
@@ -1648,6 +1866,8 @@ type DiffEndpointHttpTests() =
             let liveService: WorktreeDiffApi.Service =
                 { GetSummary =
                     WorktreeDiff.getWorktreeDiffSummaryWithinDeadline
+                  GetLayerCounts =
+                    WorktreeDiff.getWorktreeDiffLayerCountsWithinDeadline
                   GetFile =
                     WorktreeDiff.getWorktreeDiffFileWithinDeadline }
 
@@ -1671,7 +1891,11 @@ type DiffEndpointHttpTests() =
                     Assert.That(summaryResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
 
                     assertJson
-                        """{"status":"ready","baseRef":"main","fileCount":1,"files":[{"identity":"tracked-id","displayPath":"tracked.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                        ("""{"status":"ready","baseRef":"main","fileCount":1,"files":[{"identity":"tracked-id","displayPath":"tracked.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                         |> withLayerCounts
+                             (ExpectedLayerCount.Available 0)
+                             (ExpectedLayerCount.Available 1)
+                             (ExpectedLayerCount.Available 0))
                         summaryBody
 
                     use fileResponse =

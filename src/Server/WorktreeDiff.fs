@@ -46,6 +46,11 @@ type WorktreeDiffError =
     | TooManyFiles of minimumCount: int
     | FileUnavailable
 
+type internal WorktreeDiffLayerCounts =
+    { CommittedCount: Result<int, WorktreeDiffError>
+      LocalCount: Result<int, WorktreeDiffError>
+      UntrackedCount: Result<int, WorktreeDiffError> }
+
 [<RequireQualifiedAccess>]
 type WorktreeDiffReplacement =
     | BinaryContent
@@ -460,6 +465,42 @@ let getFilteredWorktreeDiffSummary
             ProcessRunner.argumentListResponseDeadlineMs)
         repoRoot
         layers
+
+let private countLayer deadline repoRoot layers =
+    async {
+        let! result =
+            getWorktreeDiffSummaryWithinDeadline deadline repoRoot layers
+
+        return
+            match result with
+            | Ok summary -> Ok summary.Files.Length
+            | Error(TooManyFiles count) -> Ok count
+            | Error error -> Error error
+    }
+
+let internal getWorktreeDiffLayerCountsWithinDeadline
+    (deadline: ProcessRunner.ResponseDeadline)
+    (repoRoot: string)
+    =
+    async {
+        let! counts =
+            [| { AlreadyCommitted = true
+                 LocalChanges = false
+                 Untracked = false }
+               { AlreadyCommitted = false
+                 LocalChanges = true
+                 Untracked = false }
+               { AlreadyCommitted = false
+                 LocalChanges = false
+                 Untracked = true } |]
+            |> Array.map (countLayer deadline repoRoot)
+            |> Async.Parallel
+
+        return
+            { CommittedCount = counts[0]
+              LocalCount = counts[1]
+              UntrackedCount = counts[2] }
+    }
 
 let private diffLineCount (bytes: byte[]) =
     if bytes.Length = 0 then

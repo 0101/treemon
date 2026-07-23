@@ -360,17 +360,6 @@
         .sync-btn:hover { background: #2e3452; }
         .sync-btn.disabled { opacity: 0.4; cursor: not-allowed; border-color: #585b70; color: #585b70; }
 
-        .diff-btn {
-            display: inline-grid; place-items: center;
-            background: #263442; border: 1px solid #94e2d5; border-radius: 4px;
-            color: #94e2d5; cursor: pointer;
-            padding: 3px 5px; line-height: 1; transition: background 0.15s, border-color 0.15s;
-        }
-        .diff-btn .btn-icon { width: 14px; height: 14px; }
-        .diff-btn:hover { background: #2c4148; }
-        .diff-btn.disabled { opacity: 0.4; cursor: not-allowed; border-color: #585b70; color: #585b70; }
-        .diff-btn:focus-visible { outline: 2px solid #94e2d5; outline-offset: 2px; }
-
         .dirty-warning { font-size: 0.78em; color: #f9e2af; font-style: italic; }
 
         .sync-cancel-btn {
@@ -820,8 +809,10 @@
         .canvas-system-tab:hover { background: #353050; border-color: #cba6f7; }
         .canvas-system-tab.active { background: #322a4a; border-color: #cba6f7; color: #cba6f7; }
         .canvas-system-tab-glyph {
+            display: inline-grid; place-items: center;
             font-size: 0.7em; font-weight: 700; letter-spacing: 0.06em; opacity: 0.85;
         }
+        .canvas-system-tab-glyph .btn-icon { width: 14px; height: 14px; }
         .canvas-system-tab-count {
             background: #cba6f7; color: #1e1e2e; border-radius: 8px;
             padding: 0 6px; min-width: 16px; text-align: center;

@@ -237,49 +237,68 @@ type ParseCommitOutputTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type ParseDirtyStatusTests() =
+
+    [<TestCase(null, false)>]
+    [<TestCase("", false)>]
+    [<TestCase("   ", false)>]
+    [<TestCase(" M tracked.txt", true)>]
+    [<TestCase("?? untracked.txt", true)>]
+    member _.``Porcelain status detects any returned change``(output: string, expected: bool) =
+        let result = output |> Option.ofObj |> parseDirtyStatus
+        Assert.That(result, Is.EqualTo(expected))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type ParseDiffStatsTests() =
 
     [<Test>]
     member _.``Insertions and deletions both present``() =
         let result = parseDiffStats (Some " 5 files changed, 120 insertions(+), 45 deletions(-)")
-        Assert.That(result, Is.EqualTo((120, 45)))
+        Assert.That(result, Is.EqualTo((true, 120, 45)))
 
     [<Test>]
     member _.``Insertions only``() =
         let result = parseDiffStats (Some " 3 files changed, 80 insertions(+)")
-        Assert.That(result, Is.EqualTo((80, 0)))
+        Assert.That(result, Is.EqualTo((true, 80, 0)))
 
     [<Test>]
     member _.``Deletions only``() =
         let result = parseDiffStats (Some " 2 files changed, 30 deletions(-)")
-        Assert.That(result, Is.EqualTo((0, 30)))
+        Assert.That(result, Is.EqualTo((true, 0, 30)))
 
     [<Test>]
-    member _.``None input returns zero pair``() =
+    member _.``None input reports no committed diff``() =
         let result = parseDiffStats None
-        Assert.That(result, Is.EqualTo((0, 0)))
+        Assert.That(result, Is.EqualTo((false, 0, 0)))
 
     [<Test>]
-    member _.``Empty string returns zero pair``() =
+    member _.``Empty string reports no committed diff``() =
         let result = parseDiffStats (Some "")
-        Assert.That(result, Is.EqualTo((0, 0)))
+        Assert.That(result, Is.EqualTo((false, 0, 0)))
 
     [<Test>]
-    member _.``Whitespace-only string returns zero pair``() =
+    member _.``Whitespace-only string reports no committed diff``() =
         let result = parseDiffStats (Some "   ")
-        Assert.That(result, Is.EqualTo((0, 0)))
+        Assert.That(result, Is.EqualTo((false, 0, 0)))
 
     [<Test>]
     member _.``Single insertion singular form``() =
         let result = parseDiffStats (Some " 1 file changed, 1 insertion(+)")
-        Assert.That(result, Is.EqualTo((1, 0)))
+        Assert.That(result, Is.EqualTo((true, 1, 0)))
 
     [<Test>]
     member _.``Single deletion singular form``() =
         let result = parseDiffStats (Some " 1 file changed, 1 deletion(-)")
-        Assert.That(result, Is.EqualTo((0, 1)))
+        Assert.That(result, Is.EqualTo((true, 0, 1)))
 
     [<Test>]
     member _.``Large numbers parsed correctly``() =
         let result = parseDiffStats (Some " 50 files changed, 12345 insertions(+), 6789 deletions(-)")
-        Assert.That(result, Is.EqualTo((12345, 6789)))
+        Assert.That(result, Is.EqualTo((true, 12345, 6789)))
+
+    [<Test>]
+    member _.``Commits with no net base diff produce no work metrics``() =
+        let result = createWorkMetrics false 3 0 0
+        Assert.That(result.IsNone, Is.True)

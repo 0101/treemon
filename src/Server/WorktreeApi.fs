@@ -267,6 +267,7 @@ let internal assembleFromState
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
+      HasDiff = gitData |> Option.map (_.HasDiff) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
       HasTestFailureLog = hasTestFailureLog

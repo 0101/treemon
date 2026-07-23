@@ -166,6 +166,7 @@ let private wtAzDoMain: WorktreeStatus =
       Pr = NoPr
       MainBehindCount = 0
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
       HasTestFailureLog = false
@@ -193,6 +194,7 @@ let private wtRetryLogic: WorktreeStatus =
       Pr = HasPr prRetryBuilding
       MainBehindCount = 2
       IsDirty = true
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 8; LinesAdded = 342; LinesRemoved = 67 }
       HasActiveSession = true
       HasTestFailureLog = false
@@ -218,6 +220,7 @@ let private wtConfigLoading: WorktreeStatus =
       Pr = NoPr
       MainBehindCount = 5
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 3; LinesAdded = 128; LinesRemoved = 89 }
       HasActiveSession = true
       HasTestFailureLog = false
@@ -243,6 +246,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       Pr = HasPr prAuth
       MainBehindCount = 1
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 5; LinesAdded = 210; LinesRemoved = 34 }
       HasActiveSession = false
       HasTestFailureLog = false
@@ -268,6 +272,7 @@ let private wtArchived: WorktreeStatus =
       Pr = NoPr
       MainBehindCount = 12
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 15; LinesAdded = 890; LinesRemoved = 234 }
       HasActiveSession = false
       HasTestFailureLog = false
@@ -293,6 +298,7 @@ let private wtGithubMain: WorktreeStatus =
       Pr = NoPr
       MainBehindCount = 0
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
       HasTestFailureLog = false
@@ -321,6 +327,7 @@ let private wtStreaming: WorktreeStatus =
       Pr = HasPr prStreaming
       MainBehindCount = 1
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 12; LinesAdded = 567; LinesRemoved = 123 }
       HasActiveSession = true
       HasTestFailureLog = false
@@ -346,6 +353,7 @@ let private wtCsvFix: WorktreeStatus =
       Pr = HasPr prCsvMerged
       MainBehindCount = 0
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 4; LinesAdded = 45; LinesRemoved = 12 }
       HasActiveSession = false
       HasTestFailureLog = false

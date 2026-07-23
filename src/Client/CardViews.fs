@@ -218,19 +218,22 @@ let syncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStat
 
 let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: string) =
     let ready = hasSystemView WorktreeDiffFilename wt
-    Html.button [
-        prop.className (if ready then "diff-btn" else "diff-btn disabled")
-        prop.disabled (not ready)
-        prop.custom ("aria-label", "Open worktree diff")
-        prop.onKeyDown (fun e ->
-            if e.key = "Enter" || e.key = " " then
-                e.stopPropagation())
-        prop.onClick (fun e ->
-            e.stopPropagation()
-            callbacks.OpenDiff scopedKey)
-        prop.title (if ready then "Open worktree diff" else "Diff view not ready")
-        prop.children [ diffIcon ]
-    ]
+
+    if wt.IsArchived || not ready || not wt.HasDiff then
+        Html.none
+    else
+        Html.button [
+            prop.className "action-btn diff-action-btn"
+            prop.custom ("aria-label", "Open worktree diff")
+            prop.onKeyDown (fun e ->
+                if e.key = "Enter" || e.key = " " then
+                    e.stopPropagation())
+            prop.onClick (fun e ->
+                e.stopPropagation()
+                callbacks.OpenDiff scopedKey)
+            prop.title "Open worktree diff"
+            prop.children [ diffIcon ]
+        ]
 
 let mainBehindWithSync (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
     Html.div [
@@ -244,7 +247,7 @@ let mainBehindWithSync (callbacks: CardCallbacks) (baseBranch: string) (wt: Work
                         prop.text "uncommitted changes"
                     ]
                 else syncButton callbacks baseBranch wt branchEvents isPending scopedKey
-            if not wt.IsArchived then diffButton callbacks wt scopedKey
+            diffButton callbacks wt scopedKey
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -676,7 +679,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator baseBranch wt.MainBehindCount
-                    if not wt.IsArchived then diffButton callbacks wt scopedKey
+                    diffButton callbacks wt scopedKey
                     prSection callbacks props.ActionCooldowns wt repoName
                 ]
             ]

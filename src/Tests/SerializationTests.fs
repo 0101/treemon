@@ -35,6 +35,15 @@ type WrapperTypeSerializationTests() =
         Assert.That(result, Is.EqualTo(original))
 
     [<Test>]
+    member _.``HasDiff_serialization survives WorktreeStatus JSON round-trip``() =
+        let original =
+            { Tests.WorktreeFixtures.baseWt with
+                HasDiff = true }
+
+        let result = roundTrip original
+        Assert.That(result.HasDiff, Is.True)
+
+    [<Test>]
     member _.``LaunchRequest with WorktreePath survives JSON round-trip``() =
         let original =
             { Path = WorktreePath @"Q:\code\test"

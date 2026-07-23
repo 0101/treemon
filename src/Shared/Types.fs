@@ -224,6 +224,18 @@ type DiffSummaryDetails =
       Files: DiffFileSummary list }
 
 [<RequireQualifiedAccess>]
+type DiffLayerCountResult =
+    | Available of fileCount: int
+    | BaseError
+    | TimedOut
+    | GitError
+
+type DiffLayerCounts =
+    { AlreadyCommitted: DiffLayerCountResult
+      LocalChanges: DiffLayerCountResult
+      Untracked: DiffLayerCountResult }
+
+[<RequireQualifiedAccess>]
 type DiffSummaryResult =
     | Ready of DiffSummaryDetails
     | Clean of baseRef: string
@@ -361,6 +373,7 @@ type WorktreeStatus =
       Pr: PrStatus
       MainBehindCount: int
       IsDirty: bool
+      HasDiff: bool
       WorkMetrics: WorkMetrics option
       HasActiveSession: bool
       HasTestFailureLog: bool

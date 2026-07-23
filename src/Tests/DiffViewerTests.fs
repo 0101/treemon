@@ -127,13 +127,28 @@ let private refreshedSecondFile =
         (Some "src/old-name.txt")
         "renamed"
 
-let private readySummaryJson files =
+let private readyLayerCounts committed local untracked =
+    {| committed =
+        {| status = "ready"
+           fileCount = committed |}
+       local =
+        {| status = "ready"
+           fileCount = local |}
+       untracked =
+        {| status = "ready"
+           fileCount = untracked |} |}
+
+let private readySummaryJsonWithCounts committed local untracked files =
     JsonSerializer.Serialize(
         {| status = "ready"
            baseRef = "origin/main"
            fileCount = Array.length files
-           files = files |}
+           files = files
+           layerCounts = readyLayerCounts committed local untracked |}
     )
+
+let private readySummaryJson files =
+    readySummaryJsonWithCounts 2 3 1 files
 
 let private fileResultJsonWithPatch patch status identity displayPath oldDisplayPath change =
     let file = fileJson identity displayPath oldDisplayPath change
@@ -170,15 +185,34 @@ let private replacementResultJson replacement =
     )
 
 let private summaryStateJson status =
+    let layerCounts = readyLayerCounts 2 3 1
+
     match status with
     | "clean" ->
-        """{"status":"clean","baseRef":"origin/main","fileCount":0,"files":[]}"""
+        JsonSerializer.Serialize(
+            {| status = "clean"
+               baseRef = "origin/main"
+               fileCount = 0
+               files = Array.empty<obj>
+               layerCounts = layerCounts |}
+        )
     | "filtered-empty" ->
-        """{"status":"filtered-empty","fileCount":0,"files":[]}"""
+        JsonSerializer.Serialize(
+            {| status = "filtered-empty"
+               fileCount = 0
+               files = Array.empty<obj>
+               layerCounts = layerCounts |}
+        )
     | "too-many-files" ->
-        """{"status":"too-many-files","minimumFileCount":1001}"""
+        JsonSerializer.Serialize(
+            {| status = "too-many-files"
+               minimumFileCount = 1001
+               layerCounts = layerCounts |}
+        )
     | _ ->
-        JsonSerializer.Serialize {| status = status |}
+        JsonSerializer.Serialize
+            {| status = status
+               layerCounts = layerCounts |}
 
 let private layerFilterQuery committed local untracked =
     $"?committed={committed.ToString().ToLowerInvariant()}&local={local.ToString().ToLowerInvariant()}&untracked={untracked.ToString().ToLowerInvariant()}"
@@ -852,7 +886,7 @@ type DiffViewerE2ETests() =
                     )
                 )
 
-            do! card.Locator(".diff-btn").ClickAsync()
+            do! card.Locator(".diff-action-btn").ClickAsync()
 
             let activeIframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             do!
@@ -1097,7 +1131,7 @@ type DiffViewerE2ETests() =
                     )
                 )
 
-            do! card.Locator(".diff-btn").ClickAsync()
+            do! card.Locator(".diff-action-btn").ClickAsync()
             let activeIframe =
                 this.Page.Locator(".canvas-pane .canvas-iframe-active")
             do! activeIframe.WaitForAsync()
@@ -1109,8 +1143,11 @@ type DiffViewerE2ETests() =
 
             let runSmoke (frame: IFrame) host =
                 task {
-                    do!
-                        frame.Locator(".file-entry[data-identity='id-js']").ClickAsync()
+                    let syntaxEntry =
+                        frame.Locator(".file-entry[data-identity='id-js']")
+                    let! syntaxClass = syntaxEntry.GetAttributeAsync("class")
+                    if not (syntaxClass.Contains("active", StringComparison.Ordinal)) then
+                        do! syntaxEntry.ClickAsync()
                     do!
                         frame.Locator(
                             "#patch[data-highlight-status='ready'] .hljs-keyword"
@@ -1345,6 +1382,143 @@ type DiffViewerE2ETests() =
                 )
 
             Assert.That(state, Is.EqualTo([| "id-1"; "true"; "1"; "1"; "1" |]))
+        }
+
+    [<Test>]
+    member this.``ready summary removes summary loading and renders nonzero change-kind totals``() =
+        task {
+            let files =
+                [| fileJson "added" "added.txt" None "added"
+                   fileJson "untracked" "untracked.txt" None "untracked"
+                   fileJson "modified" "modified.txt" None "modified"
+                   fileJson "renamed" "new.txt" (Some "old.txt") "renamed"
+                   fileJson "deleted" "deleted.txt" None "deleted" |]
+
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson files)
+            do! this.RouteFiles()
+            do! this.Goto()
+            do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            let summary = this.Page.Locator("#change-summary")
+            let! text = summary.TextContentAsync()
+            let! label = summary.GetAttributeAsync("aria-label")
+            let! staleLoading = this.Page.Locator("[data-state='loading-summary']").CountAsync()
+            let! staleSummaryState = this.Page.Locator("#summary-state > *").CountAsync()
+            let! staleHeading = this.Page.GetByText("Changed files").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(text, Is.EqualTo("Added 2Modified 2Removed 1"))
+                Assert.That(label, Is.EqualTo("Added 2, Modified 2, Removed 1"))
+                Assert.That(staleLoading, Is.Zero)
+                Assert.That(staleSummaryState, Is.Zero)
+                Assert.That(staleHeading, Is.Zero))
+        }
+
+    [<Test>]
+    member this.``layer counts stay independent of selection and zero or failed counts are explicit``() =
+        task {
+            let summary =
+                """{"status":"ready","baseRef":"HEAD","fileCount":1,"files":[{"identity":"id-1","displayPath":"src/a.txt","oldDisplayPath":null,"change":"modified"}],"layerCounts":{"committed":{"status":"base-error","fileCount":null},"local":{"status":"ready","fileCount":0},"untracked":{"status":"ready","fileCount":4}}}"""
+
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(summary)
+            do! this.RouteFiles()
+            do! this.Goto()
+            do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            let countState () =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.getElementById('count-committed').textContent,
+                        document.getElementById('count-local').textContent,
+                        document.getElementById('count-untracked').textContent,
+                        String(document.getElementById('filter-committed').disabled),
+                        String(document.getElementById('filter-local').disabled),
+                        String(document.getElementById('filter-untracked').disabled),
+                        document.getElementById('count-committed').title
+                    ]"""
+                )
+
+            let! initial = countState ()
+            do! this.Page.Locator("#filter-untracked").CheckAsync()
+            do! this.Page.Locator(".file-entry.active").WaitForAsync()
+            let! afterSelectionChange = countState ()
+
+            let expected =
+                [| "(unavailable)"
+                   "(0)"
+                   "(4)"
+                   "false"
+                   "true"
+                   "false"
+                   "File count unavailable because the comparison base could not be resolved." |]
+
+            Assert.Multiple(fun () ->
+                Assert.That(initial, Is.EqualTo(expected))
+                Assert.That(afterSelectionChange, Is.EqualTo(expected)))
+        }
+
+    [<Test>]
+    member this.``viewer chrome is border-light and code gutters use identical typography``() =
+        task {
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.RouteFiles()
+            do! this.Goto()
+            do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            let! unified =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const style = selector => getComputedStyle(document.querySelector(selector));
+                        const code = style('#patch .d2h-code-line');
+                        const number = style('#patch .d2h-code-linenumber');
+                        const unifiedButton = style('#unified-view');
+                        const refreshButton = style('#refresh');
+                        return [
+                            style('.file-entry').borderTopWidth,
+                            style('.file-item').borderBottomWidth,
+                            style('.file-panel').borderTopWidth,
+                            style('#patch .d2h-file-wrapper').borderTopWidth,
+                            style('#patch .d2h-file-header').display,
+                            code.fontSize,
+                            number.fontSize,
+                            code.lineHeight,
+                            number.lineHeight,
+                            unifiedButton.width,
+                            refreshButton.width,
+                            unifiedButton.borderTopColor,
+                            refreshButton.borderTopColor,
+                            unifiedButton.backgroundColor,
+                            style('.view-toggle').borderTopWidth
+                        ];
+                    }"""
+                )
+
+            do! this.Page.Locator("#split-view").ClickAsync()
+            do! this.Page.Locator("#patch .d2h-files-diff").WaitForAsync()
+
+            let! splitTypography =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const code = getComputedStyle(document.querySelector('#patch .d2h-code-side-line'));
+                        const number = getComputedStyle(document.querySelector('#patch .d2h-code-side-linenumber'));
+                        return [code.fontSize, number.fontSize, code.lineHeight, number.lineHeight];
+                    }"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(unified[0..4], Is.EqualTo([| "0px"; "1px"; "0px"; "0px"; "none" |]))
+                Assert.That(unified[5], Is.EqualTo(unified[6]))
+                Assert.That(unified[7], Is.EqualTo(unified[8]))
+                Assert.That(unified[9], Is.EqualTo(unified[10]))
+                Assert.That(unified[11], Is.EqualTo("rgb(88, 91, 112)"))
+                Assert.That(unified[12], Is.EqualTo("rgb(69, 71, 90)"))
+                Assert.That(unified[13], Is.EqualTo("rgb(49, 50, 68)"))
+                Assert.That(unified[14], Is.EqualTo("0px"))
+                Assert.That(splitTypography[0], Is.EqualTo(splitTypography[1]))
+                Assert.That(splitTypography[2], Is.EqualTo(splitTypography[3])))
         }
 
     [<Test>]
@@ -1675,6 +1849,88 @@ type DiffViewerE2ETests() =
             Assert.That(
                 replacementState,
                 Is.EqualTo([| "AbortError"; "id-2"; "id-2"; "1"; "1" |])
+            )
+        }
+
+    [<Test>]
+    member this.``collapsing the active file aborts its load and leaves no expanded or loading panel``() =
+        task {
+            let fileStarted =
+                TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseFile =
+                TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        window.__collapsedFileOutcome = null;
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            const request = originalFetch.apply(this, arguments);
+                            if (url.includes('diff-file?identity=id-1')) {
+                                request.then(
+                                    () => { window.__collapsedFileOutcome = 'completed'; },
+                                    error => { window.__collapsedFileOutcome = error.name; }
+                                );
+                            }
+                            return request;
+                        };
+                    })()"""
+                )
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-file?*",
+                    fun route ->
+                        task {
+                            fileStarted.TrySetResult(true) |> ignore
+                            let! _ = releaseFile.Task
+                            try
+                                do!
+                                    route.FulfillAsync(
+                                        RouteFulfillOptions(
+                                            ContentType = "application/json",
+                                            Body =
+                                                fileResultJson
+                                                    "text"
+                                                    firstFile.identity
+                                                    firstFile.displayPath
+                                                    firstFile.oldDisplayPath
+                                                    firstFile.change
+                                        )
+                                    )
+                            with _ ->
+                                ()
+                        }
+                        :> Task
+                )
+
+            do! this.Goto()
+            let! _ = fileStarted.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+            do! this.Page.Locator(".file-entry[data-identity='id-1']").ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__collapsedFileOutcome === 'AbortError'"
+                )
+
+            let! collapsed =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        String(document.querySelectorAll('.file-entry.active').length),
+                        String(document.querySelectorAll('.file-entry[aria-expanded="true"]').length),
+                        String(document.querySelectorAll('.file-panel').length),
+                        String(document.querySelectorAll('[data-state="loading-file"]').length),
+                        String(state.selected === null),
+                        String(state.currentResult === null)
+                    ]"""
+                )
+
+            releaseFile.TrySetResult(true) |> ignore
+
+            Assert.That(
+                collapsed,
+                Is.EqualTo([| "0"; "0"; "0"; "0"; "true"; "true" |])
             )
         }
 

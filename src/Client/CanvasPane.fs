@@ -5,6 +5,7 @@ open Navigation
 open CanvasTypes
 open Feliz
 open Browser
+open ActionButtons
 
 // The canvas-doc server origin for THIS build, injected by Vite's `define` (see vite.config.js).
 // Prod/dev default to 127.0.0.1:5002; the E2E test stack overrides CANVAS_PORT so its iframe origin
@@ -94,9 +95,9 @@ let openDocInBrowserTab (wt: WorktreeStatus) (doc: CanvasDoc) : unit =
 let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: string -> unit) (doc: CanvasDoc) =
     let glyph, count, label =
         match doc.Filename.ToLowerInvariant() with
-        | "beads.html" -> "BD", Some(string (beadsTotal wt.Beads)), "Beads issues"
-        | "diff.html" -> "Diff", None, "Worktree diff"
-        | _ -> doc.Filename.Replace(".html", ""), None, doc.Filename
+        | "beads.html" -> Html.text "BD", Some(string (beadsTotal wt.Beads)), "Beads issues"
+        | "diff.html" -> diffIcon, None, "Worktree diff"
+        | _ -> Html.text (doc.Filename.Replace(".html", "")), None, doc.Filename
 
     Html.button [
         prop.className (if isActive then "canvas-system-tab active" else "canvas-system-tab")
@@ -106,7 +107,7 @@ let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: stri
         prop.children [
             Html.span [
                 prop.className "canvas-system-tab-glyph"
-                prop.text glyph
+                prop.children [ glyph ]
             ]
             match count with
             | Some value ->
