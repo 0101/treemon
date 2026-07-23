@@ -71,7 +71,8 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
   when no open session exists (see `docs/spec/session-status-push.md`).
 - A live session receives the prompt immediately through `SessionBridge`; the extension serializes it through the same `enqueueSend` chain used by canvas messages, including while the session is busy.
 - `SessionBridge` POSTs a typed `{kind,prompt}` envelope. The extension passes `agent-prompt` text verbatim to `session.send`; `canvas` retains the existing `[canvas]` display/routing prefix.
-- With no live bridge session, Treemon opens a terminal and starts a new session with the sync prompt. A per-worktree in-flight guard prevents duplicate launches.
+- A selected session whose bridge is not registered gets a bounded registration grace period. If its bridge appears, delivery continues there; only a confirmed absence after the grace period opens a terminal and starts a new session with the sync prompt.
+- A failed POST to a known live bridge queues the session-targeted prompt for retry instead of launching a replacement session. A per-worktree in-flight guard prevents duplicate fallback launches.
 - The prompt asks the agent to sync with `{upstreamRemote}/{baseBranch}` when safe, preserve in-progress work, and run appropriate checks.
 - Treemon does not run a separate pull/merge/conflict-resolution/test/commit/push pipeline. Agent prompt acceptance is observable; completion of the Git synchronization is not.
 
@@ -264,7 +265,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
   liveness outranks footer identity so an open CLI receives the prompt instead of triggering an
   unnecessary second session.
 - Generic `SessionBridge` under canvas routing: session registration, liveness, queueing, and prompt forwarding are shared infrastructure; `CanvasBridge` retains only document ownership and canvas-specific message semantics.
-- New session fallback: if no live bridge exists, launch a new prompted session immediately rather than leaving auto-sync dormant.
+- New session fallback: wait briefly for a selected session's bridge registration, then launch a new prompted session only when no live bridge exists; delivery failures to known live bridges stay queued for that session rather than creating parallel agents.
 - net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
 - Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups

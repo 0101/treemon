@@ -457,6 +457,7 @@ let internal triggerAutoSync
                     let! accepted =
                         AutoSync.deliver
                             SessionBridge.tryDeliver
+                            (fun () -> Async.Sleep AutoSync.registrationGraceMilliseconds)
                             tryBeginLaunch
                             (CompleteAutoSyncLaunch >> agent.Post)
                             launch

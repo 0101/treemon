@@ -42,8 +42,11 @@ let selectSessionId
     |> Seq.toList
     |> selectTargetSessionId DateTimeOffset.UtcNow
 
+let internal registrationGraceMilliseconds = 3000
+
 let deliver
-    (tryDeliver: SessionBridge.SendRequest -> Async<bool>)
+    (tryDeliver: SessionBridge.SendRequest -> Async<SessionBridge.DeliveryResult>)
+    (waitForRegistration: unit -> Async<unit>)
     (tryBeginLaunch: string -> Async<bool>)
     (completeLaunch: string -> unit)
     (launch: WorktreePath -> string -> Async<Result<unit, string>>)
@@ -52,30 +55,47 @@ let deliver
     async {
         let path = WorktreePath.value request.WorktreePath
 
-        let! delivered =
+        let sendRequest: SessionBridge.SendRequest =
+            { WorktreePath = path
+              SessionId = request.SessionId
+              Prompt = SessionBridge.Prompt.agentPrompt request.Prompt }
+
+        let tryDelivery () =
             match request.SessionId with
-            | Some _ ->
-                tryDeliver
-                    { WorktreePath = path
-                      SessionId = request.SessionId
-                      Prompt = SessionBridge.Prompt.agentPrompt request.Prompt }
-            | None -> async { return false }
+            | Some _ -> tryDeliver sendRequest
+            | None -> async { return SessionBridge.DeliveryResult.NoLiveSession }
 
-        if delivered then
-            return true
-        else
-            let! canLaunch = tryBeginLaunch path
+        let launchFallback () =
+            async {
+                let! canLaunch = tryBeginLaunch path
 
-            if not canLaunch then
-                return false
-            else
-                try
+                if not canLaunch then
+                    return false
+                else
                     try
-                        let! result = launch request.WorktreePath request.Prompt
-                        return Result.isOk result
-                    with ex ->
-                        Log.log "AutoSync" $"Fallback launch failed for {path}: {ex.Message}"
-                        return false
-                finally
-                    completeLaunch path
+                        try
+                            let! result = launch request.WorktreePath request.Prompt
+                            return Result.isOk result
+                        with ex ->
+                            Log.log "AutoSync" $"Fallback launch failed for {path}: {ex.Message}"
+                            return false
+                    finally
+                        completeLaunch path
+            }
+
+        match! tryDelivery () with
+        | SessionBridge.DeliveryResult.Delivered
+        | SessionBridge.DeliveryResult.DeliveryFailed ->
+            return true
+        | SessionBridge.DeliveryResult.NoLiveSession when Option.isSome request.SessionId ->
+            do! waitForRegistration ()
+
+            match! tryDelivery () with
+            | SessionBridge.DeliveryResult.Delivered
+            | SessionBridge.DeliveryResult.DeliveryFailed ->
+                return true
+            | SessionBridge.DeliveryResult.NoLiveSession ->
+                return! launchFallback ()
+        | SessionBridge.DeliveryResult.NoLiveSession ->
+            return! launchFallback ()
     }

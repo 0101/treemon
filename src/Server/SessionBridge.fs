@@ -33,6 +33,12 @@ type SendResult =
     | Delivered
     | Queued
 
+[<RequireQualifiedAccess>]
+type DeliveryResult =
+    | Delivered
+    | NoLiveSession
+    | DeliveryFailed
+
 type SessionEntry =
     { WorktreePath: string
       InjectUrl: string
@@ -210,17 +216,21 @@ let private liveTarget (worktreePath: string) (targetSessionId: string option) =
         |> List.filter isSessionAlive
         |> List.tryFind (fun entry -> entry.SessionId = Some target))
 
-/// Attempt immediate delivery to the selected live session without queueing. Auto-sync uses this
-/// because its no-live-session path launches a fresh prompted session directly.
+/// Attempt immediate delivery to the selected live session. A failed POST is queued for that
+/// session, while an absent live target remains distinct so auto-sync can apply its fallback policy.
 let tryDeliver (request: SendRequest) =
     async {
-        match liveTarget request.WorktreePath (normalizeSessionId request.SessionId) with
-        | None -> return false
+        let worktreeKey = normalizePath request.WorktreePath
+        let targetSessionId = normalizeSessionId request.SessionId
+
+        match liveTarget request.WorktreePath targetSessionId with
+        | None -> return DeliveryResult.NoLiveSession
         | Some entry ->
-            let worktreeKey = normalizePath request.WorktreePath
             match! postPrompt entry request.Prompt worktreeKey with
-            | Ok () -> return true
-            | Error _ -> return false
+            | Ok () -> return DeliveryResult.Delivered
+            | Error _ ->
+                enqueue worktreeKey targetSessionId request.Prompt
+                return DeliveryResult.DeliveryFailed
     }
 
 let send (request: SendRequest) =
@@ -228,14 +238,10 @@ let send (request: SendRequest) =
         let worktreeKey = normalizePath request.WorktreePath
         let targetSessionId = normalizeSessionId request.SessionId
 
-        match liveTarget request.WorktreePath targetSessionId with
-        | Some entry ->
-            match! postPrompt entry request.Prompt worktreeKey with
-            | Ok() -> return SendResult.Delivered
-            | Error _ ->
-                enqueue worktreeKey targetSessionId request.Prompt
-                return SendResult.Queued
-        | None ->
+        match! tryDeliver request with
+        | DeliveryResult.Delivered -> return SendResult.Delivered
+        | DeliveryResult.DeliveryFailed -> return SendResult.Queued
+        | DeliveryResult.NoLiveSession ->
             enqueue worktreeKey targetSessionId request.Prompt
             return SendResult.Queued
     }

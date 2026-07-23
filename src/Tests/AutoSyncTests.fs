@@ -248,13 +248,19 @@ type AutoSyncDeliveryTests() =
         let tryDeliver value =
             async {
                 delivered <- Some value
-                return true
+                return SessionBridge.DeliveryResult.Delivered
             }
 
         let launch _ _ = failwith "fallback launch must not run"
 
         let accepted =
-            deliver tryDeliver (fun _ -> async { return true }) ignore launch request
+            deliver
+                tryDeliver
+                (fun () -> failwith "registration grace must not run")
+                (fun _ -> async { return true })
+                ignore
+                launch
+                request
             |> Async.RunSynchronously
 
         Assert.Multiple(fun () ->
@@ -298,7 +304,7 @@ type AutoSyncDeliveryTests() =
             let tryDeliver (value: SessionBridge.SendRequest) =
                 async {
                     Assert.That(value.SessionId, Is.EqualTo(Some "open-idle"))
-                    return true
+                    return SessionBridge.DeliveryResult.Delivered
                 }
 
             let tryBeginLaunch _ = failwith "fallback launch guard must not run"
@@ -307,6 +313,7 @@ type AutoSyncDeliveryTests() =
             let accepted =
                 deliver
                     tryDeliver
+                    (fun () -> failwith "registration grace must not run")
                     tryBeginLaunch
                     ignore
                     launch
@@ -320,19 +327,62 @@ type AutoSyncDeliveryTests() =
             if Directory.Exists root then Directory.Delete(root, true)
 
     [<Test>]
-    member _.``No live bridge launches one prompted session and releases the guard``() =
+    member _.``Selected session registering during grace receives prompt without fallback launch``() =
+        // Callback probes cross async boundaries, so immutable values cannot capture their ordering.
+        let mutable attempts = 0
+        let mutable registrationCompleted = false
+
+        let tryDeliver _ =
+            async {
+                attempts <- attempts + 1
+
+                return
+                    if registrationCompleted then
+                        SessionBridge.DeliveryResult.Delivered
+                    else
+                        SessionBridge.DeliveryResult.NoLiveSession
+            }
+
+        let accepted =
+            deliver
+                tryDeliver
+                (fun () ->
+                    async {
+                        registrationCompleted <- true
+                    })
+                (fun _ -> failwith "fallback launch guard must not run")
+                ignore
+                (fun _ _ -> failwith "fallback launch must not run")
+                request
+            |> Async.RunSynchronously
+
+        Assert.Multiple(fun () ->
+            Assert.That(accepted, Is.True)
+            Assert.That(attempts, Is.EqualTo(2)))
+
+    [<Test>]
+    member _.``Registration grace expiry launches exactly one prompted session and releases the guard``() =
+        // Callback probes cross async boundaries, so immutable values cannot capture invocation counts.
         let mutable launched = None
         let mutable completed = []
+        let mutable deliveryAttempts = 0
+        let mutable launchAttempts = 0
 
         let launch path prompt =
             async {
+                launchAttempts <- launchAttempts + 1
                 launched <- Some(path, prompt)
                 return Ok ()
             }
 
         let accepted =
             deliver
-                (fun _ -> async { return false })
+                (fun _ ->
+                    async {
+                        deliveryAttempts <- deliveryAttempts + 1
+                        return SessionBridge.DeliveryResult.NoLiveSession
+                    })
+                (fun () -> async { return () })
                 (fun _ -> async { return true })
                 (fun path -> completed <- path :: completed)
                 launch
@@ -341,16 +391,56 @@ type AutoSyncDeliveryTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(accepted, Is.True)
+            Assert.That(deliveryAttempts, Is.EqualTo(2))
+            Assert.That(launchAttempts, Is.EqualTo(1))
             Assert.That(launched, Is.EqualTo(Some(WorktreePath "/repo/wt", "Sync with upstream/main.")))
             Assert.That(completed, Is.EqualTo([ "/repo/wt" ])))
 
     [<Test>]
-    member _.``In-flight fallback guard prevents a duplicate launch``() =
+    member _.``No selected session launches immediately without registration grace``() =
+        // The async launch callback is the impure boundary under test.
+        let mutable launchAttempts = 0
+
+        let accepted =
+            deliver
+                (fun _ -> failwith "delivery must not run without a selected session")
+                (fun () -> failwith "registration grace must not run without a selected session")
+                (fun _ -> async { return true })
+                ignore
+                (fun _ _ ->
+                    async {
+                        launchAttempts <- launchAttempts + 1
+                        return Ok ()
+                    })
+                { request with SessionId = None }
+            |> Async.RunSynchronously
+
+        Assert.Multiple(fun () ->
+            Assert.That(accepted, Is.True)
+            Assert.That(launchAttempts, Is.EqualTo(1)))
+
+    [<Test>]
+    member _.``Delivery failure is accepted for queued retry without fallback launch``() =
+        let accepted =
+            deliver
+                (fun _ -> async { return SessionBridge.DeliveryResult.DeliveryFailed })
+                (fun () -> failwith "registration grace must not run")
+                (fun _ -> failwith "fallback launch guard must not run")
+                ignore
+                (fun _ _ -> failwith "fallback launch must not run")
+                request
+            |> Async.RunSynchronously
+
+        Assert.That(accepted, Is.True)
+
+    [<Test>]
+    member _.``In-flight fallback guard prevents a duplicate launch after grace``() =
         let launch _ _ = failwith "duplicate launch must not run"
 
         let accepted =
             deliver
-                (fun _ -> async { return false })
+                (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })
+                (fun () -> async { return () })
                 (fun _ -> async { return false })
                 ignore
                 launch
@@ -358,6 +448,54 @@ type AutoSyncDeliveryTests() =
             |> Async.RunSynchronously
 
         Assert.That(accepted, Is.False)
+
+    [<Test>]
+    member _.``Transient bridge POST failure queues the prompt for retry on registration``() =
+        let path = $"/test/auto-sync-retry/{Guid.NewGuid():N}"
+        let sessionId = $"session-{Guid.NewGuid():N}"
+        let port = TestUtils.getFreeTcpPort ()
+
+        use listener = new HttpListener()
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/")
+        listener.Start()
+
+        SessionBridge.registerSession path $"http://127.0.0.1:{port}/" (Some sessionId)
+
+        let firstRequest = listener.GetContextAsync()
+        let delivery =
+            deliver
+                SessionBridge.tryDeliver
+                (fun () -> failwith "registration grace must not run")
+                (fun _ -> failwith "fallback launch guard must not run")
+                ignore
+                (fun _ _ -> failwith "fallback launch must not run")
+                { request with
+                    WorktreePath = WorktreePath path
+                    SessionId = Some sessionId }
+            |> Async.StartAsTask
+
+        let firstContext =
+            firstRequest.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+        firstContext.Response.StatusCode <- 503
+        firstContext.Response.Close()
+
+        Assert.That(delivery.GetAwaiter().GetResult(), Is.True)
+
+        let retryRequest = listener.GetContextAsync()
+        SessionBridge.registerSession path $"http://127.0.0.1:{port}/" (Some sessionId)
+
+        let retryContext =
+            retryRequest.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+        use reader = new StreamReader(retryContext.Request.InputStream)
+        let body = reader.ReadToEnd()
+        retryContext.Response.StatusCode <- 200
+        retryContext.Response.Close()
+
+        Assert.That(
+            body,
+            Is.EqualTo(
+                SessionBridge.serializePrompt(
+                    SessionBridge.Prompt.agentPrompt request.Prompt)))
 
 [<TestFixture>]
 [<Category("Unit")>]
