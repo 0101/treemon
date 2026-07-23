@@ -192,6 +192,23 @@ type StateAgentTests() =
         state.Repos |> Map.find testRepoId
 
     [<Test>]
+    member _.``InitializeRepo keeps discovery unready until a real worktree result arrives``() =
+        async {
+            let agent = createAgent ()
+
+            agent.Post(InitializeRepo testRepoId)
+            let! initialized = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(getRepo initialized |> _.IsReady, Is.False)
+
+            agent.Post(UpdateWorktreeList(testRepoId, []))
+            let! discovered = agent.PostAndAsyncReply(GetState)
+
+            Assert.That(getRepo discovered |> _.IsReady, Is.True)
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
     member _.``UpdateWorktreeList then UpdateGit populates state``() =
         async {
             let agent = createAgent ()

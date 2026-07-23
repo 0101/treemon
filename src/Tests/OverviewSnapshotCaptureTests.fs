@@ -63,6 +63,7 @@ let private overview =
 let private defaultDependencies insert : CaptureDependencies =
     { GetState = fun () -> async.Return RefreshScheduler.DashboardState.empty
       LoadAssemblyInputs = assemblyInputs
+      IsReady = fun _ _ -> true
       AssembleRepos = fun _ _ -> []
       Aggregate = fun _ -> overview
       Insert = insert }
@@ -165,6 +166,7 @@ type OverviewSnapshotCaptureTests() =
                 fun now ->
                     calls.Enqueue "inputs"
                     assemblyInputs now
+              IsReady = fun _ _ -> true
               AssembleRepos =
                 fun inputs _ ->
                     calls.Enqueue "assemble"
@@ -198,6 +200,148 @@ type OverviewSnapshotCaptureTests() =
             Assert.That(inserted.ToArray(), Is.EqualTo [| expected |]))
 
     [<Test>]
+    member _.``startup boundary is skipped until Overview inputs are ready``() =
+        let boundary = next initial
+        let calls = ConcurrentQueue<string>()
+
+        let dependencies =
+            { GetState =
+                fun () -> async {
+                    calls.Enqueue "state"
+                    return nonEmptyState
+                }
+              LoadAssemblyInputs =
+                fun now ->
+                    calls.Enqueue "inputs"
+                    assemblyInputs now
+              IsReady =
+                fun _ _ ->
+                    calls.Enqueue "ready"
+                    false
+              AssembleRepos =
+                fun _ _ ->
+                    calls.Enqueue "assemble"
+                    []
+              Aggregate =
+                fun _ ->
+                    calls.Enqueue "aggregate"
+                    overview
+              Insert =
+                fun _ ->
+                    calls.Enqueue "insert"
+                    true }
+
+        captureBoundary dependencies boundary CancellationToken.None
+        |> Async.RunSynchronously
+
+        Assert.That(calls.ToArray(), Is.EqualTo [| "state"; "inputs"; "ready" |])
+
+    [<Test>]
+    member _.``a startup boundary skipped by readiness is never backfilled``() =
+        let clock = ControllableClock(initial)
+        let inserted = Channel.CreateUnbounded<OverviewSnapshot>()
+        // Interlocked owns the mutable readiness probe at this test synchronization boundary.
+        let mutable readinessChecks = 0
+
+        let dependencies =
+            { defaultDependencies (fun snapshot ->
+                inserted.Writer.TryWrite snapshot |> ignore
+                true) with
+                GetState = fun () -> async.Return nonEmptyState
+                IsReady =
+                    fun _ _ ->
+                        Interlocked.Increment(&readinessChecks) > 1 }
+
+        let cancellation, running =
+            runCapture clock.Clock dependencies (fun _ _ -> ())
+
+        let firstBoundary = next initial
+        Assert.That(clock.NextWait().GetAwaiter().GetResult(), Is.EqualTo firstBoundary)
+        clock.AdvanceTo firstBoundary
+
+        let secondBoundary = firstBoundary.AddSeconds 30.0
+        Assert.That(clock.NextWait().GetAwaiter().GetResult(), Is.EqualTo secondBoundary)
+        Assert.That(inserted.Reader.TryRead() |> fst, Is.False)
+
+        clock.AdvanceTo secondBoundary
+        let snapshot =
+            inserted.Reader.ReadAsync().AsTask().WaitAsync(timeout).GetAwaiter().GetResult()
+
+        stopCapture cancellation running
+        Assert.That(snapshot.Timestamp, Is.EqualTo secondBoundary)
+
+    [<Test>]
+    member _.``Overview readiness requires discovery task inputs and seeded sessions but not PR data``() =
+        let boundary = next initial
+        let repoId = RepoId "readiness"
+        let root = Path.Combine(Path.GetTempPath(), "treemon-overview-readiness")
+        let activePath = Path.Combine(root, "active")
+        let archivedPath = Path.Combine(root, "archived")
+        let ignoredPath = Path.Combine(root, "ignored")
+
+        let repo =
+            { RefreshScheduler.PerRepoState.empty with
+                WorktreeList =
+                    [ worktree activePath "active"
+                      worktree archivedPath "archived"
+                      worktree ignoredPath "ignored" ]
+                KnownPaths = Set.ofList [ activePath; archivedPath; ignoredPath ]
+                IsReady = true }
+
+        let inputs : WorktreeApi.OverviewAssemblyInputs =
+            { Now = boundary
+              IgnorePredicate = fun value -> value = "ignored"
+              ArchivedBranches = Map.ofList [ repoId, Set.singleton "archived" ] }
+
+        let rootPaths = Map.ofList [ repoId, root ]
+        let state repo sessionStatusesHydrated =
+            { RefreshScheduler.DashboardState.empty with
+                Repos = Map.ofList [ repoId, repo ]
+                SessionStatusesHydrated = sessionStatusesHydrated }
+
+        let taskReadyRepo =
+            { repo with
+                BeadsData = Map.ofList [ activePath, BeadsSummary.zero ]
+                PlanningData = Map.ofList [ activePath, BeadsPlanning.zero ] }
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                WorktreeApi.isOverviewCaptureReady
+                    rootPaths
+                    (Some inputs)
+                    (state { repo with IsReady = false } true),
+                Is.False,
+                "worktree discovery must complete first"
+            )
+            Assert.That(
+                WorktreeApi.isOverviewCaptureReady rootPaths (Some inputs) (state repo false),
+                Is.False,
+                "live session state must be seeded even when the seed is empty"
+            )
+            Assert.That(
+                WorktreeApi.isOverviewCaptureReady rootPaths (Some inputs) (state repo true),
+                Is.False,
+                "the included worktree still lacks task inputs"
+            )
+            Assert.That(
+                WorktreeApi.isOverviewCaptureReady
+                    rootPaths
+                    (Some inputs)
+                    (state taskReadyRepo true),
+                Is.True,
+                "PR data is intentionally not part of Overview readiness"
+            )
+            Assert.That(
+                WorktreeApi.isOverviewCaptureReady
+                    Map.empty
+                    None
+                    { RefreshScheduler.DashboardState.empty with
+                        SessionStatusesHydrated = true },
+                Is.True,
+                "an intentionally empty root set is ready after the session seed"
+            ))
+
+    [<Test>]
     member _.``empty monitored state stores the canonical zero snapshot without loading assembly inputs``() =
         let boundary = next initial
         let calls = ConcurrentQueue<string>()
@@ -213,6 +357,7 @@ type OverviewSnapshotCaptureTests() =
                 fun _ ->
                     calls.Enqueue "inputs"
                     failwith "empty state must not load capture inputs"
+              IsReady = fun _ _ -> true
               AssembleRepos =
                 fun _ _ ->
                     calls.Enqueue "assemble"

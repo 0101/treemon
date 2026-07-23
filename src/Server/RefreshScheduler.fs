@@ -43,6 +43,10 @@ type DashboardState =
       ExpeditedRepos: Set<RepoId>
       ClientActivity: ActivityLevel
       ClientActivityAt: DateTimeOffset
+      /// True only after the durable live-session rebuild has been applied, including an empty seed.
+      /// Overview capture uses this to distinguish "no live sessions" from "startup has not loaded
+      /// session state yet".
+      SessionStatusesHydrated: bool
       // Push-model live session status, keyed by SessionId. Fed by the SessionActivity mailbox
       // (single writer) via UpdateSessionStatus and rebuilt from SQLite on restart. Kept bounded by
       // evicting entries older than the idle window (relative to the newest LastSeen) on each update
@@ -68,10 +72,12 @@ module DashboardState =
           ExpeditedRepos = Set.empty
           ClientActivity = ActivityLevel.Idle
           ClientActivityAt = DateTimeOffset.MinValue
+          SessionStatusesHydrated = false
           SessionStatuses = Map.empty
           CodingToolSinceByWorktree = Map.empty }
 
 type StateMsg =
+    | InitializeRepo of repoId: RepoId
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary * BeadsPlanning
@@ -180,6 +186,12 @@ let internal codingToolPushEvent (stored: SessionActivityStore.StoredStatus) : C
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
+    | InitializeRepo repoId ->
+        if Map.containsKey repoId state.Repos then
+            state
+        else
+            updateRepo repoId PerRepoState.empty state
+
     | UpdateWorktreeList(repoId, worktrees) ->
         let repo = getRepo repoId state
         let newPaths = worktrees |> List.map _.Path |> Set.ofList
@@ -335,6 +347,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
                 state.LatestByCategory |> Map.add "CodingToolRefresh" (codingToolPushEvent newest)
 
         { state with
+            SessionStatusesHydrated = true
             SessionStatuses = seeded
             LatestByCategory = latestByCategory
             CodingToolSinceByWorktree = idleSince }
@@ -818,7 +831,7 @@ let start
 
     rootPaths
     |> Map.iter (fun repoId _ ->
-        agent.Post(UpdateWorktreeList(repoId, [])))
+        agent.Post(InitializeRepo repoId))
 
     // The registration owns the watcher set for the current recursive state. Reconciliation replaces
     // the registration immutably, so cancellation always disposes the latest set without a shared cell.

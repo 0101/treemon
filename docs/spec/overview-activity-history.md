@@ -35,6 +35,10 @@ missed time, late inputs, or downtime.
   next future boundary and never overlaps, catches up, or repairs missed history.
 - Startup performs no backfill or immediate synthetic capture. Existing rows are available
   immediately; a new database returns empty history until the first successful future boundary.
+- The capture loop starts before HTTP host startup, but a boundary is skipped until Overview inputs
+  are ready: every configured repo has completed worktree discovery, every included worktree has its
+  Beads summary/planning inputs, and the durable live-session seed has been applied. PR-only startup
+  work is not part of readiness. Skipped startup buckets are never backfilled or overwritten.
 - Source events arriving after a boundary never alter an already captured snapshot.
 
 ### Durable snapshots
@@ -119,9 +123,11 @@ publication generations, recovery worker, or reconstruction dependency.
 
 ### Lifecycle and API
 
-`Program` starts and stops the capture component with the server runtime but never blocks HTTP
-startup on history availability. `WorktreeApi.getOverviewHistory` performs one bounded snapshot
-query and returns the existing `OverviewHistoryResponse` wire type.
+`Program` launches capture before the HTTP host so a slow host start cannot lose the first eligible
+future boundary. Capture still does not block HTTP readiness: its explicit Overview gate skips
+boundaries until worktree discovery, task inputs, and seeded live session state are hydrated. Host
+startup failure or runtime shutdown cancels and awaits capture. `WorktreeApi.getOverviewHistory`
+performs one bounded snapshot query and returns the existing `OverviewHistoryResponse` wire type.
 
 The refresh scheduler no longer receives history assembly or persistence callbacks and performs no
 history work inside its task loop.
@@ -138,6 +144,7 @@ history work inside its task loop.
 | Stored shape | Count-only tasks and agents captured atomically |
 | Retention | Exactly 72 hours |
 | Startup | Existing rows or empty history; no backfill |
+| Startup readiness | Worktree discovery + included task inputs + live-session seed; do not wait for PR data |
 | Missed time | Leave gaps; never catch up or reconstruct |
 | Late events | Do not modify captured snapshots |
 | Activity events | Keep unchanged for event-ID idempotency |

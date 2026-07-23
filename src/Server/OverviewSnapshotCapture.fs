@@ -12,6 +12,10 @@ type internal CaptureClock =
 type internal CaptureDependencies =
     { GetState: unit -> Async<RefreshScheduler.DashboardState>
       LoadAssemblyInputs: DateTimeOffset -> WorktreeApi.OverviewAssemblyInputs
+      IsReady:
+        WorktreeApi.OverviewAssemblyInputs option ->
+            RefreshScheduler.DashboardState ->
+            bool
       AssembleRepos:
         WorktreeApi.OverviewAssemblyInputs ->
             RefreshScheduler.DashboardState ->
@@ -55,17 +59,23 @@ let internal captureBoundary
         let! state = dependencies.GetState()
         cancellationToken.ThrowIfCancellationRequested()
 
-        let repos =
+        let inputs =
             if Map.isEmpty state.Repos then
-                []
+                None
             else
-                let inputs = dependencies.LoadAssemblyInputs boundary
-                dependencies.AssembleRepos inputs state
+                Some(dependencies.LoadAssemblyInputs boundary)
 
-        let overview = dependencies.Aggregate repos
-        let snapshot = snapshotAt boundary overview
-        cancellationToken.ThrowIfCancellationRequested()
-        dependencies.Insert snapshot |> ignore
+        if dependencies.IsReady inputs state then
+            let repos =
+                inputs
+                |> Option.map (fun readyInputs ->
+                    dependencies.AssembleRepos readyInputs state)
+                |> Option.defaultValue []
+
+            let overview = dependencies.Aggregate repos
+            let snapshot = snapshotAt boundary overview
+            cancellationToken.ThrowIfCancellationRequested()
+            dependencies.Insert snapshot |> ignore
     }
 
 let rec private waitUntilReached
@@ -143,6 +153,7 @@ let internal create
           LoadAssemblyInputs =
             fun boundary ->
                 WorktreeApi.loadOverviewAssemblyInputs boundary rootPaths
+          IsReady = WorktreeApi.isOverviewCaptureReady rootPaths
           AssembleRepos =
             fun inputs state ->
                 WorktreeApi.assembleOverviewRepos inputs rootPaths state

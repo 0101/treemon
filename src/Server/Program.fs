@@ -331,10 +331,10 @@ let internal runHostWithCapture
     (stopping: CancellationToken)
     (capture: (CancellationToken -> Async<unit>) option)
     =
-    startHost ()
-
     match capture with
-    | None -> waitForShutdown ()
+    | None ->
+        startHost ()
+        waitForShutdown ()
     | Some workflow ->
         let loop = startBackgroundLoop workflow
         let stoppingRegistration =
@@ -342,6 +342,7 @@ let internal runHostWithCapture
         Log.log "Startup" "Overview snapshot capture started"
 
         try
+            startHost ()
             waitForShutdown ()
         finally
             stoppingRegistration.Dispose()
@@ -462,7 +463,7 @@ let main args =
 
     let capture =
         activityRuntime
-        |> Option.map (fun runtime -> runtime.Capture.Run)
+        |> Option.map _.Capture.Run
 
     // The register/attribute routes need the scheduler agent for their known-worktree guard. In
     // demo mode there is no agent (and the canvas doc server is never started — see above), so

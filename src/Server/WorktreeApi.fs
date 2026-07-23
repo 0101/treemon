@@ -280,6 +280,35 @@ let loadOverviewAssemblyInputs
         rootPaths
         |> Map.map (fun _ root -> TreemonConfig.readArchivedBranchSet (Some root)) }
 
+let internal isOverviewCaptureReady
+    (rootPaths: Map<RepoId, string>)
+    (inputs: OverviewAssemblyInputs option)
+    (state: RefreshScheduler.DashboardState)
+    =
+    let repoReady inputs repoId =
+        match state.Repos |> Map.tryFind repoId with
+        | Some repo when repo.IsReady ->
+            let archivedBranches =
+                inputs.ArchivedBranches
+                |> Map.tryFind repoId
+                |> Option.defaultValue Set.empty
+
+            repo.WorktreeList
+            |> List.filter (RefreshScheduler.isWorktreeIgnored inputs.IgnorePredicate >> not)
+            |> List.filter (fun wt ->
+                wt.Branch
+                |> Option.exists (fun branch -> Set.contains branch archivedBranches)
+                |> not)
+            |> List.forall (fun wt ->
+                Map.containsKey wt.Path repo.BeadsData
+                && Map.containsKey wt.Path repo.PlanningData)
+        | _ -> false
+
+    state.SessionStatusesHydrated
+    && (match inputs with
+        | Some inputs -> rootPaths |> Map.forall (fun repoId _ -> repoReady inputs repoId)
+        | None -> Map.isEmpty rootPaths)
+
 let loadRepoAssemblyInputs
     (now: DateTimeOffset)
     (activityStore: SessionActivityStore.SessionActivityStore option)

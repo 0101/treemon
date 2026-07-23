@@ -77,6 +77,11 @@ type ServerLifecycleTests() =
 
             try
                 runtime.Components.Service.Start()
+                let state =
+                    agent.PostAndAsyncReply RefreshScheduler.GetState
+                    |> Async.RunSynchronously
+
+                Assert.That(state.SessionStatusesHydrated, Is.True)
                 Assert.That(runtime.SnapshotStore.LatestAnchor(), Is.EqualTo None)
             finally
                 shutdownSessionActivityRuntime runtime None)
@@ -114,10 +119,11 @@ type ServerLifecycleTests() =
             }
 
         runHostWithCapture
-            (fun () -> order.Enqueue "http-started")
             (fun () ->
                 failed.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
                 |> ignore
+                order.Enqueue "http-started")
+            (fun () ->
                 order.Enqueue "scheduler-work")
             CancellationToken.None
             (Some capture)
@@ -125,12 +131,102 @@ type ServerLifecycleTests() =
         Assert.That(
             order.ToArray(),
             Is.EqualTo(
-                [| "http-started"
-                   "capture-started"
+                [| "capture-started"
                    "capture-failed"
+                   "http-started"
                    "scheduler-work" |]
             )
         )
+
+    [<Test>]
+    member _.``capture starts while slow HTTP startup is still in progress``() =
+        let order = ConcurrentQueue<string>()
+        let httpStarting =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let captureStarted =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let capture (cancellationToken: CancellationToken) =
+            async {
+                do! httpStarting.Task |> Async.AwaitTask
+                order.Enqueue "capture-started"
+                captureStarted.SetResult()
+
+                try
+                    do!
+                        Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                        |> Async.AwaitTask
+                with :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
+                    ()
+            }
+
+        runHostWithCapture
+            (fun () ->
+                order.Enqueue "http-starting"
+                httpStarting.SetResult()
+                captureStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+                order.Enqueue "http-started")
+            (fun () -> order.Enqueue "shutdown")
+            CancellationToken.None
+            (Some capture)
+
+        Assert.That(
+            order.ToArray(),
+            Is.EqualTo(
+                [| "http-starting"
+                   "capture-started"
+                   "http-started"
+                   "shutdown" |]
+            )
+        )
+
+    [<Test>]
+    member _.``host startup failure cancels and awaits capture``() =
+        let order = ConcurrentQueue<string>()
+        let captureStarted =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let captureStopped =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let capture (cancellationToken: CancellationToken) =
+            async {
+                order.Enqueue "capture-started"
+                captureStarted.SetResult()
+
+                try
+                    try
+                        do!
+                            Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                            |> Async.AwaitTask
+                    with :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
+                        ()
+                finally
+                    order.Enqueue "capture-stopped"
+                    captureStopped.SetResult()
+            }
+
+        let failure =
+            Assert.Throws<InvalidOperationException>(fun () ->
+                runHostWithCapture
+                    (fun () ->
+                        captureStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+                        order.Enqueue "http-failed"
+                        raise (InvalidOperationException "forced host startup failure"))
+                    (fun () -> order.Enqueue "unexpected-wait")
+                    CancellationToken.None
+                    (Some capture))
+
+        Assert.Multiple(fun () ->
+            Assert.That(failure.Message, Is.EqualTo "forced host startup failure")
+            Assert.That(captureStopped.Task.IsCompletedSuccessfully, Is.True)
+            Assert.That(
+                order.ToArray(),
+                Is.EqualTo(
+                    [| "capture-started"
+                       "http-failed"
+                       "capture-stopped" |]
+                )
+            ))
 
     [<Test>]
     member _.``shutdown cancels and awaits the background capture``() =
@@ -159,9 +255,10 @@ type ServerLifecycleTests() =
             }
 
         runHostWithCapture
-            (fun () -> order.Enqueue "http-started")
             (fun () ->
                 started.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+                order.Enqueue "http-started")
+            (fun () ->
                 order.Enqueue "shutdown"
                 hostStopping.Cancel())
             hostStopping.Token
@@ -172,8 +269,8 @@ type ServerLifecycleTests() =
             Assert.That(
                 order.ToArray(),
                 Is.EqualTo(
-                    [| "http-started"
-                       "capture-started"
+                    [| "capture-started"
+                       "http-started"
                        "shutdown"
                        "capture-stopped" |]
                 )
