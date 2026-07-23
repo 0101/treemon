@@ -251,17 +251,19 @@ let getWorktrees
         // result per worktree once, up front: each worktree's sessions → openness-driven status +
         // decoupled footer. Shared across every repo/worktree assembly below (SessionStatuses is
         // global, not per-repo). CodingToolSinceByWorktree carries the frozen time-since-idle stamps.
-        // The durable retained fallback fills gaps for worktrees whose sessions have aged out of the
-        // live idle window (after a restart), so their footer + resume button survive (keeping the dot
-        // NoSession).
+        // Each worktree's durable representative joins the live candidate set before collapse. Its
+        // own LastSeen still controls openness, while its UpdatedAt can supply the footer and resume
+        // affordance when a heartbeat-kept live sibling is not the representative session.
         // One `now` for the whole assembly so the collapse and the idle-display debounce agree.
         let now = DateTimeOffset.UtcNow
         let retainedByWorktree =
             activityStore |> Option.map _.RetainedByWorktree() |> Option.defaultValue Map.empty
 
         let pushByWorktree =
-            CodingToolStatus.collapseByWorktree now (state.SessionStatuses |> Map.values)
-            |> CodingToolStatus.withRetainedFallback retainedByWorktree
+            state.SessionStatuses
+            |> Map.values
+            |> CodingToolStatus.includeRetainedSessions retainedByWorktree
+            |> CodingToolStatus.collapseByWorktree now
 
         let codingToolSince = state.CodingToolSinceByWorktree
 

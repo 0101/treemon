@@ -129,6 +129,12 @@ type ParseReportTests() =
         Assert.That((parseOk (baseReq "went_idle")).Event, Is.EqualTo WentIdle)
 
     [<Test>]
+    member _.``user_input_completed maps to UserInputCompleted``() =
+        Assert.That(
+            (parseOk (baseReq "user_input_completed")).Event,
+            Is.EqualTo(UserInputCompleted(ts "2026-03-01T10:00:00Z")))
+
+    [<Test>]
     member _.``user_prompt with a message maps to UserPrompt carrying that message``() =
         let req = { baseReq "user_prompt" with message = msgDto "hello" "2026-03-01T10:00:00Z" }
         Assert.That((parseOk req).Event, Is.EqualTo(UserPrompt(msg "hello" "2026-03-01T10:00:00Z")))
@@ -169,11 +175,18 @@ type ParseReportTests() =
     [<Test>]
     member _.``awaiting_user_input carries the question when a message is present``() =
         let req = { baseReq "awaiting_user_input" with message = msgDto "Which file?" "2026-03-01T10:00:00Z" }
-        Assert.That((parseOk req).Event, Is.EqualTo(AwaitingUserInput(Some(msg "Which file?" "2026-03-01T10:00:00Z"))))
+        Assert.That(
+            (parseOk req).Event,
+            Is.EqualTo(
+                AwaitingUserInput(
+                    Some(msg "Which file?" "2026-03-01T10:00:00Z"),
+                    ts "2026-03-01T10:00:00Z")))
 
     [<Test>]
     member _.``awaiting_user_input with no message maps to AwaitingUserInput None``() =
-        Assert.That((parseOk (baseReq "awaiting_user_input")).Event, Is.EqualTo(AwaitingUserInput None))
+        Assert.That(
+            (parseOk (baseReq "awaiting_user_input")).Event,
+            Is.EqualTo(AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
 
     [<Test>]
     member _.``an unknown kind is rejected (no catch-all)``() =
@@ -303,7 +316,7 @@ type ParseReportTests() =
         let long = String('q', maxTextLength + 1)
         let req = { baseReq "awaiting_user_input" with message = msgDto long "2026-03-01T10:00:00Z" }
         match (parseOk req).Event with
-        | AwaitingUserInput(Some m) -> Assert.That(m.Text.Length, Is.EqualTo maxTextLength)
+        | AwaitingUserInput(Some m, _) -> Assert.That(m.Text.Length, Is.EqualTo maxTextLength)
         | other -> Assert.Fail $"expected AwaitingUserInput Some, got {other}"
 
     [<Test>]
@@ -334,6 +347,17 @@ type TryAcceptReportTests() =
             match runAsync (tryAcceptReport agent { baseReq "turn_started" with worktreePath = "C:/wt/elsewhere" }) with
             | Unmonitored _ -> ()
             | other -> Assert.Fail $"expected Unmonitored, got {other}")
+
+    [<Test>]
+    member _.``a system reminder for a monitored worktree is ignored before ingestion``() =
+        let request =
+            { baseReq "user_prompt" with
+                message = msgDto "<system_reminder>internal runtime guidance" "2026-03-01T10:00:00Z" }
+
+        withService "C:/wt/a" (fun (_, agent, _) ->
+            match runAsync (tryAcceptReport agent request) with
+            | IgnoredSystemReminder -> ()
+            | other -> Assert.Fail $"expected IgnoredSystemReminder, got {other}")
 
     [<Test>]
     member _.``an invalid body is rejected before the guard``() =
@@ -375,6 +399,62 @@ type IngestTests() =
             Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(s.LastUserMessage, Is.EqualTo(Some(msg "do it" "2026-03-01T10:00:01Z")))
             Assert.That(s.LastAssistantMessage, Is.EqualTo(Some(msg "on it" "2026-03-01T10:00:02Z"))))
+
+    [<Test>]
+    member _.``ask_user state is correct when idle arrives before the earlier request``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:01Z" WentIdle)
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "e1"
+                    "2026-03-01T10:00:00Z"
+                    (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
+
+            let waiting = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus waiting.Status, Is.EqualTo SessionLevelStatus.WaitingForUser)
+                Assert.That(waiting.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:01Z")))
+
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "e3"
+                    "2026-03-01T10:00:02Z"
+                    (UserInputCompleted(ts "2026-03-01T10:00:02Z")))
+
+            let idle = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus idle.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(effectiveStatus persisted.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(idle.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:02Z"))))
+
+    [<Test>]
+    member _.``a system reminder cannot release a pending ask_user wait``() =
+        withService "C:/wt/a" (fun (svc, agent, _) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "e1"
+                    "2026-03-01T10:00:00Z"
+                    (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
+
+            let reminder =
+                { baseReq "user_prompt" with
+                    occurredAt = "2026-03-01T10:00:01Z"
+                    message = msgDto "<system_reminder>internal runtime guidance" "2026-03-01T10:00:01Z" }
+
+            match runAsync (tryAcceptReport agent reminder) with
+            | IgnoredSystemReminder -> ()
+            | other -> Assert.Fail $"expected IgnoredSystemReminder, got {other}"
+
+            svc.Submit(mkReport "s1" "C:/wt/a" "e3" "2026-03-01T10:00:02Z" WentIdle)
+            let status = svc.LiveSnapshot() |> Map.find (SessionId "s1") |> _.Status |> effectiveStatus
+            Assert.That(status, Is.EqualTo SessionLevelStatus.WaitingForUser))
 
     [<Test>]
     member _.``ingested events are persisted to the durable mirror``() =
@@ -452,7 +532,9 @@ type IngestTests() =
                   Title = Some(msg "Old title" "2026-03-01T07:59:00Z")
                   LastUserMessage = Some(msg "resume this" "2026-03-01T07:58:30Z")
                   LastAssistantMessage = Some(msg "working on it" "2026-03-01T07:59:30Z")
-                  ContextUsage = None }
+                  ContextUsage = None
+                  AwaitingUserSince = None
+                  UserInputCompletedAt = None }
               UpdatedAt = ts "2026-03-01T08:00:00Z"
               LastSeen = ts "2026-03-01T08:00:00Z"
               ContextUsageAt = None }
@@ -750,7 +832,9 @@ type RestartRebuildTests() =
               Title = Some { Text = "Persist context info"; At = usageAt.AddMinutes(-3.0) }
               LastUserMessage = Some { Text = "keep the context"; At = usageAt.AddMinutes(-2.0) }
               LastAssistantMessage = Some { Text = "working on it"; At = usageAt.AddMinutes(-1.0) }
-              ContextUsage = None }
+              ContextUsage = None
+              AwaitingUserSince = None
+              UserInputCompletedAt = None }
 
         let seed (store: SessionActivityStore) =
             storedWithUsage "s1" worktree status (usageAt.AddMinutes(-1.0)) usage usageAt
