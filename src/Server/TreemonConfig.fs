@@ -118,6 +118,3 @@ let readBaseBranch (repoRoot: string) : string =
             Log.log "TreemonConfig" $"Rejected invalid baseBranch value: '{value}'"
             None)
     |> Option.defaultValue "main"
-
-let readTestCommand (repoRoot: string) : string option =
-    readStringConfig repoRoot "testCommand"

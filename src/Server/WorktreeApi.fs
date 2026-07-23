@@ -53,8 +53,6 @@ let readOnlyApi
       openTerminal = fun _ -> async { return () }
       openEditor = fun _ -> async { return () }
       toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
-      startSync = fun _ -> async { return Error $"Sync is not available in {modeName}" }
-      cancelSync = fun _ -> async { return () }
       deleteWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
       launchSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       focusSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
@@ -135,7 +133,6 @@ let internal assembleFromState
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
     (autoSyncBranches: Set<string>)
-    (hasTestFailureLog: bool)
     (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
     (codingToolSince: Map<string, DateTimeOffset>)
     (repo: RefreshScheduler.PerRepoState)
@@ -195,7 +192,6 @@ let internal assembleFromState
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
-      HasTestFailureLog = hasTestFailureLog
       IsMainWorktree = Directory.Exists(Path.Combine(wt.Path, ".git"))
       IsArchived =
         wt.Branch
@@ -290,9 +286,7 @@ let getWorktrees
                 let statuses =
                     repo.WorktreeList
                     |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
-                    |> List.map (fun wt ->
-                        let hasLog = SyncEngine.testFailureLogPath wt.Path |> System.IO.File.Exists
-                        assembleFromState now activeSessionPaths archivedBranches autoSyncBranches hasLog pushByWorktree codingToolSince repo wt)
+                    |> List.map (assembleFromState now activeSessionPaths archivedBranches autoSyncBranches pushByWorktree codingToolSince repo)
 
                 let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
@@ -416,7 +410,6 @@ let private updateArchivedBranches
 
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
     (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (activityStore: SessionActivityStore.SessionActivityStore option)
@@ -497,77 +490,31 @@ let worktreeApi
                           Log.log "API" $"toggleAutoSync failed for '{path}': {ex.Message}"
                           return Error $"Failed to persist auto-sync preference: {ex.Message}"
               }
-          startSync = fun wtPath ->
-              let path = WorktreePath.value wtPath
-              asyncResult {
-                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-
-                  let! ctx, branch =
-                      match tryResolveWorktreeContext rootPaths state path with
-                      | None -> Error $"No worktree found at path '{path}'"
-                      | Some { Branch = None } -> Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
-                      | Some ({ Branch = Some branch } as ctx) -> Ok (ctx, branch)
-                  let syncKey = scopedBranchKey ctx.RepoId branch
-                  let provider = CodingToolStatus.readConfiguredProvider ctx.Worktree.Path
-
-                  let! ct = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
-                  cardLog.Post(CardEventLog.SyncStarted syncKey)
-
-                  let sinks : SyncEngine.PipelineSinks =
-                      { PushEvent = fun key event -> cardLog.Post(CardEventLog.SyncStep (key, event))
-                        SetProcessState = fun key state -> syncAgent.Post(SyncEngine.UpdateProcessState (key, state))
-                        Complete = fun key ->
-                            syncAgent.Post(SyncEngine.CompleteSync key)
-                            cardLog.Post(CardEventLog.SyncEnded key) }
-                  let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
-                  let upstreamBranch = repo.GitData |> Map.tryFind ctx.Worktree.Path |> Option.bind _.UpstreamBranch
-                  let prStatus = PrStatus.lookupPrStatus repo.PrData upstreamBranch
-                  Async.Start(SyncEngine.executeSyncPipeline sinks syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
-              }
-          cancelSync = fun wtPath ->
-              let path = WorktreePath.value wtPath
-              async {
-                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-
-                  match tryResolveWorktreeContext rootPaths state path with
-                  | None ->
-                      Log.log "API" $"cancelSync: no worktree found at path '{path}'"
-                  | Some { Branch = None } ->
-                      Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
-                  | Some ({ Branch = Some branch } as ctx) ->
-                      let syncKey = scopedBranchKey ctx.RepoId branch
-                      let! wasRunning = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.CancelSync (syncKey, reply))
-                      if wasRunning then
-                          cardLog.Post(CardEventLog.SyncCancelled syncKey)
-              }
           getSyncStatus = fun () ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  let syncKeyToPath =
+                  let eventKeyToPath =
                       state.Repos
                       |> Map.toList
                       |> List.collect (fun (repoId, repo) ->
                           repo.WorktreeList
                           |> List.map (fun wt ->
                               let branch = wt.Branch |> Option.defaultValue (detachedBranchLabel wt.Path)
-                              let syncKey = scopedBranchKey repoId branch
-                              syncKey, wt.Path))
+                              let eventKey = scopedBranchKey repoId branch
+                              eventKey, wt.Path))
                       |> Map.ofList
 
-                  let! syncEvents = cardLog.PostAndAsyncReply(CardEventLog.GetAll)
+                  let! cardEvents = cardLog.PostAndAsyncReply(CardEventLog.GetAll)
 
-                  // The card's event log carries only sync/pipeline events. The last-assistant message
-                  // is now its own dedicated footer line (assistantMsgLineView, fed by
-                  // WorktreeStatus.LastAssistantMessage) — injecting it here too would render it twice.
                   return
-                      syncEvents
+                      cardEvents
                       |> Map.toList
-                      |> List.choose (fun (syncKey, syncEvts) ->
-                          match syncKeyToPath |> Map.tryFind syncKey, syncEvts with
+                      |> List.choose (fun (eventKey, branchEvents) ->
+                          match eventKeyToPath |> Map.tryFind eventKey, branchEvents with
                           | Some path, (_ :: _) ->
                               let recent =
-                                  syncEvts
+                                  branchEvents
                                   |> List.sortByDescending _.Timestamp
                                   |> List.truncate 2
                                   |> List.rev
@@ -659,19 +606,19 @@ let worktreeApi
                       | _ -> ()
 
                   // Post-fork setup (junctions, bd init, npm install) can take minutes, so run it in
-                  // the background and surface its lifecycle on the worktree card via the sync event
-                  // log — the create call returns as soon as `git worktree add` succeeds, closing the
+                  // the background and surface its lifecycle on the worktree card via CardEventLog —
+                  // the create call returns as soon as `git worktree add` succeeds, closing the
                   // modal promptly. The prompt auto-launch waits for deps, so it runs once post-fork
                   // finishes (success or failure); with no post-fork script there is nothing to wait
                   // for, so launch immediately.
                   match GitWorktree.postForkScriptPath root with
                   | None -> launchPromptSession ()
                   | Some _ ->
-                      let syncKey = scopedBranchKey repoId branchName
+                      let eventKey = scopedBranchKey repoId branchName
                       Async.Start(
                           async {
                               try
-                                  cardLog.Post(CardEventLog.PostForkStarted syncKey)
+                                  cardLog.Post(CardEventLog.PostForkStarted eventKey)
                                   let! result = GitWorktree.runPostFork root fork.WorktreePath fork.BaseRef branchName
                                   let status =
                                       match result with
@@ -679,11 +626,11 @@ let worktreeApi
                                       | Error msg ->
                                           Log.log "API" $"post-fork setup failed for {branchName}: {msg}"
                                           StepStatus.Failed msg
-                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, status))
+                                  cardLog.Post(CardEventLog.PostForkEnded(eventKey, status))
                                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
                               with ex ->
                                   Log.log "API" $"post-fork background task faulted for {branchName}: {ex.Message}"
-                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, StepStatus.Failed ex.Message))
+                                  cardLog.Post(CardEventLog.PostForkEnded(eventKey, StepStatus.Failed ex.Message))
                               launchPromptSession ()
                           })
 
@@ -696,14 +643,8 @@ let worktreeApi
               withValidatedPath req.Path "launchAction" (fun () ->
                   async {
                       let path = WorktreePath.value req.Path
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = CodingToolStatus.readConfiguredProvider path
-                      let prompt =
-                          match req.Action with
-                          | ConfigureTests ->
-                              let root = tryResolveWorktreeContext rootPaths state path |> Option.map _.RepoRoot |> Option.defaultValue path
-                              CodingToolStatus.configureTestsPrompt root
-                          | action -> CodingToolStatus.actionPrompt provider action
+                      let prompt = CodingToolStatus.actionPrompt provider req.Action
                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
                       return! SessionManager.launchAction sessionAgent req.Path command.AsShellString
                   })

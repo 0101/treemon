@@ -31,7 +31,6 @@ let private model enabled : Model =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
-      SyncPending = Set.empty
       AppVersion = Some "test"
       EditorName = "VS Code"
       WorktreeSkills = []

@@ -23,7 +23,6 @@ type Model =
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
       BranchEvents: Map<string, CardEvent list>
-      SyncPending: Set<string>
       AppVersion: string option
       EditorName: string
       WorktreeSkills: string list
@@ -51,11 +50,7 @@ type Msg =
     | OpenEditor of WorktreePath
     | ToggleAutoSync of WorktreePath
     | AutoSyncToggleResult of path: WorktreePath * previousEnabled: bool * Result<unit, string>
-    | StartSync of path: WorktreePath * scopedKey: string
-    | SyncStarted of key: string * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>
-    | CancelSync of WorktreePath
-    | SyncTick
     | ConfirmDeleteWorktree of scopedKey: string
     | ConfirmArchiveWorktree of scopedKey: string
     | ConfirmMsg of ConfirmModal.Msg

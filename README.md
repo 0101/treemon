@@ -77,7 +77,6 @@ The `tm` command is automatically added to your PATH when you run `.\treemon.ps1
 tm launch --path C:\code\my-project --prompt-file task.md   # launch agent with prompt file
 tm launch --path C:\code\my-project --fix-pr <url>         # fix PR comments
 tm launch --path C:\code\my-project --fix-build <url>      # fix failed build
-tm launch --path C:\code\my-project --fix-tests             # fix failing tests
 tm launch --path C:\code\my-project --create-pr             # create a pull request
 tm new --repo C:\code\my-project --branch feature/foo      # create worktree
 tm worktrees                                                 # list all worktrees

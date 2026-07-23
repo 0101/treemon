@@ -204,7 +204,6 @@ type AssembleFromStateDebounceTests() =
             Set.empty
             Set.empty
             Set.empty
-            false
             pushByWorktree
             state.CodingToolSinceByWorktree
             PerRepoState.empty

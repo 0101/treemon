@@ -110,7 +110,7 @@ type ReadUpstreamRemoteTests() =
     member _.``readUpstreamRemote coexists with other fields``() =
         File.WriteAllText(
             Path.Combine(tempDir, ".treemon.json"),
-            """{ "archivedBranches": ["old"], "upstreamRemote": "upstream", "testCommand": "dotnet test test.sln" }""")
+            """{ "archivedBranches": ["old"], "upstreamRemote": "upstream", "customSetting": "preserved" }""")
 
         let result = readUpstreamRemote tempDir
         Assert.That(result, Is.EqualTo(Some "upstream"))
@@ -364,18 +364,6 @@ type GitCommandConstructionTests() =
     [<Test>]
     member _.``mainRef with upstream and develop produces upstream/develop``() =
         Assert.That(mainRef "upstream" "develop", Is.EqualTo("upstream/develop"))
-
-    [<Test>]
-    member _.``SyncEngine buildFetchArgs with origin produces fetch origin``() =
-        Assert.That(Server.SyncEngine.buildFetchArgs "origin", Is.EqualTo("fetch origin"))
-
-    [<Test>]
-    member _.``SyncEngine buildFetchArgs with upstream produces fetch upstream``() =
-        Assert.That(Server.SyncEngine.buildFetchArgs "upstream", Is.EqualTo("fetch upstream"))
-
-    [<Test>]
-    member _.``SyncEngine buildFetchArgs with custom remote produces fetch custom``() =
-        Assert.That(Server.SyncEngine.buildFetchArgs "my-fork", Is.EqualTo("fetch my-fork"))
 
     [<Test>]
     member _.``PrStatus buildRemoteUrlArgs queries the specified remote``() =

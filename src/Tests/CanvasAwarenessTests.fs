@@ -33,7 +33,6 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       IsDirty = false
       WorkMetrics = None
       HasActiveSession = false
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
       CanvasDocs = canvasDocs }
@@ -71,7 +70,6 @@ let private defaultModel : Model =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
-      SyncPending = Set.empty
       AppVersion = Some "1.0"
       DeployBranch = None
       SystemMetrics = None

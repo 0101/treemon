@@ -2,9 +2,6 @@ namespace Shared
 
 open System
 
-module TestFailureLog =
-    let [<Literal>] relPath = ".agents/tests-failure.log"
-
 type RepoId = RepoId of string
 
 module RepoId =
@@ -235,8 +232,6 @@ type ActionKind =
     | FixPr of url: string
     | FixBuild of url: string
     | CreatePr
-    | FixTests
-    | ConfigureTests
     | CanvasSession of prompt: string
 
 type ActionRequest =
@@ -317,7 +312,6 @@ type WorktreeStatus =
       IsDirty: bool
       WorkMetrics: WorkMetrics option
       HasActiveSession: bool
-      HasTestFailureLog: bool
       IsMainWorktree: bool
       IsArchived: bool
       CanvasDocs: CanvasDoc list }
@@ -331,12 +325,8 @@ type StepStatus =
     | Running
     | Succeeded
     | Failed of message: string
-    | Cancelled
-    | NotConfigured
 
 module EventSource =
-    let [<Literal>] Test = "Test"
-    let [<Literal>] Sync = "sync"
     let [<Literal>] PostFork = "post-fork"
 
 type CardEvent =
@@ -405,8 +395,6 @@ type IWorktreeApi =
       openTerminal: WorktreePath -> Async<unit>
       openEditor: WorktreePath -> Async<unit>
       toggleAutoSync: WorktreePath -> bool -> Async<Result<unit, string>>
-      startSync: WorktreePath -> Async<Result<unit, string>>
-      cancelSync: WorktreePath -> Async<unit>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
       deleteWorktree: WorktreePath -> Async<Result<unit, string>>
       launchSession: LaunchRequest -> Async<Result<unit, string>>

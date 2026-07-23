@@ -281,7 +281,6 @@ let main args =
             buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None
         else
             let agent = RefreshScheduler.createAgent ()
-            let syncAgent = SyncEngine.createSyncAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
@@ -304,7 +303,7 @@ let main args =
                     cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
-            WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch
+            WorktreeApi.worktreeApi agent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch
             |> buildRemotingHandler, Some agent
 
     // Push-model status ingestion. Reuses the durable store created above (shared with the worktree

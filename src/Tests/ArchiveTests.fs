@@ -106,7 +106,7 @@ type TreemonConfigWriteTests() =
         let configPath = Path.Combine(tempDir, ".treemon.json")
         File.WriteAllText(
             configPath,
-            """{ "codingTool": "claude", "testCommand": "dotnet test src/Tests/Tests.fsproj" }""")
+            """{ "codingTool": "claude", "customSetting": "preserved" }""")
 
         setArchivedBranches tempDir [ "archived-1" ]
 
@@ -118,13 +118,13 @@ type TreemonConfigWriteTests() =
             | true, elem -> elem.GetString()
             | _ -> ""
 
-        let testCommand =
-            match doc.RootElement.TryGetProperty("testCommand") with
+        let customSetting =
+            match doc.RootElement.TryGetProperty("customSetting") with
             | true, elem -> elem.GetString()
             | _ -> ""
 
         Assert.That(codingTool, Is.EqualTo("claude"), "codingTool should be preserved")
-        Assert.That(testCommand, Is.EqualTo("dotnet test src/Tests/Tests.fsproj"), "testCommand should be preserved")
+        Assert.That(customSetting, Is.EqualTo("preserved"), "Unrelated config should be preserved")
 
         let archived = readArchivedBranches tempDir
         Assert.That(archived, Is.EqualTo([ "archived-1" ]))
@@ -260,7 +260,6 @@ type NavigationArchiveTests() =
           IsDirty = false
           WorkMetrics = None
           HasActiveSession = false
-          HasTestFailureLog = false
           IsMainWorktree = false
           IsArchived = isArchived
           CanvasDocs = [] }
@@ -362,7 +361,7 @@ type ArchiveE2ETests() =
             "Planning":{{"Planned":0,"Queued":0,"Loose":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"AutoSyncEnabled":false,"IsDirty":false,
-            "WorkMetrics":null,"HasActiveSession":false,"HasTestFailureLog":false,"IsArchived":{archived},"IsMainWorktree":false,"CanvasDocs":[],"Sessions":[]
+            "WorkMetrics":null,"HasActiveSession":false,"IsArchived":{archived},"IsMainWorktree":false,"CanvasDocs":[],"Sessions":[]
         }}"""
 
     let makeDashboardJson (worktrees: string list) =

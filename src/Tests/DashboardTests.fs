@@ -751,7 +751,7 @@ type DashboardTests() =
             let statusBadges = this.Page.Locator(".wt-card .event-status")
             do! statusBadges.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = statusBadges.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has sync events with statuses; event-status badges should be present")
+            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has a post-fork failure; its event-status badge should be present")
 
             let! cssClass = statusBadges.First.GetAttributeAsync("class")
             Assert.That(
@@ -910,13 +910,16 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Event log visible on initial page load without sync trigger``() =
+    member this.``Post-fork failure is visible on initial page load``() =
         task {
-            let logs = eventLog this.Page
-            do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = logs.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1),
-                "Event logs should be visible on initial load (getSyncStatus fetched on Tick, not just during sync)")
+            let failure =
+                this.Page.Locator(
+                    ".event-log .event-entry",
+                    PageLocatorOptions(HasText = "post-fork")).First
+
+            do! failure.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! status = failure.Locator(".event-status.failed").TextContentAsync()
+            Assert.That(status, Is.EqualTo("failed: npm install failed"))
         }
 
     [<Test>]

@@ -45,12 +45,6 @@ type CodingToolResult =
       /// `LastSeen` of the active session that won status resolution. None when every session is Idle.
       LastActivity: DateTimeOffset option }
 
-let configureTestsPrompt (repoRoot: string) =
-    "Look at this project and determine the appropriate test command to run (e.g. 'dotnet test', 'npm test', 'pytest', etc). "
-    + $"Then create or update .treemon.json at '{repoRoot}' with a \"testCommand\" field set to the full test command string. "
-    + $"IMPORTANT: The config file MUST be at '{repoRoot}\\.treemon.json', not in the current directory. "
-    + "For example: {\"testCommand\": \"dotnet test src/Tests/Tests.fsproj\"}"
-
 /// Wraps an arbitrary argument in a provider-aware skill invocation. The Copilot CLI uses the
 /// natural-language "use {skill} skill with {arg}" form. Shared by actionPrompt (FixPr/FixBuild) and
 /// the worktree-create auto-launch flow so both stay byte-identical. Provider-matched so a future
@@ -63,9 +57,6 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
     match action with
     | FixPr url -> skillInvocation provider "pr" url
     | FixBuild url -> skillInvocation provider "fix-build" url
-    | FixTests ->
-        $"Please fix the failing tests. See the test failure report in {TestFailureLog.relPath} for details."
-    | ConfigureTests -> configureTestsPrompt "the repo root"
     | CreatePr -> "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
     | CanvasSession prompt -> prompt
 

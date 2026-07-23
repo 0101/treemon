@@ -126,7 +126,6 @@ type CardViewProps =
       IsCompact: bool
       FocusedElement: FocusTarget option
       BranchEvents: Map<string, CardEvent list>
-      SyncPending: Set<string>
       ActionCooldowns: Set<WorktreePath>
       CanvasEvents: Map<string, CanvasEvent list>
       /// Currently unread by the card views; kept as part of the model read-slice — it
@@ -170,11 +169,10 @@ let mainBehindIndicator (baseBranch: string) (count: int) =
         ]
 
 /// Post-fork setup is routine when it works, so a successful or still-running run is noise on the
-/// card — only its failures (including timeouts) are worth surfacing. Events from every other
-/// source always show.
+/// card — only its failures (including timeouts) are worth surfacing.
 let isVisibleCardEvent (evt: CardEvent) =
-    evt.Source <> EventSource.PostFork
-    || (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
+    evt.Source = EventSource.PostFork
+    && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
 
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
@@ -229,12 +227,7 @@ let mainBehindRow (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeS
         ]
     ]
 
-let eventLogEntry (onFixTests: (unit -> unit) option) (onConfigureTests: (unit -> unit) option) (evt: CardEvent) =
-    let isTestFailure =
-        evt.Source = EventSource.Test && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
-    let isTestNotConfigured =
-        evt.Source = EventSource.Test && evt.Status = Some StepStatus.NotConfigured
-    let isClickable = (isTestFailure && onFixTests.IsSome) || (isTestNotConfigured && onConfigureTests.IsSome)
+let eventLogEntry (evt: CardEvent) =
     Html.div [
         prop.className "event-entry"
         prop.children [
@@ -244,41 +237,20 @@ let eventLogEntry (onFixTests: (unit -> unit) option) (onConfigureTests: (unit -
             match evt.Status with
             | Some _ ->
                 Html.span [
-                    prop.className (
-                        if isClickable
-                        then stepStatusClassName evt.Status + " clickable"
-                        else stepStatusClassName evt.Status)
+                    prop.className (stepStatusClassName evt.Status)
                     prop.text (stepStatusText evt.Status)
-                    if isTestFailure then
-                        match onFixTests with
-                        | Some handler ->
-                            prop.title "Click to fix with coding tool"
-                            prop.onClick (fun e -> e.stopPropagation(); handler())
-                        | None -> ()
-                    elif isTestNotConfigured then
-                        match onConfigureTests with
-                        | Some handler ->
-                            prop.title "Click to configure test command"
-                            prop.onClick (fun e -> e.stopPropagation(); handler())
-                        | None -> ()
                 ]
             | None -> Html.none
         ]
     ]
 
-let eventLog (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (hasTestFailureLog: bool) (events: CardEvent list) =
+let eventLog (events: CardEvent list) =
     match events with
     | [] -> Html.none
     | evts ->
-        let onFixTests =
-            if not hasTestFailureLog || cooldowns.Contains wtPath then None
-            else Some (fun () -> callbacks.LaunchAction wtPath FixTests)
-        let onConfigureTests =
-            if cooldowns.Contains wtPath then None
-            else Some (fun () -> callbacks.LaunchAction wtPath ConfigureTests)
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map (eventLogEntry onFixTests onConfigureTests))
+            prop.children (evts |> List.map eventLogEntry)
         ]
 
 let canvasEventEntry (callbacks: CardCallbacks) (scopedKey: string) (evt: CanvasEvent) =
@@ -741,7 +713,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                     userMsgLineView wt
                     assistantMsgLineView wt
 
-                    eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog visibleBranchEvents
+                    eventLog visibleBranchEvents
                     canvasEventLog callbacks scopedKey canvasEvents
                 ]
             ]

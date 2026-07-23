@@ -346,7 +346,6 @@ type AutoSyncEndpointTests() =
         let api =
             WorktreeApi.worktreeApi
                 agent
-                (SyncEngine.createSyncAgent ())
                 (CardEventLog.createAgent ())
                 sessionAgent
                 None

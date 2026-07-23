@@ -27,7 +27,6 @@ module NavHelpers =
           IsDirty = false
           WorkMetrics = None
           HasActiveSession = false
-          HasTestFailureLog = false
           IsMainWorktree = false
           IsArchived = false
           CanvasDocs = [] }

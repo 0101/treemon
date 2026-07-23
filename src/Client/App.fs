@@ -19,13 +19,6 @@ let fetchWorktrees () =
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
-let hasSyncRunning (events: Map<string, CardEvent list>) =
-    events
-    |> Map.exists (fun _ evts ->
-        evts
-        |> List.exists (fun e ->
-            e.Status = Some StepStatus.Running))
-
 // Whether an Overview drill-down selection still maps to a present (non-empty) group lives in
 // OverviewBand.overviewSelectionPresent (same pure roll-up pipeline as the band view).
 
@@ -38,7 +31,6 @@ let init () =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
-      SyncPending = Set.empty
       AppVersion = None
       EditorName = "VS Code"
       WorktreeSkills = []
@@ -323,7 +315,7 @@ let update msg model =
 
     | Tick now ->
         // Tick stays in the root update because it also expires canvas events and drives the
-        // worktree/sync poll; only the activity-recompute delegates to ActivityUpdate.
+        // worktree/card-event poll; only the activity-recompute delegates to ActivityUpdate.
         let activity, reportCmd = ActivityUpdate.tickActivity now model.Activity
         let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.Canvas.CanvasEvents
 
@@ -336,38 +328,8 @@ let update msg model =
 
     | UserActivity now -> ActivityUpdate.userActivity now model
 
-    | StartSync (path, key) ->
-        let syntheticEvent =
-            { Source = "Sync"
-              Message = "Sync starting"
-              Timestamp = System.DateTimeOffset.Now
-              Status = Some StepStatus.Running
-              Duration = None }
-        let updatedEvents =
-            model.BranchEvents
-            |> Map.add key [ syntheticEvent ]
-        { model with
-            SyncPending = model.SyncPending |> Set.add key
-            BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.Value.startSync path (fun r -> SyncStarted (key, r))
-
-    | SyncStarted (key, Ok _) ->
-        { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
-
-    | SyncStarted (key, Error _) ->
-        { model with
-            SyncPending = model.SyncPending |> Set.remove key
-            BranchEvents = model.BranchEvents |> Map.remove key },
-        Cmd.none
-
     | SyncStatusUpdate events ->
         { model with BranchEvents = events }, Cmd.none
-
-    | CancelSync path ->
-        model, Cmd.OfAsync.attempt worktreeApi.Value.cancelSync path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
-
-    | SyncTick ->
-        model, fetchSyncStatus ()
 
     | ConfirmDeleteWorktree scopedKey ->
         match findWorktree scopedKey model with
@@ -666,12 +628,6 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
-    let syncPolling (dispatch: Dispatch<Msg>) =
-        let intervalId =
-            Fable.Core.JS.setInterval (fun () -> dispatch SyncTick) 2000
-        { new System.IDisposable with
-            member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
-
     // Global "reclaim navigation focus" shortcut. The dashboard's own onKeyDown only fires while
     // DOM focus is on (or inside) the dashboard subtree; once focus escapes to a sibling (canvas
     // pane, header, mascot) or <body>, arrow navigation goes dead. This document-level listener
@@ -693,16 +649,10 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Dom.document.removeEventListener ("keydown", handler) }
 
-    let subs =
-        [ [ "polling"; activityLevelKey ], worktreePolling
-          [ "activity" ], ActivityUpdate.activityDetection
-          [ "canvas-messages" ], CanvasUpdate.messageListener
-          [ "focus-reclaim" ], focusReclaim ]
-
-    if hasSyncRunning model.BranchEvents then
-        ([ "sync-polling" ], syncPolling) :: subs
-    else
-        subs
+    [ [ "polling"; activityLevelKey ], worktreePolling
+      [ "activity" ], ActivityUpdate.activityDetection
+      [ "canvas-messages" ], CanvasUpdate.messageListener
+      [ "focus-reclaim" ], focusReclaim ]
 
 let hasAnyActive (repos: RepoModel list) =
     repos |> List.exists (fun r ->
@@ -872,7 +822,6 @@ let view model dispatch =
           IsCompact = model.IsCompact
           FocusedElement = model.FocusedElement
           BranchEvents = model.BranchEvents
-          SyncPending = model.SyncPending
           ActionCooldowns = model.ActionCooldowns
           CanvasEvents = model.Canvas.CanvasEvents
           CanvasPaneOpen = model.Canvas.CanvasPaneOpen }

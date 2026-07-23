@@ -11,7 +11,7 @@
 
 ### Action Buttons
 
-Four contextual action buttons appear on cards when conditions are met:
+Three contextual action buttons appear on cards when conditions are met:
 
 | Condition | Button Location | Action |
 |-----------|----------------|--------|
