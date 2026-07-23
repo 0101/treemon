@@ -190,6 +190,161 @@ type FoldStatusTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type BackgroundAgentLifecycleTests() =
+
+    let started toolCallId at = BackgroundAgentStarted(toolCallId, ts at)
+    let finished toolCallId at = BackgroundAgentFinished(toolCallId, ts at)
+
+    [<Test>]
+    member _.``An agent start folded onto empty status is effectively Working``() =
+        let at = ts "2026-03-01T10:00:00Z"
+        let status = fold emptyStatus (BackgroundAgentStarted("tool-1", at))
+
+        Assert.Multiple(fun () ->
+            Assert.That(status.Status, Is.EqualTo SessionLevelStatus.Idle)
+            Assert.That(effectiveStatus status, Is.EqualTo SessionLevelStatus.Working)
+            Assert.That(
+                status.BackgroundAgents,
+                Is.EqualTo(
+                    Map.ofList
+                        [ "tool-1",
+                          { StartedAt = Some at
+                            FinishedAt = None } ])))
+
+    [<Test>]
+    member _.``Parallel agents keep the session Working until the final terminal event``() =
+        let firstFinished =
+            foldMany
+                emptyStatus
+                [ started "tool-1" "2026-03-01T10:00:00Z"
+                  started "tool-2" "2026-03-01T10:00:01Z"
+                  finished "tool-1" "2026-03-01T10:00:02Z" ]
+
+        let allFinished = fold firstFinished (finished "tool-2" "2026-03-01T10:00:03Z")
+
+        Assert.Multiple(fun () ->
+            Assert.That(effectiveStatus firstFinished, Is.EqualTo SessionLevelStatus.Working)
+            Assert.That(effectiveStatus allFinished, Is.EqualTo SessionLevelStatus.Idle))
+
+    [<Test>]
+    member _.``A completion or failure terminal releases an otherwise Idle parent``() =
+        let status =
+            foldMany
+                emptyStatus
+                [ started "tool-1" "2026-03-01T10:00:00Z"
+                  finished "tool-1" "2026-03-01T10:00:01Z" ]
+
+        Assert.That(effectiveStatus status, Is.EqualTo SessionLevelStatus.Idle)
+
+    [<Test>]
+    member _.``Duplicate and out-of-order lifecycle reports merge deterministically``() =
+        let chronological =
+            foldMany
+                emptyStatus
+                [ started "tool-1" "2026-03-01T10:00:00Z"
+                  started "tool-1" "2026-03-01T10:01:00Z"
+                  finished "tool-1" "2026-03-01T10:02:00Z"
+                  finished "tool-1" "2026-03-01T10:02:00Z" ]
+
+        let outOfOrder =
+            foldMany
+                emptyStatus
+                [ finished "tool-1" "2026-03-01T10:02:00Z"
+                  started "tool-1" "2026-03-01T10:01:00Z"
+                  started "tool-1" "2026-03-01T10:00:00Z"
+                  finished "tool-1" "2026-03-01T10:02:00Z" ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(outOfOrder, Is.EqualTo chronological)
+            Assert.That(effectiveStatus outOfOrder, Is.EqualTo SessionLevelStatus.Idle))
+
+    [<Test>]
+    member _.``Parent Idle and agent start commute for effective status``() =
+        let startThenIdle =
+            foldMany
+                emptyStatus
+                [ started "tool-1" "2026-03-01T10:00:00Z"
+                  WentIdle ]
+
+        let idleThenStart =
+            foldMany
+                emptyStatus
+                [ WentIdle
+                  started "tool-1" "2026-03-01T10:00:00Z" ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(startThenIdle.Status, Is.EqualTo SessionLevelStatus.Idle)
+            Assert.That(idleThenStart.Status, Is.EqualTo SessionLevelStatus.Idle)
+            Assert.That(effectiveStatus startThenIdle, Is.EqualTo SessionLevelStatus.Working)
+            Assert.That(effectiveStatus idleThenStart, Is.EqualTo SessionLevelStatus.Working))
+
+    [<Test>]
+    member _.``A terminal event does not Idle resumed root work``() =
+        let status =
+            foldMany
+                emptyStatus
+                [ started "tool-1" "2026-03-01T10:00:00Z"
+                  WentIdle
+                  TurnStarted
+                  finished "tool-1" "2026-03-01T10:00:01Z" ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(status.Status, Is.EqualTo SessionLevelStatus.Working)
+            Assert.That(effectiveStatus status, Is.EqualTo SessionLevelStatus.Working))
+
+    [<Test>]
+    member _.``WaitingForUser outranks active background agents``() =
+        let status =
+            foldMany
+                emptyStatus
+                [ started "tool-1" "2026-03-01T10:00:00Z"
+                  AwaitingUserInput(None, ts "2026-03-01T10:00:01Z")
+                  WentIdle ]
+
+        Assert.That(effectiveStatus status, Is.EqualTo SessionLevelStatus.WaitingForUser)
+
+    [<Test>]
+    member _.``Background lifecycle preserves all parent-authored fields``() =
+        let parent =
+            { emptyStatus with
+                Status = SessionLevelStatus.Working
+                Skill = Some "review"
+                Intent = Some(msg "reviewing" "2026-03-01T09:59:55Z")
+                Title = Some(msg "Review auth" "2026-03-01T09:59:56Z")
+                LastUserMessage = Some(msg "review this" "2026-03-01T09:59:57Z")
+                LastAssistantMessage = Some(msg "on it" "2026-03-01T09:59:58Z")
+                ContextUsage = Some { CurrentTokens = 50000; TokenLimit = 200000 } }
+
+        let afterLifecycle =
+            foldMany
+                parent
+                [ started "tool-1" "2026-03-01T10:00:00Z"
+                  finished "tool-1" "2026-03-01T10:00:01Z" ]
+
+        Assert.That({ afterLifecycle with BackgroundAgents = Map.empty }, Is.EqualTo parent)
+
+    [<Test>]
+    member _.``Freshness suppresses waiting and background overlays for a stale session``() =
+        let startedAt = ts "2026-03-01T10:00:00Z"
+        let now = ts "2026-03-01T12:00:00Z"
+        let stale =
+            foldMany
+                emptyStatus
+                [ BackgroundAgentStarted("tool-1", startedAt)
+                  AwaitingUserInput(None, ts "2026-03-01T10:00:01Z") ]
+
+        let adjusted =
+            freshnessAdjusted now (now - stalenessTimeout - TimeSpan.FromMinutes 1.0) stale
+
+        Assert.Multiple(fun () ->
+            Assert.That(effectiveStatus stale, Is.EqualTo SessionLevelStatus.WaitingForUser)
+            Assert.That(effectiveStatus adjusted, Is.EqualTo SessionLevelStatus.Idle)
+            Assert.That(adjusted.BackgroundAgents["tool-1"].FinishedAt, Is.EqualTo(Some startedAt)))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type FoldIntentTests() =
 
     [<Test>]

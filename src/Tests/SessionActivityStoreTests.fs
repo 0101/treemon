@@ -155,7 +155,8 @@ type UpsertStatusTests() =
                   LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:30Z")
                   ContextUsage = None
                   AwaitingUserSince = Some(ts "2026-03-01T10:00:30Z")
-                  UserInputCompletedAt = Some(ts "2026-03-01T10:00:00Z") }
+                  UserInputCompletedAt = Some(ts "2026-03-01T10:00:00Z")
+                  BackgroundAgents = Map.empty }
 
             store.UpsertStatus(storedOf "s1" "C:/wt/a" rich "2026-03-01T10:01:00Z" "2026-03-01T12:00:00Z")
 

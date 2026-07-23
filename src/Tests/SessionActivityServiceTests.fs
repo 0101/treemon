@@ -534,7 +534,8 @@ type IngestTests() =
                   LastAssistantMessage = Some(msg "working on it" "2026-03-01T07:59:30Z")
                   ContextUsage = None
                   AwaitingUserSince = None
-                  UserInputCompletedAt = None }
+                  UserInputCompletedAt = None
+                  BackgroundAgents = Map.empty }
               UpdatedAt = ts "2026-03-01T08:00:00Z"
               LastSeen = ts "2026-03-01T08:00:00Z"
               ContextUsageAt = None }
@@ -834,7 +835,8 @@ type RestartRebuildTests() =
               LastAssistantMessage = Some { Text = "working on it"; At = usageAt.AddMinutes(-1.0) }
               ContextUsage = None
               AwaitingUserSince = None
-              UserInputCompletedAt = None }
+              UserInputCompletedAt = None
+              BackgroundAgents = Map.empty }
 
         let seed (store: SessionActivityStore) =
             storedWithUsage "s1" worktree status (usageAt.AddMinutes(-1.0)) usage usageAt

@@ -72,7 +72,9 @@ Coding-tool status is **pushed** by the Copilot CLI extension, not parsed from s
 the per-provider log-parsing detectors (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`,
 `getStatusFromFiles`) have been **removed**. The extension observes the SDK session event stream and
 POSTs lifecycle events to the server, which folds them into live per-session state and collapses each
-worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). See
+worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). Explicit background-agent
+lifecycle events are persisted and folded on the server so a root turn cannot settle Idle while
+delegated agents are still running. See
 `docs/spec/session-status-push.md` for the full model.
 
 - Status vocabulary is `CodingToolStatus = Working | WaitingForUser | Idle | NoSession`; the dot is a

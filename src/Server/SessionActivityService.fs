@@ -141,6 +141,8 @@ let internal kindText =
     | SkillInvoked _ -> "skill_invoked"
     | AwaitingUserInput _ -> "awaiting_user_input"
     | UserInputCompleted _ -> "user_input_completed"
+    | BackgroundAgentStarted _ -> "background_agent_started"
+    | BackgroundAgentFinished _ -> "background_agent_finished"
     | TurnEnded -> "turn_ended"
     | WentIdle -> "went_idle"
     | Heartbeat -> "heartbeat"

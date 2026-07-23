@@ -13,15 +13,15 @@ an open CLI session between turns), or **NoSession** (grey — no live session).
 - **Push, not parse.** Status comes from explicit lifecycle events — immediate and exact, never
   inferred from log-file mtime heuristics. The three log-parsing detectors (`CopilotDetector`,
   `ClaudeDetector`, `VsCodeCopilotDetector`) are deleted; the build is push-only.
-- **Agent-unaware.** Reporting is passive: the extension only subscribes, never calls `session.send`
+- **Passive.** The extension only subscribes, never calls `session.send`
   or injects context. The transcript is identical with reporting on or off.
 - **Durable.** Live status and footer data survive a server restart (rebuilt from SQLite); the
   lifecycle/content event stream is persisted so the historical Overview can be aggregated from it.
   The last context-window gauge is persisted for donut recovery. Usage, title bootstrap, and
   heartbeat reports update current state without being appended to history.
 - **Simple.** Events are a closed union; the server logic is a tiny pure fold with no branching for
-  sub-agents, synthetic messages, or bracket depth — ambiguity is removed at the extension and
-  server-ingestion boundaries before the fold.
+  inferred bracket depth or synthetic messages. Sub-agent content is filtered at the extension
+  boundary; explicit background-agent lifecycle reaches the durable F# fold as closed events.
 - **Four-way status dot** driven purely by push state (below).
 
 ## Expected Behavior
@@ -37,11 +37,19 @@ The single source of truth is the worktree's collapsed coding-tool status:
 | Agent finished / between prompts, **CLI still open** | Idle | blue `#89b4fa` |
 | No live session (never reported, or the CLI exited/crashed) | NoSession | grey `#585b70` |
 
-The fold derives a session's status from events:
+The fold derives a session's status from reports:
 - `assistant.turn_start` / a genuine user prompt / an assistant message → **Working**
 - `elicitation.requested` / `user_input.requested` (`ask_user`) → **WaitingForUser**
 - `assistant.turn_end` / `session.idle` → base **Idle**; a still-open ask-user request remains
-  **WaitingForUser** until its completion or genuine user reply arrives
+  **WaitingForUser** until its completion or genuine user reply arrives; otherwise any active
+  background agent keeps the effective status **Working**
+
+An active background agent keeps an otherwise-idle parent session **Working** until its matching
+`subagent.completed` or `subagent.failed`. **WaitingForUser** remains higher priority because it is
+already active and requires user action.
+
+Only Copilot sub-agent lifecycle is included. Detached background shells are outside this status
+calculation.
 
 There is **no durable `Done`** — a finished turn reads as Idle. During active work the next
 `turn_start` re-asserts Working within ≤0.1 s, so the mid-loop Idle window is invisible to polling;
@@ -57,8 +65,10 @@ drops out. Only open sessions drive the status dot; with none open the worktree 
 `openWindow` (3 min) is deliberately smaller than the `stalenessTimeout` crash-net (5 min): a dead
 Working session drops out of openness (→ grey) before the crash-net would rewrite it to Idle, so it
 never lingers blue. The crash-net (a quiet Working/WaitingForUser → Idle) remains as a defensive net
-but rarely fires. A longer **idle window** (2 h) bounds the in-memory live map; durable rows remain
-available for footer/resume until retention pruning.
+but rarely fires. Its stale projection suppresses both pending-user-input and background-agent
+overlays, so old lifecycle clocks cannot keep a dead session active. A longer **idle window** (2 h)
+bounds the in-memory live map; durable rows remain available for footer/resume until retention
+pruning.
 
 ### Footer persists (decoupled from the dot)
 
@@ -101,16 +111,18 @@ ago) and issues `copilot --resume <id>`, or `--continue` when the worktree never
 
 ### Restart
 
-On server start, live per-session status, intent/title metadata, footer messages, and last known
-context usage are rebuilt from SQLite before serving, so cards and donuts are correct immediately
-without waiting for new events. A session that has never reported usage (including a row migrated
-from the old schema) still renders the plain status dot.
+On server start, live per-session status, active background-agent lifecycle, user-input clocks,
+intent/title metadata, footer messages, and last known context usage are rebuilt from SQLite before
+serving. A session with an unfinished background agent therefore returns as Working without waiting
+for a new SDK event. A session that has never reported usage (including a row migrated from the old
+schema) still renders the plain status dot.
 
 ## Technical Approach
 
 ### Domain model (make illegal states unrepresentable)
 
-The server owns the domain; the extension is a thin forwarder. `SessionActivity.fs`:
+The server owns the persisted status domain; the extension is a stateless SDK-to-wire mapper.
+`SessionActivity.fs`:
 
 ```fsharp
 type SessionEvent =
@@ -123,6 +135,8 @@ type SessionEvent =
     | TitleBootstrap of Message             // metadata.snapshot().summary state hydration
     | AwaitingUserInput of question: Message option * at: DateTimeOffset
     | UserInputCompleted of at: DateTimeOffset
+    | BackgroundAgentStarted of toolCallId: string * at: DateTimeOffset
+    | BackgroundAgentFinished of toolCallId: string * at: DateTimeOffset
     | TurnEnded
     | WentIdle
     | UsageInfo of currentTokens: int * tokenLimit: int   // gauge only; preserves status
@@ -130,6 +144,10 @@ type SessionEvent =
 
 type SessionActivityReport =
     { SessionId; WorktreePath; Provider; EventId; OccurredAt; Event }
+
+type BackgroundAgentLifecycle =
+    { StartedAt: DateTimeOffset option
+      FinishedAt: DateTimeOffset option }
 ```
 
 A per-session status is `SessionLevelStatus = Working | WaitingForUser | Idle` (no `NoSession` — that
@@ -143,7 +161,8 @@ type SessionStatus =
       LastUserMessage: Message option; LastAssistantMessage: Message option
       ContextUsage: ContextUsage option
       AwaitingUserSince: DateTimeOffset option
-      UserInputCompletedAt: DateTimeOffset option }
+      UserInputCompletedAt: DateTimeOffset option
+      BackgroundAgents: Map<string, BackgroundAgentLifecycle> }
 ```
 
 `fold`: `TurnStarted` / `AssistantMessage` / `UserPrompt` → Working, `SkillInvoked` → set skill,
@@ -151,20 +170,25 @@ type SessionStatus =
 preserving the original change time when identical text is re-emitted and rejecting an older value
 after a newer one, and `TurnEnded` / `WentIdle` → base Idle. `AwaitingUserInput` and
 `UserInputCompleted` advance independent monotonic clocks; `effectiveStatus` overlays WaitingForUser
-when the latest request is newer than the latest completion, regardless of report arrival order. A
-genuine `UserPrompt` also advances the completion clock, keeps a running ask-user skill, and sets the
-base status to Working. `UsageInfo` updates only `ContextUsage`, and `Heartbeat` → no-op.
+when the latest request is newer than the latest completion, regardless of report arrival order.
+Otherwise it overlays Working while any background-agent start is newer than that tool call's
+terminal event. A genuine `UserPrompt` also advances the completion clock, keeps a running ask-user
+skill, and sets the base status to Working. `UsageInfo` updates only `ContextUsage`, and `Heartbeat`
+→ no-op.
+Background-agent events change only lifecycle clocks and effective status; they never replace the
+parent skill, intent, title, or footer messages.
 `effectiveActivity` selects the newer intent/title and returns a source-tagged
 `AgentActivity` (`Intent` or `SessionTitle`) so the collapse boundary never mislabels a title as
 intent. The fold is pure and append-friendly — folding a later batch onto an earlier result equals
 folding the whole stream.
 
 The persisted `StoredStatus` carries `UpdatedAt` for lifecycle ordering and representative-session
-selection, and `ContextUsageAt` for usage ordering; user-input request/completion clocks and
-intent/title message times are persisted in `SessionStatus`. These clocks are independent: a
-slightly-earlier ask-user request can still override a later-arriving idle report, metadata or usage
-cannot block a lifecycle transition, and heartbeats only advance `LastSeen`. Equal `UpdatedAt`
-values use `SessionId` as a stable tie-breaker.
+selection, and `ContextUsageAt` for usage ordering; user-input clocks, per-tool background-agent
+start/terminal clocks, and intent/title message times are persisted independently. These clocks make
+fire-and-forget arrival order irrelevant: a completion received before its older start cannot
+resurrect an agent, and a slightly-earlier ask-user request can still override a later-arriving idle
+report. Metadata or usage cannot block lifecycle state, and heartbeats only advance `LastSeen`.
+Equal `UpdatedAt` values use `SessionId` as a stable tie-breaker.
 
 `freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
 older than `stalenessTimeout` reads as Idle and closes any pending wait in the read projection.
@@ -172,15 +196,17 @@ older than `stalenessTimeout` reads as Idle and closes any pending wait in the r
 ### Transport filtering (why the fold stays simple)
 
 The extension and server ingestion boundary ensure only genuine lifecycle events reach the fold:
-1. **Sub-agent events** — every SDK event carries `agentId` (absent for the root); the extension
-   drops any event that has one. → no depth tracking on the server.
+1. **Sub-agent content** — messages, skills, intent, and assistant turns carrying `agentId` are
+   dropped. `subagent.started`, `subagent.completed`, and `subagent.failed` are mapped to explicit
+   background-agent lifecycle reports before that filter. → no inferred bracket depth or content
+   attribution on the server.
 2. **Skill-context injections** — a skill's `<skill-context>` injection arrives as a `user.message`;
    the extension drops it (source starts `skill-` AND content starts `<skill-context`).
 3. **System reminders** — runtime `<system_reminder>` instructions also arrive through the
    `user.message` channel. The server classifies and ignores them before the single-writer mailbox,
    so they cannot replace the last genuine prompt, change status, clear a skill, or enter history.
-4. **Irrelevant events** — only events mapping to the eleven SDK-backed wire kinds are forwarded; all
-   other SDK events are ignored. `title_bootstrap` is metadata-generated and `heartbeat` is
+4. **Irrelevant events** — only events mapping to the closed wire contract are forwarded; all other
+   SDK events are ignored. `title_bootstrap` is metadata-generated and `heartbeat` is
    timer-generated. → the `SessionEvent` union has no catch-all.
 
 ### Ingestion: endpoint + single-writer mailbox
@@ -193,16 +219,19 @@ The extension and server ingestion boundary ensure only genuine lifecycle events
 - **Wire contract — the single coupling point between `extension.mjs` (producer) and the
   handler (consumer).** The POST body is one report:
   `{ sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?,
-  currentTokens?, tokenLimit? }`. Exactly thirteen `kind` strings are accepted:
+  toolCallId?, currentTokens?, tokenLimit? }`. Exactly fifteen `kind` strings are accepted:
   `turn_started`→`TurnStarted`, `user_prompt`→`UserPrompt`, `assistant_message`→
   `AssistantMessage`, `skill_invoked`→`SkillInvoked`, `awaiting_user_input`→`AwaitingUserInput`,
   `user_input_completed`→`UserInputCompleted`,
+  `background_agent_started`→`BackgroundAgentStarted`,
+  `background_agent_finished`→`BackgroundAgentFinished`,
   `intent_reported`→`IntentReported`, `title_reported`→`TitleReported`,
   `title_bootstrap`→`TitleBootstrap`,
   `turn_ended`→`TurnEnded`, `went_idle`→`WentIdle`, `usage_info`→`UsageInfo`, and
   `heartbeat`→`Heartbeat`. `message` (`{ text; at }`) is mandatory for `user_prompt`,
   `assistant_message`, `intent_reported`, `title_reported`, and `title_bootstrap`, and optional only for
   `awaiting_user_input` (the ask_user question). `skillName` applies only to `skill_invoked`;
+  `toolCallId` is mandatory for both background-agent lifecycle kinds;
   `currentTokens` and `tokenLimit` apply only to `usage_info`, with `tokenLimit > 0` and negative
   `currentTokens` normalized to zero. All other kinds carry none of those event-specific fields.
   An unknown `kind` is a validation error, never silently dropped.
@@ -218,6 +247,15 @@ The extension and server ingestion boundary ensure only genuine lifecycle events
   their clocks by maximum event time while advancing `UpdatedAt` monotonically. Fire-and-forget
   delivery order therefore cannot change whether the session is waiting or regress representative
   activity ordering.
+- Background-agent lifecycle uses the same order-independent discipline per `toolCallId`: start and
+  terminal clocks merge by maximum event time, effective status reads an agent as active only when
+  its start is newer than its terminal, and lifecycle changes append to history with the resulting
+  effective status.
+- A lifecycle report may be the first report received for a session because POST delivery is
+  fire-and-forget. A start creates an Idle-base shell whose effective status is Working; a terminal
+  creates or updates an inactive lifecycle row. A later older start cannot resurrect it.
+- Accepted lifecycle reports advance `UpdatedAt` and `LastSeen` monotonically for representative
+  selection and openness, while preserving all parent-authored footer and activity fields.
 - `heartbeat` is liveness-only: it advances `last_seen` for an existing session without folding,
   changing `updated_at`, influencing representative-session selection, or appending history.
   `usage_info` arrives only on the live SDK stream but is durably status-preserving: it persists
@@ -249,7 +287,11 @@ collides:
 session_status(session_id PK, worktree_path, provider, status, current_skill,
   last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
   intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-  context_current_tokens NULL, context_token_limit NULL, context_usage_at NULL);
+  context_current_tokens NULL, context_token_limit NULL, context_usage_at NULL,
+  awaiting_user_since NULL, user_input_completed_at NULL);
+background_agent_lifecycle(
+  session_id, tool_call_id, started_at NULL, finished_at NULL,
+  PRIMARY KEY(session_id, tool_call_id));
 activity_events(event_id PK, session_id, worktree_path, provider, kind, status, skill, ts);
 ```
 
@@ -257,8 +299,9 @@ PRAGMAs `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`; each op r
 short-lived connection (thread-safe against the single-writer mailbox and concurrent WAL readers).
 Construction inspects `PRAGMA table_info(session_status)` and individually adds any missing
 `intent_text`, `intent_ts`, `title_text`, `title_ts`, `context_current_tokens`,
-`context_token_limit`, or `context_usage_at` column. This additive migration is idempotent and
-preserves legacy rows, whose new fields begin as `NULL`.
+`context_token_limit`, `context_usage_at`, `awaiting_user_since`, or
+`user_input_completed_at` column. The background-agent lifecycle table is created idempotently.
+Legacy rows begin with no active background agents.
 
 All timestamps persist as UTC round-trip (`"O"`) strings, so lexical comparison equals chronological
 order. Lifecycle upserts use `updated_at`, metadata retains the newest per-field timestamp, and
@@ -270,10 +313,13 @@ an equal-or-newer usage timestamp. Transactional history-bearing writes and cont
 and return the authoritative persisted row, which is then used for the scheduler and service maps so
 persisted metadata/context winners cannot diverge from live state. `appendEvent` is `INSERT OR
 IGNORE`; usage remains a last-known gauge and is not appended to history.
-`pruneOld(now − 14d)` runs hourly and trims both tables. `loadLiveStatuses` rebuilds status, usage,
-intent/title metadata, and their ordering state on restart for rows within the idle window. Retained
-rows outside that window still supply footer/resume metadata until pruning. The service is started
-only in the real monitoring path — demo/fixture mode serves synthetic data and takes no posts.
+Background lifecycle writes update the per-tool row and reread the authoritative aggregate in the
+same single-writer flow. `pruneOld(now − 14d)` runs hourly and trims status, event, and associated
+background-lifecycle rows. `loadLiveStatuses` rebuilds status, usage, user-input clocks,
+background-agent lifecycle, intent/title metadata, and their ordering state on restart for rows
+within the idle window. Retained rows outside that window still supply footer/resume metadata until
+pruning. The service is started only in the real monitoring path — demo/fixture mode serves
+synthetic data and takes no posts.
 
 ### Collapse to card fields (`CodingToolStatus.fs`)
 
@@ -334,12 +380,18 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   `assistant_message`, genuine `user.message` (non-blank)→`user_prompt`, `skill.invoked`→
   `skill_invoked`, `elicitation.requested` / `user_input.requested`→`awaiting_user_input`,
   `elicitation.completed` / `user_input.completed`→`user_input_completed`,
+  `subagent.started`→`background_agent_started`,
+  `subagent.completed` / `subagent.failed`→`background_agent_finished`,
   `assistant.intent` (non-blank)→`intent_reported`, `session.title_changed` (non-blank)→
   `title_reported`, `assistant.turn_end`→`turn_ended`, `session.idle`→`went_idle`,
   `session.usage_info`→`usage_info` (`currentTokens` + `tokenLimit`). (`ask_user` emits
   `elicitation.requested` / `.completed` in Copilot CLI 1.0.71+ with the prompt in `data.message`;
   older builds used `user_input.*` with `data.question` — both are handled, question reads
   `data.message ?? data.question`.) Blank-text messages and invalid usage gauges are dropped.
+- **Background-agent activity:** `subagent.started`, `subagent.completed`, and `subagent.failed`
+  map directly to background-agent lifecycle wire reports carrying `data.toolCallId`. The extension
+  keeps no active-agent set and performs no status suppression; the server fold and persistence own
+  ordering, deduplication, restart recovery, and effective-status precedence.
 - **Title bootstrap:** after live subscriptions are installed and persisted history is replayed,
   the extension installs heartbeat/cleanup handling and reads `session.rpc.metadata.snapshot()` in
   a caught background task. If no nonblank live `session.title_changed` arrived during startup, a
@@ -366,14 +418,18 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   user is CLI-only, explicit events beat mtime inference, and three detectors collapse to one pure
   fold.
 - **Filter before the fold, at the boundary with enough context.** Sub-agent (`agentId`) and
-  skill-context filtering remain in the extension, where trusted SDK metadata is available.
+  skill-context content filtering remain in the extension, where trusted SDK metadata is available.
+  Explicit background-agent lifecycle is forwarded because it affects status.
   Runtime system reminders are filtered by the server's shared user-message classifier before
   ingestion, so display policy and state policy cannot diverge.
-- **Reuse the F# fold; don't rewrite in JS.** The risky logic stays server-side F# (compiler help +
-  ported tests); the extension is a thin forwarder (no Fable/TS).
+- **Lifecycle state stays in the durable F# fold.** Ask-user clocks and background-agent lifecycle
+  are order-sensitive, restart-sensitive state. The extension forwards facts without local state;
+  the server fold and store own effective status and recovery.
 - **`session.idle` is server-resolved; freshness is only a crash net.** Idle updates the base
-  lifecycle status, while the independent request/completion clocks decide whether WaitingForUser
-  still overlays it.
+  lifecycle status, while independent request/completion and per-agent lifecycle clocks decide
+  whether WaitingForUser or Working still overlays it.
+- **WaitingForUser outranks background Working.** An outstanding user-input request remains the
+  effective status even while background agents run; background activity only overrides base Idle.
 - **No durable `Done`.** A finished turn (`turn_ended`) reads as Idle; the next `turn_start` re-asserts
   Working within ≤0.1 s, so the mid-loop Idle window is invisible to polling. This matches what the CLI
   actually models (Working / WaitingForUser / Idle).
@@ -415,8 +471,8 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
 | File | Role |
 |------|------|
 | `src/Server/SessionActivity.fs` | Domain (`SessionEvent`, `SessionActivityReport`), `SessionStatus`, pure `fold`, `freshnessAdjusted`, `pickActive`; the `openWindow` / `stalenessTimeout` / `idleWindow` timings. |
-| `src/Server/SessionActivityStore.fs` | SQLite (WAL) schema + additive metadata/context/user-input-clock migration + authoritative aggregate persistence + restart load / pruning / history queries. |
-| `src/Server/SessionActivityService.fs` | Single-writer mailbox; independent lifecycle, metadata, context, and liveness paths; endpoint + startup rebuild + retention. |
+| `src/Server/SessionActivityStore.fs` | SQLite (WAL) session state + per-tool background-agent lifecycle table; authoritative persistence, restart reconstruction, pruning, and history queries. |
+| `src/Server/SessionActivityService.fs` | Wire parsing and single-writer integration for root, user-input, and background-agent lifecycle plus independent metadata, context, and liveness paths. |
 | `src/Server/UserMessageFormatting.fs` | Server-owned user-message classification: suppress system reminders and project canvas prompts for activity and footer display. |
 | `src/Server/CodingToolStatus.fs` | `fromPushSessions` / `collapseByWorktree` (openness dot + decoupled footer), `getLastSessionId` (resume), `readConfiguredProvider`. |
 | `src/Server/RefreshScheduler.fs` | `UpdateSessionStatus`; idle-window eviction of the live map; `CodingToolSinceByWorktree` stamps. |
@@ -424,7 +480,7 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
 | `src/Server/Program.fs` | Routes `/api/session/activity`; starts the service + rebuild. |
 | `src/Shared/Types.fs` | `AgentActivity`, `ContextUsage`, and per-session `SessionDot` wire types used by cards and Overview. |
 | `src/Client/CardViews.fs`, `src/Client/index.html` | Intent/title activity line, skill pill, per-session dots/context donuts, and status colours. |
-| `src/Extension/reporting/` | Stateless SDK-to-wire mapping plus title bootstrap, usage gauge, heartbeat, and package metadata. |
+| `src/Extension/reporting/` | Stateless SDK-to-wire mapping, including background-agent lifecycle, plus title bootstrap, usage gauge, heartbeat, and package metadata. |
 | `treemon.ps1` | `Install-ReportingExtension` — installs `treemon-reporting` alongside `canvas-bridge`. |
 
 ## Related Specs
