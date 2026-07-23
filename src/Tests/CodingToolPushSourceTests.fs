@@ -15,17 +15,20 @@ open Server.CodingToolStatus
 
 let private ts (s: string) = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
 let private msg text t : Message = { Text = text; At = ts t }
+let private footerMessage text t : UserFooterMessage =
+    { Glyph = None
+      Text = text
+      Timestamp = ts t }
 
-/// A stored live session for one worktree. `UpdatedAt` and `LastSeen` are set together (an event is
-/// also the heartbeat), exactly as the ingestion service writes them.
-let private stored
+let private storedWithClocks
     (sid: string)
     (wt: string)
     (status: SessionLevelStatus)
     (skill: string option)
     (lastUser: Message option)
     (lastAsst: Message option)
-    (seen: string)
+    (updatedAt: string)
+    (lastSeen: string)
     : StoredStatus =
     { SessionId = SessionId sid
       WorktreePath = WorktreePath wt
@@ -36,9 +39,12 @@ let private stored
             Skill = skill
             LastUserMessage = lastUser
             LastAssistantMessage = lastAsst }
-      UpdatedAt = ts seen
-      LastSeen = ts seen
+      UpdatedAt = ts updatedAt
+      LastSeen = ts lastSeen
       ContextUsageAt = None }
+
+let private stored sid wt status skill lastUser lastAsst seen =
+    storedWithClocks sid wt status skill lastUser lastAsst seen seen
 
 let private now = ts "2026-03-01T12:00:00Z"
 
@@ -138,6 +144,51 @@ type FromPushSessionsTests() =
         Assert.That(result.LastAssistantMessage |> Option.map fst, Is.EqualTo(Some "which file?"))
 
     [<Test>]
+    member _.``A heartbeat cannot replace the most-recent active session``() =
+        let heartbeatNewest =
+            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Working (Some "old-skill")
+                (Some(msg "old prompt" "2026-03-01T11:57:00Z"))
+                (Some(msg "old reply" "2026-03-01T11:57:30Z"))
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:59:30Z"
+        let activityNewest =
+            storedWithClocks "activity" "wt" SessionLevelStatus.WaitingForUser (Some "new-skill")
+                (Some(msg "new prompt" "2026-03-01T11:58:30Z"))
+                (Some(msg "new reply" "2026-03-01T11:59:00Z"))
+                "2026-03-01T11:59:00Z"
+                "2026-03-01T11:59:00Z"
+
+        let result = fromPushSessions now [ heartbeatNewest; activityNewest ]
+
+        Assert.That(result.Status, Is.EqualTo WaitingForUser)
+        Assert.That(result.CurrentSkill, Is.EqualTo(Some "new-skill"))
+        Assert.That(result.LastUserMessage, Is.EqualTo(Some(footerMessage "new prompt" "2026-03-01T11:58:30Z")))
+        Assert.That(result.LastAssistantMessage, Is.EqualTo(Some("new reply", ts "2026-03-01T11:59:00Z")))
+        Assert.That(result.LastActivity, Is.EqualTo(Some(ts "2026-03-01T11:59:00Z")))
+
+    [<Test>]
+    member _.``A heartbeat cannot replace the most-recent idle footer``() =
+        let heartbeatNewest =
+            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle (Some "old-skill")
+                (Some(msg "old prompt" "2026-03-01T11:57:00Z"))
+                (Some(msg "old reply" "2026-03-01T11:57:30Z"))
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:59:30Z"
+        let activityNewest =
+            storedWithClocks "activity" "wt" SessionLevelStatus.Idle (Some "new-skill")
+                (Some(msg "new prompt" "2026-03-01T11:58:30Z"))
+                (Some(msg "new reply" "2026-03-01T11:59:00Z"))
+                "2026-03-01T11:59:00Z"
+                "2026-03-01T11:59:00Z"
+
+        let result = fromPushSessions now [ heartbeatNewest; activityNewest ]
+
+        Assert.That(result.Status, Is.EqualTo Idle)
+        Assert.That(result.CurrentSkill, Is.EqualTo(Some "new-skill"))
+        Assert.That(result.LastUserMessage, Is.EqualTo(Some(footerMessage "new prompt" "2026-03-01T11:58:30Z")))
+        Assert.That(result.LastAssistantMessage, Is.EqualTo(Some("new reply", ts "2026-03-01T11:59:00Z")))
+
+    [<Test>]
     member _.``A just-idled newer session does not hide an actively-working sibling``() =
         // The key collapse rule: drop Idle FIRST, then most-recent active wins — NOT raw latest
         // last_seen. The idle sibling is newer but must not win the STATUS, and the FOOTER stays on
@@ -201,18 +252,26 @@ type FromPushSessionsTests() =
 
     [<Test>]
     member _.``Canvas activity and user footer share display text for live and retained sessions``() =
-        let timestamp = "2026-03-01T11:59:00Z"
-        let raw = "[canvas] {\"action\":\"comment\",\"text\":\"Why is retry not jittered?\"}"
-        let session =
-            stored "a" "wt" SessionLevelStatus.Working None (Some(msg raw timestamp)) None timestamp
+        let canvasSession seen =
+            let timestamp = seen
+            let raw = "[canvas] {\"action\":\"comment\",\"text\":\"Why is retry not jittered?\"}"
+            stored "a" "wt" SessionLevelStatus.Working None (Some(msg raw timestamp)) None seen
             |> fun value -> { value with Status.Title = Some(msg raw timestamp) }
 
-        [ fromPushSessions now [ session ]; retainedFooterResult session ]
+        let liveResult = fromPushSessions now [ canvasSession "2026-03-01T11:59:00Z" ]
+        let retained = Map.ofList [ "wt", canvasSession "2026-03-01T08:00:00Z" ]
+        let retainedResult =
+            includeRetainedSessions retained []
+            |> collapseByWorktree now
+            |> Map.find "wt"
+
+        [ liveResult; retainedResult ]
         |> List.iter (fun result ->
+            let timestamp = result.LastUserMessage |> Option.map _.Timestamp |> Option.get
             Assert.Multiple(fun () ->
                 Assert.That(
                     result.AgentActivity,
-                    Is.EqualTo(Some(AgentActivity.SessionTitle("Why is retry not jittered?", ts timestamp))))
+                    Is.EqualTo(Some(AgentActivity.SessionTitle("Why is retry not jittered?", timestamp))))
                 Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "Why is retry not jittered?"))))
 
     [<Test>]
@@ -267,10 +326,8 @@ type SessionStatusesTests() =
         Assert.That(result.SessionStatuses |> List.map _.ContextUsage, Is.EqualTo [ usage 10000 200000 ])
 
     [<Test>]
-    member _.``noSessionPushResult and the retained fallback carry no per-session dots``() =
+    member _.``noSessionPushResult carries no per-session dots``() =
         Assert.That(noSessionPushResult.SessionStatuses, Is.Empty)
-        let retained = stored "r" "wt" SessionLevelStatus.Idle None (Some(msg "resume" "2026-03-01T08:00:00Z")) None "2026-03-01T08:00:00Z"
-        Assert.That((retainedFooterResult retained).SessionStatuses, Is.Empty)
 
 
 [<TestFixture>]
@@ -302,19 +359,24 @@ type CollapseByWorktreeTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type WithRetainedFallbackTests() =
+type RetainedSessionsTests() =
 
     let retainedRow sid wt lastUser seen : string * StoredStatus =
         WorktreePath.value (WorktreePath wt), stored sid wt SessionLevelStatus.Idle None lastUser None seen
 
+    let collapseWithRetained at retained live =
+        live
+        |> includeRetainedSessions retained
+        |> collapseByWorktree at
+
     [<Test>]
     member _.``A worktree absent from the live map gets a NoSession card carrying the retained footer``() =
-        // wt-old has no live session (aged out of the idle window), only a durable row with a message.
         let retained = Map.ofList [ retainedRow "old" "wt-old" (Some(msg "resume me" "2026-03-01T08:00:00Z")) "2026-03-01T08:00:00Z" ]
 
-        let merged = Map.empty |> withRetainedFallback retained
+        let merged = collapseWithRetained now retained []
 
         Assert.That(merged["wt-old"].Status, Is.EqualTo NoSession, "the dot stays grey — no OPEN session")
+        Assert.That(merged["wt-old"].SessionStatuses, Is.Empty)
         Assert.That(
             merged["wt-old"].LastUserMessage |> Option.map _.Text,
             Is.EqualTo(Some "resume me"),
@@ -334,7 +396,7 @@ type WithRetainedFallbackTests() =
               LastSeen = ts "2026-03-01T08:00:00Z"
               ContextUsageAt = None }
 
-        let result = retainedFooterResult intentOnly
+        let result = collapseWithRetained now (Map.ofList [ "wt-i", intentOnly ]) [] |> Map.find "wt-i"
 
         Assert.That(
             result.AgentActivity,
@@ -342,14 +404,37 @@ type WithRetainedFallbackTests() =
         Assert.That(result.Provider, Is.EqualTo(Some CopilotCli), "an intent-only footer must still carry the provider")
 
     [<Test>]
-    member _.``A live worktree keeps its live card (retained fallback only fills gaps)``() =
-        let live = collapseByWorktree now [ stored "a" "wt-a" SessionLevelStatus.Working (Some "review") None None "2026-03-01T11:59:00Z" ]
-        let retained = Map.ofList [ retainedRow "stale" "wt-a" (Some(msg "old" "2026-03-01T08:00:00Z")) "2026-03-01T08:00:00Z" ]
+    member _.``An active live session keeps the footer over retained data``() =
+        let live = [ stored "a" "wt-a" SessionLevelStatus.Working (Some "review") None None "2026-03-01T11:59:00Z" ]
+        let retained = Map.ofList [ retainedRow "a" "wt-a" (Some(msg "old" "2026-03-01T08:00:00Z")) "2026-03-01T08:00:00Z" ]
 
-        let merged = withRetainedFallback retained live
+        let merged = collapseWithRetained now retained live
 
-        Assert.That(merged["wt-a"].Status, Is.EqualTo Working, "the live result wins over the retained fallback")
+        Assert.That(merged["wt-a"].Status, Is.EqualTo Working)
         Assert.That(merged["wt-a"].CurrentSkill, Is.EqualTo(Some "review"))
+        Assert.That(merged["wt-a"].SessionStatuses |> List.map _.Status, Is.EqualTo [ Working ])
+
+    [<Test>]
+    member _.``A heartbeat-kept live row cannot suppress the retained activity winner``() =
+        let at = ts "2026-03-01T11:31:00Z"
+        let retained =
+            storedWithClocks "activity" "wt" SessionLevelStatus.Idle None
+                (Some(msg "resume me" "2026-03-01T09:30:00Z"))
+                None
+                "2026-03-01T09:30:00Z"
+                "2026-03-01T09:30:00Z"
+        let heartbeatKeptLive =
+            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle None None None
+                "2026-03-01T09:00:00Z"
+                "2026-03-01T10:30:00Z"
+
+        let result =
+            collapseWithRetained at (Map.ofList [ "wt", retained ]) [ heartbeatKeptLive ]
+            |> Map.find "wt"
+
+        Assert.That(result.Status, Is.EqualTo NoSession)
+        Assert.That(result.SessionStatuses, Is.Empty)
+        Assert.That(result.LastUserMessage, Is.EqualTo(Some(footerMessage "resume me" "2026-03-01T09:30:00Z")))
 
     [<Test>]
     member _.``A worktree with only a STALE idle session collapses to grey NoSession``() =
@@ -390,3 +475,29 @@ type GetLastSessionIdTests() =
 
         Assert.That(display.Status, Is.EqualTo Working, "display pick is the active session")
         Assert.That(resume, Is.EqualTo(Some "idled"), "resume pick is the most-recent (idle) session")
+
+    [<Test>]
+    member _.``A heartbeat cannot replace the most-recent resume session``() =
+        let heartbeatNewest =
+            storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle None None None
+                "2026-03-01T11:00:00Z"
+                "2026-03-01T11:59:00Z"
+        let activityNewest =
+            storedWithClocks "activity" "wt" SessionLevelStatus.Idle None None None
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:58:00Z"
+
+        Assert.That(getLastSessionId [ heartbeatNewest; activityNewest ], Is.EqualTo(Some "activity"))
+
+    [<Test>]
+    member _.``Equal activity timestamps use session id instead of heartbeat recency``() =
+        let a =
+            storedWithClocks "a" "wt" SessionLevelStatus.Idle None None None
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:59:00Z"
+        let b =
+            storedWithClocks "b" "wt" SessionLevelStatus.Idle None None None
+                "2026-03-01T11:58:00Z"
+                "2026-03-01T11:58:00Z"
+
+        Assert.That(getLastSessionId [ a; b ], Is.EqualTo(Some "b"))

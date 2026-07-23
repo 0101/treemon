@@ -38,6 +38,16 @@ type StoredStatus =
       LastSeen: DateTimeOffset
       ContextUsageAt: DateTimeOffset option }
 
+module StoredStatus =
+    let activityOrderKey (stored: StoredStatus) =
+        stored.UpdatedAt, SessionId.value stored.SessionId
+
+    /// `LastSeen` is liveness-only, so it must never decide which session owns shared content.
+    let tryMostRecentActivity sessions =
+        sessions
+        |> List.sortByDescending activityOrderKey
+        |> List.tryHead
+
 /// One activity_events row: a single pushed event, already classified. `Status`/`Skill` are the fold
 /// result *after* applying this event, so the Overview history can read a bucket's state without
 /// re-folding.
@@ -318,7 +328,8 @@ WHERE last_seen >= $cutoff
 ORDER BY last_seen;
 """
 
-// Every stored session for one worktree, newest first, with NO idle-window filter (unlike loadSql).
+// Every stored session for one worktree, newest activity first, with NO idle-window filter
+// (unlike loadSql).
 // The resume path reads this: after a restart the idle-window live cache drops sessions last active
 // >2h ago, so a resume pick over that cache returns None (→ wrong `--continue` fallback); this keeps
 // the durable identity available until the 14d retention prune. Uses the ix_status_worktree index.
@@ -330,7 +341,7 @@ SELECT session_id, worktree_path, provider, status, current_skill,
        context_current_tokens, context_token_limit, context_usage_at
 FROM session_status
 WHERE worktree_path = $wt
-ORDER BY last_seen DESC;
+ORDER BY updated_at DESC, session_id DESC;
 """
 
 let private queryWindowSql =
@@ -349,8 +360,7 @@ DELETE FROM activity_events WHERE ts < $cutoff;
 DELETE FROM session_status WHERE last_seen < $cutoff;
 """
 
-// Every stored session across all worktrees, oldest `last_seen` first (so a fold keyed by
-// worktree_path keeps the newest per worktree). NO idle-window filter — the durable footer/resume
+// Every stored session across all worktrees with NO idle-window filter — the durable footer/resume
 // substrate for cards whose sessions have aged out of the live map after a restart.
 let private allStatusesSql =
     """
@@ -359,7 +369,6 @@ SELECT session_id, worktree_path, provider, status, current_skill,
        intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
        context_current_tokens, context_token_limit, context_usage_at
 FROM session_status
-ORDER BY last_seen;
 """
 
 let private statusBySessionSql =
@@ -571,12 +580,11 @@ type SessionActivityStore(dbPath: string) =
 
         readRows reader readStored []
 
-    /// The newest stored session per worktree across ALL rows, IGNORING the idle window (unlike
-    /// LoadLiveStatuses). The durable footer/resume substrate for cards: after a restart a worktree
-    /// whose sessions last ran outside the idle window is absent from the live map, so its card would
-    /// collapse to a blank NoSession and the resume button (which needs a retained LastUserMessage)
-    /// would be UI-unreachable. Keyed by worktree_path; each value is that worktree's most-recent
-    /// session (allStatusesSql is oldest-first, so the fold keeps the newest per key).
+    /// The most recently active stored session per worktree across ALL rows, IGNORING the idle
+    /// window (unlike LoadLiveStatuses). The durable footer/resume substrate for cards: after a
+    /// restart a worktree whose sessions last ran outside the idle window is absent from the live
+    /// map, so its card would collapse to a blank NoSession and the resume button (which needs a
+    /// retained LastUserMessage) would be UI-unreachable. Keyed by worktree_path.
     member _.RetainedByWorktree() : Map<string, StoredStatus> =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
@@ -584,9 +592,14 @@ type SessionActivityStore(dbPath: string) =
         use reader = cmd.ExecuteReader()
 
         readRows reader readStored []
-        |> List.fold (fun acc s -> Map.add (WorktreePath.value s.WorktreePath) s acc) Map.empty
+        |> List.groupBy (_.WorktreePath >> WorktreePath.value)
+        |> List.choose (fun (path, sessions) ->
+            sessions
+            |> StoredStatus.tryMostRecentActivity
+            |> Option.map (fun session -> path, session))
+        |> Map.ofList
 
-    /// Every stored session for a worktree, newest `last_seen` first, INDEPENDENT of the idle window
+    /// Every stored session for a worktree, newest activity first, INDEPENDENT of the idle window
     /// (unlike LoadLiveStatuses). The RESUME substrate: after a restart a session last active >2h ago
     /// is absent from the idle-window live cache, so a resume pick over that cache returned None and
     /// resume wrongly fell back to `--continue` instead of `--resume <id>` (F10/C-02). Reading

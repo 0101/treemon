@@ -61,9 +61,10 @@ available for footer/resume until retention pruning.
 ### Footer persists (decoupled from the dot)
 
 The card footer — freshest source-tagged activity, running skill, last user message, last assistant
-message — is sourced from the active winner, or otherwise the **most-recent session of any status**,
-NOT from the status-dot collapse. Going Idle or losing the open session therefore does **not** blank
-that session's retained footer fields; durable fallback keeps them available beyond the live window.
+message — is sourced from the active winner, or otherwise the session with the greatest
+`UpdatedAt` of any status, NOT from the status-dot collapse. Going Idle or losing the open session
+therefore does **not** blank that session's retained footer fields; durable fallback keeps them
+available beyond the live window.
 
 The session title is the reliable activity source: after joining, subscribing, and replaying
 persisted history, the reporting extension reads `session.rpc.metadata.snapshot().summary` and
@@ -75,10 +76,11 @@ display.
 ### Multiple sessions in one worktree
 
 A worktree's live sessions collapse to one card via two decoupled picks:
-- **Status dot** — among *open* sessions, drop Idle and the most-recent *active* session wins; all
-  Idle → Idle; no open session → NoSession. (Not raw latest-update — a session that just went Idle
-  must not hide an actively-Working sibling.)
-- **Footer** — the active winner if one runs, else the most-recent session of any status.
+- **Status dot** — among *open* sessions, drop Idle and the active session with the greatest
+  `UpdatedAt` wins; all Idle → Idle; no open session → NoSession. Idle is filtered before ordering,
+  so a newly-idled session cannot hide an actively-Working sibling.
+- **Footer** — the active winner if one runs, else the session with the greatest `UpdatedAt` of any
+  status.
 
 ### Overview "Agents" dimension
 
@@ -90,10 +92,10 @@ A worktree's live sessions collapse to one card via two decoupled picks:
 
 ### Resume
 
-`Resume last session` picks the most-recent session **regardless of active/idle** (the session the
-user last touched) — distinct from both the display and footer picks. It reads the session id from
-the durable store (so it survives a restart even for a session last active > 2 h ago) and issues
-`copilot --resume <id>`, or `--continue` when the worktree never reported.
+`Resume last session` picks the session with the greatest `UpdatedAt` **regardless of active/idle**
+(the session the user last touched) — distinct from both the display and footer picks. It reads the
+session id from the durable store (so it survives a restart even for a session last active > 2 h
+ago) and issues `copilot --resume <id>`, or `--continue` when the worktree never reported.
 
 ### Restart
 
@@ -150,10 +152,11 @@ prompt starts fresh. `effectiveActivity` selects the newer intent/title and retu
 intent. The fold is pure and append-friendly — folding a later batch onto an earlier result equals
 folding the whole stream.
 
-The persisted `StoredStatus` carries `UpdatedAt` for lifecycle ordering and `ContextUsageAt` for
-usage ordering; intent/title ordering uses each stored `Message.At`. These clocks are independent:
-metadata or usage cannot block a slightly-earlier lifecycle transition, lifecycle events cannot
-discard newer metadata or context, and heartbeats only advance `LastSeen`.
+The persisted `StoredStatus` carries `UpdatedAt` for lifecycle ordering and representative-session
+selection, and `ContextUsageAt` for usage ordering; intent/title ordering uses each stored
+`Message.At`. These clocks are independent: metadata or usage cannot block a slightly-earlier
+lifecycle transition, lifecycle events cannot discard newer metadata or context, and heartbeats
+only advance `LastSeen`. Equal `UpdatedAt` values use `SessionId` as a stable tie-breaker.
 
 `freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
 older than `stalenessTimeout` reads as Idle. `session.idle` already sets Idle directly.
@@ -199,11 +202,11 @@ server:
   also appended, but load any retained durable aggregate, preserve `UpdatedAt`, and resolve
   independently by their message timestamps.
 - `heartbeat` is liveness-only: it advances `last_seen` for an existing session without folding,
-  changing `updated_at`, or appending history. `usage_info` arrives only on the live SDK stream but
-  is durably status-preserving: it persists `ContextUsage`, `context_usage_at`, and forward-only
-  `last_seen` for an existing live session using a separate last-write-wins clock, without changing
-  `updated_at` or appending history. The store returns the authoritative row, so an older delayed
-  gauge cannot replace a newer one.
+  changing `updated_at`, influencing representative-session selection, or appending history.
+  `usage_info` arrives only on the live SDK stream but is durably status-preserving: it persists
+  `ContextUsage`, `context_usage_at`, and forward-only `last_seen` for an existing live session using
+  a separate last-write-wins clock, without changing `updated_at` or appending history. The store
+  returns the authoritative row, so an older delayed gauge cannot replace a newer one.
 - `title_bootstrap` is durable state hydration, not source history: it updates the persisted title
   and forward-only `last_seen` without appending `activity_events` or advancing the lifecycle
   `updated_at` clock. The service loads the session's durable row regardless of the two-hour live
@@ -257,9 +260,12 @@ only in the real monitoring path — demo/fixture mode serves synthetic data and
 
 ### Collapse to card fields (`CodingToolStatus.fs`)
 
-`collapseByWorktree` groups the live session-statuses by worktree path; `fromPushSessions` collapses
-each group with the two decoupled picks (openness-driven status dot + active-winner/most-recent
-fallback footer, above).
+Each worktree's durable `UpdatedAt` winner is merged into the live candidate set by session id before
+`collapseByWorktree` groups statuses by worktree path. The row's own `LastSeen` still determines
+whether it contributes an open dot; independently, it remains eligible for the fallback footer when
+a heartbeat-kept live sibling is not the representative session. `fromPushSessions` then applies
+the two decoupled picks (openness-driven status dot + `UpdatedAt`-ordered active winner/fallback
+footer, above).
 It also exposes every open session as its own status marker with that session's skill and optional
 `ContextUsage`; a reported gauge renders as a context-window donut, while `None` renders as a plain
 status dot. Persisted gauges restore donuts after a server restart without waiting for a fresh
@@ -282,9 +288,9 @@ Idle and frozen until it changes — **not** recomputed from `last_seen` (which 
 keeps advancing via heartbeat, which would reset the chip to ~0 each poll). `WorktreeApi` reads the
 frozen stamp for Idle worktrees; a new Working turn clears it.
 
-`getLastSessionId` is the distinct resume pick — most-recent-any by `last_seen` from the **durable
-store** (not the idle-window live cache, so a session last active > 2 h ago still resolves after a
-restart), returning the stored session id. Provider for command-building comes from a per-worktree
+`getLastSessionId` is the distinct resume pick — greatest `UpdatedAt` from the **durable store**
+(not the idle-window live cache, so a session last active > 2 h ago still resolves after a restart),
+returning the stored session id. Provider for command-building comes from a per-worktree
 `.treemon.json` read (`CodingToolStatus.readConfiguredProvider`), not the retired detectors.
 
 ### Overview-history unification (Agents dimension)
@@ -361,10 +367,11 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   its `last_seen` advances; reading it live would reset the chip every poll. Capture once when the
   collapsed status enters Idle and hold it.
 - **Footer decoupled from the dot.** Card messages/skill come from the active winner, otherwise the
-  most-recent session of any status; retained fallback covers sessions outside the live window. This
-  fixes the earlier bug where the `pickActive`-only collapse blanked idle worktrees.
-- **Display pick ≠ footer pick ≠ resume pick.** Display = most-recent *open active*; footer =
-  active winner or most-recent fallback; resume = most-recent-any (durable store, survives restart).
+  session with the greatest `UpdatedAt`; retained fallback covers sessions outside the live window.
+- **Display pick ≠ footer pick ≠ resume pick.** Display = greatest-`UpdatedAt` *open active*; footer =
+  active winner or greatest-`UpdatedAt` fallback; resume = greatest-`UpdatedAt` session from the
+  durable store. `LastSeen` continues to drive openness, freshness, retention, and per-session dot
+  ordering, but never representative footer/resume selection.
 - **Future timestamps are normalized, not trusted; free text is length-capped server-side** (see
   Technical Approach) — the loopback endpoint clamps `occurredAt` and uses it for nested message
   timestamps before folding or comparing activity freshness.
