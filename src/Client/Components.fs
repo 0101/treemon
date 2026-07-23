@@ -4,6 +4,7 @@ open Shared
 open Feliz
 open Fable.Core
 open Fable.Core.JsInterop
+open BrowserObserverInterop
 
 /// Shared time-bucketing ladder for relativeTime / relativeTimeCompact: the same four thresholds and
 /// the same int truncation, parameterised only by the sub-minute label and the per-bucket suffix.
@@ -53,16 +54,6 @@ let relativeEventTime (dt: System.DateTimeOffset) =
     | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
-
-// ResizeObserver interop
-[<Emit("new ResizeObserver($0)")>]
-let private createResizeObserver (callback: obj -> unit) : obj = jsNative
-
-[<Emit("$0.observe($1)")>]
-let private observeElement (observer: obj) (el: Browser.Types.Element) : unit = jsNative
-
-[<Emit("$0.disconnect()")>]
-let private disconnectObserver (observer: obj) : unit = jsNative
 
 [<Emit("$0.scrollWidth > $0.clientWidth")>]
 let private hasOverflow (el: Browser.Types.Element) : bool = jsNative

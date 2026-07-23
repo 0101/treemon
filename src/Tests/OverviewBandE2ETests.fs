@@ -249,7 +249,7 @@ type OverviewBandE2ETests() =
                 this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Overview"))
             do! overviewBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! overviewBtn.ClickAsync()
-            do! this.Page.Locator(".overview-band").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! this.Page.Locator(".overview-agents-band").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! this.Page.Locator(".overview-band .overview-bar").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! json = this.Page.EvaluateAsync<string>(bandProbeJs)
@@ -421,4 +421,159 @@ type OverviewBandE2ETests() =
             let bd = JObject.Parse(json)
             Assert.That(bd.Value<int>("chipCount"), Is.EqualTo(3), "the Investigating breakdown lists its three member worktrees")
             Assert.That(bd.Value<float>("maxUsed"), Is.GreaterThan(0.0), "a member's most-loaded session drives a non-zero --ctx-used chip fill")
+        }
+
+    [<Test>]
+    member this.``One agent band morphs to pinned circles and closes the drill-down``() =
+        task {
+            let canvasBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
+            do! canvasBtn.ClickAsync()
+            do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let investigating =
+                this.Page.Locator(".overview-agents-band .overview-item", PageLocatorOptions(HasText = "Investigating"))
+            do! investigating.ClickAsync()
+            do! this.Page.Locator(".overview-breakdown").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! morphJson =
+                this.Page.EvaluateAsync<string>(
+                    """() => {
+                      const dashboard = document.querySelector('.dashboard');
+                      const agents = document.querySelector('.overview-agents-band');
+                      const items = agents.querySelector('.overview-items');
+                      const morphRange = parseFloat(getComputedStyle(dashboard).getPropertyValue('--overview-agents-morph-range'));
+                      dashboard.scrollTop = morphRange / 2;
+                      return new Promise(resolve =>
+                        requestAnimationFrame(() => requestAnimationFrame(() =>
+                          resolve(JSON.stringify({
+                            bandCount: document.querySelectorAll('.overview-agents-band').length,
+                            compactCount: document.querySelectorAll('.overview-agents-compact').length,
+                            shellTranslateY: new DOMMatrix(getComputedStyle(agents).transform).m42,
+                            itemProgress: new DOMMatrix(getComputedStyle(items).transform).m42
+                              / parseFloat(getComputedStyle(agents).getPropertyValue('--overview-agents-items-shift')),
+                            headerOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-header')).opacity),
+                            metaOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-meta')).opacity)
+                          })))));
+                    }""")
+
+            let morph = JObject.Parse(morphJson)
+            Assert.That(morph.Value<int>("bandCount"), Is.EqualTo(1))
+            Assert.That(morph.Value<int>("compactCount"), Is.EqualTo(0))
+            Assert.That(morph.Value<float>("shellTranslateY"), Is.InRange(-15.0, -1.0))
+            Assert.That(morph.Value<float>("itemProgress"), Is.InRange(0.1, 0.9))
+            Assert.That(morph.Value<float>("headerOpacity"), Is.LessThan(0.01))
+            Assert.That(morph.Value<float>("metaOpacity"), Is.LessThan(0.01))
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """() => {
+                      const dashboard = document.querySelector('.dashboard');
+                      const morphRange = parseFloat(getComputedStyle(dashboard).getPropertyValue('--overview-agents-morph-range'));
+                      dashboard.scrollTop = morphRange + 1;
+                      window.__overviewStickyScrollTop = dashboard.scrollTop;
+                    }""")
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """() => {
+                      const agents = document.querySelector('.overview-agents-band');
+                      const meta = agents.querySelector('.overview-meta');
+                      return parseFloat(getComputedStyle(meta).opacity) < 0.01
+                        && !document.querySelector('.overview-breakdown')
+                        && !document.querySelector('.overview-item-selected');
+                    }""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let! stickyJson =
+                this.Page.EvaluateAsync<string>(
+                    """() => new Promise(resolve => {
+                      requestAnimationFrame(() => requestAnimationFrame(() => {
+                        const dashboard = document.querySelector('.dashboard');
+                        const agents = document.querySelector('.overview-agents-band');
+                        const canvasHeader = document.querySelector('.canvas-tab-bar');
+                        const dashboardRect = dashboard.getBoundingClientRect();
+                        const circleCenters = Array.from(agents.querySelectorAll('.overview-circle'))
+                          .map(circle => {
+                            const rect = circle.getBoundingClientRect();
+                            return rect.top + rect.height / 2 - dashboardRect.top;
+                          });
+                        const transform = new DOMMatrix(getComputedStyle(agents).transform);
+                        const line = getComputedStyle(agents, '::after');
+                        resolve(JSON.stringify({
+                          scrollTop: dashboard.scrollTop,
+                          expectedScrollTop: window.__overviewStickyScrollTop,
+                          position: getComputedStyle(agents).position,
+                          canvasHeight: canvasHeader.getBoundingClientRect().height,
+                          visualHeight: transform.m42 + parseFloat(line.top) + 1,
+                          minCircleCenter: Math.min(...circleCenters),
+                          maxCircleCenter: Math.max(...circleCenters),
+                          headerOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-header')).opacity),
+                          metaOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-meta')).opacity),
+                          lineOpacity: parseFloat(line.opacity),
+                          lineColor: line.borderBottomColor,
+                          groupGap: getComputedStyle(agents.querySelector('.overview-items')).columnGap,
+                          canvasBorderColor: getComputedStyle(canvasHeader).borderBottomColor
+                        }));
+                      }));
+                    })""")
+
+            let sticky = JObject.Parse(stickyJson)
+            Assert.That(sticky.Value<float>("scrollTop"), Is.EqualTo(sticky.Value<float>("expectedScrollTop")).Within(1.0), "pinning must not move the scroll position")
+            Assert.That(sticky.Value<string>("position"), Is.EqualTo("sticky"))
+            Assert.That(sticky.Value<float>("visualHeight"), Is.EqualTo(sticky.Value<float>("canvasHeight")).Within(1.0), "agent and canvas chrome heights match")
+            Assert.That(sticky.Value<float>("minCircleCenter"), Is.EqualTo(sticky.Value<float>("maxCircleCenter")).Within(1.0), "all circle groups share one compact row")
+            Assert.That(sticky.Value<float>("minCircleCenter"), Is.EqualTo(sticky.Value<float>("canvasHeight") / 2.0).Within(1.5), "circles are vertically centered")
+            Assert.That(sticky.Value<float>("headerOpacity"), Is.LessThan(0.01))
+            Assert.That(sticky.Value<float>("metaOpacity"), Is.LessThan(0.01))
+            Assert.That(sticky.Value<float>("lineOpacity"), Is.EqualTo(1.0).Within(0.01))
+            Assert.That(sticky.Value<string>("lineColor"), Is.EqualTo(sticky.Value<string>("canvasBorderColor")))
+            Assert.That(sticky.Value<string>("groupGap"), Is.EqualTo("22px"))
+
+            do! this.Page.SetViewportSizeAsync(700, 800)
+            let! narrowJson =
+                this.Page.EvaluateAsync<string>(
+                    """() => new Promise(resolve =>
+                      requestAnimationFrame(() => requestAnimationFrame(() => {
+                        const items = document.querySelector('.overview-agents-band .overview-items');
+                        const circles = Array.from(items.querySelectorAll('.overview-circle'));
+                        const centers = circles.map(circle => {
+                          const rect = circle.getBoundingClientRect();
+                          return rect.top + rect.height / 2;
+                        });
+                        const hasOverflow = items.scrollWidth > items.clientWidth;
+                        items.scrollLeft = items.scrollWidth;
+                        requestAnimationFrame(() => {
+                          const itemsRect = items.getBoundingClientRect();
+                          const lastRect = circles[circles.length - 1].getBoundingClientRect();
+                          resolve(JSON.stringify({
+                            flexWrap: getComputedStyle(items).flexWrap,
+                            overflowX: getComputedStyle(items).overflowX,
+                            hasOverflow,
+                            rowSpread: Math.max(...centers) - Math.min(...centers),
+                            lastCircleVisible: lastRect.left >= itemsRect.left - 1 && lastRect.right <= itemsRect.right + 1
+                          }));
+                        });
+                      })))""")
+
+            let narrow = JObject.Parse(narrowJson)
+            Assert.That(narrow.Value<string>("flexWrap"), Is.EqualTo("nowrap"))
+            Assert.That(narrow.Value<string>("overflowX"), Is.EqualTo("auto"))
+            Assert.That(narrow.Value<bool>("hasOverflow"), Is.True)
+            Assert.That(narrow.Value<float>("rowSpread"), Is.LessThanOrEqualTo(1.0))
+            Assert.That(narrow.Value<bool>("lastCircleVisible"), Is.True)
+
+            do! investigating.Locator(".overview-circle").First.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """() => {
+                      const dashboard = document.querySelector('.dashboard');
+                      return dashboard.scrollTop <= 0.5
+                        && !!document.querySelector('.overview-agents-band .overview-item-selected')
+                        && !!document.querySelector('.overview-breakdown');
+                    }""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+            ()
         }
