@@ -69,6 +69,16 @@ let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
     |> List.map (fun r ->
         { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
 
+let setAutoSyncEnabled (path: WorktreePath) enabled (repos: RepoModel list) =
+    let update wt =
+        if wt.Path = path then { wt with AutoSyncEnabled = enabled } else wt
+
+    repos
+    |> List.map (fun repo ->
+        { repo with
+            Worktrees = repo.Worktrees |> List.map update
+            ArchivedWorktrees = repo.ArchivedWorktrees |> List.map update })
+
 let markDeleted (path: WorktreePath) (deletedPaths: Set<string>) =
     deletedPaths |> Set.add (WorktreePath.value path)
 
@@ -86,7 +96,7 @@ let terminalAction (wt: WorktreeStatus) =
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
-    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Path, scopedKey))
+    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (_.Path >> ToggleAutoSync)
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "r" -> findWorktree scopedKey model |> Option.bind (fun wt -> if canResumeSession wt then Some (ResumeSession wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
@@ -286,6 +296,30 @@ let update msg model =
         model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+
+    | ToggleAutoSync path ->
+        match findWorktree (WorktreePath.value path) model with
+        | None -> model, Cmd.none
+        | Some wt ->
+            let previousEnabled = wt.AutoSyncEnabled
+            let enabled = not previousEnabled
+            { model with Repos = setAutoSyncEnabled path enabled model.Repos },
+            Cmd.OfAsync.either
+                (fun () -> worktreeApi.Value.toggleAutoSync path enabled)
+                ()
+                (fun result -> AutoSyncToggleResult (path, previousEnabled, result))
+                (fun ex -> AutoSyncToggleResult (path, previousEnabled, Error ex.Message))
+
+    | AutoSyncToggleResult (_, _, Ok ()) ->
+        model, Cmd.none
+
+    | AutoSyncToggleResult (path, previousEnabled, Error _) ->
+        let attemptedEnabled = not previousEnabled
+        match findWorktree (WorktreePath.value path) model with
+        | Some wt when wt.AutoSyncEnabled = attemptedEnabled ->
+            { model with Repos = setAutoSyncEnabled path previousEnabled model.Repos }, Cmd.none
+        | _ ->
+            model, Cmd.none
 
     | Tick now ->
         // Tick stays in the root update because it also expires canvas events and drives the
@@ -853,8 +887,7 @@ let view model dispatch =
           ResumeSession = fun wt -> dispatch (ResumeSession wt.Path)
           DeleteWorktree = fun key -> dispatch (ConfirmDeleteWorktree key)
           ArchiveWorktree = fun key -> dispatch (ConfirmArchiveWorktree key)
-          StartSync = fun path key -> dispatch (StartSync (path, key))
-          CancelSync = fun path -> dispatch (CancelSync path)
+          ToggleAutoSync = fun wt -> dispatch (ToggleAutoSync wt.Path)
           LaunchAction = fun path action -> dispatch (LaunchAction (path, action))
           OpenCanvasDoc = fun key filename -> dispatch (OpenCanvasDoc (key, filename))
           DispatchArchive = ArchiveMsg >> dispatch }

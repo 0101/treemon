@@ -49,6 +49,8 @@ type Msg =
     | Tick of now: float
     | OpenTerminal of WorktreePath
     | OpenEditor of WorktreePath
+    | ToggleAutoSync of WorktreePath
+    | AutoSyncToggleResult of path: WorktreePath * previousEnabled: bool * Result<unit, string>
     | StartSync of path: WorktreePath * scopedKey: string
     | SyncStarted of key: string * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>

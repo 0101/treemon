@@ -37,6 +37,7 @@
     <Compile Include="NavigationTests.fs" />
     <Compile Include="ComponentsTests.fs" />
     <Compile Include="CardViewsTests.fs" />
+    <Compile Include="AutoSyncClientTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="WorktreePathResolutionTests.fs" />

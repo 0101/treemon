@@ -152,8 +152,7 @@ type CardCallbacks =
       DeleteWorktree: string -> unit
       /// Raises the archive *confirmation* (ConfirmArchiveWorktree), not an immediate archive.
       ArchiveWorktree: string -> unit
-      StartSync: WorktreePath -> string -> unit
-      CancelSync: WorktreePath -> unit
+      ToggleAutoSync: WorktreeStatus -> unit
       LaunchAction: WorktreePath -> ActionKind -> unit
       OpenCanvasDoc: string -> string -> unit
       DispatchArchive: ArchiveViews.Msg -> unit }
@@ -170,9 +169,6 @@ let mainBehindIndicator (baseBranch: string) (count: int) =
             prop.text ($"{count} behind {baseBranch}")
         ]
 
-let isBranchSyncing (events: CardEvent list) =
-    events |> List.exists (fun e -> e.Status = Some StepStatus.Running && e.Source <> EventSource.PostFork)
-
 /// Post-fork setup is routine when it works, so a successful or still-running run is noise on the
 /// card — only its failures (including timeouts) are worth surfacing. Events from every other
 /// source always show.
@@ -185,47 +181,44 @@ let private providerDisplayName (provider: CodingToolProvider option) =
     | Some CopilotCli -> "Copilot"
     | None -> "Coding tool"
 
-let syncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
-    if isPending then
-        Html.button [
-            prop.className "sync-starting-btn"
-            prop.disabled true
-            yield! noFocusProps
-            prop.text "Sync starting"
+let autoSyncIcon () =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 16, 16)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "1.5")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.children [
+            Svg.path [ svg.d "M2 5h10" ]
+            Svg.path [ svg.d "m9 2 3 3-3 3" ]
+            Svg.path [ svg.d "M14 11H4" ]
+            Svg.path [ svg.d "m7 8-3 3 3 3" ]
         ]
-    else
-        let syncing = isBranchSyncing branchEvents
-        let codingToolBusy = wt.CodingTool = Working || wt.CodingTool = WaitingForUser
-        let disabled = syncing || codingToolBusy
-        if syncing then
-            Html.button [
-                prop.className "sync-cancel-btn"
-                yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); callbacks.CancelSync wt.Path)
-                prop.text "Cancel"
-            ]
-        else
-            Html.button [
-                prop.className (if disabled then "sync-btn disabled" else "sync-btn")
-                prop.disabled disabled
-                yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); callbacks.StartSync wt.Path scopedKey)
-                prop.title (if codingToolBusy then $"{providerDisplayName wt.CodingToolProvider} is active" else $"Sync with {baseBranch} (S)")
-                prop.text "Sync"
-            ]
+    ]
 
-let mainBehindWithSync (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
+let autoSyncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
+    Html.button [
+        prop.className (if wt.AutoSyncEnabled then "auto-sync-btn active" else "auto-sync-btn")
+        prop.title $"Auto-sync with {baseBranch} (S)"
+        prop.ariaPressed wt.AutoSyncEnabled
+        yield! noFocusProps
+        prop.onClick (fun e -> e.stopPropagation(); callbacks.ToggleAutoSync wt)
+        prop.children [ autoSyncIcon () ]
+    ]
+
+let mainBehindRow (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
     Html.div [
         prop.className "main-behind-row"
         prop.children [
             mainBehindIndicator baseBranch wt.MainBehindCount
-            if wt.MainBehindCount > 0 then
-                if wt.IsDirty then
-                    Html.span [
-                        prop.className "dirty-warning"
-                        prop.text "uncommitted changes"
-                    ]
-                else syncButton callbacks baseBranch wt branchEvents isPending scopedKey
+            if wt.IsDirty then
+                Html.span [
+                    prop.className "dirty-warning"
+                    prop.text "uncommitted changes"
+                ]
+            autoSyncButton callbacks baseBranch wt
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -681,13 +674,14 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator baseBranch wt.MainBehindCount
+                    autoSyncButton callbacks baseBranch wt
                     prSection callbacks props.ActionCooldowns wt repoName
                 ]
             ]
         ]
     ]
 
-let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
     let hasFooterLines =
@@ -734,7 +728,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             ]
                         ]
 
-                    mainBehindWithSync callbacks baseBranch wt branchEvents isPending scopedKey
+                    mainBehindRow callbacks baseBranch wt
 
                     prRow callbacks props.ActionCooldowns wt repoName
                 ]
@@ -758,10 +752,9 @@ let renderCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: stri
     let scopedKey = WorktreePath.value wt.Path
     let events = props.BranchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let cvEvents = props.CanvasEvents |> Map.tryFind scopedKey |> Option.defaultValue []
-    let isPending = props.SyncPending |> Set.contains scopedKey
     let isFocused = props.FocusedElement = Some (Card scopedKey)
     if props.IsCompact then compactWorktreeCard props callbacks repoName baseBranch scopedKey isFocused wt
-    else worktreeCard props callbacks repoName baseBranch events cvEvents isPending scopedKey isFocused wt
+    else worktreeCard props callbacks repoName baseBranch events cvEvents scopedKey isFocused wt
 
 let skeletonCard () =
     Html.div [

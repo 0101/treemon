@@ -653,100 +653,73 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Sync button appears when MainBehindCount is greater than zero``() =
+    member this.``Auto-sync toggle appears on behind up-to-date clean and dirty cards``() =
         task {
-            let behindCards = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind:not(.up-to-date))")
-            do! behindCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! behindCount = behindCards.CountAsync()
-            Assert.That(behindCount, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; behind-main rows should be present")
+            let fullCards = this.Page.Locator(".wt-card:not(.compact)")
+            let toggles = fullCards.Locator(".auto-sync-btn")
+            let behindRows = this.Page.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
+            let upToDateRows = this.Page.Locator(".main-behind-row:has(.main-behind.up-to-date)")
+            let dirtyRows = this.Page.Locator(".main-behind-row:has(.dirty-warning)")
+            let cleanRows = this.Page.Locator(".main-behind-row:not(:has(.dirty-warning))")
 
-            let syncBtns = behindCards.First.Locator(".sync-btn, .sync-cancel-btn")
-            let! btnCount = syncBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Cards with MainBehindCount > 0 should show a sync button or cancel button")
+            do! toggles.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! cardCount = fullCards.CountAsync()
+            let! toggleCount = toggles.CountAsync()
+            let! behindToggleCount = behindRows.Locator(".auto-sync-btn").CountAsync()
+            let! upToDateToggleCount = upToDateRows.Locator(".auto-sync-btn").CountAsync()
+            let! dirtyToggleCount = dirtyRows.Locator(".auto-sync-btn").CountAsync()
+            let! cleanToggleCount = cleanRows.Locator(".auto-sync-btn").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(toggleCount, Is.EqualTo(cardCount), "Every full card should render one auto-sync toggle")
+                Assert.That(behindToggleCount, Is.GreaterThanOrEqualTo(1), "Behind cards should keep the toggle")
+                Assert.That(upToDateToggleCount, Is.GreaterThanOrEqualTo(1), "Up-to-date cards should keep the toggle")
+                Assert.That(dirtyToggleCount, Is.GreaterThanOrEqualTo(1), "Dirty cards should keep the toggle")
+                Assert.That(cleanToggleCount, Is.GreaterThanOrEqualTo(1), "Clean cards should keep the toggle"))
         }
 
     [<Test>]
-    member this.``Sync button hidden when MainBehindCount is zero``() =
+    member this.``Auto-sync toggle exposes off and on pressed states``() =
         task {
-            let upToDateRows = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind.up-to-date)")
-            do! upToDateRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = upToDateRows.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees with MainBehindCount=0; up-to-date rows should be present")
+            let enabled = this.Page.Locator(".auto-sync-btn.active[aria-pressed='true']")
+            let disabled = this.Page.Locator(".auto-sync-btn:not(.active)[aria-pressed='false']")
+            do! enabled.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! disabled.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let syncBtns = upToDateRows.First.Locator(".sync-btn, .sync-cancel-btn")
-            let! btnCount = syncBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(0), "Cards with MainBehindCount = 0 should not show a sync button")
+            let! enabledCount = enabled.CountAsync()
+            let! disabledCount = disabled.CountAsync()
+            let! title = enabled.First.GetAttributeAsync("title")
+
+            Assert.Multiple(fun () ->
+                Assert.That(enabledCount, Is.GreaterThanOrEqualTo(1), "Fixture should exercise the enabled state")
+                Assert.That(disabledCount, Is.GreaterThanOrEqualTo(1), "Fixture should exercise the disabled state")
+                Assert.That(title, Is.EqualTo("Auto-sync with main (S)"), "Tooltip should name the base branch"))
         }
 
     [<Test>]
-    member this.``Sync button disabled when Copilot is Working``() =
+    member this.``Auto-sync toggle stays enabled while Copilot is working``() =
         task {
             let workingCards = this.Page.Locator(".wt-card.ct-working:not(.compact)")
             do! workingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! workingCount = workingCards.CountAsync()
-            Assert.That(workingCount, Is.GreaterThanOrEqualTo(1), "Fixture has Working Copilot worktrees")
-
-            let behindRow = workingCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
-            let! behindCount = behindRow.CountAsync()
-            Assert.That(behindCount, Is.EqualTo(1), "Fixture Working Copilot worktree is behind main")
-
-            let syncBtn = behindRow.Locator(".sync-btn")
-            let! btnCount = syncBtn.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on Working Copilot card behind main")
-
-            let! cssClass = syncBtn.GetAttributeAsync("class")
-            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Copilot is Working")
-
-            let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Copilot is Working")
-
-            let! title = syncBtn.GetAttributeAsync("title")
-            Assert.That(title, Is.EqualTo("Copilot is active"), "Disabled sync button should show 'Copilot is active' tooltip")
+            let toggle = workingCards.First.Locator(".auto-sync-btn")
+            let! count = toggle.CountAsync()
+            let! isDisabled = toggle.EvaluateAsync<bool>("el => el.disabled")
+            Assert.Multiple(fun () ->
+                Assert.That(count, Is.EqualTo(1), "Working cards should render the auto-sync toggle")
+                Assert.That(isDisabled, Is.False, "Busy sessions should not disable auto-sync"))
         }
 
     [<Test>]
-    member this.``Sync button disabled when Copilot is WaitingForUser``() =
+    member this.``Auto-sync toggle stays enabled while Copilot waits for user``() =
         task {
             let waitingCards = this.Page.Locator(".wt-card.ct-waiting:not(.compact)")
             do! waitingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! waitingCount = waitingCards.CountAsync()
-            Assert.That(waitingCount, Is.GreaterThanOrEqualTo(1), "Fixture has WaitingForUser Copilot worktrees")
-
-            let behindRow = waitingCards.First.Locator(".main-behind-row:has(.main-behind:not(.up-to-date))")
-            let! behindCount = behindRow.CountAsync()
-            Assert.That(behindCount, Is.EqualTo(1), "Fixture WaitingForUser Copilot worktree is behind main")
-
-            let syncBtn = behindRow.Locator(".sync-btn")
-            let! btnCount = syncBtn.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Sync button should be present on WaitingForUser Copilot card behind main")
-
-            let! cssClass = syncBtn.GetAttributeAsync("class")
-            Assert.That(cssClass, Does.Contain("disabled"), "Sync button should be disabled when Copilot is WaitingForUser")
-
-            let! isDisabled = syncBtn.EvaluateAsync<bool>("el => el.disabled")
-            Assert.That(isDisabled, Is.True, "Sync button disabled attribute should be set when Copilot is WaitingForUser")
-        }
-
-    [<Test>]
-    member this.``Sync button has correct CSS classes and styling``() =
-        task {
-            let syncBtns = this.Page.Locator(".wt-card:not(.compact) .sync-btn")
-            do! syncBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = syncBtns.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; sync buttons should be present")
-
-            let btn = syncBtns.First
-            let! text = btn.TextContentAsync()
-            Assert.That(text, Is.EqualTo("Sync"), "Sync button text should be 'Sync'")
-
-            let! cursor = btn |> computedStyle "cursor"
-            let! cssClass = btn.GetAttributeAsync("class")
-            let isDisabled = cssClass.Contains("disabled")
-            match isDisabled with
-            | true ->
-                Assert.That(cursor, Is.EqualTo("not-allowed"), "Disabled sync button should have not-allowed cursor")
-            | false ->
-                Assert.That(cursor, Is.EqualTo("pointer"), "Enabled sync button should have pointer cursor")
+            let toggle = waitingCards.First.Locator(".auto-sync-btn")
+            let! count = toggle.CountAsync()
+            let! isDisabled = toggle.EvaluateAsync<bool>("el => el.disabled")
+            Assert.Multiple(fun () ->
+                Assert.That(count, Is.EqualTo(1), "Waiting cards should render the auto-sync toggle")
+                Assert.That(isDisabled, Is.False, "Waiting sessions should not disable auto-sync"))
         }
 
     [<Test>]
@@ -792,17 +765,15 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Sync button hidden in compact mode``() =
+    member this.``Auto-sync toggle appears on every compact card``() =
         task {
             do! (compactBtn this.Page).ClickAsync()
 
-            let syncBtns = this.Page.Locator(".wt-card.compact .sync-btn")
-            let! syncCount = syncBtns.CountAsync()
-            Assert.That(syncCount, Is.EqualTo(0), "Sync buttons should not appear in compact mode")
-
-            let cancelBtns = this.Page.Locator(".wt-card.compact .sync-cancel-btn")
-            let! cancelCount = cancelBtns.CountAsync()
-            Assert.That(cancelCount, Is.EqualTo(0), "Cancel buttons should not appear in compact mode")
+            let cards = this.Page.Locator(".wt-card.compact")
+            let toggles = cards.Locator(".auto-sync-btn")
+            let! cardCount = cards.CountAsync()
+            let! toggleCount = toggles.CountAsync()
+            Assert.That(toggleCount, Is.EqualTo(cardCount), "Every compact card should render one auto-sync toggle")
         }
 
     [<Test>]
@@ -816,35 +787,36 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Main-behind-row contains sync button next to behind text``() =
+    member this.``Main-behind-row contains auto-sync toggle next to behind text``() =
         task {
             let behindRows = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind:not(.up-to-date))")
             do! behindRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = behindRows.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; behind rows should be present")
 
-            let btns = behindRows.First.Locator(".sync-btn, .sync-cancel-btn")
+            let btns = behindRows.First.Locator(".auto-sync-btn")
             let! btnCount = btns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Behind-main row should contain exactly one sync/cancel button")
+            Assert.That(btnCount, Is.EqualTo(1), "Behind-main row should contain exactly one auto-sync toggle")
         }
 
     [<Test>]
-    member this.``Cancel button appears with correct CSS class``() =
+    member this.``Enabled auto-sync reuses the active-terminal glow``() =
         task {
-            let cancelBtns = this.Page.Locator(".wt-card .sync-cancel-btn")
-            do! cancelBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = cancelBtns.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has a branch with Running sync event; cancel button should be present")
-
-            let! text = cancelBtns.First.TextContentAsync()
-            Assert.That(text, Is.EqualTo("Cancel"), "Cancel button text should be 'Cancel'")
-
-            let! borderColor = cancelBtns.First |> computedStyle "borderColor"
-            Assert.That(borderColor, Does.Contain("rgb(243, 139, 168)"), "Cancel button border should be red (#f38ba8)")
+            let card = this.Page.Locator(".wt-card.has-session:has(.auto-sync-btn.active)").First
+            do! card.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let terminal = card.Locator(".terminal-btn")
+            let toggle = card.Locator(".auto-sync-btn")
+            let! terminalShadow = terminal |> computedStyle "boxShadow"
+            let! toggleShadow = toggle |> computedStyle "boxShadow"
+            let! terminalColor = terminal |> computedStyle "color"
+            let! toggleColor = toggle |> computedStyle "color"
+            Assert.Multiple(fun () ->
+                Assert.That(toggleShadow, Is.EqualTo(terminalShadow), "Pressed toggle should reuse the terminal glow")
+                Assert.That(toggleColor, Is.EqualTo(terminalColor), "Pressed toggle should reuse the terminal active color"))
         }
 
     [<Test>]
-    member this.``Compact mode uses mainBehindIndicator without sync button``() =
+    member this.``Compact mode keeps mainBehindIndicator and auto-sync toggle``() =
         task {
             do! (compactBtn this.Page).ClickAsync()
 
@@ -854,7 +826,11 @@ type DashboardTests() =
 
             let mainBehindRow = this.Page.Locator(".wt-card.compact .main-behind-row")
             let! rowCount = mainBehindRow.CountAsync()
-            Assert.That(rowCount, Is.EqualTo(0), "Compact cards should not use main-behind-row (no sync button row)")
+            let autoSync = this.Page.Locator(".wt-card.compact .auto-sync-btn")
+            let! toggleCount = autoSync.CountAsync()
+            Assert.Multiple(fun () ->
+                Assert.That(rowCount, Is.EqualTo(0), "Compact cards should keep their compact-detail layout")
+                Assert.That(toggleCount, Is.GreaterThanOrEqualTo(1), "Compact cards should still expose auto-sync"))
         }
 
     [<Test>]
@@ -1054,7 +1030,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Dirty worktree shows warning instead of sync button``() =
+    member this.``Dirty worktree shows warning beside auto-sync toggle``() =
         task {
             let dirtyWarnings = this.Page.Locator(".wt-card .dirty-warning")
             do! dirtyWarnings.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
@@ -1072,16 +1048,16 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Dirty worktree row has no sync button``() =
+    member this.``Dirty worktree row keeps auto-sync toggle``() =
         task {
             let dirtyRow = this.Page.Locator(".wt-card .main-behind-row:has(.dirty-warning)")
             do! dirtyRow.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = dirtyRow.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has dirty worktree behind main; row with dirty warning should exist")
 
-            let syncBtns = dirtyRow.First.Locator(".sync-btn")
-            let! btnCount = syncBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(0), "Row with dirty warning should not have a sync button")
+            let toggles = dirtyRow.First.Locator(".auto-sync-btn")
+            let! btnCount = toggles.CountAsync()
+            Assert.That(btnCount, Is.EqualTo(1), "Row with dirty warning should keep the auto-sync toggle")
         }
 
     [<Test>]
@@ -2042,14 +2018,14 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Local")>]
-    member this.``Sync button shows Sync starting immediately then transitions to Cancel``() =
+    member this.``Auto-sync toggles optimistically and rolls back on API error``() =
         task {
             let! page = this.Context.NewPageAsync()
 
-            let syncFulfill = System.Threading.Tasks.TaskCompletionSource<IRoute>()
+            let toggleFulfill = System.Threading.Tasks.TaskCompletionSource<IRoute>()
 
-            do! page.RouteAsync("**/IWorktreeApi/startSync", fun route ->
-                syncFulfill.TrySetResult(route) |> ignore
+            do! page.RouteAsync("**/IWorktreeApi/toggleAutoSync", fun route ->
+                toggleFulfill.TrySetResult(route) |> ignore
                 System.Threading.Tasks.Task.CompletedTask)
 
             let! _ = page.GotoAsync(baseUrl)
@@ -2058,51 +2034,38 @@ type DashboardTests() =
             let treemonSection = page.Locator(".repo-section:has(.repo-name:text-is('treemon'))")
             let multirepoCard = treemonSection.Locator(".wt-card:has(.branch-name:text-is('multirepo'))")
             do! multirepoCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let syncBtn = multirepoCard.Locator(".sync-btn")
-            do! Assertions.Expect(syncBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
+            let toggle = multirepoCard.Locator(".auto-sync-btn")
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "false")
 
-            do! syncBtn.ClickAsync()
+            do! toggle.ClickAsync()
+            let! route = toggleFulfill.Task
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
+            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn active")
 
-            let startingBtn = multirepoCard.Locator(".sync-starting-btn")
-            do! Assertions.Expect(startingBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 2000.0f))
-            let! startingText = startingBtn.TextContentAsync()
-            Assert.That(startingText, Is.EqualTo("Sync starting"), "Pending button text should be 'Sync starting'")
+            do! route.FulfillAsync(
+                RouteFulfillOptions(
+                    ContentType = "application/json",
+                    Body = """{"Error":"persist failed"}"""))
 
-            let! isDisabled = startingBtn.EvaluateAsync<bool>("el => el.disabled")
-            Assert.That(isDisabled, Is.True, "Sync starting button should be disabled")
-
-            let oldSyncBtn = multirepoCard.Locator(".sync-btn")
-            let! oldSyncCount = oldSyncBtn.CountAsync()
-            Assert.That(oldSyncCount, Is.EqualTo(0), "Original .sync-btn should be gone during pending state")
-
-            do! page.RouteAsync("**/IWorktreeApi/getSyncStatus", fun route ->
-                let json = """{"treemon/multirepo":[{"Source":"sync","Message":"Merge main","Timestamp":"2026-02-24T12:00:00+00:00","Status":"Running","Duration":null}]}"""
-                route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = json)))
-
-            let! route = syncFulfill.Task
-            do! route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = "{\"Ok\":null}"))
-
-            let cancelBtn = multirepoCard.Locator(".sync-cancel-btn")
-            do! Assertions.Expect(cancelBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
-            let! cancelText = cancelBtn.TextContentAsync()
-            Assert.That(cancelText, Is.EqualTo("Cancel"), "Button should transition to 'Cancel' after server confirms")
-
-            let! startingGone = startingBtn.CountAsync()
-            Assert.That(startingGone, Is.EqualTo(0), "sync-starting-btn should be gone after transition to Cancel")
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync(
+                "aria-pressed",
+                "false",
+                LocatorAssertionsToHaveAttributeOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn")
 
             do! page.CloseAsync()
         }
 
     [<Test>]
     [<Category("Local")>]
-    member this.``Sync starting button cannot be clicked again``() =
+    member this.``S key toggles auto-sync on the focused card``() =
         task {
             let! page = this.Context.NewPageAsync()
 
-            let clickCount = ref 0
+            let toggleFulfill = System.Threading.Tasks.TaskCompletionSource<IRoute>()
 
-            do! page.RouteAsync("**/IWorktreeApi/startSync", fun route ->
-                System.Threading.Interlocked.Increment(clickCount) |> ignore
+            do! page.RouteAsync("**/IWorktreeApi/toggleAutoSync", fun route ->
+                toggleFulfill.TrySetResult(route) |> ignore
                 System.Threading.Tasks.Task.CompletedTask)
 
             let! _ = page.GotoAsync(baseUrl)
@@ -2111,18 +2074,16 @@ type DashboardTests() =
             let treemonSection = page.Locator(".repo-section:has(.repo-name:text-is('treemon'))")
             let multirepoCard = treemonSection.Locator(".wt-card:has(.branch-name:text-is('multirepo'))")
             do! multirepoCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let syncBtn = multirepoCard.Locator(".sync-btn")
-            do! Assertions.Expect(syncBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 5000.0f))
+            let toggle = multirepoCard.Locator(".auto-sync-btn")
+            do! multirepoCard.ClickAsync()
+            do! page.Keyboard.PressAsync("s")
 
-            do! syncBtn.ClickAsync()
-
-            let startingBtn = multirepoCard.Locator(".sync-starting-btn")
-            do! Assertions.Expect(startingBtn).ToBeVisibleAsync(LocatorAssertionsToBeVisibleOptions(Timeout = 2000.0f))
-
-            do! startingBtn.ClickAsync(LocatorClickOptions(Force = true))
-
-            Assert.That(clickCount.Value, Is.EqualTo(1),
-                "Only one startSync call should have been made despite clicking the disabled button")
+            let! route = toggleFulfill.Task
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
+            do! route.FulfillAsync(
+                RouteFulfillOptions(
+                    ContentType = "application/json",
+                    Body = """{"Error":"persist failed"}"""))
 
             do! page.CloseAsync()
         }
@@ -4064,4 +4025,3 @@ type DashboardTests() =
             Assert.That(afterClass, Does.Contain("repo-header"),
                 "Focus should remain on repo header (arrow keys while modal open should not have changed it)")
         }
-

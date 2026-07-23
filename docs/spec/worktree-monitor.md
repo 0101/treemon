@@ -62,6 +62,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 - Every card shows a two-arrow auto-sync toggle in the behind-base row, including when the worktree is clean, dirty, behind, or up to date.
 - The unpressed toggle uses the normal neutral card-action style. The pressed state reuses the green glow of the active-terminal button and persists per branch in `.treemon.json` under `autoSyncBranches`.
+- Clicking the toggle updates the card optimistically and calls `IWorktreeApi.toggleAutoSync`; an API error restores the previous state. The card's `S` key binding invokes the same toggle action.
 - `autoSyncBranches` is intentionally not pruned when a worktree is archived or deleted. Branch-name reuse may restore the preference; avoiding cleanup machinery is preferred for this low-impact case.
 - When enabled, fresh Git observations request a sync when the worktree is behind a newly observed base revision. The base revision, not repeated polling of the same behind count, is the deduplication identity.
 - The prompt targets the same session selected for the card footer: the active winner when one is running, otherwise the session with the greatest activity `UpdatedAt` (see `docs/spec/session-status-push.md`).
