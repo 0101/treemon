@@ -61,7 +61,7 @@ let private overview =
       Scale = 3 }
 
 let private defaultDependencies insert : CaptureDependencies =
-    { GetState = fun () -> async.Return RefreshScheduler.DashboardState.empty
+    { CaptureState = fun () -> async.Return RefreshScheduler.DashboardState.empty
       LoadAssemblyInputs = assemblyInputs
       IsReady = fun _ _ -> true
       AssembleRepos = fun _ _ -> []
@@ -157,7 +157,7 @@ type OverviewSnapshotCaptureTests() =
         let inserted = ConcurrentQueue<OverviewSnapshot>()
 
         let dependencies =
-            { GetState =
+            { CaptureState =
                 fun () -> async {
                     calls.Enqueue "state"
                     return nonEmptyState
@@ -200,12 +200,97 @@ type OverviewSnapshotCaptureTests() =
             Assert.That(inserted.ToArray(), Is.EqualTo [| expected |]))
 
     [<Test>]
+    member _.``session update ordered after the capture barrier is not backdated into the boundary``() =
+        let boundary = next initial
+        let repoId = RepoId "capture-barrier"
+        let sessionId = "boundary-session"
+        let path = Path.Combine(Path.GetTempPath(), "treemon-overview-capture-barrier")
+
+        let beforeBoundary =
+            storedStatus
+                sessionId
+                path
+                SessionActivity.SessionLevelStatus.Working
+                (Some "bd-execute")
+                None
+                (boundary.AddMilliseconds(-100.0))
+
+        let afterBoundary =
+            storedStatus
+                sessionId
+                path
+                SessionActivity.SessionLevelStatus.Idle
+                None
+                None
+                (boundary.AddMilliseconds(100.0))
+
+        let scheduler = RefreshScheduler.createAgent()
+        scheduler.Post(RefreshScheduler.InitializeRepo repoId)
+        scheduler.Post(RefreshScheduler.UpdateSessionStatus beforeBoundary)
+        scheduler.PostAndReply RefreshScheduler.GetState |> ignore
+
+        let clock = ControllableClock(initial)
+        let stateCaptured =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let releaseCapture =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let capturedStatuses = ConcurrentQueue<SessionActivityStore.StoredStatus>()
+        let inserted = Channel.CreateUnbounded<OverviewSnapshot>()
+
+        let dependencies =
+            { defaultDependencies (fun snapshot ->
+                inserted.Writer.TryWrite snapshot |> ignore
+                true) with
+                CaptureState =
+                    fun () -> async {
+                        let state = scheduler.PostAndReply RefreshScheduler.GetState
+                        stateCaptured.SetResult()
+                        do! releaseCapture.Task |> Async.AwaitTask
+                        return state
+                    }
+                AssembleRepos =
+                    fun _ state ->
+                        state.SessionStatuses
+                        |> Map.find beforeBoundary.SessionId
+                        |> capturedStatuses.Enqueue
+
+                        [] }
+
+        let cancellation, running =
+            runCapture clock.Clock dependencies (fun _ _ -> ())
+
+        Assert.That(clock.NextWait().GetAwaiter().GetResult(), Is.EqualTo boundary)
+        clock.AdvanceTo boundary
+        stateCaptured.Task.WaitAsync(timeout).GetAwaiter().GetResult()
+
+        clock.AdvanceTo afterBoundary.LastSeen
+        scheduler.Post(RefreshScheduler.UpdateSessionStatus afterBoundary)
+        let liveState = scheduler.PostAndReply RefreshScheduler.GetState
+        releaseCapture.SetResult()
+
+        let snapshot =
+            inserted.Reader.ReadAsync().AsTask().WaitAsync(timeout).GetAwaiter().GetResult()
+
+        stopCapture cancellation running
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                capturedStatuses.ToArray(),
+                Is.EqualTo [| beforeBoundary |]
+            )
+            Assert.That(
+                liveState.SessionStatuses |> Map.find afterBoundary.SessionId,
+                Is.EqualTo afterBoundary
+            )
+            Assert.That(snapshot.Timestamp, Is.EqualTo boundary))
+
+    [<Test>]
     member _.``startup boundary is skipped until Overview inputs are ready``() =
         let boundary = next initial
         let calls = ConcurrentQueue<string>()
 
         let dependencies =
-            { GetState =
+            { CaptureState =
                 fun () -> async {
                     calls.Enqueue "state"
                     return nonEmptyState
@@ -247,7 +332,7 @@ type OverviewSnapshotCaptureTests() =
             { defaultDependencies (fun snapshot ->
                 inserted.Writer.TryWrite snapshot |> ignore
                 true) with
-                GetState = fun () -> async.Return nonEmptyState
+                CaptureState = fun () -> async.Return nonEmptyState
                 IsReady =
                     fun _ _ ->
                         Interlocked.Increment(&readinessChecks) > 1 }
@@ -348,7 +433,7 @@ type OverviewSnapshotCaptureTests() =
         let inserted = ConcurrentQueue<OverviewSnapshot>()
 
         let dependencies =
-            { GetState =
+            { CaptureState =
                 fun () -> async {
                     calls.Enqueue "state"
                     return RefreshScheduler.DashboardState.empty
@@ -557,6 +642,33 @@ type OverviewSnapshotCaptureTests() =
         Assert.That(snapshot.Timestamp, Is.EqualTo nextFuture)
 
     [<Test>]
+    member _.``a materially late wake skips the boundary instead of backdating live state``() =
+        let clock = ControllableClock(initial)
+        let inserted = Channel.CreateUnbounded<OverviewSnapshot>()
+        let dependencies =
+            defaultDependencies (fun snapshot ->
+                inserted.Writer.TryWrite snapshot |> ignore
+                true)
+        let cancellation, running =
+            runCapture clock.Clock dependencies (fun _ _ -> ())
+
+        let firstBoundary = next initial
+        Assert.That(clock.NextWait().GetAwaiter().GetResult(), Is.EqualTo firstBoundary)
+
+        clock.AdvanceTo(firstBoundary + maximumStartDelay + TimeSpan.FromMilliseconds 1.0)
+
+        let nextBoundary = firstBoundary + resolution
+        Assert.That(clock.NextWait().GetAwaiter().GetResult(), Is.EqualTo nextBoundary)
+        Assert.That(inserted.Reader.TryRead() |> fst, Is.False)
+
+        clock.AdvanceTo nextBoundary
+        let snapshot =
+            inserted.Reader.ReadAsync().AsTask().WaitAsync(timeout).GetAwaiter().GetResult()
+
+        stopCapture cancellation running
+        Assert.That(snapshot.Timestamp, Is.EqualTo nextBoundary)
+
+    [<Test>]
     member _.``capture failure is isolated and the next future boundary still runs``() =
         let clock = ControllableClock(initial)
         let attempts = ConcurrentQueue<DateTimeOffset>()
@@ -608,7 +720,7 @@ type OverviewSnapshotCaptureTests() =
 
         let dependencies =
             { defaultDependencies (fun _ -> true) with
-                GetState =
+                CaptureState =
                     fun () -> async {
                         let currentAttempt = Interlocked.Increment(&attempt)
                         let currentActive = Interlocked.Increment(&active)
@@ -660,7 +772,7 @@ type OverviewSnapshotCaptureTests() =
             { defaultDependencies (fun snapshot ->
                   inserts.Enqueue snapshot
                   true) with
-                GetState =
+                CaptureState =
                     fun () -> async {
                         projectionStarted.SetResult()
                         do! releaseProjection.Task |> Async.AwaitTask

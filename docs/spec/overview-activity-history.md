@@ -22,24 +22,29 @@ missed time, late inputs, or downtime.
 - A dedicated serial background loop targets every UTC Unix-second boundary divisible by 30. It
   does not adapt to client activity level or scheduler polling intervals and never runs overlapping
   capture attempts.
+- At boundary `B`, the loop starts a scheduler-mailbox state barrier. The barrier may start at most
+  one second after `B` to tolerate normal timer jitter; a materially later wake skips `B` and leaves
+  a gap. Within that bounded skew, mailbox order is authoritative: updates ordered before the
+  barrier may appear in `B`, while updates ordered after it cannot.
 - For boundary `B`, the capture uses `B` as `RepoAssemblyInputs.Now`, one immutable
-  `RefreshScheduler.GetState` result, one set of assembly inputs, one
+  barriered `RefreshScheduler.GetState` result, one set of assembly inputs, one
   `WorktreeApi.assembleRepos` result, and one `OverviewData.aggregate` result. Wall-clock reads
   performed later in the attempt cannot change the projection time.
 - Tasks and agents are reduced from that same `Overview` value and committed atomically as one
   `OverviewSnapshot`.
 - Capture is independent of the refresh scheduler's task-execution loop and cannot delay Git,
   Beads, PR, or worktree refresh work.
-- A failed attempt creates no row. If the loop is not ready to start a boundary before a later
-  boundary arrives, the unstarted boundary is missed; after every attempt the loop advances to the
-  next future boundary and never overlaps, catches up, or repairs missed history.
+- A failed attempt creates no row. If the loop cannot start the state barrier within the one-second
+  window, the boundary is missed; after every attempt the loop advances to the next future boundary
+  and never overlaps, catches up, or repairs missed history.
 - Startup performs no backfill or immediate synthetic capture. Existing rows are available
   immediately; a new database returns empty history until the first successful future boundary.
 - The capture loop starts before HTTP host startup, but a boundary is skipped until Overview inputs
   are ready: every configured repo has completed worktree discovery, every included worktree has its
   Beads summary/planning inputs, and the durable live-session seed has been applied. PR-only startup
   work is not part of readiness. Skipped startup buckets are never backfilled or overwritten.
-- Source events arriving after a boundary never alter an already captured snapshot.
+- Scheduler updates ordered after a boundary's state barrier never alter that snapshot, even if
+  projection or storage completes after the update.
 
 ### Durable snapshots
 
@@ -119,7 +124,10 @@ separate capture component uses the same boundary module and obtains immutable s
 through `GetState`.
 
 Capture failures are logged and isolated to the affected boundary. The store has no staging,
-publication generations, recovery worker, or reconstruction dependency.
+publication generations, recovery worker, or reconstruction dependency. `GetState` is the capture
+barrier: its immutable reply is fixed before later scheduler messages can run, so a racing session
+update cannot mutate the state used for the earlier bucket. The one-second start window is the only
+allowed boundary skew; the loop skips rather than backdating state after that window.
 
 ### Lifecycle and API
 
@@ -141,6 +149,7 @@ history work inside its task loop.
 | Canonical resolution | 30 seconds |
 | Boundary arithmetic | One shared server module for capture, validation, sampling, and empty anchors |
 | Capture cadence | Independent fixed boundary loop |
+| Boundary fidelity | Mailbox-ordered immutable barrier with at most one second of start skew; skip later wakes |
 | Stored shape | Count-only tasks and agents captured atomically |
 | Retention | Exactly 72 hours |
 | Startup | Existing rows or empty history; no backfill |

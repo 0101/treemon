@@ -10,7 +10,7 @@ type internal CaptureClock =
       WaitUntil: DateTimeOffset -> CancellationToken -> Async<unit> }
 
 type internal CaptureDependencies =
-    { GetState: unit -> Async<RefreshScheduler.DashboardState>
+    { CaptureState: unit -> Async<RefreshScheduler.DashboardState>
       LoadAssemblyInputs: DateTimeOffset -> WorktreeApi.OverviewAssemblyInputs
       IsReady:
         WorktreeApi.OverviewAssemblyInputs option ->
@@ -22,6 +22,8 @@ type internal CaptureDependencies =
             RepoWorktrees list
       Aggregate: RepoWorktrees list -> OverviewData.Overview
       Insert: OverviewData.OverviewSnapshot -> bool }
+
+let internal maximumStartDelay = TimeSpan.FromSeconds 1.0
 
 let private systemClock =
     { UtcNow = fun () -> DateTimeOffset.UtcNow
@@ -56,7 +58,7 @@ let internal captureBoundary
     =
     async {
         cancellationToken.ThrowIfCancellationRequested()
-        let! state = dependencies.GetState()
+        let! state = dependencies.CaptureState()
         cancellationToken.ThrowIfCancellationRequested()
 
         let inputs =
@@ -105,9 +107,9 @@ let rec private runLoop
                 do! waitUntilReached clock boundary cancellationToken
 
                 if not cancellationToken.IsCancellationRequested then
-                    let startedAt = clock.UtcNow()
+                    let barrierStartedAt = clock.UtcNow()
 
-                    if startedAt < boundary + OverviewSnapshotBoundary.resolution then
+                    if barrierStartedAt <= boundary + maximumStartDelay then
                         try
                             do! captureBoundary dependencies boundary cancellationToken
                         with
@@ -147,7 +149,7 @@ let internal create
     (snapshotStore: OverviewSnapshotStore.OverviewSnapshotStore)
     =
     let dependencies =
-        { GetState =
+        { CaptureState =
             fun () ->
                 scheduler.PostAndAsyncReply RefreshScheduler.GetState
           LoadAssemblyInputs =
