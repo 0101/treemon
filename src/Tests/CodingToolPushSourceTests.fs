@@ -275,6 +275,25 @@ type FromPushSessionsTests() =
                 Assert.That(result.LastUserMessage |> Option.map _.Text, Is.EqualTo(Some "Why is retry not jittered?"))))
 
     [<Test>]
+    member _.``A reminder title falls back to an older genuine intent and stays out of the user footer``() =
+        let intentTimestamp = "2026-03-01T11:58:00Z"
+        let reminderTimestamp = "2026-03-01T11:59:00Z"
+        let raw = "<system_reminder>internal runtime guidance"
+        let session =
+            stored "a" "wt" SessionLevelStatus.Working None (Some(msg raw reminderTimestamp)) None reminderTimestamp
+            |> fun value ->
+                { value with
+                    Status.Intent = Some(msg "Implementing the fix" intentTimestamp)
+                    Status.Title = Some(msg raw reminderTimestamp) }
+        let result = fromPushSessions now [ session ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                result.AgentActivity,
+                Is.EqualTo(Some(AgentActivity.Intent("Implementing the fix", ts intentTimestamp))))
+            Assert.That(result.LastUserMessage, Is.EqualTo None))
+
+    [<Test>]
     member _.``The last assistant message is truncated to the 80-char cap``() =
         let longText = String('y', 200)
         let session =

@@ -144,21 +144,24 @@ type UpsertStatusTests() =
             Assert.That((find "s1" rows).Status.Status, Is.EqualTo(SessionLevelStatus.Working)))
 
     [<Test>]
-    member _.``Skill, intent, title, and both messages round-trip through the store``() =
+    member _.``Session content and user-input clocks round-trip through the store``() =
         withStore (fun store ->
             let rich =
-                { Status = SessionLevelStatus.WaitingForUser
+                { Status = SessionLevelStatus.Idle
                   Skill = Some "review"
                   Intent = Some(msg "reviewing the auth changes" "2026-03-01T10:00:50Z")
                   Title = Some(msg "Review the auth changes" "2026-03-01T10:00:55Z")
                   LastUserMessage = Some(msg "the auth module" "2026-03-01T10:01:00Z")
                   LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:30Z")
-                  ContextUsage = None }
+                  ContextUsage = None
+                  AwaitingUserSince = Some(ts "2026-03-01T10:00:30Z")
+                  UserInputCompletedAt = Some(ts "2026-03-01T10:00:00Z") }
 
             store.UpsertStatus(storedOf "s1" "C:/wt/a" rich "2026-03-01T10:01:00Z" "2026-03-01T12:00:00Z")
 
             let row = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
             Assert.That(row.Status, Is.EqualTo(rich))
+            Assert.That(effectiveStatus row.Status, Is.EqualTo SessionLevelStatus.WaitingForUser)
             Assert.That(row.WorktreePath, Is.EqualTo(WorktreePath "C:/wt/a"))
             Assert.That(row.Provider, Is.EqualTo(CopilotCli)))
 
@@ -568,6 +571,19 @@ type LegacyDoneStatusTests() =
 
             use reopened = new SessionActivityStore(dbPath)
             Assert.That(readRawStatus dbPath "legacy", Is.EqualTo("idle"), "stored row should be rewritten to 'idle'"))
+
+    [<Test>]
+    member _.``Construction migrates legacy waiting rows to persisted user-input state``() =
+        withDbPath (fun dbPath ->
+            (use _ = new SessionActivityStore(dbPath)
+             insertRawStatus dbPath "legacy" "C:/wt/a" "waiting_for_user" "2026-03-01T11:00:00Z")
+
+            use reopened = new SessionActivityStore(dbPath)
+            let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+            Assert.Multiple(fun () ->
+                Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(row.Status.AwaitingUserSince, Is.EqualTo(Some(ts "2026-03-01T11:00:00Z")))
+                Assert.That(effectiveStatus row.Status, Is.EqualTo SessionLevelStatus.WaitingForUser)))
 
 
 [<TestFixture>]
