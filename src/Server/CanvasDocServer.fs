@@ -43,19 +43,38 @@ let private isSafeSessionIdChar (c: char) =
 let internal isValidSessionId (sessionId: string) =
     not (System.String.IsNullOrWhiteSpace sessionId) && sessionId |> Seq.forall isSafeSessionIdChar
 
-let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
-    let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
-    return
-        state.Repos
-        |> Map.values
-        |> Seq.collect _.KnownPaths
-        |> Set.ofSeq
-}
+let internal tryFindDiffComparisonContext
+    (state: RefreshScheduler.DashboardState)
+    (selectedWorktreePath: string)
+    =
+    let normalizedPath = PathUtils.normalizePath selectedWorktreePath
 
-let private isKnownWorktree agent path = async {
-    let! paths = allKnownPaths agent
-    return paths |> Set.contains path
-}
+    state.Repos
+    |> Map.values
+    |> Seq.tryPick (fun repo ->
+        if repo.KnownPaths |> Set.contains normalizedPath then
+            Some
+                ({ WorktreePath = normalizedPath
+                   UpstreamRemote = repo.UpstreamRemote
+                   BaseBranch = repo.BaseBranch }
+                 : WorktreeDiff.DiffComparisonContext)
+        else
+            None)
+
+let private getDiffComparisonContext
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    path
+    =
+    async {
+        let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
+        return tryFindDiffComparisonContext state path
+    }
+
+let private isKnownWorktree agent path =
+    async {
+        let! context = getDiffComparisonContext agent path
+        return context |> Option.isSome
+    }
 
 /// injectUrl is stored and later used as an HTTP POST target by CanvasBridge (sendMessage /
 /// drainQueue), so a non-local value would let a registrant make the server POST to arbitrary
@@ -389,12 +408,16 @@ let private handleCanvasRequest
         let diffDeadline =
             ProcessRunner.createResponseDeadline diffResponseDeadlineMs
 
-        let! isKnown = (isKnownWorktree agent worktreePath) |> Async.StartAsTask
+        let! comparisonContext =
+            getDiffComparisonContext agent worktreePath
+            |> Async.StartAsTask
+
+        let isKnown = comparisonContext |> Option.isSome
 
         if filename = "diff-summary" then
-            do! diffHandlers.Summary diffDeadline worktreePath isKnown ctx
+            do! diffHandlers.Summary diffDeadline comparisonContext ctx
         elif filename = "diff-file" then
-            do! diffHandlers.File diffDeadline worktreePath isKnown ctx
+            do! diffHandlers.File diffDeadline comparisonContext ctx
         elif filename = "beads-data" then
             if not isKnown then
                 ctx.Response.StatusCode <- 404

@@ -144,7 +144,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 ### Doc Server
 
 - The canvas doc server runs on port 5002 and serves HTML from `.agents/canvas/` only.
-- Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`.
+- Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`. One scheduler-state lookup per request identifies the owning `PerRepoState`; its result supplies both the known-worktree decision for document/data routes and the server-owned base/upstream comparison context for diff summaries.
 - `GET /{encodedWorktreePath}/beads-data` serves beads issue data as JSON for the beadspace dashboard (see `docs/spec/beadspace-canvas.md`).
 - The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds
   receive the shared base style, link interceptor, Escape focus-reclaim bridge, `canvasSend`, and

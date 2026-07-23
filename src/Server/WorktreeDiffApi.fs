@@ -7,7 +7,7 @@ open Shared
 type internal Service =
     { GetSummary:
         ProcessRunner.ResponseDeadline
-            -> string
+            -> WorktreeDiff.DiffComparisonContext
             -> WorktreeDiff.WorktreeDiffLayers
             -> Async<
                 Result<
@@ -17,7 +17,7 @@ type internal Service =
              >
       GetLayerCounts:
         ProcessRunner.ResponseDeadline
-            -> string
+            -> WorktreeDiff.DiffComparisonContext
             -> Async<WorktreeDiff.WorktreeDiffLayerCounts>
       GetFile:
         ProcessRunner.ResponseDeadline
@@ -35,14 +35,12 @@ type internal Service =
 type internal Handlers =
     { Summary:
         ProcessRunner.ResponseDeadline
-            -> string
-            -> bool
+            -> WorktreeDiff.DiffComparisonContext option
             -> HttpContext
             -> System.Threading.Tasks.Task<unit>
       File:
         ProcessRunner.ResponseDeadline
-            -> string
-            -> bool
+            -> WorktreeDiff.DiffComparisonContext option
             -> HttpContext
             -> System.Threading.Tasks.Task<unit> }
 
@@ -802,14 +800,16 @@ let private handleSummary
     (store: DiffIdentityStore)
     newIdentity
     deadline
-    worktreePath
-    isKnown
+    (comparisonContext: WorktreeDiff.DiffComparisonContext option)
     (ctx: HttpContext)
     =
     task {
-        if not isKnown then
+        match comparisonContext with
+        | None ->
             do! writeError deadline ctx 404 "Unknown worktree"
-        else
+        | Some comparisonContext ->
+            let worktreePath = comparisonContext.WorktreePath
+
             match viewerInstance ctx, summaryLayers ctx with
             | None, _ ->
                 do! writeError deadline ctx 400 "Invalid diff viewer"
@@ -826,7 +826,7 @@ let private handleSummary
                     |> Async.StartAsTask
 
                 let! counts =
-                    service.GetLayerCounts deadline worktreePath
+                    service.GetLayerCounts deadline comparisonContext
                     |> Async.StartAsTask
 
                 let! isCurrent =
@@ -848,11 +848,11 @@ let private handleSummary
                     |> Async.StartAsTask
 
                 let countsTask =
-                    service.GetLayerCounts deadline worktreePath
+                    service.GetLayerCounts deadline comparisonContext
                     |> Async.StartAsTask
 
                 let summaryTask =
-                    service.GetSummary deadline worktreePath layers
+                    service.GetSummary deadline comparisonContext layers
                     |> Async.StartAsTask
 
                 let! result = summaryTask
@@ -934,14 +934,16 @@ let private handleFile
     (service: Service)
     (store: DiffIdentityStore)
     deadline
-    worktreePath
-    isKnown
+    (comparisonContext: WorktreeDiff.DiffComparisonContext option)
     (ctx: HttpContext)
     =
     task {
-        if not isKnown then
+        match comparisonContext with
+        | None ->
             do! writeError deadline ctx 404 "Unknown worktree"
-        else
+        | Some comparisonContext ->
+            let worktreePath = comparisonContext.WorktreePath
+
             match viewerInstance ctx, identityQuery ctx with
             | Some viewer, Some identity ->
                 let! resolved =

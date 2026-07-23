@@ -449,6 +449,99 @@ type LoopbackInjectUrlTests() =
     member _.``rejects non-loopback or malformed inject URLs``(url: string) =
         Assert.That(isLoopbackInjectUrl url, Is.False, $"{url} must be rejected")
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffComparisonContextTests() =
+
+    [<Test>]
+    member _.``known root and linked paths resolve their scheduler-owned repo comparison``() =
+        let repoRoot =
+            Path.Combine(Path.GetTempPath(), "treemon-context", "repo")
+            |> PathUtils.normalizePath
+
+        let linked =
+            Path.Combine(Path.GetTempPath(), "treemon-context", "linked")
+            |> PathUtils.normalizePath
+
+        let repo =
+            { RefreshScheduler.PerRepoState.empty with
+                KnownPaths = Set.ofList [ repoRoot; linked ]
+                UpstreamRemote = "upstream"
+                BaseBranch = "dev" }
+
+        let state =
+            { RefreshScheduler.DashboardState.empty with
+                Repos =
+                    Map.ofList
+                        [ RepoId "context-repo",
+                          repo ] }
+
+        [ repoRoot; linked ]
+        |> List.iter (fun path ->
+            let context =
+                tryFindDiffComparisonContext state path
+
+            Assert.That(
+                context,
+                Is.EqualTo(
+                    Some
+                        ({ WorktreePath = path
+                           UpstreamRemote = "upstream"
+                           BaseBranch = "dev" }
+                         : WorktreeDiff.DiffComparisonContext)
+                )
+            ))
+
+        Assert.That(
+            tryFindDiffComparisonContext
+                state
+                (Path.Combine(Path.GetTempPath(), "treemon-context", "unknown")),
+            Is.EqualTo(None)
+        )
+
+    [<Test>]
+    member _.``comparison lookup cannot observe defaults once discovery makes a linked path known``() =
+        async {
+            let linked =
+                Path.Combine(Path.GetTempPath(), "treemon-context", "atomic-linked")
+                |> PathUtils.normalizePath
+
+            let agent = RefreshScheduler.createAgent ()
+
+            Assert.That(
+                tryFindDiffComparisonContext RefreshScheduler.DashboardState.empty linked,
+                Is.EqualTo(None)
+            )
+
+            let info: GitWorktree.WorktreeInfo =
+                { Path = linked
+                  Head = "abc123"
+                  Branch = Some "feature" }
+
+            agent.Post(
+                RefreshScheduler.repositoryDiscoveryUpdate
+                    (RepoId "atomic-context-repo")
+                    (Some [ info ])
+                    "upstream"
+                    "develop"
+            )
+
+            let! state = agent.PostAndAsyncReply(RefreshScheduler.GetState)
+
+            Assert.That(
+                tryFindDiffComparisonContext state linked,
+                Is.EqualTo(
+                    Some
+                        ({ WorktreePath = linked
+                           UpstreamRemote = "upstream"
+                           BaseBranch = "develop" }
+                         : WorktreeDiff.DiffComparisonContext)
+                )
+            )
+        }
+        |> Async.RunSynchronously
+
 // ── /api/canvas/attribute ownership declaration ───────────────────────────────
 // attributeOwnership is the HTTP-free core of canvasAttributeHandler (the same seam extraction
 // isLoopbackInjectUrl uses for canvasRegisterHandler). It records ownership only for a known

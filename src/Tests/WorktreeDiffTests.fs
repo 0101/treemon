@@ -29,6 +29,11 @@ let private layers committed local untracked : WorktreeDiffLayers =
       LocalChanges = local
       Untracked = untracked }
 
+let private comparisonContext worktreePath : DiffComparisonContext =
+    { WorktreePath = worktreePath
+      UpstreamRemote = "origin"
+      BaseBranch = "main" }
+
 let private assertSummaryOk result =
     match result with
     | Ok summary -> summary
@@ -261,7 +266,7 @@ type WorktreeDiffIntegrationTests() =
         writeText repoDir "untracked.txt" "untracked"
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -360,7 +365,7 @@ type WorktreeDiffIntegrationTests() =
             let selected = layers committed local untracked
 
             let summary =
-                getFilteredWorktreeDiffSummary repoDir selected
+                getFilteredWorktreeDiffSummary (comparisonContext repoDir) selected
                 |> TestUtils.runAsync
                 |> assertSummaryOk
 
@@ -378,7 +383,7 @@ type WorktreeDiffIntegrationTests() =
 
         let assertTrackedPatch selected comparison =
             let summary =
-                getFilteredWorktreeDiffSummary repoDir selected
+                getFilteredWorktreeDiffSummary (comparisonContext repoDir) selected
                 |> TestUtils.runAsync
                 |> assertSummaryOk
 
@@ -443,7 +448,7 @@ type WorktreeDiffIntegrationTests() =
             getWorktreeDiffLayerCountsWithinDeadline
                 (ProcessRunner.createResponseDeadline
                     ProcessRunner.argumentListResponseDeadlineMs)
-                repoDir
+                (comparisonContext repoDir)
             |> TestUtils.runAsync
 
         Assert.Multiple(fun () ->
@@ -461,7 +466,7 @@ type WorktreeDiffIntegrationTests() =
         writeText repoDir "delete.txt" "replacement"
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -554,7 +559,7 @@ type WorktreeDiffIntegrationTests() =
             | other -> failwith $"Unexpected replacement {other}"
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -682,7 +687,7 @@ type WorktreeDiffIntegrationTests() =
                   "--" ]
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -731,7 +736,7 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "commit"; "-m"; "feature" ]
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -815,7 +820,7 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "commit"; "-m"; "generated diff viewer" ]
 
         let viewerOnlySummary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -835,7 +840,7 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "commit"; "-m"; "nearby backup" ]
 
         let backupSummary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -903,7 +908,7 @@ type WorktreeDiffIntegrationTests() =
             gitText repoDir [ "diff"; "--name-only"; "main"; "--" ]
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -930,7 +935,7 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -945,16 +950,15 @@ type WorktreeDiffIntegrationTests() =
         )
 
     [<Test>]
-    member _.``missing configured base is a typed summary error``() =
+    member _.``missing scheduler-resolved base is a typed summary error``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
 
-        File.WriteAllText(
-            Path.Combine(repoDir, ".treemon.json"),
-            """{ "baseBranch": "missing" }"""
-        )
-
-        let result = getWorktreeDiffSummary repoDir |> TestUtils.runAsync
+        let result =
+            getWorktreeDiffSummary
+                { comparisonContext repoDir with
+                    BaseBranch = "missing" }
+            |> TestUtils.runAsync
 
         Assert.That(
             (result = Error(BaseNotFound("missing", "origin/missing"))),
@@ -963,7 +967,7 @@ type WorktreeDiffIntegrationTests() =
         )
 
     [<Test>]
-    member _.``local and untracked layers do not require a configured base``() =
+    member _.``local and untracked layers do not require the scheduler-resolved base``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
         writeText repoDir "tracked.txt" "base"
@@ -971,26 +975,21 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "commit"; "-m"; "base" ]
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        File.WriteAllText(
-            Path.Combine(repoDir, ".treemon.json"),
-            """{ "baseBranch": "missing" }"""
-        )
-        gitOk repoDir [ "add"; "--"; ".treemon.json" ]
-        gitOk repoDir [ "commit"; "-m"; "configure missing base" ]
-
         writeText repoDir "tracked.txt" "local"
         writeText repoDir "untracked.txt" "untracked"
 
         let localSummary =
             getFilteredWorktreeDiffSummary
-                repoDir
+                { comparisonContext repoDir with
+                    BaseBranch = "missing" }
                 (layers false true false)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
         let untrackedSummary =
             getFilteredWorktreeDiffSummary
-                repoDir
+                { comparisonContext repoDir with
+                    BaseBranch = "missing" }
                 (layers false false true)
             |> TestUtils.runAsync
             |> assertSummaryOk
@@ -999,7 +998,8 @@ type WorktreeDiffIntegrationTests() =
             getWorktreeDiffLayerCountsWithinDeadline
                 (ProcessRunner.createResponseDeadline
                     ProcessRunner.argumentListResponseDeadlineMs)
-                repoDir
+                { comparisonContext repoDir with
+                    BaseBranch = "missing" }
             |> TestUtils.runAsync
 
         Assert.Multiple(fun () ->
@@ -1019,10 +1019,12 @@ type WorktreeDiffIntegrationTests() =
         let nonRepo = Path.Combine(tempDir, "not-a-repo")
         Directory.CreateDirectory(nonRepo) |> ignore
 
-        let result = getWorktreeDiffSummary nonRepo |> TestUtils.runAsync
+        let result =
+            getWorktreeDiffSummary (comparisonContext nonRepo)
+            |> TestUtils.runAsync
 
         match result with
-        | Error(GitFailed(ResolveRemote, _)) -> ()
+        | Error(GitFailed(ResolveBase, _)) -> ()
         | _ -> Assert.Fail($"Expected typed Git failure, got {result}")
 
     [<Test>]
@@ -1032,7 +1034,9 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "checkout"; "--orphan"; "feature" ]
         gitOk repoDir [ "commit"; "--allow-empty"; "-m"; "unrelated feature" ]
 
-        let result = getWorktreeDiffSummary repoDir |> TestUtils.runAsync
+        let result =
+            getWorktreeDiffSummary (comparisonContext repoDir)
+            |> TestUtils.runAsync
 
         match result with
         | Error(GitFailed(ResolveMergeBase, 1)) -> ()
@@ -1046,7 +1050,7 @@ type WorktreeDiffIntegrationTests() =
         File.Delete(Path.Combine(repoDir, "delete.txt"))
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -1126,7 +1130,7 @@ type WorktreeDiffIntegrationTests() =
         |> List.iter (fun (path, _, _) -> writeText repoDir path "hello")
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -1166,7 +1170,7 @@ type WorktreeDiffIntegrationTests() =
         File.WriteAllBytes(Path.Combine(repoDir, "binary.dat"), [| 1uy; 0uy; 2uy |])
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -1191,7 +1195,7 @@ type WorktreeDiffIntegrationTests() =
         File.WriteAllBytes(Path.Combine(repoDir, "binary.dat"), [| 3uy; 0uy; 4uy |])
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -1212,7 +1216,7 @@ type WorktreeDiffIntegrationTests() =
         writeText repoDir "large.txt" (String('x', maxWorktreeDiffBytes))
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -1240,7 +1244,7 @@ type WorktreeDiffIntegrationTests() =
         writeText repoDir "over-limit.txt" (content (maxWorktreeDiffLines - 4))
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -1283,7 +1287,7 @@ type WorktreeDiffIntegrationTests() =
             writeText repoDir (Path.Combine("many", $"file-{index:D4}.txt")) "")
 
         let atLimit =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 
@@ -1294,7 +1298,9 @@ type WorktreeDiffIntegrationTests() =
         )
 
         writeText repoDir "many/one-too-many.txt" ""
-        let overLimit = getWorktreeDiffSummary repoDir |> TestUtils.runAsync
+        let overLimit =
+            getWorktreeDiffSummary (comparisonContext repoDir)
+            |> TestUtils.runAsync
 
         Assert.That(
             (overLimit = Error(TooManyFiles(maxWorktreeDiffFiles + 1))),
@@ -1318,7 +1324,7 @@ type WorktreeDiffIntegrationTests() =
             Assert.Ignore("Symbolic links are unavailable in this environment")
 
         let summary =
-            getWorktreeDiffSummary repoDir
+            getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
 

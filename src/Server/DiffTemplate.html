@@ -21,10 +21,16 @@
     --accent-bright: #b4befe;
     --added: #a6e3a1;
     --deleted: #f38ba8;
-    --modified: #f9e2af;
-    --renamed: #89b4fa;
+    --modified: #89b4fa;
+    --renamed: #cba6f7;
     --untracked: #94e2d5;
-    --diff-code-size: .72rem;
+    --line-number: #6c7086;
+    --font-ui: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-code: Consolas, "Cascadia Mono", "Fira Code", monospace;
+    --fs-sm: 11px;
+    --fs-base: 13px;
+    --fs-lg: 15px;
+    --diff-code-size: var(--fs-base);
     --diff-code-line-height: 1.45;
 }
 
@@ -39,7 +45,10 @@ body {
     overflow: hidden;
     background: var(--bg-deep);
     color: var(--text-primary);
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-family: var(--font-ui);
+    font-size: var(--fs-base);
+    font-weight: 400;
+    line-height: 1.4;
 }
 
 button { font: inherit; }
@@ -54,30 +63,32 @@ button { font: inherit; }
     display: flex;
     align-items: center;
     gap: .4rem;
-    min-height: 46px;
-    padding: .5rem .75rem;
-    border-bottom: 1px solid var(--border);
+    min-height: 40px;
+    padding: .4rem .75rem .2rem;
     background: var(--bg-deep);
 }
 
 .title {
+    display: flex;
+    gap: .4rem;
+    align-items: baseline;
     min-width: 0;
     margin-right: auto;
+    white-space: nowrap;
 }
 
 .title strong {
-    display: block;
     overflow: hidden;
     color: var(--text-primary);
-    font-size: .85rem;
+    font-size: var(--fs-base);
+    font-weight: 600;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
 .title span {
-    display: block;
     color: var(--text-muted);
-    font-size: .7rem;
+    font-size: var(--fs-base);
 }
 
 .view-toggle {
@@ -88,21 +99,22 @@ button { font: inherit; }
 .view-toggle button,
 .refresh-button {
     display: inline-grid;
-    width: 2rem;
-    height: 2rem;
+    width: 28px;
+    height: 28px;
     place-items: center;
     padding: 0;
     border: 1px solid var(--border);
     border-radius: 4px;
-    color: var(--text-muted);
-    background: var(--bg-surface);
+    color: var(--text-secondary);
+    background: var(--bg-hover);
     cursor: pointer;
+    opacity: .6;
 }
 
 .view-toggle button[aria-pressed="true"] {
-    border-color: var(--border-bright);
-    color: var(--text-primary);
-    background: var(--bg-hover);
+    border-color: #89b4fa;
+    color: #89b4fa;
+    background: #2e3452;
 }
 
 .toolbar-icon {
@@ -117,6 +129,7 @@ button { font: inherit; }
 .refresh-button:focus-visible {
     border-color: var(--border-bright);
     color: var(--text-primary);
+    opacity: 1;
 }
 
 .view-toggle button:focus-visible,
@@ -136,29 +149,25 @@ button { font: inherit; }
 .layer-filters {
     display: flex;
     flex-wrap: wrap;
-    gap: .55rem 1rem;
+    gap: .4rem 1rem;
+    align-items: center;
     margin: 0;
-    padding: .65rem .8rem .45rem;
-    border: 0;
+    padding: .25rem .75rem .45rem;
     color: var(--text-secondary);
     background: var(--bg-deep);
 }
 
-.layer-filters legend {
-    width: 100%;
-    padding: 0;
+.filters-label {
     color: var(--text-muted);
-    font-size: .62rem;
-    font-weight: 700;
-    letter-spacing: .06em;
-    text-transform: uppercase;
+    font-size: var(--fs-base);
+    font-weight: 500;
 }
 
 .layer-filter {
     display: inline-flex;
     gap: .38rem;
     align-items: center;
-    font-size: .72rem;
+    font-size: var(--fs-base);
     cursor: pointer;
 }
 
@@ -172,11 +181,14 @@ button { font: inherit; }
     width: 1rem;
     height: 1rem;
     margin: 0;
+    padding: 0;
+    border-radius: 3px;
     accent-color: var(--accent);
 }
 
 .layer-count {
     color: var(--text-muted);
+    font-size: var(--fs-sm);
     font-variant-numeric: tabular-nums;
 }
 
@@ -186,31 +198,37 @@ button { font: inherit; }
     z-index: 4;
     display: flex;
     align-items: center;
-    gap: .85rem;
-    min-height: 2.15rem;
-    padding: .4rem .8rem;
+    gap: 1rem;
+    min-height: 1.9rem;
+    padding: .25rem .75rem .45rem;
     border-bottom: 1px solid var(--border);
     color: var(--text-secondary);
     background: var(--bg-deep);
-    font-size: .7rem;
-    font-weight: 700;
+    font-size: var(--fs-base);
+    font-weight: 400;
 }
 
 .change-summary:empty {
     display: none;
 }
 
-.change-summary-added { color: var(--added); }
-.change-summary-modified { color: var(--modified); }
-.change-summary-removed { color: var(--deleted); }
-
 .change-summary span {
     white-space: nowrap;
 }
 
+.change-summary-label { color: var(--text-secondary); }
+.change-summary-count {
+    margin-left: .25rem;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+}
+.change-summary-added .change-summary-count { color: var(--added); }
+.change-summary-modified .change-summary-count { color: var(--modified); }
+.change-summary-removed .change-summary-count { color: var(--deleted); }
+
 .file-list {
     min-height: 0;
-    padding: 0 .8rem .8rem;
+    padding: 0 0 .8rem;
 }
 
 .file-item {
@@ -229,7 +247,7 @@ button { font: inherit; }
     grid-template-columns: auto minmax(0, 1fr) auto;
     gap: .3rem .5rem;
     align-items: center;
-    padding: .52rem .15rem;
+    padding: .55rem .75rem;
     border: 0;
     border-radius: 0;
     text-align: left;
@@ -241,7 +259,7 @@ button { font: inherit; }
 .file-entry::before {
     content: "›";
     color: var(--text-muted);
-    font-size: .9rem;
+    font-size: var(--fs-lg);
     line-height: 1;
     transition: transform .12s ease;
 }
@@ -265,8 +283,8 @@ button { font: inherit; }
 
 .file-path {
     overflow: hidden;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: .72rem;
+    font-family: var(--font-code);
+    font-size: var(--fs-base);
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -275,8 +293,8 @@ button { font: inherit; }
     grid-column: 2 / -1;
     overflow: hidden;
     color: var(--text-muted);
-    font-family: Consolas, "Courier New", monospace;
-    font-size: .64rem;
+    font-family: var(--font-code);
+    font-size: var(--fs-sm);
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -286,9 +304,9 @@ button { font: inherit; }
     min-width: 1.2rem;
     place-items: center;
     padding: 0;
-    font-family: Consolas, "Courier New", monospace;
-    font-size: .76rem;
-    font-weight: 800;
+    font-family: var(--font-code);
+    font-size: var(--fs-sm);
+    font-weight: 700;
 }
 
 .change-badge.added { color: var(--added); }
@@ -320,14 +338,14 @@ button { font: inherit; }
 }
 
 .state-card .state-title {
-    font-size: 1rem;
-    font-weight: 700;
+    font-size: var(--fs-lg);
+    font-weight: 600;
 }
 
 .state-card .state-detail {
     max-width: 520px;
     color: var(--text-muted);
-    font-size: .8rem;
+    font-size: var(--fs-base);
     line-height: 1.5;
 }
 
@@ -350,7 +368,9 @@ button { font: inherit; }
     overflow: auto;
     color: var(--text-secondary);
     background: var(--bg-deep);
-    font: .76rem/1.55 Consolas, "Courier New", monospace;
+    font-family: var(--font-code);
+    font-size: var(--fs-base);
+    line-height: 1.5;
     white-space: pre;
 }
 
@@ -363,13 +383,13 @@ button { font: inherit; }
 }
 
 .replacement-marker .replacement-title {
-    font-size: .86rem;
-    font-weight: 700;
+    font-size: var(--fs-base);
+    font-weight: 600;
 }
 
 .replacement-marker .replacement-detail {
     color: var(--text-muted);
-    font-size: .76rem;
+    font-size: var(--fs-sm);
     line-height: 1.45;
 }
 
@@ -415,12 +435,20 @@ button { font: inherit; }
     width: auto;
     overflow-x: hidden;
 }
+#patch .d2h-file-side-diff + .d2h-file-side-diff {
+    border-left: 1px solid var(--border);
+}
 #patch .d2h-diff-table {
     width: 100%;
     table-layout: fixed;
-    font-family: Consolas, "Courier New", monospace;
+    font-family: var(--font-code);
 }
-#patch .d2h-diff-table td { vertical-align: top; }
+#patch .d2h-diff-table th,
+#patch .d2h-diff-table td {
+    padding: 0;
+    border: 0;
+    vertical-align: top;
+}
 #patch .d2h-code-line,
 #patch .d2h-code-side-line {
     display: flex;
@@ -445,23 +473,23 @@ button { font: inherit; }
     overflow-wrap: anywhere;
     white-space: pre-wrap;
 }
-#patch .d2h-code-linenumber,
-#patch .d2h-code-side-linenumber {
+#patch td.d2h-code-linenumber,
+#patch td.d2h-code-side-linenumber {
     position: static;
     display: table-cell;
     vertical-align: top;
-    border-color: var(--border);
-    color: var(--text-muted);
+    border-right: 1px solid var(--border);
+    color: var(--line-number);
     background: var(--bg-surface);
-    font-family: Consolas, "Courier New", monospace;
+    font-family: var(--font-code);
     font-size: var(--diff-code-size);
     line-height: var(--diff-code-line-height);
 }
-#patch .d2h-code-linenumber {
+#patch td.d2h-code-linenumber {
     width: 7.5em;
     min-width: 7.5em;
 }
-#patch .d2h-code-side-linenumber {
+#patch td.d2h-code-side-linenumber {
     width: 4em;
     min-width: 4em;
 }
@@ -548,8 +576,8 @@ button { font: inherit; }
     </header>
     <div class="workspace">
         <main id="content" class="content" aria-label="Changed files">
-            <fieldset id="layer-filters" class="layer-filters">
-                <legend>Include changes</legend>
+            <div id="layer-filters" class="layer-filters" role="group" aria-label="Include changes">
+                <span class="filters-label">Include changes</span>
                 <label class="layer-filter">
                     <input id="filter-committed" type="checkbox">
                     <span>Already committed</span>
@@ -565,7 +593,7 @@ button { font: inherit; }
                     <span>Untracked</span>
                     <span id="count-untracked" class="layer-count" aria-live="polite">…</span>
                 </label>
-            </fieldset>
+            </div>
             <div id="change-summary" class="change-summary" aria-live="polite"></div>
             <div id="file-list" class="file-list"></div>
             <div id="summary-state" aria-live="polite">
@@ -897,7 +925,13 @@ function renderChangeSummary(files) {
     summary.replaceChildren.apply(summary, parts.map(function(part) {
         var item = document.createElement('span');
         item.className = 'change-summary-' + part[0];
-        item.textContent = part[1] + ' ' + part[2];
+        var label = document.createElement('span');
+        label.className = 'change-summary-label';
+        label.textContent = part[1];
+        var count = document.createElement('span');
+        count.className = 'change-summary-count';
+        count.textContent = String(part[2]);
+        item.append(label, document.createTextNode(' '), count);
         return item;
     }));
     summary.setAttribute(

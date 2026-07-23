@@ -63,7 +63,7 @@ let private syntaxPatch =
 
 let private wrappedPatch =
     let longLine prefix word =
-        prefix + String.replicate 24 $"{word} "
+        prefix + String.replicate 40 $"{word} "
 
     String.concat
         Environment.NewLine
@@ -1406,10 +1406,35 @@ type DiffViewerE2ETests() =
             let! staleLoading = this.Page.Locator("[data-state='loading-summary']").CountAsync()
             let! staleSummaryState = this.Page.Locator("#summary-state > *").CountAsync()
             let! staleHeading = this.Page.GetByText("Changed files").CountAsync()
+            let! colors =
+                summary.EvaluateAsync<string array>(
+                    """element => {
+                        const color = selector => getComputedStyle(element.querySelector(selector)).color;
+                        return [
+                            color('.change-summary-added .change-summary-label'),
+                            color('.change-summary-added .change-summary-count'),
+                            color('.change-summary-modified .change-summary-label'),
+                            color('.change-summary-modified .change-summary-count'),
+                            color('.change-summary-removed .change-summary-label'),
+                            color('.change-summary-removed .change-summary-count')
+                        ];
+                    }"""
+                )
 
             Assert.Multiple(fun () ->
                 Assert.That(text, Is.EqualTo("Added 2Modified 2Removed 1"))
                 Assert.That(label, Is.EqualTo("Added 2, Modified 2, Removed 1"))
+                Assert.That(
+                    colors,
+                    Is.EqualTo(
+                        [| "rgb(186, 194, 222)"
+                           "rgb(166, 227, 161)"
+                           "rgb(186, 194, 222)"
+                           "rgb(137, 180, 250)"
+                           "rgb(186, 194, 222)"
+                           "rgb(243, 139, 168)" |]
+                    )
+                )
                 Assert.That(staleLoading, Is.Zero)
                 Assert.That(staleSummaryState, Is.Zero)
                 Assert.That(staleHeading, Is.Zero))
@@ -1472,8 +1497,9 @@ type DiffViewerE2ETests() =
                 this.Page.EvaluateAsync<string array>(
                     """() => {
                         const style = selector => getComputedStyle(document.querySelector(selector));
-                        const code = style('#patch .d2h-code-line');
-                        const number = style('#patch .d2h-code-linenumber');
+                        const code = style('#patch td.d2h-cntx .d2h-code-line');
+                        const number = style('#patch td.d2h-code-linenumber:not(.d2h-info)');
+                        const cell = getComputedStyle(document.querySelector('#patch .d2h-code-line').closest('td'));
                         const unifiedButton = style('#unified-view');
                         const refreshButton = style('#refresh');
                         return [
@@ -1491,7 +1517,28 @@ type DiffViewerE2ETests() =
                             unifiedButton.borderTopColor,
                             refreshButton.borderTopColor,
                             unifiedButton.backgroundColor,
-                            style('.view-toggle').borderTopWidth
+                            style('.view-toggle').borderTopWidth,
+                            style('body').fontSize,
+                            style('.title strong').fontSize,
+                            style('.title span').fontSize,
+                            style('.filters-label').fontSize,
+                            style('.layer-filter').fontSize,
+                            style('.layer-count').fontSize,
+                            style('.change-summary').fontSize,
+                            style('.file-path').fontSize,
+                            cell.borderTopWidth,
+                            cell.borderRightWidth,
+                            cell.borderBottomWidth,
+                            cell.borderLeftWidth,
+                            cell.paddingTop,
+                            cell.paddingRight,
+                            cell.paddingBottom,
+                            cell.paddingLeft,
+                            number.borderRightWidth,
+                            number.color,
+                            code.color,
+                            style('.file-list').paddingLeft,
+                            style('.file-entry').paddingLeft
                         ];
                     }"""
                 )
@@ -1502,9 +1549,10 @@ type DiffViewerE2ETests() =
             let! splitTypography =
                 this.Page.EvaluateAsync<string array>(
                     """() => {
-                        const code = getComputedStyle(document.querySelector('#patch .d2h-code-side-line'));
-                        const number = getComputedStyle(document.querySelector('#patch .d2h-code-side-linenumber'));
-                        return [code.fontSize, number.fontSize, code.lineHeight, number.lineHeight];
+                        const code = getComputedStyle(document.querySelector('#patch td.d2h-cntx .d2h-code-side-line'));
+                        const number = getComputedStyle(document.querySelector('#patch td.d2h-code-side-linenumber:not(.d2h-info)'));
+                        const right = getComputedStyle(document.querySelectorAll('#patch .d2h-file-side-diff')[1]);
+                        return [code.fontSize, number.fontSize, code.lineHeight, number.lineHeight, right.borderLeftWidth];
                     }"""
                 )
 
@@ -1513,12 +1561,20 @@ type DiffViewerE2ETests() =
                 Assert.That(unified[5], Is.EqualTo(unified[6]))
                 Assert.That(unified[7], Is.EqualTo(unified[8]))
                 Assert.That(unified[9], Is.EqualTo(unified[10]))
-                Assert.That(unified[11], Is.EqualTo("rgb(88, 91, 112)"))
+                Assert.That(unified[11], Is.EqualTo("rgb(137, 180, 250)"))
                 Assert.That(unified[12], Is.EqualTo("rgb(69, 71, 90)"))
-                Assert.That(unified[13], Is.EqualTo("rgb(49, 50, 68)"))
+                Assert.That(unified[13], Is.EqualTo("rgb(46, 52, 82)"))
                 Assert.That(unified[14], Is.EqualTo("0px"))
+                Assert.That(unified[15..22], Is.EqualTo([| "13px"; "13px"; "13px"; "13px"; "13px"; "11px"; "13px"; "13px" |]))
+                Assert.That(unified[23..30], Is.All.EqualTo("0px"))
+                Assert.That(unified[31], Is.EqualTo("1px"))
+                Assert.That(unified[32], Is.EqualTo("rgb(108, 112, 134)"))
+                Assert.That(unified[33], Is.Not.EqualTo(unified[32]))
+                Assert.That(unified[34], Is.EqualTo("0px"))
+                Assert.That(unified[35], Is.EqualTo("12px"))
                 Assert.That(splitTypography[0], Is.EqualTo(splitTypography[1]))
-                Assert.That(splitTypography[2], Is.EqualTo(splitTypography[3])))
+                Assert.That(splitTypography[2], Is.EqualTo(splitTypography[3]))
+                Assert.That(splitTypography[4], Is.EqualTo("1px")))
         }
 
     [<Test>]

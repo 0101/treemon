@@ -282,6 +282,47 @@ type StateAgentTests() =
         |> Async.RunSynchronously
 
     [<Test>]
+    member _.``Repository discovery publishes a linked worktree with its comparison configuration``() =
+        async {
+            let agent = createAgent ()
+            let linked = makeWorktree (Path.Combine("repo-linked", "feature")) "feature"
+
+            agent.Post(repositoryDiscoveryUpdate testRepoId (Some [ linked ]) "upstream" "develop")
+
+            let! state = agent.PostAndAsyncReply(GetState)
+            let repo = getRepo state
+
+            Assert.Multiple(fun () ->
+                Assert.That(repo.KnownPaths, Is.EqualTo(Set.ofList [ linked.Path ]))
+                Assert.That(repo.WorktreeList, Is.EqualTo([ linked ]))
+                Assert.That(repo.UpstreamRemote, Is.EqualTo("upstream"))
+                Assert.That(repo.BaseBranch, Is.EqualTo("develop"))
+                Assert.That(repo.IsReady, Is.True))
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``Repository discovery updates an existing repo remote and base together``() =
+        async {
+            let agent = createAgent ()
+            let mainPath = Path.Combine("repo", "main")
+            let worktrees = [ makeWorktree mainPath "main" ]
+
+            agent.Post(repositoryDiscoveryUpdate testRepoId (Some worktrees) "origin" "main")
+            do! waitForAgent agent
+            agent.Post(repositoryDiscoveryUpdate testRepoId (Some worktrees) "canonical" "trunk")
+
+            let! state = agent.PostAndAsyncReply(GetState)
+            let repo = getRepo state
+
+            Assert.Multiple(fun () ->
+                Assert.That(repo.KnownPaths, Is.EqualTo(Set.ofList [ mainPath ]))
+                Assert.That(repo.UpstreamRemote, Is.EqualTo("canonical"))
+                Assert.That(repo.BaseBranch, Is.EqualTo("trunk")))
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
     member _.``HasDiff_mapping stays independent from IsDirty and WorkMetrics``() =
         let path = "/repo/untracked"
         let gitData : GitData =
@@ -379,10 +420,7 @@ type StateAgentTests() =
             agent.Post(UpdateWorktreeList(testRepoId, worktrees))
             do! waitForAgent agent
 
-            // A git failure surfaces as None from listWorktrees, so executeTask posts
-            // nothing — driving the exact skip-on-None decision used in production.
-            worktreeListUpdate testRepoId None |> Option.iter agent.Post
-            do! waitForAgent agent
+            agent.Post(repositoryDiscoveryUpdate testRepoId None "upstream" "develop")
 
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = getRepo state
@@ -390,6 +428,8 @@ type StateAgentTests() =
             Assert.That(repo.WorktreeList.Length, Is.EqualTo(2), "a failed discovery must not blank the last-known-good list")
             Assert.That(repo.WorktreeList |> List.map _.Path, Is.EquivalentTo([ "/repo/main"; "/repo/feature" ]))
             Assert.That(repo.IsReady, Is.True)
+            Assert.That(repo.UpstreamRemote, Is.EqualTo("upstream"))
+            Assert.That(repo.BaseBranch, Is.EqualTo("develop"))
         }
         |> Async.RunSynchronously
 
@@ -488,15 +528,17 @@ type StateAgentTests() =
         |> Async.RunSynchronously
 
     [<Test>]
-    member _.``UpdateWorktreeList auto-removes stale data for removed worktrees``() =
+    member _.``Repository discovery reuses worktree data and idle-stamp pruning``() =
         async {
             let agent = createAgent ()
+            let mainPath = Path.Combine("repo", "main")
+            let oldPath = Path.Combine("repo", "old")
 
             let initial =
-                [ { WorktreeInfo.Path = "/repo/main"
+                [ { WorktreeInfo.Path = mainPath
                     Head = "abc123"
                     Branch = Some "main" }
-                  { Path = "/repo/old"
+                  { Path = oldPath
                     Head = "def456"
                     Branch = Some "old" } ]
 
@@ -504,7 +546,7 @@ type StateAgentTests() =
             do! waitForAgent agent
 
             let gitData : GitData =
-                { Path = "/repo/old"
+                { Path = oldPath
                   Branch = "old"
                   LastCommitMessage = "old"
                   LastCommitTime = DateTimeOffset.UtcNow
@@ -514,21 +556,49 @@ type StateAgentTests() =
                   HasDiff = false
                   WorkMetrics = None }
 
-            agent.Post(UpdateGit(testRepoId, "/repo/old", gitData))
+            agent.Post(UpdateGit(testRepoId, oldPath, gitData))
+            agent.Post(
+                UpdateBeads(
+                    testRepoId,
+                    oldPath,
+                    { Open = 1; InProgress = 0; Blocked = 0; Closed = 0 },
+                    { Planned = 1; Queued = 0; Loose = 0 }
+                )
+            )
+
+            let seen = DateTimeOffset(2026, 7, 23, 12, 0, 0, TimeSpan.Zero)
+
+            agent.Post(
+                UpdateSessionStatus
+                    { SessionId = SessionId "removed-worktree"
+                      WorktreePath = WorktreePath oldPath
+                      Provider = CopilotCli
+                      Status = { emptyStatus with Status = SessionLevelStatus.Idle }
+                      UpdatedAt = seen
+                      LastSeen = seen
+                      ContextUsageAt = None }
+            )
             do! waitForAgent agent
 
             let updated =
-                [ { WorktreeInfo.Path = "/repo/main"
+                [ { WorktreeInfo.Path = mainPath
                     Head = "abc123"
                     Branch = Some "main" } ]
 
-            agent.Post(UpdateWorktreeList(testRepoId, updated))
+            agent.Post(repositoryDiscoveryUpdate testRepoId (Some updated) "upstream" "develop")
 
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = getRepo state
 
-            Assert.That(repo.WorktreeList.Length, Is.EqualTo(1))
-            Assert.That(repo.GitData.ContainsKey("/repo/old"), Is.False)
+            Assert.Multiple(fun () ->
+                Assert.That(repo.WorktreeList, Is.EqualTo(updated))
+                Assert.That(repo.KnownPaths, Is.EqualTo(Set.ofList [ mainPath ]))
+                Assert.That(repo.GitData.ContainsKey(oldPath), Is.False)
+                Assert.That(repo.BeadsData.ContainsKey(oldPath), Is.False)
+                Assert.That(repo.PlanningData.ContainsKey(oldPath), Is.False)
+                Assert.That(state.CodingToolSinceByWorktree.ContainsKey(oldPath), Is.False)
+                Assert.That(repo.UpstreamRemote, Is.EqualTo("upstream"))
+                Assert.That(repo.BaseBranch, Is.EqualTo("develop")))
         }
         |> Async.RunSynchronously
 
@@ -570,30 +640,34 @@ type StateAgentTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type WorktreeListUpdateTests() =
+type RepositoryDiscoveryUpdateTests() =
 
     [<Test>]
-    member _.``Successful discovery produces an UpdateWorktreeList message``() =
+    member _.``Discovery produces one message containing worktrees remote and base``() =
         let worktrees = [ makeWorktree "/repo/main" "main" ]
 
-        match worktreeListUpdate testRepoId (Some worktrees) with
-        | Some(UpdateWorktreeList(repoId, wts)) ->
+        match repositoryDiscoveryUpdate testRepoId (Some worktrees) "upstream" "develop" with
+        | UpdateRepositoryDiscovery(repoId, discovery) ->
             Assert.That(repoId, Is.EqualTo(testRepoId))
-            Assert.That(wts, Is.EqualTo(worktrees))
-        | other -> Assert.Fail($"Expected Some(UpdateWorktreeList ...) but got {other}")
+            Assert.That(discovery.Worktrees, Is.EqualTo(Some worktrees))
+            Assert.That(discovery.UpstreamRemote, Is.EqualTo("upstream"))
+            Assert.That(discovery.BaseBranch, Is.EqualTo("develop"))
+        | other -> Assert.Fail($"Expected UpdateRepositoryDiscovery but got {other}")
 
     [<Test>]
-    member _.``Empty-but-successful discovery still produces an update``() =
-        match worktreeListUpdate testRepoId (Some []) with
-        | Some(UpdateWorktreeList(repoId, wts)) ->
+    member _.``Empty successful discovery remains distinguishable from failed discovery``() =
+        match repositoryDiscoveryUpdate testRepoId (Some []) "origin" "main" with
+        | UpdateRepositoryDiscovery(repoId, discovery) ->
             Assert.That(repoId, Is.EqualTo(testRepoId))
-            Assert.That(wts, Is.Empty)
-        | other -> Assert.Fail($"Expected Some(UpdateWorktreeList ...) but got {other}")
+            Assert.That(discovery.Worktrees |> Option.map List.isEmpty, Is.EqualTo(Some true))
+        | other -> Assert.Fail($"Expected UpdateRepositoryDiscovery but got {other}")
 
     [<Test>]
-    member _.``Failed discovery (None) produces no message``() =
-        let result = worktreeListUpdate testRepoId None
-        Assert.That(result, Is.EqualTo(None))
+    member _.``Failed discovery carries no replacement worktree list``() =
+        match repositoryDiscoveryUpdate testRepoId None "origin" "main" with
+        | UpdateRepositoryDiscovery(_, discovery) ->
+            Assert.That(discovery.Worktrees, Is.EqualTo(None))
+        | other -> Assert.Fail($"Expected UpdateRepositoryDiscovery but got {other}")
 
 
 [<TestFixture>]

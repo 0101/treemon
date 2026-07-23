@@ -70,8 +70,14 @@ module DashboardState =
           SessionStatuses = Map.empty
           CodingToolSinceByWorktree = Map.empty }
 
+type RepositoryDiscovery =
+    { Worktrees: GitWorktree.WorktreeInfo list option
+      UpstreamRemote: string
+      BaseBranch: string }
+
 type StateMsg =
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
+    | UpdateRepositoryDiscovery of repoId: RepoId * RepositoryDiscovery
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary * BeadsPlanning
     | UpdateCanvasDoc of repoId: RepoId * path: string * CanvasDoc list
@@ -177,32 +183,54 @@ let internal codingToolPushEvent (stored: SessionActivityStore.StoredStatus) : C
       Status = Some StepStatus.Succeeded
       Duration = None }
 
+let private updateWorktreeList
+    (repoId: RepoId)
+    (worktrees: GitWorktree.WorktreeInfo list)
+    (state: DashboardState)
+    =
+    let repo = getRepo repoId state
+    let newPaths = worktrees |> List.map _.Path |> Set.ofList
+    let removedPaths = Set.difference repo.KnownPaths newPaths
+
+    let cleaned =
+        removedPaths
+        |> Set.fold (fun r path -> removeWorktreeData path r) repo
+
+    let updated =
+        { cleaned with
+            WorktreeList = worktrees
+            KnownPaths = newPaths
+            IsReady = true }
+
+    // Prune the GLOBAL time-since-idle stamps for the removed worktrees. CodingToolSinceByWorktree
+    // hangs off DashboardState (not PerRepoState), so it cannot be pruned inside removeWorktreeData;
+    // without this a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince
+    // freezes existing keys), overstating the chip on reuse (F10/C-13).
+    let prunedSince =
+        removedPaths
+        |> Set.fold (fun m path -> Map.remove path m) state.CodingToolSinceByWorktree
+
+    updateRepo repoId updated { state with CodingToolSinceByWorktree = prunedSince }
+
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
     | UpdateWorktreeList(repoId, worktrees) ->
-        let repo = getRepo repoId state
-        let newPaths = worktrees |> List.map _.Path |> Set.ofList
-        let removedPaths = Set.difference repo.KnownPaths newPaths
+        updateWorktreeList repoId worktrees state
 
-        let cleaned =
-            removedPaths
-            |> Set.fold (fun r path -> removeWorktreeData path r) repo
+    | UpdateRepositoryDiscovery(repoId, discovery) ->
+        let discoveredState =
+            discovery.Worktrees
+            |> Option.map (fun worktrees -> updateWorktreeList repoId worktrees state)
+            |> Option.defaultValue state
 
-        let updated =
-            { cleaned with
-                WorktreeList = worktrees
-                KnownPaths = newPaths
-                IsReady = true }
+        let repo = getRepo repoId discoveredState
 
-        // Prune the GLOBAL time-since-idle stamps for the removed worktrees. CodingToolSinceByWorktree
-        // hangs off DashboardState (not PerRepoState), so it cannot be pruned inside removeWorktreeData;
-        // without this a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince
-        // freezes existing keys), overstating the chip on reuse (F10/C-13).
-        let prunedSince =
-            removedPaths
-            |> Set.fold (fun m path -> Map.remove path m) state.CodingToolSinceByWorktree
-
-        updateRepo repoId updated { state with CodingToolSinceByWorktree = prunedSince }
+        updateRepo
+            repoId
+            { repo with
+                UpstreamRemote = discovery.UpstreamRemote
+                BaseBranch = discovery.BaseBranch }
+            discoveredState
 
     | UpdateGit(repoId, path, gitData) ->
         let repo = getRepo repoId state
@@ -474,11 +502,18 @@ let buildPhase2Tasks (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
 let buildPhase3Tasks (repos: Map<RepoId, PerRepoState>) =
     repos |> Map.toList |> List.map (fun (repoId, _) -> RefreshPr repoId)
 
-/// Maps a worktree-discovery result to the state update to post. `None` means the
-/// git call failed, so no update is produced and the repo's last-known-good worktree
-/// list is retained rather than blanked by a transient git hiccup.
-let worktreeListUpdate (repoId: RepoId) (discovered: GitWorktree.WorktreeInfo list option) : StateMsg option =
-    discovered |> Option.map (fun worktrees -> UpdateWorktreeList(repoId, worktrees))
+let repositoryDiscoveryUpdate
+    (repoId: RepoId)
+    (worktrees: GitWorktree.WorktreeInfo list option)
+    upstreamRemote
+    baseBranch
+    =
+    UpdateRepositoryDiscovery(
+        repoId,
+        { Worktrees = worktrees
+          UpstreamRemote = upstreamRemote
+          BaseBranch = baseBranch }
+    )
 
 let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
@@ -497,10 +532,8 @@ let internal executeTask
             let root = rootPaths |> Map.find repoId
             let! worktrees = GitWorktree.listWorktrees root
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
-            worktreeListUpdate repoId worktrees |> Option.iter agent.Post
-            agent.Post(UpdateUpstreamRemote(repoId, upstreamRemote))
             let baseBranch = TreemonConfig.readBaseBranch root
-            agent.Post(UpdateBaseBranch(repoId, baseBranch))
+            agent.Post(repositoryDiscoveryUpdate repoId worktrees upstreamRemote baseBranch)
             let! state = agent.PostAndAsyncReply(GetState)
             let alreadyDetected = state.Repos |> Map.tryFind repoId |> Option.bind _.Provider |> Option.isSome
             if not alreadyDetected then

@@ -93,8 +93,10 @@ let private worktreeUrl
 
     $"{baseUrl}/{encoded}/{endpoint}"
 
-let private agentKnowing
+let private agentKnowingWithConfiguration
     (worktreePaths: string list)
+    upstreamRemote
+    baseBranch
     : MailboxProcessor<RefreshScheduler.StateMsg> =
     let agent = RefreshScheduler.createAgent ()
 
@@ -108,11 +110,13 @@ let private agentKnowing
 
             info)
 
+    let repoId = RepoId "diff-endpoint-tests"
     agent.Post(
-        RefreshScheduler.UpdateWorktreeList(
-            RepoId "diff-endpoint-tests",
-            worktrees
-        )
+        RefreshScheduler.repositoryDiscoveryUpdate
+            repoId
+            (Some worktrees)
+            upstreamRemote
+            baseBranch
     )
 
     agent.PostAndAsyncReply(RefreshScheduler.GetState)
@@ -121,15 +125,24 @@ let private agentKnowing
 
     agent
 
-let private withDiffServerDeadline
+let private agentKnowing worktreePaths =
+    agentKnowingWithConfiguration worktreePaths "origin" "main"
+
+let private withDiffServerConfiguration
     responseDeadlineMs
     (worktreePaths: string list)
+    upstreamRemote
+    baseBranch
     (service: WorktreeDiffApi.Service)
     (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
-    (action: HttpClient -> string -> unit)
+    (action: MailboxProcessor<RefreshScheduler.StateMsg> -> HttpClient -> string -> unit)
     =
     let port = TestUtils.getFreeTcpPort ()
-    let agent = agentKnowing worktreePaths
+    let agent =
+        agentKnowingWithConfiguration
+            worktreePaths
+            upstreamRemote
+            baseBranch
 
     use host =
         CanvasDocServer.createHostWithDiffDeadline
@@ -149,11 +162,27 @@ let private withDiffServerDeadline
             WorktreeDiffApi.viewerHeaderName,
             Guid.NewGuid().ToString("D")
         )
-        action client $"http://127.0.0.1:{port}"
+        action agent client $"http://127.0.0.1:{port}"
     finally
         host.StopAsync(CancellationToken.None)
             .GetAwaiter()
             .GetResult()
+
+let private withDiffServerDeadline
+    responseDeadlineMs
+    (worktreePaths: string list)
+    (service: WorktreeDiffApi.Service)
+    (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
+    (action: HttpClient -> string -> unit)
+    =
+    withDiffServerConfiguration
+        responseDeadlineMs
+        worktreePaths
+        "origin"
+        "main"
+        service
+        newIdentity
+        (fun _ client baseUrl -> action client baseUrl)
 
 let private withDiffServer
     worktreePaths
@@ -1294,8 +1323,6 @@ type DiffEndpointHttpTests() =
                   )
               ),
               ("""{"status":"git-error"}""" |> withUniformLayerError "git-error")
-              Error(WorktreeDiff.GitTimedOut WorktreeDiff.ResolveRemote),
-              ("""{"status":"timeout"}""" |> withUniformLayerError "timeout")
               Error(WorktreeDiff.GitTimedOut WorktreeDiff.ResolveBase),
               ("""{"status":"timeout"}""" |> withUniformLayerError "timeout")
               Error(WorktreeDiff.GitTimedOut WorktreeDiff.ResolveMergeBase),
@@ -1810,6 +1837,187 @@ type DiffEndpointHttpTests() =
                     let body = getResponseBody response
                     Assert.That(response.StatusCode, Is.EqualTo(expectedStatus))
                     Assert.That(body, Is.EqualTo(expectedBody))))
+
+    [<Test>]
+    member _.``canvas diff uses scheduler repo configuration for root and linked worktrees``() =
+        let tempDir = fakePath "scheduler-config"
+        let repoDir = Path.Combine(tempDir, "repo")
+        let linkedDir = Path.Combine(tempDir, "linked")
+        let configPath = Path.Combine(repoDir, ".treemon.json")
+
+        try
+            GitTestHelpers.initRepoOnMain repoDir
+            GitTestHelpers.gitOk repoDir [ "branch"; "-M"; "dev" ]
+            File.WriteAllText(Path.Combine(repoDir, "tracked.txt"), "base")
+            GitTestHelpers.gitOk repoDir [ "add"; "--"; "tracked.txt" ]
+            GitTestHelpers.gitOk repoDir [ "commit"; "-m"; "dev base" ]
+            GitTestHelpers.gitOk repoDir [ "update-ref"; "refs/remotes/origin/dev"; "HEAD" ]
+            GitTestHelpers.gitOk repoDir [ "worktree"; "add"; "-b"; "feature"; linkedDir; "dev" ]
+
+            File.AppendAllText(
+                Path.Combine(repoDir, ".git", "info", "exclude"),
+                Environment.NewLine + ".treemon.json" + Environment.NewLine
+            )
+
+            File.WriteAllText(
+                configPath,
+                """{ "baseBranch": "dev", "upstreamRemote": "origin" }"""
+            )
+
+            File.WriteAllText(Path.Combine(linkedDir, "tracked.txt"), "feature")
+            GitTestHelpers.gitOk linkedDir [ "add"; "--"; "tracked.txt" ]
+            GitTestHelpers.gitOk linkedDir [ "commit"; "-m"; "feature change" ]
+
+            Assert.Multiple(fun () ->
+                Assert.That(File.Exists(configPath), Is.True)
+                Assert.That(
+                    File.Exists(Path.Combine(linkedDir, ".treemon.json")),
+                    Is.False
+                ))
+
+            let expectedPatch =
+                GitTestHelpers.gitOutput
+                    linkedDir
+                    [ "-c"
+                      "core.quotepath=false"
+                      "diff"
+                      "--no-ext-diff"
+                      "--no-textconv"
+                      "--find-renames"
+                      "--full-index"
+                      "--no-color"
+                      GitTestHelpers.gitText linkedDir [ "merge-base"; "HEAD"; "origin/dev" ]
+                      "--"
+                      "tracked.txt" ]
+
+            withDiffServerConfiguration
+                ProcessRunner.argumentListResponseDeadlineMs
+                [ repoDir; linkedDir ]
+                "origin"
+                "dev"
+                WorktreeDiffApi.liveService
+                (fun _ -> "linked-id")
+                (fun agent client baseUrl ->
+                    let previousCwd = Environment.CurrentDirectory
+
+                    let dashboard =
+                        try
+                            Directory.SetCurrentDirectory(tempDir)
+
+                            WorktreeApi.getWorktrees
+                                agent
+                                (SessionManager.createAgent ())
+                                None
+                                (Map.ofList
+                                    [ RepoId "diff-endpoint-tests",
+                                      repoDir ])
+                                "test"
+                                None
+                            |> TestUtils.runAsync
+                        finally
+                            Directory.SetCurrentDirectory(previousCwd)
+
+                    let dashboardBase =
+                        dashboard.Repos
+                        |> List.exactlyOne
+                        |> _.BaseBranch
+
+                    let rootSummaryUrl =
+                        worktreeUrl
+                            baseUrl
+                            repoDir
+                            ("diff-summary"
+                             + layerQuery true true false)
+
+                    use rootResponse = get client rootSummaryUrl
+                    let rootBody = getResponseBody rootResponse
+
+                    assertJson
+                        ("""{"status":"clean","baseRef":"origin/dev","fileCount":0,"files":[]}"""
+                         |> withLayerCounts
+                             (ExpectedLayerCount.Available 0)
+                             (ExpectedLayerCount.Available 0)
+                             (ExpectedLayerCount.Available 0))
+                        rootBody
+
+                    let linkedSummaryUrl =
+                        worktreeUrl baseUrl linkedDir "diff-summary"
+
+                    use linkedResponse = get client linkedSummaryUrl
+                    let linkedBody = getResponseBody linkedResponse
+                    use linkedDocument = JsonDocument.Parse(linkedBody)
+                    let diffBase =
+                        linkedDocument.RootElement
+                            .GetProperty("baseRef")
+                            .GetString()
+
+                    assertJson
+                        ("""{"status":"ready","baseRef":"origin/dev","fileCount":1,"files":[{"identity":"linked-id","displayPath":"tracked.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                         |> withLayerCounts
+                             (ExpectedLayerCount.Available 1)
+                             (ExpectedLayerCount.Available 0)
+                             (ExpectedLayerCount.Available 0))
+                        linkedBody
+
+                    use fileResponse =
+                        get
+                            client
+                            (worktreeUrl
+                                baseUrl
+                                linkedDir
+                                "diff-file?identity=linked-id")
+
+                    fileResponse
+                    |> getResponseBody
+                    |> assertJson (
+                        DiffFileResult.Text(
+                            fileSummary
+                                "linked-id"
+                                "tracked.txt"
+                                None
+                                DiffChangeKind.Modified,
+                            expectedPatch
+                        )
+                        |> WorktreeDiffApi.serializeFileResult
+                    )
+
+                    [ "?baseRef=main"; $"?root={Uri.EscapeDataString(repoDir)}" ]
+                    |> List.iter (fun query ->
+                        use response = get client (linkedSummaryUrl + query)
+                        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
+                        Assert.That(
+                            getResponseBody response,
+                            Is.EqualTo("Invalid diff-summary query")
+                        ))
+
+                    use unknownResponse =
+                        get
+                            client
+                            (worktreeUrl
+                                baseUrl
+                                (Path.Combine(tempDir, "unknown"))
+                                "diff-summary")
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(dashboardBase, Is.EqualTo("dev"))
+                        Assert.That(
+                            diffBase,
+                            Is.EqualTo(GitWorktree.mainRef "origin" dashboardBase)
+                        )
+                        Assert.That(rootResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                        Assert.That(linkedResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                        Assert.That(fileResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                        Assert.That(unknownResponse.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+                        Assert.That(
+                            getResponseBody unknownResponse,
+                            Is.EqualTo("Unknown worktree")
+                        )))
+        finally
+            if Directory.Exists(tempDir) then
+                try
+                    Directory.Delete(tempDir, recursive = true)
+                with _ ->
+                    ()
 
     [<Test>]
     member _.``live routes suppress external diff and textconv commands``() =

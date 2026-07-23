@@ -170,7 +170,7 @@ For fork workflows (push to fork, PRs in upstream repo), treemon auto-detects an
 
 - **Resolution order**: `.treemon.json` `"upstreamRemote"` field → auto-detect `upstream` remote → fall back to `origin`
 - **Affects**: PR fetching (remote URL), base branch comparisons (`{remote}/{baseBranch}`), fetch cycle, sync merge target
-- **Stored** per-repo in `PerRepoState.UpstreamRemote`, resolved during worktree list refresh
+- **Stored** per-repo in `PerRepoState.UpstreamRemote`, resolved during worktree list refresh. Generated diff summaries consume this stored value for every root or linked worktree in the repo rather than re-reading config from the selected worktree path.
 - **Config example**: `{ "upstreamRemote": "upstream" }` in `.treemon.json` at repo root
 
 ### Base Branch Resolution
@@ -179,7 +179,7 @@ Each repo can configure which branch is considered the "base" for committed diff
 
 - **Resolution**: `.treemon.json` `"baseBranch"` field → default `"main"`
 - **Affects**: committed `git rev-list`/`git diff --shortstat` metrics use the remote-tracking ref when available and otherwise the local branch. Behind count is computed only against the remote-tracking ref because Sync fetches and targets that remote; a local fallback or missing base reports zero behind. Missing-base refreshes retain last-commit, upstream, tracked-dirty, and local/untracked diff data while omitting committed metrics.
-- **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh
+- **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh. The dashboard and generated diff viewer therefore expose the same base branch, including for linked worktrees without their own `.treemon.json`.
 - **Config example**: `{ "baseBranch": "dev" }` in `.treemon.json` at repo root
 
 ### CommentSummary

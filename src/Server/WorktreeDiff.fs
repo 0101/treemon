@@ -23,13 +23,17 @@ type WorktreeDiffLayers =
       LocalChanges: bool
       Untracked: bool }
 
+type internal DiffComparisonContext =
+    { WorktreePath: string
+      UpstreamRemote: string
+      BaseBranch: string }
+
 type WorktreeDiffSummary =
     { BaseRef: string
       MergeBase: string
       Files: WorktreeDiffEntry list }
 
 type WorktreeDiffOperation =
-    | ResolveRemote
     | ResolveBase
     | ResolveMergeBase
     | EnumerateTracked
@@ -187,29 +191,6 @@ let private runRefExists
                 Error(GitFailed(ResolveBase, output.ExitCode))
     }
 
-let private resolveDiffRemote
-    (deadline: ProcessRunner.ResponseDeadline)
-    (repoRoot: string)
-    =
-    async {
-        match TreemonConfig.readUpstreamRemote repoRoot with
-        | Some remote -> return Ok remote
-        | None ->
-            let! remotes =
-                runDiffGit
-                    deadline
-                    ResolveRemote
-                    smallGitCaptureLimitBytes
-                    repoRoot
-                    [ "remote" ]
-
-            return
-                remotes
-                |> Result.bind (fun bytes ->
-                    decodeGitOutput ResolveRemote bytes
-                    |> Result.map (Some >> GitWorktree.selectUpstreamRemote None))
-    }
-
 let private resolveDiffBaseRef
     (deadline: ProcessRunner.ResponseDeadline)
     (repoRoot: string)
@@ -352,7 +333,7 @@ let private trackedDiffArguments mergeBase layers =
 
 let private resolveComparison
     (deadline: ProcessRunner.ResponseDeadline)
-    (repoRoot: string)
+    (context: DiffComparisonContext)
     (layers: WorktreeDiffLayers)
     =
     asyncResult {
@@ -363,21 +344,19 @@ let private resolveComparison
                 else
                     "working tree", "HEAD"
         else
-            let! upstreamRemote = resolveDiffRemote deadline repoRoot
-            let baseBranch = TreemonConfig.readBaseBranch repoRoot
             let! baseRef =
                 resolveDiffBaseRef
                     deadline
-                    repoRoot
-                    upstreamRemote
-                    baseBranch
+                    context.WorktreePath
+                    context.UpstreamRemote
+                    context.BaseBranch
 
             let! mergeBaseBytes =
                 runDiffGit
                     deadline
                     ResolveMergeBase
                     smallGitCaptureLimitBytes
-                    repoRoot
+                    context.WorktreePath
                     [ "merge-base"; "HEAD"; baseRef ]
 
             let! mergeBase = trimSingleLine ResolveMergeBase mergeBaseBytes
@@ -386,11 +365,11 @@ let private resolveComparison
 
 let internal getWorktreeDiffSummaryWithinDeadline
     (deadline: ProcessRunner.ResponseDeadline)
-    (repoRoot: string)
+    (context: DiffComparisonContext)
     (layers: WorktreeDiffLayers)
     : Async<Result<WorktreeDiffSummary, WorktreeDiffError>> =
     asyncResult {
-        let! baseRef, mergeBase = resolveComparison deadline repoRoot layers
+        let! baseRef, mergeBase = resolveComparison deadline context layers
 
         let! tracked =
             match trackedDiffArguments mergeBase layers with
@@ -402,7 +381,7 @@ let internal getWorktreeDiffSummaryWithinDeadline
                             deadline
                             EnumerateTracked
                             summaryCaptureLimitBytes
-                            repoRoot
+                            context.WorktreePath
                             ([ "diff"
                                "--name-status"
                                "-z"
@@ -426,7 +405,7 @@ let internal getWorktreeDiffSummaryWithinDeadline
                             deadline
                             EnumerateUntracked
                             summaryCaptureLimitBytes
-                            repoRoot
+                            context.WorktreePath
                             [ "ls-files"
                               "--others"
                               "--exclude-standard"
@@ -449,27 +428,27 @@ let internal getWorktreeDiffSummaryWithinDeadline
               Files = sortDiffEntries files }
     }
 
-let getWorktreeDiffSummary (repoRoot: string) =
+let internal getWorktreeDiffSummary (context: DiffComparisonContext) =
     getWorktreeDiffSummaryWithinDeadline
         (ProcessRunner.createResponseDeadline
             ProcessRunner.argumentListResponseDeadlineMs)
-        repoRoot
+        context
         allWorktreeDiffLayers
 
-let getFilteredWorktreeDiffSummary
-    (repoRoot: string)
+let internal getFilteredWorktreeDiffSummary
+    (context: DiffComparisonContext)
     (layers: WorktreeDiffLayers)
     =
     getWorktreeDiffSummaryWithinDeadline
         (ProcessRunner.createResponseDeadline
             ProcessRunner.argumentListResponseDeadlineMs)
-        repoRoot
+        context
         layers
 
-let private countLayer deadline repoRoot layers =
+let private countLayer deadline context layers =
     async {
         let! result =
-            getWorktreeDiffSummaryWithinDeadline deadline repoRoot layers
+            getWorktreeDiffSummaryWithinDeadline deadline context layers
 
         return
             match result with
@@ -480,7 +459,7 @@ let private countLayer deadline repoRoot layers =
 
 let internal getWorktreeDiffLayerCountsWithinDeadline
     (deadline: ProcessRunner.ResponseDeadline)
-    (repoRoot: string)
+    (context: DiffComparisonContext)
     =
     async {
         let! counts =
@@ -493,7 +472,7 @@ let internal getWorktreeDiffLayerCountsWithinDeadline
                { AlreadyCommitted = false
                  LocalChanges = false
                  Untracked = true } |]
-            |> Array.map (countLayer deadline repoRoot)
+            |> Array.map (countLayer deadline context)
             |> Async.Parallel
 
         return
