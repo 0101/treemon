@@ -25,7 +25,8 @@ open Server.SessionActivityStore
 // lifecycle/content kinds, the state-only title bootstrap and usage gauge, plus the liveness-only
 // heartbeat. Unknown kinds are rejected. `message` is present for user_prompt / assistant_message /
 // intent_reported / title_reported / title_bootstrap and optionally awaiting_user_input;
-// `skillName` is only for skill_invoked, and usage counters only for usage_info.
+// `skillName` is only for skill_invoked, `toolCallId` only for background-agent lifecycle, and usage
+// counters only for usage_info.
 
 [<CLIMutable>]
 type MessageDto = { text: string; at: string }
@@ -40,6 +41,7 @@ type SessionActivityRequest =
       kind: string
       message: MessageDto
       skillName: string
+      toolCallId: string
       currentTokens: int
       tokenLimit: int }
 
@@ -89,15 +91,17 @@ let private parseMessage (dto: MessageDto) : Result<Message, string> =
     elif String.IsNullOrWhiteSpace dto.text then Error "missing message text"
     else tryParseTimestamp dto.at |> Result.map (fun at -> { Text = capText dto.text; At = at })
 
-/// Map the wire `kind` (+ its optional message / skillName / usage counters) onto a SessionEvent. The
-/// The lifecycle/fold kinds plus state-only bootstrap/gauge and liveness heartbeat are the whole
-/// contract. message is mandatory for user_prompt / assistant_message / intent_reported /
-/// title_reported / title_bootstrap, optional for awaiting_user_input, and absent otherwise.
+/// Map the wire `kind` (+ its optional message / skillName / toolCallId / usage counters) onto a
+/// SessionEvent. The lifecycle/fold kinds plus state-only bootstrap/gauge and liveness heartbeat are
+/// the whole contract. message is mandatory for user_prompt / assistant_message / intent_reported /
+/// title_reported / title_bootstrap, optional for awaiting_user_input, toolCallId is mandatory for
+/// background-agent lifecycle, and all other event-specific fields are absent otherwise.
 let internal parseEvent
     (occurredAt: DateTimeOffset)
     (kind: string)
     (message: MessageDto)
     (skillName: string)
+    (toolCallId: string)
     (currentTokens: int)
     (tokenLimit: int)
     : Result<SessionEvent, string> =
@@ -112,6 +116,12 @@ let internal parseEvent
     | "title_reported" -> parseMessage message |> Result.map TitleReported
     | "title_bootstrap" -> parseMessage message |> Result.map TitleBootstrap
     | "user_input_completed" -> Ok(UserInputCompleted occurredAt)
+    | "background_agent_started" ->
+        if String.IsNullOrWhiteSpace toolCallId then Error "background_agent_started requires toolCallId"
+        else Ok(BackgroundAgentStarted(toolCallId, occurredAt))
+    | "background_agent_finished" ->
+        if String.IsNullOrWhiteSpace toolCallId then Error "background_agent_finished requires toolCallId"
+        else Ok(BackgroundAgentFinished(toolCallId, occurredAt))
     | "skill_invoked" ->
         if String.IsNullOrWhiteSpace skillName then Error "skill_invoked requires skillName"
         else Ok(SkillInvoked(capText skillName))
@@ -164,7 +174,7 @@ let private withMessageTimestamp at =
 /// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
 /// is clamped against `now` so a future timestamp can't poison freshness or activity ordering.
 /// Message-bearing events use that same normalized timestamp. Pure (given `now`), so the whole
-/// contract (12 kinds, unknown rejected, per-kind payload rules, future-timestamp clamp) is
+/// contract (15 kinds, unknown rejected, per-kind payload rules, future-timestamp clamp) is
 /// unit-testable without HTTP plumbing.
 let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<SessionActivityReport, string> =
     if obj.ReferenceEquals(box req, null) then Error "missing body"
@@ -179,7 +189,7 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
             tryParseTimestamp req.occurredAt
             |> Result.bind (fun rawOccurredAt ->
                 let occurredAt = clampFutureTimestamp now rawOccurredAt
-                parseEvent occurredAt req.kind req.message req.skillName req.currentTokens req.tokenLimit
+                parseEvent occurredAt req.kind req.message req.skillName req.toolCallId req.currentTokens req.tokenLimit
                 |> Result.map (fun ev ->
                     { SessionId = SessionId req.sessionId
                       WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
@@ -344,6 +354,37 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             store.UpsertStatus stored
             scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
             live |> Map.add report.SessionId stored
+        | BackgroundAgentStarted(toolCallId, at)
+        | BackgroundAgentFinished(toolCallId, at) ->
+            let status, stored = foldReportState ()
+            let orderedStored =
+                { stored with
+                    UpdatedAt = max stored.UpdatedAt report.OccurredAt
+                    LastSeen = max stored.LastSeen report.OccurredAt }
+            let lifecycle =
+                match report.Event with
+                | BackgroundAgentStarted _ ->
+                    { StartedAt = Some at
+                      FinishedAt = None }
+                | BackgroundAgentFinished _ ->
+                    { StartedAt = None
+                      FinishedAt = Some at }
+                | event -> invalidOp $"unexpected background lifecycle event: {event}"
+            let eventRow =
+                { EventId = report.EventId
+                  SessionId = report.SessionId
+                  WorktreePath = report.WorktreePath
+                  Provider = report.Provider
+                  Kind = kindText report.Event
+                  Status = SessionActivity.effectiveStatus status
+                  Skill = status.Skill
+                  Ts = report.OccurredAt }
+
+            match store.AppendBackgroundAgentAndUpsert(eventRow, orderedStored, toolCallId, lifecycle) with
+            | None -> live
+            | Some persisted ->
+                scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+                live |> Map.add report.SessionId persisted
         | AwaitingUserInput _
         | UserInputCompleted _
         | IntentReported _

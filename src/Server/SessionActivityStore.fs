@@ -319,6 +319,13 @@ INSERT OR IGNORE INTO activity_events
 VALUES ($eid, $sid, $wt, $prov, $kind, $status, $skill, $ts);
 """
 
+let private updateAppendedEventStateSql =
+    """
+UPDATE activity_events
+SET status = $status, skill = $skill
+WHERE event_id = $eid;
+"""
+
 // Liveness-only bump: advance a session's last_seen (openness) without touching updated_at, status,
 // or any message/skill field, and only ever forward. Heartbeats take this path instead of
 // upsert+append, so they refresh openness without moving the last-write-wins clock or polluting the
@@ -541,6 +548,22 @@ let private readStoredBySession
             Status.BackgroundAgents = readBackgroundAgents conn (Some tx) row.SessionId }
     | None -> failwith $"{nameof StoredStatus}: persisted session row missing"
 
+let private upsertBackgroundAgent
+    (conn: SqliteConnection)
+    (tx: SqliteTransaction)
+    (sessionId: SessionId)
+    (toolCallId: string)
+    (lifecycle: BackgroundAgentLifecycle)
+    =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- upsertBackgroundAgentSql
+    cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
+    cmd.Parameters.AddWithValue("$toolCallId", toolCallId) |> ignore
+    cmd.Parameters.AddWithValue("$startedAt", timestampToDb lifecycle.StartedAt) |> ignore
+    cmd.Parameters.AddWithValue("$finishedAt", timestampToDb lifecycle.FinishedAt) |> ignore
+    cmd.ExecuteNonQuery() |> ignore
+
 // --- Store ------------------------------------------------------------------------------------
 
 /// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
@@ -651,15 +674,56 @@ type SessionActivityStore(dbPath: string) =
     ) : Map<string, BackgroundAgentLifecycle> =
         use conn = openConn ()
         use tx = conn.BeginTransaction()
-        use cmd = conn.CreateCommand()
-        cmd.Transaction <- tx
-        cmd.CommandText <- upsertBackgroundAgentSql
-        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-        cmd.Parameters.AddWithValue("$toolCallId", toolCallId) |> ignore
-        cmd.Parameters.AddWithValue("$startedAt", timestampToDb lifecycle.StartedAt) |> ignore
-        cmd.Parameters.AddWithValue("$finishedAt", timestampToDb lifecycle.FinishedAt) |> ignore
-        cmd.ExecuteNonQuery() |> ignore
+        upsertBackgroundAgent conn tx sessionId toolCallId lifecycle
         let persisted = readBackgroundAgents conn (Some tx) sessionId
+        tx.Commit()
+        persisted
+
+    /// Atomically dedupe and append a background-agent event, merge that tool call's independent
+    /// lifecycle clocks, upsert the session shell/aggregate, and return the authoritative persisted
+    /// row. The event is inserted first inside the transaction, so a duplicate event_id skips both
+    /// lifecycle and status changes. The final history status is rewritten from the authoritative
+    /// reread after the clock merge, so out-of-order delivery is represented by its effective state.
+    member _.AppendBackgroundAgentAndUpsert(
+        row: ActivityEventRow,
+        stored: StoredStatus,
+        toolCallId: string,
+        lifecycle: BackgroundAgentLifecycle
+    ) : StoredStatus option =
+        use conn = openConn ()
+        use tx = conn.BeginTransaction()
+        use appendCmd = conn.CreateCommand()
+        appendCmd.Transaction <- tx
+        appendCmd.CommandText <- appendSql
+        bindAppend appendCmd row
+        let inserted = appendCmd.ExecuteNonQuery() = 1
+
+        let persisted =
+            if inserted then
+                upsertBackgroundAgent conn tx stored.SessionId toolCallId lifecycle
+                let authoritativeAgents = readBackgroundAgents conn (Some tx) stored.SessionId
+                let authoritativeInput =
+                    { stored with
+                        Status.BackgroundAgents = authoritativeAgents }
+
+                use upsertCmd = conn.CreateCommand()
+                upsertCmd.Transaction <- tx
+                upsertCmd.CommandText <- upsertSql
+                bindUpsert upsertCmd authoritativeInput
+                upsertCmd.ExecuteNonQuery() |> ignore
+                let authoritative = readStoredBySession conn tx stored.SessionId
+
+                use eventStateCmd = conn.CreateCommand()
+                eventStateCmd.Transaction <- tx
+                eventStateCmd.CommandText <- updateAppendedEventStateSql
+                eventStateCmd.Parameters.AddWithValue("$eid", EventId.value row.EventId) |> ignore
+                eventStateCmd.Parameters.AddWithValue("$status", statusText (effectiveStatus authoritative.Status)) |> ignore
+                eventStateCmd.Parameters.AddWithValue("$skill", optToDb authoritative.Status.Skill) |> ignore
+                eventStateCmd.ExecuteNonQuery() |> ignore
+                Some authoritative
+            else
+                None
+
         tx.Commit()
         persisted
 
