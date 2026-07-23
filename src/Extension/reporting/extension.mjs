@@ -10,20 +10,22 @@ import { buildNonBlankMessageReport, buildReport } from "./reporting-core.mjs";
 // injects context — so the agent transcript is identical with reporting on or off, and there is no
 // canvas_take_ownership tool collision when both extensions load in the same session.
 //
-// All the ambiguity-resolving filtering lives HERE (at the source), so the server fold stays a tiny
-// pure state machine with no branches for sub-agents or skill injections:
+// Source-metadata filtering lives HERE, while lifecycle state stays in the server's pure fold:
 //   * sub-agent events (any event carrying `agentId`) are dropped;
 //   * a skill's own `<skill-context>` injection (a `user.message` tagged `source: skill-*`) is dropped;
+//   * runtime `<system_reminder>` user-channel messages are classified by the server;
+//   * ask_user request/completion and session.idle are forwarded as facts for the server to resolve;
 //   * only the relevant SDK event types are mapped — everything else is ignored.
 //
 // The wire contract (the single coupling point with the F# handler, Server/SessionActivityService.fs):
 //   { sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?, currentTokens?, tokenLimit? }
 // where `kind` is one of the closed set mapped 1:1 onto the server's SessionEvent union:
 //   assistant.turn_start   -> turn_started
-//   user.message (genuine) -> user_prompt         (message required)
+//   user.message           -> user_prompt         (message required; server drops system reminders)
 //   assistant.message      -> assistant_message   (message required)
 //   skill.invoked          -> skill_invoked        (skillName required)
 //   elicitation.requested / user_input.requested -> awaiting_user_input (message = the ask_user question, optional)
+//   elicitation.completed / user_input.completed -> user_input_completed
 //   assistant.intent       -> intent_reported     (message = the intent text, required)
 //   session.title_changed  -> title_reported      (message = the session title, required)
 //   metadata.snapshot      -> title_bootstrap     (message = the persisted session summary, required)
@@ -58,8 +60,7 @@ const TREEMON_FETCH_TIMEOUT_MS = 5000;
 // is not wrongly decayed to Idle. Within the spec's ~30–120s band.
 const HEARTBEAT_INTERVAL_MS = 60000;
 
-// The relevant SDK event types plus the two ask_user "completed" events, which are unmapped but
-// close the ask_user window. ask_user in Copilot CLI 1.0.71+ emits
+// The relevant SDK event types. ask_user in Copilot CLI 1.0.71+ emits
 // `elicitation.requested`/`elicitation.completed` (question in `data.message`); older builds emitted
 // `user_input.requested`/`user_input.completed` (question in `data.question`) — both shapes are
 // subscribed for forward/backward compat. `session.usage_info` is the context-window gauge (ephemeral
@@ -85,49 +86,6 @@ const log = (msg) => console.error(`[treemon-reporting] ${msg}`);
 
 const worktreePath = process.cwd();
 let sessionId = null;
-
-// --- Local status mirror (drives the heartbeat) ------------------------------------------------
-// A minimal reflection of what the server fold derives, kept only so the heartbeat can re-assert the
-// current status without corrupting the server's skill/message state. `lastStatusMs` is a newest-wins
-// guard: replaying older history must never rewind a status already advanced by a live event.
-let currentStatus = null; // "working" | "waiting" | "done" | "idle" | null
-let lastStatusMs = -Infinity;
-
-// True between an ask_user open (`elicitation.requested`/`user_input.requested`) and its matching
-// `*.completed`. While open, a `session.idle` must not be forwarded — the SDK may report the session
-// idle while it blocks on the user, and the fold would otherwise flip the card off WaitingForUser to
-// Idle. Maintained in BOTH the live and replay paths (the *.completed events are subscribed AND
-// returned by getEvents()), so a rejoin rebuilds the true open/closed state and a completed ask_user
-// stops suppressing idle.
-let askUserOpen = false;
-
-function statusForKind(kind) {
-  switch (kind) {
-    case "turn_started":
-    case "user_prompt":
-    case "assistant_message":
-      return "working";
-    case "awaiting_user_input":
-      return "waiting";
-    case "turn_ended":
-      return "done";
-    case "went_idle":
-      return "idle";
-    default:
-      return null; // skill/activity/bootstrap/gauge reports do not change status
-  }
-}
-
-function updateStatus(kind, tsIso) {
-  const s = statusForKind(kind);
-  if (s === null) return;
-  const ms = Date.parse(tsIso);
-  if (Number.isNaN(ms)) return;
-  if (ms >= lastStatusMs) {
-    currentStatus = s;
-    lastStatusMs = ms;
-  }
-}
 
 // --- HTTP forwarding ---------------------------------------------------------------------------
 
@@ -227,10 +185,9 @@ function mapEvent(event) {
       return messageReport(event, "user_prompt", data.content);
     }
     case "session.usage_info": {
-      // The context-window gauge: currentTokens of tokenLimit. Status-preserving (statusForKind
-      // returns null for "usage_info"), so it never perturbs the working/idle fold. A non-positive
-      // or non-finite limit is degenerate and dropped; a negative current is clamped to 0. Values
-      // are rounded to plain integers for the F# int DTO.
+      // The context-window gauge: currentTokens of tokenLimit. It never perturbs lifecycle state.
+      // A non-positive or non-finite limit is degenerate and dropped; a negative current is clamped
+      // to 0. Values are rounded to plain integers for the F# int DTO.
       const cur = Number(data.currentTokens);
       const lim = Number(data.tokenLimit);
       if (!Number.isFinite(cur) || !Number.isFinite(lim) || lim <= 0) return null;
@@ -244,36 +201,22 @@ function mapEvent(event) {
       return messageReport(event, "awaiting_user_input", data.message ?? data.question)
         ?? base(event, "awaiting_user_input");
     }
+    case "elicitation.completed":
+    case "user_input.completed":
+      return base(event, "user_input_completed");
     default:
       return null;
   }
 }
 
-// Handle one event (from either the live stream or the join-time getEvents() replay). The ask_user
-// latch (`askUserOpen`) and the `went_idle` suppression are maintained in BOTH paths: the ask_user
-// *.completed events are subscribed AND returned by getEvents(), so a rejoin rebuilds from replay
-// whether an ask_user is still open. Suppressing `went_idle` while (and only while) the latch is open
-// keeps a genuinely-waiting session on WaitingForUser, yet lets a real idle settle to Idle the moment
-// the ask_user is completed. Replayed events also reconstruct status/skill/messages.
+// Handle one event from either the live stream or join-time replay. The extension only filters using
+// trusted source metadata and maps SDK events to wire facts; the server owns lifecycle state.
 function handle(event) {
   if (event.agentId) return; // sub-agent event — never the user's top-level status
-
-  // ask_user opens the window via elicitation.requested (CLI 1.0.71+) or user_input.requested (older
-  // builds), and closes it via the matching *.completed event.
-  if (event.type === "elicitation.requested" || event.type === "user_input.requested") askUserOpen = true;
-  else if (event.type === "elicitation.completed" || event.type === "user_input.completed") askUserOpen = false;
 
   const report = mapEvent(event);
   if (!report) return;
 
-  // A genuine user prompt implies the ask_user was answered (belt-and-suspenders clear).
-  if (report.kind === "user_prompt") askUserOpen = false;
-  // Keep WaitingForUser visible while an ask_user is genuinely open: the SDK may report the session
-  // idle while it blocks on the user, so suppress that idle. Once the ask_user is completed the latch
-  // releases and a real session.idle correctly settles the card on Idle.
-  if (report.kind === "went_idle" && askUserOpen) return;
-
-  updateStatus(report.kind, event.timestamp);
   postReport(report);
 }
 
@@ -285,13 +228,10 @@ function handle(event) {
 // moving the last-write-wins clock, or appending to the event history. Keeping it distinct from real
 // events (rather than re-sending a synthetic turn_started / awaiting_user_input / went_idle) means a
 // heartbeat can never overtake a slightly-earlier real event and drop it via the server's ordering
-// guard, and never inflates the activity_events history with synthetic rows. We only heartbeat once a
-// real event has established a status — before that there is nothing open to keep alive; a
-// genuinely-waiting session simply stays "waiting" (the server holds its last real status). Cadence
-// (60s) stays comfortably under the server openWindow.
+// guard, and never inflates the activity_events history with synthetic rows. The server ignores a
+// heartbeat until that session has a status row, keeping this extension free of a local status
+// mirror. Cadence (60s) stays comfortably under the server openWindow.
 function heartbeatTick() {
-  if (!currentStatus) return;
-
   postReport({
     sessionId,
     worktreePath,

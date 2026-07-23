@@ -24,6 +24,7 @@
     <Compile Include="WorktreeDiff.fs" />
     <Compile Include="WorktreeDiffApi.fs" />
     <Compile Include="JsonHelpers.fs" />
+    <Compile Include="UserMessageFormatting.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />

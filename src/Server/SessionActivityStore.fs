@@ -29,6 +29,7 @@ open Server.SessionActivity
 /// context donut is ordered independently of status and never shares the status LWW clock (a usage
 /// report must not block a slightly-earlier status transition, nor be discarded by one). It is
 /// server-internal ordering state persisted alongside `ContextUsage`, but never sent on the wire.
+/// Ask-user request/completion clocks live in `SessionStatus` and are persisted independently too.
 type StoredStatus =
     { SessionId: SessionId
       WorktreePath: WorktreePath
@@ -100,6 +101,9 @@ let private optToDb (o: string option) : obj =
     | Some s -> box s
     | None -> box DBNull.Value
 
+let private timestampToDb =
+    Option.map isoUtc >> optToDb
+
 /// A `Message option` as two parameter values (text, iso-ts); `None` binds NULL for both.
 let private msgToDb (m: Message option) : obj * obj =
     match m with
@@ -114,6 +118,9 @@ let private contextToDb (stored: StoredStatus) : obj * obj * obj =
 
 let private readOptStr (r: SqliteDataReader) (i: int) =
     if r.IsDBNull i then None else Some(r.GetString i)
+
+let private readOptTimestamp (r: SqliteDataReader) i =
+    readOptStr r i |> Option.map parseIso
 
 let private readContextUsage (r: SqliteDataReader) currentTokensIndex tokenLimitIndex usageAtIndex =
     match r.IsDBNull currentTokensIndex, r.IsDBNull tokenLimitIndex, r.IsDBNull usageAtIndex with
@@ -146,7 +153,9 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
           Title = readOptMsg r 11 12
           LastUserMessage = readOptMsg r 5 6
           LastAssistantMessage = readOptMsg r 7 8
-          ContextUsage = contextUsage }
+          ContextUsage = contextUsage
+          AwaitingUserSince = readOptTimestamp r 18
+          UserInputCompletedAt = readOptTimestamp r 19 }
       UpdatedAt = parseIso (r.GetString 13)
       LastSeen = parseIso (r.GetString 14)
       ContextUsageAt = contextUsageAt }
@@ -183,7 +192,9 @@ CREATE TABLE IF NOT EXISTS session_status (
     last_seen     TEXT NOT NULL,
     context_current_tokens INTEGER,
     context_token_limit     INTEGER,
-    context_usage_at        TEXT
+    context_usage_at        TEXT,
+    awaiting_user_since     TEXT,
+    user_input_completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
 
@@ -207,7 +218,9 @@ let private additiveColumnMigrations =
       "title_ts", "TEXT"
       "context_current_tokens", "INTEGER"
       "context_token_limit", "INTEGER"
-      "context_usage_at", "TEXT" ]
+      "context_usage_at", "TEXT"
+      "awaiting_user_since", "TEXT"
+      "user_input_completed_at", "TEXT" ]
 
 let rec private readColumnNames (reader: SqliteDataReader) names =
     if reader.Read() then
@@ -236,14 +249,15 @@ let private ensureAdditiveColumns (conn: SqliteConnection) =
         cmd.CommandText <- migrationSql
         cmd.ExecuteNonQuery() |> ignore
 
-// One-time normalisation of legacy rows: pre-idle-only builds persisted the retired "done" status, so
-// existing DBs still carry status='done' rows. Rewrite them to 'idle' (the value 'done' now folds to)
-// so stored data matches the current vocabulary. Idempotent — a no-op once no 'done' rows remain — so
-// it is safe to re-run on every store construction.
+// Bounded normalisation of legacy rows. Retired "done" values become idle; pre-clock waiting rows
+// become an idle base plus an open request at their lifecycle timestamp. Both updates are idempotent.
 let private migrateSql =
     """
 UPDATE session_status SET status = 'idle' WHERE status = 'done';
 UPDATE activity_events SET status = 'idle' WHERE status = 'done';
+UPDATE session_status
+SET status = 'idle', awaiting_user_since = updated_at
+WHERE status = 'waiting_for_user' AND awaiting_user_since IS NULL;
 """
 
 // Last-write-wins: on a session_id conflict the incoming row overwrites only when its updated_at is
@@ -255,10 +269,11 @@ INSERT INTO session_status
     (session_id, worktree_path, provider, status, current_skill,
      last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
      intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-     context_current_tokens, context_token_limit, context_usage_at)
+     context_current_tokens, context_token_limit, context_usage_at,
+     awaiting_user_since, user_input_completed_at)
 VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats,
         $it, $its, $tt, $tts, $upd, $seen,
-        $contextCurrent, $contextLimit, $contextAt)
+        $contextCurrent, $contextLimit, $contextAt, $awaitingUserSince, $userInputCompletedAt)
 ON CONFLICT(session_id) DO UPDATE SET
     worktree_path = excluded.worktree_path,
     provider      = excluded.provider,
@@ -273,7 +288,9 @@ ON CONFLICT(session_id) DO UPDATE SET
     title_text    = excluded.title_text,
     title_ts      = excluded.title_ts,
     updated_at    = excluded.updated_at,
-    last_seen     = excluded.last_seen
+    last_seen     = excluded.last_seen,
+    awaiting_user_since = excluded.awaiting_user_since,
+    user_input_completed_at = excluded.user_input_completed_at
 WHERE excluded.updated_at >= session_status.updated_at;
 """
 
@@ -301,10 +318,11 @@ INSERT INTO session_status
     (session_id, worktree_path, provider, status, current_skill,
      last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
      intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-     context_current_tokens, context_token_limit, context_usage_at)
+     context_current_tokens, context_token_limit, context_usage_at,
+     awaiting_user_since, user_input_completed_at)
 VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats,
         $it, $its, $tt, $tts, $upd, $seen,
-        $contextCurrent, $contextLimit, $contextAt)
+        $contextCurrent, $contextLimit, $contextAt, $awaitingUserSince, $userInputCompletedAt)
 ON CONFLICT(session_id) DO UPDATE SET
     context_current_tokens = excluded.context_current_tokens,
     context_token_limit = excluded.context_token_limit,
@@ -322,7 +340,8 @@ let private loadSql =
 SELECT session_id, worktree_path, provider, status, current_skill,
        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
        intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-       context_current_tokens, context_token_limit, context_usage_at
+       context_current_tokens, context_token_limit, context_usage_at,
+       awaiting_user_since, user_input_completed_at
 FROM session_status
 WHERE last_seen >= $cutoff
 ORDER BY last_seen;
@@ -338,7 +357,8 @@ let private worktreeStatusesSql =
 SELECT session_id, worktree_path, provider, status, current_skill,
        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
        intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-       context_current_tokens, context_token_limit, context_usage_at
+       context_current_tokens, context_token_limit, context_usage_at,
+       awaiting_user_since, user_input_completed_at
 FROM session_status
 WHERE worktree_path = $wt
 ORDER BY updated_at DESC, session_id DESC;
@@ -367,7 +387,8 @@ let private allStatusesSql =
 SELECT session_id, worktree_path, provider, status, current_skill,
        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
        intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-       context_current_tokens, context_token_limit, context_usage_at
+       context_current_tokens, context_token_limit, context_usage_at,
+       awaiting_user_since, user_input_completed_at
 FROM session_status
 """
 
@@ -376,7 +397,8 @@ let private statusBySessionSql =
 SELECT session_id, worktree_path, provider, status, current_skill,
        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
        intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-       context_current_tokens, context_token_limit, context_usage_at
+       context_current_tokens, context_token_limit, context_usage_at,
+       awaiting_user_since, user_input_completed_at
 FROM session_status
 WHERE session_id = $sid
 LIMIT 1;
@@ -428,6 +450,8 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     cmd.Parameters.AddWithValue("$contextCurrent", contextCurrent) |> ignore
     cmd.Parameters.AddWithValue("$contextLimit", contextLimit) |> ignore
     cmd.Parameters.AddWithValue("$contextAt", contextAt) |> ignore
+    cmd.Parameters.AddWithValue("$awaitingUserSince", timestampToDb s.AwaitingUserSince) |> ignore
+    cmd.Parameters.AddWithValue("$userInputCompletedAt", timestampToDb s.UserInputCompletedAt) |> ignore
 
 let private readStoredBySession
     (conn: SqliteConnection)
@@ -482,9 +506,11 @@ type SessionActivityStore(dbPath: string) =
     let keepAlive =
         let c = openConn ()
         use cmd = c.CreateCommand()
-        cmd.CommandText <- schemaSql + migrateSql
+        cmd.CommandText <- schemaSql
         cmd.ExecuteNonQuery() |> ignore
         ensureAdditiveColumns c
+        cmd.CommandText <- migrateSql
+        cmd.ExecuteNonQuery() |> ignore
         c
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report

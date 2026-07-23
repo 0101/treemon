@@ -40,7 +40,7 @@ type CodingToolResult =
       CurrentSkill: string option
       /// The freshest source-tagged activity value from the same footer session as the other fields.
       AgentActivity: AgentActivity option
-      LastUserMessage: (string * DateTimeOffset) option
+      LastUserMessage: UserFooterMessage option
       LastAssistantMessage: (string * DateTimeOffset) option
       /// `LastSeen` of the active session that won status resolution. None when every session is Idle.
       LastActivity: DateTimeOffset option }
@@ -99,6 +99,27 @@ let noSessionPushResult: CodingToolResult =
 let private toFooterMessage maxLength (message: Message) =
     FileUtils.truncateMessage maxLength message.Text, message.At
 
+let private tryFormatActivityMessage (message: Message) =
+    match UserMessageFormatting.classify message.Text with
+    | UserMessageFormatting.UserMessageClassification.SystemReminder -> None
+    | UserMessageFormatting.UserMessageClassification.Display(_, displayText) ->
+        Some { message with Text = FileUtils.truncateMessage 120 displayText }
+
+let private effectiveDisplayActivity (status: SessionStatus) =
+    { status with
+        Intent = status.Intent |> Option.bind tryFormatActivityMessage
+        Title = status.Title |> Option.bind tryFormatActivityMessage }
+    |> SessionActivity.effectiveActivity
+
+let private toUserFooterMessage (message: Message) =
+    match UserMessageFormatting.classify message.Text with
+    | UserMessageFormatting.UserMessageClassification.SystemReminder -> None
+    | UserMessageFormatting.UserMessageClassification.Display(glyph, text) ->
+        Some
+            { Glyph = glyph
+              Text = FileUtils.truncateMessage 120 text
+              Timestamp = message.At }
+
 /// Collapse a worktree's live push sessions into the card's coding-tool fields. Two DECOUPLED picks:
 ///
 /// * **Status dot** — driven by OPENNESS. Only sessions seen within `openWindow` (a live CLI keeps
@@ -143,7 +164,10 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
         | [] -> NoSession
         | _ ->
             activeWinner
-            |> Option.map (fun winner -> SessionActivity.toCodingToolStatus winner.Status.Status)
+            |> Option.map (fun winner ->
+                winner.Status
+                |> SessionActivity.effectiveStatus
+                |> SessionActivity.toCodingToolStatus)
             |> Option.defaultValue Idle
 
     // Per-session dots: every open session's freshness-adjusted status paired with its own running
@@ -155,7 +179,10 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     let sessionStatuses =
         adjustedOpen
         |> List.map (fun s ->
-            { Status = SessionActivity.toCodingToolStatus s.Status.Status
+            { Status =
+                s.Status
+                |> SessionActivity.effectiveStatus
+                |> SessionActivity.toCodingToolStatus
               Skill = s.Status.Skill
               ContextUsage = s.Status.ContextUsage },
             s.LastSeen)
@@ -183,12 +210,11 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
       CurrentSkill = footer |> Option.bind _.Skill
       AgentActivity =
         footer
-        |> Option.bind SessionActivity.effectiveActivity
-        |> Option.map (AgentActivity.mapText (FileUtils.truncateMessage 120))
+        |> Option.bind effectiveDisplayActivity
       LastUserMessage =
         footer
         |> Option.bind _.LastUserMessage
-        |> Option.map (toFooterMessage 120)
+        |> Option.bind toUserFooterMessage
       LastAssistantMessage =
         footer
         |> Option.bind _.LastAssistantMessage

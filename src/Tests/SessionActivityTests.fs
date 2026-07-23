@@ -62,7 +62,9 @@ let private skillScenarios: (string * SessionEvent list * string option) list =
       [ UserPrompt(msg "/review the changes" "2026-03-01T10:00:00Z")
         SkillInvoked "review"
         AssistantMessage(msg "let me look at the diff" "2026-03-01T10:00:04Z")
-        AwaitingUserInput(Some(msg "which file should I focus on?" "2026-03-01T10:00:05Z"))
+        AwaitingUserInput(
+            Some(msg "which file should I focus on?" "2026-03-01T10:00:05Z"),
+            ts "2026-03-01T10:00:05Z")
         UserPrompt(msg "the auth module" "2026-03-01T10:01:01Z")
         AssistantMessage(msg "reviewing the auth module" "2026-03-01T10:01:02Z")
         TurnEnded ],
@@ -81,7 +83,9 @@ let private skillScenarios: (string * SessionEvent list * string option) list =
       [ UserPrompt(msg "/investigate the flake" "2026-03-01T10:00:00Z")
         SkillInvoked "investigate"
         AssistantMessage(msg "digging in" "2026-03-01T10:00:03Z")
-        AwaitingUserInput(Some(msg "can you share the failing run URL?" "2026-03-01T10:00:04Z")) ],
+        AwaitingUserInput(
+            Some(msg "can you share the failing run URL?" "2026-03-01T10:00:04Z"),
+            ts "2026-03-01T10:00:04Z") ],
       Some "investigate" ]
 
 
@@ -111,20 +115,24 @@ type FoldStatusTests() =
 
     [<Test>]
     member _.``AwaitingUserInput yields WaitingForUser``() =
-        let s = fold emptyStatus (AwaitingUserInput None)
-        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.WaitingForUser))
+        let s = fold emptyStatus (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z"))
+        Assert.That(effectiveStatus s, Is.EqualTo(SessionLevelStatus.WaitingForUser))
 
     [<Test>]
     member _.``AwaitingUserInput surfaces the question as the last assistant message``() =
         let q = msg "which file?" "2026-03-01T10:00:00Z"
-        let s = fold emptyStatus (AwaitingUserInput(Some q))
+        let s = fold emptyStatus (AwaitingUserInput(Some q, q.At))
         Assert.That(s.LastAssistantMessage, Is.EqualTo(Some q))
 
     [<Test>]
     member _.``AwaitingUserInput with no question keeps the prior assistant message``() =
         let prior = msg "let me look" "2026-03-01T10:00:00Z"
-        let s = foldMany emptyStatus [ AssistantMessage prior; AwaitingUserInput None ]
-        Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.WaitingForUser))
+        let s =
+            foldMany
+                emptyStatus
+                [ AssistantMessage prior
+                  AwaitingUserInput(None, ts "2026-03-01T10:00:01Z") ]
+        Assert.That(effectiveStatus s, Is.EqualTo(SessionLevelStatus.WaitingForUser))
         Assert.That(s.LastAssistantMessage, Is.EqualTo(Some prior))
 
     [<Test>]
@@ -136,6 +144,22 @@ type FoldStatusTests() =
     member _.``WentIdle yields Idle``() =
         let s = foldMany emptyStatus [ TurnStarted; WentIdle ]
         Assert.That(s.Status, Is.EqualTo(SessionLevelStatus.Idle))
+
+    [<Test>]
+    member _.``WentIdle preserves WaitingForUser until input completes``() =
+        let s =
+            foldMany emptyStatus [ AwaitingUserInput(None, ts "2026-03-01T10:00:00Z"); WentIdle ]
+        Assert.That(effectiveStatus s, Is.EqualTo(SessionLevelStatus.WaitingForUser))
+
+    [<Test>]
+    member _.``Completed input releases WaitingForUser so a later idle settles``() =
+        let s =
+            foldMany
+                emptyStatus
+                [ AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")
+                  UserInputCompleted(ts "2026-03-01T10:00:01Z")
+                  WentIdle ]
+        Assert.That(effectiveStatus s, Is.EqualTo(SessionLevelStatus.Idle))
 
     [<Test>]
     member _.``SkillInvoked does not change status``() =
@@ -265,7 +289,9 @@ type FoldSkillTests() =
             [ UserPrompt(msg "/review the changes" "2026-03-01T10:00:00Z")
               SkillInvoked "review"
               AssistantMessage(msg "let me look at the diff" "2026-03-01T10:00:03Z")
-              AwaitingUserInput(Some(msg "which file should I focus on?" "2026-03-01T10:00:04Z"))
+              AwaitingUserInput(
+                  Some(msg "which file should I focus on?" "2026-03-01T10:00:04Z"),
+                  ts "2026-03-01T10:00:04Z")
               UserPrompt(msg "the auth module" "2026-03-01T10:01:01Z")
               AssistantMessage(msg "reviewing the auth module" "2026-03-01T10:01:02Z") ]
 
@@ -311,7 +337,9 @@ type FoldAppendTests() =
             [ UserPrompt(msg "/review the changes" "2026-03-01T10:00:00Z")
               SkillInvoked "review"
               AssistantMessage(msg "let me look at the diff" "2026-03-01T10:00:03Z")
-              AwaitingUserInput(Some(msg "which file?" "2026-03-01T10:00:04Z"))
+              AwaitingUserInput(
+                  Some(msg "which file?" "2026-03-01T10:00:04Z"),
+                  ts "2026-03-01T10:00:04Z")
               UserPrompt(msg "the auth module" "2026-03-01T10:01:01Z")
               AssistantMessage(msg "reviewing the auth module" "2026-03-01T10:01:02Z")
               TurnEnded ]
