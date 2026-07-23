@@ -384,16 +384,21 @@ type PickActiveTests() =
     let statusAt (status: SessionLevelStatus) (skill: string option) =
         { emptyStatus with Status = status; Skill = skill }
 
+    let pickStatus sessions =
+        sessions
+        |> pickActive fst snd
+        |> Option.map fst
+
     [<Test>]
     member _.``Empty list yields None``() =
-        Assert.That(pickActive [], Is.EqualTo(None))
+        Assert.That(pickStatus [], Is.EqualTo(None))
 
     [<Test>]
     member _.``All Idle yields None``() =
         let sessions =
             [ statusAt SessionLevelStatus.Idle None, ts "2026-03-01T10:00:00Z"
               statusAt SessionLevelStatus.Idle None, ts "2026-03-01T11:00:00Z" ]
-        Assert.That(pickActive sessions, Is.EqualTo(None))
+        Assert.That(pickStatus sessions, Is.EqualTo(None))
 
     [<Test>]
     member _.``The most-recent active session wins``() =
@@ -402,7 +407,7 @@ type PickActiveTests() =
         let sessions =
             [ older, ts "2026-03-01T10:00:00Z"
               newer, ts "2026-03-01T11:00:00Z" ]
-        Assert.That(pickActive sessions, Is.EqualTo(Some newer))
+        Assert.That(pickStatus sessions, Is.EqualTo(Some newer))
 
     [<Test>]
     member _.``A more-recently-idled session does not hide an actively-working sibling``() =
@@ -413,7 +418,7 @@ type PickActiveTests() =
         let sessions =
             [ active, ts "2026-03-01T10:00:00Z"
               justIdled, ts "2026-03-01T11:59:00Z" ]
-        Assert.That(pickActive sessions, Is.EqualTo(Some active))
+        Assert.That(pickStatus sessions, Is.EqualTo(Some active))
 
     [<Test>]
     member _.``The whole winning record is returned, not cherry-picked fields``() =
@@ -426,7 +431,7 @@ type PickActiveTests() =
         let sessions =
             [ statusAt SessionLevelStatus.Idle (Some "stale-skill"), ts "2026-03-01T11:00:00Z"
               winner, ts "2026-03-01T10:30:00Z" ]
-        Assert.That(pickActive sessions, Is.EqualTo(Some winner))
+        Assert.That(pickStatus sessions, Is.EqualTo(Some winner))
 
 
 [<TestFixture>]
