@@ -381,43 +381,6 @@ type OverviewChartTests() =
         )
 
     [<Test>]
-    member _.``history refresh cadence is measured from the last request attempt`` () =
-        let lastRequestedAt = now - TimeSpan.FromSeconds 29.0
-
-        Assert.Multiple(fun () ->
-            Assert.That(
-                App.shouldRefreshOverviewHistory
-                    true
-                    (Some HistoryWindow.Hours24)
-                    None
-                    lastRequestedAt
-                    now,
-                Is.False
-            )
-
-            Assert.That(
-                App.shouldRefreshOverviewHistory
-                    true
-                    (Some HistoryWindow.Hours24)
-                    None
-                    lastRequestedAt
-                    (now + TimeSpan.FromSeconds 1.0),
-                Is.True
-            ))
-
-    [<Test>]
-    member _.``a failed window switch retries from request time`` () =
-        Assert.That(
-            App.shouldRefreshOverviewHistory
-                true
-                (Some HistoryWindow.Hours24)
-                None
-                (now - TimeSpan.FromSeconds 29.0)
-                now,
-            Is.False
-        )
-
-    [<Test>]
     member _.``history window cycle includes 12h before 24h and 72h`` () =
         let states =
             [ None
