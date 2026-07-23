@@ -43,11 +43,31 @@ let private bucketOf parameterName (timestamp: DateTimeOffset) =
 let private timestampOf bucket =
     DateTimeOffset.FromUnixTimeSeconds bucket
 
+let internal floorBoundary (timestamp: DateTimeOffset) =
+    timestamp.ToUnixTimeSeconds()
+    |> fun seconds -> seconds - seconds % resolutionSeconds
+    |> timestampOf
+
 let private stride =
     function
     | OverviewData.HistoryWindow.Hours12 -> 5L
     | OverviewData.HistoryWindow.Hours24 -> 10L
     | OverviewData.HistoryWindow.Hours72 -> 30L
+
+let private sameValues
+    (left: OverviewData.OverviewSnapshot)
+    (right: OverviewData.OverviewSnapshot)
+    =
+    left.Tasks = right.Tasks && left.Agents = right.Agents
+
+let private collapseEqualRuns snapshots =
+    snapshots
+    |> List.fold (fun collapsed snapshot ->
+        match collapsed with
+        | previous :: _ when sameValues previous snapshot -> collapsed
+        | _ -> snapshot :: collapsed
+    ) []
+    |> List.rev
 
 let private migrationSql =
     """
@@ -171,3 +191,66 @@ LIMIT $limit;
                   Tasks = deserialize<OverviewData.TaskCount list> (row.GetString 1)
                   Agents = deserialize<OverviewData.AgentCount list> (row.GetString 2) })
             []
+
+    /// Read the latest committed anchor and its bounded, anchor-aligned window in one SQLite
+    /// statement. An empty store returns the current 30-second boundary with no snapshots.
+    member _.ReadLatestWindow
+        (
+            now: DateTimeOffset,
+            window: OverviewData.HistoryWindow
+        ) : OverviewData.OverviewHistoryResponse =
+        let emptyAnchor = floorBoundary now |> _.ToUnixTimeSeconds()
+        let durationSeconds =
+            int64 (OverviewData.HistoryWindow.duration window).TotalSeconds
+        let stepSeconds = resolutionSeconds * stride window
+
+        use connection = openConnection ()
+        use command = connection.CreateCommand()
+        command.CommandText <-
+            """
+WITH latest AS (
+    SELECT COALESCE(MAX(bucket), $emptyAnchor) AS anchor
+    FROM overview_snapshots
+),
+sampled AS (
+    SELECT snapshots.bucket, snapshots.tasks, snapshots.agents
+    FROM overview_snapshots AS snapshots
+    CROSS JOIN latest
+    WHERE snapshots.bucket >= latest.anchor - $duration
+      AND snapshots.bucket <= latest.anchor
+      AND ((latest.anchor - snapshots.bucket) % $step) = 0
+    ORDER BY snapshots.bucket
+    LIMIT $limit
+)
+SELECT latest.anchor, sampled.bucket, sampled.tasks, sampled.agents
+FROM latest
+LEFT JOIN sampled ON 1 = 1
+ORDER BY sampled.bucket;
+"""
+        command.Parameters.AddWithValue("$emptyAnchor", emptyAnchor) |> ignore
+        command.Parameters.AddWithValue("$duration", durationSeconds) |> ignore
+        command.Parameters.AddWithValue("$step", stepSeconds) |> ignore
+        command.Parameters.AddWithValue("$limit", maxRows) |> ignore
+        use reader = command.ExecuteReader()
+
+        let rec read
+            (anchor: DateTimeOffset)
+            (snapshots: OverviewData.OverviewSnapshot list)
+            : OverviewData.OverviewHistoryResponse =
+            if reader.Read() then
+                let anchor = timestampOf (reader.GetInt64 0)
+
+                if reader.IsDBNull 1 then
+                    read anchor snapshots
+                else
+                    let snapshot: OverviewData.OverviewSnapshot =
+                        { Timestamp = timestampOf (reader.GetInt64 1)
+                          Tasks = deserialize<OverviewData.TaskCount list> (reader.GetString 2)
+                          Agents = deserialize<OverviewData.AgentCount list> (reader.GetString 3) }
+
+                    read anchor (snapshot :: snapshots)
+            else
+                { Anchor = anchor
+                  Snapshots = snapshots |> List.rev |> collapseEqualRuns }
+
+        read (floorBoundary now) []

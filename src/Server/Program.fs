@@ -405,7 +405,7 @@ let main args =
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
 
-                WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent None worktreeRoots config.TestFixtures appVersion deployBranch
+                WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent None None worktreeRoots config.TestFixtures appVersion deployBranch
                 |> buildRemotingHandler,
                 Some agent,
                 None,
@@ -448,6 +448,7 @@ let main args =
                         cardLog
                         sessionAgent
                         (Some store)
+                        (Some activity.SnapshotStore)
                         worktreeRoots
                         config.TestFixtures
                         appVersion

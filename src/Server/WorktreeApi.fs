@@ -112,7 +112,8 @@ let readOnlyApi
         fun _ ->
             async {
                 return
-                    { OverviewData.OverviewHistoryResponse.Anchor = DateTimeOffset.UtcNow
+                    { OverviewData.OverviewHistoryResponse.Anchor =
+                        OverviewSnapshotStore.floorBoundary DateTimeOffset.UtcNow
                       Snapshots = [] }
             } }
 
@@ -468,6 +469,7 @@ let worktreeApi
     (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (activityStore: SessionActivityStore.SessionActivityStore option)
+    (snapshotStore: OverviewSnapshotStore.OverviewSnapshotStore option)
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
@@ -476,7 +478,6 @@ let worktreeApi
     let fixtures = testFixtures |> Option.bind (fun p -> loadFixtures p |> Result.toOption)
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
-    let overviewHistoryCache = OverviewHistoryCache.create ()
 
     let validatePath path =
         async {
@@ -818,12 +819,15 @@ let worktreeApi
           getRoots = fun () -> async { return readWorktreeRootsConfig () }
           getOverviewHistory =
             fun requestedWindow ->
-                match activityStore with
+                match snapshotStore with
                 | Some store ->
-                    overviewHistoryCached
-                        overviewHistoryCache
-                        store
-                        requestedWindow
+                    async {
+                        return
+                            store.ReadLatestWindow(
+                                DateTimeOffset.UtcNow,
+                                requestedWindow
+                            )
+                    }
                 | None ->
                     async {
                         return

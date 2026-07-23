@@ -49,8 +49,8 @@ type Model =
       OverviewPanelOpen: bool
       SelectedOverviewGroup: OverviewSelection option
       // None is the client-only Hidden state; only a concrete shared HistoryWindow can cross the API.
-      // The response anchor drives normal refresh cadence. RequestedAt provides failure retry backoff,
-      // while the request identity prevents overlapping polls and stale completions.
+      // RequestedAt throttles every request attempt, while the request identity prevents overlapping
+      // polls and stale completions.
       OverviewHistoryWindow: HistoryWindow option
       OverviewHistory: InstalledOverviewHistory option
       OverviewHistoryRequestedAt: System.DateTimeOffset

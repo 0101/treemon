@@ -25,10 +25,8 @@ let fetchOverviewHistory request =
     let loaded response = OverviewHistoryLoaded(request, Some response)
     Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory request.Window loaded (fun _ -> OverviewHistoryLoaded(request, None))
 
-// The in-band history chart is refreshed no more often than this while open. The poll ticks ~1/s and
-// getOverviewHistory reconstructs the whole agent timeline from the event window (hundreds of ms on a
-// busy store), so a per-tick refetch would run it back-to-back. A multi-hour chart does not need
-// sub-30s freshness.
+// The in-band history chart is refreshed no more often than this while open. Snapshot capture itself
+// advances on a 30-second grid, so more frequent request attempts cannot reveal newer history.
 let overviewHistoryRefreshInterval = System.TimeSpan.FromSeconds 30.0
 
 let shouldRefreshOverviewHistory
@@ -36,18 +34,12 @@ let shouldRefreshOverviewHistory
     historyWindow
     requestInFlight
     lastRequestedAt
-    (current: InstalledOverviewHistory option)
     now
     =
-    let cadenceAnchor =
-        match historyWindow, current with
-        | Some selected, Some installed when installed.Window = selected -> installed.Response.Anchor
-        | _ -> lastRequestedAt
-
     panelOpen
     && Option.isSome historyWindow
     && Option.isNone requestInFlight
-    && now - cadenceAnchor >= overviewHistoryRefreshInterval
+    && now - lastRequestedAt >= overviewHistoryRefreshInterval
 
 let installOverviewHistory
     selectedWindow
@@ -59,7 +51,7 @@ let installOverviewHistory
     | Some selected, Some loaded, Some installed
         when selected = requestedWindow
              && installed.Window = requestedWindow
-             && loaded.Anchor < installed.Response.Anchor ->
+             && loaded.Anchor <= installed.Response.Anchor ->
         current
     | Some selected, Some loaded, _ when selected = requestedWindow ->
         Some
@@ -350,15 +342,13 @@ let update msg model =
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
         // Refresh the in-band history chart while it is open. The in-flight request identity prevents
-        // overlapping polls, while the installed server anchor keeps a near-expiry cache hit from delaying
-        // the first post-expiry refresh. RequestedAt provides retry backoff when no response is installed.
+        // overlapping polls, and RequestedAt throttles every attempt whether it succeeds or fails.
         let shouldRefreshHistory =
             shouldRefreshOverviewHistory
                 model.OverviewPanelOpen
                 model.OverviewHistoryWindow
                 model.OverviewHistoryRequestInFlight
                 model.OverviewHistoryRequestedAt
-                model.OverviewHistory
                 nowDto
 
         let historyRequest =

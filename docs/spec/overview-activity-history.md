@@ -84,9 +84,10 @@ missed time, late inputs, or downtime.
   reload.
 - History and drill-down are mutually exclusive. Opening either closes the other.
 - The client fetches immediately when a chart opens and refreshes at most every 30 seconds while
-  visible.
+  visible, measured from each request attempt whether it succeeds or fails.
 - When switching windows, the installed chart remains mounted until the matching response succeeds.
-  A stale or failed response cannot replace the selected chart.
+  A stale or failed response cannot replace the selected chart, and an equal-anchor response
+  preserves the already installed data.
 - Agents and Tasks render stepped stacked-area charts below their live sections. The existing
   stepped carry-forward rendering visually spans missing capture or downtime intervals.
 - Hover shows a snapped crosshair, non-empty series, total, and absolute local time. Static geometry
@@ -106,8 +107,10 @@ the same implementation.
 ### Snapshot store and capture
 
 A small history store owns table creation, atomic insert/prune, bounded window reads, serialization,
-retention, insert-once behavior, and anchor-aligned sampling. A separate capture component owns
-canonical-boundary timing and obtains immutable scheduler state through `GetState`.
+retention, insert-once behavior, and anchor-aligned sampling. Its latest-anchor and sampled-row read
+is one SQLite statement, so both come from the same read snapshot; equal runs are collapsed after
+the bounded read. A separate capture component owns canonical-boundary timing and obtains immutable
+scheduler state through `GetState`.
 
 Capture failures are logged and isolated to the affected boundary. The store has no staging,
 publication generations, recovery worker, or reconstruction dependency.

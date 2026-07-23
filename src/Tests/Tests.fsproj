@@ -70,6 +70,7 @@
     <Compile Include="OverviewPersistenceTests.fs" />
     <Compile Include="OverviewTestHelpers.fs" />
     <Compile Include="OverviewSnapshotStoreTests.fs" />
+    <Compile Include="OverviewHistoryApiTests.fs" />
     <Compile Include="OverviewSnapshotCaptureTests.fs" />
     <Compile Include="OverviewHistoryRollupTests.fs" />
     <Compile Include="OverviewHistoryTests.fs" />
