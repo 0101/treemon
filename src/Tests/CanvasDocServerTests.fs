@@ -603,10 +603,6 @@ type AttributeOwnershipTests() =
             Assert.That(runAsync (attributeOwnership agent worktree "diff.html" second), Is.EqualTo(Attributed))
 
             Assert.That(
-                runAsync (CanvasInteractionOwnership.getOwner worktree "diff.html"),
-                Is.EqualTo(Some second),
-                "The second explicit declaration must reassign the interaction target")
-            Assert.That(
                 runAsync (CanvasDocOwnership.getOwner worktree "diff.html"),
                 Is.EqualTo(Some second),
                 "Both document kinds must persist their routing target in the unified store"))

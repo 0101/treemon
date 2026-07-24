@@ -8,6 +8,7 @@ open System.Text
 open Shared
 
 let private normalizePath = Server.PathUtils.normalizePath
+let private normalizeFilename (filename: string) = filename.ToLowerInvariant()
 
 type SessionEntry =
     { WorktreePath: string
@@ -15,14 +16,11 @@ type SessionEntry =
       SessionId: string option
       RegisteredAt: DateTime }
 
-// A queued canvas message. AgentDoc Owner is captured at enqueue time. SystemViews instead
-// re-resolve their persistent interaction owner at drain time so pending claims and explicit
-// reassignment are honored before delivery.
+// A queued canvas message re-resolves its persistent target at drain time so ownership changes
+// made while it waits are honored before delivery.
 type QueuedMessage =
     { EnqueuedAt: DateTime
       Filename: string
-      Kind: CanvasDocKind
-      Owner: string option
       Payload: string }
 
 // Mutable: ConcurrentDictionary used for thread-safe bridge registry;
@@ -42,12 +40,10 @@ let private cleanExpired (messages: QueuedMessage list) =
     let cutoff = DateTime.UtcNow - queueTtl
     messages |> List.filter (fun m -> m.EnqueuedAt > cutoff)
 
-let private enqueue key filename kind (owner: string option) payload =
+let private enqueue key filename payload =
     let msg =
         { EnqueuedAt = DateTime.UtcNow
           Filename = filename
-          Kind = kind
-          Owner = owner
           Payload = payload }
 
     messageQueue.AddOrUpdate(
@@ -64,20 +60,11 @@ let private enqueue key filename kind (owner: string option) payload =
     )
     |> ignore
 
-/// AgentDoc queue entries preserve the author owner captured at enqueue time. Their existing
-/// owner-unknown fallback remains best-effort. SystemView entries instead re-resolve persistent
-/// interaction ownership at drain time: an unclaimed view is never deliverable, and after
-/// claim/reassignment only the current interaction owner may receive it.
+/// Re-resolve the current unified target for every queued message. A message without a target is
+/// never deliverable, and after reassignment only the current target may receive it.
 let private deliverableTo key (sessionId: string option) (msg: QueuedMessage) =
-    let owner =
-        match msg.Kind with
-        | AgentDoc -> msg.Owner
-        | SystemView -> CanvasInteractionOwnership.getDeliveryOwnerSync key msg.Filename
-
-    match msg.Kind, owner with
-    | AgentDoc, None -> true
-    | SystemView, None -> false
-    | _, Some ownerId -> sessionId = Some ownerId
+    CanvasDocOwnership.getOwnerSync key msg.Filename = sessionId
+    && Option.isSome sessionId
 
 /// Re-queue messages a drain did not deliver so their owner can collect them later. Survivors
 /// keep their original EnqueuedAt (TTL preserved) and are placed ahead of anything enqueued
@@ -96,13 +83,83 @@ let private requeue (key: string) (survivors: QueuedMessage list) =
                     merged)
         |> ignore
 
+type internal PendingLaunchResult =
+    | PendingLaunchStarted
+    | PendingLaunchJoined
+
+type private PendingLaunchMsg =
+    | BeginPendingLaunch of worktreeKey: string * filename: string * AsyncReplyChannel<PendingLaunchResult>
+    | CancelPendingLaunch of worktreeKey: string * AsyncReplyChannel<unit>
+    | TakePendingLaunch of worktreeKey: string * AsyncReplyChannel<Set<string>>
+
+let private pendingLaunchAgent =
+    MailboxProcessor.Start(fun inbox ->
+        let rec loop pending =
+            async {
+                let! msg = inbox.Receive()
+
+                match msg with
+                | BeginPendingLaunch(worktreeKey, filename, reply) ->
+                    let existing =
+                        pending
+                        |> Map.tryFind worktreeKey
+                        |> Option.defaultValue Set.empty
+
+                    let result =
+                        if Set.isEmpty existing then PendingLaunchStarted
+                        else PendingLaunchJoined
+
+                    reply.Reply(result)
+                    return! loop (pending |> Map.add worktreeKey (existing |> Set.add filename))
+
+                | CancelPendingLaunch(worktreeKey, reply) ->
+                    reply.Reply()
+                    return! loop (pending |> Map.remove worktreeKey)
+
+                | TakePendingLaunch(worktreeKey, reply) ->
+                    pending
+                    |> Map.tryFind worktreeKey
+                    |> Option.defaultValue Set.empty
+                    |> reply.Reply
+
+                    return! loop (pending |> Map.remove worktreeKey)
+            }
+
+        loop Map.empty)
+
+let internal beginPendingLaunch worktreePath filename =
+    pendingLaunchAgent.PostAndAsyncReply(fun reply ->
+        BeginPendingLaunch(normalizePath worktreePath, normalizeFilename filename, reply))
+
+let internal cancelPendingLaunch worktreePath =
+    pendingLaunchAgent.PostAndAsyncReply(fun reply ->
+        CancelPendingLaunch(normalizePath worktreePath, reply))
+
+let private takePendingLaunch worktreeKey =
+    pendingLaunchAgent.PostAndReply(fun reply -> TakePendingLaunch(worktreeKey, reply))
+
+let private assignPendingLaunch worktreeKey sessionId =
+    let filenames = takePendingLaunch worktreeKey
+
+    if not (Set.isEmpty filenames) then
+        filenames
+        |> Set.toList
+        |> List.map (fun filename -> CanvasDocOwnership.assign worktreeKey filename sessionId)
+        |> Async.Sequential
+        |> Async.Ignore
+        |> Async.RunSynchronously
+
+        Log.log
+            "CanvasBridge"
+            $"Session {sessionId} assigned {Set.count filenames} pending canvas target(s) for {worktreeKey}"
+
 let private drainQueue (key: string) (entry: SessionEntry) =
     match messageQueue.TryRemove(key) with
     | false, _ -> ()
     | true, queued ->
         let valid = cleanExpired queued
         // Forward only what this session may receive and re-queue the rest for the rightful
-        // owner. An unclaimed SystemView always stays queued.
+        // target. An untargeted document always stays queued.
         let deliver, requeued = valid |> List.partition (deliverableTo key entry.SessionId)
         requeue key requeued
 
@@ -172,7 +229,6 @@ let private registerSessionCore
     (worktreePath: string)
     (injectUrl: string)
     (sessionId: string option)
-    (claimToken: Guid option)
     =
     // Defense-in-depth: a blank/whitespace sessionId from any caller collapses to None, so
     // entry.SessionId is never Some "" (see normalizeSessionId). The HTTP boundary normalizes
@@ -181,16 +237,6 @@ let private registerSessionCore
     let worktreeKey = normalizePath worktreePath
     let key = registryKeyFor worktreeKey sessionId
     let existing = sessionRegistry.TryGetValue(key)
-
-    match sessionId, claimToken with
-    | Some sid, Some token ->
-        // The launch token is inherited only by the session deliberately started for one
-        // SystemView. A normal heartbeat has no token and cannot consume any pending claim.
-        match CanvasInteractionOwnership.claimPending worktreeKey token sid with
-        | Some filename ->
-            Log.log "CanvasBridge" $"Session {sid} claimed SystemView interaction target: {filename}"
-        | None -> ()
-    | _ -> ()
 
     let entry =
         { WorktreePath = worktreeKey
@@ -205,19 +251,15 @@ let private registerSessionCore
 
     sessionRegistry[key] <- entry
     Log.log "CanvasBridge" $"Session registered {worktreeKey} (key={key}) -> {injectUrl} (session registry size: {sessionRegistry.Count})"
+
+    sessionId
+    |> Option.iter (assignPendingLaunch worktreeKey)
+
     // The message queue stays keyed by worktree path, so drain to the new entry by worktree key.
     drainQueue worktreeKey entry
 
 let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
-    registerSessionCore worktreePath injectUrl sessionId None
-
-let internal registerSessionForClaim
-    (worktreePath: string)
-    (injectUrl: string)
-    (sessionId: string option)
-    (claimToken: Guid)
-    =
-    registerSessionCore worktreePath injectUrl sessionId (Some claimToken)
+    registerSessionCore worktreePath injectUrl sessionId
 
 let registerPoll (worktreePath: string) =
     let key = normalizePath worktreePath
@@ -302,17 +344,13 @@ let private postPayload (entry: SessionEntry) (payload: string) (key: string) : 
     }
 
 let getTargetOwner (worktreePath: string) (filename: string) =
-    match CanvasDocKinds.classify filename with
-    | AgentDoc -> CanvasDocOwnership.getOwner worktreePath filename
-    | SystemView -> CanvasInteractionOwnership.getDeliveryOwner worktreePath filename
+    CanvasDocOwnership.getOwner worktreePath filename
 
-/// Route a canvas-doc message to its authored owner (AgentDoc) or persistent interaction owner
-/// (SystemView).
+/// Route a canvas-doc message through the unified persistent target store.
 ///
 /// The registry is sessionId-keyed, so two sessions can share one worktree; this
-/// resolves the appropriate owner and delivers only to it. AgentDoc owner-unknown queue entries
-/// retain their legacy best-effort drain; unclaimed SystemViews remain queued until an identified
-/// session claims them.
+/// resolves the appropriate target and delivers only to it. Untargeted messages remain queued
+/// until an identified registration consumes the worktree's pending launch.
 ///
 /// 1. Owner has a live registry entry -> POST to it (HTTP failure -> queue for redelivery).
 /// 2. Owner offline/gone              -> queue (never fall back to a non-owner).
@@ -333,12 +371,11 @@ let sendMessage (request: CanvasMessageRequest) =
             |> List.filter isSessionAlive
             |> List.sortByDescending _.RegisteredAt
 
-        let kind = CanvasDocKinds.classify request.Filename
         let! owner = getTargetOwner worktree request.Filename
 
         let queueWith reason =
             Log.log "CanvasBridge" $"sendMessage: {reason} for {Path.GetFileName(key)}, message queued"
-            enqueue key request.Filename kind owner request.Payload
+            enqueue key request.Filename request.Payload
             CanvasMessageResult.Queued
 
         match owner with
@@ -357,10 +394,8 @@ let sendMessage (request: CanvasMessageRequest) =
                 // even if another session for the worktree is live.
                 return queueWith $"owner {ownerId} offline"
         | None ->
-            // An unowned AgentDoc or unclaimed SystemView has no deterministic recipient.
-            // Queue it; the send/resume flow starts or continues a session. For SystemViews,
-            // that session must claim the pending interaction target before registration drains
-            // the queue, so a co-located session cannot steal the message.
+            // An unowned document has no deterministic recipient. Queue it; the send/resume flow
+            // records the filename in the worktree launch coordinator before starting a session.
             match liveSessions with
             | [] ->
                 let reason = if pollRegistry.ContainsKey(key) then "no owner, poll-based bridge" else "no owner, no bridge"
@@ -369,9 +404,8 @@ let sendMessage (request: CanvasMessageRequest) =
                 return queueWith $"no owner with {List.length sessions} live session(s) — not delivering to a non-author"
     }
 
-/// Atomically drain pending AgentDoc owner-unknown messages for a worktree (used by heartbeat
-/// polling). Owner-bound AgentDocs and every SystemView interaction are re-queued for an identified
-/// push bridge, so an anonymous poll cannot claim or cross-route them.
+/// Atomically inspect pending messages for heartbeat polling. Unified targets always require an
+/// identified push bridge, so an anonymous poll cannot claim or cross-route them.
 let drainPending (worktreePath: string) : string list =
     let key = normalizePath worktreePath
     match messageQueue.TryRemove(key) with

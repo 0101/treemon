@@ -12,7 +12,6 @@ import {
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
 const TREEMON_ATTRIBUTE_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/attribute`;
-const TREEMON_CANVAS_CLAIM_TOKEN = process.env.TREEMON_CANVAS_CLAIM_TOKEN || null;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const HEARTBEAT_MAX_INTERVAL_MS = 120000;
 // Bound every Treemon fetch so a TCP-alive-but-unresponsive server can't stall the caller
@@ -238,7 +237,6 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
         worktreePath,
         injectUrl,
         sessionId,
-        claimToken: TREEMON_CANVAS_CLAIM_TOKEN,
       }),
       signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });

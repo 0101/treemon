@@ -13,8 +13,7 @@ open Shared
 type CanvasRegisterRequest =
     { worktreePath: string
       injectUrl: string
-      sessionId: string
-      claimToken: string }
+      sessionId: string }
 
 [<CLIMutable>]
 type CanvasAttributeRequest =
@@ -102,40 +101,22 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
                 Log.log "Canvas" $"Registration failed: non-loopback injectUrl ({body.injectUrl}) for {body.worktreePath}"
                 return! RequestErrors.BAD_REQUEST "injectUrl must resolve to a loopback host" next ctx
             else
-                let claimToken =
-                    if System.String.IsNullOrWhiteSpace body.claimToken then
-                        Ok None
-                    else
-                        match System.Guid.TryParse body.claimToken with
-                        | true, token -> Ok(Some token)
-                        | false, _ -> Error "claimToken must be a GUID"
+                let worktreePath = body.worktreePath |> Server.PathUtils.normalizePath
+                let! isKnown = isKnownWorktree agent worktreePath |> Async.StartAsTask
 
-                match claimToken with
-                | Error reason ->
-                    Log.log "Canvas" $"Registration failed: invalid claim token for {body.worktreePath}"
-                    return! RequestErrors.BAD_REQUEST reason next ctx
-                | Ok claimToken ->
-                    let worktreePath = body.worktreePath |> Server.PathUtils.normalizePath
-                    let! isKnown = isKnownWorktree agent worktreePath |> Async.StartAsTask
+                if not isKnown then
+                    Log.log "Canvas" $"Registration: unmonitored worktree — {worktreePath} (extension serves the doc in a browser)"
+                    return! Successful.ok (json {| registered = false; monitored = false |}) next ctx
+                else
+                    // Normalize a blank/whitespace sessionId to None (anonymous) rather than
+                    // Some "": Option.ofObj only maps null. A Some "" owner is unroutable yet
+                    // sticky (see CanvasBridge.normalizeSessionId), so it must never be stored —
+                    // mirror attributeOwnership's IsNullOrWhiteSpace treatment of sessionId.
+                    let sessionId =
+                        if System.String.IsNullOrWhiteSpace body.sessionId then None else Some body.sessionId
 
-                    if not isKnown then
-                        Log.log "Canvas" $"Registration: unmonitored worktree — {worktreePath} (extension serves the doc in a browser)"
-                        return! Successful.ok (json {| registered = false; monitored = false |}) next ctx
-                    else
-                        // Normalize a blank/whitespace sessionId to None (anonymous) rather than
-                        // Some "": Option.ofObj only maps null. A Some "" owner is unroutable yet
-                        // sticky (see CanvasBridge.normalizeSessionId), so it must never be stored —
-                        // mirror attributeOwnership's IsNullOrWhiteSpace treatment of sessionId.
-                        let sessionId =
-                            if System.String.IsNullOrWhiteSpace body.sessionId then None else Some body.sessionId
-
-                        match claimToken with
-                        | Some token ->
-                            CanvasBridge.registerSessionForClaim worktreePath body.injectUrl sessionId token
-                        | None ->
-                            CanvasBridge.registerSession worktreePath body.injectUrl sessionId
-
-                        return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
+                    CanvasBridge.registerSession worktreePath body.injectUrl sessionId
+                    return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
@@ -166,9 +147,7 @@ let attributeOwnership
             if not isKnown then
                 return UnknownWorktree
             else
-                match CanvasDocKinds.classify filename with
-                | AgentDoc -> CanvasDocOwnership.attribute worktreePath filename sessionId
-                | SystemView -> do! CanvasInteractionOwnership.assign worktreePath filename sessionId
+                do! CanvasDocOwnership.assign worktreePath filename sessionId
                 return Attributed
     }
 
@@ -363,11 +342,11 @@ let private errorOverlayScript (filename: string) =
 /// selected-text contextual actions. AgentDocs additionally get the message-bridge heartbeat,
 /// canvasExpand helper, JS error overlay, and the idiomorph runtime + morph controller.
 /// `filename` is embedded into the error overlay so a doc-side error carries its own identity.
-/// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
-/// session: they drive their own refresh and must never morph (a morph would stomp the live,
-/// JS-rendered dashboard back to the empty template shell). Their selected-text interactions route
-/// separately from authored ownership, so the author heartbeat, canvasExpand, error overlay, and
-/// morph pieces remain omitted.
+/// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no authored
+/// owner: they drive their own refresh and must never morph (a morph would stomp the live,
+/// JS-rendered dashboard back to the empty template shell). An internal routing target in the
+/// unified store does not change their kind, so the author heartbeat, canvasExpand, error overlay,
+/// and morph pieces remain omitted.
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
     | SystemView ->

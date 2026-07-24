@@ -25,12 +25,6 @@ let private uniqueSid prefix =
     let id = Guid.NewGuid().ToString("N")[..7]
     $"{prefix}-{id}"
 
-let private startSystemViewClaim path filename =
-    match runAsync (Server.CanvasInteractionOwnership.beginClaim path filename) with
-    | Server.CanvasInteractionOwnership.ClaimStarted token -> token
-    | Server.CanvasInteractionOwnership.ExistingOwner owner ->
-        failwith $"Expected a pending claim for {filename}, but it is owned by {owner}"
-
 // A minimal loopback HTTP sink used to assert *which* inject URL a message reaches.
 // It speaks just enough HTTP/1.1 over a raw TcpListener so no HttpListener URL ACL /
 // admin rights are needed on Windows. Each received request body is recorded and a
@@ -291,6 +285,7 @@ type RegisterAndStatusTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+[<NonParallelizable>]
 type EnqueueTests() =
 
     [<Test>]
@@ -316,23 +311,35 @@ type EnqueueTests() =
 
     [<Test>]
     member _.``Queue respects max 10 size limit — oldest messages dropped``() =
-        let path = uniquePath "enq-limit"
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 1
+            use sink = new HttpSink(ports[0])
+            sink.Start()
 
-        // Enqueue 12 messages — only the last 10 should survive (oldest two evicted).
-        [ 1..12 ]
-        |> List.iter (fun i ->
-            let request = { WorktreePath = WorktreePath path; Filename = ""; Payload = $"msg-{i}" }
-            sendMessage request |> Async.RunSynchronously |> ignore)
+            let path = uniquePath "enq-limit"
+            let sid = uniqueSid "owner"
+            runAsync (Server.CanvasDocOwnership.assign path "report.html" sid)
 
-        // Drain in-process (no HTTP) and inspect the survivors directly.
-        let survivors = drainPending path
+            // Enqueue 12 owner-bound messages while the owner is offline.
+            [ 1..12 ]
+            |> List.iter (fun i ->
+                let request =
+                    { WorktreePath = WorktreePath path
+                      Filename = "report.html"
+                      Payload = $"msg-{i}" }
 
-        Assert.That(List.length survivors, Is.EqualTo(10), "Queue should cap at 10 survivors")
-        Assert.That(
-            survivors,
-            Is.EqualTo([ for i in 3..12 -> $"msg-{i}" ]),
-            "Oldest two (msg-1, msg-2) should be evicted, leaving msg-3..msg-12 in order"
-        )
+                sendMessage request |> Async.RunSynchronously |> ignore)
+
+            registerSession path sink.Url (Some sid)
+
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> List.length sink.Bodies = 10), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "The owner registration must drain the capped queue")
+            Assert.That(
+                sink.Bodies,
+                Is.EqualTo([ for i in 3..12 -> $"msg-{i}" ]),
+                "Oldest two (msg-1, msg-2) should be evicted, leaving msg-3..msg-12 in order"))
 
 
 // ── drainQueue via register ─────────────────────────────────────────
@@ -340,24 +347,37 @@ type EnqueueTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+[<NonParallelizable>]
 type DrainQueueTests() =
 
     [<Test>]
-    member _.``Register drains the queued owner-unknown message out of the queue``() =
-        let path = uniquePath "drain-basic"
+    member _.``Registration assigns a pending target before draining its queued message``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 1
+            use sink = new HttpSink(ports[0])
+            sink.Start()
 
-        // Enqueue a message while no bridge is registered.
-        let req = { WorktreePath = WorktreePath path; Filename = ""; Payload = "queued-msg" }
-        Assert.That(sendMessage req |> Async.RunSynchronously, Is.EqualTo(CanvasMessageResult.Queued))
+            let path = uniquePath "drain-basic"
+            let sid = uniqueSid "drainer"
+            let req =
+                { WorktreePath = WorktreePath path
+                  Filename = "diff.html"
+                  Payload = "queued-msg" }
 
-        // Registering a bridge triggers drainQueue. The queued message has no known owner, so the
-        // registering bridge may drain it: it is removed from the queue (the unreachable URL just
-        // makes the async POST fail silently — it is not re-queued).
-        registerSession path "http://127.0.0.1:1/inject" None
+            Assert.That(sendMessage req |> Async.RunSynchronously, Is.EqualTo(CanvasMessageResult.Queued))
+            Assert.That(
+                runAsync (beginPendingLaunch path "diff.html"),
+                Is.EqualTo(PendingLaunchStarted))
 
-        // The queue is now empty: a subsequent anonymous poll drains nothing.
-        Assert.That(drainPending path, Is.Empty,
-            "drainQueue on register must consume the queued owner-unknown message")
+            registerSession path sink.Url (Some sid)
+
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> sink.Bodies = [ "queued-msg" ]), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "The pending target must be assigned before registration drains the queue")
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some sid)))
 
     [<Test>]
     member _.``Register with no queued messages works without error``() =
@@ -370,38 +390,59 @@ type DrainQueueTests() =
         Assert.That(status.Registered, Is.True)
 
     [<Test>]
-    member _.``Register with a sessionId drains the worktree-keyed queue``() =
-        let path = uniquePath "drain-sid"
+    member _.``Anonymous registration cannot consume a pending launch``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use anonymousSink = new HttpSink(ports[0])
+            use identifiedSink = new HttpSink(ports[1])
+            anonymousSink.Start()
+            identifiedSink.Start()
 
-        // Enqueue with no bridge registered (the queue is keyed by worktree path).
-        let req = { WorktreePath = WorktreePath path; Filename = ""; Payload = "queued-msg" }
-        sendMessage req |> Async.RunSynchronously |> ignore
+            let path = uniquePath "drain-identified"
+            let sid = uniqueSid "identified"
+            let req =
+                { WorktreePath = WorktreePath path
+                  Filename = "diff.html"
+                  Payload = "queued-msg" }
 
-        // Register an *identified* (sid:-keyed) session. The registry is no longer
-        // worktree-keyed, so this guards that drainQueue still locates the worktree-keyed
-        // queue and removes it (forwarding to the entry; the unreachable HTTP fails silently).
-        registerSession path "http://127.0.0.1:1/inject" (Some(uniqueSid "drainer"))
+            sendMessage req |> Async.RunSynchronously |> ignore
+            runAsync (beginPendingLaunch path "diff.html") |> ignore
 
-        // The worktree-keyed queue was drained on registration — nothing remains to poll.
-        Assert.That(drainPending path, Is.Empty,
-            "A sid-keyed registration must drain the worktree-keyed queue")
+            registerSession path anonymousSink.Url None
+            Assert.That(anonymousSink.Bodies, Is.Empty)
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(None: string option))
+
+            registerSession path identifiedSink.Url (Some sid)
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> identifiedSink.Bodies = [ "queued-msg" ]), TimeSpan.FromSeconds 5.0),
+                Is.True)
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some sid)))
 
     [<Test>]
-    member _.``Queue is cleared after drain — second register has nothing to drain``() =
-        let path = uniquePath "drain-clear"
+    member _.``Cancelled pending launch is not consumed by registration``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "drain-cancel"
+            let sid = uniqueSid "session"
 
-        // Enqueue
-        let req = { WorktreePath = WorktreePath path; Filename = ""; Payload = "test" }
-        sendMessage req |> Async.RunSynchronously |> ignore
+            Assert.That(
+                runAsync (beginPendingLaunch path "diff.html"),
+                Is.EqualTo(PendingLaunchStarted))
+            runAsync (cancelPendingLaunch path)
+            registerSession path "http://127.0.0.1:1/inject" (Some sid)
 
-        // First register drains
-        registerSession path "http://127.0.0.1:1/inject" None
-        // Second register — queue should already be empty
-        registerSession path "http://127.0.0.1:2/inject" None
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(None: string option))
+            Assert.That(
+                runAsync (beginPendingLaunch path "diff.html"),
+                Is.EqualTo(PendingLaunchStarted),
+                "Cancelling must release the worktree launch slot")
 
-        // If queue was properly drained, this just works without issues
-        let status = getStatus path
-        Assert.That(status.Registered, Is.True)
+            runAsync (cancelPendingLaunch path))
 
 
 // ── multi-session registry (sessionId-keyed re-key) ─────────────────
@@ -600,9 +641,9 @@ type OwnerRoutingTests() =
     member _.``Unowned doc never delivers to a co-located non-author (Bug B regression)``() =
         // Direct Bug B guard: an unowned doc with exactly one live, *reachable* session must not
         // hand that session the message. A real sink proves the non-author receives nothing.
-        // Scope: this guards the *send* path (`sendMessage` queues instead of delivering). An
-        // already-queued owner-unknown message may still drain best-effort to a co-located session
-        // by design — see `Register drains the queued owner-unknown message` in DrainQueueTests.
+        // Scope: this guards the *send* path (`sendMessage` queues instead of delivering). Queue
+        // drain also re-resolves the unified target and therefore cannot deliver an untargeted
+        // message to a co-located registration.
         let ports = getFreeTcpPorts 1
         use nonAuthorSink = new HttpSink(ports[0])
         nonAuthorSink.Start()
@@ -709,18 +750,18 @@ type SystemViewInteractionRoutingTests() =
         Assert.That(retry.GetAwaiter().GetResult(), Is.True, "A newer registration must complete the retry")
 
     [<Test>]
-    member _.``start-fresh reassignment claims queued interaction and delivers it only to replacement``() =
+    member _.``queued message re-resolves the current target when registration drains it``() =
         withTempCwd (fun () ->
             let ports = getFreeTcpPorts 2
             use oldOwnerSink = new HttpSink(ports[0])
-            use replacementSink = new HttpSink(ports[1])
+            use currentOwnerSink = new HttpSink(ports[1])
             oldOwnerSink.Start()
-            replacementSink.Start()
+            currentOwnerSink.Start()
 
             let path = Path.Combine(Environment.CurrentDirectory, $"system-reassign-{Guid.NewGuid():N}")
             let oldSid = uniqueSid "old"
-            let replacementSid = uniqueSid "replacement"
-            runAsync (Server.CanvasInteractionOwnership.assign path "diff.html" oldSid)
+            let currentSid = uniqueSid "current"
+            runAsync (Server.CanvasDocOwnership.assign path "diff.html" oldSid)
 
             let queued =
                 runAsync (
@@ -731,40 +772,22 @@ type SystemViewInteractionRoutingTests() =
 
             Assert.That(queued, Is.EqualTo(CanvasMessageResult.Queued))
 
-            let reassignment =
-                match runAsync (Server.CanvasInteractionOwnership.beginReassignment path "diff.html") with
-                | Ok value -> value
-                | Error err -> failwith err
-
-            Assert.That(
-                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some oldSid),
-                "The old owner remains authoritative until replacement registration")
+            runAsync (Server.CanvasDocOwnership.assign path "diff.html" currentSid)
 
             registerSession path oldOwnerSink.Url (Some oldSid)
             Assert.That(
                 oldOwnerSink.Bodies,
                 Is.Empty,
-                "A pending explicit reassignment must freeze delivery to the old owner")
+                "Drain must not use the target captured when the message was queued")
 
-            registerSessionForClaim path replacementSink.Url (Some replacementSid) reassignment.Token
-
+            registerSession path currentOwnerSink.Url (Some currentSid)
             Assert.That(
-                SpinWait.SpinUntil((fun () -> replacementSink.Bodies = [ "recover-me" ]), TimeSpan.FromSeconds 5.0),
+                SpinWait.SpinUntil((fun () -> currentOwnerSink.Bodies = [ "recover-me" ]), TimeSpan.FromSeconds 5.0),
                 Is.True,
-                "Replacement registration must claim and drain the queued interaction")
-            Assert.That(
-                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some replacementSid))
-
-            runAsync (
-                Server.CanvasInteractionOwnership.cancelReassignment
-                    path
-                    "diff.html"
-                    reassignment.Token))
+                "The current target must receive the queued interaction"))
 
     [<Test>]
-    member _.``heartbeat cannot steal pending SystemView claim from deliberately launched session``() =
+    member _.``first identified registration after launch assigns before queue drain``() =
         withTempCwd (fun () ->
             let ports = getFreeTcpPorts 2
             use sinkA = new HttpSink(ports[0])
@@ -787,34 +810,25 @@ type SystemViewInteractionRoutingTests() =
 
             Assert.That(first, Is.EqualTo(CanvasMessageResult.Queued))
 
-            // A co-located registration before the launch flow marks a pending claim cannot
-            // collect an unclaimed SystemView interaction.
             registerSession path sinkB.Url (Some sidB)
             Assert.That(sinkB.Bodies, Is.Empty)
 
-            let claimToken = startSystemViewClaim path "diff.html"
-
-            // B was already registered when the interaction launch began, so its periodic
-            // re-registration is only a heartbeat: it cannot claim or drain the pending view.
-            registerSession path sinkB.Url (Some sidB)
             Assert.That(
-                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
-                Is.EqualTo(None: string option))
-            Assert.That(sinkB.Bodies, Is.Empty)
+                runAsync (beginPendingLaunch path "diff.html"),
+                Is.EqualTo(PendingLaunchStarted))
 
-            // Registration claims the target synchronously before drainQueue runs.
-            registerSessionForClaim path sinkA.Url (Some sidA) claimToken
+            // The first identified same-worktree registration after launch wins the bounded race.
+            registerSession path sinkA.Url (Some sidA)
             Assert.That(
                 SpinWait.SpinUntil((fun () -> List.length sinkA.Bodies = 1), TimeSpan.FromSeconds 5.0),
                 Is.True,
-                "The claiming session must receive the queued interaction")
+                "Registration must assign the target before draining the queued interaction")
             Assert.That(sinkA.Bodies, Is.EqualTo([ "p1" ]))
             Assert.That(sinkB.Bodies, Is.Empty)
             Assert.That(
-                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
                 Is.EqualTo(Some sidA))
 
-            // Re-registering B cannot steal the unified target from A or duplicate the drained message.
             registerSession path sinkB.Url (Some sidB)
             let second =
                 runAsync (
@@ -827,7 +841,7 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(sinkA.Bodies, Is.EqualTo([ "p1"; "p2" ]))
             Assert.That(sinkB.Bodies, Is.Empty)
 
-            runAsync (Server.CanvasInteractionOwnership.assign path "diff.html" sidB)
+            runAsync (Server.CanvasDocOwnership.assign path "diff.html" sidB)
             let third =
                 runAsync (
                     sendMessage
@@ -840,17 +854,14 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(sinkB.Bodies, Is.EqualTo([ "p3" ])))
 
     [<Test>]
-    member _.``concurrent diff and beads launches claim and drain only their matching view``() =
+    member _.``concurrent filenames join one worktree launch and drain to the same registration``() =
         withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 2
-            use diffSink = new HttpSink(ports[0])
-            use beadsSink = new HttpSink(ports[1])
-            diffSink.Start()
-            beadsSink.Start()
+            let ports = getFreeTcpPorts 1
+            use sink = new HttpSink(ports[0])
+            sink.Start()
 
             let path = Path.Combine(Environment.CurrentDirectory, $"system-concurrent-{Guid.NewGuid():N}")
-            let diffSid = uniqueSid "diff"
-            let beadsSid = uniqueSid "beads"
+            let sid = uniqueSid "shared"
 
             let diffQueued =
                 runAsync (
@@ -869,34 +880,73 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(diffQueued, Is.EqualTo(CanvasMessageResult.Queued))
             Assert.That(beadsQueued, Is.EqualTo(CanvasMessageResult.Queued))
 
-            let diffToken = startSystemViewClaim path "diff.html"
-            let beadsToken = startSystemViewClaim path "beads.html"
-
-            registerSessionForClaim path diffSink.Url (Some diffSid) diffToken
-
             Assert.That(
-                SpinWait.SpinUntil((fun () -> diffSink.Bodies = [ "diff-payload" ]), TimeSpan.FromSeconds 5.0),
+                runAsync (beginPendingLaunch path "diff.html"),
+                Is.EqualTo(PendingLaunchStarted))
+            Assert.That(
+                runAsync (beginPendingLaunch path "beads.html"),
+                Is.EqualTo(PendingLaunchJoined),
+                "A second filename in the worktree must join the existing launch")
+
+            registerSession path sink.Url (Some sid)
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> List.length sink.Bodies = 2), TimeSpan.FromSeconds 5.0),
                 Is.True,
-                "The diff launch must drain only diff.html")
-            Assert.That(beadsSink.Bodies, Is.Empty)
+                "One registration must drain every pending filename in the worktree")
+            Assert.That(sink.Bodies, Is.EqualTo([ "diff-payload"; "beads-payload" ]))
             Assert.That(
-                runAsync (Server.CanvasInteractionOwnership.getOwner path "beads.html"),
-                Is.EqualTo(None: string option))
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some sid))
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "beads.html"),
+                Is.EqualTo(Some sid)))
 
-            registerSessionForClaim path beadsSink.Url (Some beadsSid) beadsToken
+    [<Test>]
+    member _.``pending launches never cross worktree boundaries``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use sinkA = new HttpSink(ports[0])
+            use sinkB = new HttpSink(ports[1])
+            sinkA.Start()
+            sinkB.Start()
 
-            Assert.That(
-                SpinWait.SpinUntil((fun () -> beadsSink.Bodies = [ "beads-payload" ]), TimeSpan.FromSeconds 5.0),
-                Is.True,
-                "The beads launch must drain the independently correlated beads.html interaction")
-            Assert.That(diffSink.Bodies, Is.EqualTo([ "diff-payload" ]))
-            Assert.That(
-                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some diffSid))
-            Assert.That(
-                runAsync (Server.CanvasInteractionOwnership.getOwner path "beads.html"),
-                Is.EqualTo(Some beadsSid)))
+            let pathA = Path.Combine(Environment.CurrentDirectory, $"system-a-{Guid.NewGuid():N}")
+            let pathB = Path.Combine(Environment.CurrentDirectory, $"system-b-{Guid.NewGuid():N}")
+            let sidA = uniqueSid "a"
+            let sidB = uniqueSid "b"
 
+            [ pathA, "payload-a"; pathB, "payload-b" ]
+            |> List.iter (fun (path, payload) ->
+                sendMessage
+                    { WorktreePath = WorktreePath path
+                      Filename = "diff.html"
+                      Payload = payload }
+                |> runAsync
+                |> ignore)
+
+            Assert.That(runAsync (beginPendingLaunch pathA "diff.html"), Is.EqualTo(PendingLaunchStarted))
+            Assert.That(runAsync (beginPendingLaunch pathB "diff.html"), Is.EqualTo(PendingLaunchStarted))
+
+            registerSession pathA sinkA.Url (Some sidA)
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> sinkA.Bodies = [ "payload-a" ]), TimeSpan.FromSeconds 5.0),
+                Is.True)
+            Assert.That(sinkB.Bodies, Is.Empty)
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner pathB "diff.html"),
+                Is.EqualTo(None: string option),
+                "A registration may consume only its own worktree's pending launch")
+
+            registerSession pathB sinkB.Url (Some sidB)
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> sinkB.Bodies = [ "payload-b" ]), TimeSpan.FromSeconds 5.0),
+                Is.True)
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner pathA "diff.html"),
+                Is.EqualTo(Some sidA))
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner pathB "diff.html"),
+                Is.EqualTo(Some sidB)))
 
 // ── scanner fallback-only attribution (RefreshScheduler.CanvasWatchers) ──────
 // The scanner is the *fallback* attribution path only: it may attribute a no-owner changed
@@ -971,10 +1021,6 @@ type ScannerFallbackAttributionTests() =
 
             Assert.That(
                 runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(None: string option),
-                "A generated file scan must not assign a routing target")
-            Assert.That(
-                runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
                 Is.EqualTo(None: string option),
                 "A file scan is not an explicit interaction claim"))
 
