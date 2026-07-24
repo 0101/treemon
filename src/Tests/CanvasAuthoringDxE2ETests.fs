@@ -665,6 +665,26 @@ type CanvasSelectionContextE2ETests() =
         }
 
     [<Test>]
+    member this.``selection config omits surrounding context while retaining selected text``() =
+        task {
+            do! (this.ServeDoc
+                "<section data-section=\"configured\">Before <span id=\"selected\">Selected phrase</span> after</section>"
+                SystemViewHost)
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { window.canvasSelectionConfig = { includeSurroundingContext: false }; }")
+            do! this.SelectAndWaitForToolbar "#selected"
+            do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
+            let! _ = this.Page.WaitForFunctionAsync("() => window.__selectionMessages.length===1")
+            let! message =
+                this.Page.EvaluateAsync<string>(
+                    "() => JSON.stringify(window.__selectionMessages[0])")
+            let expected =
+                """{"intent":"explain","doc":"selection.html","selectedText":"Selected phrase","section":"configured","request":"User asked to explain/expand this","action":"canvas-selection"}"""
+            Assert.That(message, Is.EqualTo(expected))
+        }
+
+    [<Test>]
     member this.``browser fallback exposes canvasSend and posts selection actions through it``() =
         task {
             do! (this.ServeDoc

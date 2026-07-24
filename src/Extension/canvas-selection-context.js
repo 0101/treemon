@@ -526,18 +526,24 @@
     return window.canvasSend(action, payload) ? 'sent' : 'too-large';
   }
 
+  function includeSurroundingContext() {
+    const config = window.canvasSelectionConfig;
+    return !(config && config.includeSurroundingContext === false);
+  }
+
   function sendSelection(intent, comment) {
     if (!state) return;
 
     const payload = {
       intent: intent,
-      doc: documentName(),
-      contextBefore: state.contextBefore,
-      selectedText: state.selectedText,
-      contextAfter: state.contextAfter,
-      section: state.section || undefined,
-      request: requestFor(intent, comment)
+      doc: documentName()
     };
+    const includesContext = includeSurroundingContext();
+    if (includesContext) payload.contextBefore = state.contextBefore;
+    payload.selectedText = state.selectedText;
+    if (includesContext) payload.contextAfter = state.contextAfter;
+    payload.section = state.section || undefined;
+    payload.request = requestFor(intent, comment);
 
     const metadata = selectionMetadata(state);
     if (metadata.status === 'invalid') {

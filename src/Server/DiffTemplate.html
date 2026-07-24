@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Worktree Diff</title>
 <link rel="stylesheet" href="/assets/diff2html/3.4.52/diff2html.min.css">
+<script>window.canvasSelectionConfig = { includeSurroundingContext: false };</script>
 <style>
 :root {
     color-scheme: dark;
@@ -97,7 +98,8 @@ button { font: inherit; }
 }
 
 .view-toggle button,
-.refresh-button {
+.refresh-button,
+.file-actions-button {
     display: inline-grid;
     width: 28px;
     height: 28px;
@@ -126,14 +128,17 @@ button { font: inherit; }
 .view-toggle button:hover,
 .view-toggle button:focus-visible,
 .refresh-button:hover,
-.refresh-button:focus-visible {
+.refresh-button:focus-visible,
+.file-actions-button:hover,
+.file-actions-button:focus-visible {
     border-color: var(--border-bright);
     color: var(--text-primary);
     opacity: 1;
 }
 
 .view-toggle button:focus-visible,
-.refresh-button:focus-visible {
+.refresh-button:focus-visible,
+.file-actions-button:focus-visible {
     outline: 2px solid var(--accent-bright);
     outline-offset: 2px;
 }
@@ -231,23 +236,41 @@ button { font: inherit; }
 }
 
 .file-heading {
+    display: grid;
+    grid-template-columns: minmax(0, auto) auto minmax(0, 1fr) auto;
+    gap: 0 .25rem;
+    align-items: start;
     margin: 0;
     font: inherit;
+    cursor: pointer;
 }
 
 .file-entry {
     display: grid;
-    width: 100%;
-    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    width: auto;
+    min-width: 0;
+    grid-template-columns: auto auto minmax(0, 1fr);
     gap: .3rem .5rem;
     align-items: center;
-    padding: .55rem .75rem;
+    padding: .55rem 0 .55rem .75rem;
     border: 0;
     border-radius: 0;
     text-align: left;
     color: var(--text-secondary);
     background: transparent;
     cursor: pointer;
+}
+
+.file-actions-button {
+    width: 18px;
+    height: 18px;
+    margin-top: .5rem;
+    border-radius: 50%;
+}
+
+.file-actions-button .toolbar-icon {
+    width: .75rem;
+    height: .75rem;
 }
 
 .file-entry::before {
@@ -258,8 +281,8 @@ button { font: inherit; }
     transition: transform .12s ease;
 }
 
-.file-entry:hover,
-.file-entry:focus-visible {
+.file-heading:hover,
+.file-heading:has(.file-entry:focus-visible) {
     background: var(--bg-elevated);
 }
 
@@ -270,6 +293,9 @@ button { font: inherit; }
 
 .file-entry.active {
     color: var(--text-primary);
+}
+
+.file-heading:has(.file-entry.active) {
     background: var(--bg-surface);
 }
 
@@ -295,7 +321,9 @@ button { font: inherit; }
 
 .file-stats {
     display: inline-flex;
+    grid-column: 4;
     gap: .4rem;
+    margin: .65rem .75rem 0 .25rem;
     font-family: var(--font-code);
     font-size: var(--fs-sm);
     font-variant-numeric: tabular-nums;
@@ -811,6 +839,15 @@ function changePresentation(change) {
     }[change] || { symbol: '?', label: 'Changed file' };
 }
 
+function showFileActions(path) {
+    var range = document.createRange();
+    range.selectNodeContents(path);
+    var selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+}
+
 function renderFileList(files) {
     var list = document.getElementById('file-list');
     list.replaceChildren();
@@ -846,12 +883,13 @@ function renderFileList(files) {
         path.textContent = file.displayPath;
         button.appendChild(path);
 
+        var stats = null;
         if (
             Number.isInteger(file.linesAdded) &&
             Number.isInteger(file.linesRemoved) &&
             (file.linesAdded > 0 || file.linesRemoved > 0)
         ) {
-            var stats = document.createElement('span');
+            stats = document.createElement('span');
             stats.className = 'file-stats';
             var statLabels = [];
 
@@ -872,7 +910,6 @@ function renderFileList(files) {
             }
 
             stats.setAttribute('aria-label', statLabels.join(', '));
-            button.appendChild(stats);
         }
 
         if (file.oldDisplayPath) {
@@ -882,7 +919,6 @@ function renderFileList(files) {
             button.appendChild(oldPath);
         }
 
-        button.addEventListener('click', function() { selectFile(file, button, item); });
         button.addEventListener('keydown', function(event) {
             var buttons = Array.from(list.querySelectorAll('.file-entry'));
             var current = buttons.indexOf(button);
@@ -897,7 +933,25 @@ function renderFileList(files) {
             }
         });
 
-        heading.appendChild(button);
+        var actionsButton = document.createElement('button');
+        actionsButton.type = 'button';
+        actionsButton.className = 'file-actions-button';
+        actionsButton.setAttribute('aria-label', 'Actions for ' + file.displayPath);
+        actionsButton.title = 'Actions for ' + file.displayPath;
+        actionsButton.innerHTML =
+            '<svg class="toolbar-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false">' +
+            '<circle cx="3" cy="8" r="1"></circle>' +
+            '<circle cx="8" cy="8" r="1"></circle>' +
+            '<circle cx="13" cy="8" r="1"></circle>' +
+            '</svg>';
+        actionsButton.addEventListener('click', function(event) {
+            event.stopPropagation();
+            showFileActions(path);
+        });
+        heading.addEventListener('click', function() { selectFile(file, button, item); });
+
+        heading.append(button, actionsButton);
+        if (stats) heading.appendChild(stats);
         item.appendChild(heading);
         list.appendChild(item);
     });
@@ -1378,17 +1432,29 @@ function intersectingRows(range) {
     });
 }
 
+function fileForRange(range) {
+    if (!range || !state.summary || !Array.isArray(state.summary.files)) return null;
+    var start = range.startContainer;
+    var element = start && (start.nodeType === Node.ELEMENT_NODE ? start : start.parentElement);
+    var item = element && element.closest('.file-item');
+    if (!item) return null;
+    return state.summary.files.find(function(file) {
+        return file.identity === item.dataset.identity;
+    }) || null;
+}
+
 window.canvasSelectionMetadata = function(selectionContext) {
-    if (!state.selected) return { kind: 'diff' };
     var range = selectionContext && selectionContext.range;
+    var file = fileForRange(range) || state.selected;
+    if (!file) return { kind: 'diff' };
     var rows = range ? intersectingRows(range) : [];
     var hunks = Array.from(new Set(rows.map(function(row) { return row.dataset.hunk; }).filter(Boolean)));
     var hasExactHunk = hunks.length === 1;
     return {
         kind: 'diff',
-        fileIdentity: state.selected.identity,
-        displayPath: state.selected.displayPath,
-        oldDisplayPath: state.selected.oldDisplayPath || null,
+        fileIdentity: file.identity,
+        displayPath: file.displayPath,
+        oldDisplayPath: file.oldDisplayPath || null,
         hunkHeader: hasExactHunk ? hunks[0] : null,
         oldLineRange: hasExactHunk ? rangeFor(rows, 'oldLine') : null,
         newLineRange: hasExactHunk ? rangeFor(rows, 'newLine') : null

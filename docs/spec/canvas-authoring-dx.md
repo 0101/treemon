@@ -121,8 +121,11 @@ selection with **Explain**, **Remove**, and **Comment**. Clearing the selection 
 box. Comment expands to an Enter-to-submit input and pins the captured selection until a new
 selection or Escape.
 
-All three actions send `action: "canvas-selection"` with an `intent` discriminator, the document
-filename, and ordered `contextBefore`, `selectedText`, `contextAfter` fields. The nearest safe
+All three actions send `action: "canvas-selection"` with an `intent` discriminator and the document
+filename. By default the payload contains ordered `contextBefore`, `selectedText`, `contextAfter`
+fields; a trusted document may set
+`window.canvasSelectionConfig = { includeSurroundingContext: false }` before an action is sent to
+omit the two surrounding-context fields while retaining `selectedText`. The nearest safe
 `data-section`/`id` is included when available. Comments appear once in the human-readable
 `request`; selected document text stays in separate data fields so it cannot become instruction
 text.
@@ -130,7 +133,7 @@ text.
 After submission, a pointer-inert overlay pulses over the selected range until the document updates
 or the user starts another selection. Static shared exports receive no selection UI. SystemViews
 use persistent interaction-session ownership and may enrich the payload with structured
-`sourceContext`; see `docs/spec/canvas-system-view-interactions.md`.
+`sourceContext`; see `docs/spec/canvas-interaction-routing.md`.
 
 ### 5. Always-visible doc tab with last-modified age (Phase 8)
 

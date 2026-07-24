@@ -73,4 +73,4 @@ The template distinguishes the initial render from subsequent polls:
 ## Related Specs
 
 - `docs/spec/canvas-pane.md` — generic canvas pane architecture and the `AgentDoc` vs `SystemView` behavior matrix
-- `docs/spec/canvas-system-view-interactions.md` — generic selected-text actions and interaction-session routing
+- `docs/spec/canvas-interaction-routing.md` — generic selected-text routing and ownership

@@ -843,6 +843,51 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
+    member this.``file action selects the filename and opens file-level selection actions``() =
+        task {
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.RouteFiles()
+            do! this.Goto()
+
+            let action = this.Page.Locator(".file-actions-button")
+            do! action.WaitForAsync()
+            do! action.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => { const host = document.querySelector('canvas-selection-context'); return host?.style.display === 'block' && host.style.visibility === 'visible'; }",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f)
+                )
+
+            let! state =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const selection = window.getSelection();
+                        const range = selection.getRangeAt(0);
+                        return [
+                            selection.toString(),
+                            document.querySelector('.file-actions-button').getAttribute('aria-label'),
+                            String(document.querySelectorAll('.file-entry.active').length),
+                            String(document.querySelectorAll('.file-panel').length),
+                            JSON.stringify(window.canvasSelectionMetadata({ range }))
+                        ];
+                    }"""
+                )
+
+            Assert.That(
+                state,
+                Is.EqualTo(
+                    [| "src/a.txt"
+                       "Actions for src/a.txt"
+                       "0"
+                       "0"
+                       """{"kind":"diff","fileIdentity":"id-1","displayPath":"src/a.txt","oldDisplayPath":null,"hunkHeader":null,"oldLineRange":null,"newLineRange":null}""" |]
+                )
+            )
+        }
+
+    [<Test>]
     member this.``pane-hosted diff selection exposes and emits all generic actions with exact source context``() =
         task {
             let browserErrors =
@@ -1081,6 +1126,9 @@ type DiffViewerE2ETests() =
                     """() => JSON.stringify(window.__paneSelectionMessages.map(message => ({
                         intent: message.intent,
                         doc: message.doc,
+                        hasContextBefore: Object.hasOwn(message, 'contextBefore'),
+                        hasContextAfter: Object.hasOwn(message, 'contextAfter'),
+                        hasSelectedText: typeof message.selectedText === 'string' && message.selectedText.length > 0,
                         request: message.request,
                         action: message.action,
                         sourceContext: message.sourceContext
@@ -1092,11 +1140,11 @@ type DiffViewerE2ETests() =
 
             let expected =
                 "["
-                + $"""{{"intent":"explain","doc":"diff.html","request":"User asked to explain/expand this","action":"canvas-selection","sourceContext":{sourceContext}}}"""
+                + $"""{{"intent":"explain","doc":"diff.html","hasContextBefore":false,"hasContextAfter":false,"hasSelectedText":true,"request":"User asked to explain/expand this","action":"canvas-selection","sourceContext":{sourceContext}}}"""
                 + ","
-                + $"""{{"intent":"remove","doc":"diff.html","request":"User asked to remove this","action":"canvas-selection","sourceContext":{sourceContext}}}"""
+                + $"""{{"intent":"remove","doc":"diff.html","hasContextBefore":false,"hasContextAfter":false,"hasSelectedText":true,"request":"User asked to remove this","action":"canvas-selection","sourceContext":{sourceContext}}}"""
                 + ","
-                + $"""{{"intent":"comment","doc":"diff.html","request":"User commented: Verify this change","action":"canvas-selection","sourceContext":{sourceContext}}}"""
+                + $"""{{"intent":"comment","doc":"diff.html","hasContextBefore":false,"hasContextAfter":false,"hasSelectedText":true,"request":"User commented: Verify this change","action":"canvas-selection","sourceContext":{sourceContext}}}"""
                 + "]"
 
             let browserErrorEvidence = browserErrors.ToArray()
@@ -1582,15 +1630,18 @@ type DiffViewerE2ETests() =
             let! state =
                 this.Page.EvaluateAsync<string array>(
                     """() => {
+                        const headings = [...document.querySelectorAll('.file-heading')];
                         const entries = [...document.querySelectorAll('.file-entry')];
-                        const addedStats = entries[0].querySelector('.file-stats');
-                        const removedStats = entries[1].querySelector('.file-stats');
+                        const addedStats = headings[0].querySelector('.file-stats');
+                        const removedStats = headings[1].querySelector('.file-stats');
                         const added = addedStats.querySelector('.file-lines-added');
                         const removed = removedStats.querySelector('.file-lines-removed');
                         const path = entries[0].querySelector('.file-path');
                         const badge = entries[0].querySelector('.change-badge');
+                        const action = headings[0].querySelector('.file-actions-button');
                         const badgeRect = badge.getBoundingClientRect();
                         const pathRect = path.getBoundingClientRect();
+                        const actionRect = action.getBoundingClientRect();
                         return [
                             addedStats.textContent,
                             addedStats.getAttribute('aria-label'),
@@ -1601,9 +1652,14 @@ type DiffViewerE2ETests() =
                             getComputedStyle(removed).color,
                             String(removedStats.querySelectorAll('.file-lines-added').length),
                             String(path.previousElementSibling.classList.contains('change-badge')),
-                            String(addedStats.previousElementSibling === path),
+                            String(action.previousElementSibling === entries[0]),
+                            String(addedStats.previousElementSibling === action),
+                            String(actionRect.left - pathRect.right >= 2 && actionRect.left - pathRect.right <= 6),
+                            String(Math.round(actionRect.width)),
+                            String(Math.round(actionRect.height)),
+                            getComputedStyle(action).borderRadius,
                             String(Math.round(pathRect.left - badgeRect.right)),
-                            String(entries[2].querySelectorAll('.file-stats').length)
+                            String(headings[2].querySelectorAll('.file-stats').length)
                         ];
                     }"""
                 )
@@ -1621,6 +1677,11 @@ type DiffViewerE2ETests() =
                        "0"
                        "true"
                        "true"
+                       "true"
+                       "true"
+                       "18"
+                       "18"
+                       "50%"
                        "8"
                        "0" |]
                 )
