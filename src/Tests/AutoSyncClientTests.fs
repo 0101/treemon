@@ -48,7 +48,11 @@ let private model enabled : Model =
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
-      SelectedOverviewGroup = None }
+      SelectedOverviewGroup = None
+      OverviewHistoryWindow = None
+      OverviewHistory = None
+      OverviewHistoryRequestedAt = DateTimeOffset.MinValue
+      OverviewHistoryRequestInFlight = None }
 
 let private enabled (model: Model) =
     findWorktree scopedKey model |> Option.map _.AutoSyncEnabled

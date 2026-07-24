@@ -10,22 +10,37 @@ open Shared
 
 let private normPath = Server.PathUtils.normalizePath
 
+let private worktreePath root name =
+    Path.Combine(Path.GetFullPath root, name) |> normPath
+
 let private makeWorktree path branch : WorktreeInfo =
     { Path = normPath path; Head = "abc123"; Branch = Some branch }
 
 let private makeDetachedWorktree path : WorktreeInfo =
     { Path = normPath path; Head = "abc123"; Branch = None }
 
+let private getAgentState (agent: MailboxProcessor<StateMsg>) =
+    agent.PostAndAsyncReply(GetState)
+
 let private populateAgent (agent: MailboxProcessor<StateMsg>) (repos: (RepoId * WorktreeInfo list) list) =
     async {
         repos
         |> List.iter (fun (repoId, worktrees) ->
             agent.Post(UpdateWorktreeList(repoId, worktrees)))
-        do! Async.Sleep 100
+        do! getAgentState agent |> Async.Ignore
     }
 
-let private getAgentState (agent: MailboxProcessor<StateMsg>) =
-    agent.PostAndAsyncReply(GetState)
+let private createApi agent roots =
+    WorktreeApi.worktreeApi
+        agent
+        (CardEventLog.createAgent ())
+        (SessionManager.createAgent ())
+        None
+        None
+        roots
+        None
+        "1.0"
+        None
 
 
 [<TestFixture>]
@@ -33,6 +48,7 @@ let private getAgentState (agent: MailboxProcessor<StateMsg>) =
 [<Category("Fast")>]
 type DeleteWorktreeResolutionTests() =
 
+    // NUnit setup assigns fresh directories for each test.
     let mutable tempDirA = ""
     let mutable tempDirB = ""
 
@@ -56,20 +72,19 @@ type DeleteWorktreeResolutionTests() =
             let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
-                [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirA}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirA "main") "main"
+                  makeWorktree (worktreePath tempDirA "feature-x") "feature-x" ]
             let worktreesB =
-                [ makeWorktree $"{Path.GetFullPath tempDirB}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirB}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirB "main") "main"
+                  makeWorktree (worktreePath tempDirB "feature-x") "feature-x" ]
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
+            let api = createApi agent [ tempDirA; tempDirB ]
 
-            let targetPath = normPath $"{Path.GetFullPath tempDirA}/feature-x"
+            let targetPath = worktreePath tempDirA "feature-x"
             let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
 
-            do! Async.Sleep 50
             let! state = getAgentState agent
 
             let repoAWorktrees =
@@ -91,12 +106,12 @@ type DeleteWorktreeResolutionTests() =
 
             Assert.That(
                 repoBWorktrees,
-                Does.Contain(normPath $"{Path.GetFullPath tempDirB}/feature-x"),
+                Does.Contain(worktreePath tempDirB "feature-x"),
                 "RepoB's feature-x should NOT be affected")
 
             Assert.That(
                 repoBWorktrees,
-                Does.Contain(normPath $"{Path.GetFullPath tempDirB}/main"),
+                Does.Contain(worktreePath tempDirB "main"),
                 "RepoB's main should NOT be affected")
         }
 
@@ -108,20 +123,19 @@ type DeleteWorktreeResolutionTests() =
             let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
-                [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirA}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirA "main") "main"
+                  makeWorktree (worktreePath tempDirA "feature-x") "feature-x" ]
             let worktreesB =
-                [ makeWorktree $"{Path.GetFullPath tempDirB}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirB}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirB "main") "main"
+                  makeWorktree (worktreePath tempDirB "feature-x") "feature-x" ]
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
+            let api = createApi agent [ tempDirA; tempDirB ]
 
-            let targetPath = normPath $"{Path.GetFullPath tempDirB}/main"
+            let targetPath = worktreePath tempDirB "main"
             let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
 
-            do! Async.Sleep 50
             let! state = getAgentState agent
 
             let repoBWorktrees =
@@ -143,7 +157,7 @@ type DeleteWorktreeResolutionTests() =
 
             Assert.That(
                 repoAWorktrees,
-                Does.Contain(normPath $"{Path.GetFullPath tempDirA}/main"),
+                Does.Contain(worktreePath tempDirA "main"),
                 "RepoA's main should NOT be affected")
         }
 
@@ -154,13 +168,14 @@ type DeleteWorktreeResolutionTests() =
             let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
 
             let worktreesA =
-                [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main" ]
+                [ makeWorktree (worktreePath tempDirA "main") "main" ]
 
             do! populateAgent agent [ repoAId, worktreesA ]
 
-            let api = WorktreeApi.worktreeApi agent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA ] None "1.0" None
+            let api = createApi agent [ tempDirA ]
 
-            let! result = api.deleteWorktree (PathUtils.toWorktreePath "/nonexistent/path/main")
+            let! result =
+                api.deleteWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "missing"))
 
             match result with
             | Error msg ->
@@ -175,6 +190,7 @@ type DeleteWorktreeResolutionTests() =
 [<Category("Fast")>]
 type ArchiveWorktreeResolutionTests() =
 
+    // NUnit setup assigns fresh directories for each test.
     let mutable tempDirA = ""
     let mutable tempDirB = ""
 
@@ -198,17 +214,18 @@ type ArchiveWorktreeResolutionTests() =
             let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
-                [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirA}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirA "main") "main"
+                  makeWorktree (worktreePath tempDirA "feature-x") "feature-x" ]
             let worktreesB =
-                [ makeWorktree $"{Path.GetFullPath tempDirB}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirB}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirB "main") "main"
+                  makeWorktree (worktreePath tempDirB "feature-x") "feature-x" ]
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
+            let api = createApi agent [ tempDirA; tempDirB ]
 
-            let! result = api.archiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
+            let! result =
+                api.archiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "feature-x"))
 
             match result with
             | Ok () -> ()
@@ -229,17 +246,18 @@ type ArchiveWorktreeResolutionTests() =
             let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
             let worktreesA =
-                [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirA}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirA "main") "main"
+                  makeWorktree (worktreePath tempDirA "feature-x") "feature-x" ]
             let worktreesB =
-                [ makeWorktree $"{Path.GetFullPath tempDirB}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirB}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirB "main") "main"
+                  makeWorktree (worktreePath tempDirB "feature-x") "feature-x" ]
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
+            let api = createApi agent [ tempDirA; tempDirB ]
 
-            let! result = api.archiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirB}/main")
+            let! result =
+                api.archiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirB "main"))
 
             match result with
             | Ok () -> ()
@@ -263,17 +281,18 @@ type ArchiveWorktreeResolutionTests() =
             TreemonConfig.setArchivedBranches tempDirB [ "feature-x" ]
 
             let worktreesA =
-                [ makeWorktree $"{Path.GetFullPath tempDirA}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirA}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirA "main") "main"
+                  makeWorktree (worktreePath tempDirA "feature-x") "feature-x" ]
             let worktreesB =
-                [ makeWorktree $"{Path.GetFullPath tempDirB}/main" "main"
-                  makeWorktree $"{Path.GetFullPath tempDirB}/feature-x" "feature-x" ]
+                [ makeWorktree (worktreePath tempDirB "main") "main"
+                  makeWorktree (worktreePath tempDirB "feature-x") "feature-x" ]
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = WorktreeApi.worktreeApi agent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA; tempDirB ] None "1.0" None
+            let api = createApi agent [ tempDirA; tempDirB ]
 
-            let! result = api.unarchiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/feature-x")
+            let! result =
+                api.unarchiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "feature-x"))
 
             match result with
             | Ok () -> ()
@@ -293,13 +312,14 @@ type ArchiveWorktreeResolutionTests() =
             let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
 
             let worktreesA =
-                [ makeDetachedWorktree $"{Path.GetFullPath tempDirA}/detached" ]
+                [ makeDetachedWorktree (worktreePath tempDirA "detached") ]
 
             do! populateAgent agent [ repoAId, worktreesA ]
 
-            let api = WorktreeApi.worktreeApi agent (CardEventLog.createAgent ()) (SessionManager.createAgent ()) None [ tempDirA ] None "1.0" None
+            let api = createApi agent [ tempDirA ]
 
-            let! result = api.archiveWorktree (PathUtils.toWorktreePath $"{Path.GetFullPath tempDirA}/detached")
+            let! result =
+                api.archiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "detached"))
 
             match result with
             | Error msg ->

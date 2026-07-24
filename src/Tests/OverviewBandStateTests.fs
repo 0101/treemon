@@ -6,6 +6,7 @@ open Shared
 open Shared.EventUtils
 open Navigation
 open OverviewData
+open OverviewPresentation
 open OverviewBand
 open AppTypes
 open App
@@ -60,7 +61,11 @@ let private modelWith repos =
       Canvas = CanvasState.empty
       OverviewPanelOpen = true
       OverviewAgentsStuck = false
-      SelectedOverviewGroup = None }
+      SelectedOverviewGroup = None
+      OverviewHistoryWindow = None
+      OverviewHistory = None
+      OverviewHistoryRequestedAt = DateTimeOffset.Now
+      OverviewHistoryRequestInFlight = None }
 
 let private response repos =
     { Repos = repos |> List.map toRepoWorktrees

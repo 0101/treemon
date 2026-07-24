@@ -2,7 +2,9 @@ open Saturn
 open Giraffe
 open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
+open System
 open System.Threading
+open Microsoft.Extensions.Hosting
 open Shared
 open Server
 
@@ -225,6 +227,32 @@ let internal persistResolvedRoots (resolution: RootsResolution) =
         | Error msg ->
             Log.log "Startup" $"Failed to persist worktree roots: {msg}"
 
+let internal usesSessionActivity (config: ServerConfig) =
+    not config.Demo && config.TestFixtures.IsNone
+
+let internal runHostWithCapture
+    (startHost: unit -> unit)
+    (waitForShutdown: unit -> unit)
+    (stopping: CancellationToken)
+    (capture: (CancellationToken -> Async<unit>) option)
+    =
+    match capture with
+    | None ->
+        startHost ()
+        waitForShutdown ()
+    | Some workflow ->
+        let loop = BackgroundLoop.start workflow
+        let stoppingRegistration =
+            stopping.Register(fun () -> BackgroundLoop.cancel loop)
+        Log.log "Startup" "Overview snapshot capture started"
+
+        try
+            startHost ()
+            waitForShutdown ()
+        finally
+            stoppingRegistration.Dispose()
+            BackgroundLoop.stop "Overview snapshot capture" loop
+
 [<EntryPoint>]
 let main args =
     let config = parseArgs args
@@ -238,7 +266,7 @@ let main args =
     // this startup boundary. Demo and fixture modes bypass resolution entirely — they serve
     // synthetic data, so roots stay [].
     let worktreeRoots =
-        if config.Demo || config.TestFixtures.IsSome then
+        if not (usesSessionActivity config) then
             []
         else
             let resolution = resolveWorktreeRoots config.WorktreeRoots
@@ -259,23 +287,8 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
-    let cts = new CancellationTokenSource()
-
-    // The push-model durable store, created up front (real monitoring path only — not demo/fixture)
-    // so it can back BOTH the scalar resume-identity lookup in the worktree API and the activity
-    // ingestion service below. Instance-specific SQLite path keyed by the server's port so a
-    // side-by-side validation instance never collides on the DB file. The service (below) owns
-    // disposal on shutdown; when no service is started (demo/fixture) there is no store to dispose.
-    let sessionActivityStore =
-        if not config.Demo && config.TestFixtures.IsNone then
-            let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
-            Log.log "Startup" $"Session activity store db: {dbPath}"
-            Some(new SessionActivityStore.SessionActivityStore(dbPath))
-        else
-            None
-
     let mergedPrStore =
-        if not config.Demo && config.TestFixtures.IsNone then
+        if usesSessionActivity config then
             let path = MergedPrStore.filePathForPort config.Port
             let store = MergedPrStore.create path
             Log.log "Startup" $"Merged PR store: {path}"
@@ -284,10 +297,10 @@ let main args =
         else
             None
 
-    let remotingApi, schedulerAgent =
+    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
-            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None
         else
             let agent = RefreshScheduler.createAgent ()
             let cardLog = CardEventLog.createAgent ()
@@ -303,54 +316,79 @@ let main args =
                 | Error msg ->
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
-            | None, Some store ->
-                RefreshScheduler.start
+
+                WorktreeApi.worktreeApi
                     agent
-                    { SessionAgent = sessionAgent
-                      ActivityStore = sessionActivityStore
-                      MergedPrStore = store }
+                    cardLog
+                    sessionAgent
+                    None
+                    None
                     worktreeRoots
-                    cts.Token
-                Log.log "Startup" "Scheduler background loop started"
+                    config.TestFixtures
+                    appVersion
+                    deployBranch
+                |> buildRemotingHandler,
+                Some agent,
+                None,
+                None
+            | None, Some mergedStore ->
+                let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
+                Log.log "Startup" $"Session activity store db: {dbPath}"
+                let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
+                let activity =
+                    SessionActivityRuntime.create
+                        dbPath
+                        agent
+                        rootPaths
+                let store = activity.Components.Store
+
+                let schedulerServices: RefreshScheduler.SchedulerServices =
+                    { SessionAgent = sessionAgent
+                      ActivityStore = Some store
+                      MergedPrStore = mergedStore }
+
+                let scheduler =
+                    try
+                        BackgroundLoop.start
+                            (RefreshScheduler.run
+                                agent
+                                schedulerServices
+                                worktreeRoots)
+                    with _ ->
+                        SessionActivityRuntime.shutdown activity None
+                        reraise ()
+
+                try
+                    activity.Components.Service.Start()
+                    Log.log "Startup" "Session activity ingestion started"
+                    Log.log "Startup" "Scheduler background loop started"
+
+                    WorktreeApi.worktreeApi
+                        agent
+                        cardLog
+                        sessionAgent
+                        (Some store)
+                        (Some activity.SnapshotStore)
+                        worktreeRoots
+                        config.TestFixtures
+                        appVersion
+                        deployBranch
+                    |> buildRemotingHandler,
+                    Some agent,
+                    Some activity,
+                    Some scheduler
+                with _ ->
+                    SessionActivityRuntime.shutdown activity (Some scheduler)
+                    reraise ()
             | None, None ->
                 failwith "Merged PR store was not initialized for the live scheduler"
 
-            WorktreeApi.worktreeApi agent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch
-            |> buildRemotingHandler, Some agent
-
-    // Push-model status ingestion. Reuses the durable store created above (shared with the worktree
-    // API's resume-identity lookup). The service owns that store: it rebuilds live status from SQLite
-    // on Start and arms the retention timer, and disposes the store on shutdown. Started only in the
-    // real monitoring path — demo mode has no scheduler agent (and no store), and fixture mode serves
-    // synthetic data and receives no activity posts (mirrors skipping the scheduler background loop).
     let sessionActivityService =
-        match schedulerAgent, sessionActivityStore with
-        | Some agent, Some store when config.TestFixtures.IsNone ->
-            let svc = new SessionActivityService.SessionActivityService(store, agent)
-            svc.Start()
-            Log.log "Startup" "Session activity ingestion started"
-            Some svc
-        | _ -> None
+        activityRuntime |> Option.map _.Components.Service
 
-    System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
-        Log.log "Shutdown" "Cancelling scheduler"
-        cts.Cancel()
-
-        mergedPrStore
-        |> Option.iter (fun store ->
-            try
-                match Async.RunSynchronously(store.Flush(), timeout = 5000) with
-                | Ok() -> ()
-                | Error error -> Log.log "Shutdown" error
-            with :? System.TimeoutException ->
-                Log.log "Shutdown" "Timed out flushing merged PR store")
-
-        cts.Dispose()
-        sessionActivityService |> Option.iter (fun svc -> (svc :> System.IDisposable).Dispose()))
-
-    match schedulerAgent, config.CanvasPort with
-    | Some agent, Some canvasPort -> CanvasDocServer.start agent canvasPort cts.Token
-    | _ -> ()
+    let capture =
+        activityRuntime
+        |> Option.map _.Capture.Run
 
     // The register/attribute routes need the scheduler agent for their known-worktree guard. In
     // demo mode there is no agent (and the canvas doc server is never started — see above), so
@@ -398,5 +436,43 @@ let main args =
             use_gzip
         }
 
-    run app
+    try
+        let canvasHost =
+            match schedulerAgent, config.CanvasPort with
+            | Some agent, Some canvasPort -> Some(CanvasDocServer.start agent canvasPort)
+            | _ -> None
+
+        try
+            use host = app.Build()
+            let applicationLifetime =
+                host.Services.GetService(typeof<IHostApplicationLifetime>)
+                :?> IHostApplicationLifetime
+
+            runHostWithCapture
+                (fun () -> host.Start())
+                (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
+                applicationLifetime.ApplicationStopping
+                capture
+        finally
+            canvasHost
+            |> Option.iter (fun host ->
+                try
+                    host.StopAsync().GetAwaiter().GetResult()
+                finally
+                    host.Dispose())
+    finally
+        activityRuntime
+        |> Option.iter (fun runtime ->
+            Log.log "Shutdown" "Stopping session activity"
+            SessionActivityRuntime.shutdown runtime schedulerLoop)
+
+        mergedPrStore
+        |> Option.iter (fun store ->
+            try
+                match Async.RunSynchronously(store.Flush(), timeout = 5000) with
+                | Ok() -> ()
+                | Error error -> Log.log "Shutdown" error
+            with :? System.TimeoutException ->
+                Log.log "Shutdown" "Timed out flushing merged PR store")
+
     0

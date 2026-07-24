@@ -146,8 +146,8 @@ let withTempCwd (action: unit -> unit) =
 /// the TREEMON_CONFIG_DIR override, then restore the previous value and delete the dir. Required,
 /// not merely convenient: on Windows Environment.GetFolderPath(UserProfile) ignores USERPROFILE/HOME,
 /// so the override is the only way to keep in-process config tests (the global read/write helpers and
-/// the orphan roots.json lookup) off the real ~/.treemon. `prefix` names the temp dir for debugging,
-/// mirroring withTempFile. TREEMON_CONFIG_DIR is process-global, so callers must stay non-parallel.
+/// the orphan roots.json lookup) off the real ~/.treemon. `prefix` names the temp dir for debugging.
+/// TREEMON_CONFIG_DIR is process-global, so callers must stay non-parallel.
 let withTempConfigDir (prefix: string) (action: string -> unit) =
     let tempDir = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid()}")
     Directory.CreateDirectory(tempDir) |> ignore

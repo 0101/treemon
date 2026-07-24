@@ -38,7 +38,11 @@ let private defaultModel : Model =
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
-      SelectedOverviewGroup = None }
+      SelectedOverviewGroup = None
+      OverviewHistoryWindow = None
+      OverviewHistory = None
+      OverviewHistoryRequestedAt = System.DateTimeOffset.Now
+      OverviewHistoryRequestInFlight = None }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where
 /// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
@@ -439,7 +443,8 @@ type SubmitCreateWorktreeRequestMappingTests() =
           getBridgeLiveness = fun _ -> failwith "unused"
           addRoot = fun _ -> failwith "unused"
           removeRoot = fun _ -> failwith "unused"
-          getRoots = fun _ -> failwith "unused" }
+          getRoots = fun _ -> failwith "unused"
+          getOverviewHistory = fun _ -> failwith "unused" }
 
     let baseForm prompt : Modal.CreateWorktreeForm =
         { RepoId = testRepoId

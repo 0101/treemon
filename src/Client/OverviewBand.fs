@@ -30,6 +30,8 @@ open Shared
 open Navigation
 open Feliz
 open OverviewData
+open OverviewPresentation
+open AppTypes
 open Browser
 open Fable.Core.JsInterop
 open BrowserObserverInterop
@@ -89,62 +91,6 @@ let observePinnedState (onChange: bool -> unit) =
         member _.Dispose() =
             Dom.window?cancelAnimationFrame(frameId)
             observers |> List.iter disconnectObserver }
-
-// Display label per task bucket, in the aggregate's canonical left-to-right order.
-let private taskLabel =
-    function
-    | TaskBucketKind.Planned -> "Planned"
-    | TaskBucketKind.Queued -> "Queued"
-    | TaskBucketKind.InProgress -> "In progress"
-    | TaskBucketKind.Blocked -> "Blocked"
-    | TaskBucketKind.Done -> "Done"
-    | TaskBucketKind.Unattended -> "Unattended"
-
-// Accent-color modifier class per task bucket. The class sets `color`, which drives BOTH the count
-// text and the bar fill (the bar paints `background: currentColor`).
-let private taskClass =
-    function
-    | TaskBucketKind.Planned -> "task-planned"
-    | TaskBucketKind.Queued -> "task-queued"
-    | TaskBucketKind.InProgress -> "task-inprogress"
-    | TaskBucketKind.Blocked -> "task-blocked"
-    | TaskBucketKind.Done -> "task-done"
-    | TaskBucketKind.Unattended -> "task-unattended"
-
-// Display label per activity bucket, in the aggregate's canonical order.
-let private activityLabel =
-    function
-    | CurrentActivity.Investigating -> "Investigating"
-    | CurrentActivity.Planning -> "Planning"
-    | CurrentActivity.Executing -> "Executing"
-    | CurrentActivity.Reviewing -> "Reviewing"
-    | CurrentActivity.PR -> "PR"
-    | CurrentActivity.Working -> "Working"
-
-// Accent-color modifier class per activity bucket (same currentColor scheme as taskClass).
-let private activityClass =
-    function
-    | CurrentActivity.Investigating -> "activity-investigating"
-    | CurrentActivity.Planning -> "activity-planning"
-    | CurrentActivity.Executing -> "activity-executing"
-    | CurrentActivity.Reviewing -> "activity-reviewing"
-    | CurrentActivity.PR -> "activity-pr"
-    | CurrentActivity.Working -> "activity-working"
-
-// Display label per agent group: the skill-derived activity, the distinct Waiting group, or the
-// distinct Idle group (blue-dot agents with an open-but-idle session).
-let private agentLabel =
-    function
-    | AgentGroupKind.Activity activity -> activityLabel activity
-    | AgentGroupKind.Waiting -> "Waiting"
-    | AgentGroupKind.Idle -> "Idle"
-
-// Accent-color modifier class per agent group (same currentColor scheme as activityClass).
-let private agentClass =
-    function
-    | AgentGroupKind.Activity activity -> activityClass activity
-    | AgentGroupKind.Waiting -> "activity-waiting"
-    | AgentGroupKind.Idle -> "activity-idle"
 
 /// The count+label meta line shown ABOVE each visual: count FIRST in the accent colour, label
 /// neutral, both the same font size/weight so they differ only by colour (prototype `.ulbl`). The
@@ -349,6 +295,23 @@ let private section (isSeparated: bool) (header: string) (columns: ReactElement 
                 Html.div [ prop.className "overview-items"; prop.children columns ]
                 breakdown ] ]
 
+/// The band's single history-window cycle button. None is the client-only Hidden state.
+let private cycleButton (isInAgentsBand: bool) (historyWindow: HistoryWindow option) (onCycleChart: unit -> unit) =
+    let label =
+        historyWindow
+        |> Option.map (fun window -> $"\u25F7 {historyWindowLabel window}")
+        |> Option.defaultValue "\u25F7 History"
+
+    Html.div
+        [ prop.className [ "overview-toolbar"; if isInAgentsBand then "overview-toolbar-agents" ]
+          prop.children
+              [ Html.button
+                    [ prop.className "history-toggle"
+                      prop.ariaPressed (Option.isSome historyWindow)
+                      prop.title "Cycle history window (hidden \u2192 12h \u2192 24h \u2192 72h)"
+                      prop.onClick (fun _ -> onCycleChart ())
+                      prop.text label ] ] ]
+
 /// Whether an Overview drill-down selection still maps to a present (non-empty) group in the given
 /// repos' fresh roll-up. Empty groups are dropped by aggregate, so a selection is stale once its
 /// group's count hits 0 — App's DataLoaded reducer uses this to clear the selection and close the
@@ -361,24 +324,29 @@ let hasAgentGroups (repos: RepoModel list) =
     aggregateRepos repos |> _.Agents |> List.isEmpty |> not
 
 let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel list) =
-    let overview = aggregateRepos repos
-    match selection with
-    | OverviewSelection.Agents kind -> overview.Agents |> List.exists (fun g -> g.Kind = kind)
-    | OverviewSelection.Tasks kind -> overview.Tasks |> List.exists (fun b -> b.Kind = kind)
+    aggregateRepos repos |> selectionPresent selection
 
 /// Render the Overview band for the current repos. Returns Html.none when the whole roll-up is empty
 /// so the band adds no chrome (not even margin) when there is nothing to show. `selection` is the
 /// currently drilled-down group (if any); `onSelectGroup` toggles a group's selection when its column
 /// is clicked, and `onSelectWorktree` (used by the breakdown panel) focuses a member card with
-/// arrow-nav parity.
+/// arrow-nav parity. `historyWindow`/`onCycleChart` drive the ephemeral in-band history chart's cycle,
+/// mutually exclusive with the drill-down. The anchored server response fixes both charts' right edge.
 let view
     (isAgentsStuck: bool)
     (selection: OverviewSelection option)
     (onSelectGroup: OverviewSelection -> unit)
     (onSelectWorktree: string -> unit)
+    (historyWindow: HistoryWindow option)
+    (onCycleChart: unit -> unit)
+    (history: InstalledOverviewHistory option)
     (repos: RepoModel list)
     : ReactElement =
     let overview = aggregateRepos repos
+    let chartData =
+        match historyWindow, history with
+        | Some _, Some installed -> Some(installed.Window, installed.Response)
+        | _ -> None
 
     match overview.Agents, overview.Tasks with
     | [], [] -> Html.none
@@ -402,6 +370,13 @@ let view
                 |> Option.defaultValue Html.none
             | _ -> Html.none
 
+        let agentHistory =
+            match agents, chartData with
+            | [], _
+            | _, None -> Html.none
+            | _, Some (window, response) ->
+                OverviewChart.agentsChart window response.Anchor response.Snapshots
+
         let taskSection =
             match tasks with
             | [] -> Html.none
@@ -418,6 +393,13 @@ let view
                          |> Option.defaultValue Html.none
                      | _ -> Html.none)
 
+        let taskHistory =
+            match tasks, chartData with
+            | [], _
+            | _, None -> Html.none
+            | _, Some (window, response) ->
+                OverviewChart.tasksChart window response.Anchor response.Snapshots
+
         React.fragment
             [ match agents with
               | [] -> Html.none
@@ -428,7 +410,15 @@ let view
                             [ "overview-band"
                               "overview-agents-band"
                               if isAgentsStuck then "overview-agents-band-pinned" ]
-                        prop.children [ agentSection ] ]
+                        prop.children
+                            [ cycleButton true historyWindow onCycleChart
+                              agentSection ] ]
               Html.div
                   [ prop.className [ "overview-band"; if not (List.isEmpty agents) then "overview-band-rest" ]
-                    prop.children [ agentBreakdownPanel; taskSection ] ] ]
+                    prop.children
+                        [ if List.isEmpty agents then
+                              cycleButton false historyWindow onCycleChart
+                          agentBreakdownPanel
+                          agentHistory
+                          taskSection
+                          taskHistory ] ] ]
