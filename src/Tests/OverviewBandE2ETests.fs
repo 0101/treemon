@@ -837,25 +837,32 @@ type OverviewBandE2ETests() =
             do! investigating.ClickAsync()
             do! this.Page.Locator(".overview-breakdown").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """() => {
+                      const dashboard = document.querySelector('.dashboard');
+                      const morphRange = parseFloat(getComputedStyle(dashboard).getPropertyValue('--overview-agents-morph-range'));
+                      dashboard.scrollTop = morphRange / 2;
+                    }""")
+
+            // The page clock is faked, so in-page frame counting cannot pace the scroll-driven
+            // timeline; a driver-side wait lets real frames commit it before the DOM is sampled.
+            do! this.Page.WaitForTimeoutAsync(250.0f)
+
             let! morphJson =
                 this.Page.EvaluateAsync<string>(
                     """() => {
-                      const dashboard = document.querySelector('.dashboard');
                       const agents = document.querySelector('.overview-agents-band');
                       const items = agents.querySelector('.overview-items');
-                      const morphRange = parseFloat(getComputedStyle(dashboard).getPropertyValue('--overview-agents-morph-range'));
-                      dashboard.scrollTop = morphRange / 2;
-                      return new Promise(resolve =>
-                        requestAnimationFrame(() => requestAnimationFrame(() =>
-                          resolve(JSON.stringify({
-                            bandCount: document.querySelectorAll('.overview-agents-band').length,
-                            compactCount: document.querySelectorAll('.overview-agents-compact').length,
-                            shellTranslateY: new DOMMatrix(getComputedStyle(agents).transform).m42,
-                            itemProgress: new DOMMatrix(getComputedStyle(items).transform).m42
-                              / parseFloat(getComputedStyle(agents).getPropertyValue('--overview-agents-items-shift')),
-                            headerOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-header')).opacity),
-                            metaOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-meta')).opacity)
-                          })))));
+                      return JSON.stringify({
+                        bandCount: document.querySelectorAll('.overview-agents-band').length,
+                        compactCount: document.querySelectorAll('.overview-agents-compact').length,
+                        shellTranslateY: new DOMMatrix(getComputedStyle(agents).transform).m42,
+                        itemProgress: new DOMMatrix(getComputedStyle(items).transform).m42
+                          / parseFloat(getComputedStyle(agents).getPropertyValue('--overview-agents-items-shift')),
+                        headerOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-header')).opacity),
+                        metaOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-meta')).opacity)
+                      });
                     }""")
 
             let morph = JObject.Parse(morphJson)
@@ -887,6 +894,8 @@ type OverviewBandE2ETests() =
                     null,
                     PageWaitForFunctionOptions(Timeout = 5000.0f))
 
+            do! this.Page.WaitForTimeoutAsync(250.0f)
+
             let! stickyJson =
                 this.Page.EvaluateAsync<string>(
                     """() => new Promise(resolve => {
@@ -900,14 +909,17 @@ type OverviewBandE2ETests() =
                             const rect = circle.getBoundingClientRect();
                             return rect.top + rect.height / 2 - dashboardRect.top;
                           });
-                        const transform = new DOMMatrix(getComputedStyle(agents).transform);
                         const line = getComputedStyle(agents, '::after');
+                        const topEdgeY = dashboardRect.top + 1;
+                        const topEdgeCovered = [1, dashboard.clientWidth / 2, dashboard.clientWidth - 1]
+                          .every(offset => agents.contains(
+                            document.elementFromPoint(dashboardRect.left + offset, topEdgeY)));
                         resolve(JSON.stringify({
                           scrollTop: dashboard.scrollTop,
                           expectedScrollTop: window.__overviewStickyScrollTop,
                           position: getComputedStyle(agents).position,
                           canvasHeight: canvasHeader.getBoundingClientRect().height,
-                          visualHeight: transform.m42 + parseFloat(line.top) + 1,
+                          visualHeight: agents.getBoundingClientRect().top - dashboardRect.top + parseFloat(line.top) + 1,
                           minCircleCenter: Math.min(...circleCenters),
                           maxCircleCenter: Math.max(...circleCenters),
                           headerOpacity: parseFloat(getComputedStyle(agents.querySelector('.overview-header')).opacity),
@@ -915,7 +927,8 @@ type OverviewBandE2ETests() =
                           lineOpacity: parseFloat(line.opacity),
                           lineColor: line.borderBottomColor,
                           groupGap: getComputedStyle(agents.querySelector('.overview-items')).columnGap,
-                          canvasBorderColor: getComputedStyle(canvasHeader).borderBottomColor
+                          canvasBorderColor: getComputedStyle(canvasHeader).borderBottomColor,
+                          topEdgeCovered
                         }));
                       }));
                     })""")
@@ -931,8 +944,10 @@ type OverviewBandE2ETests() =
             Assert.That(sticky.Value<float>("lineOpacity"), Is.EqualTo(1.0).Within(0.01))
             Assert.That(sticky.Value<string>("lineColor"), Is.EqualTo(sticky.Value<string>("canvasBorderColor")))
             Assert.That(sticky.Value<string>("groupGap"), Is.EqualTo("22px"))
+            Assert.That(sticky.Value<bool>("topEdgeCovered"), Is.True, "pinned chrome must mask cards edge to edge along the dashboard top")
 
             do! this.Page.SetViewportSizeAsync(700, 800)
+            do! this.Page.WaitForTimeoutAsync(250.0f)
             let! narrowJson =
                 this.Page.EvaluateAsync<string>(
                     """() => new Promise(resolve =>
