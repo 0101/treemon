@@ -44,15 +44,18 @@ let internal launchFreshCanvasSessionWith
     async {
         let! pendingLaunch = beginLaunch ()
 
+        let awaitCompletion () =
+            pendingLaunch.Completion |> Async.AwaitTask
+
         let cancelAndAwait reason =
             async {
                 do! cancelLaunch reason
-                return! pendingLaunch.Completion
+                return! awaitCompletion ()
             }
 
         match pendingLaunch.Role with
         | CanvasBridge.PendingLaunchJoined ->
-            return! pendingLaunch.Completion
+            return! awaitCompletion ()
         | CanvasBridge.PendingLaunchStarted ->
             match! launch () |> Async.Catch with
             | Choice2Of2 ex ->
@@ -61,7 +64,7 @@ let internal launchFreshCanvasSessionWith
                 return! cancelAndAwait err
             | Choice1Of2 (Ok ()) ->
                 match! waitForRegistration pendingLaunch |> Async.Catch with
-                | Choice1Of2 (Ok ()) -> return! pendingLaunch.Completion
+                | Choice1Of2 (Ok ()) -> return! awaitCompletion ()
                 | Choice1Of2 (Error err) -> return! cancelAndAwait err
                 | Choice2Of2 ex ->
                     return! cancelAndAwait ex.Message

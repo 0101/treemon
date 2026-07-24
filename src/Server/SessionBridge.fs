@@ -230,34 +230,6 @@ let internal registrationStamp worktreePath sessionId =
     |> List.tryFind (fun entry -> entry.SessionId = Some sessionId)
     |> Option.map _.RegisteredAt
 
-let internal waitForRegistrationAfter
-    (timeout: TimeSpan)
-    worktreePath
-    sessionId
-    previous
-    =
-    let deadline = DateTime.UtcNow + timeout
-
-    let rec wait () =
-        async {
-            let registered =
-                registrationStamp worktreePath sessionId
-                |> Option.exists (fun registeredAt ->
-                    previous
-                    |> Option.forall (fun previousAt ->
-                        registeredAt > previousAt))
-
-            if registered then
-                return true
-            elif DateTime.UtcNow >= deadline then
-                return false
-            else
-                do! Async.Sleep 50
-                return! wait ()
-        }
-
-    wait ()
-
 let private freshestSession (worktreePath: string) =
     sessionsForWorktree worktreePath
     |> List.sortByDescending _.RegisteredAt

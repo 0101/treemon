@@ -450,7 +450,7 @@ type DrainQueueTests() =
             Assert.That(cancelledLaunch.Role, Is.EqualTo(PendingLaunchStarted))
             runAsync (cancelPendingLaunch path "cancelled")
             Assert.That(
-                runAsync cancelledLaunch.Completion,
+                runAsync (cancelledLaunch.Completion |> Async.AwaitTask),
                 Is.EqualTo(Error "cancelled": Result<unit, string>))
             registerSession path "http://127.0.0.1:1/inject" (Some sid)
 
@@ -844,6 +844,46 @@ type OwnerRoutingTests() =
 [<Category("Fast")>]
 [<NonParallelizable>]
 type SystemViewInteractionRoutingTests() =
+
+    [<Test>]
+    member _.``Polling checks completed conditions before an expired deadline``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "completed-before-deadline"
+            let sid = uniqueSid "owner"
+            let pendingLaunch =
+                runAsync (beginPendingLaunch path "diff.html")
+
+            registerSession path "http://127.0.0.1:1/inject" (Some sid)
+
+            Assert.That(
+                waitForPendingLaunchCompletion TimeSpan.Zero pendingLaunch
+                |> runAsync,
+                Is.EqualTo(Ok (): Result<unit, string>))
+
+            let previous = registrationStamp path sid
+            registerSession path "http://127.0.0.1:1/inject" (Some sid)
+
+            Assert.That(
+                waitForRegistrationAfter TimeSpan.Zero path sid previous
+                |> runAsync,
+                Is.True))
+
+    [<Test>]
+    member _.``Pending launch completion returns the registration timeout``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "pending-launch-timeout"
+            let pendingLaunch =
+                runAsync (beginPendingLaunch path "diff.html")
+
+            Assert.That(
+                waitForPendingLaunchCompletion TimeSpan.Zero pendingLaunch
+                |> runAsync,
+                Is.EqualTo(
+                    Error
+                        "the session did not register with Treemon before the timeout":
+                        Result<unit, string>))
+
+            runAsync (cancelPendingLaunch path "test cleanup"))
 
     [<Test>]
     member _.``owner registration wait requires a newer registration and succeeds on retry``() =

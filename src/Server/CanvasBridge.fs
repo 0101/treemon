@@ -12,7 +12,7 @@ type internal PendingLaunchResult =
 
 type internal PendingLaunch =
     { Role: PendingLaunchResult
-      Completion: Async<Result<unit, string>> }
+      Completion: Task<Result<unit, string>> }
 
 type internal ActivityTargetAssignment =
     | ActivityTargetAssigned
@@ -46,7 +46,7 @@ let private routingAgent =
                     | Some existing ->
                         reply.Reply(
                             { Role = PendingLaunchJoined
-                              Completion = existing.Completion.Task |> Async.AwaitTask })
+                              Completion = existing.Completion.Task })
 
                         return!
                             loop (
@@ -62,7 +62,7 @@ let private routingAgent =
 
                         reply.Reply(
                             { Role = PendingLaunchStarted
-                              Completion = completion.Task |> Async.AwaitTask })
+                              Completion = completion.Task })
 
                         return!
                             loop (
@@ -162,19 +162,34 @@ let private registerCoordinatedSession worktreePath injectUrl sessionId =
             $"Session {sessionId} assigned {Set.count filenames} pending canvas target(s) for {worktreeKey}"
     | _ -> ()
 
+let private pollUntil (timeout: TimeSpan) condition =
+    let deadline = DateTime.UtcNow + timeout
+
+    let rec wait () =
+        async {
+            if condition () then
+                return true
+            elif DateTime.UtcNow >= deadline then
+                return false
+            else
+                do! Async.Sleep 50
+                return! wait ()
+        }
+
+    wait ()
+
 let internal waitForPendingLaunchCompletion
     (timeout: TimeSpan)
     (pendingLaunch: PendingLaunch)
     =
     async {
-        try
-            let! completion =
-                Async.StartChild(
-                    pendingLaunch.Completion,
-                    int timeout.TotalMilliseconds)
+        let! completed =
+            pollUntil timeout (fun () ->
+                pendingLaunch.Completion.IsCompleted)
 
-            return! completion
-        with :? TimeoutException ->
+        if completed then
+            return! pendingLaunch.Completion |> Async.AwaitTask
+        else
             return
                 Error
                     "the session did not register with Treemon before the timeout"
@@ -192,7 +207,12 @@ let internal registrationStamp worktreePath sessionId =
     SessionBridge.registrationStamp worktreePath sessionId
 
 let internal waitForRegistrationAfter timeout worktreePath sessionId previous =
-    SessionBridge.waitForRegistrationAfter timeout worktreePath sessionId previous
+    pollUntil timeout (fun () ->
+        registrationStamp worktreePath sessionId
+        |> Option.exists (fun registeredAt ->
+            previous
+            |> Option.forall (fun previousAt ->
+                registeredAt > previousAt)))
 
 type internal TargetState =
     | NoTarget
