@@ -461,6 +461,8 @@ let private diffFileJson (file: DiffFileSummary) =
     {| identity = file.Identity
        displayPath = file.DisplayPath
        oldDisplayPath = file.OldDisplayPath
+       linesAdded = file.LinesAdded
+       linesRemoved = file.LinesRemoved
        change = diffChangeName file.Change |}
 
 let private diffReplacementName =
@@ -615,6 +617,8 @@ let private issueFile
     { Identity = newIdentity entry
       DisplayPath = entry.Path
       OldDisplayPath = entry.OldPath
+      LinesAdded = entry.LinesAdded
+      LinesRemoved = entry.LinesRemoved
       Change = diffChangeKind entry.Status }
 
 let private summaryErrorResult =

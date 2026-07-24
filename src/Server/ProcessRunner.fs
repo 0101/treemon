@@ -66,6 +66,15 @@ let internal responseDeadlineRemainingMs deadline =
               - 1L)
              / Stopwatch.Frequency)
 
+let internal responseDeadlineOperationRemainingMs deadline =
+    max
+        0
+        (responseDeadlineRemainingMs deadline
+         - deadline.ResponseReserveMs)
+
+let internal responseDeadlineCanContinue deadline =
+    responseDeadlineOperationRemainingMs deadline > 0
+
 let private truncate (s: string) =
     if s.Length > 200 then s[..199] + "..." else s
 

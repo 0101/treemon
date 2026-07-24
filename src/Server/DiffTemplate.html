@@ -157,12 +157,6 @@ button { font: inherit; }
     background: var(--bg-deep);
 }
 
-.filters-label {
-    color: var(--text-muted);
-    font-size: var(--fs-base);
-    font-weight: 500;
-}
-
 .layer-filter {
     display: inline-flex;
     gap: .38rem;
@@ -244,7 +238,7 @@ button { font: inherit; }
 .file-entry {
     display: grid;
     width: 100%;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
     gap: .3rem .5rem;
     align-items: center;
     padding: .55rem .75rem;
@@ -290,7 +284,7 @@ button { font: inherit; }
 }
 
 .old-path {
-    grid-column: 2 / -1;
+    grid-column: 3 / -1;
     overflow: hidden;
     color: var(--text-muted);
     font-family: var(--font-code);
@@ -298,6 +292,19 @@ button { font: inherit; }
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+
+.file-stats {
+    display: inline-flex;
+    gap: .4rem;
+    font-family: var(--font-code);
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.file-lines-added { color: #a6e3a1; }
+.file-lines-removed { color: #f38ba8; }
 
 .change-badge {
     display: inline-grid;
@@ -577,7 +584,6 @@ button { font: inherit; }
     <div class="workspace">
         <main id="content" class="content" aria-label="Changed files">
             <div id="layer-filters" class="layer-filters" role="group" aria-label="Include changes">
-                <span class="filters-label">Include changes</span>
                 <label class="layer-filter">
                     <input id="filter-committed" type="checkbox">
                     <span>Already committed</span>
@@ -633,6 +639,10 @@ function readStorage(key) {
 
 function writeStorage(key, value) {
     try { localStorage.setItem(key, value); } catch (_) {}
+}
+
+function removeStorage(key) {
+    try { localStorage.removeItem(key); } catch (_) {}
 }
 
 function readViewPreference() {
@@ -781,6 +791,8 @@ function renderState(status, title, detail, loading) {
 function clearNavigator() {
     state.summary = null;
     state.selected = null;
+    state.currentResult = null;
+    state.currentPatch = null;
     state.selectedButton = null;
     state.panel = null;
     document.getElementById('file-list').replaceChildren();
@@ -821,11 +833,6 @@ function renderFileList(files) {
             ? file.oldDisplayPath + ' → ' + file.displayPath
             : file.displayPath;
 
-        var path = document.createElement('span');
-        path.className = 'file-path';
-        path.textContent = file.displayPath;
-        button.appendChild(path);
-
         var presentation = changePresentation(file.change);
         var badge = document.createElement('span');
         badge.className = 'change-badge ' + file.change;
@@ -833,6 +840,40 @@ function renderFileList(files) {
         badge.setAttribute('aria-label', presentation.label);
         badge.title = presentation.label;
         button.appendChild(badge);
+
+        var path = document.createElement('span');
+        path.className = 'file-path';
+        path.textContent = file.displayPath;
+        button.appendChild(path);
+
+        if (
+            Number.isInteger(file.linesAdded) &&
+            Number.isInteger(file.linesRemoved) &&
+            (file.linesAdded > 0 || file.linesRemoved > 0)
+        ) {
+            var stats = document.createElement('span');
+            stats.className = 'file-stats';
+            var statLabels = [];
+
+            if (file.linesAdded > 0) {
+                var added = document.createElement('span');
+                added.className = 'file-lines-added';
+                added.textContent = '+' + file.linesAdded;
+                statLabels.push(file.linesAdded + ' lines added');
+                stats.appendChild(added);
+            }
+
+            if (file.linesRemoved > 0) {
+                var removed = document.createElement('span');
+                removed.className = 'file-lines-removed';
+                removed.textContent = '−' + file.linesRemoved;
+                statLabels.push(file.linesRemoved + ' lines removed');
+                stats.appendChild(removed);
+            }
+
+            stats.setAttribute('aria-label', statLabels.join(', '));
+            button.appendChild(stats);
+        }
 
         if (file.oldDisplayPath) {
             var oldPath = document.createElement('span');
@@ -886,6 +927,7 @@ function collapseFilePanel() {
     if (state.fileAbort) state.fileAbort.abort();
     state.fileAbort = null;
     state.fileRequest += 1;
+    removeStorage(SELECTION_KEY);
     state.currentResult = null;
     state.currentPatch = null;
     state.selected = null;
@@ -898,15 +940,28 @@ function collapseFilePanel() {
     state.panel = null;
 }
 
+function openFile(file, button, item) {
+    mountFilePanel(button, item);
+    state.selected = file;
+    loadFile(file);
+}
+
 function selectFile(file, button, item) {
     if (state.selectedButton === button) {
         collapseFilePanel();
         return;
     }
-    mountFilePanel(button, item);
-    state.selected = file;
     writeStorage(SELECTION_KEY, fileSelectionKey(file));
-    loadFile(file);
+    openFile(file, button, item);
+}
+
+function restoreFileSelection(files) {
+    var stored = readStorage(SELECTION_KEY);
+    var selected = files.find(function(file) { return fileSelectionKey(file) === stored; });
+    if (!selected) return;
+    var button = Array.from(document.querySelectorAll('.file-entry'))
+        .find(function(candidate) { return candidate.dataset.identity === selected.identity; });
+    if (button) openFile(selected, button, button.closest('.file-item'));
 }
 
 function renderChangeSummary(files) {
@@ -1280,21 +1335,17 @@ function renderReadySummary(summary) {
         return;
     }
 
+    clearNavigator();
     state.summary = summary;
     document.getElementById('base-label').textContent = comparisonLabel(summary.baseRef);
-    document.getElementById('summary-state').replaceChildren();
     renderChangeSummary(files);
     renderFileList(files);
-
-    var stored = readStorage(SELECTION_KEY);
-    var selected = files.find(function(file) { return fileSelectionKey(file) === stored; }) || files[0];
-    var button = Array.from(document.querySelectorAll('.file-entry'))
-        .find(function(candidate) { return candidate.dataset.identity === selected.identity; });
-    selectFile(selected, button, button.closest('.file-item'));
+    restoreFileSelection(files);
 }
 
 async function loadSummary() {
     if (state.fileAbort) state.fileAbort.abort();
+    state.fileAbort = null;
     state.fileRequest += 1;
     var request = ++state.summaryRequest;
     clearNavigator();

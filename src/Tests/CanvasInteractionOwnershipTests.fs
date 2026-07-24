@@ -42,12 +42,16 @@ let private seedDiffIdentity
     let entry: Server.WorktreeDiff.WorktreeDiffEntry =
         { Path = "changed.txt"
           OldPath = None
+          LinesAdded = Some 1
+          LinesRemoved = Some 1
           Status = Server.WorktreeDiff.Modified }
 
     let file: DiffFileSummary =
         { Identity = identity
           DisplayPath = entry.Path
           OldDisplayPath = None
+          LinesAdded = entry.LinesAdded
+          LinesRemoved = entry.LinesRemoved
           Change = DiffChangeKind.Modified }
 
     runAsync (

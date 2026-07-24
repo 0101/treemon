@@ -216,6 +216,8 @@ type DiffFileSummary =
     { Identity: string
       DisplayPath: string
       OldDisplayPath: string option
+      LinesAdded: int option
+      LinesRemoved: int option
       Change: DiffChangeKind }
 
 type DiffSummaryDetails =

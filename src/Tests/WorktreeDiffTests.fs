@@ -6,6 +6,7 @@ open System.IO
 open System.Runtime.InteropServices
 open System.Text
 open System.Threading
+open System.Threading.Tasks
 open NUnit.Framework
 open Server
 open Server.GitWorktree
@@ -47,6 +48,61 @@ let private findEntry path (summary: WorktreeDiffSummary) =
     |> Option.defaultWith (fun () ->
         Assert.Fail($"Missing diff entry '{path}'")
         Unchecked.defaultof<_>)
+
+let private assertLineCounts added removed (entry: WorktreeDiffEntry) =
+    Assert.Multiple(fun () ->
+        Assert.That(entry.LinesAdded, Is.EqualTo(added), entry.Path)
+        Assert.That(entry.LinesRemoved, Is.EqualTo(removed), entry.Path))
+
+module private HardLinks =
+    [<DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)>]
+    extern bool private createWindows(string path, string target, nativeint securityAttributes)
+
+    [<DllImport("libc", EntryPoint = "link", SetLastError = true)>]
+    extern int private createUnix(string target, string path)
+
+    let create path target =
+        let created =
+            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+                createWindows (path, target, 0n)
+            else
+                createUnix (target, path) = 0
+
+        if not created then
+            raise (
+                IOException(
+                    $"Could not create hard link '{path}': {Marshal.GetLastWin32Error()}"
+                )
+            )
+
+type private CancelAwareReadStream(readStarted: TaskCompletionSource<unit>) =
+    inherit Stream()
+
+    override _.CanRead = true
+    override _.CanSeek = false
+    override _.CanWrite = false
+    override _.Length = raise (NotSupportedException())
+
+    override _.Position
+        with get () = raise (NotSupportedException())
+        and set _ = raise (NotSupportedException())
+
+    override _.Flush() = ()
+    override _.Read(_, _, _) = raise (NotSupportedException())
+
+    override _.ReadAsync(_, cancellationToken) =
+        let read =
+            task {
+                readStarted.TrySetResult(()) |> ignore
+                do! Task.Delay(Timeout.Infinite, cancellationToken)
+                return 0
+            }
+
+        ValueTask<int>(read)
+
+    override _.Seek(_, _) = raise (NotSupportedException())
+    override _.SetLength(_) = raise (NotSupportedException())
+    override _.Write(_, _, _) = raise (NotSupportedException())
 
 let private initializeDiffRepo repoDir =
     initRepoOnMain repoDir
@@ -253,6 +309,202 @@ type WorktreeDiffIntegrationTests() =
                 ()
 
     [<Test>]
+    member _.``numstat parser preserves paths renames binary markers and zero counts``() =
+        let bytes =
+            String.concat
+                "\000"
+                [ "3\t1\tspace name.txt"
+                  "-\t-\tbinary.dat"
+                  "0\t0\t"
+                  "žluťoučký old.txt"
+                  "-leading new.txt"
+                  "" ]
+            |> Encoding.UTF8.GetBytes
+
+        let result = parseNumstatEntries bytes
+
+        match result with
+        | Error error -> Assert.Fail($"Expected parsed numstat entries, got {error}")
+        | Ok entries ->
+            let expected =
+                [ { Path = "space name.txt"
+                    OldPath = None
+                    LinesAdded = Some 3
+                    LinesRemoved = Some 1 }
+                  { Path = "binary.dat"
+                    OldPath = None
+                    LinesAdded = None
+                    LinesRemoved = None }
+                  { Path = "-leading new.txt"
+                    OldPath = Some "žluťoučký old.txt"
+                    LinesAdded = Some 0
+                    LinesRemoved = Some 0 } ]
+
+            Assert.That(entries, Is.EqualTo(expected))
+
+        let negative =
+            "-1\t0\tinvalid.txt\000"
+            |> Encoding.UTF8.GetBytes
+            |> parseNumstatEntries
+
+        Assert.That(
+            (negative = Error(InvalidGitOutput EnumerateTracked)),
+            Is.True,
+            $"Expected a negative count to be rejected, got {negative}"
+        )
+
+    [<Test>]
+    member _.``deadline expiration between untracked files returns timeout without partial stats``() =
+        let untracked path =
+            { Path = path
+              OldPath = None
+              LinesAdded = None
+              LinesRemoved = None
+              Status = Untracked }
+
+        let result =
+            collectUntrackedLineCounts
+                (fun entry -> entry.Path <> "second.txt")
+                (fun entry ->
+                    async {
+                        return
+                            if entry.Path = "second.txt" then
+                                failwith "Expired entries must not be read"
+                            else
+                                Ok
+                                    { entry with
+                                        LinesAdded = Some 1
+                                        LinesRemoved = Some 0 }
+                    })
+                [ untracked "first.txt"; untracked "second.txt" ]
+            |> TestUtils.runAsync
+
+        Assert.That(
+            (result = Error(GitTimedOut EnumerateUntracked)),
+            Is.True,
+            $"Expected untracked timeout, got {result}"
+        )
+
+    [<Test>]
+    member _.``expired deadline returns typed timeout before untracked content read``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initializeDiffRepo repoDir
+        writeText repoDir "untracked.txt" "content"
+
+        let deadline = ProcessRunner.createResponseDeadline 1
+
+        let expired =
+            SpinWait.SpinUntil(
+                (fun () ->
+                    not (ProcessRunner.responseDeadlineCanContinue deadline)),
+                TimeSpan.FromSeconds(1.0)
+            )
+
+        let entry =
+            { Path = "untracked.txt"
+              OldPath = None
+              LinesAdded = None
+              LinesRemoved = None
+              Status = Untracked }
+
+        let result =
+            untrackedLineCountsWithinDeadline deadline repoDir entry
+            |> TestUtils.runAsync
+
+        Assert.Multiple(fun () ->
+            Assert.That(expired, Is.True)
+            Assert.That(
+                (result = Error(GitTimedOut EnumerateUntracked)),
+                Is.True,
+                $"Expected untracked timeout, got {result}"
+            ))
+
+    [<Test>]
+    member _.``deadline expiration after final untracked metric returns timeout``() =
+        use expired = new CancellationTokenSource()
+
+        let entry =
+            { Path = "only.txt"
+              OldPath = None
+              LinesAdded = None
+              LinesRemoved = None
+              Status = Untracked }
+
+        let result =
+            collectUntrackedLineCounts
+                (fun _ -> not expired.IsCancellationRequested)
+                (fun value ->
+                    async {
+                        expired.Cancel()
+
+                        return
+                            Ok
+                                { value with
+                                    LinesAdded = Some 1
+                                    LinesRemoved = Some 0 }
+                    })
+                [ entry ]
+            |> TestUtils.runAsync
+
+        Assert.That(
+            (result = Error(GitTimedOut EnumerateUntracked)),
+            Is.True,
+            $"Expected final-file timeout, got {result}"
+        )
+
+    [<Test>]
+    member _.``bounded async read observes cancellation at stream boundary``() =
+        let readStarted =
+            TaskCompletionSource<unit>(
+                TaskCreationOptions.RunContinuationsAsynchronously
+            )
+
+        use stream = new CancelAwareReadStream(readStarted)
+        use cancelled = new CancellationTokenSource()
+        let read = readStreamBounded cancelled.Token stream
+
+        Assert.That(
+            readStarted.Task.Wait(TimeSpan.FromSeconds(1.0)),
+            Is.True,
+            "The async stream read did not start"
+        )
+
+        cancelled.Cancel()
+        let result = read.GetAwaiter().GetResult()
+
+        Assert.That(
+            (result = FileReadTimedOut),
+            Is.True,
+            $"Expected cancelled bounded read, got {result}"
+        )
+
+    [<Test>]
+    member _.``directory input is unavailable without a content read``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initializeDiffRepo repoDir
+        Directory.CreateDirectory(Path.Combine(repoDir, "folder")) |> ignore
+
+        let entry =
+            { Path = "folder"
+              OldPath = None
+              LinesAdded = Some 99
+              LinesRemoved = Some 99
+              Status = Untracked }
+
+        let result =
+            untrackedLineCountsWithinDeadline
+                (ProcessRunner.createResponseDeadline 1_000)
+                repoDir
+                entry
+            |> TestUtils.runAsync
+
+        match result with
+        | Ok unavailable ->
+            assertLineCounts None None unavailable
+        | Error error ->
+            Assert.Fail($"Expected unavailable directory stats, got {error}")
+
+    [<Test>]
     member _.``summary compares the merge base to committed staged unstaged and untracked changes``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initializeDiffRepo repoDir
@@ -305,6 +557,10 @@ type WorktreeDiffIntegrationTests() =
         Assert.That((findEntry "staged.txt" summary).Status, Is.EqualTo(Added))
         Assert.That((findEntry "tracked.txt" summary).Status, Is.EqualTo(Modified))
         Assert.That((findEntry "untracked.txt" summary).Status, Is.EqualTo(Untracked))
+        assertLineCounts (Some 1) (Some 0) (findEntry "committed.txt" summary)
+        assertLineCounts (Some 1) (Some 0) (findEntry "staged.txt" summary)
+        assertLineCounts (Some 1) (Some 1) (findEntry "tracked.txt" summary)
+        assertLineCounts (Some 1) (Some 0) (findEntry "untracked.txt" summary)
 
         let trackedPatch =
             getWorktreeDiffFile repoDir summary.MergeBase (findEntry "tracked.txt" summary)
@@ -485,6 +741,7 @@ type WorktreeDiffIntegrationTests() =
             entry.Status,
             Is.EqualTo(TrackedAndUntracked Deleted)
         )
+        assertLineCounts (Some 1) (Some 1) entry
 
         let result =
             getWorktreeDiffFile repoDir summary.MergeBase entry
@@ -587,6 +844,8 @@ type WorktreeDiffIntegrationTests() =
         | Ok(Replacement(actualPatch, actualReplacement)) ->
             Assert.Multiple(fun () ->
                 Assert.That(entry.Status, Is.EqualTo(TrackedAndUntracked Deleted))
+                Assert.That(entry.LinesAdded, Is.EqualTo(None))
+                Assert.That(entry.LinesRemoved, Is.EqualTo(None))
                 Assert.That(
                     normalizeNewlines actualPatch,
                     Is.EqualTo(normalizeNewlines trackedPatch)
@@ -1060,6 +1319,8 @@ type WorktreeDiffIntegrationTests() =
         Assert.That(renamed.Status, Is.EqualTo(Renamed))
         Assert.That(renamed.OldPath, Is.EqualTo(Some "rename-old.txt"))
         Assert.That(deleted.Status, Is.EqualTo(Deleted))
+        assertLineCounts (Some 0) (Some 0) renamed
+        assertLineCounts (Some 0) (Some 1) deleted
 
         let renameResult =
             getWorktreeDiffFile repoDir summary.MergeBase renamed
@@ -1138,6 +1399,7 @@ type WorktreeDiffIntegrationTests() =
         |> List.iter (fun (path, oldPath, newPath) ->
             let entry = findEntry path summary
             Assert.That(entry.Status, Is.EqualTo(Untracked))
+            assertLineCounts (Some 1) (Some 0) entry
 
             let result =
                 getWorktreeDiffFile repoDir summary.MergeBase entry
@@ -1174,6 +1436,8 @@ type WorktreeDiffIntegrationTests() =
             |> TestUtils.runAsync
             |> assertSummaryOk
 
+        assertLineCounts None None (findEntry "binary.dat" summary)
+
         let result =
             getWorktreeDiffFile repoDir summary.MergeBase (findEntry "binary.dat" summary)
             |> TestUtils.runAsync
@@ -1199,6 +1463,8 @@ type WorktreeDiffIntegrationTests() =
             |> TestUtils.runAsync
             |> assertSummaryOk
 
+        assertLineCounts None None (findEntry "binary.dat" summary)
+
         let result =
             getWorktreeDiffFile repoDir summary.MergeBase (findEntry "binary.dat" summary)
             |> TestUtils.runAsync
@@ -1210,6 +1476,95 @@ type WorktreeDiffIntegrationTests() =
         )
 
     [<Test>]
+    member _.``tracked symlink exposes unavailable stats from raw mode metadata``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+
+        let addSymlinkTarget (content: string) =
+            let blobPath =
+                Path.Combine(tempDir, $"symlink-target-{Guid.NewGuid():N}.txt")
+
+            File.WriteAllText(blobPath, content)
+            let hash = gitText repoDir [ "hash-object"; "-w"; blobPath ]
+
+            gitOk
+                repoDir
+                [ "update-index"
+                  "--add"
+                  "--cacheinfo"
+                  $"120000,{hash},link.txt" ]
+
+        addSymlinkTarget "target-one"
+        gitOk repoDir [ "commit"; "-m"; "symlink base" ]
+        gitOk repoDir [ "checkout"; "-b"; "feature" ]
+        addSymlinkTarget "target-two"
+        gitOk repoDir [ "commit"; "-m"; "change symlink" ]
+
+        let selected = layers true false false
+
+        let summary =
+            getFilteredWorktreeDiffSummary
+                (comparisonContext repoDir)
+                selected
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        let entry = findEntry "link.txt" summary
+        assertLineCounts None None entry
+
+        let result =
+            getFilteredWorktreeDiffFile
+                repoDir
+                summary.MergeBase
+                selected
+                entry
+            |> TestUtils.runAsync
+
+        match result with
+        | Ok(Symlink(Some _)) -> ()
+        | _ -> Assert.Fail($"Expected tracked symlink state, got {result}")
+
+    [<Test>]
+    member _.``tracked oversized and truncated text retain numstat counts``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initializeDiffRepo repoDir
+
+        writeText repoDir "oversized.txt" (String('x', maxWorktreeDiffBytes))
+
+        List.replicate maxWorktreeDiffLines "x"
+        |> String.concat Environment.NewLine
+        |> fun content ->
+            writeText
+                repoDir
+                "truncated.txt"
+                (content + Environment.NewLine)
+
+        gitOk repoDir [ "add"; "--"; "oversized.txt"; "truncated.txt" ]
+
+        let summary =
+            getWorktreeDiffSummary (comparisonContext repoDir)
+            |> TestUtils.runAsync
+            |> assertSummaryOk
+
+        let oversized = findEntry "oversized.txt" summary
+        let truncated = findEntry "truncated.txt" summary
+
+        assertLineCounts (Some 1) (Some 0) oversized
+        assertLineCounts (Some maxWorktreeDiffLines) (Some 0) truncated
+
+        let oversizedResult =
+            getWorktreeDiffFile repoDir summary.MergeBase oversized
+            |> TestUtils.runAsync
+
+        let truncatedResult =
+            getWorktreeDiffFile repoDir summary.MergeBase truncated
+            |> TestUtils.runAsync
+
+        Assert.Multiple(fun () ->
+            Assert.That((oversizedResult = Ok Oversized), Is.True)
+            Assert.That((truncatedResult = Ok Truncated), Is.True))
+
+    [<Test>]
     member _.``untracked patch byte cap returns oversized with no partial patch``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initializeDiffRepo repoDir
@@ -1219,6 +1574,8 @@ type WorktreeDiffIntegrationTests() =
             getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
+
+        assertLineCounts None None (findEntry "large.txt" summary)
 
         let result =
             getWorktreeDiffFile repoDir summary.MergeBase (findEntry "large.txt" summary)
@@ -1247,6 +1604,12 @@ type WorktreeDiffIntegrationTests() =
             getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
+
+        assertLineCounts
+            (Some(maxWorktreeDiffLines - 5))
+            (Some 0)
+            (findEntry "at-limit.txt" summary)
+        assertLineCounts None None (findEntry "over-limit.txt" summary)
 
         let atLimit =
             getWorktreeDiffFile repoDir summary.MergeBase (findEntry "at-limit.txt" summary)
@@ -1309,6 +1672,52 @@ type WorktreeDiffIntegrationTests() =
         )
 
     [<Test>]
+    member _.``too many near-limit untracked paths return before content reads``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initializeDiffRepo repoDir
+        let firstPath = Path.Combine(repoDir, "near-limit-0001.txt")
+
+        let createNearLimitFile () =
+            use seed =
+                new FileStream(
+                    firstPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.Read
+                )
+
+            seed.SetLength(int64 maxWorktreeDiffBytes - 1L)
+
+        createNearLimitFile ()
+
+        [ 2..maxWorktreeDiffFiles + 1 ]
+        |> List.iter (fun index ->
+            HardLinks.create
+                (Path.Combine(repoDir, $"near-limit-{index:D4}.txt"))
+                firstPath
+        )
+
+        let stopwatch = Stopwatch.StartNew()
+
+        let result =
+            getWorktreeDiffSummary (comparisonContext repoDir)
+            |> TestUtils.runAsync
+
+        stopwatch.Stop()
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                (result = Error(TooManyFiles(maxWorktreeDiffFiles + 1))),
+                Is.True,
+                $"Expected too-many-files state, got {result}"
+            )
+            Assert.That(
+                stopwatch.ElapsedMilliseconds,
+                Is.LessThan(1_000),
+                $"Over-limit summary read file contents in {stopwatch.ElapsedMilliseconds} ms"
+            ))
+
+    [<Test>]
     member _.``untracked symlink is reported without reading its target``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initializeDiffRepo repoDir
@@ -1327,6 +1736,8 @@ type WorktreeDiffIntegrationTests() =
             getWorktreeDiffSummary (comparisonContext repoDir)
             |> TestUtils.runAsync
             |> assertSummaryOk
+
+        assertLineCounts None None (findEntry "link.txt" summary)
 
         let result =
             getWorktreeDiffFile repoDir summary.MergeBase (findEntry "link.txt" summary)

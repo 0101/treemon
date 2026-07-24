@@ -1,8 +1,12 @@
 module Server.WorktreeDiff
 
 open System
+open System.Globalization
 open System.IO
+open System.Security
 open System.Text
+open System.Threading
+open System.Threading.Tasks
 open FsToolkit.ErrorHandling
 
 type WorktreeDiffStatus =
@@ -16,7 +20,19 @@ type WorktreeDiffStatus =
 type WorktreeDiffEntry =
     { Path: string
       OldPath: string option
+      LinesAdded: int option
+      LinesRemoved: int option
       Status: WorktreeDiffStatus }
+
+type internal WorktreeDiffStatsEntry =
+    { Path: string
+      OldPath: string option
+      LinesAdded: int option
+      LinesRemoved: int option }
+
+type private WorktreeDiffRawEntry =
+    { Entry: WorktreeDiffEntry
+      IsSymlink: bool }
 
 type WorktreeDiffLayers =
     { AlreadyCommitted: bool
@@ -71,10 +87,22 @@ type WorktreeDiffFile =
     | Truncated
     | Symlink of patch: string option
 
-type private BoundedFileRead =
+type internal BoundedFileRead =
     | FileBytes of byte[]
     | FileTooLarge
     | FileReadFailed
+    | FileReadTimedOut
+
+type private UntrackedFileKind =
+    | RegularFile of length: int64
+    | SymbolicLinkFile
+    | UnsupportedFile
+    | MissingFile
+
+type private UntrackedPatchMetrics =
+    { ContentLineCount: int
+      PatchByteCount: int
+      PatchLineCount: int }
 
 let maxWorktreeDiffFiles = 1_000
 let maxWorktreeDiffBytes = 2 * 1024 * 1024
@@ -247,13 +275,21 @@ let private parseNulTokens
         else
             tokens |> Array.toList)
 
+let private entryWithoutStats path oldPath status : WorktreeDiffEntry =
+    { Path = path
+      OldPath = oldPath
+      LinesAdded = None
+      LinesRemoved = None
+      Status = status }
+
 let private trackedEntry (status: char) (paths: string list) =
     match status, paths with
     | ('R' | 'C'), oldPath :: newPath :: rest ->
         Ok(
-            { Path = newPath
-              OldPath = Some oldPath
-              Status = if status = 'R' then Renamed else Added },
+            entryWithoutStats
+                newPath
+                (Some oldPath)
+                (if status = 'R' then Renamed else Added),
             rest
         )
     | ('A' | 'M' | 'D' | 'T' | 'U' | 'X' | 'B'), path :: rest ->
@@ -264,9 +300,7 @@ let private trackedEntry (status: char) (paths: string list) =
             | _ -> Modified
 
         Ok(
-            { Path = path
-              OldPath = None
-              Status = diffStatus },
+            entryWithoutStats path None diffStatus,
             rest
         )
     | _ -> Error(InvalidGitOutput EnumerateTracked)
@@ -287,13 +321,165 @@ let private parseTrackedEntries (bytes: byte[]) =
 
         parse [] tokens)
 
+let private parseLineCount value =
+    if value = "-" then
+        Ok None
+    else
+        match Int32.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture) with
+        | true, count when count >= 0 -> Ok(Some count)
+        | _ -> Error(InvalidGitOutput EnumerateTracked)
+
+let private parseNumstatHeader (header: string) =
+    let firstTab = header.IndexOf('\t')
+    let secondTab =
+        if firstTab < 0 then -1 else header.IndexOf('\t', firstTab + 1)
+
+    if firstTab < 0 || secondTab < 0 then
+        Error(InvalidGitOutput EnumerateTracked)
+    else
+        let addedText = header[..firstTab - 1]
+        let removedText = header[firstTab + 1..secondTab - 1]
+        let path = header[secondTab + 1..]
+
+        match parseLineCount addedText, parseLineCount removedText with
+        | Ok linesAdded, Ok linesRemoved ->
+            match linesAdded, linesRemoved with
+            | Some _, Some _
+            | None, None -> Ok(linesAdded, linesRemoved, path)
+            | _ -> Error(InvalidGitOutput EnumerateTracked)
+        | _ -> Error(InvalidGitOutput EnumerateTracked)
+
+let private parseNumstatTokens tokens =
+    let rec parse entries remaining =
+        match remaining with
+        | [] -> Ok(List.rev entries)
+        | header :: rest ->
+            parseNumstatHeader header
+            |> Result.bind (fun (linesAdded, linesRemoved, path) ->
+                match path, rest with
+                | "", oldPath :: newPath :: tail ->
+                    parse
+                        ({ Path = newPath
+                           OldPath = Some oldPath
+                           LinesAdded = linesAdded
+                           LinesRemoved = linesRemoved }
+                         :: entries)
+                        tail
+                | "", _ -> Error(InvalidGitOutput EnumerateTracked)
+                | path, tail ->
+                    parse
+                        ({ Path = path
+                           OldPath = None
+                           LinesAdded = linesAdded
+                           LinesRemoved = linesRemoved }
+                         :: entries)
+                        tail)
+
+    parse [] tokens
+
+let internal parseNumstatEntries (bytes: byte[]) =
+    parseNulTokens EnumerateTracked bytes
+    |> Result.bind parseNumstatTokens
+
+let private isGitMode (mode: string) =
+    mode.Length = 6 && mode |> Seq.forall Char.IsDigit
+
+let private parseRawHeader (header: string) =
+    let fields =
+        header.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+
+    if
+        fields.Length < 5
+        || not (fields[0].StartsWith(":", StringComparison.Ordinal))
+    then
+        Error(InvalidGitOutput EnumerateTracked)
+    else
+        let oldMode = fields[0][1..]
+        let newMode = fields[1]
+
+        fields
+        |> Array.tryLast
+        |> Option.filter (fun status ->
+            status.Length > 0
+            && isGitMode oldMode
+            && isGitMode newMode)
+        |> Option.map (fun status ->
+            status.Chars(0),
+            oldMode = "120000" || newMode = "120000")
+        |> Result.requireSome (InvalidGitOutput EnumerateTracked)
+
+let private parseRawEntries (tokens: string list) =
+    let rec parse entries (remaining: string list) =
+        match remaining with
+        | header :: paths when header.StartsWith(":", StringComparison.Ordinal) ->
+            parseRawHeader header
+            |> Result.bind (fun (status, isSymlink) ->
+                trackedEntry status paths
+                |> Result.bind (fun (entry, rest) ->
+                    parse
+                        ({ Entry = entry
+                           IsSymlink = isSymlink }
+                         :: entries)
+                        rest))
+        | rest -> Ok(List.rev entries, rest)
+
+    parse [] tokens
+
+let private entryKey path oldPath = oldPath, path
+
+let private applyTrackedStats
+    (tracked: WorktreeDiffRawEntry list)
+    (stats: WorktreeDiffStatsEntry list)
+    =
+    let statsByPath =
+        stats
+        |> List.map (fun entry -> entryKey entry.Path entry.OldPath, entry)
+        |> Map.ofList
+
+    if Map.count statsByPath <> stats.Length then
+        Error(InvalidGitOutput EnumerateTracked)
+    else
+        let rec apply
+            (entries: WorktreeDiffEntry list)
+            (remaining: WorktreeDiffRawEntry list)
+            =
+            match remaining with
+            | [] -> Ok(List.rev entries)
+            | rawEntry :: rest ->
+                let entry = rawEntry.Entry
+
+                match statsByPath |> Map.tryFind (entryKey entry.Path entry.OldPath) with
+                | None -> Error(InvalidGitOutput EnumerateTracked)
+                | Some stats ->
+                    let linesAdded, linesRemoved =
+                        if rawEntry.IsSymlink then
+                            None, None
+                        else
+                            stats.LinesAdded, stats.LinesRemoved
+
+                    let updated =
+                        { entry with
+                            LinesAdded = linesAdded
+                            LinesRemoved = linesRemoved }
+
+                    apply (updated :: entries) rest
+
+        if tracked.Length <> stats.Length then
+            Error(InvalidGitOutput EnumerateTracked)
+        else
+            apply [] tracked
+
+let private parseTrackedSummaryEntries bytes =
+    parseNulTokens EnumerateTracked bytes
+    |> Result.bind parseRawEntries
+    |> Result.bind (fun (tracked, numstatTokens) ->
+        parseNumstatTokens numstatTokens
+        |> Result.bind (applyTrackedStats tracked))
+
 let private parseUntrackedEntries (bytes: byte[]) =
     parseNulTokens EnumerateUntracked bytes
     |> Result.map (
-        List.map (fun path ->
-            { Path = path
-              OldPath = None
-              Status = Untracked })
+        List.map (fun path -> entryWithoutStats path None Untracked)
     )
 
 let private sortDiffEntries (entries: WorktreeDiffEntry list) =
@@ -305,18 +491,28 @@ let private excludeGeneratedDiffViewer (entries: WorktreeDiffEntry list) =
     entries
     |> List.filter (fun entry -> entry.Path <> generatedDiffViewerPath)
 
-let private composeTrackedAndUntracked tracked untracked =
+let private combineLineCounts left right =
+    Option.map2 (+) left right
+
+let private composeTrackedAndUntracked
+    (tracked: WorktreeDiffEntry list)
+    (untracked: WorktreeDiffEntry list)
+    =
     let trackedPaths = tracked |> List.map _.Path |> Set.ofList
-    let untrackedPaths = untracked |> List.map _.Path |> Set.ofList
+    let untrackedByPath = untracked |> List.map (fun entry -> entry.Path, entry) |> Map.ofList
 
     let composedTracked =
         tracked
         |> List.map (fun entry ->
-            if Set.contains entry.Path untrackedPaths then
+            match untrackedByPath |> Map.tryFind entry.Path with
+            | Some untrackedEntry ->
                 { entry with
+                    LinesAdded =
+                        combineLineCounts entry.LinesAdded untrackedEntry.LinesAdded
+                    LinesRemoved =
+                        combineLineCounts entry.LinesRemoved untrackedEntry.LinesRemoved
                     Status = TrackedAndUntracked entry.Status }
-            else
-                entry)
+            | None -> entry)
 
     let untrackedOnly =
         untracked
@@ -330,6 +526,25 @@ let private trackedDiffArguments mergeBase layers =
     | true, false -> Some [ mergeBase; "HEAD" ]
     | false, true -> Some [ "HEAD" ]
     | false, false -> None
+
+let private trackedEnumerationArguments
+    (formats: string list)
+    (comparison: string list)
+    =
+    [ "diff" ]
+    @ formats
+    @ [ "-z"
+        "--find-renames"
+        "--no-ext-diff"
+        "--no-textconv" ]
+    @ comparison
+
+let private untrackedEnumerationArguments =
+    [ "ls-files"
+      "--others"
+      "--exclude-standard"
+      "-z"
+      "--" ]
 
 let private resolveComparison
     (deadline: ProcessRunner.ResponseDeadline)
@@ -363,6 +578,390 @@ let private resolveComparison
             return baseRef, mergeBase
     }
 
+let private diffLineCount (bytes: byte[]) =
+    if bytes.Length = 0 then
+        0
+    else
+        let newlineCount =
+            bytes
+            |> Array.sumBy (fun value -> if value = 0x0Auy then 1 else 0)
+
+        if bytes[bytes.Length - 1] = 0x0Auy then newlineCount else newlineCount + 1
+
+let private resolveUntrackedPath (repoRoot: string) (relativePath: string) =
+    try
+        let root = Path.GetFullPath(repoRoot)
+        let fullPath = Path.GetFullPath(Path.Combine(root, relativePath))
+        let relative = Path.GetRelativePath(root, fullPath)
+        let parentPrefix = ".." + string Path.DirectorySeparatorChar
+
+        if
+            Path.IsPathRooted(relative)
+            || relative = ".."
+            || relative.StartsWith(parentPrefix, StringComparison.Ordinal)
+        then
+            Error FileUnavailable
+        else
+            Ok fullPath
+    with
+    | :? ArgumentException
+    | :? NotSupportedException
+    | :? PathTooLongException
+    | :? SecurityException ->
+        Error FileUnavailable
+
+let private inspectUntrackedFile (path: string) =
+    // Portable pre-open guards cover directories, links/reparse points, and devices.
+    // Some platforms expose FIFOs as regular files, and FileStream open itself is not cancellable.
+    try
+        let attributes = File.GetAttributes(path)
+
+        if attributes.HasFlag(FileAttributes.ReparsePoint) then
+            SymbolicLinkFile
+        elif
+            attributes.HasFlag(FileAttributes.Directory)
+            || attributes.HasFlag(FileAttributes.Device)
+        then
+            UnsupportedFile
+        else
+            RegularFile(FileInfo(path).Length)
+    with
+    | :? FileNotFoundException
+    | :? DirectoryNotFoundException
+    | :? UnauthorizedAccessException
+    | :? IOException
+    | :? NotSupportedException
+    | :? SecurityException ->
+        MissingFile
+
+let rec private readStreamBoundedCore
+    (stream: Stream)
+    (cancellationToken: CancellationToken)
+    (captured: MemoryStream)
+    (buffer: byte[])
+    =
+    task {
+        let! count =
+            stream.ReadAsync(buffer.AsMemory(), cancellationToken)
+
+        if count = 0 then
+            return FileBytes(captured.ToArray())
+        else
+            let remaining =
+                maxWorktreeDiffBytes - int captured.Length
+
+            if count > remaining then
+                return FileTooLarge
+            else
+                do!
+                    captured.WriteAsync(
+                        buffer.AsMemory(0, count),
+                        cancellationToken
+                    )
+
+                return!
+                    readStreamBoundedCore
+                        stream
+                        cancellationToken
+                        captured
+                        buffer
+    }
+
+let internal readStreamBounded
+    (cancellationToken: CancellationToken)
+    (stream: Stream)
+    =
+    task {
+        try
+            use captured = new MemoryStream(64 * 1024)
+            let buffer = Array.zeroCreate<byte> (64 * 1024)
+
+            return!
+                readStreamBoundedCore
+                    stream
+                    cancellationToken
+                    captured
+                    buffer
+        with :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
+            return FileReadTimedOut
+    }
+
+let private readFileBounded
+    (deadline: ProcessRunner.ResponseDeadline)
+    (path: string)
+    =
+    async {
+        use cts = new CancellationTokenSource()
+        let remainingMs =
+            ProcessRunner.responseDeadlineOperationRemainingMs deadline
+
+        if remainingMs <= 0 then
+            return FileReadTimedOut
+        else
+            cts.CancelAfter(remainingMs)
+
+            let options = FileStreamOptions()
+            options.Mode <- FileMode.Open
+            options.Access <- FileAccess.Read
+            options.Share <- FileShare.ReadWrite ||| FileShare.Delete
+            options.BufferSize <- 64 * 1024
+            options.Options <-
+                FileOptions.Asynchronous
+                ||| FileOptions.SequentialScan
+
+            try
+                use stream = new FileStream(path, options)
+                let! result =
+                    readStreamBounded cts.Token stream
+                    |> Async.AwaitTask
+
+                return
+                    if
+                        ProcessRunner.responseDeadlineCanContinue
+                            deadline
+                    then
+                        result
+                    else
+                        FileReadTimedOut
+            with
+            | :? OperationCanceledException when cts.IsCancellationRequested ->
+                return FileReadTimedOut
+            | :? FileNotFoundException
+            | :? DirectoryNotFoundException
+            | :? UnauthorizedAccessException
+            | :? IOException
+            | :? NotSupportedException
+            | :? SecurityException ->
+                return
+                    if
+                        ProcessRunner.responseDeadlineCanContinue
+                            deadline
+                    then
+                        FileReadFailed
+                    else
+                        FileReadTimedOut
+    }
+
+let private gitPatchPath prefix (path: string) =
+    let value = prefix + path.Replace('\\', '/')
+
+    let needsQuotes =
+        value
+        |> Seq.exists (fun character ->
+            Char.IsWhiteSpace(character)
+            || Char.IsControl(character)
+            || character = '"'
+            || character = '\\')
+
+    if not needsQuotes then
+        value
+    else
+        let escaped =
+            value
+                .Replace("\\", "\\\\")
+                .Replace("\"", "\\\"")
+                .Replace("\t", "\\t")
+                .Replace("\r", "\\r")
+                .Replace("\n", "\\n")
+
+        $"\"{escaped}\""
+
+let private untrackedPatchMetrics (path: string) (bytes: byte[]) =
+    if bytes |> Array.contains 0uy then
+        None
+    else
+        try
+            strictUtf8.GetCharCount(bytes) |> ignore
+
+            let endsWithNewline =
+                bytes.Length > 0
+                && bytes[bytes.Length - 1] = 0x0Auy
+            let contentLineCount = diffLineCount bytes
+            let oldPath = gitPatchPath "a/" path
+            let newPath = gitPatchPath "b/" path
+
+            let header =
+                [ $"diff --git {oldPath} {newPath}"
+                  "new file mode 100644"
+                  "--- /dev/null"
+                  $"+++ {newPath}" ]
+
+            let hunk =
+                if contentLineCount = 0 then
+                    []
+                else
+                    [ $"@@ -0,0 +1,{contentLineCount} @@" ]
+
+            let noNewlineMarker =
+                if contentLineCount = 0 || endsWithNewline then
+                    []
+                else
+                    [ "\\ No newline at end of file" ]
+
+            let fixedByteCount =
+                header @ hunk @ noNewlineMarker
+                |> List.sumBy (fun line ->
+                    strictUtf8.GetByteCount(line) + 1)
+
+            let bodyByteCount =
+                bytes.Length
+                + contentLineCount
+                + (if contentLineCount > 0 && not endsWithNewline then 1 else 0)
+
+            Some
+                { ContentLineCount = contentLineCount
+                  PatchByteCount = fixedByteCount + bodyByteCount
+                  PatchLineCount =
+                    header.Length
+                    + hunk.Length
+                    + contentLineCount
+                    + noNewlineMarker.Length }
+        with :? DecoderFallbackException ->
+            None
+
+let private synthesizeUntrackedPatch (path: string) (bytes: byte[]) =
+    match untrackedPatchMetrics path bytes with
+    | None -> Binary
+    | Some metrics when metrics.PatchByteCount > maxWorktreeDiffBytes ->
+        Oversized
+    | Some metrics when metrics.PatchLineCount > maxWorktreeDiffLines ->
+        Truncated
+    | Some _ ->
+        let text = strictUtf8.GetString(bytes)
+        let endsWithNewline =
+            bytes.Length > 0
+            && bytes[bytes.Length - 1] = 0x0Auy
+        let oldPath = gitPatchPath "a/" path
+        let newPath = gitPatchPath "b/" path
+
+        let contentLines =
+            if text.Length = 0 then
+                []
+            else
+                let split = text.Split('\n') |> Array.toList
+                if endsWithNewline then split |> List.take (split.Length - 1) else split
+
+        let patchLines =
+            [ $"diff --git {oldPath} {newPath}"
+              "new file mode 100644"
+              "--- /dev/null"
+              $"+++ {newPath}" ]
+            @ (if contentLines.IsEmpty then
+                   []
+               else
+                   [ $"@@ -0,0 +1,{contentLines.Length} @@" ])
+            @ (contentLines |> List.map (fun line -> "+" + line))
+            @ (if contentLines.IsEmpty || endsWithNewline then
+                   []
+               else
+                   [ "\\ No newline at end of file" ])
+
+        patchLines
+        |> String.concat "\n"
+        |> fun value -> Text(value + "\n")
+
+let internal untrackedLineCountsWithinDeadline
+    (deadline: ProcessRunner.ResponseDeadline)
+    repoRoot
+    (entry: WorktreeDiffEntry)
+    =
+    async {
+        let unavailable =
+            { entry with
+                LinesAdded = None
+                LinesRemoved = None }
+
+        let timedOut () =
+            not (ProcessRunner.responseDeadlineCanContinue deadline)
+
+        if timedOut () then
+            return Error(GitTimedOut EnumerateUntracked)
+        else
+            match resolveUntrackedPath repoRoot entry.Path with
+            | Error _ when timedOut () ->
+                return Error(GitTimedOut EnumerateUntracked)
+            | Error _ -> return Ok unavailable
+            | Ok path when timedOut () ->
+                return Error(GitTimedOut EnumerateUntracked)
+            | Ok path ->
+                match inspectUntrackedFile path with
+                | _ when timedOut () ->
+                    return Error(GitTimedOut EnumerateUntracked)
+                | SymbolicLinkFile
+                | UnsupportedFile
+                | MissingFile ->
+                    return Ok unavailable
+                | RegularFile length
+                    when length > int64 maxWorktreeDiffBytes ->
+                    return Ok unavailable
+                | RegularFile 0L ->
+                    return
+                        Ok
+                            { entry with
+                                LinesAdded = Some 0
+                                LinesRemoved = Some 0 }
+                | RegularFile _ ->
+                    let! read = readFileBounded deadline path
+
+                    if timedOut () then
+                        return Error(GitTimedOut EnumerateUntracked)
+                    else
+                        match read with
+                        | FileReadTimedOut ->
+                            return Error(GitTimedOut EnumerateUntracked)
+                        | FileBytes bytes ->
+                            let metrics =
+                                untrackedPatchMetrics entry.Path bytes
+
+                            if timedOut () then
+                                return Error(GitTimedOut EnumerateUntracked)
+                            else
+                                return
+                                    match metrics with
+                                    | Some metrics
+                                        when metrics.PatchByteCount <= maxWorktreeDiffBytes
+                                             && metrics.PatchLineCount <= maxWorktreeDiffLines ->
+                                        Ok
+                                            { entry with
+                                                LinesAdded =
+                                                    Some metrics.ContentLineCount
+                                                LinesRemoved = Some 0 }
+                                    | _ -> Ok unavailable
+                        | FileTooLarge
+                        | FileReadFailed ->
+                            return Ok unavailable
+    }
+
+let internal collectUntrackedLineCounts
+    (canContinue: WorktreeDiffEntry -> bool)
+    (readLineCounts:
+        WorktreeDiffEntry
+            -> Async<Result<WorktreeDiffEntry, WorktreeDiffError>>)
+    entries
+    =
+    let rec collect collected remaining =
+        async {
+            match remaining with
+            | [] -> return Ok(List.rev collected)
+            | entry :: _ when not (canContinue entry) ->
+                return Error(GitTimedOut EnumerateUntracked)
+            | entry :: rest ->
+                let! result = readLineCounts entry
+
+                if not (canContinue entry) then
+                    return Error(GitTimedOut EnumerateUntracked)
+                else
+                    match result with
+                    | Error error -> return Error error
+                    | Ok counted ->
+                        return!
+                            collect
+                                (counted :: collected)
+                                rest
+        }
+
+    collect [] entries
+
 let internal getWorktreeDiffSummaryWithinDeadline
     (deadline: ProcessRunner.ResponseDeadline)
     (context: DiffComparisonContext)
@@ -371,31 +970,27 @@ let internal getWorktreeDiffSummaryWithinDeadline
     asyncResult {
         let! baseRef, mergeBase = resolveComparison deadline context layers
 
-        let! tracked =
+        let tracked =
             match trackedDiffArguments mergeBase layers with
             | None -> async.Return(Ok [])
             | Some comparison ->
                 asyncResult {
-                    let! trackedBytes =
+                    let! bytes =
                         runDiffGit
                             deadline
                             EnumerateTracked
                             summaryCaptureLimitBytes
                             context.WorktreePath
-                            ([ "diff"
-                               "--name-status"
-                               "-z"
-                               "--find-renames"
-                               "--no-ext-diff"
-                               "--no-textconv" ]
-                             @ comparison)
+                            (trackedEnumerationArguments
+                                [ "--raw"; "--numstat" ]
+                                comparison)
 
                     return!
-                        parseTrackedEntries trackedBytes
+                        parseTrackedSummaryEntries bytes
                         |> Result.map excludeGeneratedDiffViewer
                 }
 
-        let! untracked =
+        let untrackedPaths =
             if not layers.Untracked then
                 async.Return(Ok [])
             else
@@ -406,26 +1001,45 @@ let internal getWorktreeDiffSummaryWithinDeadline
                             EnumerateUntracked
                             summaryCaptureLimitBytes
                             context.WorktreePath
-                            [ "ls-files"
-                              "--others"
-                              "--exclude-standard"
-                              "-z"
-                              "--" ]
+                            untrackedEnumerationArguments
 
                     return!
                         parseUntrackedEntries untrackedBytes
                         |> Result.map excludeGeneratedDiffViewer
                 }
 
-        let files = composeTrackedAndUntracked tracked untracked
+        let! enumerated = [| tracked; untrackedPaths |] |> Async.Parallel
+        let! tracked = enumerated[0]
+        let! untrackedPaths = enumerated[1]
+        let selectedPaths =
+            composeTrackedAndUntracked tracked untrackedPaths
 
-        if files.Length > maxWorktreeDiffFiles then
-            return! Error(TooManyFiles files.Length)
+        if selectedPaths.Length > maxWorktreeDiffFiles then
+            return! Error(TooManyFiles selectedPaths.Length)
+
+        let! untracked =
+            collectUntrackedLineCounts
+                (fun _ ->
+                    ProcessRunner.responseDeadlineCanContinue deadline)
+                (untrackedLineCountsWithinDeadline
+                    deadline
+                    context.WorktreePath)
+                untrackedPaths
+
+        let files =
+            composeTrackedAndUntracked tracked untracked
+            |> sortDiffEntries
+
+        if
+            layers.Untracked
+            && not (ProcessRunner.responseDeadlineCanContinue deadline)
+        then
+            return! Error(GitTimedOut EnumerateUntracked)
 
         return
             { BaseRef = baseRef
               MergeBase = mergeBase
-              Files = sortDiffEntries files }
+              Files = files }
     }
 
 let internal getWorktreeDiffSummary (context: DiffComparisonContext) =
@@ -446,15 +1060,46 @@ let internal getFilteredWorktreeDiffSummary
         layers
 
 let private countLayer deadline context layers =
-    async {
-        let! result =
-            getWorktreeDiffSummaryWithinDeadline deadline context layers
+    asyncResult {
+        let! _, mergeBase = resolveComparison deadline context layers
 
-        return
-            match result with
-            | Ok summary -> Ok summary.Files.Length
-            | Error(TooManyFiles count) -> Ok count
-            | Error error -> Error error
+        let! tracked =
+            match trackedDiffArguments mergeBase layers with
+            | None -> async.Return(Ok [])
+            | Some comparison ->
+                asyncResult {
+                    let! bytes =
+                        runDiffGit
+                            deadline
+                            EnumerateTracked
+                            summaryCaptureLimitBytes
+                            context.WorktreePath
+                            (trackedEnumerationArguments [ "--name-status" ] comparison)
+
+                    return!
+                        parseTrackedEntries bytes
+                        |> Result.map excludeGeneratedDiffViewer
+                }
+
+        let! untracked =
+            if not layers.Untracked then
+                async.Return(Ok [])
+            else
+                asyncResult {
+                    let! bytes =
+                        runDiffGit
+                            deadline
+                            EnumerateUntracked
+                            summaryCaptureLimitBytes
+                            context.WorktreePath
+                            untrackedEnumerationArguments
+
+                    return!
+                        parseUntrackedEntries bytes
+                        |> Result.map excludeGeneratedDiffViewer
+                }
+
+        return composeTrackedAndUntracked tracked untracked |> List.length
     }
 
 let internal getWorktreeDiffLayerCountsWithinDeadline
@@ -480,16 +1125,6 @@ let internal getWorktreeDiffLayerCountsWithinDeadline
               LocalCount = counts[1]
               UntrackedCount = counts[2] }
     }
-
-let private diffLineCount (bytes: byte[]) =
-    if bytes.Length = 0 then
-        0
-    else
-        let newlineCount =
-            bytes
-            |> Array.sumBy (fun value -> if value = 0x0Auy then 1 else 0)
-
-        if bytes[bytes.Length - 1] = 0x0Auy then newlineCount else newlineCount + 1
 
 let private isBinaryPatch (patch: string) =
     patch.Split('\n')
@@ -567,7 +1202,7 @@ let private combineTrackedAndUntrackedFiles tracked untracked =
       | Symlink(Some untrackedPatch)) ->
         combinePatchText trackedPatch untrackedPatch
 
-let private trackedDiffPaths entry =
+let private trackedDiffPaths (entry: WorktreeDiffEntry) =
     match entry.OldPath with
     | Some oldPath when oldPath <> entry.Path -> [ oldPath; entry.Path ]
     | _ -> [ entry.Path ]
@@ -608,175 +1243,59 @@ let private getTrackedDiffFile
             | Ok bytes -> classifyTrackedPatch entry bytes
     }
 
-let private resolveUntrackedPath (repoRoot: string) (relativePath: string) =
-    try
-        let root = Path.GetFullPath(repoRoot)
-        let fullPath = Path.GetFullPath(Path.Combine(root, relativePath))
-        let relative = Path.GetRelativePath(root, fullPath)
-        let parentPrefix = ".." + string Path.DirectorySeparatorChar
-
-        if
-            Path.IsPathRooted(relative)
-            || relative = ".."
-            || relative.StartsWith(parentPrefix, StringComparison.Ordinal)
-        then
-            Error FileUnavailable
-        else
-            Ok fullPath
-    with _ ->
-        Error FileUnavailable
-
-let private isSymbolicLink (fileInfo: FileInfo) =
-    let hasLinkTarget =
-        try
-            not (isNull fileInfo.LinkTarget)
-        with _ ->
-            false
-
-    if hasLinkTarget then
-        true
-    else
-        try
-            fileInfo.Attributes.HasFlag(FileAttributes.ReparsePoint)
-        with _ ->
-            false
-
-let private readFileBounded (path: string) =
-    try
-        use stream =
-            new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.ReadWrite ||| FileShare.Delete,
-                64 * 1024,
-                FileOptions.SequentialScan
-            )
-
-        use captured =
-            new MemoryStream(
-                min
-                    maxWorktreeDiffBytes
-                    (int (min stream.Length (int64 maxWorktreeDiffBytes)))
-            )
-
-        let buffer = Array.zeroCreate<byte> (64 * 1024)
-
-        let rec read () =
-            let count = stream.Read(buffer, 0, buffer.Length)
-
-            if count = 0 then
-                FileBytes(captured.ToArray())
-            else
-                let remaining = maxWorktreeDiffBytes - int captured.Length
-
-                if count > remaining then
-                    FileTooLarge
-                else
-                    captured.Write(buffer, 0, count)
-                    read ()
-
-        read ()
-    with _ ->
-        FileReadFailed
-
-let private gitPatchPath prefix (path: string) =
-    let value = prefix + path.Replace('\\', '/')
-
-    let needsQuotes =
-        value
-        |> Seq.exists (fun character ->
-            Char.IsWhiteSpace(character)
-            || Char.IsControl(character)
-            || character = '"'
-            || character = '\\')
-
-    if not needsQuotes then
-        value
-    else
-        let escaped =
-            value
-                .Replace("\\", "\\\\")
-                .Replace("\"", "\\\"")
-                .Replace("\t", "\\t")
-                .Replace("\r", "\\r")
-                .Replace("\n", "\\n")
-
-        $"\"{escaped}\""
-
-let private synthesizeUntrackedPatch (path: string) (bytes: byte[]) =
-    if bytes |> Array.contains 0uy then
-        Binary
-    else
-        try
-            let text = strictUtf8.GetString(bytes)
-            let endsWithNewline =
-                bytes.Length > 0
-                && bytes[bytes.Length - 1] = 0x0Auy
-            let oldPath = gitPatchPath "a/" path
-            let newPath = gitPatchPath "b/" path
-
-            let contentLines =
-                if text.Length = 0 then
-                    []
-                else
-                    let split = text.Split('\n') |> Array.toList
-                    if endsWithNewline then split |> List.take (split.Length - 1) else split
-
-            let header =
-                [ $"diff --git {oldPath} {newPath}"
-                  "new file mode 100644"
-                  "--- /dev/null"
-                  $"+++ {newPath}" ]
-
-            let hunk =
-                if contentLines.IsEmpty then
-                    []
-                else
-                    [ $"@@ -0,0 +1,{contentLines.Length} @@" ]
-
-            let body = contentLines |> List.map (fun line -> "+" + line)
-
-            let noNewlineMarker =
-                if contentLines.IsEmpty || endsWithNewline then
-                    []
-                else
-                    [ "\\ No newline at end of file" ]
-
-            let patch =
-                header @ hunk @ body @ noNewlineMarker
-                |> String.concat "\n"
-                |> fun value -> value + "\n"
-
-            let patchBytes = Encoding.UTF8.GetBytes(patch)
-
-            if patchBytes.Length > maxWorktreeDiffBytes then
-                Oversized
-            elif diffLineCount patchBytes > maxWorktreeDiffLines then
-                Truncated
-            else
-                Text patch
-        with :? DecoderFallbackException ->
-            Binary
-
-let private getUntrackedDiffFile (repoRoot: string) (entry: WorktreeDiffEntry) =
+let private getUntrackedDiffFile
+    (deadline: ProcessRunner.ResponseDeadline)
+    (repoRoot: string)
+    (entry: WorktreeDiffEntry)
+    =
     async {
-        return
-            resolveUntrackedPath repoRoot entry.Path
-            |> Result.bind (fun path ->
-                let info = FileInfo(path)
+        let timedOut () =
+            not (ProcessRunner.responseDeadlineCanContinue deadline)
 
-                if isSymbolicLink info then
-                    Ok(Symlink None)
-                elif not info.Exists then
-                    Error FileUnavailable
-                elif info.Length > int64 maxWorktreeDiffBytes then
-                    Ok Oversized
-                else
-                    match readFileBounded path with
-                    | FileBytes bytes -> Ok(synthesizeUntrackedPatch entry.Path bytes)
-                    | FileTooLarge -> Ok Oversized
-                    | FileReadFailed -> Error FileUnavailable)
+        if timedOut () then
+            return Error(GitTimedOut LoadFile)
+        else
+            match resolveUntrackedPath repoRoot entry.Path with
+            | Error _ when timedOut () ->
+                return Error(GitTimedOut LoadFile)
+            | Error error -> return Error error
+            | Ok path when timedOut () ->
+                return Error(GitTimedOut LoadFile)
+            | Ok path ->
+                match inspectUntrackedFile path with
+                | _ when timedOut () ->
+                    return Error(GitTimedOut LoadFile)
+                | SymbolicLinkFile -> return Ok(Symlink None)
+                | UnsupportedFile
+                | MissingFile ->
+                    return Error FileUnavailable
+                | RegularFile length
+                    when length > int64 maxWorktreeDiffBytes ->
+                    return Ok Oversized
+                | RegularFile 0L ->
+                    return Ok(synthesizeUntrackedPatch entry.Path Array.empty)
+                | RegularFile _ ->
+                    let! read = readFileBounded deadline path
+
+                    if timedOut () then
+                        return Error(GitTimedOut LoadFile)
+                    else
+                        match read with
+                        | FileBytes bytes ->
+                            let file =
+                                synthesizeUntrackedPatch
+                                    entry.Path
+                                    bytes
+
+                            return
+                                if timedOut () then
+                                    Error(GitTimedOut LoadFile)
+                                else
+                                    Ok file
+                        | FileTooLarge -> return Ok Oversized
+                        | FileReadFailed -> return Error FileUnavailable
+                        | FileReadTimedOut ->
+                            return Error(GitTimedOut LoadFile)
     }
 
 let private getTrackedAndUntrackedDiffFile
@@ -805,7 +1324,8 @@ let private getTrackedAndUntrackedDiffFile
                 layers
                 trackedEntry
 
-        let! untracked = getUntrackedDiffFile repoRoot untrackedEntry
+        let! untracked =
+            getUntrackedDiffFile deadline repoRoot untrackedEntry
         return combineTrackedAndUntrackedFiles tracked untracked
     }
 
@@ -817,7 +1337,7 @@ let internal getWorktreeDiffFileWithinDeadline
     (entry: WorktreeDiffEntry)
     : Async<Result<WorktreeDiffFile, WorktreeDiffError>> =
     match entry.Status with
-    | Untracked -> getUntrackedDiffFile repoRoot entry
+    | Untracked -> getUntrackedDiffFile deadline repoRoot entry
     | TrackedAndUntracked trackedStatus ->
         getTrackedAndUntrackedDiffFile
             deadline

@@ -257,6 +257,8 @@ let private entry
     : WorktreeDiff.WorktreeDiffEntry =
     { Path = path
       OldPath = oldPath
+      LinesAdded = None
+      LinesRemoved = None
       Status = status }
 
 let private summary
@@ -288,6 +290,8 @@ let private fileSummary
     { Identity = identity
       DisplayPath = path
       OldDisplayPath = oldPath
+      LinesAdded = None
+      LinesRemoved = None
       Change = change }
 
 let private replaceIdentity
@@ -444,11 +448,13 @@ type DiffIdentityStoreTests() =
 type DiffSerializationTests() =
 
     let file =
-        fileSummary
-            "opaque-1"
-            "new.txt"
-            (Some "old.txt")
-            DiffChangeKind.Renamed
+        { fileSummary
+              "opaque-1"
+              "new.txt"
+              (Some "old.txt")
+              DiffChangeKind.Renamed with
+            LinesAdded = Some 4
+            LinesRemoved = Some 2 }
 
     [<Test>]
     member _.``summary results serialize as a stable tagged renderer-neutral contract``() =
@@ -457,7 +463,7 @@ type DiffSerializationTests() =
                    { BaseRef = "origin/main"
                      FileCount = 1
                      Files = [ file ] },
-               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"}],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.Clean "main",
                """{"status":"clean","baseRef":"main","fileCount":0,"files":[],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.FilteredEmpty,
@@ -483,29 +489,29 @@ type DiffSerializationTests() =
     member _.``file results serialize every semantic state without renderer concepts``() =
         let cases =
             [ DiffFileResult.Text(file, "patch"),
-              """{"status":"text","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"patch"}"""
+              """{"status":"text","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"},"patch":"patch"}"""
               DiffFileResult.Deleted(file, "deleted patch"),
-              """{"status":"deleted","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"deleted patch"}"""
+              """{"status":"deleted","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"},"patch":"deleted patch"}"""
               DiffFileResult.Replacement(file, "tracked patch", DiffReplacementKind.Binary),
-              """{"status":"replacement","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"tracked patch","replacement":"binary"}"""
+              """{"status":"replacement","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"},"patch":"tracked patch","replacement":"binary"}"""
               DiffFileResult.Replacement(file, "tracked patch", DiffReplacementKind.Symlink),
-              """{"status":"replacement","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"tracked patch","replacement":"symlink"}"""
+              """{"status":"replacement","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"},"patch":"tracked patch","replacement":"symlink"}"""
               DiffFileResult.Binary file,
-              """{"status":"binary","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}"""
+              """{"status":"binary","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"}}"""
               DiffFileResult.Oversized file,
-              """{"status":"oversized","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}"""
+              """{"status":"oversized","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"}}"""
               DiffFileResult.Truncated file,
-              """{"status":"truncated","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}"""
+              """{"status":"truncated","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"}}"""
               DiffFileResult.Symlink(file, Some "link patch"),
-              """{"status":"symlink","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"link patch"}"""
+              """{"status":"symlink","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"},"patch":"link patch"}"""
               DiffFileResult.Symlink(file, None),
-              """{"status":"symlink","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":null}"""
+              """{"status":"symlink","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"},"patch":null}"""
               DiffFileResult.Unavailable file,
-              """{"status":"unavailable","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}"""
+              """{"status":"unavailable","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"}}"""
               DiffFileResult.TimedOut file,
-              """{"status":"timeout","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}"""
+              """{"status":"timeout","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"}}"""
               DiffFileResult.GitError file,
-              """{"status":"git-error","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"}}""" ]
+              """{"status":"git-error","file":{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"}}""" ]
 
         cases
         |> List.iter (fun (result, expected) ->
@@ -650,7 +656,7 @@ type DiffEndpointHttpTests() =
                 response
                 |> getResponseBody
                 |> assertJson
-                    ("""{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"local.txt","displayPath":"local.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                    ("""{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"local.txt","displayPath":"local.txt","oldDisplayPath":null,"linesAdded":null,"linesRemoved":null,"change":"modified"}]}"""
                      |> withLayerCounts
                          (ExpectedLayerCount.Error "base-error")
                          (ExpectedLayerCount.Available 2)
@@ -681,7 +687,7 @@ type DiffEndpointHttpTests() =
                     response
                     |> getResponseBody
                     |> assertJson
-                        ("""{"status":"ready","baseRef":"main","fileCount":1,"files":[{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"}]}"""
+                        ("""{"status":"ready","baseRef":"main","fileCount":1,"files":[{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"linesAdded":1,"linesRemoved":0,"change":"untracked"}]}"""
                          |> withLayerCounts
                              (ExpectedLayerCount.Available 0)
                              (ExpectedLayerCount.Available 0)
@@ -1116,7 +1122,10 @@ type DiffEndpointHttpTests() =
         let canvasDir = Path.Combine(worktree, ".agents", "canvas")
         let filename = "secret.html"
         let rawHtml = "<!doctype html><html><head><title>Secret</title></head><body>repository document</body></html>"
-        let changed = entry "changed.txt" None WorktreeDiff.Modified
+        let changed =
+            { entry "changed.txt" None WorktreeDiff.Modified with
+                LinesAdded = Some 7
+                LinesRemoved = Some 3 }
 
         let service =
             fakeService
@@ -1153,7 +1162,7 @@ type DiffEndpointHttpTests() =
                         summaryResponse
                         |> getResponseBody
                         |> assertJson
-                            ("""{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                            ("""{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"linesAdded":7,"linesRemoved":3,"change":"modified"}]}"""
                              |> withUniformLayerCount 1)
 
                         use fileResponse = getWithHost client host $"{fileUrl}?identity=issued-id"
@@ -1161,7 +1170,7 @@ type DiffEndpointHttpTests() =
                         fileResponse
                         |> getResponseBody
                         |> assertJson
-                            """{"status":"text","file":{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"change":"modified"},"patch":"repository patch"}"""
+                            """{"status":"text","file":{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"linesAdded":7,"linesRemoved":3,"change":"modified"},"patch":"repository patch"}"""
 
                         use documentResponse = getWithHost client host documentUrl
                         Assert.That(documentResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
@@ -1275,7 +1284,7 @@ type DiffEndpointHttpTests() =
                 Assert.That(summaryResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
 
                 assertJson
-                    ("""{"status":"ready","baseRef":"origin/main","fileCount":3,"files":[{"identity":"rename-id","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},{"identity":"replacement-id","displayPath":"replaced.txt","oldDisplayPath":null,"change":"modified"},{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"}]}"""
+                    ("""{"status":"ready","baseRef":"origin/main","fileCount":3,"files":[{"identity":"rename-id","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":null,"linesRemoved":null,"change":"renamed"},{"identity":"replacement-id","displayPath":"replaced.txt","oldDisplayPath":null,"linesAdded":null,"linesRemoved":null,"change":"modified"},{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"linesAdded":null,"linesRemoved":null,"change":"untracked"}]}"""
                      |> withUniformLayerCount 3)
                     summaryBody
 
@@ -1285,7 +1294,7 @@ type DiffEndpointHttpTests() =
                 renameResponse
                 |> getResponseBody
                 |> assertJson
-                    """{"status":"text","file":{"identity":"rename-id","displayPath":"new.txt","oldDisplayPath":"old.txt","change":"renamed"},"patch":"rename patch"}"""
+                    """{"status":"text","file":{"identity":"rename-id","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":null,"linesRemoved":null,"change":"renamed"},"patch":"rename patch"}"""
 
                 use replacementResponse =
                     get client $"{fileUrl}?identity=replacement-id"
@@ -1293,7 +1302,7 @@ type DiffEndpointHttpTests() =
                 replacementResponse
                 |> getResponseBody
                 |> assertJson
-                    """{"status":"text","file":{"identity":"replacement-id","displayPath":"replaced.txt","oldDisplayPath":null,"change":"modified"},"patch":"replacement patch"}"""
+                    """{"status":"text","file":{"identity":"replacement-id","displayPath":"replaced.txt","oldDisplayPath":null,"linesAdded":null,"linesRemoved":null,"change":"modified"},"patch":"replacement patch"}"""
 
                 use untrackedResponse =
                     get client $"{fileUrl}?identity=untracked-id"
@@ -1301,7 +1310,7 @@ type DiffEndpointHttpTests() =
                 untrackedResponse
                 |> getResponseBody
                 |> assertJson
-                    """{"status":"text","file":{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"change":"untracked"},"patch":"untracked patch"}""")
+                    """{"status":"text","file":{"identity":"untracked-id","displayPath":"untracked.txt","oldDisplayPath":null,"linesAdded":null,"linesRemoved":null,"change":"untracked"},"patch":"untracked patch"}""")
 
     [<Test>]
     member _.``clean and summary error states replace the identity map without partial files``() =
@@ -1414,7 +1423,9 @@ type DiffEndpointHttpTests() =
                   (WorktreeDiff.TrackedAndUntracked WorktreeDiff.Deleted)
               entry "binary.dat" None WorktreeDiff.Modified
               entry "oversized.txt" None WorktreeDiff.Untracked
-              entry "truncated.txt" None WorktreeDiff.Modified
+              { entry "truncated.txt" None WorktreeDiff.Modified with
+                  LinesAdded = Some 20_000
+                  LinesRemoved = Some 0 }
               entry "link.txt" None WorktreeDiff.Untracked
               entry "missing.txt" None WorktreeDiff.Untracked
               entry "timeout.txt" None WorktreeDiff.Modified
@@ -1488,6 +1499,11 @@ type DiffEndpointHttpTests() =
                          DiffChangeKind.Untracked
                      | WorktreeDiff.TrackedAndUntracked _ ->
                          DiffChangeKind.Modified)
+
+            let descriptor =
+                { descriptor with
+                    LinesAdded = file.LinesAdded
+                    LinesRemoved = file.LinesRemoved }
 
             match file.Path with
             | "deleted.txt" ->
@@ -1813,7 +1829,7 @@ type DiffEndpointHttpTests() =
                 summaryResponse
                 |> getResponseBody
                 |> assertJson
-                    ("""{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                    ("""{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"issued-id","displayPath":"changed.txt","oldDisplayPath":null,"linesAdded":null,"linesRemoved":null,"change":"modified"}]}"""
                      |> withUniformLayerCount 1)
 
                 [ $"?identity=issued-id&path={Uri.EscapeDataString(unknown)}",
@@ -1952,7 +1968,7 @@ type DiffEndpointHttpTests() =
                             .GetString()
 
                     assertJson
-                        ("""{"status":"ready","baseRef":"origin/dev","fileCount":1,"files":[{"identity":"linked-id","displayPath":"tracked.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                        ("""{"status":"ready","baseRef":"origin/dev","fileCount":1,"files":[{"identity":"linked-id","displayPath":"tracked.txt","oldDisplayPath":null,"linesAdded":1,"linesRemoved":1,"change":"modified"}]}"""
                          |> withLayerCounts
                              (ExpectedLayerCount.Available 1)
                              (ExpectedLayerCount.Available 0)
@@ -1971,11 +1987,13 @@ type DiffEndpointHttpTests() =
                     |> getResponseBody
                     |> assertJson (
                         DiffFileResult.Text(
-                            fileSummary
-                                "linked-id"
-                                "tracked.txt"
-                                None
-                                DiffChangeKind.Modified,
+                            { fileSummary
+                                  "linked-id"
+                                  "tracked.txt"
+                                  None
+                                  DiffChangeKind.Modified with
+                                LinesAdded = Some 1
+                                LinesRemoved = Some 1 },
                             expectedPatch
                         )
                         |> WorktreeDiffApi.serializeFileResult
@@ -2099,7 +2117,7 @@ type DiffEndpointHttpTests() =
                     Assert.That(summaryResponse.StatusCode, Is.EqualTo(HttpStatusCode.OK))
 
                     assertJson
-                        ("""{"status":"ready","baseRef":"main","fileCount":1,"files":[{"identity":"tracked-id","displayPath":"tracked.txt","oldDisplayPath":null,"change":"modified"}]}"""
+                        ("""{"status":"ready","baseRef":"main","fileCount":1,"files":[{"identity":"tracked-id","displayPath":"tracked.txt","oldDisplayPath":null,"linesAdded":1,"linesRemoved":1,"change":"modified"}]}"""
                          |> withLayerCounts
                              (ExpectedLayerCount.Available 0)
                              (ExpectedLayerCount.Available 1)
@@ -2117,11 +2135,13 @@ type DiffEndpointHttpTests() =
                     |> getResponseBody
                     |> assertJson (
                         DiffFileResult.Text(
-                            fileSummary
-                                "tracked-id"
-                                "tracked.txt"
-                                None
-                                DiffChangeKind.Modified,
+                            { fileSummary
+                                  "tracked-id"
+                                  "tracked.txt"
+                                  None
+                                  DiffChangeKind.Modified with
+                                LinesAdded = Some 1
+                                LinesRemoved = Some 1 },
                             expectedPatch
                         )
                         |> WorktreeDiffApi.serializeFileResult
