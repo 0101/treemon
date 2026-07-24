@@ -251,6 +251,19 @@ try {
   });
   await page.waitForFunction((element) => !element.disabled, await toggle.elementHandle());
 
+  await page.evaluate(() => {
+    window.__autoSyncErrorSurfaceObserved = Boolean(
+      document.querySelector("#eye-shape"),
+    );
+    const observer = new MutationObserver(() => {
+      if (document.querySelector("#eye-shape")) {
+        window.__autoSyncErrorSurfaceObserved = true;
+        observer.disconnect();
+      }
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  });
+
   await card.click();
   await page.keyboard.press("s");
   await waitForCondition(() => routedRequests.length >= 4, "fourth auto-sync request");
@@ -262,6 +275,11 @@ try {
   await page.waitForFunction(
     (element) => element.getAttribute("aria-pressed") === "false" && !element.disabled,
     await toggle.elementHandle(),
+  );
+  await page.waitForFunction(
+    () => window.__autoSyncErrorSurfaceObserved === true,
+    undefined,
+    { timeout: 5000 },
   );
 
   const result = {
@@ -285,6 +303,8 @@ try {
       toggleRequests: routedRequests.length,
       finalAriaPressed: await toggle.getAttribute("aria-pressed"),
       finalAriaDisabled: await toggle.getAttribute("aria-disabled"),
+      errorSurfaceObserved:
+        await page.evaluate(() => window.__autoSyncErrorSurfaceObserved),
       errorSurfaceEyeCount: await page.locator("#eye-shape").count(),
     },
   };
@@ -300,8 +320,9 @@ try {
     result.pendingInputIsolation.firstRemainedPendingAfterSecondCompleted,
     true,
   );
-  assert.ok(
-    result.requestLifecycle.errorSurfaceEyeCount > 0,
+  assert.equal(
+    result.requestLifecycle.errorSurfaceObserved,
+    true,
     "Failed auto-sync request rolled back state but did not activate the dashboard's normal error surface",
   );
 } finally {
