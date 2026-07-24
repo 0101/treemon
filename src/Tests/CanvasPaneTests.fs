@@ -1,9 +1,11 @@
 module Tests.CanvasPaneTests
 
 open System
+open System.IO
 open System.Threading.Tasks
 open NUnit.Framework
 open Newtonsoft.Json
+open Newtonsoft.Json.Linq
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 open Tests.CanvasTestHelpers
@@ -337,6 +339,186 @@ type CanvasPaneTests() =
                 Assert.Inconclusive(
                     "sendCanvasMessage API call not observed within 5s. " +
                     "This may happen if no canvas bridge is registered (extension not running).")
+        }
+
+    [<Test>]
+    member this.``pane-hosted Beadspace selection emits each action once with task source context``() =
+        task {
+            let beadsHtmlPath =
+                Path.GetFullPath(
+                    Path.Combine(
+                        __SOURCE_DIRECTORY__,
+                        "..",
+                        "Server",
+                        "BeadspaceTemplate.html"))
+
+            let beadsJson =
+                """[{"id":"pane-task-1","title":"Verify pane routing","description":"Exercise Beadspace selection routing","status":"in_progress","priority":1,"issue_type":"task","labels":[],"created_at":"2026-07-24T10:00:00Z","updated_at":"2026-07-24T11:00:00Z","dependency_count":0,"dependent_count":0}]"""
+
+            do!
+                this.Page.RouteAsync(
+                    "**/beads.html",
+                    fun route ->
+                        task {
+                            let! html = File.ReadAllTextAsync(beadsHtmlPath)
+                            let injected =
+                                html
+                                |> Server.CanvasExport.injectAtHead (
+                                    Server.CanvasDocServer.buildInjection
+                                        CanvasDocKind.SystemView
+                                        "beads.html")
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "text/html",
+                                        Body = injected))
+                        }
+                        :> Task)
+
+            do!
+                this.Page.RouteAsync(
+                    "**/beads-data",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = beadsJson)))
+
+            let forwardedRequests =
+                Array.init 3 (fun _ ->
+                    TaskCompletionSource<string>(
+                        TaskCreationOptions.RunContinuationsAsynchronously))
+
+            // Playwright invokes this impure route callback for each pane-to-server delivery.
+            let mutable forwardedCount = 0
+            let successBody =
+                JsonConvert.SerializeObject(
+                    CanvasMessageResult.Ok,
+                    Fable.Remoting.Json.FableJsonConverter())
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/sendCanvasMessage",
+                    fun route ->
+                        task {
+                            let index = forwardedCount
+                            forwardedCount <- forwardedCount + 1
+
+                            if index < forwardedRequests.Length then
+                                route.Request.PostData
+                                |> Option.ofObj
+                                |> Option.defaultValue ""
+                                |> forwardedRequests[index].TrySetResult
+                                |> ignore
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = successBody))
+                        }
+                        :> Task)
+
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! ensureCanvasPaneOpen this.Page
+
+            let beadsFrame =
+                this.Page.FrameLocator(".canvas-pane .canvas-iframe-active")
+            let title = beadsFrame.Locator(".issue-table-row .col-title").First
+            do! title.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let selectTitle () =
+                task {
+                    let! _ =
+                        title.EvaluateAsync(
+                            """element => {
+                                const range = document.createRange();
+                                range.selectNodeContents(element);
+                                const selection = window.getSelection();
+                                selection.removeAllRanges();
+                                selection.addRange(range);
+                                document.dispatchEvent(new Event('selectionchange'));
+                            }""")
+
+                    do!
+                        beadsFrame.Locator(
+                            "canvas-selection-context button[data-intent='explain']"
+                        ).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+                }
+
+            let explain =
+                beadsFrame.Locator(
+                    "canvas-selection-context button[data-intent='explain']")
+            let remove =
+                beadsFrame.Locator(
+                    "canvas-selection-context button[data-intent='remove']")
+            let comment =
+                beadsFrame.Locator("canvas-selection-context button[data-comment]")
+
+            do! selectTitle ()
+            do! explain.ClickAsync()
+            let! first =
+                forwardedRequests[0].Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            do! selectTitle ()
+            do! remove.ClickAsync()
+            let! second =
+                forwardedRequests[1].Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            do! selectTitle ()
+            do! comment.ClickAsync()
+            do!
+                beadsFrame.Locator("canvas-selection-context input")
+                    .FillAsync("Keep the task context")
+            do!
+                beadsFrame.Locator("canvas-selection-context input")
+                    .PressAsync("Enter")
+            let! third =
+                forwardedRequests[2].Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let requests =
+                [| first; second; third |]
+                |> Array.map (fun raw ->
+                    JsonConvert.DeserializeObject<CanvasMessageRequest array>(
+                        raw,
+                        converter)
+                    |> Array.exactlyOne)
+
+            let payloads =
+                requests
+                |> Array.map (fun request ->
+                    request, JObject.Parse(request.Payload))
+
+            TestContext.Out.WriteLine(
+                $"Pane-forwarded Beadspace requests:{Environment.NewLine}{System.Text.Json.JsonSerializer.Serialize([| first; second; third |])}")
+
+            Assert.Multiple(fun () ->
+                Assert.That(forwardedCount, Is.EqualTo(3))
+                Assert.That(
+                    requests |> Array.map _.Filename,
+                    Is.EqualTo([| "beads.html"; "beads.html"; "beads.html" |]))
+                Assert.That(
+                    payloads |> Array.map (fun (_, payload) -> payload["intent"].Value<string>()),
+                    Is.EqualTo([| "explain"; "remove"; "comment" |]))
+                Assert.That(
+                    payloads |> Array.map (fun (_, payload) -> payload["doc"].Value<string>()),
+                    Is.EqualTo([| "beads.html"; "beads.html"; "beads.html" |]))
+                Assert.That(
+                    payloads
+                    |> Array.map (fun (_, payload) ->
+                        let sourceContext = payload["sourceContext"] :?> JObject
+                        let kind = sourceContext["kind"].Value<string>()
+                        let taskId = sourceContext["taskId"].Value<string>()
+                        kind, taskId),
+                    Is.EqualTo(
+                        [| "beads", "pane-task-1"
+                           "beads", "pane-task-1"
+                           "beads", "pane-task-1" |])))
         }
 
     [<Test>]

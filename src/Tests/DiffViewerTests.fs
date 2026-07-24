@@ -1712,7 +1712,7 @@ type DiffViewerE2ETests() =
             do! this.ActivateFile("large")
             do! this.Page.Locator("[data-state='oversized']").WaitForAsync()
 
-            let stats = this.Page.Locator(".file-entry .file-stats")
+            let stats = this.Page.Locator(".file-heading .file-stats")
             let! statsCount = stats.CountAsync()
             let! statsText = stats.TextContentAsync()
             let! statsLabel = stats.GetAttributeAsync("aria-label")
