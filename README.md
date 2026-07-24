@@ -29,7 +29,7 @@ Point Treemon at one or more directories, and it runs a lightweight background p
 
 - **AI Agent Status:** Claude Code and Copilot session tracking (Working / Waiting / Done / Idle)
 - **Terminal Management:** Spawn, focus, and track Windows Terminal tabs per worktree
-- **Git State:** Dirty / behind-main indicators, one-click branch sync, and commit metrics
+- **Git State:** Dirty / behind-base indicators, persistent agent-driven auto-sync, and commit metrics
 - **PR Tracking:** Azure DevOps and GitHub PR badges, comment counts, and build results
 - **Task Tracking:** [Beads](https://github.com/steveyegge/beads) completion and progress bars
 
@@ -77,7 +77,6 @@ The `tm` command is automatically added to your PATH when you run `.\treemon.ps1
 tm launch --path C:\code\my-project --prompt-file task.md   # launch agent with prompt file
 tm launch --path C:\code\my-project --fix-pr <url>         # fix PR comments
 tm launch --path C:\code\my-project --fix-build <url>      # fix failed build
-tm launch --path C:\code\my-project --fix-tests             # fix failing tests
 tm launch --path C:\code\my-project --create-pr             # create a pull request
 tm new --repo C:\code\my-project --branch feature/foo      # create worktree
 tm worktrees                                                 # list all worktrees

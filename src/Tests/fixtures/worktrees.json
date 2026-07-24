@@ -45,6 +45,7 @@
             },
             "MainBehindCount": 25,
             "HasDiff": true,
+            "AutoSyncEnabled": true,
             "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 },
             "CanvasDocs": [{ "Filename": "e2e-test.html", "ContentHash": "fixture-abc123", "LastModified": "2026-01-15T10:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" }]
           },
@@ -78,6 +79,7 @@
             },
             "MainBehindCount": 5,
             "HasDiff": true,
+            "AutoSyncEnabled": false,
             "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 },
             "CanvasDocs": []
           },
@@ -92,6 +94,7 @@
             "Pr": "NoPr",
             "MainBehindCount": 0,
             "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -104,6 +107,7 @@
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 42,
+            "AutoSyncEnabled": false,
             "IsDirty": true,
             "HasDiff": true,
             "CanvasDocs": []
@@ -137,6 +141,7 @@
             },
             "MainBehindCount": 0,
             "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -176,6 +181,7 @@
             },
             "MainBehindCount": 2,
             "HasDiff": true,
+            "AutoSyncEnabled": false,
             "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 },
             "CanvasDocs": []
           },
@@ -190,6 +196,7 @@
             "Pr": "NoPr",
             "MainBehindCount": 0,
             "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": [
               { "Filename": "overview.html", "ContentHash": "multi-hash-001", "LastModified": "2026-02-16T22:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
               { "Filename": "details.html", "ContentHash": "multi-hash-002", "LastModified": "2026-02-16T22:10:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
@@ -207,10 +214,12 @@
             "Pr": "NoPr",
             "MainBehindCount": 10,
             "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           }
         ],
         "IsReady": true,
+        "BaseBranch": "main",
         "Provider": { "AzDoProvider": "https://dev.azure.com/myorg/TestProject/_git/TestProject" }
       },
       {
@@ -249,6 +258,7 @@
             },
             "MainBehindCount": 0,
             "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -283,6 +293,7 @@
             },
             "MainBehindCount": 0,
             "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -296,6 +307,7 @@
             "Pr": "NoPr",
             "MainBehindCount": 3,
             "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": [
               { "Filename": "beads.html", "ContentHash": "treemon-beads-000", "LastModified": "2026-02-22T13:45:00+00:00", "OwnerSessionId": null, "Kind": "SystemView" },
               { "Filename": "dashboard.html", "ContentHash": "treemon-hash-001", "LastModified": "2026-02-22T13:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
@@ -304,6 +316,7 @@
           }
         ],
         "IsReady": true,
+        "BaseBranch": "main",
         "Provider": { "GitHubProvider": "https://github.com/user/treemon" }
       }
     ],
@@ -372,67 +385,12 @@
   "SyncStatus": {
     "Q:/code/TestProject/feature-active": [
       {
-        "Source": "sync",
-        "Message": "Merge main",
+        "Source": "post-fork",
+        "Message": "setup",
         "Timestamp": "2026-02-16T20:00:00+00:00",
-        "Status": "Succeeded",
-        "Duration": null
-      },
-      {
-        "Source": "claude",
-        "Message": "Implementing input validation for user forms",
-        "Timestamp": "2026-02-16T22:30:00+00:00",
-        "Status": null,
-        "Duration": null
-      }
-    ],
-    "Q:/code/TestProject/feature-recent": [
-      {
-        "Source": "sync",
-        "Message": "Pull",
-        "Timestamp": "2026-02-16T21:30:00+00:00",
-        "Status": "Succeeded",
-        "Duration": null
-      },
-      {
-        "Source": "claude",
-        "Message": "Refactoring complete, running tests",
-        "Timestamp": "2026-02-16T22:00:00+00:00",
-        "Status": null,
-        "Duration": null
-      }
-    ],
-    "Q:/code/TestProject/feature-draft": [
-      {
-        "Source": "claude",
-        "Message": "Setting up API route handlers",
-        "Timestamp": "2026-02-16T18:30:00+00:00",
-        "Status": null,
-        "Duration": null
-      },
-      {
-        "Source": "sync",
-        "Message": "Merge main",
-        "Timestamp": "2026-02-16T19:00:00+00:00",
         "Status": {
-          "Failed": "Merge conflict in src/Api/Routes.fs"
+          "Failed": "npm install failed"
         },
-        "Duration": null
-      }
-    ],
-    "Q:/code/TestProject/feature-unknown": [
-      {
-        "Source": "sync",
-        "Message": "Check clean",
-        "Timestamp": "2026-02-16T17:29:00+00:00",
-        "Status": "Succeeded",
-        "Duration": null
-      },
-      {
-        "Source": "sync",
-        "Message": "Pull",
-        "Timestamp": "2026-02-16T17:30:00+00:00",
-        "Status": "Running",
         "Duration": null
       }
     ]

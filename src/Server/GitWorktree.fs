@@ -23,6 +23,7 @@ type GitData =
       LastCommitTime: DateTimeOffset
       UpstreamBranch: string option
       MainBehindCount: int
+      BaseRevision: string option
       IsDirty: bool
       HasDiff: bool
       WorkMetrics: Shared.WorkMetrics option }
@@ -148,6 +149,16 @@ let getMainBehindCount (worktreePath: string) (baseRef: string) =
                 | true, count -> Some count
                 | _ -> None)
             |> Option.defaultValue 0
+    }
+
+let getBaseRevision (worktreePath: string) (mainRef: string) =
+    async {
+        let! output = runGit worktreePath $"rev-parse {mainRef}"
+
+        return
+            output
+            |> Option.map _.Trim()
+            |> Option.filter (String.IsNullOrWhiteSpace >> not)
     }
 
 let getUpstreamBranch (worktreePath: string) =
@@ -441,10 +452,16 @@ let private collectWorktreeGitDataForBaseRef
                 Async.StartChild(getMainBehindCount worktreePath baseRef)
             else
                 Async.StartChild(async.Return 0)
+        let! baseRevisionChild =
+            if baseRef = remoteRef then
+                Async.StartChild(getBaseRevision worktreePath baseRef)
+            else
+                Async.StartChild(async.Return None)
 
         let! commitCount = commitCountChild
         let! hasCommittedDiff, linesAdded, linesRemoved = diffStatsChild
         let! mainBehind = mainBehindChild
+        let! baseRevision = baseRevisionChild
 
         return
             { Path = worktreePath
@@ -453,6 +470,7 @@ let private collectWorktreeGitDataForBaseRef
               LastCommitTime = common.LastCommit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
               UpstreamBranch = common.UpstreamBranch
               MainBehindCount = mainBehind
+              BaseRevision = baseRevision
               IsDirty = common.IsDirty
               HasDiff = hasCommittedDiff || common.HasLocalDiff
               WorkMetrics = createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved }
@@ -481,6 +499,7 @@ let collectWorktreeGitData
                   LastCommitTime = common.LastCommit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
                   UpstreamBranch = common.UpstreamBranch
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = common.IsDirty
                   HasDiff = common.HasLocalDiff
                   WorkMetrics = None }

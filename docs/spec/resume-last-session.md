@@ -15,7 +15,8 @@ The resume button appears on a worktree card when ALL of these conditions are tr
 - A previous session message exists (`LastUserMessage.IsSome`) — proves there was a real session to resume
 - The coding tool is not actively running (`CodingTool = Idle` or `NoSession`)
 
-The button is **hidden** (not disabled) when conditions aren't met — unlike contextual action buttons which show disabled.
+The button is **hidden** (not disabled) when conditions aren't met — unlike contextual card actions,
+which remain visible and temporarily disable during their launch cooldown.
 
 ### Button Appearance
 
@@ -27,8 +28,8 @@ The button is **hidden** (not disabled) when conditions aren't met — unlike co
 
 When clicked:
 1. Server reads the configured provider from `.treemon.json` (Copilot CLI is the only supported provider)
-2. Server loads the worktree's durable `session_status` rows and selects the greatest
-   `(UpdatedAt, SessionId)` so liveness-only heartbeats cannot change the resume target
+2. Server runs a scalar durable-store query for the greatest `(UpdatedAt, SessionId)` so
+   liveness-only heartbeats cannot change the resume target
 3. Server builds `copilot --yolo --resume <id>` via
    `CodingToolCli.build provider (Resume sessionId)`, falling back to `--continue` when no retained
    session exists
@@ -45,10 +46,11 @@ When clicked:
 
 ### Server: Resume Command Construction
 
-`SessionActivityStore.StatusesForWorktree` loads all durable rows for the worktree, independent of
-the two-hour live window. `getLastSessionId` in `CodingToolStatus.fs` selects the greatest
-`(UpdatedAt, SessionId)` and returns that exact Copilot session id. `LastSeen` remains the liveness,
-freshness, and retention clock and cannot influence resume selection.
+`SessionActivityStore.LatestSessionIdForWorktree` reads only the newest durable session id for the
+worktree, independent of the two-hour live window. The query orders by `(UpdatedAt, SessionId)` and
+does not hydrate status content. Background-agent lifecycle is process-local and therefore has no
+resume-store projection. `LastSeen` remains the liveness, freshness, and retention clock and cannot
+influence resume selection.
 
 `CodingToolCli.build` in `CodingToolCli.fs` unifies all coding-tool CLI invocations across the server (Interactive prompts, Resume, NonInteractive). For the resume case, it takes a provider and an optional session ID via the `Resume` `InvocationMode`:
 - With session ID: `copilot --yolo --resume <id>` (targets the exact session)
@@ -67,7 +69,7 @@ resumeSession: WorktreePath -> Async<Result<unit, string>>
 Implementation in `WorktreeApi.fs`:
 1. Validate path against known worktrees
 2. Read the provider from `.treemon.json`, defaulting to Copilot
-3. Load durable worktree sessions and select the greatest `(UpdatedAt, SessionId)`
+3. Read the greatest durable `(UpdatedAt, SessionId)` through the scalar store lookup
 4. Build the resume command via `CodingToolCli.build provider (Resume sessionId)`
 5. Call `SessionManager.spawnSession` to spawn a new tracked terminal with the command
 
@@ -112,7 +114,7 @@ Minimal styling for `.resume-btn` — matches existing button styles (`.terminal
 ## Decisions
 
 - **`--resume <id>` over `--continue`**: `--continue` is supposed to resume the most recent session in the current directory, but in practice Copilot's `--continue` doesn't reliably scope to the working directory — it can resume sessions from other worktrees. Using `--resume <session-id>` with the specific UUID ensures the correct session is targeted. Falls back to `--continue` if no session ID is found.
-- **Hidden over disabled**: Unlike contextual actions (which show disabled when tool is active), the resume button is hidden when not applicable — it targets a specific scenario (post-reboot) and showing a disabled "resume" button when a session IS active would be confusing
+- **Hidden over disabled**: Unlike contextual card actions (which remain visible and temporarily disable during launch cooldown), the resume button is hidden when not applicable — it targets a specific scenario (post-reboot) and showing a disabled "resume" button when a session IS active would be confusing
 - **No new shared types needed**: Client already has `HasActiveSession`, `LastUserMessage`, and `CodingTool` — enough to determine visibility. Server resolves provider at request time.
 - **Spawn (not new-tab)**: Resume always spawns a new terminal window since the precondition is "no tracked terminal exists"
 
@@ -121,8 +123,8 @@ Minimal styling for `.resume-btn` — matches existing button styles (`.terminal
 | File | Role |
 |------|---------|
 | `src/Shared/Types.fs` | `resumeSession` API contract |
-| `src/Server/SessionActivityStore.fs` | Durable worktree-session lookup |
-| `src/Server/CodingToolStatus.fs` | Selects the greatest `(UpdatedAt, SessionId)` for resume |
+| `src/Server/SessionActivityStore.fs` | Scalar durable worktree-session lookup |
+| `src/Server/CodingToolStatus.fs` | Provider configuration and card status collapse |
 | `src/Server/CodingToolCli.fs` | Unified CLI invocation builder — `Resume` mode handles the resume command |
 | `src/Server/WorktreeApi.fs` | `resumeSession` endpoint implementation |
 | `src/Client/App.fs` | `ResumeSession` update arm and keyboard shortcut |
@@ -131,5 +133,5 @@ Minimal styling for `.resume-btn` — matches existing button styles (`.terminal
 
 ## Related Specs
 
-- `docs/spec/contextual-actions.md` — Similar pattern for action buttons with provider-aware command construction
-- `docs/spec/native-session-management.md` — Session spawning/tracking foundation
+- `docs/spec/worktree-monitor.md` — Contextual card-action visibility and launch behavior
+- `docs/spec/native-session-management.md` — Session spawning/tracking and smart action-launch foundation

@@ -56,7 +56,9 @@ type DashboardState =
       // heartbeats that keep advancing last_seen (so the chip shows time-in-category, not
       // time-since-last-write), and cleared when the status leaves Idle (a new Working turn moves it).
       // In-memory only: a restart rebuilds it from the reloaded sessions (re-stamping at reload time).
-      CodingToolSinceByWorktree: Map<string, DateTimeOffset> }
+      CodingToolSinceByWorktree: Map<string, DateTimeOffset>
+      AutoSyncTriggeredRevisions: Map<string, string>
+      AutoSyncLaunchesInFlight: Set<string> }
 
 module DashboardState =
     let empty =
@@ -68,7 +70,9 @@ module DashboardState =
           ClientActivity = ActivityLevel.Idle
           ClientActivityAt = DateTimeOffset.MinValue
           SessionStatuses = Map.empty
-          CodingToolSinceByWorktree = Map.empty }
+          CodingToolSinceByWorktree = Map.empty
+          AutoSyncTriggeredRevisions = Map.empty
+          AutoSyncLaunchesInFlight = Set.empty }
 
 type RepositoryDiscovery =
     { Worktrees: GitWorktree.WorktreeInfo list option
@@ -100,6 +104,11 @@ type StateMsg =
     /// oldest-replayed row, which the per-row UpdateSessionStatus path would freeze in, overstating the
     /// chip for the whole post-restart idle span (F11/C-14).
     | SeedSessionStatuses of SessionActivityStore.StoredStatus list
+    | ClaimAutoSyncTrigger of path: string * baseRevision: string * AsyncReplyChannel<bool>
+    | ReleaseAutoSyncTrigger of path: string * baseRevision: string
+    | ClearAutoSyncTrigger of path: string
+    | TryBeginAutoSyncLaunch of path: string * AsyncReplyChannel<bool>
+    | CompleteAutoSyncLaunch of path: string
 
 let private maxEvents = 50
 
@@ -210,7 +219,19 @@ let private updateWorktreeList
         removedPaths
         |> Set.fold (fun m path -> Map.remove path m) state.CodingToolSinceByWorktree
 
-    updateRepo repoId updated { state with CodingToolSinceByWorktree = prunedSince }
+    let prunedAutoSync =
+        removedPaths
+        |> Set.fold (fun revisions path -> Map.remove path revisions) state.AutoSyncTriggeredRevisions
+
+    let prunedLaunches =
+        removedPaths
+        |> Set.fold (fun launches path -> Set.remove path launches) state.AutoSyncLaunchesInFlight
+
+    updateRepo repoId updated
+        { state with
+            CodingToolSinceByWorktree = prunedSince
+            AutoSyncTriggeredRevisions = prunedAutoSync
+            AutoSyncLaunchesInFlight = prunedLaunches }
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -278,7 +299,11 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         // Also drop the worktree's GLOBAL time-since-idle stamp (same reason as UpdateWorktreeList —
         // it lives on DashboardState, not PerRepoState, so removeWorktreeData can't reach it; F10/C-13).
         let prunedSince = state.CodingToolSinceByWorktree |> Map.remove path
-        updateRepo repoId (removeWorktreeData path repo) { state with CodingToolSinceByWorktree = prunedSince }
+        updateRepo repoId (removeWorktreeData path repo)
+            { state with
+                CodingToolSinceByWorktree = prunedSince
+                AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path
+                AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path }
 
     | GetState replyChannel ->
         replyChannel.Reply(state)
@@ -366,6 +391,42 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             LatestByCategory = latestByCategory
             CodingToolSinceByWorktree = idleSince }
 
+    | ClaimAutoSyncTrigger(path, baseRevision, reply) ->
+        let claimed = state.AutoSyncTriggeredRevisions |> Map.tryFind path <> Some baseRevision
+        reply.Reply claimed
+
+        if claimed then
+            { state with
+                AutoSyncTriggeredRevisions =
+                    state.AutoSyncTriggeredRevisions |> Map.add path baseRevision }
+        else
+            state
+
+    | ReleaseAutoSyncTrigger(path, baseRevision) ->
+        match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
+        | Some current when current = baseRevision ->
+            { state with
+                AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
+        | _ -> state
+
+    | ClearAutoSyncTrigger path ->
+        { state with
+            AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
+
+    | TryBeginAutoSyncLaunch(path, reply) ->
+        let claimed = not (Set.contains path state.AutoSyncLaunchesInFlight)
+        reply.Reply claimed
+
+        if claimed then
+            { state with
+                AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.add path }
+        else
+            state
+
+    | CompleteAutoSyncLaunch path ->
+        { state with
+            AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path }
+
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->
         let rec loop (state: DashboardState) =
@@ -376,6 +437,37 @@ let createAgent () =
             }
 
         loop DashboardState.empty)
+
+type SchedulerServices =
+    { SessionAgent: SessionManager.SessionAgent
+      ActivityStore: SessionActivityStore.SessionActivityStore option }
+
+let internal autoSyncDependencies (agent: MailboxProcessor<StateMsg>) (services: SchedulerServices) : AutoSync.TriggerDependencies =
+    let tryBeginLaunch path =
+        agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply))
+
+    let launch worktreePath text =
+        let provider = CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
+        let command =
+            CodingToolCli.build provider (CodingToolCli.Interactive text)
+        SessionManager.launchAction services.SessionAgent worktreePath command.AsShellString
+
+    { ClaimRevision =
+        fun path baseRevision -> agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reply))
+      ReleaseRevision = fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
+      SelectSessionId =
+        fun path ->
+            async {
+                let! state = agent.PostAndAsyncReply(GetState)
+                return AutoSync.selectSessionId services.ActivityStore (state.SessionStatuses |> Map.values) path
+            }
+      Deliver =
+        AutoSync.deliver
+            SessionBridge.tryDeliver
+            (fun () -> Async.Sleep AutoSync.registrationGraceMilliseconds)
+            tryBeginLaunch
+            (CompleteAutoSyncLaunch >> agent.Post)
+            launch }
 
 type RefreshTask =
     | RefreshWorktreeList of repoId: RepoId
@@ -523,6 +615,7 @@ let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, Dat
 
 let internal executeTask
     (agent: MailboxProcessor<StateMsg>)
+    (services: SchedulerServices)
     (rootPaths: Map<RepoId, string>)
     (task: RefreshTask)
     =
@@ -558,6 +651,13 @@ let internal executeTask
                     repo.BaseBranch
 
             agent.Post(UpdateGit(repoId, path, gitData))
+            let repoRoot = rootPaths |> Map.find repoId
+            AutoSync.triggerInBackground
+                (autoSyncDependencies agent services)
+                repoRoot
+                repo.UpstreamRemote
+                repo.BaseBranch
+                gitData
 
             DiffProvisioner.provisionViewer path
             |> Option.iter (Log.log "DiffProvisioner")
@@ -617,6 +717,7 @@ let private timeoutMs = 60_000
 
 let private executeWithTimeout
     (agent: MailboxProcessor<StateMsg>)
+    (services: SchedulerServices)
     (rootPaths: Map<RepoId, string>)
     (task: RefreshTask)
     =
@@ -624,7 +725,7 @@ let private executeWithTimeout
         let sw = Stopwatch.StartNew()
 
         try
-            let! child = Async.StartChild(executeTask agent rootPaths task, timeoutMs)
+            let! child = Async.StartChild(executeTask agent services rootPaths task, timeoutMs)
             do! child
             sw.Stop()
             return Ok sw.Elapsed
@@ -667,6 +768,7 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
 
 let private runPhase
     (agent: MailboxProcessor<StateMsg>)
+    (services: SchedulerServices)
     (rootPaths: Map<RepoId, string>)
     (tasks: RefreshTask list)
     =
@@ -677,7 +779,7 @@ let private runPhase
             tasks
             |> List.map (fun task ->
                 async {
-                    let! result = executeWithTimeout agent rootPaths task
+                    let! result = executeWithTimeout agent services rootPaths task
                     logTaskResult agent task result
                     return task, now
                 })
@@ -686,11 +788,15 @@ let private runPhase
         return results |> Array.toList
     }
 
-let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, string>) =
+let runInitialBurst
+    (agent: MailboxProcessor<StateMsg>)
+    (services: SchedulerServices)
+    (rootPaths: Map<RepoId, string>)
+    =
     async {
         Log.log "Scheduler" "Starting initial burst — Phase 1 (discover worktrees)"
         let phase1Tasks = buildPhase1Tasks rootPaths
-        let! phase1Runs = runPhase agent rootPaths phase1Tasks
+        let! phase1Runs = runPhase agent services rootPaths phase1Tasks
 
         let! state = agent.PostAndAsyncReply(GetState)
         let archivedBranchSets = readArchivedBranchSets rootPaths
@@ -700,12 +806,12 @@ let runInitialBurst (agent: MailboxProcessor<StateMsg>) (rootPaths: Map<RepoId, 
         let filters = { Archived = archivedPaths; Ignored = ignoredPaths }
         Log.log "Scheduler" "Starting initial burst — Phase 2 (local data + fetch)"
         let phase2Tasks = buildPhase2Tasks filters state.Repos
-        let! phase2Runs = runPhase agent rootPaths phase2Tasks
+        let! phase2Runs = runPhase agent services rootPaths phase2Tasks
 
         let! state = agent.PostAndAsyncReply(GetState)
         Log.log "Scheduler" "Starting initial burst — Phase 3 (PR data)"
         let phase3Tasks = buildPhase3Tasks state.Repos
-        let! phase3Runs = runPhase agent rootPaths phase3Tasks
+        let! phase3Runs = runPhase agent services rootPaths phase3Tasks
 
         Log.log "Scheduler" "Initial burst complete"
 
@@ -743,7 +849,7 @@ module CanvasWatchers =
     /// previous last-registered attribution (`getSessionForWorktree`) that credited every
     /// changed doc to whichever session registered last — the misattribution bug that
     /// cross-credited docs whenever two sessions shared a worktree.
-    let fallbackOwner (sessions: CanvasBridge.SessionEntry list) : string option =
+    let fallbackOwner (sessions: SessionBridge.SessionEntry list) : string option =
         match sessions with
         | [ single ] -> single.SessionId
         | _ -> None
@@ -756,7 +862,7 @@ module CanvasWatchers =
     /// overwrites it. SystemViews never participate. With zero or many registered sessions,
     /// nothing is attributed.
     let attributeChangedDocs
-        (sessions: CanvasBridge.SessionEntry list)
+        (sessions: SessionBridge.SessionEntry list)
         (worktreePath: string)
         (previousDocs: CanvasDoc list)
         (currentDocs: CanvasDoc list)
@@ -831,7 +937,7 @@ module CanvasWatchers =
                             // primary path. The scanner only attributes a no-owner changed doc when exactly one
                             // session is registered for the worktree — never the old last-registered guess that
                             // misattributed every changed doc whenever two sessions shared a worktree.
-                            attributeChangedDocs (CanvasBridge.sessionsForWorktree path) path prev canvasDocs
+                            attributeChangedDocs (SessionBridge.sessionsForWorktree path) path prev canvasDocs
                             previousDocs.Value <- canvasDocs
                             agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
                         return
@@ -852,7 +958,12 @@ module CanvasWatchers =
         watchers |> Map.iter (fun _ watcher ->
             try watcher.Dispose() with _ -> ())
 
-let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: CancellationToken) =
+let start
+    (agent: MailboxProcessor<StateMsg>)
+    (services: SchedulerServices)
+    (worktreeRoots: string list)
+    (ct: CancellationToken)
+    =
     let rootPaths = buildRootPaths worktreeRoots
 
     let initialRepos =
@@ -894,7 +1005,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
             match pickMostOverdue activity now effectiveLastRuns tasks with
             | Some task ->
-                let! result = executeWithTimeout agent rootPaths task
+                let! result = executeWithTimeout agent services rootPaths task
                 logTaskResult agent task result
 
                 match task with
@@ -912,7 +1023,7 @@ let start (agent: MailboxProcessor<StateMsg>) (worktreeRoots: string list) (ct: 
 
     let startup =
         async {
-            let! lastRuns = runInitialBurst agent rootPaths
+            let! lastRuns = runInitialBurst agent services rootPaths
             let! state = agent.PostAndAsyncReply(GetState)
             let! initialWatchers = CanvasWatchers.reconcile agent state.Repos Map.empty
             let latestWatchers = ref initialWatchers

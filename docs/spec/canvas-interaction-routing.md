@@ -65,8 +65,9 @@ ranges. Beadspace selections identify the task.
 ## Technical Approach
 
 `CanvasDocOwnership` is the sole mailbox-backed ownership module, providing assignment, lookup,
-removal, pruning, and legacy-import operations. `CanvasBridge` uses it for both document kinds
-while keeping its sessionId-keyed bridge registry, queue limits, and owner-aware delivery.
+removal, pruning, and legacy-import operations. `SessionBridge` owns the sessionId-keyed registry,
+transport queue, limits, and liveness shared by canvas and agent prompts. `CanvasBridge` layers
+filename-based target resolution and worktree launch policy over that generic transport.
 
 The in-memory worktree launch coordinator records pending filenames, serializes fresh starts per
 worktree, and is consumed by the next identified registration before queue drain. Registration
@@ -96,7 +97,8 @@ affordance on `CanvasDoc.Kind`.
 | File | Purpose |
 |---|---|
 | `src/Server/CanvasDocOwnership.fs` | Unified persistent target store and legacy migration |
-| `src/Server/CanvasBridge.fs` | Session registry, worktree launch coordination, queueing, and delivery |
+| `src/Server/SessionBridge.fs` | Session registry, prompt transport, queueing, and liveness |
+| `src/Server/CanvasBridge.fs` | Canvas target resolution and worktree launch coordination |
 | `src/Server/WorktreeApi.fs` | Resume, fresh-start, timeout, and recovery behavior |
 | `src/Server/SessionActivityService.fs` | Automatic `diff.html` target updates |
 | `src/Server/CanvasDocServer.fs` | Registration and explicit ownership endpoints |

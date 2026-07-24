@@ -23,7 +23,6 @@ type Model =
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
       BranchEvents: Map<string, CardEvent list>
-      SyncPending: Set<string>
       AppVersion: string option
       EditorName: string
       WorktreeSkills: string list
@@ -34,10 +33,12 @@ type Model =
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       ActionCooldowns: Set<WorktreePath>
+      AutoSyncPending: Set<WorktreePath>
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
+      OverviewAgentsStuck: bool
       SelectedOverviewGroup: OverviewSelection option }
 
 type Msg =
@@ -49,11 +50,9 @@ type Msg =
     | Tick of now: float
     | OpenTerminal of WorktreePath
     | OpenEditor of WorktreePath
-    | StartSync of path: WorktreePath * scopedKey: string
-    | SyncStarted of key: string * Result<unit, string>
+    | ToggleAutoSync of WorktreePath
+    | AutoSyncToggleResult of path: WorktreePath * previousEnabled: bool * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>
-    | CancelSync of WorktreePath
-    | SyncTick
     | ConfirmDeleteWorktree of scopedKey: string
     | ConfirmArchiveWorktree of scopedKey: string
     | ConfirmMsg of ConfirmModal.Msg
@@ -75,6 +74,7 @@ type Msg =
     | UserActivity of now: float
     | ToggleCanvasPane
     | ToggleOverviewPanel
+    | SetOverviewAgentsStuck of bool
     // Overview drill-down (spec: docs/spec/overview-drilldown.md). SelectOverviewGroup toggles the
     // clicked group's breakdown panel (re-selecting the current group clears it). SelectOverviewWorktree
     // is the arrow-nav-parity handler: it focuses/expands/scrolls the clicked member card WITHOUT

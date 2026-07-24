@@ -262,11 +262,10 @@ let main args =
     let cts = new CancellationTokenSource()
 
     // The push-model durable store, created up front (real monitoring path only — not demo/fixture)
-    // so it can back BOTH the resume-identity lookup in the worktree API (getLastSessionId reads the
-    // durable store, not the idle-window live cache — see F10/C-02) AND the activity ingestion
-    // service below. Instance-specific SQLite path keyed by the server's port so a side-by-side
-    // validation instance never collides on the DB file. The service (below) owns disposal on
-    // shutdown; when no service is started (demo/fixture) there is no store to dispose.
+    // so it can back BOTH the scalar resume-identity lookup in the worktree API and the activity
+    // ingestion service below. Instance-specific SQLite path keyed by the server's port so a
+    // side-by-side validation instance never collides on the DB file. The service (below) owns
+    // disposal on shutdown; when no service is started (demo/fixture) there is no store to dispose.
     let sessionActivityStore =
         if not config.Demo && config.TestFixtures.IsNone then
             let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
@@ -281,7 +280,6 @@ let main args =
             buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None
         else
             let agent = RefreshScheduler.createAgent ()
-            let syncAgent = SyncEngine.createSyncAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
@@ -296,10 +294,15 @@ let main args =
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
             | None ->
-                RefreshScheduler.start agent worktreeRoots cts.Token
+                RefreshScheduler.start
+                    agent
+                    { SessionAgent = sessionAgent
+                      ActivityStore = sessionActivityStore }
+                    worktreeRoots
+                    cts.Token
                 Log.log "Startup" "Scheduler background loop started"
 
-            WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch
+            WorktreeApi.worktreeApi agent cardLog sessionAgent sessionActivityStore worktreeRoots config.TestFixtures appVersion deployBranch
             |> buildRemotingHandler, Some agent
 
     // Push-model status ingestion. Reuses the durable store created above (shared with the worktree

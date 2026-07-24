@@ -29,11 +29,11 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       LastAssistantMessage = None
       Pr = PrStatus.NoPr
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
       CanvasDocs = canvasDocs }
@@ -71,7 +71,6 @@ let private defaultModel : Model =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
-      SyncPending = Set.empty
       AppVersion = Some "1.0"
       DeployBranch = None
       SystemMetrics = None
@@ -82,10 +81,12 @@ let private defaultModel : Model =
       EditorName = "VS Code"
       WorktreeSkills = []
       ActionCooldowns = Set.empty
+      AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
+      OverviewAgentsStuck = false
       SelectedOverviewGroup = None }
 
 /// Calls update and returns the model, ignoring the Cmd. Tolerates the

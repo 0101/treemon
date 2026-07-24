@@ -8,6 +8,7 @@ import {
   isValidCanvasFilename,
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
+import { promptForSession } from "./session-prompt.mjs";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
@@ -144,8 +145,16 @@ function startHttpServer(session, state) {
           res.end("Payload Too Large");
           return;
         }
-        log(`/inject received: payload length=${body.length}`);
-        enqueueSend(session, `[canvas] ${body}`);
+        let prompt;
+        try {
+          prompt = promptForSession(body);
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+          return;
+        }
+        log(`/inject received: transport length=${body.length}, prompt length=${prompt.length}`);
+        enqueueSend(session, prompt);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
         return;

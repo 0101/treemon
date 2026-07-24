@@ -55,9 +55,14 @@ type RefreshGitTaskTests() =
             agent.Post(UpdateWorktreeList(testRepoId, [ worktree ]))
             agent.Post(UpdateBaseBranch(testRepoId, "missing"))
 
+            let services =
+                { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
+                  ActivityStore = None }
+
             do!
                 executeTask
                     agent
+                    services
                     (Map.ofList [ testRepoId, repoDir ])
                     (RefreshGit(testRepoId, repoDir))
 
@@ -264,6 +269,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   UpstreamBranch = None
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   HasDiff = false
                   WorkMetrics = None }
@@ -332,6 +338,7 @@ type StateAgentTests() =
               LastCommitTime = DateTimeOffset.UtcNow
               UpstreamBranch = None
               MainBehindCount = 0
+              BaseRevision = None
               IsDirty = false
               HasDiff = true
               WorkMetrics = None }
@@ -350,7 +357,7 @@ type StateAgentTests() =
                 DateTimeOffset.UtcNow
                 Set.empty
                 Set.empty
-                false
+                Set.empty
                 Map.empty
                 Map.empty
                 repo
@@ -384,6 +391,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   UpstreamBranch = None
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   HasDiff = false
                   WorkMetrics = None }
@@ -479,6 +487,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   UpstreamBranch = None
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   HasDiff = false
                   WorkMetrics = None }
@@ -552,6 +561,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   UpstreamBranch = None
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   HasDiff = false
                   WorkMetrics = None }

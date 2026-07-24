@@ -53,9 +53,6 @@ let private withCpu cpu mem (fix: FixtureData) =
     { fix with
         Worktrees.SystemMetrics = Some { CpuPercent = cpu; MemoryUsedMb = mem; MemoryTotalMb = 32768 } }
 
-let private withCardEvt branch cardEvt (fix: FixtureData) =
-    { fix with SyncStatus = fix.SyncStatus |> Map.add branch [ cardEvt ] }
-
 let private azDoEvt = "C:\\code\\CloudPlatform"
 let private githubEvt = "C:\\code\\DataPipeline"
 let private retryKey = WorktreePath.value (azDoPath "feature-retry")
@@ -170,11 +167,11 @@ let private wtAzDoMain: WorktreeStatus =
       LastAssistantMessage = None
       Pr = NoPr
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
-      HasTestFailureLog = false
       IsMainWorktree = true
       IsArchived = false
       CanvasDocs = [] }
@@ -198,11 +195,11 @@ let private wtRetryLogic: WorktreeStatus =
       LastAssistantMessage = Some("Updating the retry helper to spread out retries with jitter…", baseTimestamp.AddSeconds(-40.0))
       Pr = HasPr prRetryBuilding
       MainBehindCount = 2
+      AutoSyncEnabled = true
       IsDirty = true
       HasDiff = true
       WorkMetrics = Some { CommitCount = 8; LinesAdded = 342; LinesRemoved = 67 }
       HasActiveSession = true
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
       CanvasDocs = [] }
@@ -224,11 +221,11 @@ let private wtConfigLoading: WorktreeStatus =
       LastAssistantMessage = Some("Splitting config validation into its own module", baseTimestamp.AddMinutes(-1.0))
       Pr = NoPr
       MainBehindCount = 5
+      AutoSyncEnabled = false
       IsDirty = false
       HasDiff = true
       WorkMetrics = Some { CommitCount = 3; LinesAdded = 128; LinesRemoved = 89 }
       HasActiveSession = true
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
       CanvasDocs = [] }
@@ -250,11 +247,11 @@ let private wtAuthMiddleware: WorktreeStatus =
       LastAssistantMessage = Some("Added the admin role guard — let me know if that covers it", baseTimestamp.AddMinutes(-8.0))
       Pr = HasPr prAuth
       MainBehindCount = 1
+      AutoSyncEnabled = false
       IsDirty = false
       HasDiff = true
       WorkMetrics = Some { CommitCount = 5; LinesAdded = 210; LinesRemoved = 34 }
       HasActiveSession = false
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
       CanvasDocs = [] }
@@ -276,11 +273,11 @@ let private wtArchived: WorktreeStatus =
       LastAssistantMessage = None
       Pr = NoPr
       MainBehindCount = 12
+      AutoSyncEnabled = false
       IsDirty = false
       HasDiff = true
       WorkMetrics = Some { CommitCount = 15; LinesAdded = 890; LinesRemoved = 234 }
       HasActiveSession = false
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = true
       CanvasDocs = [] }
@@ -302,11 +299,11 @@ let private wtGithubMain: WorktreeStatus =
       LastAssistantMessage = None
       Pr = NoPr
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
-      HasTestFailureLog = false
       IsMainWorktree = true
       IsArchived = false
       CanvasDocs = [] }
@@ -331,11 +328,11 @@ let private wtStreaming: WorktreeStatus =
       LastAssistantMessage = Some("Windowed aggregation added; running the tests now", baseTimestamp.AddSeconds(-20.0))
       Pr = HasPr prStreaming
       MainBehindCount = 1
+      AutoSyncEnabled = true
       IsDirty = false
       HasDiff = true
       WorkMetrics = Some { CommitCount = 12; LinesAdded = 567; LinesRemoved = 123 }
       HasActiveSession = true
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
       CanvasDocs = [] }
@@ -357,11 +354,11 @@ let private wtCsvFix: WorktreeStatus =
       LastAssistantMessage = None
       Pr = HasPr prCsvMerged
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       HasDiff = true
       WorkMetrics = Some { CommitCount = 4; LinesAdded = 45; LinesRemoved = 12 }
       HasActiveSession = false
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
       CanvasDocs = [] }
@@ -382,19 +379,9 @@ let private baseSchedulerEvents: CardEvent list =
       evt "GitFetch" "DataPipeline (up to date)" 11 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 0.9))
       evt "PrFetch" "CloudPlatform (4 PRs checked)" 8 (Some StepStatus.Succeeded) (Some(TimeSpan.FromSeconds 1.8)) ]
 
-// --- Card events: only 1 "Running" at a time, rest are recent "Succeeded" ---
-
-let private retryEvt msg secsAgo = evt "claude" msg secsAgo
-
 let private baseSyncStatus: Map<string, CardEvent list> =
     [ retryKey,
-      [ retryEvt "Reading BlobStorageClient retry logic" 3 None None ]
-      configKey,
-      [ evt "claude" "Extracting config validation rules" 8 None None ]
-      authKey,
-      [ evt "copilot" "All tests passing" 5 None None ]
-      streamKey,
-      [ evt "copilot" "Implementing tumbling window support" 5 None None ] ]
+      [ evt EventSource.PostFork "setup" 3 (Some(StepStatus.Failed "npm install failed")) None ] ]
     |> Map.ofList
 
 // --- Base dashboard ---
@@ -454,7 +441,7 @@ let private f2 =
             WorkMetrics = Some { CommitCount = 4; LinesAdded = 186; LinesRemoved = 95 } })
     |> withCpu 38.0 14400
 
-// F3 (4-6s): Auth — Copilot starts working (dot changes, event updates)
+// F3 (4-6s): Auth — Copilot starts working
 let private f3 =
     f2
     |> withAuth (fun wt ->
@@ -462,23 +449,17 @@ let private f3 =
             CodingTool = Working
             CodingToolSince = Some baseTimestamp
             Sessions = [ { Status = Working; Skill = Some "investigate"; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
-    |> withCardEvt authKey
-        (evt "copilot" "Reading authorization middleware" 1 None None)
     |> withCpu 45.0 14800
 
 // F4 (6-8s): Retry build fails (red badge appears)
 let private f4 =
     f3
     |> withRetry (fun wt -> { wt with Pr = HasPr prRetryFailed })
-    |> withCardEvt retryKey
-        (retryEvt "CI build failed — analyzing test results" 1 None None)
     |> withCpu 58.0 15200
 
 // F5 (8-10s): Auth copilot progresses
 let private f5 =
     f4
-    |> withCardEvt authKey
-        (evt "copilot" "Generating role-based access checks" 1 None None)
     |> withCpu 72.0 16100
 
 // F6 (10-12s): Retry agent pushes fix, CI rebuilds
@@ -488,8 +469,6 @@ let private f6 =
         { wt with
             LastCommitMessage = "Fix flaky retry test timing"
             Pr = HasPr prRetryRebuilding })
-    |> withCardEvt retryKey
-        (retryEvt "Pushed fix, waiting for CI" 1 None None)
     |> withCpu 84.0 17400
 
 // F7 (12-14s): Streaming commits (lines grow)
@@ -509,16 +488,12 @@ let private f8 =
             CodingTool = Idle
             CodingToolSince = Some baseTimestamp
             Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
-    |> withCardEvt authKey
-        (evt "copilot" "All tests passing" 5 None None)
     |> withCpu 52.0 15800
 
 // F9 (16-18s): Retry build passes
 let private f9 =
     f8
     |> withRetry (fun wt -> { wt with Pr = HasPr prRetrySucceeded })
-    |> withCardEvt retryKey
-        (retryEvt "All tests passing — task complete" 1 None None)
     |> withCpu 41.0 15200
 
 // F10 (18-20s): Config commits again
@@ -535,8 +510,6 @@ let private f11 =
     f10
     |> withRetry (fun wt ->
         { wt with LastUserMessage = Some(userMessage "add request deduplication" (baseTimestamp.AddMinutes(-1.0))) })
-    |> withCardEvt retryKey
-        (retryEvt "Starting next task: request deduplication" 1 None None)
     |> withCpu 39.0 14400
 
 // F12 (22-24s): Retry beads update, settling toward start

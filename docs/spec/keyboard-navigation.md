@@ -36,7 +36,7 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Context | Key | Action |
 |---------|-----|--------|
 | Card | Enter | Open terminal / focus active session |
-| Card | s | Start sync |
+| Card | s | Toggle auto-sync |
 | Card | r | Resume last session (when resumable) |
 | Card | + | Open new tab (when session active) |
 | Card | e | Open editor |
@@ -75,4 +75,3 @@ in an editable field inside the doc.
 - `src/Server/CanvasDocServer.fs` — `reclaimFocusScript` (Escape→`reclaim-focus` bridge injected into every canvas doc)
 - `src/Client/CanvasPane.fs` — routes the `reclaim-focus` doc message to the Escape reclaim
 - `src/Client/index.html` — `.focused` CSS class (outline: 2px solid #4a9eff), `.nav-hint` footer hint
-

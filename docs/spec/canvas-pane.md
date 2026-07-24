@@ -115,7 +115,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - The Elmish client accepts only messages from `http://127.0.0.1:5002`, validates the payload shape, and turns it into Elmish messages.
 - The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
-- The extension bridge calls `session.send()` with the canvas payload.
+- `SessionBridge` wraps the payload in a typed `{kind:"canvas",prompt}` envelope; the extension maps that kind to the unchanged `[canvas] {payload}` session prompt and sends it through its serialized `enqueueSend` chain.
 - When the reporting extension later publishes that `[canvas]` prompt as session activity, the
   dashboard collapse projects it through `UserMessageFormatting`: the first-party
   `canvas-selection` action displays its human-readable `request`, other known actions get concise
@@ -138,7 +138,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - After startup it re-registers every 30 seconds as a heartbeat.
 - Failed extension heartbeats back off exponentially up to 120 seconds, then reset after reconnect.
 - Served docs receive an injected heartbeat script that posts to `/bridge/heartbeat` every 30 seconds.
-- `CanvasBridge` keeps separate `sessionRegistry` and `pollRegistry` maps so poll heartbeats do not overwrite session registrations.
+- `SessionBridge` keeps separate `sessionRegistry` and `pollRegistry` maps so poll heartbeats do not overwrite session registrations. `CanvasBridge` adds document-owner routing and canvas queue policy on top.
 - `GET /api/canvas/bridge-status?worktreePath=...` exposes bridge registration, heartbeat age, liveness, and session ID.
 
 ### Doc Server
@@ -185,7 +185,7 @@ Three layers of state preservation:
 
 - The client is Elmish/Fable. It polls `DashboardResponse`, stores canvas UI state locally, and routes iframe messages through Elmish before calling Remoting.
 - The server keeps `CanvasDoc list` in scheduler state beside git, PR, and coding-tool data. `CanvasScanner` computes hashes and `CanvasWatchers` pushes filesystem changes into the same mailbox.
-- `Program.fs` hosts the main app/API on port 5000 and the canvas doc server on port 5002. `CanvasBridge` owns live registration, queueing, forwarding, and liveness.
+- `Program.fs` hosts the main app/API on port 5000 and the canvas doc server on port 5002. `SessionBridge` owns generic live registration, queueing, forwarding, and liveness; `CanvasBridge` owns canvas document routing and ownership semantics.
 - Security relies on separate origin plus `postMessage`: docs cannot call privileged app endpoints directly, and the parent validates sender origin before forwarding anything.
 - Canvas awareness helpers stay pure: `detectCanvasEvents` and `expireCanvasEvents` take `now` as an argument instead of capturing the clock internally.
 - The Elmish `update` reads no wall-clock; time enters only via message payloads (e.g. a `Tick` carrying `now`), keeping `update` a pure function of `(model, msg)`.
@@ -207,19 +207,20 @@ Three layers of state preservation:
 | `src/Client/index.html` | Canvas layout, badge, tab, banner, liveness, and overview styling |
 | `src/Server/RefreshScheduler.fs` | Canvas scanning, content hashing, watcher lifecycle, scheduler state updates |
 | `src/Server/WorktreeApi.fs` | Canvas config persistence, archive endpoint, send routing, bridge-liveness API wiring |
-| `src/Server/CanvasBridge.fs` | Session registry, poll registry, queueing, liveness, and bridge forwarding |
+| `src/Server/SessionBridge.fs` | Generic session registry, poll registry, queueing, liveness, and prompt forwarding |
+| `src/Server/CanvasBridge.fs` | Canvas document-owner routing and canvas-specific queue/drain policy over `SessionBridge` |
 | `src/Server/BeadspaceTemplate.fs` | Reads the embedded `BeadspaceTemplate.html` resource at startup for auto-provisioning |
 | `src/Server/BeadspaceTemplate.html` | Beadspace dashboard HTML — single source of truth (embedded into the Server assembly) |
 | `src/Server/Program.fs` | Canvas register endpoint, bridge status endpoint, doc server, HTML injection, heartbeat route |
 | `src/Server/PathUtils.fs` | Canvas path normalization and validation |
-| `src/Extension/extension.mjs` | Session bridge registration, `/inject` server, heartbeat, and reconnect backoff |
+| `src/Extension/extension.mjs`, `session-prompt.mjs` | Session bridge registration, `/inject` server, typed prompt-transport decoding, heartbeat, and reconnect backoff |
 | `src/Extension/skill/SKILL.md` | Authoring contract for agent-created canvas docs |
 
 ## Decisions
 
 - **Separate origin + postMessage** — docs run on `:5002`, the app stays on `:5000`, and Elmish is the only privileged message gate.
 - **File as source of truth** — Treemon renders HTML from disk and derives `contentHash` from file bytes instead of keeping a separate live-doc state.
-- **Split bridge registry** — `sessionRegistry` and `pollRegistry` are separate so iframe heartbeats cannot clobber session-backed routing.
+- **Split bridge registry** — `SessionBridge.sessionRegistry` and `pollRegistry` are separate so iframe heartbeats cannot clobber session-backed routing.
 - **Injected heartbeat script** — agent-authored docs participate in liveness and queued-message drain without extra per-doc setup.
 - **`CanvasSendState` DU** — send state is `Idle`, `Waiting of scopedKey`, or `Failed of message`, avoiding illegal combinations of optional fields. `Waiting` carries **only** the target worktree's `scopedKey` (`WorktreePath.value`, the same key space as `agentChangedDocs`); the earlier `queuedAt` timestamp and the wall-clock failure timer were removed (Finding C-02) because a queued message lives in the server-side queue and is delivered when its *target* session registers, so `Waiting` is cleared on delivery (`clearWaitingOnDelivery`) and is never reported as a failure on a timer. `CanvasSendResult` likewise dropped its `now` argument, removing two `Date.now()` reads from the send command and keeping `update` wall-clock-free.
 - **Per-doc target routing** — canvas filenames persist a target `sessionId`; messages route to that target, while only AgentDocs expose it for liveness/resume UI.

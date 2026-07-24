@@ -1,5 +1,6 @@
 module Server.SystemMetrics
 
+open System.Runtime.InteropServices
 open Shared
 
 let private fileTimeToUint64 (ft: Win32.FILETIME) =
@@ -32,7 +33,7 @@ let private computeCpuPercent (prev: CpuSample) (curr: CpuSample) =
         let busy = totalDelta - idleDelta
         System.Math.Round(float busy / float totalDelta * 100.0, 1)
 
-let getSystemMetrics () : SystemMetrics option =
+let private getWindowsSystemMetrics () : SystemMetrics option =
     let cpuPercent =
         match readCpuTimes () with
         | None -> None
@@ -46,3 +47,7 @@ let getSystemMetrics () : SystemMetrics option =
     | Some cpu, Some (usedMb, totalMb) ->
         Some { CpuPercent = cpu; MemoryUsedMb = usedMb; MemoryTotalMb = totalMb }
     | _ -> None
+
+let getSystemMetrics () =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then getWindowsSystemMetrics ()
+    else None

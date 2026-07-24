@@ -25,7 +25,8 @@ open Server.SessionActivityStore
 // lifecycle/content kinds, the state-only title bootstrap and usage gauge, plus the liveness-only
 // heartbeat. Unknown kinds are rejected. `message` is present for user_prompt / assistant_message /
 // intent_reported / title_reported / title_bootstrap and optionally awaiting_user_input;
-// `skillName` is only for skill_invoked, and usage counters only for usage_info.
+// `skillName` is only for skill_invoked, `toolCallId` only for background-agent lifecycle, and usage
+// counters only for usage_info.
 
 [<CLIMutable>]
 type MessageDto = { text: string; at: string }
@@ -40,6 +41,7 @@ type SessionActivityRequest =
       kind: string
       message: MessageDto
       skillName: string
+      toolCallId: string
       currentTokens: int
       tokenLimit: int }
 
@@ -70,6 +72,17 @@ let internal maxTextLength = 8192
 let internal capText (s: string) : string =
     if isNull s || s.Length <= maxTextLength then s else s.Substring(0, maxTextLength)
 
+/// Opaque lifecycle identity keys are never truncated because that could alias distinct agents.
+/// The producer mirrors this bound, but the server still rejects oversized values independently.
+let internal maxToolCallIdLength = 512
+
+let private parseToolCallId kind (toolCallId: string) =
+    if String.IsNullOrWhiteSpace toolCallId then Error $"{kind} requires toolCallId"
+    elif toolCallId.Length > maxToolCallIdLength then
+        Error $"{kind} toolCallId exceeds {maxToolCallIdLength} characters"
+    else
+        Ok toolCallId
+
 /// Clock-skew allowance for the producer's `occurredAt`. Minor skew between the reporting client's
 /// clock and the server's is tolerated as-is; anything further ahead is implausible.
 let internal futureSkewAllowance = TimeSpan.FromMinutes 5.0
@@ -89,15 +102,17 @@ let private parseMessage (dto: MessageDto) : Result<Message, string> =
     elif String.IsNullOrWhiteSpace dto.text then Error "missing message text"
     else tryParseTimestamp dto.at |> Result.map (fun at -> { Text = capText dto.text; At = at })
 
-/// Map the wire `kind` (+ its optional message / skillName / usage counters) onto a SessionEvent. The
-/// The lifecycle/fold kinds plus state-only bootstrap/gauge and liveness heartbeat are the whole
-/// contract. message is mandatory for user_prompt / assistant_message / intent_reported /
-/// title_reported / title_bootstrap, optional for awaiting_user_input, and absent otherwise.
+/// Map the wire `kind` (+ its optional message / skillName / toolCallId / usage counters) onto a
+/// SessionEvent. The lifecycle/fold kinds plus state-only bootstrap/gauge and liveness heartbeat are
+/// the whole contract. message is mandatory for user_prompt / assistant_message / intent_reported /
+/// title_reported / title_bootstrap, optional for awaiting_user_input, toolCallId is mandatory for
+/// background-agent lifecycle, and all other event-specific fields are absent otherwise.
 let internal parseEvent
     (occurredAt: DateTimeOffset)
     (kind: string)
     (message: MessageDto)
     (skillName: string)
+    (toolCallId: string)
     (currentTokens: int)
     (tokenLimit: int)
     : Result<SessionEvent, string> =
@@ -112,6 +127,12 @@ let internal parseEvent
     | "title_reported" -> parseMessage message |> Result.map TitleReported
     | "title_bootstrap" -> parseMessage message |> Result.map TitleBootstrap
     | "user_input_completed" -> Ok(UserInputCompleted occurredAt)
+    | "background_agent_started" ->
+        parseToolCallId kind toolCallId
+        |> Result.map (fun id -> BackgroundAgentStarted(id, occurredAt))
+    | "background_agent_finished" ->
+        parseToolCallId kind toolCallId
+        |> Result.map (fun id -> BackgroundAgentFinished(id, occurredAt))
     | "skill_invoked" ->
         if String.IsNullOrWhiteSpace skillName then Error "skill_invoked requires skillName"
         else Ok(SkillInvoked(capText skillName))
@@ -141,6 +162,8 @@ let internal kindText =
     | SkillInvoked _ -> "skill_invoked"
     | AwaitingUserInput _ -> "awaiting_user_input"
     | UserInputCompleted _ -> "user_input_completed"
+    | BackgroundAgentStarted _ -> "background_agent_started"
+    | BackgroundAgentFinished _ -> "background_agent_finished"
     | TurnEnded -> "turn_ended"
     | WentIdle -> "went_idle"
     | Heartbeat -> "heartbeat"
@@ -162,7 +185,7 @@ let private withMessageTimestamp at =
 /// worktree path is normalised here so it matches the scheduler's known-path set, and `occurredAt`
 /// is clamped against `now` so a future timestamp can't poison freshness or activity ordering.
 /// Message-bearing events use that same normalized timestamp. Pure (given `now`), so the whole
-/// contract (12 kinds, unknown rejected, per-kind payload rules, future-timestamp clamp) is
+/// contract (15 kinds, unknown rejected, per-kind payload rules, future-timestamp clamp) is
 /// unit-testable without HTTP plumbing.
 let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<SessionActivityReport, string> =
     if obj.ReferenceEquals(box req, null) then Error "missing body"
@@ -177,7 +200,7 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
             tryParseTimestamp req.occurredAt
             |> Result.bind (fun rawOccurredAt ->
                 let occurredAt = clampFutureTimestamp now rawOccurredAt
-                parseEvent occurredAt req.kind req.message req.skillName req.currentTokens req.tokenLimit
+                parseEvent occurredAt req.kind req.message req.skillName req.toolCallId req.currentTokens req.tokenLimit
                 |> Result.map (fun ev ->
                     { SessionId = SessionId req.sessionId
                       WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
@@ -250,6 +273,23 @@ type private ServiceMsg =
     | Seed of StoredStatus list
     | Snapshot of AsyncReplyChannel<Map<SessionId, StoredStatus>>
 
+let private historyState
+    (prior: StoredStatus option)
+    (report: SessionActivityReport)
+    (currentStatus: SessionStatus)
+    =
+    let isOutOfOrder =
+        prior
+        |> Option.exists (fun stored -> report.OccurredAt < stored.UpdatedAt)
+
+    let rowState =
+        if isOutOfOrder then
+            SessionActivity.fold emptyStatus report.Event
+        else
+            currentStatus
+
+    isOutOfOrder, rowState
+
 /// The SessionActivity ingestion service: the single-writer mailbox, the POST handler, and the
 /// start/stop lifecycle (restart rebuild + retention timer). Construct with an instance-specific
 /// store (its dbPath keyed to the server's port/data dir so a side-by-side validation instance
@@ -281,14 +321,32 @@ type SessionActivityService internal
         }
 
     // Apply one report on the single writer. State-only reports have independent persistence/order
-    // paths; lifecycle events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed
-    // the scheduler. Returns the new in-memory live map.
+    // paths; source events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed the
+    // scheduler. Background lifecycle clocks are restored onto authoritative persisted rows only in
+    // memory. Returns the new in-memory live map.
     let apply (live: Map<SessionId, StoredStatus>) (report: SessionActivityReport) : Map<SessionId, StoredStatus> =
+        let preparePrior (prior: StoredStatus) =
+            if report.OccurredAt - prior.LastSeen > stalenessTimeout then
+                { prior with Status.BackgroundAgentClocks = Map.empty }
+            else
+                { prior with
+                    Status =
+                        prior.Status
+                        |> pruneCompletedBackgroundAgentClocks (max prior.LastSeen report.OccurredAt) }
+
+        let livePrior =
+            live
+            |> Map.tryFind report.SessionId
+            |> Option.map preparePrior
+
+        let priorForFold () =
+            livePrior
+            |> Option.orElseWith (fun () ->
+                store.StatusBySession report.SessionId
+                |> Option.map preparePrior)
+
         let foldReportState () =
-            let prior =
-                live
-                |> Map.tryFind report.SessionId
-                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+            let prior = priorForFold ()
             let status =
                 prior
                 |> Option.map _.Status
@@ -308,7 +366,18 @@ type SessionActivityService internal
                       UpdatedAt = DateTimeOffset.MinValue
                       LastSeen = report.OccurredAt
                       ContextUsageAt = None }
-            status, stored
+            prior, status, stored
+
+        let publish
+            (clocks: Map<string, BackgroundAgentLifecycle>)
+            (persisted: StoredStatus)
+            =
+            let current =
+                { persisted with
+                    Status.BackgroundAgentClocks = clocks }
+
+            scheduler.Post(RefreshScheduler.UpdateSessionStatus current)
+            live |> Map.add report.SessionId current
 
         match report.Event with
         | Heartbeat ->
@@ -318,13 +387,12 @@ type SessionActivityService internal
             // real event and dropping it (F20), and from inflating activity_events with synthetic rows
             // (F14). A heartbeat for a session with no prior event is ignored — there is nothing live to
             // keep alive.
-            match live |> Map.tryFind report.SessionId with
+            match livePrior with
             | None -> live
             | Some prior ->
                 let bumped = { prior with LastSeen = max prior.LastSeen report.OccurredAt }
                 store.TouchLastSeen(report.SessionId, bumped.LastSeen)
-                scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
-                live |> Map.add report.SessionId bumped
+                publish bumped.Status.BackgroundAgentClocks bumped
         | UsageInfo(currentTokens, tokenLimit) ->
             // A pure context-window gauge on its OWN order path, DECOUPLED from the status
             // last-write-wins clock (UpdatedAt). Sharing that clock let a usage report's timestamp
@@ -333,7 +401,7 @@ type SessionActivityService internal
             // heartbeat, it never moves UpdatedAt and never appends a history row; it is ordered only
             // against prior usage via its own ContextUsageAt clock. It needs a live session to attach
             // to — a usage report for a session with no prior status is dropped (nothing to gauge).
-            match live |> Map.tryFind report.SessionId with
+            match livePrior with
             | None -> live
             | Some prior ->
                 // Usage LWW: a snapshot older than the one already held is ignored, so an out-of-order
@@ -352,68 +420,78 @@ type SessionActivityService internal
                             Status.ContextUsage = Some usage
                             ContextUsageAt = Some report.OccurredAt
                             LastSeen = max prior.LastSeen report.OccurredAt }
-                    let persisted = store.UpsertContextUsage bumped
-                    scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
-                    live |> Map.add report.SessionId persisted
+                    store.UpsertContextUsage bumped
+                    |> publish bumped.Status.BackgroundAgentClocks
         | TitleBootstrap _ ->
             // Metadata hydration is current state, not a source event. Persist the title without
             // appending history or advancing the lifecycle UpdatedAt clock. A bootstrap that arrives
             // before delayed replay creates an Idle shell with the minimum ordering timestamp, so
             // every real SDK event can still fold onto it; its join timestamp seeds LastSeen only
             // until a real event/heartbeat takes over.
-            let _, stored = foldReportState ()
+            let _, status, stored = foldReportState ()
             store.UpsertStatus stored
-            scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
-            live |> Map.add report.SessionId stored
+            publish status.BackgroundAgentClocks stored
+        | BackgroundAgentStarted _
+        | BackgroundAgentFinished _
         | AwaitingUserInput _
         | UserInputCompleted _
         | IntentReported _
         | TitleReported _ ->
-            // Interaction clocks and activity fields are ordered independently from lifecycle status.
-            // Ask events merge even when older while advancing UpdatedAt only forward; activity fields
-            // preserve UpdatedAt so they cannot block an older lifecycle transition.
-            let status, stored = foldReportState ()
-            let orderedStored =
-                match report.Event with
-                | AwaitingUserInput _
-                | UserInputCompleted _ ->
-                    { stored with UpdatedAt = max stored.UpdatedAt report.OccurredAt }
-                | IntentReported _
-                | TitleReported _ -> stored
-                | event -> invalidOp $"unexpected independent event: {event}"
-            let eventRow =
-                { EventId = report.EventId
-                  SessionId = report.SessionId
-                  WorktreePath = report.WorktreePath
-                  Provider = report.Provider
-                  Kind = kindText report.Event
-                  Status = SessionActivity.effectiveStatus status
-                  Skill = status.Skill
-                  Ts = report.OccurredAt }
+            // Background clocks merge out of order within their five-minute retention window;
+            // interaction clocks merge without that cutoff. Both advance UpdatedAt only forward.
+            // Activity fields preserve UpdatedAt so they cannot block an older lifecycle transition.
+            let prior, status, stored = foldReportState ()
+            let isExpiredBackgroundEvent =
+                match report.Event, prior with
+                | (BackgroundAgentStarted _ | BackgroundAgentFinished _), Some previous ->
+                    isExpiredBackgroundAgentEvent previous.LastSeen report.OccurredAt
+                | _ -> false
 
-            match store.AppendAndUpsert(eventRow, orderedStored) with
-            | None -> live
-            | Some persisted ->
-                scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
-                live |> Map.add report.SessionId persisted
+            if isExpiredBackgroundEvent then
+                match livePrior with
+                | Some current -> publish current.Status.BackgroundAgentClocks current
+                | None -> live
+            else
+                let rowState =
+                    match report.Event with
+                    | BackgroundAgentStarted _
+                    | BackgroundAgentFinished _ ->
+                        historyState prior report status |> snd
+                    | _ -> status
+                let orderedStored =
+                    match report.Event with
+                    | BackgroundAgentStarted _
+                    | BackgroundAgentFinished _
+                    | AwaitingUserInput _
+                    | UserInputCompleted _ ->
+                        { stored with UpdatedAt = max stored.UpdatedAt report.OccurredAt }
+                    | IntentReported _
+                    | TitleReported _ -> stored
+                    | event -> invalidOp $"unexpected independent event: {event}"
+                let eventRow =
+                    { EventId = report.EventId
+                      SessionId = report.SessionId
+                      WorktreePath = report.WorktreePath
+                      Provider = report.Provider
+                      Kind = kindText report.Event
+                      Status = SessionActivity.effectiveStatus rowState
+                      Skill = rowState.Skill
+                      Ts = report.OccurredAt }
+
+                match store.AppendAndUpsert(eventRow, orderedStored) with
+                | None -> live
+                | Some persisted ->
+                    publish status.BackgroundAgentClocks persisted
         | _ ->
-            let prior =
-                live
-                |> Map.tryFind report.SessionId
-                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+            let prior = priorForFold ()
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
             let newStatus = SessionActivity.fold priorStatus report.Event
-
-            let isOutOfOrder =
-                match prior with
-                | Some p -> report.OccurredAt < p.UpdatedAt
-                | None -> false
 
             // The history row records the fold state AFTER this event. For an out-of-order (older) event
             // that must be the event's OWN direct effect (fold onto empty), never the current newest live
             // status — which never held at this event's point in history (F19). In-order events fold onto
             // the running state as usual.
-            let rowState = if isOutOfOrder then SessionActivity.fold emptyStatus report.Event else newStatus
+            let isOutOfOrder, rowState = historyState prior report newStatus
 
             let eventRow =
                 { EventId = report.EventId
@@ -458,8 +536,7 @@ type SessionActivityService internal
                 // history substrate but must not regress the live fold state or the shown card.
                 live
             | Some persisted ->
-                scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
-                live |> Map.add report.SessionId persisted
+                publish newStatus.BackgroundAgentClocks persisted
 
     let mailbox =
         MailboxProcessor<ServiceMsg>.Start(fun inbox ->
@@ -550,9 +627,9 @@ type SessionActivityService internal
     /// handler and by tests (which drive the fold/persist/feed path without HTTP plumbing).
     member internal _.Submit(report: SessionActivityReport) = mailbox.Post(Ingest report)
 
-    /// Restart rebuild + retention timer. Loads every still-live session (last_seen within the idle
-    /// window) from the store, feeds it to the scheduler and primes the in-memory fold map, so cards
-    /// are correct before any new event arrives; then arms the retention timer.
+    /// Restart rebuild + retention timer. Loads every still-live session's persisted base state
+    /// (last_seen within the idle window), feeds it to the scheduler and primes the in-memory fold
+    /// map with empty background lifecycle clocks; then arms the retention timer.
     member _.Start() =
         let loaded = store.LoadLiveStatuses DateTimeOffset.UtcNow
         // Seed the scheduler in ONE batch so the time-since-idle chip is stamped from each worktree's
