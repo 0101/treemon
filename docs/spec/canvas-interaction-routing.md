@@ -6,7 +6,8 @@
 - Keep authored-document behavior and generated-view behavior controlled by `CanvasDoc.Kind`, not by whether a routing owner exists.
 - Preserve exact AgentDoc author routing while letting `diff.html` follow the worktree's most recently active session.
 - Queue interactions safely when no target session is available and start at most one replacement session per worktree.
-- Keep the launch and registration flow simple enough to understand without claim tokens or a second ownership subsystem.
+- Correlate launch and registration at worktree scope without a per-view claim-token state machine
+  or second ownership subsystem.
 
 ## Expected Behavior
 
@@ -32,15 +33,16 @@ that session to register a newer bridge before the registration timeout.
 
 When no target exists, or the user chooses a fresh session after resume failure, Treemon queues the
 interaction and starts one session under a worktree-wide launch lock. The previous durable target,
-if any, remains unchanged until registration succeeds. The first identified bridge registration
-after that launch assigns every pending canvas filename for the worktree before queued messages are
-drained. Launch failure or timeout clears the pending launch without changing the previous target.
+if any, is not cleared or replaced by the launch path until registration succeeds. The first
+identified bridge registration after that launch assigns every pending canvas filename for the
+worktree before queued messages are drained. Launch failure or timeout clears the pending launch
+without changing the previous target.
 
 Treemon starts a fresh canvas session only when the worktree has no active session suitable for the
 interaction. Concurrent diff and Beadspace interactions join the same pending worktree launch
 instead of starting competing sessions. A reconnecting same-worktree session may win the narrow
-registration race; this bounded same-worktree routing risk is accepted in exchange for removing
-per-view claim tokens and their state machine.
+registration race; this bounded same-worktree routing risk is accepted because registration is
+correlated only by worktree and pending filenames.
 
 Queued messages retain the existing cap of 10 and five-minute TTL. Drain re-resolves the current
 target by filename, so ownership changes made while a message waits are honored.
@@ -62,18 +64,19 @@ ranges. Beadspace selections identify the task.
 
 ## Technical Approach
 
-`CanvasDocOwnership` becomes the sole mailbox-backed ownership module and gains assignment,
-lookup, removal, pruning, and legacy-import operations. `CanvasBridge` uses it for both document
-kinds while keeping its sessionId-keyed bridge registry, queue limits, and owner-aware delivery.
+`CanvasDocOwnership` is the sole mailbox-backed ownership module, providing assignment, lookup,
+removal, pruning, and legacy-import operations. `CanvasBridge` uses it for both document kinds
+while keeping its sessionId-keyed bridge registry, queue limits, and owner-aware delivery.
 
-The in-memory worktree launch coordinator replaces per-view claims. It records pending filenames,
-serializes fresh starts per worktree, and is consumed by the next identified registration before
-queue drain. `/api/canvas/register` no longer accepts `claimToken`; the extension no longer reads or
-forwards `TREEMON_CANVAS_CLAIM_TOKEN`.
+The in-memory worktree launch coordinator records pending filenames, serializes fresh starts per
+worktree, and is consumed by the next identified registration before queue drain. Registration
+carries only the worktree, inject URL, and session identity; launch correlation remains server-side
+and worktree-scoped.
 
 `SessionActivityService` assigns the unified `diff.html` target whenever the real-activity winner
-changes. `CanvasScanner` continues exposing `OwnerSessionId` only for AgentDocs, and the client
-continues gating every lifecycle affordance on `CanvasDoc.Kind`.
+changes; heartbeat, usage, and metadata-only reports cannot move it. `CanvasScanner` continues
+exposing `OwnerSessionId` only for AgentDocs, and the client continues gating every lifecycle
+affordance on `CanvasDoc.Kind`.
 
 ## Decisions
 
@@ -83,8 +86,8 @@ continues gating every lifecycle affordance on `CanvasDoc.Kind`.
   authored-document UI or lifecycle behavior.
 - **One launch per worktree:** pending interactions share a replacement session rather than
   maintaining independent per-view claim state.
-- **No claim token:** registration-after-launch is correlated by the worktree-wide pending launch;
-  the rare same-worktree reconnect race is an accepted simplification.
+- **Server-side launch correlation:** registration-after-launch is correlated by the worktree-wide
+  pending launch; the rare same-worktree reconnect race is an accepted simplification.
 - **Diff follows real activity; Beadspace stays sticky:** this preserves current user-facing
   affinity while allowing future SystemViews to choose their own assignment policy.
 

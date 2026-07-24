@@ -285,7 +285,6 @@ let main args =
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
-            CanvasInteractionOwnership.load ()
 
             match config.TestFixtures with
             | Some path ->
@@ -311,18 +310,7 @@ let main args =
     let sessionActivityService =
         match schedulerAgent, sessionActivityStore with
         | Some agent, Some store when config.TestFixtures.IsNone ->
-            let followDiffInteractionOwner worktreePath sessionId =
-                CanvasInteractionOwnership.followLastActive
-                    (WorktreePath.value worktreePath)
-                    DiffProvisioner.filename
-                    sessionId
-
-            let svc =
-                new SessionActivityService.SessionActivityService(
-                    store,
-                    agent,
-                    followDiffInteractionOwner
-                )
+            let svc = new SessionActivityService.SessionActivityService(store, agent)
             svc.Start()
             Log.log "Startup" "Session activity ingestion started"
             Some svc

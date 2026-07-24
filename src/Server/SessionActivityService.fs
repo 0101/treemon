@@ -255,11 +255,11 @@ type private ServiceMsg =
 /// store (its dbPath keyed to the server's port/data dir so a side-by-side validation instance
 /// never collides) and the scheduler agent it feeds. Call Start once before serving; Dispose on
 /// shutdown. Owns the store's lifetime — Dispose disposes it.
-type SessionActivityService
+type SessionActivityService internal
     (
         store: SessionActivityStore,
         scheduler: MailboxProcessor<RefreshScheduler.StateMsg>,
-        followDiffInteractionOwner: WorktreePath -> string -> Async<CanvasInteractionOwnership.FollowResult>
+        assignCanvasTarget: WorktreePath -> string -> string -> Async<unit>
     ) =
 
     let lastActiveSessionId worktreePath (live: Map<SessionId, StoredStatus>) =
@@ -272,17 +272,11 @@ type SessionActivityService
         |> StoredStatus.tryMostRecentActivity
         |> Option.map (_.SessionId >> SessionId.value)
 
-    let syncDiffInteractionOwner previous current worktreePath =
+    let syncDiffTarget previous current worktreePath =
         async {
             match lastActiveSessionId worktreePath previous, lastActiveSessionId worktreePath current with
             | previousOwner, Some currentOwner when previousOwner <> Some currentOwner ->
-                match! followDiffInteractionOwner worktreePath currentOwner with
-                | CanvasInteractionOwnership.Deferred ->
-                    Log.log
-                        "Activity"
-                        $"Deferred diff interaction routing to {currentOwner} while an explicit ownership claim is pending"
-                | CanvasInteractionOwnership.Assigned
-                | CanvasInteractionOwnership.Unchanged -> ()
+                do! assignCanvasTarget worktreePath DiffProvisioner.filename currentOwner
             | _ -> ()
         }
 
@@ -482,7 +476,7 @@ type SessionActivityService
                         with ex ->
                             Log.log "Activity" $"Ingest failed (report dropped, mailbox kept alive): {ex.Message}"
                             live
-                    do! syncDiffInteractionOwner live next report.WorktreePath
+                    do! syncDiffTarget live next report.WorktreePath
                     return! loop next
                 | Seed loaded ->
                     let seeded = loaded |> List.fold (fun m s -> Map.add s.SessionId s m) live
@@ -492,7 +486,7 @@ type SessionActivityService
                         |> Seq.map _.WorktreePath
                         |> Set.ofSeq
                         |> Set.toList
-                        |> List.map (syncDiffInteractionOwner live seeded)
+                        |> List.map (syncDiffTarget live seeded)
                         |> Async.Sequential
                         |> Async.Ignore
                     return! loop seeded
@@ -515,6 +509,14 @@ type SessionActivityService
     // same handle.
     let pruneTimer =
         new Timer(TimerCallback(prune), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan)
+
+    new(store, scheduler) =
+        SessionActivityService(
+            store,
+            scheduler,
+            fun worktreePath filename sessionId ->
+                CanvasDocOwnership.assign (WorktreePath.value worktreePath) filename sessionId
+        )
 
     /// POST /api/session/activity. Mirrors canvasRegisterHandler: bind the JSON DTO, validate + map
     /// to the domain report, apply the known-worktree guard, then hand the report to the single
