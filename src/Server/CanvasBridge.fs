@@ -15,16 +15,29 @@ type internal PendingLaunch =
     { Role: PendingLaunchResult
       Completion: Async<Result<unit, string>> }
 
+type internal ActivityTargetAssignment =
+    | ActivityTargetAssigned
+    | ActivityTargetDeferred
+
 type private PendingLaunchState =
     { Filenames: Set<string>
       Completion: TaskCompletionSource<Result<unit, string>> }
 
-type private PendingLaunchMsg =
+type private RoutingMsg =
     | BeginPendingLaunch of worktreeKey: string * filename: string * AsyncReplyChannel<PendingLaunch>
     | CancelPendingLaunch of worktreeKey: string * reason: string * AsyncReplyChannel<unit>
-    | AssignPendingLaunch of worktreeKey: string * sessionId: string * AsyncReplyChannel<Set<string>>
+    | RegisterSession of
+        worktreeKey: string *
+        injectUrl: string *
+        sessionId: string option *
+        AsyncReplyChannel<Set<string>>
+    | AssignActivityTarget of
+        worktreeKey: string *
+        filename: string *
+        sessionId: string *
+        AsyncReplyChannel<ActivityTargetAssignment>
 
-let private pendingLaunchAgent =
+let private routingAgent =
     MailboxProcessor.Start(fun inbox ->
         let rec loop pending =
             async {
@@ -69,12 +82,9 @@ let private pendingLaunchAgent =
                     reply.Reply()
                     return! loop (pending |> Map.remove worktreeKey)
 
-                | AssignPendingLaunch(worktreeKey, sessionId, reply) ->
-                    match pending |> Map.tryFind worktreeKey with
-                    | None ->
-                        reply.Reply(Set.empty)
-                        return! loop pending
-                    | Some launch ->
+                | RegisterSession(worktreeKey, injectUrl, sessionId, reply) ->
+                    match sessionId, pending |> Map.tryFind worktreeKey with
+                    | Some sessionId, Some launch ->
                         let! assignment =
                             launch.Filenames
                             |> Set.toList
@@ -83,6 +93,8 @@ let private pendingLaunchAgent =
                             |> Async.Sequential
                             |> Async.Ignore
                             |> Async.Catch
+
+                        SessionBridge.registerSession worktreeKey injectUrl (Some sessionId)
 
                         match assignment with
                         | Choice1Of2 () ->
@@ -96,32 +108,60 @@ let private pendingLaunchAgent =
                                 $"Could not assign pending canvas targets for {worktreeKey}: {ex.Message}"
 
                         return! loop (pending |> Map.remove worktreeKey)
+                    | _ ->
+                        SessionBridge.registerSession worktreeKey injectUrl sessionId
+                        reply.Reply(Set.empty)
+                        return! loop pending
+
+                | AssignActivityTarget(worktreeKey, filename, sessionId, reply) ->
+                    match pending |> Map.tryFind worktreeKey with
+                    | Some launch when launch.Filenames |> Set.contains filename ->
+                        reply.Reply(ActivityTargetDeferred)
+                        return! loop pending
+                    | _ ->
+                        do! CanvasDocOwnership.assign worktreeKey filename sessionId
+                        reply.Reply(ActivityTargetAssigned)
+                        return! loop pending
             }
 
         loop Map.empty)
 
 let internal beginPendingLaunch worktreePath filename =
-    pendingLaunchAgent.PostAndAsyncReply(fun reply ->
+    routingAgent.PostAndAsyncReply(fun reply ->
         BeginPendingLaunch(
             normalizePath worktreePath,
             normalizeFilename filename,
             reply))
 
 let internal cancelPendingLaunch worktreePath reason =
-    pendingLaunchAgent.PostAndAsyncReply(fun reply ->
+    routingAgent.PostAndAsyncReply(fun reply ->
         CancelPendingLaunch(normalizePath worktreePath, reason, reply))
 
-let private assignPendingLaunch worktreePath sessionId =
+let internal assignActivityTarget worktreePath filename sessionId =
+    routingAgent.PostAndAsyncReply(fun reply ->
+        AssignActivityTarget(
+            normalizePath worktreePath,
+            normalizeFilename filename,
+            sessionId,
+            reply))
+
+let private registerCoordinatedSession worktreePath injectUrl sessionId =
     let worktreeKey = normalizePath worktreePath
 
     let filenames =
-        pendingLaunchAgent.PostAndReply(fun reply ->
-            AssignPendingLaunch(worktreeKey, sessionId, reply))
+        routingAgent.PostAndReply(fun reply ->
+            RegisterSession(
+                worktreeKey,
+                injectUrl,
+                sessionId,
+                reply))
 
-    if not (Set.isEmpty filenames) then
+    match sessionId with
+    | Some sessionId when not (Set.isEmpty filenames) ->
         Log.log
             "CanvasBridge"
             $"Session {sessionId} assigned {Set.count filenames} pending canvas target(s) for {worktreeKey}"
+    | _ -> ()
 
 let internal waitForPendingLaunchCompletion
     (timeout: TimeSpan)
@@ -147,10 +187,7 @@ let registerSession worktreePath injectUrl sessionId =
         | Some value when not (String.IsNullOrWhiteSpace value) -> Some value
         | _ -> None
 
-    normalizedSessionId
-    |> Option.iter (assignPendingLaunch worktreePath)
-
-    SessionBridge.registerSession worktreePath injectUrl normalizedSessionId
+    registerCoordinatedSession worktreePath injectUrl normalizedSessionId
 
 let internal registrationStamp worktreePath sessionId =
     SessionBridge.registrationStamp worktreePath sessionId

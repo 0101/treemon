@@ -467,6 +467,100 @@ type DrainQueueTests() =
 
             runAsync (cancelPendingLaunch path "test cleanup"))
 
+    [<Test>]
+    member _.``pending launch registration wins over concurrent diff activity before queue drain``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use activeSink = new HttpSink(ports[0])
+            use launchedSink = new HttpSink(ports[1])
+            activeSink.Start()
+            launchedSink.Start()
+
+            let path = uniquePath "activity-success"
+            let previousSid = uniqueSid "previous"
+            let activeSid = uniqueSid "active"
+            let launchedSid = uniqueSid "launched"
+
+            registerSession path activeSink.Url (Some activeSid)
+            runAsync (Server.CanvasDocOwnership.assign path "diff.html" previousSid)
+
+            Assert.That(
+                runAsync (
+                    sendMessage
+                        { WorktreePath = WorktreePath path
+                          Filename = "diff.html"
+                          Payload = "queued-msg" }),
+                Is.EqualTo(CanvasMessageResult.Queued))
+
+            runAsync (beginPendingLaunch path "diff.html") |> ignore
+
+            Assert.That(
+                runAsync (assignActivityTarget path "diff.html" activeSid),
+                Is.EqualTo(ActivityTargetDeferred))
+
+            registerSession path launchedSink.Url (Some launchedSid)
+
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> launchedSink.Bodies = [ canvasWire "queued-msg" ]), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "The launched registration must retain the target through queue drain")
+            Assert.That(activeSink.Bodies, Is.Empty)
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some launchedSid),
+                "Deferred activity must not replay after successful registration"))
+
+    [<Test>]
+    member _.``timed out launch discards concurrent diff activity and preserves its prior target``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 1
+            use activeSink = new HttpSink(ports[0])
+            activeSink.Start()
+
+            let path = uniquePath "activity-timeout"
+            let previousSid = uniqueSid "previous"
+            let activeSid = uniqueSid "active"
+            let timeoutReason =
+                "the session did not register with Treemon before the timeout"
+
+            registerSession path activeSink.Url (Some activeSid)
+            runAsync (Server.CanvasDocOwnership.assign path "diff.html" previousSid)
+
+            let result =
+                Server.WorktreeApi.launchFreshCanvasSessionWith
+                    (fun () -> beginPendingLaunch path "diff.html")
+                    (cancelPendingLaunch path)
+                    (fun () -> async { return Ok () })
+                    (fun _ ->
+                        async {
+                            let! assignment =
+                                assignActivityTarget path "diff.html" activeSid
+
+                            let! sendResult =
+                                sendMessage
+                                    { WorktreePath = WorktreePath path
+                                      Filename = "diff.html"
+                                      Payload = "stay-queued" }
+
+                            return
+                                if assignment <> ActivityTargetDeferred then
+                                    Error "activity assignment was not deferred"
+                                elif sendResult <> CanvasMessageResult.Queued then
+                                    Error "the second interaction was not queued"
+                                else
+                                    Error timeoutReason
+                        })
+                |> runAsync
+
+            Assert.That(
+                result,
+                Is.EqualTo(Error timeoutReason: Result<unit, string>))
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some previousSid),
+                "Failed fresh launches must preserve the durable target")
+            Assert.That(activeSink.Bodies, Is.Empty))
+
 
 // ── multi-session registry (sessionId-keyed re-key) ─────────────────
 

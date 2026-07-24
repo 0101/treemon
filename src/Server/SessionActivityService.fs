@@ -592,7 +592,11 @@ type SessionActivityService internal
             store,
             scheduler,
             fun worktreePath filename sessionId ->
-                CanvasDocOwnership.assign (WorktreePath.value worktreePath) filename sessionId
+                CanvasBridge.assignActivityTarget
+                    (WorktreePath.value worktreePath)
+                    filename
+                    sessionId
+                |> Async.Ignore
         )
 
     /// POST /api/session/activity. Mirrors canvasRegisterHandler: bind the JSON DTO, validate + map

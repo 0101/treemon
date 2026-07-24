@@ -23,7 +23,8 @@ morph behavior continue to depend only on `CanvasDoc.Kind`.
 ownership remains sticky until another author writes or claims the document. `diff.html` is
 reassigned whenever the worktree's real-activity winner changes, using `StoredStatus.UpdatedAt`
 rather than heartbeat or usage timestamps. Other SystemViews, including Beadspace, remain sticky
-until explicitly reassigned or removed.
+until explicitly reassigned or removed. Automatic diff reassignment is discarded while a fresh
+launch for `diff.html` is pending; the explicit launch keeps precedence until it succeeds or fails.
 
 ### Delivery and Session Startup
 
@@ -74,7 +75,9 @@ filename-based target resolution and worktree launch policy over that generic tr
 The in-memory worktree launch coordinator records pending filenames plus one shared completion
 result, serializes fresh starts per worktree, and is consumed by the next identified registration
 before queue drain. Registration carries only the worktree, inject URL, and session identity;
-launch correlation remains server-side and worktree-scoped.
+launch correlation remains server-side and worktree-scoped. The same coordinator serializes
+automatic diff assignments with pending registration and queue drain, discarding assignments for
+a filename whose fresh launch is still pending.
 
 `SessionActivityService` assigns the unified `diff.html` target whenever the real-activity winner
 changes; heartbeat, usage, and metadata-only reports cannot move it. `CanvasScanner` continues
@@ -93,6 +96,9 @@ affordance on `CanvasDoc.Kind`.
   pending launch; the rare same-worktree reconnect race is an accepted simplification.
 - **Diff follows real activity; Beadspace stays sticky:** this preserves current user-facing
   affinity while allowing future SystemViews to choose their own assignment policy.
+- **Pending fresh launch beats activity:** automatic diff assignments that reach the routing
+  coordinator while `diff.html` is pending are discarded rather than replayed, so successful
+  registration keeps the new target and failed launches preserve the previous durable target.
 
 ## Key Files
 
