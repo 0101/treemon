@@ -29,7 +29,9 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 - The **Agents strip is sticky** at the top of the dashboard scroll container. In its normal
   top-of-page position it shows the `AGENTS` heading and count/label metadata; once pinned it
   collapses to a circles-only chrome bar matching the Canvas tab bar's height, background, and solid
-  `#313244` boundary. The Tasks section and drill-down panel stay in normal document flow.
+  `#313244` boundary. The pinned bar spans the **full dashboard width**, bleeding over the dashboard
+  padding so scrolling cards never show through at its edges, while its columns stay aligned with the
+  normal-flow sections. The Tasks section and drill-down panel stay in normal document flow.
 - **Aggregate-only**: no per-worktree cards or rows inside the band (the grid below already does
   that). All figures are cross-worktree roll-ups.
 - Two stacked sections are separated by a **1px solid** `#313244` rule and headed by small uppercase
