@@ -22,10 +22,10 @@ let private withDbPath =
 type ServerLifecycleTests() =
 
     [<Test>]
-    member _.``Program shares one store and ingestion drains before releasing its borrow``() =
+    member _.``runtime shares one store and ingestion drains before releasing its borrow``() =
         withDbPath (fun path ->
             let agent = RefreshScheduler.createAgent ()
-            let components = createSessionActivityComponents path agent
+            let components = SessionActivityRuntime.createComponents path agent
             let occurredAt = DateTimeOffset.UtcNow
 
             let report =
@@ -70,7 +70,7 @@ type ServerLifecycleTests() =
         withDbPath (fun path ->
             let agent = RefreshScheduler.createAgent ()
             let runtime =
-                createSessionActivityRuntime
+                SessionActivityRuntime.create
                     path
                     agent
                     Map.empty
@@ -84,13 +84,13 @@ type ServerLifecycleTests() =
                 Assert.That(state.SessionStatusesHydrated, Is.True)
                 Assert.That(runtime.SnapshotStore.LatestAnchor(), Is.EqualTo None)
             finally
-                shutdownSessionActivityRuntime runtime None)
+                SessionActivityRuntime.shutdown runtime None)
 
     [<Test>]
     member _.``shutdown stops every store user before disposing the store``() =
         let order = ConcurrentQueue<string>()
 
-        shutdownStoreUsers
+        SessionActivityRuntime.shutdownStoreUsers
             (fun () -> order.Enqueue "ingestion")
             (fun () -> order.Enqueue "scheduler")
             (fun () -> order.Enqueue "store")

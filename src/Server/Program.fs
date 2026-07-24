@@ -227,75 +227,8 @@ let internal persistResolvedRoots (resolution: RootsResolution) =
         | Error msg ->
             Log.log "Startup" $"Failed to persist worktree roots: {msg}"
 
-type internal SessionActivityComponents =
-    { Store: SessionActivityStore.SessionActivityStore
-      Service: SessionActivityService.SessionActivityService }
-
-type internal SessionActivityRuntime =
-    { Components: SessionActivityComponents
-      SnapshotStore: OverviewSnapshotStore.OverviewSnapshotStore
-      Capture: OverviewSnapshotCapture.SnapshotCapture }
-
 let internal usesSessionActivity (config: ServerConfig) =
     not config.Demo && config.TestFixtures.IsNone
-
-let internal createSessionActivityComponents
-    (dbPath: string)
-    (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
-    =
-    let store = new SessionActivityStore.SessionActivityStore(dbPath)
-
-    try
-        { Store = store
-          Service = new SessionActivityService.SessionActivityService(store, scheduler) }
-    with _ ->
-        (store :> System.IDisposable).Dispose()
-        reraise ()
-
-let internal createSessionActivityRuntime
-    (dbPath: string)
-    (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (rootPaths: Map<RepoId, string>)
-    =
-    let snapshotStore = OverviewSnapshotStore.OverviewSnapshotStore(dbPath)
-    let components = createSessionActivityComponents dbPath scheduler
-
-    try
-        { Components = components
-          SnapshotStore = snapshotStore
-          Capture =
-            OverviewSnapshotCapture.create
-                scheduler
-                rootPaths
-                snapshotStore }
-    with _ ->
-        (components.Service :> System.IDisposable).Dispose()
-        (components.Store :> System.IDisposable).Dispose()
-        reraise ()
-
-let internal shutdownStoreUsers
-    (disposeIngestion: unit -> unit)
-    (stopScheduler: unit -> unit)
-    (disposeStore: unit -> unit)
-    =
-    try
-        disposeIngestion ()
-    finally
-        try
-            stopScheduler ()
-        finally
-            disposeStore ()
-
-let internal shutdownSessionActivityRuntime
-    (runtime: SessionActivityRuntime)
-    (schedulerLoop: BackgroundLoop.Running option)
-    =
-    shutdownStoreUsers
-        (fun () -> (runtime.Components.Service :> System.IDisposable).Dispose())
-        (fun () ->
-            schedulerLoop
-            |> Option.iter (BackgroundLoop.stop "Refresh scheduler"))
-        (fun () -> (runtime.Components.Store :> System.IDisposable).Dispose())
 
 let internal runHostWithCapture
     (startHost: unit -> unit)
@@ -385,7 +318,7 @@ let main args =
                 Log.log "Startup" $"Session activity store db: {dbPath}"
                 let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
                 let activity =
-                    createSessionActivityRuntime
+                    SessionActivityRuntime.create
                         dbPath
                         agent
                         rootPaths
@@ -396,7 +329,7 @@ let main args =
                         BackgroundLoop.start
                             (RefreshScheduler.run agent worktreeRoots)
                     with _ ->
-                        shutdownSessionActivityRuntime activity None
+                        SessionActivityRuntime.shutdown activity None
                         reraise ()
 
                 try
@@ -420,7 +353,7 @@ let main args =
                     Some activity,
                     Some scheduler
                 with _ ->
-                    shutdownSessionActivityRuntime activity (Some scheduler)
+                    SessionActivityRuntime.shutdown activity (Some scheduler)
                     reraise ()
 
     let sessionActivityService =
@@ -504,6 +437,6 @@ let main args =
         activityRuntime
         |> Option.iter (fun runtime ->
             Log.log "Shutdown" "Stopping session activity"
-            shutdownSessionActivityRuntime runtime schedulerLoop)
+            SessionActivityRuntime.shutdown runtime schedulerLoop)
 
     0

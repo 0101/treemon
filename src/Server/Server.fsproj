@@ -55,6 +55,7 @@
     <Compile Include="CanvasSelectionScript.fs" />
     <Compile Include="CanvasDocServer.fs" />
     <Compile Include="SessionActivityService.fs" />
+    <Compile Include="SessionActivityRuntime.fs" />
     <Compile Include="HttpSecurity.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
