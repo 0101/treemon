@@ -35,20 +35,22 @@ the same normalized worktree and exact target session join one shared resume out
 immediate POST fails at the transport boundary, Treemon conditionally invalidates only that failed
 registration; a newer concurrent re-registration wins and is never removed.
 
-When no target exists, or the user chooses a fresh session after resume failure, Treemon queues the
-interaction and starts one session under a worktree-wide launch lock. The previous durable target,
-if any, is not cleared or replaced by the launch path until registration succeeds. The first
-identified bridge registration after that launch assigns every pending canvas filename for the
-worktree before queued messages are drained. Launch failure or timeout clears the pending launch
-without changing the previous target.
+When no target exists, Treemon queues the interaction and starts one session under a worktree-wide
+launch lock. After resume failure, the explicit “Start fresh and reassign” recovery is available
+only for SystemViews; AgentDoc ownership can change only through an author write or explicit claim.
+The previous durable target, if any, is not cleared or replaced by the launch path until
+registration succeeds. The first identified bridge registration after that launch assigns pending
+SystemViews before queued messages are drained. It may claim an unowned AgentDoc only while that
+document remains unowned, so a newer author write or explicit claim always wins. Launch failure or
+timeout clears the pending launch without changing the previous target.
 
 Treemon starts a fresh canvas session only when the worktree has no active session suitable for the
 interaction. Concurrent diff and Beadspace interactions join the same pending worktree launch
 instead of starting competing sessions. Every starter and joiner awaits one shared completion
 result: identified registration resolves success after target assignment, while spawn failure,
 exception, cancellation, or timeout resolves the same error for every caller. A reconnecting
-same-worktree session may win the narrow registration race; this bounded same-worktree routing risk
-is accepted because registration is correlated only by worktree and pending filenames.
+same-worktree session may win the narrow SystemView registration race; this bounded routing risk is
+accepted because SystemView registration is correlated only by worktree and pending filenames.
 
 Queued messages retain the existing cap of 10 and five-minute TTL. Drain re-resolves the current
 target by filename, so ownership changes made while a message waits are honored.
@@ -77,10 +79,12 @@ filename-based target resolution and worktree launch policy over that generic tr
 
 The in-memory worktree launch coordinator records pending filenames plus one shared completion
 result, serializes fresh starts per worktree, and is consumed by the next identified registration
-before queue drain. Registration carries only the worktree, inject URL, and session identity;
-launch correlation remains server-side and worktree-scoped. The same coordinator serializes
-automatic diff assignments with pending registration and queue drain, discarding assignments for
-a filename whose fresh launch is still pending.
+before queue drain. SystemView targets use unconditional pending assignment. An AgentDoc pending
+without an owner uses an atomic conditional assignment whose expected owner is `None`; generic
+registration never replaces an existing AgentDoc owner. Registration carries only the worktree,
+inject URL, and session identity; launch correlation remains server-side and worktree-scoped. The
+same coordinator serializes automatic diff assignments with pending registration and queue drain,
+discarding assignments for a filename whose fresh launch is still pending.
 
 Exact-session recovery uses a separate in-memory coordinator keyed by normalized worktree and
 target session ID. The starter owns spawn plus registration confirmation; joiners await the same
@@ -106,7 +110,11 @@ affordance on `CanvasDoc.Kind`.
 - **One resume per exact target:** concurrent offline interactions share the same exact-session
   recovery instead of repeatedly replacing the worktree's terminal.
 - **Server-side launch correlation:** registration-after-launch is correlated by the worktree-wide
-  pending launch; the rare same-worktree reconnect race is an accepted simplification.
+  pending launch. SystemViews accept the bounded same-worktree registration race; AgentDoc
+  ownership does not.
+- **AgentDoc ownership stays author-controlled:** generic registration may claim only a still-unowned
+  AgentDoc. Existing ownership changes only through an author write or explicit claim. SystemView
+  pending assignment remains unconditional.
 - **Diff follows real activity; Beadspace stays sticky:** this preserves current user-facing
   affinity while allowing future SystemViews to choose their own assignment policy.
 - **Pending fresh launch beats activity:** automatic diff assignments that reach the routing

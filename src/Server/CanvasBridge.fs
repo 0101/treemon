@@ -110,17 +110,40 @@ let private routingAgent =
                             launch.Filenames
                             |> Set.toList
                             |> List.map (fun filename ->
-                                CanvasDocOwnership.assign worktreeKey filename sessionId)
+                                async {
+                                    match CanvasDocKinds.classify filename with
+                                    | SystemView ->
+                                        do! CanvasDocOwnership.assign worktreeKey filename sessionId
+                                        return Some filename
+                                    | AgentDoc ->
+                                        let! assigned =
+                                            CanvasDocOwnership.assignIfCurrentOwner
+                                                worktreeKey
+                                                filename
+                                                None
+                                                sessionId
+
+                                        if not assigned then
+                                            Log.log
+                                                "CanvasBridge"
+                                                $"Preserved existing AgentDoc owner for {filename} in {worktreeKey}"
+
+                                        return if assigned then Some filename else None
+                                })
                             |> Async.Sequential
-                            |> Async.Ignore
                             |> Async.Catch
 
                         SessionBridge.registerSession worktreeKey injectUrl (Some sessionId)
 
                         match assignment with
-                        | Choice1Of2 () ->
+                        | Choice1Of2 assigned ->
+                            let assignedFilenames =
+                                assigned
+                                |> Array.choose id
+                                |> Set.ofArray
+
                             launch.Completion.TrySetResult(Ok ()) |> ignore
-                            reply.Reply(launch.Filenames)
+                            reply.Reply(assignedFilenames)
                         | Choice2Of2 ex ->
                             launch.Completion.TrySetResult(Error ex.Message) |> ignore
                             reply.Reply(Set.empty)

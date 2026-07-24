@@ -380,7 +380,16 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
         | CanvasSendState.Failed msg ->
             render msg None
         | CanvasSendState.OwnerUnavailable(msg, scopedKey, filename) ->
-            render msg (Some(scopedKey, filename))
+            let recovery =
+                match focusedDoc with
+                | Some (wt, doc)
+                    when WorktreePath.value wt.Path = scopedKey
+                         && doc.Filename = filename
+                         && doc.Kind = SystemView ->
+                    Some(scopedKey, filename)
+                | _ -> None
+
+            render msg recovery
         | _ -> Html.none
 
     // Doc-side JS error banner — a distinct source from CanvasSendState.Failed (which is a

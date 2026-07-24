@@ -12,10 +12,18 @@ open Server.GlobalConfig
 
 let private canvasRegistrationTimeout = TimeSpan.FromSeconds 15.0
 
+let internal canReassignCanvasInteraction filename =
+    CanvasDocKinds.classify filename = SystemView
+
 let private ownerUnavailable filename reason =
+    let recovery =
+        if canReassignCanvasInteraction filename then
+            "Retry to preserve the current session, or start fresh and reassign."
+        else
+            "Retry after the author session reconnects, or explicitly claim the document from an authoring session."
+
     CanvasMessageResult.OwnerUnavailable(
-        $"Could not resume the interaction session for {filename}: {reason}. "
-        + "Retry to preserve the current session, or start fresh and reassign.")
+        $"Could not resume the interaction session for {filename}: {reason}. {recovery}")
 
 let internal resumeCanvasTargetWith
     (spawn: unit -> Async<Result<unit, string>>)
@@ -923,6 +931,10 @@ let worktreeApi
                           return Error $"Invalid canvas filename: {request.Filename}"
                       | Ok viewPath when not (File.Exists viewPath) ->
                           return Error $"Canvas view not found: {request.Filename}"
+                      | Ok _ when not (canReassignCanvasInteraction request.Filename) ->
+                          return
+                              Error
+                                  "AgentDoc ownership can change only through an author write or explicit ownership claim."
                       | Ok _ ->
                           let provider = CodingToolStatus.readConfiguredProvider path
                           let prompt = CanvasPrompt.continueWorking path request.Filename

@@ -68,6 +68,36 @@ type PersistenceTests() =
                 Is.EquivalentTo([ "Review.html"; "diff.html" ])))
 
     [<Test>]
+    member _.``conditional assignment replaces only the expected owner``() =
+        withOwnershipFiles (fun dir filePath _ ->
+            let worktree = Path.Combine(dir, "worktree")
+            let store = CanvasDocOwnership.createStore filePath
+
+            runAsync (store.Assign(worktree, "Review.html", "author-a"))
+
+            let replaced =
+                store.AssignIfCurrentOwner(
+                    worktree,
+                    "Review.html",
+                    Some "author-a",
+                    "replacement")
+                |> runAsync
+
+            let staleReplacement =
+                store.AssignIfCurrentOwner(
+                    worktree,
+                    "Review.html",
+                    Some "author-a",
+                    "stale-replacement")
+                |> runAsync
+
+            Assert.That(replaced, Is.True)
+            Assert.That(staleReplacement, Is.False)
+            Assert.That(
+                runAsync (store.GetOwner(worktree, "Review.html")),
+                Is.EqualTo(Some "replacement")))
+
+    [<Test>]
     member _.``legacy migration imports only missing SystemViews once``() =
         withOwnershipFiles (fun dir filePath legacyPath ->
             let worktree = Path.Combine(dir, "worktree")

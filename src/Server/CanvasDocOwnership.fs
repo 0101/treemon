@@ -15,6 +15,12 @@ type internal Targets = Map<string, Map<string, string>>
 
 type private Msg =
     | Assign of worktreeKey: string * filename: string * sessionId: string * AsyncReplyChannel<unit> option
+    | AssignIfCurrentOwner of
+        worktreeKey: string *
+        filename: string *
+        expectedOwner: string option *
+        sessionId: string *
+        AsyncReplyChannel<bool>
     | GetOwner of worktreeKey: string * filename: string * AsyncReplyChannel<string option>
     | GetAll of worktreeKey: string * AsyncReplyChannel<Map<string, string>>
     | RemoveView of worktreeKey: string * filename: string * AsyncReplyChannel<unit>
@@ -184,6 +190,17 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
                         reply |> Option.iter _.Reply()
                         return! loop targets'
 
+                    | AssignIfCurrentOwner(worktreeKey, filename, expectedOwner, sessionId, reply) ->
+                        if ownerFor worktreeKey filename targets = expectedOwner then
+                            let targets' = targets |> addTarget worktreeKey filename sessionId
+                            if targets' <> targets then
+                                do! persist filePath targets' |> Async.Ignore
+                            reply.Reply(true)
+                            return! loop targets'
+                        else
+                            reply.Reply(false)
+                            return! loop targets
+
                     | GetOwner(worktreeKey, filename, reply) ->
                         targets
                         |> ownerFor worktreeKey filename
@@ -249,6 +266,20 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
         agent.PostAndAsyncReply(fun reply ->
             Assign(normalizePath worktreePath, filename, sessionId, Some reply))
 
+    member _.AssignIfCurrentOwner(
+        worktreePath: string,
+        filename: string,
+        expectedOwner: string option,
+        sessionId: string
+    ) =
+        agent.PostAndAsyncReply(fun reply ->
+            AssignIfCurrentOwner(
+                normalizePath worktreePath,
+                filename,
+                expectedOwner,
+                sessionId,
+                reply))
+
     member _.GetOwner(worktreePath: string, filename: string) =
         agent.PostAndAsyncReply(fun reply ->
             GetOwner(normalizePath worktreePath, filename, reply))
@@ -310,6 +341,13 @@ let attribute worktreePath filename sessionId =
 
 let assign worktreePath filename sessionId =
     defaultStore.Assign(worktreePath, filename, sessionId)
+
+let internal assignIfCurrentOwner worktreePath filename expectedOwner sessionId =
+    defaultStore.AssignIfCurrentOwner(
+        worktreePath,
+        filename,
+        expectedOwner,
+        sessionId)
 
 let getOwner worktreePath filename =
     defaultStore.GetOwner(worktreePath, filename)

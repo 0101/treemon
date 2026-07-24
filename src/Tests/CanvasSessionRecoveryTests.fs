@@ -21,6 +21,12 @@ let private uniquePath prefix =
 type CanvasSessionRecoveryTests() =
 
     [<Test>]
+    member _.``fresh interaction reassignment is restricted to SystemViews``() =
+        Assert.That(WorktreeApi.canReassignCanvasInteraction "diff.html", Is.True)
+        Assert.That(WorktreeApi.canReassignCanvasInteraction "beads.html", Is.True)
+        Assert.That(WorktreeApi.canReassignCanvasInteraction "Review.html", Is.False)
+
+    [<Test>]
     member _.``comment with no target queues and starts a fresh session``() =
         let freshStarts = ConcurrentQueue<unit>()
         let resumed = ConcurrentQueue<string>()
@@ -384,6 +390,53 @@ type CanvasSessionRecoveryTests() =
             Assert.That(
                 runAsync (CanvasDocOwnership.getOwner path "beads.html"),
                 Is.EqualTo(Some sessionId)))
+
+    [<Test>]
+    member _.``new AgentDoc author claim wins over a pending generic registration``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "agentdoc-new-author-race"
+            let filename = "Review.html"
+            let pending =
+                runAsync (CanvasBridge.beginPendingLaunch path filename)
+
+            runAsync (CanvasDocOwnership.assign path filename "new-author")
+            CanvasBridge.registerSession
+                path
+                "http://127.0.0.1:1/inject"
+                (Some "generic-session")
+
+            Assert.That(
+                pending.Completion.Wait(TimeSpan.FromSeconds 2.0),
+                Is.True)
+            Assert.That(pending.Completion.Result |> Result.isOk, Is.True)
+            Assert.That(
+                runAsync (CanvasDocOwnership.getOwner path filename),
+                Is.EqualTo(Some "new-author"),
+                "A registration correlated only by worktree must not overwrite a newer author claim"))
+
+    [<Test>]
+    member _.``reconnecting prior AgentDoc author cannot steal ownership from a newer author``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "agentdoc-reconnect-race"
+            let filename = "Review.html"
+            runAsync (CanvasDocOwnership.assign path filename "prior-author")
+            let pending =
+                runAsync (CanvasBridge.beginPendingLaunch path filename)
+
+            runAsync (CanvasDocOwnership.assign path filename "new-author")
+            CanvasBridge.registerSession
+                path
+                "http://127.0.0.1:1/inject"
+                (Some "prior-author")
+
+            Assert.That(
+                pending.Completion.Wait(TimeSpan.FromSeconds 2.0),
+                Is.True)
+            Assert.That(pending.Completion.Result |> Result.isOk, Is.True)
+            Assert.That(
+                runAsync (CanvasDocOwnership.getOwner path filename),
+                Is.EqualTo(Some "new-author"),
+                "A reconnect is not a fresh author write or explicit ownership claim"))
 
     [<Test>]
     member _.``joined requests share the starter launch failure``() =
