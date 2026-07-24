@@ -5,7 +5,6 @@ open System.Threading.Tasks
 open Shared
 
 let private normalizePath = Server.PathUtils.normalizePath
-let private normalizeFilename (filename: string) = filename.ToLowerInvariant()
 
 type internal PendingLaunchResult =
     | PendingLaunchStarted
@@ -130,7 +129,7 @@ let internal beginPendingLaunch worktreePath filename =
     routingAgent.PostAndAsyncReply(fun reply ->
         BeginPendingLaunch(
             normalizePath worktreePath,
-            normalizeFilename filename,
+            filename,
             reply))
 
 let internal cancelPendingLaunch worktreePath reason =
@@ -141,7 +140,7 @@ let internal assignActivityTarget worktreePath filename sessionId =
     routingAgent.PostAndAsyncReply(fun reply ->
         AssignActivityTarget(
             normalizePath worktreePath,
-            normalizeFilename filename,
+            filename,
             sessionId,
             reply))
 

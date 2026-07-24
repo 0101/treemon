@@ -44,21 +44,28 @@ let private writeOwners (filePath: string) (entries: (string * string * string) 
 type PersistenceTests() =
 
     [<Test>]
-    member _.``AgentDoc and SystemView targets share one persistent store``() =
+    member _.``filename case persists while worktree paths stay normalized``() =
         withOwnershipFiles (fun dir filePath _ ->
             let worktree = Path.Combine(dir, "worktree")
             let store = CanvasDocOwnership.createStore filePath
 
-            runAsync (store.Assign(worktree, "REPORT.HTML", "agent-session"))
-            runAsync (store.Assign(worktree, "DIFF.HTML", "system-session"))
+            runAsync (store.Assign(Path.Combine(worktree, "."), "Review.html", "agent-session"))
+            runAsync (store.Assign(worktree, "diff.html", "system-session"))
 
             let restarted = CanvasDocOwnership.createStore filePath
             Assert.That(
-                runAsync (restarted.GetOwner(worktree, "report.html")),
+                runAsync (restarted.GetOwner(worktree, "Review.html")),
                 Is.EqualTo(Some "agent-session"))
             Assert.That(
                 runAsync (restarted.GetOwner(worktree, "diff.html")),
-                Is.EqualTo(Some "system-session")))
+                Is.EqualTo(Some "system-session"))
+            Assert.That(
+                runAsync (restarted.GetOwner(worktree, "review.html")),
+                Is.EqualTo(None: string option),
+                "Filename identity must retain the on-disk casing")
+            Assert.That(
+                runAsync (restarted.GetAll(worktree)) |> Map.keys,
+                Is.EquivalentTo([ "Review.html"; "diff.html" ])))
 
     [<Test>]
     member _.``legacy migration imports only missing SystemViews once``() =
@@ -84,6 +91,10 @@ type PersistenceTests() =
                 runAsync (migrated.GetOwner(worktree, "diff.html")),
                 Is.EqualTo(Some "unified-diff"),
                 "An existing unified target must win over the legacy value")
+            Assert.That(
+                runAsync (migrated.GetOwner(worktree, "DIFF.HTML")),
+                Is.EqualTo(None: string option),
+                "Case variants of an existing SystemView must not create duplicate targets")
             Assert.That(
                 runAsync (migrated.GetOwner(worktree, "beads.html")),
                 Is.EqualTo(Some "legacy-beads"))

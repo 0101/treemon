@@ -7,7 +7,6 @@ open System.Text.Json
 open Shared
 
 let private normalizePath = Server.PathUtils.normalizePath
-let private normalizeFilename (filename: string) = filename.ToLowerInvariant()
 
 let private defaultFilePath = Path.Combine("data", "canvas-owners.json")
 let private legacyFilePath = Path.Combine("data", "canvas-interaction-owners.json")
@@ -112,7 +111,7 @@ let private readTargets filePath =
                     |> Seq.choose (fun viewProp ->
                         viewProp.Value.GetString()
                         |> Option.ofObj
-                        |> Option.map (fun sessionId -> normalizeFilename viewProp.Name, sessionId))
+                        |> Option.map (fun sessionId -> viewProp.Name, sessionId))
                     |> Map.ofSeq
 
                 targets |> Map.add (normalizePath worktreeProp.Name) views
@@ -133,7 +132,12 @@ let private mergeLegacySystemViews unified legacy =
         let merged =
             legacyViews
             |> Map.fold (fun views filename sessionId ->
-                match CanvasDocKinds.classify filename, views |> Map.containsKey filename with
+                let alreadyOwned =
+                    views
+                    |> Map.exists (fun existingFilename _ ->
+                        String.Equals(existingFilename, filename, StringComparison.OrdinalIgnoreCase))
+
+                match CanvasDocKinds.classify filename, alreadyOwned with
                 | SystemView, false -> views |> Map.add filename sessionId
                 | _ -> views
             ) existing
@@ -239,26 +243,26 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
             loop initialTargets)
 
     member _.Attribute(worktreePath: string, filename: string, sessionId: string) =
-        agent.Post(Assign(normalizePath worktreePath, normalizeFilename filename, sessionId, None))
+        agent.Post(Assign(normalizePath worktreePath, filename, sessionId, None))
 
     member _.Assign(worktreePath: string, filename: string, sessionId: string) =
         agent.PostAndAsyncReply(fun reply ->
-            Assign(normalizePath worktreePath, normalizeFilename filename, sessionId, Some reply))
+            Assign(normalizePath worktreePath, filename, sessionId, Some reply))
 
     member _.GetOwner(worktreePath: string, filename: string) =
         agent.PostAndAsyncReply(fun reply ->
-            GetOwner(normalizePath worktreePath, normalizeFilename filename, reply))
+            GetOwner(normalizePath worktreePath, filename, reply))
 
     member _.GetOwnerSync(worktreePath: string, filename: string) =
         agent.PostAndReply(fun reply ->
-            GetOwner(normalizePath worktreePath, normalizeFilename filename, reply))
+            GetOwner(normalizePath worktreePath, filename, reply))
 
     member _.GetAll(worktreePath: string) =
         agent.PostAndAsyncReply(fun reply -> GetAll(normalizePath worktreePath, reply))
 
     member _.RemoveView(worktreePath: string, filename: string) =
         agent.PostAndAsyncReply(fun reply ->
-            RemoveView(normalizePath worktreePath, normalizeFilename filename, reply))
+            RemoveView(normalizePath worktreePath, filename, reply))
 
     member _.RemoveWorktree(worktreePath: string) =
         agent.PostAndAsyncReply(fun reply -> RemoveWorktree(normalizePath worktreePath, reply))

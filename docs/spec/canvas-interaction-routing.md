@@ -88,6 +88,9 @@ affordance on `CanvasDoc.Kind`.
 
 - **One target store:** authorship and interaction affinity share the same persisted
   `(worktree, filename) -> sessionId` representation.
+- **Case-preserving filename identity:** ownership keys retain the real on-disk filename case;
+  only worktree paths are normalized. Scanner lookup and filesystem pruning therefore use the same
+  identity on case-sensitive hosts.
 - **Kind controls behavior:** a SystemView may have an internal routing owner without acquiring
   authored-document UI or lifecycle behavior.
 - **One launch per worktree:** pending interactions share a replacement session rather than

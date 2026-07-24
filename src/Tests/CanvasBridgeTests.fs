@@ -1021,6 +1021,42 @@ type SystemViewInteractionRoutingTests() =
                 Is.EqualTo(Some sid)))
 
     [<Test>]
+    member _.``mixed-case pending filename assigns and drains with its original case``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 1
+            use sink = new HttpSink(ports[0])
+            sink.Start()
+
+            let path = Path.Combine(Environment.CurrentDirectory, $"mixed-pending-{Guid.NewGuid():N}")
+            let sid = uniqueSid "mixed"
+
+            Assert.That(
+                runAsync (
+                    sendMessage
+                        { WorktreePath = WorktreePath path
+                          Filename = "Review.html"
+                          Payload = "mixed-payload" }),
+                Is.EqualTo(CanvasMessageResult.Queued))
+            Assert.That(
+                (runAsync (beginPendingLaunch path "Review.html")).Role,
+                Is.EqualTo(PendingLaunchStarted))
+            Assert.That(
+                runAsync (assignActivityTarget path "Review.html" (uniqueSid "activity")),
+                Is.EqualTo(ActivityTargetDeferred),
+                "Pending-launch arbitration must use the same case-preserving filename identity")
+
+            registerSession path sink.Url (Some sid)
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> sink.Bodies = [ canvasWire "mixed-payload" ]), TimeSpan.FromSeconds 5.0),
+                Is.True)
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "Review.html"),
+                Is.EqualTo(Some sid))
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "review.html"),
+                Is.EqualTo(None: string option)))
+
+    [<Test>]
     member _.``pending launches never cross worktree boundaries``() =
         withTempCwd (fun () ->
             let ports = getFreeTcpPorts 2
@@ -1178,6 +1214,32 @@ type ScannerFallbackAttributionTests() =
                 report.OwnerSessionId,
                 Is.EqualTo(Some agentTarget),
                 "AgentDoc author ownership remains exposed from the same target store"))
+
+    [<Test>]
+    member _.``mixed-case AgentDoc owner survives scanner lookup and prune``() =
+        withTempCwd (fun () ->
+            let path = Path.Combine(Environment.CurrentDirectory, $"scan-mixed-owner-{Guid.NewGuid():N}")
+            let canvasDir = Path.Combine(path, ".agents", "canvas")
+            Directory.CreateDirectory(canvasDir) |> ignore
+            File.WriteAllText(Path.Combine(canvasDir, "Review.html"), "<html></html>")
+            let sid = uniqueSid "mixed-owner"
+            runAsync (Server.CanvasDocOwnership.assign path "Review.html" sid)
+
+            let assertOwned () =
+                let review =
+                    runAsync (Server.CanvasScanner.scan path)
+                    |> List.find (fun doc -> doc.Filename = "Review.html")
+
+                Assert.That(review.Kind, Is.EqualTo(AgentDoc))
+                Assert.That(review.OwnerSessionId, Is.EqualTo(Some sid))
+
+            assertOwned ()
+            runAsync (Server.CanvasDocOwnership.prune (Set.singleton path))
+            assertOwned ()
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getAll path) |> Map.keys,
+                Is.EquivalentTo([ "Review.html" ]),
+                "Pruning must validate the real case-sensitive filename path"))
 
     [<Test>]
     member _.``A pre-declared owner is never overwritten by the scanner``() =
