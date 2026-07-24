@@ -26,11 +26,15 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   directly under the app-header on the dashboard background.
 - **Placement is dashboard-scoped**: rendered inside `.dashboard`, above `.repo-list`. It leaves the
   Canvas pane untouched and reflows via the existing dashboard container-query on narrow panes.
+- The **Agents strip is sticky** at the top of the dashboard scroll container. In its normal
+  top-of-page position it shows the `AGENTS` heading and count/label metadata; once pinned it
+  collapses to a circles-only chrome bar matching the Canvas tab bar's height, background, and solid
+  `#313244` boundary. The Tasks section and drill-down panel stay in normal document flow.
 - **Aggregate-only**: no per-worktree cards or rows inside the band (the grid below already does
   that). All figures are cross-worktree roll-ups.
-- Two stacked sections are separated by a **1px dashed** rule and headed by small uppercase muted
-  labels: `AGENTS` and `TASKS`. The per-group/per-bucket counts live in the columns below, so the
-  headers stay bare (no count suffix, no "across all worktrees" caption).
+- Two stacked sections are separated by a **1px solid** `#313244` rule and headed by small uppercase
+  muted labels: `AGENTS` and `TASKS`. The per-group/per-bucket counts live in the columns below, so
+  the headers stay bare (no count suffix, no "across all worktrees" caption).
 - Each category is a column with its **count-first label above the visual**: the count uses the
   category accent, the label stays neutral, and both share the same font size/weight.
   1. **Agents** — **circles** (~15px), one **per live session**, each placed in its own group by
@@ -254,17 +258,25 @@ the solution compiling (no compat shims, per house rules).
   `background: currentColor`. Label stays neutral, the same inherited `12.5px`/weight `400` as the
   count — so count and label differ only by colour, per spec.
 - **Section chrome.** The band renders bare `AGENTS` and `TASKS` headings (no count suffix, no
-  "across all worktrees" caption — the columns carry the counts), separated by a 1px dashed rule,
+  "across all worktrees" caption — the columns carry the counts), separated by a 1px solid rule,
   and has no top/bottom border hairlines or task footer caption.
 - **RepoModel → RepoWorktrees recombination lives in the band** (`toRepoWorktrees`, the single
   `aggregate` call site) so decision (f)'s `Worktrees @ ArchivedWorktrees` merge can't be forgotten.
 - **Empty-state collapse.** `view` drops an all-empty lens by pattern-matching (each section is built
   by the `section` helper) and returns `Html.none` when both lenses are empty, so an opened-but-empty
   band adds no chrome (not even margin).
-- **Placement:** rendered in `App.fs` as the first child inside `.dashboard` (above `.repo-list`),
-  gated on `model.OverviewPanelOpen`. The two sections stay **stacked** at every width; the reflow is
-  the category columns wrapping onto new rows via `.overview-items { flex-wrap: wrap }` as the pane
-  narrows — there is no container-query flip to a side-by-side layout.
+- **Placement:** rendered in `App.fs` above `.repo-list`, gated on `model.OverviewPanelOpen`.
+  `OverviewBand.view` emits a 1px zero-net-flow sentinel, one sticky Agents section, and the
+  normal-flow breakdown/Tasks remainder. A dashboard CSS Scroll Timeline morphs that single Agents
+  DOM across the first 112px of scrolling: heading and metadata fade, the existing circle groups
+  translate into one compact row, and `clip-path` reduces the same background to Canvas-header
+  height. No duplicate circle tree exists. The final translation is measured from rendered circle
+  geometry and refreshed by `ResizeObserver`, avoiding platform-font pixel tuning. An
+  `IntersectionObserver` watches only the sentinel and reports pinned after it passes strictly above
+  the dashboard boundary. Its Elmish subscription exists only while agent groups are rendered, so
+  removing the Agents DOM disposes the observers and resets pinned state. Entering the pinned state
+  closes an agent drill-down and switches Agents to one `nowrap` row with hidden-scrollbar horizontal
+  overflow. Expanded category columns still wrap normally.
 
 ## Decisions
 
@@ -310,7 +322,7 @@ call site; running skill and persisted per-session context usage from the existi
   of the archived policy — drop the archived ones.
 
 **Additional locked decisions:**
-- The visual contract is the count-first, label-above-mark layout with section headers, dashed
+- The visual contract is the count-first, label-above-mark layout with section headers, a 1px solid
   separator, exact Catppuccin palette, no hairline borders, and no footer caption.
 - Working agents are red-dot worktrees (`CodingTool = Working`); `WaitingForUser` is a separate
   Waiting group; idle sessions form a distinct blue Idle group and do not inflate activity counts.
