@@ -35,6 +35,33 @@ let internal resumeCanvasTargetWith
             | Choice2Of2 ex -> return ownerUnavailable filename ex.Message
     }
 
+let internal resumeCanvasTargetCoalescedWith
+    (beginResume: unit -> Async<CanvasBridge.PendingResume>)
+    (completeResume: CanvasMessageResult -> Async<unit>)
+    (spawn: unit -> Async<Result<unit, string>>)
+    (waitForRegistration: unit -> Async<bool>)
+    (filename: string)
+    =
+    async {
+        let! pendingResume = beginResume ()
+
+        let awaitCompletion () =
+            pendingResume.Completion |> Async.AwaitTask
+
+        match pendingResume.Role with
+        | CanvasBridge.PendingResumeJoined ->
+            return! awaitCompletion ()
+        | CanvasBridge.PendingResumeStarted ->
+            let! outcome =
+                resumeCanvasTargetWith
+                    spawn
+                    waitForRegistration
+                    filename
+
+            do! completeResume outcome
+            return! awaitCompletion ()
+    }
+
 let internal launchFreshCanvasSessionWith
     (beginLaunch: unit -> Async<CanvasBridge.PendingLaunch>)
     (cancelLaunch: string -> Async<unit>)
@@ -71,12 +98,16 @@ let internal launchFreshCanvasSessionWith
     }
 
 let internal recoverQueuedCanvasMessageWith
+    (failedRegistration: SessionBridge.SessionEntry option)
     (getTarget: unit -> Async<CanvasBridge.TargetState>)
     (resumeTarget: string -> Async<CanvasMessageResult>)
     (startFresh: unit -> Async<Result<unit, string>>)
     (filename: string)
     =
     async {
+        failedRegistration
+        |> Option.iter (CanvasBridge.invalidateFailedRegistration >> ignore)
+
         match! getTarget () with
         | CanvasBridge.LiveTarget _ ->
             return CanvasMessageResult.Queued
@@ -775,10 +806,10 @@ let worktreeApi
                   })
           sendCanvasMessage = fun request ->
               async {
-                  let! result = CanvasBridge.sendMessage request
+                  let! sendResult = CanvasBridge.sendMessageForRecovery request
 
-                  match result with
-                  | CanvasMessageResult.Queued ->
+                  match sendResult with
+                  | CanvasBridge.MessageQueued failedRegistration ->
                       let path = WorktreePath.value request.WorktreePath
 
                       let resumeTarget ownerSessionId =
@@ -794,7 +825,14 @@ let worktreeApi
                                   $"sendCanvasMessage: resuming target session {ownerSessionId} for {request.Filename}"
 
                               let! outcome =
-                                  resumeCanvasTargetWith
+                                  resumeCanvasTargetCoalescedWith
+                                      (fun () ->
+                                          CanvasBridge.beginPendingResume
+                                              path
+                                              ownerSessionId)
+                                      (CanvasBridge.completePendingResume
+                                          path
+                                          ownerSessionId)
                                       (fun () ->
                                           SessionManager.spawnSession
                                               sessionAgent
@@ -850,6 +888,7 @@ let worktreeApi
 
                       return!
                           recoverQueuedCanvasMessageWith
+                              failedRegistration
                               (fun () ->
                                   async {
                                       let! target =
@@ -871,7 +910,8 @@ let worktreeApi
                               resumeTarget
                               startFresh
                               request.Filename
-                  | _ -> return result
+                  | CanvasBridge.MessageDelivered ->
+                      return CanvasMessageResult.Ok
               }
           reassignCanvasInteraction = fun request ->
               withValidatedPath request.WorktreePath "reassignCanvasInteraction" (fun () ->

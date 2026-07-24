@@ -2,6 +2,7 @@ module Server.SessionBridge
 
 open System
 open System.Collections.Concurrent
+open System.Collections.Generic
 open System.IO
 open System.Net.Http
 open System.Text
@@ -42,11 +43,6 @@ type SendRequest =
       Prompt: Prompt }
 
 [<RequireQualifiedAccess>]
-type SendResult =
-    | Delivered
-    | Queued
-
-[<RequireQualifiedAccess>]
 type DeliveryResult =
     | Delivered
     | NoLiveSession
@@ -58,10 +54,26 @@ type SessionEntry =
       SessionId: string option
       RegisteredAt: DateTime }
 
+[<RequireQualifiedAccess>]
+type SendResult =
+    | Delivered
+    | Queued
+    | TransportFailed of SessionEntry
+
 type internal QueuedPrompt =
     { EnqueuedAt: DateTime
       TargetSessionId: string option
       Prompt: Prompt }
+
+[<RequireQualifiedAccess>]
+type private PromptDeliveryFailure =
+    | Rejected
+    | Transport
+
+type private DeliveryAttempt =
+    | AttemptDelivered
+    | AttemptNoLiveSession
+    | AttemptFailed of SessionEntry * PromptDeliveryFailure
 
 // Mutable: ConcurrentDictionary is the thread-safe boundary for bridge registration and queueing.
 // Separate session and poll maps prevent canvas-document heartbeats from overwriting live sessions.
@@ -129,7 +141,11 @@ let private requeue now (worktreeKey: string) (survivors: QueuedPrompt list) =
             fun _ existing -> survivors @ cleanExpired now existing |> capQueue)
         |> ignore
 
-let private postPrompt (entry: SessionEntry) (prompt: Prompt) (worktreeKey: string) : Async<Result<unit, string>> =
+let private postPrompt
+    (entry: SessionEntry)
+    (prompt: Prompt)
+    (worktreeKey: string)
+    : Async<Result<unit, PromptDeliveryFailure>> =
     async {
         try
             use content = new StringContent(serializePrompt prompt, Encoding.UTF8, "application/json")
@@ -143,10 +159,10 @@ let private postPrompt (entry: SessionEntry) (prompt: Prompt) (worktreeKey: stri
                 let! body = response.Content.ReadAsStringAsync() |> Async.AwaitTask
                 let failure = formatPostFailure (int response.StatusCode) body
                 Log.log "SessionBridge" $"Prompt forward failed: {failure}"
-                return Error failure
+                return Error PromptDeliveryFailure.Rejected
         with ex ->
             Log.log "SessionBridge" $"Prompt forward error: {ex.Message}"
-            return Error ex.Message
+            return Error PromptDeliveryFailure.Transport
     }
 
 let private drainQueue now (worktreeKey: string) (entry: SessionEntry) =
@@ -194,6 +210,14 @@ let private registryKeyFor normalizedWorktree sessionId =
     match normalizeSessionId sessionId with
     | Some value -> "sid:" + value
     | None -> "wt:" + normalizedWorktree
+
+/// Remove only the exact failed entry so a newer concurrent re-registration always survives.
+let internal invalidateRegistration (entry: SessionEntry) =
+    let registryKey = registryKeyFor entry.WorktreePath entry.SessionId
+    let registrations =
+        sessionRegistry :> ICollection<KeyValuePair<string, SessionEntry>>
+
+    registrations.Remove(KeyValuePair(registryKey, entry))
 
 let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
     let now = DateTime.UtcNow
@@ -260,19 +284,23 @@ let private tryDeliverAt now (request: SendRequest) =
             |> selectLiveTarget now request.Prompt.Kind targetSessionId
 
         match target with
-        | None -> return DeliveryResult.NoLiveSession
+        | None -> return AttemptNoLiveSession
         | Some entry ->
             match! postPrompt entry request.Prompt worktreeKey with
-            | Ok () -> return DeliveryResult.Delivered
-            | Error _ ->
+            | Ok () -> return AttemptDelivered
+            | Error failure ->
                 enqueue now worktreeKey entry.SessionId request.Prompt
-                return DeliveryResult.DeliveryFailed
+                return AttemptFailed(entry, failure)
     }
 
 let tryDeliver (request: SendRequest) =
     async {
         let now = DateTime.UtcNow
-        return! tryDeliverAt now request
+
+        match! tryDeliverAt now request with
+        | AttemptDelivered -> return DeliveryResult.Delivered
+        | AttemptNoLiveSession -> return DeliveryResult.NoLiveSession
+        | AttemptFailed _ -> return DeliveryResult.DeliveryFailed
     }
 
 let send (request: SendRequest) =
@@ -282,9 +310,12 @@ let send (request: SendRequest) =
         let targetSessionId = normalizeSessionId request.SessionId
 
         match! tryDeliverAt now request with
-        | DeliveryResult.Delivered -> return SendResult.Delivered
-        | DeliveryResult.DeliveryFailed -> return SendResult.Queued
-        | DeliveryResult.NoLiveSession ->
+        | AttemptDelivered -> return SendResult.Delivered
+        | AttemptFailed(entry, PromptDeliveryFailure.Transport) ->
+            return SendResult.TransportFailed entry
+        | AttemptFailed(_, PromptDeliveryFailure.Rejected) ->
+            return SendResult.Queued
+        | AttemptNoLiveSession ->
             enqueue now worktreeKey targetSessionId request.Prompt
             return SendResult.Queued
     }

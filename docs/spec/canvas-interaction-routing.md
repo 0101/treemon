@@ -30,7 +30,10 @@ launch for `diff.html` is pending; the explicit launch keeps precedence until it
 
 Canvas messages resolve the current target from the unified store. A live target receives the
 payload immediately. An offline known target is resumed by its exact session ID; success requires
-that session to register a newer bridge before the registration timeout.
+that session to register a newer bridge before the registration timeout. Concurrent recoveries for
+the same normalized worktree and exact target session join one shared resume outcome. If an
+immediate POST fails at the transport boundary, Treemon conditionally invalidates only that failed
+registration; a newer concurrent re-registration wins and is never removed.
 
 When no target exists, or the user chooses a fresh session after resume failure, Treemon queues the
 interaction and starts one session under a worktree-wide launch lock. The previous durable target,
@@ -79,6 +82,11 @@ launch correlation remains server-side and worktree-scoped. The same coordinator
 automatic diff assignments with pending registration and queue drain, discarding assignments for
 a filename whose fresh launch is still pending.
 
+Exact-session recovery uses a separate in-memory coordinator keyed by normalized worktree and
+target session ID. The starter owns spawn plus registration confirmation; joiners await the same
+`CanvasMessageResult`, and completion removes the entry for success, spawn failure, exception, or
+registration timeout.
+
 `SessionActivityService` assigns the unified `diff.html` target whenever the real-activity winner
 changes; heartbeat, usage, and metadata-only reports cannot move it. `CanvasScanner` continues
 exposing `OwnerSessionId` only for AgentDocs, and the client continues gating every lifecycle
@@ -95,6 +103,8 @@ affordance on `CanvasDoc.Kind`.
   authored-document UI or lifecycle behavior.
 - **One launch per worktree:** pending interactions share a replacement session rather than
   maintaining independent per-view claim state.
+- **One resume per exact target:** concurrent offline interactions share the same exact-session
+  recovery instead of repeatedly replacing the worktree's terminal.
 - **Server-side launch correlation:** registration-after-launch is correlated by the worktree-wide
   pending launch; the rare same-worktree reconnect race is an accepted simplification.
 - **Diff follows real activity; Beadspace stays sticky:** this preserves current user-facing
