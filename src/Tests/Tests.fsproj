@@ -7,6 +7,7 @@
 
   <ItemGroup>
     <Compile Include="TestUtils.fs" />
+    <Compile Include="SqliteTestDatabase.fs" />
     <Compile Include="WorktreeFixtures.fs" />
     <Compile Include="GitTestHelpers.fs" />
     <Compile Include="WorktreeDiffTests.fs" />
@@ -19,7 +20,6 @@
     <Compile Include="SchedulerTests.fs" />
     <Compile Include="IdleDetectionTests.fs" />
     <Compile Include="ServerParsingTests.fs" />
-    <Compile Include="FileUtilsTests.fs" />
     <Compile Include="PrFilteringTests.fs" />
     <Compile Include="GithubParsingTests.fs" />
     <Compile Include="GithubFixtureTests.fs" />
@@ -52,6 +52,7 @@
     <Compile Include="SerializationTests.fs" />
     <Compile Include="WorktreeRootsConfigTests.fs" />
     <Compile Include="ServerStartupResolutionTests.fs" />
+    <Compile Include="ServerLifecycleTests.fs" />
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
     <Compile Include="OverviewBandE2ETests.fs" />
@@ -76,6 +77,10 @@
     <Compile Include="OverviewDataTests.fs" />
     <Compile Include="OverviewBandStateTests.fs" />
     <Compile Include="OverviewPersistenceTests.fs" />
+    <Compile Include="OverviewSnapshotStoreTests.fs" />
+    <Compile Include="OverviewHistoryApiTests.fs" />
+    <Compile Include="OverviewSnapshotCaptureTests.fs" />
+    <Compile Include="OverviewChartTests.fs" />
     <Compile Include="BeadsDataTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />
     <Compile Include="HttpSecurityTests.fs" />

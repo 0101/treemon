@@ -518,7 +518,7 @@ let internal createHost
         newIdentity
         canvasPort
 
-let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int) (cts: System.Threading.CancellationToken) =
+let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int) =
     let host =
         createHost
             agent
@@ -527,7 +527,5 @@ let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int)
             canvasPort
 
     Log.log "Startup" $"Canvas doc server starting on http://127.0.0.1:{canvasPort}"
-    host.StartAsync(cts).ContinueWith(fun (t: System.Threading.Tasks.Task) ->
-        if t.IsFaulted then
-            Log.log "Canvas" $"Canvas doc server failed to start: {t.Exception.InnerException.Message}")
-    |> ignore
+    host.Start()
+    host
