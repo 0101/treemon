@@ -254,7 +254,7 @@ let eventLog (events: CardEvent list) =
     | evts ->
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map eventLogEntry)
+            prop.children (evts |> List.sortBy _.Timestamp |> List.map eventLogEntry)
         ]
 
 let canvasEventEntry (callbacks: CardCallbacks) (scopedKey: string) (evt: CanvasEvent) =
@@ -277,7 +277,7 @@ let canvasEventLog (callbacks: CardCallbacks) (scopedKey: string) (events: Canva
     | evts ->
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map (canvasEventEntry callbacks scopedKey))
+            prop.children (evts |> List.sortBy _.Timestamp |> List.map (canvasEventEntry callbacks scopedKey))
         ]
 
 let abbreviatePipelineName (repoName: string) (name: string) =

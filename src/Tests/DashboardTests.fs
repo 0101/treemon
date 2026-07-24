@@ -1,8 +1,11 @@
 module Tests.DashboardTests
 
+open System
 open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
+open Newtonsoft.Json
+open Shared
 
 [<TestFixture>]
 [<Category("E2E")>]
@@ -926,6 +929,34 @@ type DashboardTests() =
     [<Test>]
     member this.``Event entries are in chronological order newest at bottom``() =
         task {
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let routeHandler =
+                Func<IRoute, System.Threading.Tasks.Task>(fun route ->
+                    (task {
+                        let! upstream = route.FetchAsync()
+                        let! json = upstream.TextAsync()
+                        let events = JsonConvert.DeserializeObject<Map<string, CardEvent list>>(json, converter)
+                        let now = DateTimeOffset.UtcNow
+                        let newest =
+                            { Source = EventSource.PostFork
+                              Message = "newer setup failure"
+                              Timestamp = now.AddSeconds(-5.0)
+                              Status = Some(StepStatus.Failed "newer failure")
+                              Duration = None }
+                        let oldest =
+                            { newest with
+                                Message = "older setup failure"
+                                Timestamp = now.AddMinutes(-2.0)
+                                Status = Some(StepStatus.Failed "older failure") }
+                        let body =
+                            events
+                            |> Map.map (fun _ _ -> [ newest; oldest ])
+                            |> fun reversed -> JsonConvert.SerializeObject(reversed, converter)
+                        do! route.FulfillAsync(RouteFulfillOptions(ContentType = "application/json", Body = body))
+                    } :> System.Threading.Tasks.Task))
+
+            do! this.Page.RouteAsync("**/IWorktreeApi/getSyncStatus", routeHandler)
+            let! _ = this.Page.ReloadAsync()
             let logs = eventLog this.Page
             do! logs.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
