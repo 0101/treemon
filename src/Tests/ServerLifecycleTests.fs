@@ -101,6 +101,35 @@ type ServerLifecycleTests() =
         )
 
     [<Test>]
+    member _.``background loop shares cancellation between workflow and task``() =
+        let started =
+            TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let stopped =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let loop =
+            BackgroundLoop.start (fun cancellationToken -> async {
+                let! ambientCancellation = Async.CancellationToken
+                let usesSameCancellation = ambientCancellation = cancellationToken
+                started.SetResult usesSameCancellation
+
+                try
+                    do!
+                        Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                        |> Async.AwaitTask
+                finally
+                    stopped.SetResult()
+            })
+
+        Assert.That(
+            started.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(),
+            Is.True
+        )
+
+        BackgroundLoop.stop "Test background loop" loop
+        Assert.That(stopped.Task.IsCompletedSuccessfully, Is.True)
+
+    [<Test>]
     member _.``capture failure does not stop host startup or scheduler work``() =
         let order = ConcurrentQueue<string>()
         let failed =

@@ -138,7 +138,8 @@ startup failure or runtime shutdown cancels and awaits capture. `WorktreeApi.get
 performs one bounded snapshot query and returns the existing `OverviewHistoryResponse` wire type.
 
 The refresh scheduler no longer receives history assembly or persistence callbacks and performs no
-history work inside its task loop.
+history work inside its task loop. Scheduler polling and snapshot capture share the same
+start/cancel/await lifecycle machinery while retaining independent cadence policies.
 
 ## Decisions
 

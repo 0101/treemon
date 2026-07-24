@@ -818,7 +818,7 @@ module CanvasWatchers =
         watchers |> Map.iter (fun _ watcher ->
             try watcher.Dispose() with _ -> ())
 
-let start
+let run
     (agent: MailboxProcessor<StateMsg>)
     (worktreeRoots: string list)
     (ct: CancellationToken)
@@ -943,4 +943,4 @@ let start
             return! loop lastRuns initialWatchers watcherCleanup
         }
 
-    Async.StartAsTask(startup, cancellationToken = ct) :> Task
+    startup

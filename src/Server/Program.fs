@@ -4,7 +4,6 @@ open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
 open System
 open System.Threading
-open System.Threading.Tasks
 open Microsoft.Extensions.Hosting
 open Shared
 open Server
@@ -228,10 +227,6 @@ let internal persistResolvedRoots (resolution: RootsResolution) =
         | Error msg ->
             Log.log "Startup" $"Failed to persist worktree roots: {msg}"
 
-type internal BackgroundLoop =
-    { Cancellation: CancellationTokenSource
-      Completion: Task }
-
 type internal SessionActivityComponents =
     { Store: SessionActivityStore.SessionActivityStore
       Service: SessionActivityService.SessionActivityService }
@@ -256,29 +251,6 @@ let internal createSessionActivityComponents
     with _ ->
         (store :> System.IDisposable).Dispose()
         reraise ()
-
-let internal startBackgroundLoop (workflow: CancellationToken -> Async<unit>) =
-    let cancellation = new CancellationTokenSource()
-
-    { Cancellation = cancellation
-      Completion =
-        Async.StartAsTask(
-            workflow cancellation.Token,
-            cancellationToken = CancellationToken.None
-        )
-        :> Task }
-
-let internal stopBackgroundLoop name (loop: BackgroundLoop) =
-    try
-        loop.Cancellation.Cancel()
-
-        try
-            loop.Completion.GetAwaiter().GetResult()
-        with
-        | :? OperationCanceledException -> ()
-        | ex -> Log.log "Shutdown" $"{name} stopped with an error: {ex.Message}"
-    finally
-        loop.Cancellation.Dispose()
 
 let internal createSessionActivityRuntime
     (dbPath: string)
@@ -316,13 +288,13 @@ let internal shutdownStoreUsers
 
 let internal shutdownSessionActivityRuntime
     (runtime: SessionActivityRuntime)
-    (schedulerLoop: BackgroundLoop option)
+    (schedulerLoop: BackgroundLoop.Running option)
     =
     shutdownStoreUsers
         (fun () -> (runtime.Components.Service :> System.IDisposable).Dispose())
         (fun () ->
             schedulerLoop
-            |> Option.iter (stopBackgroundLoop "Refresh scheduler"))
+            |> Option.iter (BackgroundLoop.stop "Refresh scheduler"))
         (fun () -> (runtime.Components.Store :> System.IDisposable).Dispose())
 
 let internal runHostWithCapture
@@ -336,9 +308,9 @@ let internal runHostWithCapture
         startHost ()
         waitForShutdown ()
     | Some workflow ->
-        let loop = startBackgroundLoop workflow
+        let loop = BackgroundLoop.start workflow
         let stoppingRegistration =
-            stopping.Register(fun () -> loop.Cancellation.Cancel())
+            stopping.Register(fun () -> BackgroundLoop.cancel loop)
         Log.log "Startup" "Overview snapshot capture started"
 
         try
@@ -346,7 +318,7 @@ let internal runHostWithCapture
             waitForShutdown ()
         finally
             stoppingRegistration.Dispose()
-            stopBackgroundLoop "Overview snapshot capture" loop
+            BackgroundLoop.stop "Overview snapshot capture" loop
 
 [<EntryPoint>]
 let main args =
@@ -419,18 +391,11 @@ let main args =
                         rootPaths
                 let store = activity.Components.Store
 
-                let schedulerCancellation = new CancellationTokenSource()
-
                 let scheduler =
                     try
-                        { Cancellation = schedulerCancellation
-                          Completion =
-                            RefreshScheduler.start
-                                agent
-                                worktreeRoots
-                                schedulerCancellation.Token }
+                        BackgroundLoop.start
+                            (RefreshScheduler.run agent worktreeRoots)
                     with _ ->
-                        schedulerCancellation.Dispose()
                         shutdownSessionActivityRuntime activity None
                         reraise ()
 
