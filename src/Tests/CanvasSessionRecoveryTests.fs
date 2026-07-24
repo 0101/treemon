@@ -2,7 +2,6 @@ module Tests.CanvasSessionRecoveryTests
 
 open System
 open System.Collections.Concurrent
-open System.IO
 open System.Net
 open System.Net.Sockets
 open System.Threading.Tasks
@@ -10,9 +9,6 @@ open NUnit.Framework
 open Shared
 open Server
 open Tests.TestUtils
-
-let private uniquePath prefix =
-    Path.Combine(Path.GetTempPath(), $"treemon-{prefix}-{Guid.NewGuid():N}")
 
 [<TestFixture>]
 [<Category("Unit")>]

@@ -555,11 +555,6 @@ type DiffComparisonContextTests() =
 [<NonParallelizable>]
 type AttributeOwnershipTests() =
 
-    // Unique per test so the process-global ownership agent never leaks state between tests.
-    let uniquePath prefix =
-        let id = System.Guid.NewGuid().ToString("N")[..7]
-        $"/test/{prefix}/{id}"
-
     let uniqueSid prefix =
         let id = System.Guid.NewGuid().ToString("N")[..7]
         $"{prefix}-{id}"

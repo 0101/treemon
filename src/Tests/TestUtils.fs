@@ -18,6 +18,10 @@ let ts (s: string) : DateTimeOffset = DateTimeOffset.Parse(s, CultureInfo.Invari
 /// Build a push-model `Message` (domain record) from body text and an ISO-8601 timestamp string.
 let msg (text: string) (t: string) : Message = { Text = text; At = ts t }
 
+/// Build a unique temporary path without creating it.
+let uniquePath prefix =
+    Path.Combine(Path.GetTempPath(), $"treemon-{prefix}-{Guid.NewGuid():N}")
+
 let resolveCmdShim (fileName: string) =
     if Path.GetExtension(fileName) = "" then
         let cmdPath = $"{fileName}.cmd"

@@ -14,12 +14,6 @@ open Server.CanvasBridge
 open Server.RefreshScheduler.CanvasWatchers
 open Tests.TestUtils
 
-// Each test uses a unique worktree path to avoid shared-state interference
-// between tests (the module uses ConcurrentDictionaries at module level).
-let private uniquePath prefix =
-    let id = Guid.NewGuid().ToString("N")[..7]
-    $"/test/{prefix}/{id}"
-
 // Unique session IDs keep tests isolated now that the registry is keyed by sessionId
 // (a shared literal like "s1" would otherwise collide across tests).
 let private uniqueSid prefix =
