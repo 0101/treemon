@@ -25,16 +25,21 @@ Static styling prototypes: `.agents/canvas/overview-drilldown-investigation.html
 
 - Each agent-group column (Agents section) and task-bucket column (Tasks section) is
   clickable. Clicking a column selects that group; clicking the selected group again deselects it.
+- Selecting an agent group from the sticky Agents strip scrolls the dashboard all the way to the top
+  after the selection renders, placing the newly-opened agent breakdown in view. Closing the selected
+  group does not force a scroll.
 - **Single-select**: at most one group is selected at a time (across both sections).
 - The selected column renders as a **black "tab"** with rounded top corners, sitting flush against a
   black **breakdown panel** rendered directly beneath the group's row.
 - The breakdown panel appears **inside its own section**:
   - Agent-group breakdown renders **between the Agents row and the Tasks section**.
   - Task-bucket breakdown renders **directly below the Tasks row**.
-- Within each section, the group columns **wrap** to the next line when the pane is too narrow (a
-  row-gap keeps wrapped lines legible), instead of a horizontal scrollbar.
+- In the expanded Overview, group columns **wrap** to the next line when the pane is too narrow (a
+  row-gap keeps wrapped lines legible). The compact pinned Agents row stays on one line and uses
+  horizontal overflow when needed, so no agent group is clipped.
 - The panel closes when: the group is re-clicked, the panel's **✕** button is clicked, or **Esc** is
-  pressed while a group is selected.
+  pressed while a group is selected. An agent-group panel also closes when scrolling transitions
+  the Agents strip into its compact pinned state.
 - Selection is **ephemeral** session state — it does not persist across reloads (unlike the band's
   open/closed state).
 
@@ -126,11 +131,16 @@ type OverviewSelection =
 - `Model` gains `SelectedOverviewGroup: OverviewSelection option` (initialized `None`).
 - New messages:
   - `SelectOverviewGroup of OverviewSelection` — **toggles**: selecting the already-selected group
-    sets it back to `None`.
+    sets it back to `None`. Opening an Agents selection while the Agents strip is pinned schedules a
+    dashboard scroll to `top = 0` through `Navigation` on the next animation frame so the rendered
+    breakdown is visible; normal-row selections do not move the dashboard.
   - `SelectOverviewWorktree of scopedKey: string` — the arrow-nav-parity handler:
     `expandRepoOwning` → `applyFocus true (Some (Card scopedKey))` → `scrollFocusedIntoView Normal`,
     persisting collapsed repos when a repo was expanded. Must **not** open the Canvas pane.
 - `ToggleOverviewPanel` clears `SelectedOverviewGroup` when it closes the band.
+- `SetOverviewAgentsStuck` records the dashboard's normal-vs-pinned transition. Entering the pinned
+  state clears an Agents selection so a detached selected tab cannot remain after its panel scrolls
+  away.
 - On `DataLoaded`, drop `SelectedOverviewGroup` if the fresh roll-up no longer contains that group.
 - `Esc` closes the panel when a group is selected (extend the dashboard key handling / `KeyPressed`).
 
@@ -141,12 +151,21 @@ type OverviewSelection =
   `OverviewBand.view model.Repos`).
 - Each `agentColumn` / `taskColumn` becomes clickable (raises `onSelectGroup`) and gets an
   `overview-item-selected`/tab class when it is the selected group.
-- Render the breakdown panel inside the relevant section when a matching group is selected: the ✕
-  close button (top-right corner, absolutely positioned so it adds no vertical space), repo-grouped members, agent chips vs. task bars (task bar width = `member.Contribution * barMaxPx / overview.Scale`, floored at the existing visible minimum).
+- Render one sticky Agents section plus a 1px zero-net-flow sentinel and the normal-flow
+  breakdown/Tasks remainder. A dashboard CSS Scroll Timeline morphs the same Agents DOM: heading and
+  metadata fade, the existing circle groups translate upward, and the band clips to compact
+  Canvas-header height. There is no second compact circle tree to overlap during transition. Circle
+  translation is derived from rendered geometry and refreshed by `ResizeObserver`, so platform font
+  metrics land on the same center. An `IntersectionObserver` is active only while agent groups
+  exist, watches only the sentinel, closes an agent selection after it passes strictly above the
+  dashboard boundary, and enables the pinned `nowrap` layout with horizontal overflow.
+- Render the breakdown panel below the relevant row when a matching group is selected: the ✕ close
+  button (top-right corner, absolutely positioned so it adds no vertical space), repo-grouped members,
+  agent chips vs. task bars.
 - CSS additions near the existing `.overview-*` rules (`index.html`): the selected black tab
   (rounded top corners), the `.overview-breakdown` panel, `.overview-chips`/chip, the task
-  `name + bar` rows, the close button, and `.overview-items` wrapping (`flex-wrap: wrap`, no
-  horizontal scrollbar). Follow
+  `name + bar` rows, the close button, expanded `.overview-items` wrapping, and pinned-agent
+  single-row overflow. Follow
   the existing Catppuccin palette and the CSS-classes-only rule (the proportional bar width is the
   already-documented inline-width exception).
 
@@ -155,9 +174,11 @@ type OverviewSelection =
 - **Unit** (`src/Tests/OverviewDataTests.fs`): membership correctness per bucket/group — the right
   worktrees, correct `Contribution`, `Count` == list length / Σ contributions, respects
   `isActive`/`IsArchived`, and repo names populated.
-- **E2E**: **no new E2E tests are added** for this feature (project decision). Verification instead
-  proves the existing E2E suite (`Category=E2E`, incl. the read-only `OverviewBandE2ETests`) still
-  passes with zero regressions, alongside the `OverviewData` membership unit tests above.
+- **E2E** (`OverviewBandE2ETests`): verifies exactly one Agents band/circle tree exists, heading and
+  metadata have intermediate opacity midway through the morph, entering the pinned state closes an
+  agent drill-down, final circles share one centered row at Canvas-header height on Windows/Linux,
+  a narrow dashboard keeps one horizontally scrollable row with the last group reachable, and
+  clicking a circle scrolls back to its drill-down.
 
 ## Decisions
 
@@ -167,11 +188,13 @@ Locked during prototyping (see the canvas prototype doc):
 - **Panel placement: inside the band**, directly under the selected group's section row.
 - **Single-select**; re-click / ✕ / Esc closes.
 - **Ephemeral** selection (not persisted).
-- **Groups wrap** to the next line per section on narrow panes (no horizontal scrollbar).
+- **Expanded groups wrap** on narrow panes; the compact pinned Agents row stays single-line and
+  horizontally scrolls only when required.
 - **Agent breakdown** = borderless activity-colored `[● name]` chips; **task breakdown** = `name + bar`
   rows on the band's shared task scale.
-- **No new E2E tests.** Verification = existing E2E suite stays green + `OverviewData` membership unit
-  tests; new UI behavior is covered by unit tests at the data layer, not new Playwright tests.
+- **Sticky strip stays separate from the breakdown.** Only the agent summary remains pinned; the
+  detail panel and Tasks content stay in normal flow so they cannot cover the dashboard while
+  scrolling.
 
 ## Related Specs
 

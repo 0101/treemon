@@ -47,6 +47,7 @@ let private model enabled : Model =
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
+      OverviewAgentsStuck = false
       SelectedOverviewGroup = None }
 
 let private enabled (model: Model) =

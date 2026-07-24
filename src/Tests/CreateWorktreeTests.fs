@@ -37,6 +37,7 @@ let private defaultModel : Model =
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
+      OverviewAgentsStuck = false
       SelectedOverviewGroup = None }
 
 /// Calls update and returns the model, ignoring the Cmd. Handles the case where

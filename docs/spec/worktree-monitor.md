@@ -91,7 +91,10 @@ Coding-tool status is **pushed** by the Copilot CLI extension, not parsed from s
 the per-provider log-parsing detectors (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`,
 `getStatusFromFiles`) have been **removed**. The extension observes the SDK session event stream and
 POSTs lifecycle events to the server, which folds them into live per-session state and collapses each
-worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). See
+worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). Explicit background-agent
+lifecycle events are folded into process-local per-tool clocks so a root turn cannot settle Idle
+while delegated agents are still running. The clocks are intentionally forgotten on a Treemon
+restart in exchange for a much simpler persistence model. See
 `docs/spec/session-status-push.md` for the full model.
 
 - Status vocabulary is `CodingToolStatus = Working | WaitingForUser | Idle | NoSession`; the dot is a
@@ -223,9 +226,9 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Shared/Types.fs` | Domain types: `DashboardResponse`, `CodingToolStatus`, `CodingToolProvider`, `CommentSummary` |
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
-| `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure fold, SQLite (WAL) store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
+| `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure live fold, SQLite (WAL) base-state/history store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
 | `src/Server/UserMessageFormatting.fs` | Server-owned system-reminder suppression and canvas prompt projection shared by ingestion, activity, and footer fields |
-| `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, per-worktree provider config |
+| `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, and per-worktree provider config |
 | `src/Server/AutoSync.fs` | Agent auto-sync prompt, open-session-first target selection, base-revision eligibility, and live-delivery/fallback orchestration |
 | `src/Server/CardEventLog.fs` | Transient post-fork lifecycle events surfaced on worktree cards through `getSyncStatus` |
 | `src/Server/SessionBridge.fs` | Generic session registration, liveness, queued prompt delivery, and forwarding |

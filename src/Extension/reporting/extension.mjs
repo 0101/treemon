@@ -1,6 +1,6 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { randomUUID } from "node:crypto";
-import { buildNonBlankMessageReport, buildReport } from "./reporting-core.mjs";
+import { buildNonBlankMessageReport, mapSdkEvent } from "./reporting-core.mjs";
 
 // treemon-reporting — the passive, reporting-only extension (Phase 1 of the push status model).
 //
@@ -10,15 +10,17 @@ import { buildNonBlankMessageReport, buildReport } from "./reporting-core.mjs";
 // injects context — so the agent transcript is identical with reporting on or off, and there is no
 // canvas_take_ownership tool collision when both extensions load in the same session.
 //
-// Source-metadata filtering lives HERE, while lifecycle state stays in the server's pure fold:
-//   * sub-agent events (any event carrying `agentId`) are dropped;
+// Source-metadata filtering stays at this extension boundary, while lifecycle state stays in the
+// server's pure fold:
+//   * explicit sub-agent start/completion/failure lifecycle is forwarded before content filtering;
+//   * other sub-agent events (any event carrying `agentId`) are dropped;
 //   * a skill's own `<skill-context>` injection (a `user.message` tagged `source: skill-*`) is dropped;
 //   * runtime `<system_reminder>` user-channel messages are classified by the server;
 //   * ask_user request/completion and session.idle are forwarded as facts for the server to resolve;
 //   * only the relevant SDK event types are mapped — everything else is ignored.
 //
 // The wire contract (the single coupling point with the F# handler, Server/SessionActivityService.fs):
-//   { sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?, currentTokens?, tokenLimit? }
+//   { sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?, toolCallId?, currentTokens?, tokenLimit? }
 // where `kind` is one of the closed set mapped 1:1 onto the server's SessionEvent union:
 //   assistant.turn_start   -> turn_started
 //   user.message           -> user_prompt         (message required; server drops system reminders)
@@ -26,6 +28,8 @@ import { buildNonBlankMessageReport, buildReport } from "./reporting-core.mjs";
 //   skill.invoked          -> skill_invoked        (skillName required)
 //   elicitation.requested / user_input.requested -> awaiting_user_input (message = the ask_user question, optional)
 //   elicitation.completed / user_input.completed -> user_input_completed
+//   subagent.started       -> background_agent_started  (toolCallId required)
+//   subagent.completed / subagent.failed -> background_agent_finished (toolCallId required)
 //   assistant.intent       -> intent_reported     (message = the intent text, required)
 //   session.title_changed  -> title_reported      (message = the session title, required)
 //   metadata.snapshot      -> title_bootstrap     (message = the persisted session summary, required)
@@ -64,7 +68,8 @@ const HEARTBEAT_INTERVAL_MS = 60000;
 // `elicitation.requested`/`elicitation.completed` (question in `data.message`); older builds emitted
 // `user_input.requested`/`user_input.completed` (question in `data.question`) — both shapes are
 // subscribed for forward/backward compat. `session.usage_info` is the context-window gauge (ephemeral
-// upstream, so it only ever arrives live, never in the getEvents() replay). Subscribing per-type
+// upstream, so it only ever arrives live, never in the getEvents() replay). Explicit subagent
+// lifecycle is included, but sub-agent content is still dropped by the mapper. Subscribing per-type
 // avoids handling the high-volume streaming/delta events at all.
 const SUBSCRIBED_TYPES = [
   "assistant.turn_start",
@@ -80,6 +85,9 @@ const SUBSCRIBED_TYPES = [
   "elicitation.completed",
   "user_input.requested",
   "user_input.completed",
+  "subagent.started",
+  "subagent.completed",
+  "subagent.failed",
 ];
 
 const log = (msg) => console.error(`[treemon-reporting] ${msg}`);
@@ -131,90 +139,10 @@ function eventContext(event) {
   };
 }
 
-function base(event, kind) {
-  return buildReport(eventContext(event), kind);
-}
-
-function messageReport(event, kind, text) {
-  return buildNonBlankMessageReport(eventContext(event), kind, text);
-}
-
-// A skill's own context injection arrives as a `user.message` tagged with BOTH a `source` of
-// `skill-<name>` AND a `<skill-context …>` content preamble. Both markers are required: the source
-// alone is system-controlled and trustworthy, but a genuine user message could legitimately begin
-// with the literal "<skill-context", so requiring the content check without the system-set source
-// would let such a message masquerade as an injection (and vice-versa).
-function isSkillContextInjection(data) {
-  const source = String(data?.source ?? "").toLowerCase();
-  const content = String(data?.content ?? "").replace(/^\s+/, "").toLowerCase();
-  return source.startsWith("skill-") && content.startsWith("<skill-context");
-}
-
-// Map one SDK event onto a wire report, or null when it bears no status (and is therefore dropped at
-// the source). Messages with no text are dropped: an empty assistant.message is a pure tool-call
-// turn, and a content-less user.message boundary is already covered by the paired assistant.turn_start.
-function mapEvent(event) {
-  const data = event.data ?? {};
-  switch (event.type) {
-    case "assistant.turn_start":
-      return base(event, "turn_started");
-    case "assistant.turn_end":
-      return base(event, "turn_ended");
-    case "session.idle":
-      return base(event, "went_idle");
-    case "skill.invoked": {
-      const name = String(data.name ?? "").trim();
-      return name ? { ...base(event, "skill_invoked"), skillName: name } : null;
-    }
-    case "assistant.message": {
-      return messageReport(event, "assistant_message", data.content);
-    }
-    case "assistant.intent": {
-      // The agent's short description of what it's currently doing/planning. Blank is dropped so a
-      // "cleared" intent never regresses the card — the last non-empty intent is retained.
-      return messageReport(event, "intent_reported", data.intent);
-    }
-    case "session.title_changed": {
-      // The session's rolling title/summary — the same text the CLI shows in its tab. The server
-      // combines it with the intent (freshest of the two wins), so a fresh title supersedes a stale
-      // intent. Blank is dropped (nothing to show).
-      return messageReport(event, "title_reported", data.title);
-    }
-    case "user.message": {
-      if (isSkillContextInjection(data)) return null;
-      return messageReport(event, "user_prompt", data.content);
-    }
-    case "session.usage_info": {
-      // The context-window gauge: currentTokens of tokenLimit. It never perturbs lifecycle state.
-      // A non-positive or non-finite limit is degenerate and dropped; a negative current is clamped
-      // to 0. Values are rounded to plain integers for the F# int DTO.
-      const cur = Number(data.currentTokens);
-      const lim = Number(data.tokenLimit);
-      if (!Number.isFinite(cur) || !Number.isFinite(lim) || lim <= 0) return null;
-      return { ...base(event, "usage_info"), currentTokens: Math.max(0, Math.round(cur)), tokenLimit: Math.round(lim) };
-    }
-    case "elicitation.requested":
-    case "user_input.requested": {
-      // ask_user in Copilot CLI 1.0.71+ emits elicitation.requested carrying the prompt in
-      // `data.message`; older builds emitted user_input.requested carrying it in `data.question`.
-      // Accept either shape so the ask_user question surfaces as LastAssistantMessage.
-      return messageReport(event, "awaiting_user_input", data.message ?? data.question)
-        ?? base(event, "awaiting_user_input");
-    }
-    case "elicitation.completed":
-    case "user_input.completed":
-      return base(event, "user_input_completed");
-    default:
-      return null;
-  }
-}
-
 // Handle one event from either the live stream or join-time replay. The extension only filters using
 // trusted source metadata and maps SDK events to wire facts; the server owns lifecycle state.
 function handle(event) {
-  if (event.agentId) return; // sub-agent event — never the user's top-level status
-
-  const report = mapEvent(event);
+  const report = mapSdkEvent(eventContext(event), event);
   if (!report) return;
 
   postReport(report);

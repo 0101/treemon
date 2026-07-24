@@ -10,10 +10,12 @@ open Server.SessionActivity
 // The durable mirror behind the push-model live state. The SessionActivity mailbox (single writer)
 // upserts the per-session fold result and appends the raw event to two tables:
 //
-//   session_status  — one row per session: the latest fold state. Read back on restart to rebuild the
-//                     live Map before serving (loadLiveStatuses), so cards are correct immediately.
+//   session_status  — one row per session: the latest persisted base fold state. Read back on
+//                     restart to rebuild the live Map (loadLiveStatuses).
 //   activity_events — the append-only raw stream: the substrate the Overview history aggregates on
 //                     read (queryWindow), and the source of INSERT OR IGNORE idempotency (event_id PK).
+//
+// Background-agent ordering clocks are deliberately process-local and are not persisted.
 //
 // WAL journalling lets queryWindow / loadLiveStatuses read concurrently with the mailbox writer with
 // no lock contention; the writer being single means status upserts never race each other. The SQLite
@@ -155,7 +157,8 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
           LastAssistantMessage = readOptMsg r 7 8
           ContextUsage = contextUsage
           AwaitingUserSince = readOptTimestamp r 18
-          UserInputCompletedAt = readOptTimestamp r 19 }
+          UserInputCompletedAt = readOptTimestamp r 19
+          BackgroundAgentClocks = Map.empty }
       UpdatedAt = parseIso (r.GetString 13)
       LastSeen = parseIso (r.GetString 14)
       ContextUsageAt = contextUsageAt }
@@ -197,6 +200,8 @@ CREATE TABLE IF NOT EXISTS session_status (
     user_input_completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
+CREATE INDEX IF NOT EXISTS ix_status_worktree_activity
+ON session_status(worktree_path, updated_at DESC, session_id DESC);
 
 CREATE TABLE IF NOT EXISTS activity_events (
     event_id      TEXT PRIMARY KEY,
@@ -347,21 +352,14 @@ WHERE last_seen >= $cutoff
 ORDER BY last_seen;
 """
 
-// Every stored session for one worktree, newest activity first, with NO idle-window filter
-// (unlike loadSql).
-// The resume path reads this: after a restart the idle-window live cache drops sessions last active
-// >2h ago, so a resume pick over that cache returns None (→ wrong `--continue` fallback); this keeps
-// the durable identity available until the 14d retention prune. Uses the ix_status_worktree index.
-let private worktreeStatusesSql =
+// Resume only needs the durable identity, not the full status aggregate.
+let private latestSessionIdForWorktreeSql =
     """
-SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-       intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-       context_current_tokens, context_token_limit, context_usage_at,
-       awaiting_user_since, user_input_completed_at
+SELECT session_id
 FROM session_status
 WHERE worktree_path = $wt
-ORDER BY updated_at DESC, session_id DESC;
+ORDER BY updated_at DESC, session_id DESC
+LIMIT 1;
 """
 
 let private queryWindowSql =
@@ -372,24 +370,32 @@ WHERE ts >= $start AND ts <= $end
 ORDER BY ts;
 """
 
-// pruneOld trims both tables past the retention cutoff: the append-only event stream (the unbounded
-// one) plus long-dead session rows well outside any live window.
-let private pruneSql =
-    """
-DELETE FROM activity_events WHERE ts < $cutoff;
-DELETE FROM session_status WHERE last_seen < $cutoff;
-"""
+let private pruneOldEventsSql = "DELETE FROM activity_events WHERE ts < $cutoff;"
 
-// Every stored session across all worktrees with NO idle-window filter — the durable footer/resume
-// substrate for cards whose sessions have aged out of the live map after a restart.
-let private allStatusesSql =
+let private pruneOldStatusesSql = "DELETE FROM session_status WHERE last_seen < $cutoff;"
+
+// One durable footer representative per worktree, selected before rows cross the SQLite boundary.
+let private retainedByWorktreeSql =
     """
+WITH ranked AS (
+    SELECT session_id, worktree_path, provider, status, current_skill,
+           last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+           intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
+           context_current_tokens, context_token_limit, context_usage_at,
+           awaiting_user_since, user_input_completed_at,
+           ROW_NUMBER() OVER (
+               PARTITION BY worktree_path
+               ORDER BY updated_at DESC, session_id DESC
+           ) AS activity_rank
+    FROM session_status
+)
 SELECT session_id, worktree_path, provider, status, current_skill,
        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
        intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
        context_current_tokens, context_token_limit, context_usage_at,
        awaiting_user_since, user_input_completed_at
-FROM session_status
+FROM ranked
+WHERE activity_rank = 1;
 """
 
 let private statusBySessionSql =
@@ -603,51 +609,46 @@ type SessionActivityStore(dbPath: string) =
         cmd.CommandText <- loadSql
         cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
         use reader = cmd.ExecuteReader()
-
         readRows reader readStored []
 
     /// The most recently active stored session per worktree across ALL rows, IGNORING the idle
-    /// window (unlike LoadLiveStatuses). The durable footer/resume substrate for cards: after a
-    /// restart a worktree whose sessions last ran outside the idle window is absent from the live
-    /// map, so its card would collapse to a blank NoSession and the resume button (which needs a
-    /// retained LastUserMessage) would be UI-unreachable. Keyed by worktree_path.
+    /// window (unlike LoadLiveStatuses). This is the durable footer and resume-button-visibility
+    /// substrate for cards whose sessions have aged out of the live map. Keyed by worktree_path.
     member _.RetainedByWorktree() : Map<string, StoredStatus> =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
-        cmd.CommandText <- allStatusesSql
+        cmd.CommandText <- retainedByWorktreeSql
         use reader = cmd.ExecuteReader()
 
         readRows reader readStored []
-        |> List.groupBy (_.WorktreePath >> WorktreePath.value)
-        |> List.choose (fun (path, sessions) ->
-            sessions
-            |> StoredStatus.tryMostRecentActivity
-            |> Option.map (fun session -> path, session))
+        |> List.map (fun session -> WorktreePath.value session.WorktreePath, session)
         |> Map.ofList
 
-    /// Every stored session for a worktree, newest activity first, INDEPENDENT of the idle window
-    /// (unlike LoadLiveStatuses). The RESUME substrate: after a restart a session last active >2h ago
-    /// is absent from the idle-window live cache, so a resume pick over that cache returned None and
-    /// resume wrongly fell back to `--continue` instead of `--resume <id>` (F10/C-02). Reading
-    /// session_status directly by worktree_path returns those older sessions too (kept until the 14d
-    /// retention prune), so `getLastSessionId` still finds the most-recent one across a restart.
-    member _.StatusesForWorktree(worktreePath: WorktreePath) : StoredStatus list =
+    /// Resume identity for a worktree, independent of the idle window and retained until pruning.
+    member _.LatestSessionIdForWorktree(worktreePath: WorktreePath) : string option =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
-        cmd.CommandText <- worktreeStatusesSql
+        cmd.CommandText <- latestSessionIdForWorktreeSql
         cmd.Parameters.AddWithValue("$wt", WorktreePath.value worktreePath) |> ignore
         use reader = cmd.ExecuteReader()
+        if reader.Read() then Some(reader.GetString 0) else None
 
-        readRows reader readStored []
-
-    /// Retention: drop events older than `cutoff` and session rows last seen before it. Returns the
-    /// total number of rows deleted across both tables.
+    /// Retention: drop old events and dead sessions. Returns the number of deleted rows.
     member _.PruneOld(cutoff: DateTimeOffset) : int =
         use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- pruneSql
-        cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-        cmd.ExecuteNonQuery()
+        use tx = conn.BeginTransaction()
+
+        let execute sql =
+            use cmd = conn.CreateCommand()
+            cmd.Transaction <- tx
+            cmd.CommandText <- sql
+            cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
+            cmd.ExecuteNonQuery()
+
+        let oldEventsDeleted = execute pruneOldEventsSql
+        let oldStatusesDeleted = execute pruneOldStatusesSql
+        tx.Commit()
+        oldEventsDeleted + oldStatusesDeleted
 
     /// History substrate: raw events with `ts` in [startTime, endTime], oldest first. WAL lets this
     /// run concurrently with the mailbox writer.
@@ -658,7 +659,6 @@ type SessionActivityStore(dbPath: string) =
         cmd.Parameters.AddWithValue("$start", isoUtc startTime) |> ignore
         cmd.Parameters.AddWithValue("$end", isoUtc endTime) |> ignore
         use reader = cmd.ExecuteReader()
-
         readRows reader readEventRow []
 
     interface IDisposable with

@@ -69,7 +69,7 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
 //     Working/WaitingForUser, open-but-idle → Idle (blue), no open session → NoSession (grey);
 //   * the FOOTER (activity / skill / last-user / last-assistant) comes from the active winner when
 //     one runs, else the session with the most-recent activity, so it survives Idle / NoSession.
-// Resume is a THIRD, distinct pick (getLastSessionId): the most-recently-active session regardless
+// Resume is a THIRD, distinct durable-store scalar pick: the most-recently-active session regardless
 // of active/idle (the session the user last touched).
 
 /// The blank grey card a worktree shows when it has NO push session at all (never reported, or its
@@ -121,9 +121,9 @@ let private toUserFooterMessage (message: Message) =
 ///   would rewrite it to Idle — it never lingers blue.
 /// * **Footer** (activity / skill / last user / last assistant) — DECOUPLED from the dot: the active
 ///   winner when one is running, otherwise the session with the MOST-RECENT ACTIVITY of ANY status
-///   (the same pick `getLastSessionId` uses for resume). Going Idle or losing the open session does NOT
-///   blank the footer: it stays populated while any session for the worktree remains in the store
-///   (retention / `idleWindow`).
+///   (the same activity ordering the durable resume query uses). Going Idle or losing the open
+///   session does NOT blank the footer: it stays populated while any session for the worktree remains
+///   in the store (retention / `idleWindow`).
 /// Render order for the per-session dots: Working first, then WaitingForUser, then Idle. NoSession is
 /// never a per-session status (it is the worktree-level collapse of an empty session set).
 let private sessionStatusOrder =
@@ -241,12 +241,3 @@ let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<
     |> Seq.groupBy (_.WorktreePath >> WorktreePath.value)
     |> Seq.map (fun (path, group) -> path, fromPushSessions now (List.ofSeq group))
     |> Map.ofSeq
-
-/// Resume pick — DISTINCT from the display (`pickActive`) pick: the most-recently-active session for
-/// the worktree regardless of active/idle (the session the user last touched). Reads the id from the
-/// push live state (the store's in-memory reflection) instead of scanning log directories. `None`
-/// when the worktree has never reported (→ the CLI `--continue` fallback in CodingToolCli).
-let getLastSessionId (sessions: StoredStatus list) : string option =
-    sessions
-    |> StoredStatus.tryMostRecentActivity
-    |> Option.map (_.SessionId >> SessionId.value)
