@@ -41,6 +41,7 @@ type GitData =
       /// reading a failed read as "no branch" (Decision #8 residual).
       Upstream: UpstreamResult
       MainBehindCount: int
+      BaseRevision: string option
       IsDirty: bool
       WorkMetrics: Shared.WorkMetrics option }
 
@@ -180,6 +181,16 @@ let getMainBehindCount (worktreePath: string) (mainRef: string) =
             |> Option.defaultValue 0
     }
 
+let getBaseRevision (worktreePath: string) (mainRef: string) =
+    async {
+        let! output = runGit worktreePath $"rev-parse {mainRef}"
+
+        return
+            output
+            |> Option.map _.Trim()
+            |> Option.filter (String.IsNullOrWhiteSpace >> not)
+    }
+
 /// git reports a genuine, stable "no upstream" deterministically via one of these fatals: the branch
 /// never configured a tracking ref ("no upstream configured"), HEAD is detached ("does not point to
 /// a branch"), or the branch is unborn / has no commits ("no such branch: '<name>'"). These are the
@@ -278,11 +289,13 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
         let! commitCountChild = Async.StartChild(getCommitCount worktreePath mainRef)
         let! diffStatsChild = Async.StartChild(getDiffStats worktreePath mainRef)
         let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath mainRef)
+        let! baseRevisionChild = Async.StartChild(getBaseRevision worktreePath mainRef)
 
         let! commit = commitChild
         let! headCommit = headChild
         let! upstream = upstreamChild
         let! mainBehind = mainBehindChild
+        let! baseRevision = baseRevisionChild
         let! dirty = dirtyChild
         let! commitCount = commitCountChild
         let! (linesAdded, linesRemoved) = diffStatsChild
@@ -319,6 +332,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
               LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
               Upstream = upstreamState
               MainBehindCount = mainBehind
+              BaseRevision = baseRevision
               IsDirty = dirty
               WorkMetrics = workMetrics }
     }

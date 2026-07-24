@@ -28,7 +28,6 @@
     <Compile Include="UserMessageFormattingTests.fs" />
     <Compile Include="CodingToolPushSourceTests.fs" />
     <Compile Include="CodingToolOrchestratorTests.fs" />
-    <Compile Include="SyncEngineTests.fs" />
     <Compile Include="CardEventLogTests.fs" />
     <Compile Include="UpstreamRemoteTests.fs" />
     <Compile Include="CreateWorktreeTests.fs" />
@@ -37,6 +36,7 @@
     <Compile Include="NavigationTests.fs" />
     <Compile Include="ComponentsTests.fs" />
     <Compile Include="CardViewsTests.fs" />
+    <Compile Include="AutoSyncClientTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="WorktreePathResolutionTests.fs" />
@@ -63,12 +63,15 @@
     <Compile Include="CanvasAwarenessTests.fs" />
     <Compile Include="CanvasShareClientTests.fs" />
     <Compile Include="FormattingTests.fs" />
+    <Compile Include="SessionBridgeTests.fs" />
+    <Compile Include="AutoSyncTests.fs" />
     <Compile Include="CanvasBridgeTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />
     <Compile Include="BeadsPlanningTests.fs" />
     <Compile Include="ActivityClassifierTests.fs" />
     <Compile Include="OverviewDataTests.fs" />
+    <Compile Include="OverviewBandStateTests.fs" />
     <Compile Include="OverviewPersistenceTests.fs" />
     <Compile Include="BeadsDataTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />

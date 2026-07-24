@@ -206,6 +206,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   Upstream = NoUpstream
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   WorkMetrics = None }
 
@@ -246,6 +247,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   Upstream = NoUpstream
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   WorkMetrics = None }
 
@@ -342,6 +344,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   Upstream = NoUpstream
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   WorkMetrics = None }
 
@@ -413,6 +416,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   Upstream = NoUpstream
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   WorkMetrics = None }
 
@@ -1177,6 +1181,7 @@ type MergedPrBranchScopeTests() =
               LastCommitTime = DateTimeOffset.UtcNow
               Upstream = Upstream "main"
               MainBehindCount = 0
+              BaseRevision = None
               IsDirty = false
               WorkMetrics = None }
 

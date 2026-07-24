@@ -178,7 +178,7 @@ type CardFooterRenderingTests() =
 
 /// isVisibleCardEvent decides which events reach a card. Post-fork setup is routine noise while it
 /// runs or when it succeeds, so only its failures (a genuine failure or a timeout, both `Failed`)
-/// stay on the card; events from every other source always show.
+/// stay on the card.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -206,7 +206,3 @@ type VisibleCardEventTests() =
     [<Test>]
     member _.``A timed-out post-fork event is kept (timeout surfaces as a failure)``() =
         Assert.That(isVisibleCardEvent (event EventSource.PostFork (Some(StepStatus.Failed "Timed out after 300000ms"))), Is.True)
-
-    [<Test>]
-    member _.``A succeeded sync event is always kept``() =
-        Assert.That(isVisibleCardEvent (event EventSource.Sync (Some StepStatus.Succeeded)), Is.True)

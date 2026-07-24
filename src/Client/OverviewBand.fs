@@ -3,9 +3,10 @@ module OverviewBand
 // The chrome-less Overview band (spec: docs/spec/beads-overview-band.md, Corrections v1.1).
 //
 // A native Feliz view rendered inside the dashboard, above the repo list, gated by the caller on
-// Model.OverviewPanelOpen. It consumes the pure cross-worktree roll-up from OverviewData.aggregate
-// and paints the prototype's `.band` block (.agents/canvas/beads-panel-prototypes.html) exactly:
-// two STACKED sections split by a 1px dashed rule, each opening with an uppercase muted header, each
+// Model.OverviewPanelOpen. It consumes the pure cross-worktree roll-up from OverviewData.aggregate.
+// The Agents section is one sticky DOM tree. CSS scroll-driven animations fade its metadata,
+// translate its existing circle groups, and clip the same band down to compact chrome.
+// two STACKED sections split by a 1px solid rule, each opening with an uppercase muted header, each
 // category a column whose count+label meta line sits ABOVE its visual (count FIRST in the accent
 // colour, label neutral, same size/weight):
 //   - Agents        -> a row of session markers, one per agent, grouped by activity (red-dot working
@@ -22,12 +23,72 @@ module OverviewBand
 //                      workaround is gone.
 //
 // Empty categories never reach the view (aggregate omits them), so nothing ever renders a 0, and a
-// fully-empty roll-up collapses to Html.none. v1 is static — no hover/click/greenlight.
+// fully-empty roll-up collapses to Html.none. Group columns toggle the drill-down described by
+// docs/spec/overview-drilldown.md.
 
 open Shared
 open Navigation
 open Feliz
 open OverviewData
+open Browser
+open Fable.Core.JsInterop
+open BrowserObserverInterop
+
+let isPastStickyBoundary (sentinelBottom: float) (dashboardTop: float) =
+    sentinelBottom < dashboardTop
+
+let private setCircleShift (dashboard: Browser.Types.Element) (agentsBand: Browser.Types.Element) =
+    let circle: Browser.Types.Element = agentsBand?querySelector(".overview-circle")
+    let items: Browser.Types.Element = agentsBand?querySelector(".overview-items")
+    match Option.ofObj circle, Option.ofObj items with
+    | Some circle, Some items ->
+        let bandRect = agentsBand?getBoundingClientRect()
+        let circleRect = circle?getBoundingClientRect()
+        let bandTop: float = bandRect?top
+        let circleTop: float = circleRect?top
+        let circleHeight: float = circleRect?height
+        let unshiftedCenter = circleTop + circleHeight / 2.0 - bandTop - translatedY items
+        let compactCenter = cssPixelValue dashboard "--pane-header-height" / 2.0
+        agentsBand?style?setProperty("--overview-agents-items-shift", $"{compactCenter - unshiftedCenter}px")
+    | _ -> ()
+
+let private createPinnedObservers (onChange: bool -> unit) =
+    match
+        Dom.document.querySelector ".dashboard" |> Option.ofObj,
+        Dom.document.querySelector ".overview-agents-stick-sentinel" |> Option.ofObj,
+        Dom.document.querySelector ".overview-agents-band" |> Option.ofObj
+    with
+    | Some dashboard, Some sentinel, Some agentsBand ->
+        setCircleShift dashboard agentsBand
+        let intersectionObserver =
+            createIntersectionObserver
+                (fun entries ->
+                    let entry = firstIntersectionEntry entries
+                    (entry?rootBounds: obj)
+                    |> Option.ofObj
+                    |> Option.iter (fun rootBounds ->
+                        let sentinelBottom: float = entry?boundingClientRect?bottom
+                        let dashboardTop: float = rootBounds?top
+                        onChange (isPastStickyBoundary sentinelBottom dashboardTop)))
+                (createObj [ "root" ==> dashboard; "threshold" ==> 0 ])
+        let resizeObserver =
+            createResizeObserver (fun _ -> setCircleShift dashboard agentsBand)
+        observeElement intersectionObserver sentinel
+        observeElement resizeObserver agentsBand
+        [ intersectionObserver; resizeObserver ]
+    | _ -> []
+
+let observePinnedState (onChange: bool -> unit) =
+    // Observer attachment follows the React commit, so the handles must live across the frame callback.
+    let mutable observers = []
+    let frameId: int =
+        Dom.window?requestAnimationFrame(fun (_: float) ->
+            observers <- createPinnedObservers onChange)
+
+    { new System.IDisposable with
+        member _.Dispose() =
+            Dom.window?cancelAnimationFrame(frameId)
+            observers |> List.iter disconnectObserver }
 
 // Display label per task bucket, in the aggregate's canonical left-to-right order.
 let private taskLabel =
@@ -95,43 +156,37 @@ let private metaLine (accentClass: string) (label: string) (count: int) =
               [ Html.span [ prop.className ("overview-count " + accentClass); prop.text (string count) ]
                 Html.span [ prop.className "overview-label"; prop.text label ] ] ]
 
-/// One agent group column: the meta line above a row of session markers, one per agent, tinted to the
-/// group's accent (fill = currentColor, driven by the accent class). Each agent with a known
-/// context-window occupancy renders as a donut whose arc = fraction of context *remaining* (inline
-/// `--ctx-remaining`), so a healthy low-usage agent reads as a nearly full ring and one near its limit
-/// thins to a sliver; an agent that hasn't reported usage falls back to a centred 10px solid circle.
-/// Clicking the column raises onSelectGroup (App toggles the drill-down selection); when this group is
-/// the selected one it renders as the black "tab" (overview-item-selected) sitting flush above its
-/// breakdown panel.
+let private sessionCircle (accent: string) (key: string) (session: SessionDot) =
+    match session.ContextUsage with
+    | Some usage ->
+        Html.span
+            [ prop.key key
+              prop.className [ "overview-circle"; "overview-donut"; accent ]
+              prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
+    | None -> Html.span [ prop.key key; prop.className ("overview-circle " + accent) ]
+
+let private agentCircles (accent: string) (group: AgentGroup) =
+    group.Members
+    |> List.collect (fun member' ->
+        member'.Sessions
+        |> List.mapi (fun index session -> sessionCircle accent $"{member'.ScopedKey}-{index}" session))
+    |> fun circles -> Html.div [ prop.className "overview-circles"; prop.children circles ]
+
+/// One full agent group column: count/label metadata above its session circles. Clicking selects the
+/// group; a selected group renders as the tab attached to its normal-flow breakdown panel.
 let private agentColumn (selection: OverviewSelection option) (onSelectGroup: OverviewSelection -> unit) (group: AgentGroup) =
     let accent = agentClass group.Kind
     let target = OverviewSelection.Agents group.Kind
     let isSelected = selection = Some target
 
-    // One circle per SESSION, tinted to the group accent and — when the session has reported context
-    // usage — rendered as a donut filled to its remaining context. Grouping is per session, so each
-    // group holds only the sessions actually in that state; every agent member carries at least one
-    // matching session. All circles share one uniform gap regardless of which worktree they belong to.
-    let sessionCircle (key: string) (s: SessionDot) =
-        match s.ContextUsage with
-        | Some usage ->
-            Html.span
-                [ prop.key key
-                  prop.className [ "overview-circle"; "overview-donut"; accent ]
-                  prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
-        | None -> Html.span [ prop.key key; prop.className ("overview-circle " + accent) ]
-
-    let circles =
-        group.Members
-        |> List.collect (fun m -> m.Sessions |> List.mapi (fun j s -> sessionCircle $"{m.ScopedKey}-{j}" s))
-
     Html.div
         [ prop.className [ "overview-item"; accent; if isSelected then "overview-item-selected" ]
           prop.key accent
+          prop.title $"{group.Count} {agentLabel group.Kind}"
           prop.onClick (fun _ -> onSelectGroup target)
           prop.children
               [ metaLine accent (agentLabel group.Kind) group.Count
-                Html.div [ prop.className "overview-circles"; prop.children circles ] ] ]
+                agentCircles accent group ] ]
 
 /// One task bucket column: the meta line above ONE proportional bar. The bar's share of the shared
 /// scale — count / Scale — is emitted as the inline `--bar-fill` custom property; CSS multiplies it by
@@ -283,14 +338,12 @@ let private taskBreakdown
 
     breakdownPanel accent (fun () -> onSelectGroup (OverviewSelection.Tasks bucket.Kind)) repoBlocks
 
-/// A section shell: an uppercase header over the (wrapping) row of category columns, plus the
-/// (optional) drill-down breakdown panel rendered INSIDE the section, flush beneath its row — so the
-/// agent breakdown sits between the agents row and the Tasks section, and the task breakdown sits
-/// directly below the Tasks row (Html.none when nothing in this section is selected). The stacked
-/// layout + dashed separator live in CSS.
-let private section (header: string) (columns: ReactElement list) (breakdown: ReactElement) =
+/// A section shell: an uppercase header over the wrapping row of category columns, plus an optional
+/// drill-down panel. The separated modifier preserves the solid rule between Agents and Tasks even
+/// though the sticky Agents section and normal-flow Tasks section have different parent elements.
+let private section (isSeparated: bool) (header: string) (columns: ReactElement list) (breakdown: ReactElement) =
     Html.div
-        [ prop.className "overview-section"
+        [ prop.className [ "overview-section"; if isSeparated then "overview-section-separated" ]
           prop.children
               [ Html.div [ prop.className "overview-header"; prop.text header ]
                 Html.div [ prop.className "overview-items"; prop.children columns ]
@@ -301,8 +354,14 @@ let private section (header: string) (columns: ReactElement list) (breakdown: Re
 /// group's count hits 0 — App's DataLoaded reducer uses this to clear the selection and close the
 /// panel. Lives here because it runs the exact same `repos |> List.map toRepoWorktrees |>
 /// OverviewData.aggregate` pipeline the view does — a pure Overview data query, not App/Elmish state.
+let private aggregateRepos (repos: RepoModel list) =
+    repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+
+let hasAgentGroups (repos: RepoModel list) =
+    aggregateRepos repos |> _.Agents |> List.isEmpty |> not
+
 let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel list) =
-    let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+    let overview = aggregateRepos repos
     match selection with
     | OverviewSelection.Agents kind -> overview.Agents |> List.exists (fun g -> g.Kind = kind)
     | OverviewSelection.Tasks kind -> overview.Tasks |> List.exists (fun b -> b.Kind = kind)
@@ -313,42 +372,63 @@ let overviewSelectionPresent (selection: OverviewSelection) (repos: RepoModel li
 /// is clicked, and `onSelectWorktree` (used by the breakdown panel) focuses a member card with
 /// arrow-nav parity.
 let view
+    (isAgentsStuck: bool)
     (selection: OverviewSelection option)
     (onSelectGroup: OverviewSelection -> unit)
     (onSelectWorktree: string -> unit)
     (repos: RepoModel list)
     : ReactElement =
-    let overview = repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+    let overview = aggregateRepos repos
 
     match overview.Agents, overview.Tasks with
     | [], [] -> Html.none
     | agents, tasks ->
-        Html.div
-            [ prop.className "overview-band"
-              prop.children
-                  [ match agents with
-                    | [] -> Html.none
-                    | groups ->
-                        // Bare uppercase muted section header (CSS upper-cases it): the per-group
-                        // counts live in the columns right below, so the header stays just "AGENTS".
-                        section "Agents" (groups |> List.map (agentColumn selection onSelectGroup)) (
-                            match selection with
-                            | Some (OverviewSelection.Agents kind) ->
-                                groups
-                                |> List.tryFind (fun g -> g.Kind = kind)
-                                |> Option.map (agentBreakdown onSelectGroup onSelectWorktree)
-                                |> Option.defaultValue Html.none
-                            | _ -> Html.none)
-                    match tasks with
-                    | [] -> Html.none
-                    | buckets ->
-                        section
-                            "Tasks"
-                            (buckets |> List.map (taskColumn selection onSelectGroup overview.Scale))
-                            (match selection with
-                             | Some (OverviewSelection.Tasks kind) ->
-                                 buckets
-                                 |> List.tryFind (fun b -> b.Kind = kind)
-                                 |> Option.map (taskBreakdown onSelectGroup onSelectWorktree overview.Scale)
-                                 |> Option.defaultValue Html.none
-                             | _ -> Html.none) ] ]
+        let agentSection =
+            match agents with
+            | [] -> Html.none
+            | groups ->
+                section
+                    false
+                    "Agents"
+                    (groups |> List.map (agentColumn selection onSelectGroup))
+                    Html.none
+
+        let agentBreakdownPanel =
+            match selection with
+            | Some (OverviewSelection.Agents kind) ->
+                agents
+                |> List.tryFind (fun g -> g.Kind = kind)
+                |> Option.map (agentBreakdown onSelectGroup onSelectWorktree)
+                |> Option.defaultValue Html.none
+            | _ -> Html.none
+
+        let taskSection =
+            match tasks with
+            | [] -> Html.none
+            | buckets ->
+                section
+                    (not (List.isEmpty agents))
+                    "Tasks"
+                    (buckets |> List.map (taskColumn selection onSelectGroup overview.Scale))
+                    (match selection with
+                     | Some (OverviewSelection.Tasks kind) ->
+                         buckets
+                         |> List.tryFind (fun b -> b.Kind = kind)
+                         |> Option.map (taskBreakdown onSelectGroup onSelectWorktree overview.Scale)
+                         |> Option.defaultValue Html.none
+                     | _ -> Html.none)
+
+        React.fragment
+            [ match agents with
+              | [] -> Html.none
+              | _ ->
+                  Html.div [ prop.className "overview-agents-stick-sentinel" ]
+                  Html.div
+                      [ prop.className
+                            [ "overview-band"
+                              "overview-agents-band"
+                              if isAgentsStuck then "overview-agents-band-pinned" ]
+                        prop.children [ agentSection ] ]
+              Html.div
+                  [ prop.className [ "overview-band"; if not (List.isEmpty agents) then "overview-band-rest" ]
+                    prop.children [ agentBreakdownPanel; taskSection ] ] ]

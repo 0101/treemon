@@ -48,11 +48,11 @@ The liveness dot in the tab bar and overview is per-doc rather than per-worktree
 
 ### Bridge Registry (per session)
 
-The bridge registry is keyed by **`sessionId`**, not worktree path, so multiple sessions in one worktree coexist instead of overwriting each other's slot. Each entry carries `{ WorktreePath; InjectUrl; SessionId; RegisteredAt }`. `registerSession` upserts by `sessionId`. A helper `sessionsForWorktree: worktreePath -> SessionEntry list` backs worktree-level fallbacks and liveness.
+The generic `SessionBridge` registry is keyed by **`sessionId`**, not worktree path, so multiple sessions in one worktree coexist instead of overwriting each other's slot. Each entry carries `{ WorktreePath; InjectUrl; SessionId; RegisteredAt }`. `registerSession` upserts by `sessionId`. A helper `sessionsForWorktree: worktreePath -> SessionEntry list` backs worktree-level fallbacks and liveness.
 
 ### Message Routing (by owner)
 
-`CanvasBridge.sendMessage` routes a doc's message to that doc's **owner**:
+`CanvasBridge.sendMessage` resolves a doc's **owner**, then uses `SessionBridge` for registration lookup and forwarding:
 
 1. Resolve `owner = CanvasDocOwnership.getOwner worktree filename`.
 2. Owner has a live registry entry → POST to that session's `InjectUrl` (on HTTP failure, fall through to queue).
@@ -98,14 +98,14 @@ enqueue and drain is not reconciled.)
 - **Authorship declaration** — successful `create`, `edit`, and `apply_patch` events provide canvas destination filenames. The extension stamps its own `sessionId` and POSTs `{worktreePath, filename, sessionId}` to `/api/canvas/attribute`. Patch parsing accepts Add/Update/Move headers and acts only after successful completion. Declarations are single-shot: a failed request remains a best-effort no-op rather than starting a retry protocol. The handler validates body + worktree like `canvasRegisterHandler`: malformed/blank → `400` (including a sessionId containing characters outside `[A-Za-z0-9_-]`, since a stored owner id is later interpolated into a `--resume {id}` launch); well-formed but **unmonitored** worktree → `200` with nothing recorded (benign no-op — the extension still serves the doc in-browser); **monitored** → records ownership. The extension also exposes a `canvas_take_ownership` tool (registered via `joinSession({ tools })`) as an escape hatch for a doc written by a script/unsupported tool or one misrouted to the wrong session.
 - **Ownership store** — `CanvasDocOwnership.fs` is a `MailboxProcessor` serializing an immutable `Map<worktreePath, Map<filename, sessionId>>`, persisted to `data/canvas-owners.json` on every change and loaded at startup; reads are async.
 - **Scanner attribution is fallback-only** — `RefreshScheduler` populates `CanvasDoc.OwnerSessionId` from the ownership map on each scan and auto-attributes a no-owner changed doc only when exactly one session is registered for the worktree. Explicit declarations are primary and are never overwritten.
-- **Send / resume flow** — `WorktreeApi.sendCanvasMessage` calls `CanvasBridge.sendMessage`; on `Queued` it resumes the doc's owner via `SessionManager.spawnSession` (or starts a fresh session when the owner is unknown or resume fails) and leaves the message queued for delivery when the bridge re-registers.
+- **Send / resume flow** — `WorktreeApi.sendCanvasMessage` calls `CanvasBridge.sendMessage`; on `Queued` it resumes the doc's owner via `SessionManager.spawnSession` (or starts a fresh session when the owner is unknown or resume fails) and leaves the canvas-owned message queued for delivery when `SessionBridge` observes the registration.
 
 ## Decisions
 
 | # | Decision | Choice |
 |---|----------|--------|
 | 1 | Ownership attribution trigger | **Explicit declaration** from the authoring session's extension (`POST /api/canvas/attribute`); file-watcher inference kept only as a single-session fallback |
-| 1b | Bridge registry keying | Keyed by **`sessionId`** (was worktree path) — multiple sessions per worktree coexist |
+| 1b | Bridge registry keying | `SessionBridge` is keyed by **`sessionId`** (was worktree path) — multiple sessions per worktree coexist |
 | 1b-i | `None`/blank sessionId | A blank/whitespace sessionId is normalized to `None`, so it can't become a sticky, unroutable owner; `None`-sessionId registrations share one per-worktree fallback slot and never clobber an identified session. |
 | 1c | Delivery routing | Route by doc **owner** sessionId; with no declared owner, queue (the single-session fallback is removed — never deliver to a co-located non-author); never cross-route to a non-owner |
 | 1c-i | Queue/drain ownership | Each `QueuedMessage` carries its resolved owner; `drainQueue` (on register) and `drainPending` (anonymous poll) deliver only when the owner is unknown or matches the drainer, re-queuing the rest (TTL preserved) |
@@ -125,7 +125,8 @@ enqueue and drain is not reconciled.)
 | `src/Shared/Types.fs` | Defines `CanvasDoc.OwnerSessionId` and `CanvasMessageRequest.Filename` |
 | `src/Server/CanvasDocOwnership.fs` | Stores per-doc ownership and persists it to `data/canvas-owners.json` |
 | `src/Server/RefreshScheduler.fs` | Fallback-only scanner attribution: credits a no-owner changed doc to the worktree's bridge session **only when exactly one is registered** (`CanvasWatchers.fallbackOwner`/`attributeChangedDocs`); never overwrites a declared owner |
-| `src/Server/CanvasBridge.fs` | sessionId-keyed registry; owner-based delivery routing; liveness |
+| `src/Server/SessionBridge.fs` | sessionId-keyed registry, liveness, queueing, and forwarding |
+| `src/Server/CanvasBridge.fs` | Owner-based canvas delivery routing over `SessionBridge` |
 | `src/Extension/extension.mjs`, `src/Extension/canvas-ownership.mjs` | Detect canvas write destinations, stamp the session ID, and forward single-shot declarations to `/api/canvas/attribute`; also expose the `canvas_take_ownership` escape hatch |
 | `src/Extension/skill/SKILL.md` | Instructs the agent to use ownership-aware write tools and claim script/unsupported writes explicitly |
 | `src/Server/WorktreeApi.fs` | Queues canvas messages, resumes owner sessions, and falls back to new sessions |

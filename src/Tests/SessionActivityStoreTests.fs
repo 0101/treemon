@@ -10,9 +10,9 @@ open Shared
 open Tests.TestUtils
 
 // These exercise the SQLite (WAL) durable mirror behind the push-model live state: last-write-wins
-// upserts, INSERT OR IGNORE event dedupe, the restart rebuild (loadLiveStatuses within the idle
-// window), the history-substrate window query, and retention pruning. Each test runs against a fresh
-// temp .db file that is disposed + deleted in teardown.
+// upserts, INSERT OR IGNORE event dedupe, the base-status restart rebuild (loadLiveStatuses within
+// the idle window), the history-substrate window query, and retention pruning. Each test runs
+// against a fresh temp .db file that is disposed + deleted in teardown.
 
 /// A fresh store over a throwaway temp .db, disposed (releasing the file handle) and its dir deleted
 /// afterwards. Store construction creates the schema, so the DB is ready to use inside `action`.
@@ -49,6 +49,7 @@ let private connStr (dbPath: string) =
     SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
 
 let private contextWorktree = Path.Combine(Path.GetTempPath(), "treemon-context-worktree")
+let private otherWorktree = Path.Combine(Path.GetTempPath(), "treemon-other-worktree")
 
 let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredStatus =
     { SessionId = SessionId sid
@@ -155,7 +156,8 @@ type UpsertStatusTests() =
                   LastAssistantMessage = Some(msg "which file?" "2026-03-01T10:00:30Z")
                   ContextUsage = None
                   AwaitingUserSince = Some(ts "2026-03-01T10:00:30Z")
-                  UserInputCompletedAt = Some(ts "2026-03-01T10:00:00Z") }
+                  UserInputCompletedAt = Some(ts "2026-03-01T10:00:00Z")
+                  BackgroundAgentClocks = Map.empty }
 
             store.UpsertStatus(storedOf "s1" "C:/wt/a" rich "2026-03-01T10:01:00Z" "2026-03-01T12:00:00Z")
 
@@ -235,7 +237,6 @@ type ContextUsagePersistenceTests() =
 
             let row = store.LoadLiveStatuses(ts "2026-03-01T10:00:00Z") |> find "s1"
             Assert.That(row, Is.EqualTo(recreated)))
-
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -386,37 +387,69 @@ type LoadLiveStatusesTests() =
         withStore (fun store ->
             Assert.That(store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z"), Is.Empty))
 
+    [<Test>]
+    member _.``Restart forgets lifecycle clocks and falls back to the persisted base status``() =
+        withDbPath (fun dbPath ->
+            let withActiveAgent =
+                fold
+                    emptyStatus
+                    (BackgroundAgentStarted("tool-active", ts "2026-03-01T11:31:00Z"))
+
+            (use store = new SessionActivityStore(dbPath)
+             store.UpsertStatus(
+                 storedOf
+                     "active"
+                     contextWorktree
+                     withActiveAgent
+                     "2026-03-01T11:31:00Z"
+                     "2026-03-01T11:31:00Z"
+             ))
+
+            use reopened = new SessionActivityStore(dbPath)
+            let restored = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "active"
+            Assert.Multiple(fun () ->
+                Assert.That(restored.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(effectiveStatus restored.Status, Is.EqualTo SessionLevelStatus.Idle)))
+
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type StatusesForWorktreeTests() =
+type LatestSessionIdForWorktreeTests() =
 
     [<Test>]
-    member _.``Sessions outside the idle window are returned in activity order``() =
-        withStore (fun store ->
+    member _.``Session outside the idle window is returned by latest activity``() =
+        withDbPath (fun dbPath ->
             let now = ts "2026-03-01T12:00:00Z"
-            store.UpsertStatus(storedOf "heartbeat" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
-            store.UpsertStatus(storedOf "activity" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+            (use store = new SessionActivityStore(dbPath)
+             store.UpsertStatus(storedOf "heartbeat" contextWorktree emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
+             store.UpsertStatus(storedOf "activity" contextWorktree emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+             Assert.That(store.LoadLiveStatuses now, Is.Empty, "both sessions are outside the idle window"))
 
-            Assert.That(store.LoadLiveStatuses now, Is.Empty, "both sessions are outside the idle window")
-
-            let ids = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.map (_.SessionId >> SessionId.value)
-            Assert.That(ids, Is.EqualTo([ "activity"; "heartbeat" ])))
-
-    [<Test>]
-    member _.``Only the requested worktree's sessions are returned``() =
-        withStore (fun store ->
-            store.UpsertStatus(storedOf "a1" "C:/wt/a" emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z")
-            store.UpsertStatus(storedOf "b1" "C:/wt/b" emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z")
-
-            let ids = store.StatusesForWorktree(WorktreePath "C:/wt/a") |> List.map (_.SessionId >> SessionId.value)
-            Assert.That(ids, Is.EqualTo([ "a1" ])))
+            use reopened = new SessionActivityStore(dbPath)
+            Assert.That(
+                reopened.LatestSessionIdForWorktree(WorktreePath contextWorktree),
+                Is.EqualTo(Some "activity")
+            ))
 
     [<Test>]
-    member _.``A worktree that never reported yields an empty list``() =
+    member _.``Latest session query is scoped by worktree and uses session id as tie breaker``() =
         withStore (fun store ->
-            Assert.That(store.StatusesForWorktree(WorktreePath "C:/wt/never"), Is.Empty))
+            store.UpsertStatus(storedOf "a1" contextWorktree emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z")
+            store.UpsertStatus(storedOf "a2" contextWorktree emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T10:00:00Z")
+            store.UpsertStatus(storedOf "b1" otherWorktree emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z")
+
+            Assert.That(
+                store.LatestSessionIdForWorktree(WorktreePath contextWorktree),
+                Is.EqualTo(Some "a2")
+            ))
+
+    [<Test>]
+    member _.``A worktree that never reported yields no session id``() =
+        withStore (fun store ->
+            let unknownWorktree = Path.Combine(Path.GetTempPath(), "treemon-unknown-worktree")
+            Assert.That(store.LatestSessionIdForWorktree(WorktreePath unknownWorktree), Is.EqualTo None))
 
 
 [<TestFixture>]
@@ -440,7 +473,6 @@ type RetainedByWorktreeTests() =
     member _.``An empty store yields no retained rows``() =
         withStore (fun store ->
             Assert.That(store.RetainedByWorktree() |> Map.isEmpty, Is.True))
-
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -495,7 +527,8 @@ type PruneOldTests() =
             store.UpsertStatus(storedOf "old" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
             store.UpsertStatus(storedOf "recent" "C:/wt/a" emptyStatus "2026-03-01T03:00:00Z" "2026-03-01T03:00:00Z")
 
-            // cutoff 02:30 → e1(01:00), e2(02:00), old(01:00) go; e3(03:00), recent(03:00) stay.
+            // cutoff 02:30 → e1(01:00), e2(02:00), and old(01:00) go;
+            // e3(03:00) and recent(03:00) stay.
             let deleted = store.PruneOld(ts "2026-03-01T02:30:00Z")
             Assert.That(deleted, Is.EqualTo(3))
 
@@ -505,11 +538,12 @@ type PruneOldTests() =
 
             Assert.That(remainingEvents, Is.EqualTo([ "e3" ]))
 
-            let remainingSessions =
-                store.LoadLiveStatuses(ts "2026-03-01T03:30:00Z")
-                |> List.map (_.SessionId >> SessionId.value)
+            let remainingSessions = store.LoadLiveStatuses(ts "2026-03-01T03:30:00Z")
 
-            Assert.That(remainingSessions, Is.EqualTo([ "recent" ])))
+            Assert.That(
+                remainingSessions |> List.map (_.SessionId >> SessionId.value),
+                Is.EqualTo([ "recent" ])
+            ))
 
     [<Test>]
     member _.``pruneOld on an empty store deletes nothing``() =
@@ -522,8 +556,8 @@ type PruneOldTests() =
 type LegacyDoneStatusTests() =
 
     // Pre-idle-only builds persisted the retired "done" status; live DBs still hold such rows. The
-    // idempotent construction-time migration rewrites 'done' rows to 'idle' so the unguarded reads
-    // (LoadLiveStatuses at startup, StatusesForWorktree on resume) never hit an unknown status.
+    // idempotent construction-time migration rewrites 'done' rows to 'idle' so startup hydration
+    // never hits an unknown status.
 
     /// Insert a raw session_status row with an arbitrary status text, bypassing the store's typed
     /// writers (which can only emit the live vocabulary) — the shape of a row a pre-idle-only build
@@ -630,6 +664,7 @@ VALUES
              let legacy = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
              Assert.That(legacy.Status.Intent, Is.EqualTo(None))
              Assert.That(legacy.Status.Title, Is.EqualTo(None))
+             Assert.That(legacy.Status.BackgroundAgentClocks, Is.Empty)
 
              let intent = msg "investigating the fold" "2026-03-01T11:45:00Z"
              let title = msg "Investigate the fold" "2026-03-01T11:46:00Z"

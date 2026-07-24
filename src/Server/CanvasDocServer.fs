@@ -56,7 +56,7 @@ let private isKnownWorktree agent path = async {
     return paths |> Set.contains path
 }
 
-/// injectUrl is stored and later used as an HTTP POST target by CanvasBridge (sendMessage /
+/// injectUrl is stored and later used as an HTTP POST target by SessionBridge (send /
 /// drainQueue), so a non-local value would let a registrant make the server POST to arbitrary
 /// hosts (SSRF). Accept only well-formed absolute http(s) URLs whose host is a loopback IP
 /// (IPAddress.IsLoopback — IPv4 127.0.0.0/8 or IPv6 ::1) or the literal "localhost".
@@ -94,11 +94,11 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
                 else
                     // Normalize a blank/whitespace sessionId to None (anonymous) rather than
                     // Some "": Option.ofObj only maps null. A Some "" owner is unroutable yet
-                    // sticky (see CanvasBridge.normalizeSessionId), so it must never be stored —
+                    // sticky (SessionBridge also normalizes blank IDs), so it must never be stored —
                     // mirror attributeOwnership's IsNullOrWhiteSpace treatment of sessionId.
                     let sessionId =
                         if System.String.IsNullOrWhiteSpace body.sessionId then None else Some body.sessionId
-                    CanvasBridge.registerSession worktreePath body.injectUrl sessionId
+                    SessionBridge.registerSession worktreePath body.injectUrl sessionId
                     return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
@@ -165,7 +165,7 @@ let bridgeStatusHandler : HttpHandler =
 
         match worktreePath with
         | Ok path when not (System.String.IsNullOrWhiteSpace path) ->
-            let status = CanvasBridge.getStatus path
+            let status = SessionBridge.getStatus path
             Successful.ok
                 (json {| registered = status.Registered; lastHeartbeatAge = status.LastHeartbeatAge; isAlive = status.IsAlive; sessionId = status.SessionId |})
                 next ctx
@@ -190,7 +190,7 @@ let private handleHeartbeat (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
                     ctx.Response.StatusCode <- 404
                     do! ctx.Response.WriteAsync("Unknown worktree")
                 else
-                    CanvasBridge.registerPoll worktreePath
+                    SessionBridge.registerPoll worktreePath
                     let messages = CanvasBridge.drainPending worktreePath
                     ctx.Response.ContentType <- "application/json"
                     do! ctx.Response.WriteAsJsonAsync(messages)
@@ -198,7 +198,7 @@ let private handleHeartbeat (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
             ctx.Response.StatusCode <- 400
             do! ctx.Response.WriteAsync("missing worktreePath")
     with ex ->
-        Log.log "CanvasBridge" $"Heartbeat error: {ex.Message}"
+        Log.log "SessionBridge" $"Heartbeat error: {ex.Message}"
         ctx.Response.StatusCode <- 400
         do! ctx.Response.WriteAsync("malformed request")
 }

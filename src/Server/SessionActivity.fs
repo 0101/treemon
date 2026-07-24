@@ -51,6 +51,8 @@ type SessionEvent =
     | AwaitingUserInput of question: Message option * at: DateTimeOffset
     /// The SDK reports that the pending ask_user interaction completed.
     | UserInputCompleted of at: DateTimeOffset
+    | BackgroundAgentStarted of toolCallId: string * at: DateTimeOffset
+    | BackgroundAgentFinished of toolCallId: string * at: DateTimeOffset
     | TurnEnded
     | WentIdle
     /// A liveness-only heartbeat: re-asserts the CLI is still open WITHOUT bearing on status. Handled
@@ -82,6 +84,11 @@ type SessionLevelStatus =
     | WaitingForUser
     | Idle
 
+/// Per-tool ordering clocks retained for the lifetime of the server process.
+type BackgroundAgentLifecycle =
+    { StartedAt: DateTimeOffset option
+      FinishedAt: DateTimeOffset option }
+
 /// Widen a per-session status to the card/worktree `CodingToolStatus`. Total — `NoSession` is only
 /// ever produced by the collapse, never by the per-session fold.
 let toCodingToolStatus =
@@ -104,7 +111,10 @@ type SessionStatus =
       /// decoupled from Status.
       ContextUsage: ContextUsage option
       AwaitingUserSince: DateTimeOffset option
-      UserInputCompletedAt: DateTimeOffset option }
+      UserInputCompletedAt: DateTimeOffset option
+      /// Per-tool lifecycle clocks. Active clocks remain while their agent runs; completed clocks
+      /// retain only the supported late-event window.
+      BackgroundAgentClocks: Map<string, BackgroundAgentLifecycle> }
 
 /// The starting state for a session with no events yet.
 let emptyStatus =
@@ -116,7 +126,8 @@ let emptyStatus =
       LastAssistantMessage = None
       ContextUsage = None
       AwaitingUserSince = None
-      UserInputCompletedAt = None }
+      UserInputCompletedAt = None
+      BackgroundAgentClocks = Map.empty }
 
 let private retainLatestChange current next =
     match current with
@@ -128,11 +139,30 @@ let private latestTimestamp current next =
     | Some previous when previous > next -> current
     | _ -> Some next
 
+let private hasActiveBackgroundAgent status =
+    status.BackgroundAgentClocks
+    |> Map.exists (fun _ lifecycle -> lifecycle.StartedAt > lifecycle.FinishedAt)
+
 let effectiveStatus (status: SessionStatus) =
     match status.AwaitingUserSince, status.UserInputCompletedAt with
-    | Some awaiting, Some completed when awaiting <= completed -> status.Status
+    | Some awaiting, Some completed when awaiting <= completed ->
+        if hasActiveBackgroundAgent status then SessionLevelStatus.Working else status.Status
     | Some _, _ -> SessionLevelStatus.WaitingForUser
-    | None, _ -> status.Status
+    | None, _ ->
+        if hasActiveBackgroundAgent status then SessionLevelStatus.Working else status.Status
+
+let private updateBackgroundAgent toolCallId update status =
+    let current =
+        status.BackgroundAgentClocks
+        |> Map.tryFind toolCallId
+        |> Option.defaultValue
+            { StartedAt = None
+              FinishedAt = None }
+
+    { status with
+        BackgroundAgentClocks =
+            status.BackgroundAgentClocks
+            |> Map.add toolCallId (update current) }
 
 /// Pure, append-friendly fold. Folding a later batch onto an earlier result equals folding the whole
 /// stream, which is what the durable-mirror + live-Map ingestion relies on.
@@ -164,6 +194,14 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
             AwaitingUserSince = latestTimestamp s.AwaitingUserSince at }
     | UserInputCompleted at ->
         { s with UserInputCompletedAt = latestTimestamp s.UserInputCompletedAt at }
+    | BackgroundAgentStarted(toolCallId, at) ->
+        s
+        |> updateBackgroundAgent toolCallId (fun lifecycle ->
+            { lifecycle with StartedAt = latestTimestamp lifecycle.StartedAt at })
+    | BackgroundAgentFinished(toolCallId, at) ->
+        s
+        |> updateBackgroundAgent toolCallId (fun lifecycle ->
+            { lifecycle with FinishedAt = latestTimestamp lifecycle.FinishedAt at })
     | TurnEnded -> { s with Status = SessionLevelStatus.Idle }
     | WentIdle -> { s with Status = SessionLevelStatus.Idle }
     | Heartbeat -> s
@@ -201,6 +239,27 @@ let effectiveActivity (s: SessionStatus) : AgentActivity option =
 /// missed heartbeats — much faster than the old 30-min mtime staleness.
 let stalenessTimeout = TimeSpan.FromMinutes 5.0
 
+/// Completed lifecycle clocks retain this much out-of-order delivery history. Active agents are
+/// never removed by this window.
+let backgroundAgentClockRetention = stalenessTimeout
+
+let pruneCompletedBackgroundAgentClocks (now: DateTimeOffset) (status: SessionStatus) =
+    let cutoff = now - backgroundAgentClockRetention
+
+    { status with
+        BackgroundAgentClocks =
+            status.BackgroundAgentClocks
+            |> Map.filter (fun _ lifecycle ->
+                let isActive = lifecycle.StartedAt > lifecycle.FinishedAt
+                let isRecentCompletion =
+                    lifecycle.FinishedAt
+                    |> Option.exists (fun finishedAt -> finishedAt > cutoff)
+
+                isActive || isRecentCompletion) }
+
+let isExpiredBackgroundAgentEvent (latestSeen: DateTimeOffset) (occurredAt: DateTimeOffset) =
+    occurredAt <= latestSeen - backgroundAgentClockRetention
+
 /// The idle window for `pickActive` display collapse and restart `loadLiveStatuses` (reuses the
 /// existing idle cutoff): sessions quiet longer than this are not considered live.
 let idleWindow = TimeSpan.FromHours 2.0
@@ -224,7 +283,8 @@ let freshnessAdjusted (now: DateTimeOffset) (lastSeen: DateTimeOffset) (s: Sessi
             Status = SessionLevelStatus.Idle
             UserInputCompletedAt =
                 s.AwaitingUserSince
-                |> Option.fold latestTimestamp s.UserInputCompletedAt }
+                |> Option.fold latestTimestamp s.UserInputCompletedAt
+            BackgroundAgentClocks = Map.empty }
     else
         s
 
