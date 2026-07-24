@@ -369,17 +369,22 @@ type DrainQueueTests() =
                   Payload = "queued-msg" }
 
             Assert.That(sendMessage req |> Async.RunSynchronously, Is.EqualTo(CanvasMessageResult.Queued))
-            Assert.That(
-                runAsync (beginPendingLaunch path "diff.html"),
-                Is.EqualTo(PendingLaunchStarted))
+            let pendingLaunch =
+                runAsync (beginPendingLaunch path "diff.html")
+
+            Assert.That(pendingLaunch.Role, Is.EqualTo(PendingLaunchStarted))
 
             let completion =
-                waitForPendingLaunchCompletion (TimeSpan.FromSeconds 2.0) path
+                waitForPendingLaunchCompletion
+                    (TimeSpan.FromSeconds 2.0)
+                    pendingLaunch
                 |> Async.StartAsTask
 
             registerSession path sink.Url (Some sid)
 
-            Assert.That(completion.GetAwaiter().GetResult(), Is.True)
+            Assert.That(
+                completion.GetAwaiter().GetResult() |> Result.isOk,
+                Is.True)
             Assert.That(
                 runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
                 Is.EqualTo(Some sid),
@@ -439,21 +444,28 @@ type DrainQueueTests() =
             let path = uniquePath "drain-cancel"
             let sid = uniqueSid "session"
 
+            let cancelledLaunch =
+                runAsync (beginPendingLaunch path "diff.html")
+
+            Assert.That(cancelledLaunch.Role, Is.EqualTo(PendingLaunchStarted))
+            runAsync (cancelPendingLaunch path "cancelled")
             Assert.That(
-                runAsync (beginPendingLaunch path "diff.html"),
-                Is.EqualTo(PendingLaunchStarted))
-            runAsync (cancelPendingLaunch path)
+                runAsync cancelledLaunch.Completion,
+                Is.EqualTo(Error "cancelled": Result<unit, string>))
             registerSession path "http://127.0.0.1:1/inject" (Some sid)
 
             Assert.That(
                 runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
                 Is.EqualTo(None: string option))
+            let nextLaunch =
+                runAsync (beginPendingLaunch path "diff.html")
+
             Assert.That(
-                runAsync (beginPendingLaunch path "diff.html"),
+                nextLaunch.Role,
                 Is.EqualTo(PendingLaunchStarted),
                 "Cancelling must release the worktree launch slot")
 
-            runAsync (cancelPendingLaunch path))
+            runAsync (cancelPendingLaunch path "test cleanup"))
 
 
 // ── multi-session registry (sessionId-keyed re-key) ─────────────────
@@ -825,7 +837,7 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(sinkB.Bodies, Is.Empty)
 
             Assert.That(
-                runAsync (beginPendingLaunch path "diff.html"),
+                (runAsync (beginPendingLaunch path "diff.html")).Role,
                 Is.EqualTo(PendingLaunchStarted))
 
             // The first identified same-worktree registration after launch wins the bounded race.
@@ -892,10 +904,10 @@ type SystemViewInteractionRoutingTests() =
             Assert.That(beadsQueued, Is.EqualTo(CanvasMessageResult.Queued))
 
             Assert.That(
-                runAsync (beginPendingLaunch path "diff.html"),
+                (runAsync (beginPendingLaunch path "diff.html")).Role,
                 Is.EqualTo(PendingLaunchStarted))
             Assert.That(
-                runAsync (beginPendingLaunch path "beads.html"),
+                (runAsync (beginPendingLaunch path "beads.html")).Role,
                 Is.EqualTo(PendingLaunchJoined),
                 "A second filename in the worktree must join the existing launch")
 
@@ -937,8 +949,12 @@ type SystemViewInteractionRoutingTests() =
                 |> runAsync
                 |> ignore)
 
-            Assert.That(runAsync (beginPendingLaunch pathA "diff.html"), Is.EqualTo(PendingLaunchStarted))
-            Assert.That(runAsync (beginPendingLaunch pathB "diff.html"), Is.EqualTo(PendingLaunchStarted))
+            Assert.That(
+                (runAsync (beginPendingLaunch pathA "diff.html")).Role,
+                Is.EqualTo(PendingLaunchStarted))
+            Assert.That(
+                (runAsync (beginPendingLaunch pathB "diff.html")).Role,
+                Is.EqualTo(PendingLaunchStarted))
 
             registerSession pathA sinkA.Url (Some sidA)
             Assert.That(

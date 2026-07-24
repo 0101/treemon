@@ -36,32 +36,35 @@ let internal resumeCanvasTargetWith
     }
 
 let internal launchFreshCanvasSessionWith
-    (beginLaunch: unit -> Async<CanvasBridge.PendingLaunchResult>)
-    (cancelLaunch: unit -> Async<unit>)
+    (beginLaunch: unit -> Async<CanvasBridge.PendingLaunch>)
+    (cancelLaunch: string -> Async<unit>)
     (launch: unit -> Async<Result<unit, string>>)
-    (waitForRegistration: unit -> Async<bool>)
+    (waitForRegistration: CanvasBridge.PendingLaunch -> Async<Result<unit, string>>)
     =
     async {
-        match! beginLaunch () with
+        let! pendingLaunch = beginLaunch ()
+
+        let cancelAndAwait reason =
+            async {
+                do! cancelLaunch reason
+                return! pendingLaunch.Completion
+            }
+
+        match pendingLaunch.Role with
         | CanvasBridge.PendingLaunchJoined ->
-            return Ok ()
+            return! pendingLaunch.Completion
         | CanvasBridge.PendingLaunchStarted ->
             match! launch () |> Async.Catch with
             | Choice2Of2 ex ->
-                do! cancelLaunch ()
-                return Error ex.Message
+                return! cancelAndAwait ex.Message
             | Choice1Of2 (Error err) ->
-                do! cancelLaunch ()
-                return Error err
+                return! cancelAndAwait err
             | Choice1Of2 (Ok ()) ->
-                match! waitForRegistration () |> Async.Catch with
-                | Choice1Of2 true -> return Ok ()
-                | Choice1Of2 false ->
-                    do! cancelLaunch ()
-                    return Error "the session did not register with Treemon before the timeout"
+                match! waitForRegistration pendingLaunch |> Async.Catch with
+                | Choice1Of2 (Ok ()) -> return! pendingLaunch.Completion
+                | Choice1Of2 (Error err) -> return! cancelAndAwait err
                 | Choice2Of2 ex ->
-                    do! cancelLaunch ()
-                    return Error ex.Message
+                    return! cancelAndAwait ex.Message
     }
 
 let internal recoverQueuedCanvasMessageWith
@@ -830,16 +833,16 @@ let worktreeApi
                                   launchFreshCanvasSessionWith
                                       (fun () ->
                                           CanvasBridge.beginPendingLaunch path request.Filename)
-                                      (fun () -> CanvasBridge.cancelPendingLaunch path)
+                                      (CanvasBridge.cancelPendingLaunch path)
                                       (fun () ->
                                           SessionManager.launchAction
                                               sessionAgent
                                               request.WorktreePath
                                               command.AsShellString)
-                                      (fun () ->
+                                      (fun pendingLaunch ->
                                           CanvasBridge.waitForPendingLaunchCompletion
                                               canvasRegistrationTimeout
-                                              path)
+                                              pendingLaunch)
                           }
 
                       return!
@@ -887,16 +890,16 @@ let worktreeApi
                               launchFreshCanvasSessionWith
                                   (fun () ->
                                       CanvasBridge.beginPendingLaunch path request.Filename)
-                                  (fun () -> CanvasBridge.cancelPendingLaunch path)
+                                  (CanvasBridge.cancelPendingLaunch path)
                                   (fun () ->
                                       SessionManager.launchAction
                                           sessionAgent
                                           request.WorktreePath
                                           command.AsShellString)
-                                  (fun () ->
+                                  (fun pendingLaunch ->
                                       CanvasBridge.waitForPendingLaunchCompletion
                                           canvasRegistrationTimeout
-                                          path)
+                                          pendingLaunch)
                           with
                           | Ok () -> return Ok ()
                           | Error err ->

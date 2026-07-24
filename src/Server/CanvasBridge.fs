@@ -1,6 +1,7 @@
 module Server.CanvasBridge
 
 open System
+open System.Threading.Tasks
 open Shared
 
 let private normalizePath = Server.PathUtils.normalizePath
@@ -10,11 +11,18 @@ type internal PendingLaunchResult =
     | PendingLaunchStarted
     | PendingLaunchJoined
 
+type internal PendingLaunch =
+    { Role: PendingLaunchResult
+      Completion: Async<Result<unit, string>> }
+
+type private PendingLaunchState =
+    { Filenames: Set<string>
+      Completion: TaskCompletionSource<Result<unit, string>> }
+
 type private PendingLaunchMsg =
-    | BeginPendingLaunch of worktreeKey: string * filename: string * AsyncReplyChannel<PendingLaunchResult>
-    | CancelPendingLaunch of worktreeKey: string * AsyncReplyChannel<unit>
+    | BeginPendingLaunch of worktreeKey: string * filename: string * AsyncReplyChannel<PendingLaunch>
+    | CancelPendingLaunch of worktreeKey: string * reason: string * AsyncReplyChannel<unit>
     | AssignPendingLaunch of worktreeKey: string * sessionId: string * AsyncReplyChannel<Set<string>>
-    | HasPendingLaunch of worktreeKey: string * AsyncReplyChannel<bool>
 
 let private pendingLaunchAgent =
     MailboxProcessor.Start(fun inbox ->
@@ -22,41 +30,72 @@ let private pendingLaunchAgent =
             async {
                 match! inbox.Receive() with
                 | BeginPendingLaunch(worktreeKey, filename, reply) ->
-                    let existing =
-                        pending
-                        |> Map.tryFind worktreeKey
-                        |> Option.defaultValue Set.empty
+                    match pending |> Map.tryFind worktreeKey with
+                    | Some existing ->
+                        reply.Reply(
+                            { Role = PendingLaunchJoined
+                              Completion = existing.Completion.Task |> Async.AwaitTask })
 
-                    reply.Reply(
-                        if Set.isEmpty existing then PendingLaunchStarted
-                        else PendingLaunchJoined)
+                        return!
+                            loop (
+                                pending
+                                |> Map.add worktreeKey
+                                    { existing with
+                                        Filenames = existing.Filenames |> Set.add filename }
+                            )
+                    | None ->
+                        let completion =
+                            TaskCompletionSource<Result<unit, string>>(
+                                TaskCreationOptions.RunContinuationsAsynchronously)
 
-                    return! loop (pending |> Map.add worktreeKey (existing |> Set.add filename))
+                        reply.Reply(
+                            { Role = PendingLaunchStarted
+                              Completion = completion.Task |> Async.AwaitTask })
 
-                | CancelPendingLaunch(worktreeKey, reply) ->
+                        return!
+                            loop (
+                                pending
+                                |> Map.add worktreeKey
+                                    { Filenames = Set.singleton filename
+                                      Completion = completion }
+                            )
+
+                | CancelPendingLaunch(worktreeKey, reason, reply) ->
+                    pending
+                    |> Map.tryFind worktreeKey
+                    |> Option.iter (fun launch ->
+                        launch.Completion.TrySetResult(Error reason) |> ignore)
+
                     reply.Reply()
                     return! loop (pending |> Map.remove worktreeKey)
 
                 | AssignPendingLaunch(worktreeKey, sessionId, reply) ->
-                    let filenames =
-                        pending
-                        |> Map.tryFind worktreeKey
-                        |> Option.defaultValue Set.empty
+                    match pending |> Map.tryFind worktreeKey with
+                    | None ->
+                        reply.Reply(Set.empty)
+                        return! loop pending
+                    | Some launch ->
+                        let! assignment =
+                            launch.Filenames
+                            |> Set.toList
+                            |> List.map (fun filename ->
+                                CanvasDocOwnership.assign worktreeKey filename sessionId)
+                            |> Async.Sequential
+                            |> Async.Ignore
+                            |> Async.Catch
 
-                    do!
-                        filenames
-                        |> Set.toList
-                        |> List.map (fun filename ->
-                            CanvasDocOwnership.assign worktreeKey filename sessionId)
-                        |> Async.Sequential
-                        |> Async.Ignore
+                        match assignment with
+                        | Choice1Of2 () ->
+                            launch.Completion.TrySetResult(Ok ()) |> ignore
+                            reply.Reply(launch.Filenames)
+                        | Choice2Of2 ex ->
+                            launch.Completion.TrySetResult(Error ex.Message) |> ignore
+                            reply.Reply(Set.empty)
+                            Log.log
+                                "CanvasBridge"
+                                $"Could not assign pending canvas targets for {worktreeKey}: {ex.Message}"
 
-                    reply.Reply(filenames)
-                    return! loop (pending |> Map.remove worktreeKey)
-
-                | HasPendingLaunch(worktreeKey, reply) ->
-                    reply.Reply(pending |> Map.containsKey worktreeKey)
-                    return! loop pending
+                        return! loop (pending |> Map.remove worktreeKey)
             }
 
         loop Map.empty)
@@ -68,9 +107,9 @@ let internal beginPendingLaunch worktreePath filename =
             normalizeFilename filename,
             reply))
 
-let internal cancelPendingLaunch worktreePath =
+let internal cancelPendingLaunch worktreePath reason =
     pendingLaunchAgent.PostAndAsyncReply(fun reply ->
-        CancelPendingLaunch(normalizePath worktreePath, reply))
+        CancelPendingLaunch(normalizePath worktreePath, reason, reply))
 
 let private assignPendingLaunch worktreePath sessionId =
     let worktreeKey = normalizePath worktreePath
@@ -84,25 +123,23 @@ let private assignPendingLaunch worktreePath sessionId =
             "CanvasBridge"
             $"Session {sessionId} assigned {Set.count filenames} pending canvas target(s) for {worktreeKey}"
 
-let private hasPendingLaunch worktreePath =
-    pendingLaunchAgent.PostAndReply(fun reply ->
-        HasPendingLaunch(normalizePath worktreePath, reply))
+let internal waitForPendingLaunchCompletion
+    (timeout: TimeSpan)
+    (pendingLaunch: PendingLaunch)
+    =
+    async {
+        try
+            let! completion =
+                Async.StartChild(
+                    pendingLaunch.Completion,
+                    int timeout.TotalMilliseconds)
 
-let internal waitForPendingLaunchCompletion (timeout: TimeSpan) worktreePath =
-    let deadline = DateTime.UtcNow + timeout
-
-    let rec wait () =
-        async {
-            if not (hasPendingLaunch worktreePath) then
-                return true
-            elif DateTime.UtcNow >= deadline then
-                return false
-            else
-                do! Async.Sleep 50
-                return! wait ()
-        }
-
-    wait ()
+            return! completion
+        with :? TimeoutException ->
+            return
+                Error
+                    "the session did not register with Treemon before the timeout"
+    }
 
 let registerSession worktreePath injectUrl sessionId =
     let normalizedSessionId =

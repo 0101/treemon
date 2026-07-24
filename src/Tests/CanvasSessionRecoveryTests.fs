@@ -100,50 +100,161 @@ type CanvasSessionRecoveryTests() =
         withTempCwd (fun () ->
             let path = uniquePath "shared-canvas-launch"
             let sessionId = $"session-{Guid.NewGuid():N}"
-            let launchCalls = ConcurrentQueue<unit>()
             let launchEntered =
+                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let duplicateLaunch =
                 TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
             let releaseLaunch =
                 TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let launchCompleted =
+                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let secondJoined =
+                TaskCompletionSource<CanvasBridge.PendingLaunchResult>(
+                    TaskCreationOptions.RunContinuationsAsynchronously)
 
             let launch () =
                 async {
-                    launchCalls.Enqueue(())
-                    launchEntered.TrySetResult(()) |> ignore
+                    if not (launchEntered.TrySetResult(())) then
+                        duplicateLaunch.TrySetResult(()) |> ignore
+
                     do! releaseLaunch.Task |> Async.AwaitTask
+                    launchCompleted.TrySetResult(()) |> ignore
                     return Ok ()
                 }
 
-            let run filename =
+            let run beginLaunch =
                 WorktreeApi.launchFreshCanvasSessionWith
-                    (fun () -> CanvasBridge.beginPendingLaunch path filename)
-                    (fun () -> CanvasBridge.cancelPendingLaunch path)
+                    beginLaunch
+                    (CanvasBridge.cancelPendingLaunch path)
                     launch
-                    (fun () ->
+                    (fun pendingLaunch ->
                         CanvasBridge.waitForPendingLaunchCompletion
                             (TimeSpan.FromSeconds 2.0)
-                            path)
+                            pendingLaunch)
 
-            let first = run "diff.html" |> Async.StartAsTask
+            let first =
+                run (fun () -> CanvasBridge.beginPendingLaunch path "diff.html")
+                |> Async.StartAsTask
+
             Assert.That(
                 launchEntered.Task.Wait(TimeSpan.FromSeconds 2.0),
                 Is.True,
                 "The first request must own and enter the launch")
 
-            Assert.That(runAsync (run "beads.html") |> Result.isOk, Is.True)
-            Assert.That(launchCalls.Count, Is.EqualTo(1), "The joining filename must not launch again")
+            let second =
+                run (fun () ->
+                    async {
+                        let! pendingLaunch =
+                            CanvasBridge.beginPendingLaunch path "beads.html"
+
+                        secondJoined.TrySetResult(pendingLaunch.Role) |> ignore
+                        return pendingLaunch
+                    })
+                |> Async.StartAsTask
+
+            Assert.That(
+                secondJoined.Task.Wait(TimeSpan.FromSeconds 2.0),
+                Is.True,
+                "The second request must join the pending launch")
+            Assert.That(secondJoined.Task.Result, Is.EqualTo(CanvasBridge.PendingLaunchJoined))
+            Assert.That(
+                duplicateLaunch.Task.IsCompleted,
+                Is.False,
+                "The joining filename must not launch again")
+            Assert.That(first.IsCompleted, Is.False)
+            Assert.That(second.IsCompleted, Is.False)
 
             releaseLaunch.TrySetResult(()) |> ignore
+            Assert.That(
+                launchCompleted.Task.Wait(TimeSpan.FromSeconds 2.0),
+                Is.True,
+                "The shared launch must finish before registration completes it")
             CanvasBridge.registerSession path "http://127.0.0.1:1/inject" (Some sessionId)
 
             Assert.That(first.Wait(TimeSpan.FromSeconds 3.0), Is.True)
+            Assert.That(second.Wait(TimeSpan.FromSeconds 3.0), Is.True)
             Assert.That(first.Result |> Result.isOk, Is.True)
+            Assert.That(second.Result, Is.EqualTo(first.Result))
             Assert.That(
                 runAsync (CanvasDocOwnership.getOwner path "diff.html"),
                 Is.EqualTo(Some sessionId))
             Assert.That(
                 runAsync (CanvasDocOwnership.getOwner path "beads.html"),
                 Is.EqualTo(Some sessionId)))
+
+    [<Test>]
+    member _.``joined requests share the starter launch failure``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "shared-canvas-launch-failure"
+            let launchEntered =
+                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let duplicateLaunch =
+                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseLaunch =
+                TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let secondJoined =
+                TaskCompletionSource<CanvasBridge.PendingLaunchResult>(
+                    TaskCreationOptions.RunContinuationsAsynchronously)
+
+            let launch () =
+                async {
+                    if not (launchEntered.TrySetResult(())) then
+                        duplicateLaunch.TrySetResult(()) |> ignore
+
+                    do! releaseLaunch.Task |> Async.AwaitTask
+                    return Error "terminal failed"
+                }
+
+            let run beginLaunch =
+                WorktreeApi.launchFreshCanvasSessionWith
+                    beginLaunch
+                    (CanvasBridge.cancelPendingLaunch path)
+                    launch
+                    (fun pendingLaunch ->
+                        CanvasBridge.waitForPendingLaunchCompletion
+                            (TimeSpan.FromSeconds 2.0)
+                            pendingLaunch)
+
+            let first =
+                run (fun () -> CanvasBridge.beginPendingLaunch path "diff.html")
+                |> Async.StartAsTask
+
+            Assert.That(
+                launchEntered.Task.Wait(TimeSpan.FromSeconds 2.0),
+                Is.True,
+                "The first request must own and enter the launch")
+
+            let second =
+                run (fun () ->
+                    async {
+                        let! pendingLaunch =
+                            CanvasBridge.beginPendingLaunch path "beads.html"
+
+                        secondJoined.TrySetResult(pendingLaunch.Role) |> ignore
+                        return pendingLaunch
+                    })
+                |> Async.StartAsTask
+
+            Assert.That(
+                secondJoined.Task.Wait(TimeSpan.FromSeconds 2.0),
+                Is.True,
+                "The second request must join the pending launch")
+            Assert.That(secondJoined.Task.Result, Is.EqualTo(CanvasBridge.PendingLaunchJoined))
+            Assert.That(
+                duplicateLaunch.Task.IsCompleted,
+                Is.False,
+                "The joining filename must not launch again")
+            Assert.That(first.IsCompleted, Is.False)
+            Assert.That(second.IsCompleted, Is.False)
+
+            releaseLaunch.TrySetResult(()) |> ignore
+
+            Assert.That(first.Wait(TimeSpan.FromSeconds 3.0), Is.True)
+            Assert.That(second.Wait(TimeSpan.FromSeconds 3.0), Is.True)
+            Assert.That(
+                first.Result,
+                Is.EqualTo(Error "terminal failed": Result<unit, string>))
+            Assert.That(second.Result, Is.EqualTo(first.Result)))
 
     [<Test>]
     member _.``spawn failure and timeout clear pending launch without replacing target``() =
@@ -154,7 +265,7 @@ type CanvasSessionRecoveryTests() =
             let run launch waitForRegistration =
                 WorktreeApi.launchFreshCanvasSessionWith
                     (fun () -> CanvasBridge.beginPendingLaunch path "diff.html")
-                    (fun () -> CanvasBridge.cancelPendingLaunch path)
+                    (CanvasBridge.cancelPendingLaunch path)
                     launch
                     waitForRegistration
                 |> runAsync
@@ -162,28 +273,41 @@ type CanvasSessionRecoveryTests() =
             match
                 run
                     (fun () -> async { return Error "terminal failed" })
-                    (fun () -> async { return true })
+                    (fun _ -> async { return Ok () })
             with
             | Error "terminal failed" -> ()
             | other -> Assert.Fail($"Expected terminal failure, got {other}")
+
+            let afterSpawnFailure =
+                runAsync (CanvasBridge.beginPendingLaunch path "diff.html")
+
             Assert.That(
-                runAsync (CanvasBridge.beginPendingLaunch path "diff.html"),
+                afterSpawnFailure.Role,
                 Is.EqualTo(CanvasBridge.PendingLaunchStarted),
                 "Spawn failure must release the worktree launch slot")
-            runAsync (CanvasBridge.cancelPendingLaunch path)
+            runAsync (CanvasBridge.cancelPendingLaunch path "test cleanup")
 
             match
                 run
                     (fun () -> async { return Ok () })
-                    (fun () -> async { return false })
+                    (fun _ ->
+                        async {
+                            return
+                                Error
+                                    "the session did not register with Treemon before the timeout"
+                        })
             with
             | Error "the session did not register with Treemon before the timeout" -> ()
             | other -> Assert.Fail($"Expected registration timeout, got {other}")
+
+            let afterTimeout =
+                runAsync (CanvasBridge.beginPendingLaunch path "diff.html")
+
             Assert.That(
-                runAsync (CanvasBridge.beginPendingLaunch path "diff.html"),
+                afterTimeout.Role,
                 Is.EqualTo(CanvasBridge.PendingLaunchStarted),
                 "Timeout must release the worktree launch slot")
-            runAsync (CanvasBridge.cancelPendingLaunch path)
+            runAsync (CanvasBridge.cancelPendingLaunch path "test cleanup")
 
             Assert.That(
                 runAsync (CanvasDocOwnership.getOwner path "diff.html"),

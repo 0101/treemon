@@ -40,9 +40,11 @@ without changing the previous target.
 
 Treemon starts a fresh canvas session only when the worktree has no active session suitable for the
 interaction. Concurrent diff and Beadspace interactions join the same pending worktree launch
-instead of starting competing sessions. A reconnecting same-worktree session may win the narrow
-registration race; this bounded same-worktree routing risk is accepted because registration is
-correlated only by worktree and pending filenames.
+instead of starting competing sessions. Every starter and joiner awaits one shared completion
+result: identified registration resolves success after target assignment, while spawn failure,
+exception, cancellation, or timeout resolves the same error for every caller. A reconnecting
+same-worktree session may win the narrow registration race; this bounded same-worktree routing risk
+is accepted because registration is correlated only by worktree and pending filenames.
 
 Queued messages retain the existing cap of 10 and five-minute TTL. Drain re-resolves the current
 target by filename, so ownership changes made while a message waits are honored.
@@ -69,10 +71,10 @@ removal, pruning, and legacy-import operations. `SessionBridge` owns the session
 transport queue, limits, and liveness shared by canvas and agent prompts. `CanvasBridge` layers
 filename-based target resolution and worktree launch policy over that generic transport.
 
-The in-memory worktree launch coordinator records pending filenames, serializes fresh starts per
-worktree, and is consumed by the next identified registration before queue drain. Registration
-carries only the worktree, inject URL, and session identity; launch correlation remains server-side
-and worktree-scoped.
+The in-memory worktree launch coordinator records pending filenames plus one shared completion
+result, serializes fresh starts per worktree, and is consumed by the next identified registration
+before queue drain. Registration carries only the worktree, inject URL, and session identity;
+launch correlation remains server-side and worktree-scoped.
 
 `SessionActivityService` assigns the unified `diff.html` target whenever the real-activity winner
 changes; heartbeat, usage, and metadata-only reports cannot move it. `CanvasScanner` continues
