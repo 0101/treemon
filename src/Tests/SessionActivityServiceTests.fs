@@ -597,6 +597,57 @@ type IngestTests() =
                 Assert.That(events |> List.map _.Status, Is.EqualTo([ SessionLevelStatus.Working; SessionLevelStatus.Idle ]))))
 
     [<Test>]
+    member _.``heartbeats expire completed clocks without removing active agents or accepting older starts``() =
+        withService "C:/wt/a" (fun (svc, agent, store) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "completed-start"
+                    "2026-03-01T10:00:00Z"
+                    (BackgroundAgentStarted("completed", ts "2026-03-01T10:00:00Z")))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "completed-finish"
+                    "2026-03-01T10:00:10Z"
+                    (BackgroundAgentFinished("completed", ts "2026-03-01T10:00:10Z")))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "active-start"
+                    "2026-03-01T10:00:20Z"
+                    (BackgroundAgentStarted("active", ts "2026-03-01T10:00:20Z")))
+            svc.Submit(mkReport "s1" "C:/wt/a" "heartbeat-1" "2026-03-01T10:04:00Z" Heartbeat)
+            svc.Submit(mkReport "s1" "C:/wt/a" "heartbeat-2" "2026-03-01T10:06:00Z" Heartbeat)
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "expired-start"
+                    "2026-03-01T10:00:05Z"
+                    (BackgroundAgentStarted("completed", ts "2026-03-01T10:00:05Z")))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    live.Status.BackgroundAgentClocks,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ "active",
+                              { StartedAt = Some(ts "2026-03-01T10:00:20Z")
+                                FinishedAt = None } ])
+                )
+                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:06:00Z"))
+                Assert.That(events |> List.exists (fun row -> row.EventId = EventId "expired-start"), Is.False)
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
+
+    [<Test>]
     member _.``an older terminal after a newer start cannot finish the active agent``() =
         withService "C:/wt/a" (fun (svc, agent, store) ->
             svc.Submit(
@@ -632,15 +683,15 @@ type IngestTests() =
                 Assert.That(events |> List.map _.Status, Is.EqualTo([ SessionLevelStatus.Idle; SessionLevelStatus.Working ]))))
 
     [<Test>]
-    member _.``a delayed finish records event-time history without regressing newer root work``() =
+    member _.``a delayed finish within retention records event-time history without regressing newer root work``() =
         withService "C:/wt/a" (fun (svc, agent, store) ->
             svc.Submit(
                 mkReport
                     "s1"
                     "C:/wt/a"
                     "bg-start"
-                    "2026-03-01T10:00:00Z"
-                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
+                    "2026-03-01T10:55:00Z"
+                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:55:00Z")))
             svc.Submit(mkReport "s1" "C:/wt/a" "root-start" "2026-03-01T11:00:00Z" TurnStarted)
             svc.Submit(mkReport "s1" "C:/wt/a" "root-skill" "2026-03-01T11:00:01Z" (SkillInvoked "review"))
             svc.Submit(
@@ -648,8 +699,8 @@ type IngestTests() =
                     "s1"
                     "C:/wt/a"
                     "bg-finish"
-                    "2026-03-01T10:01:00Z"
-                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:01:00Z")))
+                    "2026-03-01T10:56:00Z"
+                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:56:00Z")))
 
             let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             let persisted = store.StatusBySession(SessionId "s1") |> Option.get
@@ -665,8 +716,8 @@ type IngestTests() =
                 Assert.That(
                     live.Status.BackgroundAgentClocks["tool-1"],
                     Is.EqualTo(
-                        { StartedAt = None
-                          FinishedAt = Some(ts "2026-03-01T10:01:00Z") }))
+                        { StartedAt = Some(ts "2026-03-01T10:55:00Z")
+                          FinishedAt = Some(ts "2026-03-01T10:56:00Z") }))
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
                 Assert.That(

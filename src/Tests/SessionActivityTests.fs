@@ -259,6 +259,27 @@ type BackgroundAgentLifecycleTests() =
             Assert.That(effectiveStatus status, Is.EqualTo SessionLevelStatus.Idle))
 
     [<Test>]
+    member _.``Clock retention removes old completions but preserves recent tombstones and active agents``() =
+        let status =
+            foldMany
+                emptyStatus
+                [ started "old-completed" "2026-03-01T10:00:00Z"
+                  finished "old-completed" "2026-03-01T10:01:00Z"
+                  started "recent-completed" "2026-03-01T10:08:00Z"
+                  finished "recent-completed" "2026-03-01T10:09:00Z"
+                  started "active" "2026-03-01T10:00:00Z" ]
+
+        let retained =
+            status
+            |> pruneCompletedBackgroundAgentClocks (ts "2026-03-01T10:10:01Z")
+
+        Assert.Multiple(fun () ->
+            Assert.That(retained.BackgroundAgentClocks |> Map.containsKey "old-completed", Is.False)
+            Assert.That(retained.BackgroundAgentClocks |> Map.containsKey "recent-completed", Is.True)
+            Assert.That(retained.BackgroundAgentClocks |> Map.containsKey "active", Is.True)
+            Assert.That(effectiveStatus retained, Is.EqualTo SessionLevelStatus.Working))
+
+    [<Test>]
     member _.``A terminal before an older start remains inactive``() =
         let status =
             foldMany

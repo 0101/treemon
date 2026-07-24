@@ -112,8 +112,8 @@ type SessionStatus =
       ContextUsage: ContextUsage option
       AwaitingUserSince: DateTimeOffset option
       UserInputCompletedAt: DateTimeOffset option
-      /// Per-tool lifecycle clocks. Completed clocks remain until the session is stale/removed or
-      /// the server process restarts so delayed reports can be merged deterministically.
+      /// Per-tool lifecycle clocks. Active clocks remain while their agent runs; completed clocks
+      /// retain only the supported late-event window.
       BackgroundAgentClocks: Map<string, BackgroundAgentLifecycle> }
 
 /// The starting state for a session with no events yet.
@@ -238,6 +238,27 @@ let effectiveActivity (s: SessionStatus) : AgentActivity option =
 /// its `last_seen` is older than this. The extension heartbeats every ~30–120s, so this is a few
 /// missed heartbeats — much faster than the old 30-min mtime staleness.
 let stalenessTimeout = TimeSpan.FromMinutes 5.0
+
+/// Completed lifecycle clocks retain this much out-of-order delivery history. Active agents are
+/// never removed by this window.
+let backgroundAgentClockRetention = stalenessTimeout
+
+let pruneCompletedBackgroundAgentClocks (now: DateTimeOffset) (status: SessionStatus) =
+    let cutoff = now - backgroundAgentClockRetention
+
+    { status with
+        BackgroundAgentClocks =
+            status.BackgroundAgentClocks
+            |> Map.filter (fun _ lifecycle ->
+                let isActive = lifecycle.StartedAt > lifecycle.FinishedAt
+                let isRecentCompletion =
+                    lifecycle.FinishedAt
+                    |> Option.exists (fun finishedAt -> finishedAt > cutoff)
+
+                isActive || isRecentCompletion) }
+
+let isExpiredBackgroundAgentEvent (latestSeen: DateTimeOffset) (occurredAt: DateTimeOffset) =
+    occurredAt <= latestSeen - backgroundAgentClockRetention
 
 /// The idle window for `pickActive` display collapse and restart `loadLiveStatuses` (reuses the
 /// existing idle cutoff): sessions quiet longer than this are not considered live.

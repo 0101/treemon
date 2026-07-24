@@ -192,10 +192,11 @@ folding the whole stream.
 The persisted `StoredStatus` carries `UpdatedAt` for base lifecycle ordering and representative
 selection, and `ContextUsageAt` for usage ordering; user-input clocks and intent/title message times
 are persisted independently. Background-agent clocks remain only in the service's live map and are
-overlaid after authoritative store rereads. A completion received before its older start cannot
-resurrect an agent during that process lifetime, and a slightly-earlier ask-user request can still
-override a later-arriving idle report. Metadata or usage cannot block lifecycle state, and
-heartbeats only advance `LastSeen`.
+overlaid after authoritative store rereads. Completed clocks retain five minutes of late-event
+ordering; older lifecycle reports are ignored, so pruning a terminal clock cannot resurrect its
+agent. A slightly-earlier ask-user request can still override a later-arriving idle report. Metadata
+or usage cannot block lifecycle state, and heartbeats advance `LastSeen` while pruning expired
+completed clocks.
 Equal `UpdatedAt` values use `SessionId` as a stable tie-breaker.
 
 `freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
@@ -250,10 +251,10 @@ The extension and server ingestion boundary ensure only genuine lifecycle events
   Transactional writes reread the authoritative persisted row; the service overlays its
   process-local background clocks before publishing that row to the scheduler/live map. Duplicate
   `EventId`s are complete no-ops.
-- Lifecycle reports use `UpdatedAt`: an older report is appended to `activity_events` for historical
-  reconstruction but cannot regress the live aggregate. `IntentReported` and `TitleReported` are
-  also appended, but load any retained durable aggregate, preserve `UpdatedAt`, and resolve
-  independently by their message timestamps.
+- Accepted lifecycle reports use `UpdatedAt`: an older report within the five-minute late-event
+  window is appended to `activity_events` for historical reconstruction but cannot regress the live
+  aggregate. `IntentReported` and `TitleReported` are also appended, but load any retained durable
+  aggregate, preserve `UpdatedAt`, and resolve independently by their message timestamps.
 - `AwaitingUserInput` and `UserInputCompleted` use the same independent ordering path: they merge
   their clocks by maximum event time while advancing `UpdatedAt` monotonically. Fire-and-forget
   delivery order therefore cannot change whether the session is waiting or regress representative
@@ -266,8 +267,11 @@ The extension and server ingestion boundary ensure only genuine lifecycle events
   state), so a newer live status or skill is never attributed to an older event.
 - A lifecycle report may be the first report received for a session because POST delivery is
   fire-and-forget. A start creates an Idle-base shell whose effective status is Working; a terminal
-  creates or updates an inactive in-memory clock. A later older start cannot resurrect it during the
-  same server process.
+  creates or updates an inactive in-memory clock.
+- Completed clocks are retained for the five-minute `stalenessTimeout` window and pruned on any
+  subsequent report, including heartbeats. Active clocks are never removed by this cleanup.
+  Lifecycle reports at or before the resulting cutoff are ignored, so a delayed older start cannot
+  resurrect an agent after its terminal clock has been pruned.
 - Accepted lifecycle reports advance `UpdatedAt` and `LastSeen` monotonically for representative
   selection and openness, while preserving all parent-authored footer and activity fields.
 - Before any report path advances a stale session's `LastSeen`, the service clears its process-local
@@ -446,7 +450,7 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   local state; the server fold keeps per-tool start/finish clocks and effective-status precedence
   while Treemon is running. Those clocks are not stored or reconstructed after restart. This
   knowingly allows a mid-agent restart to fall back to the persisted parent/base status, chosen to
-  avoid a lifecycle table, replay floor, tombstone pruning, hydration, and special transaction paths.
+  avoid a lifecycle table, hydration, and special transaction paths.
 - **Opaque lifecycle IDs are bounded, never transformed.** Both producer and server enforce the same
   512-code-unit `toolCallId` limit. The producer drops overlong events and the server rejects them;
   accepted IDs are preserved exactly because truncation could merge distinct agents.
@@ -455,10 +459,11 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   whether WaitingForUser or Working still overlays it.
 - **WaitingForUser outranks background Working.** An outstanding user-input request remains the
   effective status even while background agents run; background activity only overrides base Idle.
-- **Completed clocks remain only in live memory.** Keeping both start and terminal clocks preserves
-  full duplicate/out-of-order behavior during one process lifetime. They may accumulate during a
-  long continuously-active session, but are cleared by the next report after a stale gap or by a
-  restart. This accepted memory trade-off is preferred over durable lifecycle machinery.
+- **Completed clocks have a five-minute in-memory lifetime.** Keeping both start and terminal clocks
+  during the supported late-event window preserves duplicate/out-of-order behavior without allowing
+  a continuously-active session to accumulate them indefinitely. Ordinary reports and heartbeats
+  prune older completed clocks while preserving every active agent; lifecycle events older than the
+  same cutoff are ignored. Restart still clears all lifecycle state.
 - **A stale resume clears the crashed run in memory.** Every report path shares one pre-fold
   stale-session check. It drops the prior process-local lifecycle before folding the resumed report,
   preventing the reused session id from retaining crashed work while preserving genuinely new starts.

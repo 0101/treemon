@@ -309,7 +309,10 @@ type SessionActivityService(
             if report.OccurredAt - prior.LastSeen > stalenessTimeout then
                 { prior with Status.BackgroundAgentClocks = Map.empty }
             else
-                prior
+                { prior with
+                    Status =
+                        prior.Status
+                        |> pruneCompletedBackgroundAgentClocks (max prior.LastSeen report.OccurredAt) }
 
         let livePrior =
             live
@@ -414,40 +417,51 @@ type SessionActivityService(
         | UserInputCompleted _
         | IntentReported _
         | TitleReported _ ->
-            // Background and interaction clocks merge even when older while advancing UpdatedAt only
-            // forward. Activity fields preserve UpdatedAt so they cannot block an older lifecycle
-            // transition.
+            // Background clocks merge out of order within their five-minute retention window;
+            // interaction clocks merge without that cutoff. Both advance UpdatedAt only forward.
+            // Activity fields preserve UpdatedAt so they cannot block an older lifecycle transition.
             let prior, status, stored = foldReportState ()
-            let rowState =
-                match report.Event with
-                | BackgroundAgentStarted _
-                | BackgroundAgentFinished _ ->
-                    historyState prior report status |> snd
-                | _ -> status
-            let orderedStored =
-                match report.Event with
-                | BackgroundAgentStarted _
-                | BackgroundAgentFinished _
-                | AwaitingUserInput _
-                | UserInputCompleted _ ->
-                    { stored with UpdatedAt = max stored.UpdatedAt report.OccurredAt }
-                | IntentReported _
-                | TitleReported _ -> stored
-                | event -> invalidOp $"unexpected independent event: {event}"
-            let eventRow =
-                { EventId = report.EventId
-                  SessionId = report.SessionId
-                  WorktreePath = report.WorktreePath
-                  Provider = report.Provider
-                  Kind = kindText report.Event
-                  Status = SessionActivity.effectiveStatus rowState
-                  Skill = rowState.Skill
-                  Ts = report.OccurredAt }
+            let isExpiredBackgroundEvent =
+                match report.Event, prior with
+                | (BackgroundAgentStarted _ | BackgroundAgentFinished _), Some previous ->
+                    isExpiredBackgroundAgentEvent previous.LastSeen report.OccurredAt
+                | _ -> false
 
-            match store.AppendAndUpsert(eventRow, orderedStored) with
-            | None -> live
-            | Some persisted ->
-                publish status.BackgroundAgentClocks persisted
+            if isExpiredBackgroundEvent then
+                match livePrior with
+                | Some current -> publish current.Status.BackgroundAgentClocks current
+                | None -> live
+            else
+                let rowState =
+                    match report.Event with
+                    | BackgroundAgentStarted _
+                    | BackgroundAgentFinished _ ->
+                        historyState prior report status |> snd
+                    | _ -> status
+                let orderedStored =
+                    match report.Event with
+                    | BackgroundAgentStarted _
+                    | BackgroundAgentFinished _
+                    | AwaitingUserInput _
+                    | UserInputCompleted _ ->
+                        { stored with UpdatedAt = max stored.UpdatedAt report.OccurredAt }
+                    | IntentReported _
+                    | TitleReported _ -> stored
+                    | event -> invalidOp $"unexpected independent event: {event}"
+                let eventRow =
+                    { EventId = report.EventId
+                      SessionId = report.SessionId
+                      WorktreePath = report.WorktreePath
+                      Provider = report.Provider
+                      Kind = kindText report.Event
+                      Status = SessionActivity.effectiveStatus rowState
+                      Skill = rowState.Skill
+                      Ts = report.OccurredAt }
+
+                match store.AppendAndUpsert(eventRow, orderedStored) with
+                | None -> live
+                | Some persisted ->
+                    publish status.BackgroundAgentClocks persisted
         | _ ->
             let prior = priorForFold ()
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
