@@ -18,9 +18,10 @@ type CommitInfo =
       Time: DateTimeOffset }
 
 /// Outcome of resolving a worktree's upstream tracking branch (`git rev-parse --abbrev-ref @{u}`).
-/// Distinguishes git's deterministic "no upstream configured" from a transient read failure
-/// (timeout, `index.lock`, IO error) so downstream prune logic never mistakes a failed read for
-/// "this branch has no upstream" and wrongly forgets a merged PR.
+/// `Upstream` carries the remote-stripped branch name — the store/PR-map key. Distinguishes git's
+/// deterministic "no upstream configured" from a transient read failure (timeout, `index.lock`, IO
+/// error) so downstream prune logic never mistakes a failed read for "this branch has no upstream"
+/// and wrongly forgets a merged PR.
 type UpstreamResult =
     | Upstream of string
     | NoUpstream
@@ -29,35 +30,24 @@ type UpstreamResult =
 type GitData =
     { Path: string
       Branch: string
-      /// The worktree tip commit hash (from `getLastCommit`), used as the identity stamp for a
-      /// merged-PR record so a reused branch name cannot resurrect a prior incarnation's badge.
-      /// Empty when no commit could be read.
+      /// The worktree tip commit hash from `git rev-parse HEAD` — deliberately not `getLastCommit`,
+      /// which skips merge commits. Used as the identity stamp for a merged-PR record so a reused
+      /// branch name cannot resurrect a prior incarnation's badge. Empty when no commit could be read.
       HeadCommit: string
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
-      /// Resolved upstream tracking state. `Upstream` carries the remote-stripped branch name;
-      /// `UpstreamReadFailed` marks a transient read (timeout/lock/IO) rather than git deterministically
-      /// reporting no upstream, so the merged-PR prune enumeration can exclude this worktree instead of
-      /// reading a failed read as "no branch" (Decision #8 residual).
+      /// Resolved upstream tracking state, as returned by `getUpstreamBranch`.
       Upstream: UpstreamResult
       MainBehindCount: int
       BaseRevision: string option
       IsDirty: bool
       WorkMetrics: Shared.WorkMetrics option }
 
-/// True only when both direct and configured-upstream reads failed.
-let isUpstreamReadFailed =
-    function
-    | UpstreamReadFailed -> true
-    | Upstream _
-    | NoUpstream -> false
-
 let prBranchName (gitData: GitData) =
     match gitData.Upstream with
     | Upstream branch -> Some branch
     | UpstreamReadFailed ->
-        gitData.Branch
-        |> Option.ofObj
+        Some gitData.Branch
         |> Option.filter (fun branch ->
             not (String.IsNullOrWhiteSpace branch)
             && branch <> WorktreeStatus.DetachedBranchName)
@@ -248,12 +238,17 @@ let internal parseConfiguredUpstream (branch: string) (output: string) =
             Some upstream
         | _ -> None)
 
+let private stripRemote (upstream: string) =
+    match upstream.IndexOf('/') with
+    | -1 -> upstream
+    | i -> upstream[(i + 1)..]
+
 let getUpstreamBranch (worktreePath: string) (branch: string option) : Async<UpstreamResult> =
     async {
         let! result = runGitResult worktreePath "rev-parse --abbrev-ref @{u}"
 
         match classifyUpstream result, branch with
-        | Upstream upstream, _ -> return Upstream upstream
+        | Upstream upstream, _ -> return Upstream(stripRemote upstream)
         | NoUpstream, _ -> return NoUpstream
         | UpstreamReadFailed, None -> return UpstreamReadFailed
         | UpstreamReadFailed, Some localBranch ->
@@ -267,7 +262,7 @@ let getUpstreamBranch (worktreePath: string) (branch: string option) : Async<Ups
                 | Ok output ->
                     output
                     |> parseConfiguredUpstream localBranch
-                    |> Option.map Upstream
+                    |> Option.map (stripRemote >> Upstream)
                     |> Option.defaultValue UpstreamReadFailed
                 | Error _ -> UpstreamReadFailed
     }
@@ -337,21 +332,6 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
         let! commitCount = commitCountChild
         let! (linesAdded, linesRemoved) = diffStatsChild
 
-        // Strip the remote prefix ("origin/foo" -> "foo"); the store/PR-map key is the bare branch.
-        let stripRemote (u: string) =
-            match u.IndexOf('/') with
-            | -1 -> u
-            | i -> u[(i + 1)..]
-
-        // Store the remote-stripped upstream state, preserving the DU so a transient read failure
-        // (vs. git's clean "no upstream") stays distinct and the prune enumeration can exclude this
-        // worktree instead of mistaking it for "no branch" (Decision #8).
-        let upstreamState =
-            match upstream with
-            | Upstream u -> Upstream(stripRemote u)
-            | NoUpstream -> NoUpstream
-            | UpstreamReadFailed -> UpstreamReadFailed
-
         let workMetrics : Shared.WorkMetrics option =
             match commitCount with
             | 0 -> None
@@ -367,7 +347,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
               HeadCommit = headCommit
               LastCommitMessage = commit |> Option.map _.Message |> Option.defaultValue ""
               LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
-              Upstream = upstreamState
+              Upstream = upstream
               MainBehindCount = mainBehind
               BaseRevision = baseRevision
               IsDirty = dirty

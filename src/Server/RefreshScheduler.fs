@@ -506,32 +506,32 @@ let readArchivedBranchSets (rootPaths: Map<RepoId, string>) =
     rootPaths
     |> Map.map (fun _ root -> TreemonConfig.readArchivedBranchSet (Some root))
 
+let archivedPathsFor (archivedBranches: Set<string>) (repo: PerRepoState) =
+    repo.WorktreeList
+    |> List.filter (fun wt -> wt.Branch |> Option.exists (fun b -> Set.contains b archivedBranches))
+    |> List.map _.Path
+    |> Set.ofList
+
 let resolveArchivedPaths (archivedBranchSets: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
     repos
     |> Map.map (fun repoId repo ->
         let archivedBranches =
-            archivedBranchSets
-            |> Map.tryFind repoId
-            |> Option.defaultValue Set.empty
+            archivedBranchSets |> Map.tryFind repoId |> Option.defaultValue Set.empty
 
-        repo.WorktreeList
-        |> List.choose (fun wt ->
-            wt.Branch
-            |> Option.filter (fun b -> Set.contains b archivedBranches)
-            |> Option.map (fun _ -> wt.Path))
-        |> Set.ofList)
+        archivedPathsFor archivedBranches repo)
 
 let isWorktreeIgnored (ignorePredicate: string -> bool) (wt: GitWorktree.WorktreeInfo) =
     (wt.Branch |> Option.exists ignorePredicate)
     || (wt.Path |> Path.GetFileName |> ignorePredicate)
 
+let ignoredPathsFor (ignorePredicate: string -> bool) (repo: PerRepoState) =
+    repo.WorktreeList
+    |> List.filter (isWorktreeIgnored ignorePredicate)
+    |> List.map _.Path
+    |> Set.ofList
+
 let resolveIgnoredPaths (ignorePredicate: string -> bool) (repos: Map<RepoId, PerRepoState>) =
-    repos
-    |> Map.map (fun _ repo ->
-        repo.WorktreeList
-        |> List.filter (isWorktreeIgnored ignorePredicate)
-        |> List.map _.Path
-        |> Set.ofList)
+    repos |> Map.map (fun _ repo -> ignoredPathsFor ignorePredicate repo)
 
 type PathFilters =
     { Archived: Map<RepoId, Set<string>>
@@ -545,29 +545,48 @@ type MergedPrBranchScope =
       KnownBranches: Set<string>
       PruneBranches: Set<string> option }
 
-let internal mergedPrBranchScope (ignoredPaths: Set<string>) (repo: PerRepoState) =
+/// Branch scope for one repo's merged-PR reconciliation. Archived worktrees are skipped by the
+/// steady-state refresh, so one first seen while already archived never collects `GitData`. Its
+/// worktree-list branch stands in and its path is exempt from the completeness check — otherwise a
+/// single such worktree would block pruning for the rest of the process lifetime.
+let internal mergedPrBranchScope (ignoredPaths: Set<string>) (archivedPaths: Set<string>) (repo: PerRepoState) =
     let eligiblePaths = Set.difference repo.KnownPaths ignoredPaths
 
     let eligibleGitData =
         repo.GitData |> Map.filter (fun path _ -> Set.contains path eligiblePaths)
+
+    let collectedGitPaths = eligibleGitData |> Map.keys |> Set.ofSeq
+
+    let uncollectedArchivedPaths =
+        Set.difference (Set.intersect eligiblePaths archivedPaths) collectedGitPaths
+
+    let archivedFallbackBranches =
+        repo.WorktreeList
+        |> List.filter (fun wt -> Set.contains wt.Path uncollectedArchivedPaths)
+        |> List.choose _.Branch
+        |> Set.ofList
 
     let knownBranches =
         eligibleGitData
         |> Map.values
         |> Seq.choose GitWorktree.prBranchName
         |> Set.ofSeq
-
-    let collectedGitPaths = eligibleGitData |> Map.keys |> Set.ofSeq
+        |> Set.union archivedFallbackBranches
 
     let readFailedPaths =
         eligibleGitData
-        |> Map.filter (fun _ gitData -> GitWorktree.isUpstreamReadFailed gitData.Upstream)
+        |> Map.filter (fun _ gitData -> gitData.Upstream = GitWorktree.UpstreamReadFailed)
         |> Map.keys
         |> Set.ofSeq
 
     { GitData = eligibleGitData
       KnownBranches = knownBranches
-      PruneBranches = MergedPrStore.pruneScope eligiblePaths collectedGitPaths readFailedPaths knownBranches }
+      PruneBranches =
+        MergedPrStore.pruneScope
+            (Set.difference eligiblePaths uncollectedArchivedPaths)
+            collectedGitPaths
+            readFailedPaths
+            knownBranches }
 
 let buildTaskList (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
     let repoList = repos |> Map.toList
@@ -707,13 +726,11 @@ let private executeTask
             let ignorePredicate =
                 GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
 
-            let ignoredPaths =
-                repo.WorktreeList
-                |> List.filter (isWorktreeIgnored ignorePredicate)
-                |> List.map _.Path
-                |> Set.ofList
-
-            let branchScope = mergedPrBranchScope ignoredPaths repo
+            let branchScope =
+                mergedPrBranchScope
+                    (ignoredPathsFor ignorePredicate repo)
+                    (archivedPathsFor (TreemonConfig.readArchivedBranchSet (Some root)) repo)
+                    repo
 
             let! livePrObservations =
                 PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote branchScope.KnownBranches
@@ -729,7 +746,7 @@ let private executeTask
                     |> Option.map (fun sha -> branch, sha))
                 |> Map.ofSeq
 
-            let! persisted = services.MergedPrStore.GetForRepo repoId
+            let! persisted = MergedPrStore.getForRepo services.MergedPrStore repoId
 
             let worktreeHeads =
                 branchScope.GitData
@@ -751,7 +768,7 @@ let private executeTask
                     branchScope.PruneBranches
 
             if newPersisted <> persisted then
-                services.MergedPrStore.SetForRepo repoId newPersisted
+                MergedPrStore.setForRepo services.MergedPrStore repoId newPersisted
 
             agent.Post(UpdatePr(repoId, effectiveMap))
 

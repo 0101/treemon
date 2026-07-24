@@ -12,7 +12,7 @@ type MergedPrRecord =
       HeadSha: string }
 
 /// Reconstructs the `PrInfo` a persisted record stands in for. Only the merged fact is stored, so
-/// volatile fields get inert defaults; the badge renders from `IsMerged`/`Title`/`Url` (Decision #7).
+/// volatile fields get inert defaults; the badge renders from `IsMerged`/`Title`/`Url`.
 let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
     HasPr
         { Id = record.Id
@@ -35,16 +35,19 @@ let reconcileMergedPrs
     (knownBranches: Set<string> option)
     : Map<string, PrStatus> * Map<string, MergedPrRecord> =
 
-    let mergedIdentityMatches branch =
-        match Map.tryFind branch liveHeadShas, Map.tryFind branch worktreeHeads with
-        | Some headSha, Some tips when not (Set.isEmpty tips) -> Set.contains headSha tips
-        | _ -> true
+    /// A SHA still describes the branch when it matches any observed worktree tip for it, or when
+    /// no worktree currently tracks the branch (nothing local can disprove the identity).
+    let describesBranch branch sha =
+        match Map.tryFind branch worktreeHeads with
+        | Some tips -> Set.contains sha tips
+        | None -> true
 
     let identityValidatedLive =
         livePrMap
         |> Map.filter (fun branch status ->
             match status with
-            | HasPr pr when pr.IsMerged -> mergedIdentityMatches branch
+            | HasPr pr when pr.IsMerged ->
+                liveHeadShas |> Map.tryFind branch |> Option.forall (describesBranch branch)
             | _ -> true)
 
     let upserted =
@@ -61,13 +64,7 @@ let reconcileMergedPrs
             persisted
 
     let identityFiltered =
-        upserted
-        |> Map.filter (fun branch record ->
-            not (System.String.IsNullOrWhiteSpace record.HeadSha)
-            &&
-            (match Map.tryFind branch worktreeHeads with
-             | None -> true
-             | Some tips -> Set.isEmpty tips || Set.contains record.HeadSha tips))
+        upserted |> Map.filter (fun branch record -> describesBranch branch record.HeadSha)
 
     let newPersisted =
         match knownBranches with
@@ -86,8 +83,8 @@ let reconcileMergedPrs
 
     effectiveMap, newPersisted
 
-/// Decides the enumeration `reconcileMergedPrs` may prune against (review F7 / Decision #8). Returns
-/// `Some knownBranches` only when it is trustworthy:
+/// Decides the enumeration `reconcileMergedPrs` may prune against. Returns `Some knownBranches`
+/// only when it is trustworthy:
 ///  - at least one worktree is known and at least one branch resolved (non-empty);
 ///  - every known worktree path has collected `GitData` (`knownPaths ⊆ collectedGitPaths`);
 ///  - no known worktree's upstream read *failed* (`git rev-parse @{u}` timing out / erroring rather
@@ -138,9 +135,6 @@ let private writeState (writer: System.Text.Json.Utf8JsonWriter) (state: Map<Rep
 let internal tryPersistAtPath (path: string) (state: Map<RepoId, Map<string, MergedPrRecord>>) =
     JsonStore.tryPersist "MergedPrStore" path (fun writer -> writeState writer state)
 
-let internal persistAtPath path state =
-    tryPersistAtPath path state |> Async.Ignore
-
 /// Loads the store via the shared safe loader; an absent or corrupt file yields an empty store so
 /// startup never throws. The path is explicit so tests can target a temp dir.
 let internal loadAtPath (path: string) : Map<RepoId, Map<string, MergedPrRecord>> =
@@ -175,24 +169,18 @@ let internal loadAtPath (path: string) : Map<RepoId, Map<string, MergedPrRecord>
             Map.empty)
     |> Option.defaultValue Map.empty
 
-type Store =
-    { GetForRepo: RepoId -> Async<Map<string, MergedPrRecord>>
-      SetForRepo: RepoId -> Map<string, MergedPrRecord> -> unit
-      Load: unit -> unit
-      Flush: unit -> Async<Result<unit, string>> }
+type Store = PersistentStore.Store<RepoId, Map<string, MergedPrRecord>>
 
-let create path =
-    let store =
-        PersistentStore.create "MergedPrStore" (tryPersistAtPath path) (fun () -> loadAtPath path)
+let create path : Store =
+    PersistentStore.create "MergedPrStore" (tryPersistAtPath path) (fun () -> loadAtPath path)
 
-    { GetForRepo =
-        fun repoId ->
-            async {
-                let! records = store.Get repoId
-                return records |> Option.defaultValue Map.empty
-            }
-      SetForRepo =
-        fun repoId records ->
-            store.Update repoId (fun _ -> if Map.isEmpty records then None else Some records)
-      Load = store.Load
-      Flush = store.Flush }
+let getForRepo (store: Store) repoId =
+    async {
+        let! records = store.Get repoId
+        return records |> Option.defaultValue Map.empty
+    }
+
+/// An empty record map is stored as absence, so a repo that loses its last merged PR disappears
+/// from the persisted document instead of leaving an empty object behind.
+let setForRepo (store: Store) repoId records =
+    store.Update repoId (fun _ -> if Map.isEmpty records then None else Some records)

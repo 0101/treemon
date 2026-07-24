@@ -287,28 +287,18 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
-    let mergedPrStore =
-        if usesSessionActivity config then
-            let path = MergedPrStore.filePathForPort config.Port
-            let store = MergedPrStore.create path
-            Log.log "Startup" $"Merged PR store: {path}"
-            store.Load()
-            Some store
-        else
-            None
-
-    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop =
+    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, mergedPrStore =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
-            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None, None
         else
             let agent = RefreshScheduler.createAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
 
-            match config.TestFixtures, mergedPrStore with
-            | Some path, _ ->
+            match config.TestFixtures with
+            | Some path ->
                 match WorktreeApi.loadFixtures path with
                 | Ok fixtures ->
                     populateAgentFromFixtures agent fixtures
@@ -330,8 +320,9 @@ let main args =
                 |> buildRemotingHandler,
                 Some agent,
                 None,
+                None,
                 None
-            | None, Some mergedStore ->
+            | None ->
                 let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
                 Log.log "Startup" $"Session activity store db: {dbPath}"
                 let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
@@ -341,6 +332,13 @@ let main args =
                         agent
                         rootPaths
                 let store = activity.Components.Store
+
+                let mergedStore =
+                    let path = MergedPrStore.filePathForPort config.Port
+                    Log.log "Startup" $"Merged PR store: {path}"
+                    let created = MergedPrStore.create path
+                    created.Load()
+                    created
 
                 let schedulerServices: RefreshScheduler.SchedulerServices =
                     { SessionAgent = sessionAgent
@@ -376,12 +374,11 @@ let main args =
                     |> buildRemotingHandler,
                     Some agent,
                     Some activity,
-                    Some scheduler
+                    Some scheduler,
+                    Some mergedStore
                 with _ ->
                     SessionActivityRuntime.shutdown activity (Some scheduler)
                     reraise ()
-            | None, None ->
-                failwith "Merged PR store was not initialized for the live scheduler"
 
     let sessionActivityService =
         activityRuntime |> Option.map _.Components.Service

@@ -1218,11 +1218,44 @@ type MergedPrBranchScopeTests() =
                 KnownPaths = Set.ofList [ activePath; ignoredPath ]
                 GitData = Map.ofList [ activePath, gitData; ignoredPath, ignoredGitData ] }
 
-        let scope = mergedPrBranchScope (Set.ofList [ ignoredPath ]) repo
+        let scope = mergedPrBranchScope (Set.ofList [ ignoredPath ]) Set.empty repo
 
         Assert.That(scope.GitData |> Map.containsKey ignoredPath, Is.False)
         Assert.That(scope.KnownBranches, Is.EqualTo(Set.ofList [ "main" ]))
         Assert.That(scope.PruneBranches, Is.EqualTo(Some(Set.ofList [ "main" ])))
+
+    // A worktree first seen while already archived never gets a steady-state RefreshGit, so it has
+    // no GitData. Its list branch must still enter the enumeration, and its path must not count
+    // against completeness — otherwise pruning stops for this repo for the process lifetime.
+    [<Test>]
+    member _.``archived worktree without git data contributes its branch without blocking pruning``() =
+        let activePath = "/r1/main"
+        let archivedPath = "/r1/archived"
+
+        let gitData : GitData =
+            { Path = activePath
+              Branch = "main"
+              HeadCommit = "sha-main"
+              LastCommitMessage = "main"
+              LastCommitTime = DateTimeOffset.UtcNow
+              Upstream = Upstream "main"
+              MainBehindCount = 0
+              BaseRevision = None
+              IsDirty = false
+              WorkMetrics = None }
+
+        let repo =
+            { PerRepoState.empty with
+                WorktreeList = [ makeWorktree activePath "main"; makeWorktree archivedPath "feature/archived" ]
+                KnownPaths = Set.ofList [ activePath; archivedPath ]
+                GitData = Map.ofList [ activePath, gitData ] }
+
+        let scope = mergedPrBranchScope Set.empty (Set.ofList [ archivedPath ]) repo
+
+        Assert.That(scope.KnownBranches, Is.EqualTo(Set.ofList [ "main"; "feature/archived" ]),
+            "an archived worktree's branch must stay in scope so its merged record is not pruned")
+        Assert.That(scope.PruneBranches, Is.EqualTo(Some(Set.ofList [ "main"; "feature/archived" ])),
+            "an archived worktree that never collects git data must not block pruning forever")
 
     [<Test>]
     member _.``failed upstream read remains in PR scope without enabling pruning``() =
@@ -1245,7 +1278,7 @@ type MergedPrBranchScopeTests() =
                 KnownPaths = Set.singleton path
                 GitData = Map.ofList [ path, gitData ] }
 
-        let scope = mergedPrBranchScope Set.empty repo
+        let scope = mergedPrBranchScope Set.empty Set.empty repo
 
         Assert.That(scope.KnownBranches, Is.EqualTo(Set.singleton "local-name"))
         Assert.That(scope.PruneBranches, Is.EqualTo(None))

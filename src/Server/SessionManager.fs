@@ -190,13 +190,14 @@ let private sessionsFilePath =
     Path.Combine("data", "sessions.json")
 
 let internal persistSessions (sessions: Map<string, nativeint>) =
-    JsonStore.persist "SessionManager" sessionsFilePath (fun writer ->
+    JsonStore.tryPersist "SessionManager" sessionsFilePath (fun writer ->
         writer.WriteStartObject()
         writer.WritePropertyName("sessions")
         writer.WriteStartObject()
         sessions |> Map.iter (fun path hwnd -> writer.WriteNumber(path, int64 hwnd))
         writer.WriteEndObject()
         writer.WriteEndObject())
+    |> Async.Ignore
 
 let internal loadSessions () =
     JsonStore.load "SessionManager" sessionsFilePath (fun root ->

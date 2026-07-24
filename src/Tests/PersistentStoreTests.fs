@@ -4,19 +4,13 @@ open System
 open System.Threading.Tasks
 open NUnit.Framework
 open Server.PersistentStore
+open Tests.TestUtils
 
 type private PersistMsg =
     | Persist of Map<int, string> * AsyncReplyChannel<Result<unit, string>>
 
-let private timeout = TimeSpan.FromSeconds 5.0
-
 let private awaitTask (task: Task<'T>) =
-    task.WaitAsync(timeout).GetAwaiter().GetResult()
-
-let private runAsync workflow =
-    workflow
-    |> Async.StartAsTask
-    |> awaitTask
+    task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
 
 let private createPersist handler =
     let agent =

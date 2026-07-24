@@ -18,13 +18,10 @@ type private Msg<'K, 'V when 'K: comparison> =
     | Retry of token: int
     | Flush of AsyncReplyChannel<Result<unit, string>>
 
-type private Retry =
-    { Token: int }
-
 type private State<'K, 'V when 'K: comparison> =
     { Desired: Map<'K, 'V>
       Durable: Map<'K, 'V>
-      Retry: Retry option
+      RetryToken: int option
       FailureCount: int
       NextRetryToken: int }
 
@@ -40,24 +37,24 @@ let create<'K, 'V when 'K: comparison and 'V: equality>
         MailboxProcessor.Start(fun inbox ->
             let clearRetry state =
                 { state with
-                    Retry = None
+                    RetryToken = None
                     FailureCount = 0
                     NextRetryToken = state.NextRetryToken + 1 }
 
             let scheduleRetry state =
-                match state.Retry with
+                match state.RetryToken with
                 | Some _ -> state
                 | None ->
-                    let retry = { Token = state.NextRetryToken }
+                    let token = state.NextRetryToken
 
                     async {
                         do! Async.Sleep(retryDelay state.FailureCount)
-                        inbox.Post(Retry retry.Token)
+                        inbox.Post(Retry token)
                     }
                     |> Async.Start
 
                     { state with
-                        Retry = Some retry
+                        RetryToken = Some token
                         NextRetryToken = state.NextRetryToken + 1 }
 
             let persistDirty state =
@@ -107,9 +104,9 @@ let create<'K, 'V when 'K: comparison and 'V: equality>
                         return! loop (clean loaded state)
 
                     | Retry token ->
-                        match state.Retry with
-                        | Some retry when retry.Token = token ->
-                            let! nextState, _ = persistDirty { state with Retry = None }
+                        match state.RetryToken with
+                        | Some pending when pending = token ->
+                            let! nextState, _ = persistDirty { state with RetryToken = None }
                             return! loop nextState
                         | _ ->
                             return! loop state
@@ -127,7 +124,7 @@ let create<'K, 'V when 'K: comparison and 'V: equality>
             loop
                 { Desired = Map.empty
                   Durable = Map.empty
-                  Retry = None
+                  RetryToken = None
                   FailureCount = 0
                   NextRetryToken = 0 })
 

@@ -28,22 +28,13 @@ let tryPersist (logTag: string) (path: string) (writeBody: Utf8JsonWriter -> uni
             return Error error
     }
 
-/// Atomically persists a JSON document, logging and ignoring failures for legacy direct callers.
-let persist (logTag: string) (path: string) (writeBody: Utf8JsonWriter -> unit) : Async<unit> =
-    tryPersist logTag path writeBody |> Async.Ignore
-
 /// Loads a JSON document from `path` and projects its root element with `parse`, returning `None`
-/// for an absent OR corrupt file and `Some (parse root)` otherwise. Owns the safe-load shell —
-/// `File.Exists`, `File.ReadAllText`, `JsonDocument.Parse`, and swallow-and-log error handling — so
-/// each caller keeps only its own projection. NEVER throws (this runs at server startup, where a
-/// throw would crash boot); an unreadable/unparseable file degrades to `None`. Mirrors the
-/// `FileUtils` `logTag` convention and is shared by `MergedPrStore`, `CanvasDocOwnership`, and
-/// `SessionManager` (review F2/F3).
+/// for an absent OR corrupt file and `Some (parse root)` otherwise. NEVER throws — this runs at
+/// server startup, where a throw would crash boot.
 ///
 /// `parse` receives the root `JsonElement` and MUST fully materialize its result before returning:
 /// the backing `JsonDocument` is disposed the instant `parse` completes, so returning a lazy `Seq`
-/// that re-reads the element would read a disposed document. Every current caller folds into a
-/// `Map`, which materializes eagerly.
+/// that re-reads the element would read a disposed document.
 let load (logTag: string) (path: string) (parse: JsonElement -> 'T) : 'T option =
     try
         if File.Exists path then
