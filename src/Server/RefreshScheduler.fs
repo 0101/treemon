@@ -540,14 +540,14 @@ let internal mergedPrBranchScope (ignoredPaths: Set<string>) (repo: PerRepoState
     let knownBranches =
         eligibleGitData
         |> Map.values
-        |> Seq.choose (fun gitData -> GitWorktree.upstreamBranchName gitData.Upstream)
+        |> Seq.choose GitWorktree.prBranchName
         |> Set.ofSeq
 
     let collectedGitPaths = eligibleGitData |> Map.keys |> Set.ofSeq
 
     let readFailedPaths =
         eligibleGitData
-        |> Map.filter (fun _ gitData -> gitData.Upstream = GitWorktree.UpstreamReadFailed)
+        |> Map.filter (fun _ gitData -> GitWorktree.isUpstreamReadFailed gitData.Upstream)
         |> Map.keys
         |> Set.ofSeq
 
@@ -721,7 +721,7 @@ let private executeTask
                 branchScope.GitData
                 |> Map.values
                 |> Seq.choose (fun gitData ->
-                    match GitWorktree.upstreamBranchName gitData.Upstream with
+                    match GitWorktree.prBranchName gitData with
                     | Some branch when gitData.HeadCommit <> "" -> Some(branch, gitData.HeadCommit)
                     | _ -> None)
                 |> Seq.groupBy fst

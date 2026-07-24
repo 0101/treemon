@@ -531,11 +531,13 @@ type ReconcileMergedPrsTests() =
         let providerHeads = Map.ofList [ "feature/x", "sha-X" ]
         let worktreeHeads = Map.ofList [ "feature/x", Set.ofList [ "sha-Y" ] ]
 
-        let _, newPersisted =
+        let effective, newPersisted =
             reconcileObserved live providerHeads persisted worktreeHeads (Some(Set.ofList [ "feature/x" ]))
 
         Assert.That(Map.containsKey "feature/x" newPersisted, Is.False,
             "later local commit Y must not be stamped as proof that merged PR #42 covers it")
+        Assert.That(Map.containsKey "feature/x" effective, Is.False,
+            "the mismatched live merged result must not be displayed after the branch advances")
 
 // pruneScope decides whether the live-derived branch enumeration is trustworthy enough to prune
 // against (review F7 / Decision #8): it must be complete, non-empty, AND free of transient upstream

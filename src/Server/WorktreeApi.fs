@@ -157,8 +157,8 @@ let internal assembleFromState
             now
             (codingToolSince |> Map.tryFind wt.Path)
             codingToolData.Status
-    let upstreamBranch = gitData |> Option.bind (fun data -> GitWorktree.upstreamBranchName data.Upstream)
-    let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
+    let prBranch = gitData |> Option.bind GitWorktree.prBranchName
+    let pr = PrStatus.lookupPrStatus repo.PrData prBranch
 
     { Path = PathUtils.toWorktreePath wt.Path
       Branch = wt.Branch |> Option.defaultValue WorktreeStatus.DetachedBranchName

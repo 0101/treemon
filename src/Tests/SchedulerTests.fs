@@ -1201,6 +1201,78 @@ type MergedPrBranchScopeTests() =
         Assert.That(scope.KnownBranches, Is.EqualTo(Set.ofList [ "main" ]))
         Assert.That(scope.PruneBranches, Is.EqualTo(Some(Set.ofList [ "main" ])))
 
+    [<Test>]
+    member _.``failed upstream read remains in PR scope without enabling pruning``() =
+        let path = "/r1/local-name"
+
+        let gitData: GitData =
+            { Path = path
+              Branch = "local-name"
+              HeadCommit = "provider-sha"
+              LastCommitMessage = "merged"
+              LastCommitTime = DateTimeOffset.UtcNow
+              Upstream = UpstreamReadFailed
+              MainBehindCount = 0
+              BaseRevision = None
+              IsDirty = false
+              WorkMetrics = None }
+
+        let repo =
+            { PerRepoState.empty with
+                KnownPaths = Set.singleton path
+                GitData = Map.ofList [ path, gitData ] }
+
+        let scope = mergedPrBranchScope Set.empty repo
+
+        Assert.That(scope.KnownBranches, Is.EqualTo(Set.singleton "local-name"))
+        Assert.That(scope.PruneBranches, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``card lookup uses local fallback when both upstream reads fail``() =
+        let path = "/r1/local-name"
+        let worktree = makeWorktree path "local-name"
+
+        let gitData: GitData =
+            { Path = path
+              Branch = "local-name"
+              HeadCommit = "provider-sha"
+              LastCommitMessage = "merged"
+              LastCommitTime = DateTimeOffset.UtcNow
+              Upstream = UpstreamReadFailed
+              MainBehindCount = 0
+              BaseRevision = None
+              IsDirty = false
+              WorkMetrics = None }
+
+        let mergedPr =
+            HasPr
+                { Id = 42
+                  Title = "Merged"
+                  Url = "https://example.test/pull/42"
+                  IsDraft = false
+                  Comments = WithResolution(0, 0)
+                  Builds = []
+                  IsMerged = true
+                  HasConflicts = false }
+
+        let repo =
+            { PerRepoState.empty with
+                GitData = Map.ofList [ path, gitData ]
+                PrData = Map.ofList [ "local-name", mergedPr ] }
+
+        let card =
+            Server.WorktreeApi.assembleFromState
+                DateTimeOffset.UtcNow
+                Set.empty
+                Set.empty
+                Set.empty
+                Map.empty
+                Map.empty
+                repo
+                worktree
+
+        Assert.That(card.Pr, Is.EqualTo(mergedPr))
+
 
 [<TestFixture>]
 [<Category("Unit")>]

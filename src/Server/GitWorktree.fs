@@ -45,12 +45,23 @@ type GitData =
       IsDirty: bool
       WorkMetrics: Shared.WorkMetrics option }
 
-/// The remote-stripped upstream branch name, present only when a tracking branch was read successfully.
-let upstreamBranchName =
+/// True only when both direct and configured-upstream reads failed.
+let isUpstreamReadFailed =
     function
-    | Upstream u -> Some u
-    | NoUpstream
-    | UpstreamReadFailed -> None
+    | UpstreamReadFailed -> true
+    | Upstream _
+    | NoUpstream -> false
+
+let prBranchName (gitData: GitData) =
+    match gitData.Upstream with
+    | Upstream branch -> Some branch
+    | UpstreamReadFailed ->
+        gitData.Branch
+        |> Option.ofObj
+        |> Option.filter (fun branch ->
+            not (String.IsNullOrWhiteSpace branch)
+            && branch <> WorktreeStatus.DetachedBranchName)
+    | NoUpstream -> None
 
 /// Result of a successful worktree creation: the path of the new worktree (so
 /// callers can act on the exact location — e.g. launch a session there) alongside
@@ -229,10 +240,36 @@ let internal classifyUpstream (result: Result<string, string>) : UpstreamResult 
         else
             UpstreamReadFailed
 
-let getUpstreamBranch (worktreePath: string) : Async<UpstreamResult> =
+let internal parseConfiguredUpstream (branch: string) (output: string) =
+    output.Split([| '\n' |], StringSplitOptions.RemoveEmptyEntries)
+    |> Array.tryPick (fun line ->
+        match line.TrimEnd('\r').Split([| '\t' |], 2) with
+        | [| localBranch; upstream |] when localBranch = branch && not (String.IsNullOrWhiteSpace upstream) ->
+            Some upstream
+        | _ -> None)
+
+let getUpstreamBranch (worktreePath: string) (branch: string option) : Async<UpstreamResult> =
     async {
         let! result = runGitResult worktreePath "rev-parse --abbrev-ref @{u}"
-        return classifyUpstream result
+
+        match classifyUpstream result, branch with
+        | Upstream upstream, _ -> return Upstream upstream
+        | NoUpstream, _ -> return NoUpstream
+        | UpstreamReadFailed, None -> return UpstreamReadFailed
+        | UpstreamReadFailed, Some localBranch ->
+            let! configured =
+                runGitResult
+                    worktreePath
+                    "for-each-ref \"--format=%(refname:short)%09%(upstream:short)\" refs/heads"
+
+            return
+                match configured with
+                | Ok output ->
+                    output
+                    |> parseConfiguredUpstream localBranch
+                    |> Option.map Upstream
+                    |> Option.defaultValue UpstreamReadFailed
+                | Error _ -> UpstreamReadFailed
     }
 
 let isDirty (worktreePath: string) =
@@ -284,7 +321,7 @@ let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainR
     async {
         let! commitChild = Async.StartChild(getLastCommit worktreePath)
         let! headChild = Async.StartChild(getHeadCommit worktreePath)
-        let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
+        let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath branch)
         let! dirtyChild = Async.StartChild(isDirty worktreePath)
         let! commitCountChild = Async.StartChild(getCommitCount worktreePath mainRef)
         let! diffStatsChild = Async.StartChild(getDiffStats worktreePath mainRef)

@@ -35,8 +35,20 @@ let reconcileMergedPrs
     (knownBranches: Set<string> option)
     : Map<string, PrStatus> * Map<string, MergedPrRecord> =
 
-    let upserted =
+    let mergedIdentityMatches branch =
+        match Map.tryFind branch liveHeadShas, Map.tryFind branch worktreeHeads with
+        | Some headSha, Some tips when not (Set.isEmpty tips) -> Set.contains headSha tips
+        | _ -> true
+
+    let identityValidatedLive =
         livePrMap
+        |> Map.filter (fun branch status ->
+            match status with
+            | HasPr pr when pr.IsMerged -> mergedIdentityMatches branch
+            | _ -> true)
+
+    let upserted =
+        identityValidatedLive
         |> Map.fold
             (fun acc branch status ->
                 match status with
@@ -70,7 +82,7 @@ let reconcileMergedPrs
                 match Map.tryFind branch acc with
                 | Some(HasPr _) -> acc
                 | _ -> acc |> Map.add branch (toMergedPrStatus record))
-            livePrMap
+            identityValidatedLive
 
     effectiveMap, newPersisted
 

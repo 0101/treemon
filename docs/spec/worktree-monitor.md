@@ -150,11 +150,11 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 
 ### Merged-PR Persistence
 
-- Live provider results are authoritative. When the bounded PR fetch no longer returns a tracked upstream branch, a persisted merged record supplies a fallback `HasPr`; live `HasPr` entries are never overridden. Only the terminal merged fact is retained — open PRs and volatile builds, comments, draft, and conflict state are not persisted.
+- Live provider results are authoritative. PR association uses the resolved provider branch. When a deleted remote ref makes `@{u}` unresolvable, Treemon reads Git's still-configured upstream name; only if both reads fail does it fall back to the local branch while disabling pruning. This keeps merged PRs linked when the provider deletes their source branch, including differently named local/provider branches. When the bounded PR fetch no longer returns the branch, a persisted merged record supplies a fallback `HasPr`; live open PRs and identity-matched merged PRs take precedence. Only the terminal merged fact is retained — open PRs and volatile builds, comments, draft, and conflict state are not persisted.
 - `MergedPrStore` keeps `repo → upstream branch → { Id; Title; Url; HeadSha }` in port-scoped gitignored runtime state at `data/merged-prs-{port}.json`. Each server instance owns its store; missing, corrupt, identity-less, or older incompatible records start empty, and failed writes remain dirty in memory until a retry succeeds.
 - Records are pruned to live branches only from a trustworthy enumeration: at least one eligible worktree and branch exist, every non-ignored worktree has collected git data, and no eligible worktree's upstream read failed. Otherwise live merge upserts and fallback overlay still run, but pruning is skipped.
-- The upstream/provider branch identifies the association; `HeadSha` is the immutable provider-reported PR source commit. Fallback accepts a match against any current worktree tip for that upstream branch, and a present mismatch evicts the stale record so branch-name reuse or later unmerged commits cannot inherit an old merged badge.
-- `PrStatus.lookupPrStatus`, `WorktreeApi`, and auto-sync behavior are unchanged by persistence. The `WorktreeApi` PR lookup obtains the branch name from the upstream-state representation through `GitWorktree.upstreamBranchName`.
+- The provider branch identifies the association; `HeadSha` is the immutable provider-reported PR source commit. A merged provider result or persisted fallback is accepted only when its SHA matches a current worktree tip when both are known. A present mismatch evicts or suppresses the stale result so branch-name reuse or later unmerged commits cannot inherit an old merged badge.
+- Failed upstream reads still make branch enumeration untrustworthy and disable pruning when only the local fallback branch is available for PR discovery and card lookup.
 
 ### Merge Conflict Detection
 

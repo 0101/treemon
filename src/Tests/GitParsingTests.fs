@@ -376,3 +376,71 @@ type ClassifyUpstreamTests() =
         Assert.That(
             classifyUpstream (Error "fatal: Unable to create '/repo/.git/index.lock': File exists"),
             Is.EqualTo(UpstreamReadFailed))
+
+    [<Test>]
+    member _.``configured upstream survives deletion of a differently named remote branch``() =
+        let refs =
+            String.concat "\n"
+                [ "local-name\torigin/provider-name"
+                  "main\torigin/main" ]
+
+        Assert.That(parseConfiguredUpstream "local-name" refs, Is.EqualTo(Some "origin/provider-name"))
+
+    [<Test>]
+    member _.``configured branch without tracking yields no fallback identity``() =
+        Assert.That(parseConfiguredUpstream "local-name" "local-name\t", Is.EqualTo(None))
+
+    [<Test>]
+    member _.``missing configured branch yields no fallback identity``() =
+        Assert.That(parseConfiguredUpstream "missing" "main\torigin/main", Is.EqualTo(None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type PrBranchNameTests() =
+
+    let gitData branch upstream =
+        { Path = "/repo/worktree"
+          Branch = branch
+          HeadCommit = "abc123"
+          LastCommitMessage = "message"
+          LastCommitTime = DateTimeOffset.UtcNow
+          Upstream = upstream
+          MainBehindCount = 0
+          BaseRevision = None
+          IsDirty = false
+          WorkMetrics = None }
+
+    [<Test>]
+    member _.``resolved provider branch wins over the local branch``() =
+        Assert.That(prBranchName (gitData "local-name" (Upstream "provider-name")), Is.EqualTo(Some "provider-name"))
+
+    [<Test>]
+    member _.``failed read falls back to the local branch``() =
+        Assert.That(prBranchName (gitData "feature/deleted" UpstreamReadFailed), Is.EqualTo(Some "feature/deleted"))
+
+    [<Test>]
+    member _.``clean no-upstream state has no PR branch identity``() =
+        Assert.That(prBranchName (gitData "feature/local" NoUpstream), Is.EqualTo(None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DeletedUpstreamTests() =
+
+    [<Test>]
+    member _.``collect keeps configured provider branch after remote deletion``() =
+        withTempDir "treemon-deleted-upstream" (fun tempDir ->
+            let repoDir, _ = initRepoWithOrigin tempDir
+            gitAssert repoDir "switch -c local-name"
+            gitAssert repoDir "commit --allow-empty -m feature"
+            gitAssert repoDir "push -u origin HEAD:provider-name"
+            gitAssert repoDir "push origin --delete provider-name"
+            gitAssert repoDir "fetch --prune origin"
+
+            let gitData =
+                collectWorktreeGitData repoDir (Some "local-name") "origin/main"
+                |> runAsync
+
+            Assert.That(gitData.Upstream, Is.EqualTo(Upstream "provider-name"))
+            Assert.That(prBranchName gitData, Is.EqualTo(Some "provider-name")))
