@@ -27,6 +27,7 @@ type CanvasAttributeRequest =
 /// unmonitored worktree records nothing, so a later getOwner stays None.
 type AttributeOutcome =
     | Attributed                  // ownership recorded + persisted
+    | NotAttributable             // a SystemView has no author — routing is resolved, not stored
     | UnknownWorktree             // well-formed but unmonitored worktree — nothing recorded
     | Invalid of reason: string   // missing/blank field — nothing recorded
 
@@ -139,6 +140,9 @@ let attributeOwnership
             return Invalid "missing sessionId"
         elif not (isValidSessionId sessionId) then
             return Invalid "invalid sessionId format"
+        elif CanvasDocKinds.classify filename = SystemView then
+            // Nothing reads a stored SystemView target, so recording one would silently mislead.
+            return NotAttributable
         else
             let worktreePath = worktreePath |> Server.PathUtils.normalizePath
             let! isKnown = isKnownWorktree agent worktreePath
@@ -166,6 +170,9 @@ let canvasAttributeHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) 
             | UnknownWorktree ->
                 Log.log "Canvas" $"Attribution: unmonitored worktree — {body.worktreePath} (nothing recorded)"
                 return! Successful.ok (json {| attributed = false; monitored = false |}) next ctx
+            | NotAttributable ->
+                Log.log "Canvas" $"Attribution skipped: {body.filename} is a SystemView (routing is resolved, not stored)"
+                return! Successful.ok (json {| attributed = false; monitored = true |}) next ctx
             | Attributed ->
                 Log.log "Canvas" $"Attribution recorded: {body.filename} -> {body.sessionId} for {body.worktreePath}"
                 return! Successful.ok (json {| attributed = true; monitored = true |}) next ctx

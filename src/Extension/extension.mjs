@@ -370,7 +370,7 @@ const extensionState = { browserMode: false, port: 0, sessionId: null, worktreeP
 const takeOwnershipTool = {
   name: "canvas_take_ownership",
   description:
-    "Route a canvas doc's replies to THIS session. AgentDocs assign author ownership; SystemViews explicitly assign or reassign their interaction target. Pass the filename under .agents/canvas/, e.g. \"review.html\" or \"diff.html\".",
+    "Route an authored canvas doc's replies to THIS session by claiming its author ownership. Pass the filename under .agents/canvas/, e.g. \"review.html\". SystemViews such as diff.html and beads.html are not claimable: they always reach the worktree's most recently active session.",
   parameters: {
     type: "object",
     properties: {

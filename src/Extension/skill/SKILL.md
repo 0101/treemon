@@ -138,8 +138,9 @@ Editing a doc another session created transfers ownership to you (most recent au
 
 **Claiming ownership explicitly.** If a canvas doc was written by a **script or unsupported tool** (so no supported write event fired to declare ownership), or its messages are reaching the **wrong session**, claim it directly: call the **`canvas_take_ownership`** tool with the doc's filename — e.g. `canvas_take_ownership({ filename: "review.html" })`. It stamps in your session ID without rewriting the file. When the user says something like "take ownership of the review doc," find which `.agents/canvas/*.html` they mean and call the tool with that filename.
 
-For generated SystemViews such as `diff.html` and `beads.html`, the same tool explicitly
-assigns/reassigns only the interaction target; it does not make the generated file an authored doc.
+Generated SystemViews such as `diff.html` and `beads.html` are not claimable: their interactions
+always reach the worktree's most recently active session, resolved per interaction rather than
+stored, so there is no target to assign.
 
 ## Updating
 
