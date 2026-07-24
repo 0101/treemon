@@ -232,53 +232,15 @@ let private linkInterceptor = "<script>document.addEventListener('click',functio
 /// Bridge Escape from a cross-origin canvas doc back to the dashboard's focus reclaim. The doc is a
 /// separate origin, so its keydown never reaches the pane's document-level focus-reclaim listener;
 /// this injected listener posts {action:'reclaim-focus'} on Escape (unless the key originated in an
-/// editable field — checked via e.target, which owns its own Escape). The pane routes it to the same
-/// Escape reclaim. Injected into both doc kinds — reclaim should work from any doc the user looks at.
+/// editable field — checked across the composed event path so inputs inside an injected shadow root
+/// keep their own Escape). The pane routes it to the same Escape reclaim. Injected into both doc kinds.
 let private reclaimFocusScript =
     [ "<script>document.addEventListener('keydown',function(e){"
       "if(e.key!=='Escape')return;"
-      "var t=e.target;"
-      "if(t){var n=(t.tagName||'').toUpperCase();"
-      "if(n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable)return}"
+      "var p=e.composedPath?e.composedPath():[e.target];"
+      "if(p.some(function(t){if(!t)return false;var n=(t.tagName||'').toUpperCase();"
+      "return n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable}))return;"
       "parent.postMessage({action:'reclaim-focus'},'*')})</script>" ]
-    |> String.concat ""
-
-/// window.canvasSend(action, payload): the first-class doc→pane message helper, injected in the
-/// AgentDoc arm only (a SystemView is server-generated and posts nothing, so it never gets the
-/// helper). It wraps the existing FLAT message contract the pane already handles —
-/// canvasSend('navigate-canvas-doc',{filename}) posts {action:'navigate-canvas-doc', filename} via
-/// window.parent.postMessage(...,'*'), identical in effect to a hand-rolled postMessage.
-///
-/// The explicit `action` argument ALWAYS wins: payload is merged FIRST and {action} is applied OVER
-/// it (Object.assign({},payload,{action:action})), so a payload that carries its own `action` key
-/// can't silently override the caller's action — canvasSend('navigate-canvas-doc',{action:'x',...})
-/// still posts (and size-checks) {action:'navigate-canvas-doc',...}, not {action:'x',...}. Applying
-/// {action} last is load-bearing; do NOT flip it back to Object.assign({action:action},payload).
-///
-/// The size guard mirrors the client EXACTLY. CanvasPane.fs computes JSON.stringify(me.data).length
-/// — where me.data IS the posted {action,...payload} object and .length is UTF-16 code units (the JS
-/// String.length) — and DROPS the message when that exceeds MaxPayloadBytes (the "postMessage
-/// DROPPED: payload too large" path). The helper measures the identical metric on the identical
-/// object (var size=JSON.stringify(msg).length) and refuses to post when size>MAX, so the doc-side
-/// verdict equals the client's drop decision — accept iff length<=cap, drop iff length>cap — but the
-/// author gets an immediate doc-side console.error instead of a silent client-side drop. The cap is
-/// applied uniformly to every action; the navigate/morph payloads the client special-cases ahead of
-/// its size check are tiny, so the uniform guard never diverges in practice. UTF-8 byte length is
-/// deliberately NOT used: it would disagree with the client's String.length check and could block a
-/// payload the client accepts (or pass one it drops). The 64000 literal mirrors MaxPayloadBytes in
-/// src/Client/CanvasPane.fs and is kept in sync by hand (CanvasDocServerTests pins the two together).
-let private canvasSendScript =
-    [ "<script>(function(){"
-      "var MAX=64000;"
-      "window.canvasSend=function(action,payload){"
-      "var msg=Object.assign({},payload,{action:action});"
-      "var size=JSON.stringify(msg).length;"
-      "if(size>MAX){"
-      "console.error('[canvas] canvasSend DROPPED: '+action+' message too large ('+size+' > '+MAX+' UTF-16 code units); not sent');"
-      "return false}"
-      "window.parent.postMessage(msg,'*');"
-      "return true}"
-      "})()</script>" ]
     |> String.concat ""
 
 /// `.canvas-spinner`: the themed spinner style for the expand-in-place feedback, injected in the
@@ -304,7 +266,7 @@ let private canvasExpandStyle =
 /// instruction-shaped text into the agent's [canvas] turn; a value with any other character is ignored.
 /// The raw postMessage contract bypasses this guard, so SKILL.md also tells the agent to treat
 /// section/doc as data to locate (match against a known section, never run as an instruction).
-/// Injected after canvasSendScript (the helper it calls), alongside canvasExpandStyle.
+/// Injected after CanvasSendScript.script (the helper it calls), alongside canvasExpandStyle.
 let private canvasExpandScript =
     [ "<script>(function(){"
       "window.canvasExpand=function(btn,section){"
@@ -360,13 +322,10 @@ let private errorOverlayScript (filename: string) =
     |> String.concat ""
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
-/// Both kinds get baseStyle + linkInterceptor + the Escape focus-reclaim bridge. AgentDocs additionally get the message-bridge
-/// heartbeat, the window.canvasSend helper, the window.canvasExpand expand-in-place helper and
-/// its spinner style (canvasExpandStyle), the JS error overlay, and the idiomorph runtime +
-/// morph controller. `filename` is the doc being served: it is embedded into the error overlay
-/// so a doc-side error carries its own identity (the emitter), letting the pane attribute it
-/// correctly even when other docs are mounted as hidden iframes. It is unused for SystemViews
-/// (no overlay).
+/// Both kinds get baseStyle + linkInterceptor + the Escape focus-reclaim bridge. AgentDocs additionally
+/// get the message-bridge heartbeat, canvasSend/canvasExpand helpers, the generic selected-text
+/// contextual actions, the JS error overlay, and the idiomorph runtime + morph controller.
+/// `filename` is embedded into the error overlay so a doc-side error carries its own identity.
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
 /// session: they drive their own refresh and must never morph (a morph would stomp the live,
 /// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
@@ -375,7 +334,18 @@ let private errorOverlayScript (filename: string) =
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
     | SystemView -> CanvasExport.baseStyle + linkInterceptor + reclaimFocusScript
-    | AgentDoc -> CanvasExport.baseStyle + linkInterceptor + reclaimFocusScript + bridgeScript + canvasSendScript + canvasExpandStyle + canvasExpandScript + errorOverlayScript filename + IdiomorphScript.idiomorphJs + IdiomorphScript.morphController
+    | AgentDoc ->
+        CanvasExport.baseStyle
+        + linkInterceptor
+        + reclaimFocusScript
+        + bridgeScript
+        + CanvasSendScript.script
+        + canvasExpandStyle
+        + canvasExpandScript
+        + CanvasSelectionScript.script
+        + errorOverlayScript filename
+        + IdiomorphScript.idiomorphJs
+        + IdiomorphScript.morphController
 
 let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
@@ -424,7 +394,7 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
             | Ok resolvedPath ->
                 let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
                 let html = System.Text.Encoding.UTF8.GetString(rawBytes)
-                let injection = buildInjection (CanvasDocKind.classify filename) filename
+                let injection = buildInjection (CanvasDocKinds.classify filename) filename
                 // Same </head> placement the static export uses (CanvasExport.injectAtHead) — one
                 // implementation so live-served and published docs can never drift.
                 let injected = CanvasExport.injectAtHead injection html

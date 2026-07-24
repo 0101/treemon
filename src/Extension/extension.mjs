@@ -1,6 +1,7 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import {
@@ -19,6 +20,14 @@ const HEARTBEAT_MAX_INTERVAL_MS = 120000;
 const TREEMON_FETCH_TIMEOUT_MS = 5000;
 
 const log = (msg) => console.error(`[canvas-bridge] ${msg}`);
+const CANVAS_SEND_SCRIPT =
+  `<script>${readFileSync(new URL("./canvas-send.js", import.meta.url), "utf8")}</script>`;
+const CANVAS_SELECTION_CONTEXT_SCRIPT =
+  `<script>${readFileSync(new URL("./canvas-selection-context.js", import.meta.url), "utf8")}</script>`;
+const SYSTEM_VIEW_FILENAMES = new Set(
+  JSON.parse(readFileSync(new URL("./canvas-doc-kinds.json", import.meta.url), "utf8"))
+    .map((filename) => filename.toLowerCase()),
+);
 
 const TRANSPORT_SHIM = `<script>
 if (window.parent === window) {
@@ -81,9 +90,13 @@ function hashContent(content) {
   return createHash("sha256").update(content, "utf-8").digest("hex");
 }
 
-function injectScripts(html, port) {
+function injectScripts(html, port, filename) {
   const shim = TRANSPORT_SHIM.replaceAll("__PORT__", String(port));
-  const scripts = shim + "\n" + CONTENT_POLL_SCRIPT;
+  const agentDocScripts =
+    SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())
+      ? ""
+      : "\n" + CANVAS_SEND_SCRIPT + "\n" + CANVAS_SELECTION_CONTEXT_SCRIPT;
+  const scripts = shim + agentDocScripts + "\n" + CONTENT_POLL_SCRIPT;
   if (html.includes("</head>")) {
     return html.replace("</head>", scripts + "\n</head>");
   }
@@ -183,8 +196,11 @@ function startHttpServer(session, state) {
               res.end(hashContent(content));
             } else {
               const port = server.address().port;
-              res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-              res.end(injectScripts(content, port));
+              res.writeHead(200, {
+                "Content-Type": "text/html; charset=utf-8",
+                "Content-Security-Policy": "frame-ancestors 'none'",
+              });
+              res.end(injectScripts(content, port, canvasRoute.filename));
             }
           } catch (err) {
             if (err.code === "ENOENT") {

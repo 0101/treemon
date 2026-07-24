@@ -47,7 +47,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats)
-- Coding tool status dots — one per live session (Working / WaitingForUser / Idle), each a context-usage donut (arc = remaining context) when that session has reported usage, else a plain dot; a worktree with no live session shows the single grey NoSession dot. Tooltip shows the status.
+- Coding tool status dots — one per live session (Working / WaitingForUser / Idle), each a context-usage donut (arc = remaining context) when that session has reported usage, else a plain dot; the last known gauge survives server restart for sessions restored from the durable live window. A worktree with no live session shows the single grey NoSession dot. Tooltip shows the status.
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind main" with sync button; dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
@@ -81,10 +81,19 @@ worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). See
   provider for command-building (`readConfiguredProvider`); the push status source is Copilot-CLI-only today.
 - The card footer has up to three lines: the freshest source-tagged activity (`assistant.intent` or
   the session title) with an optional `▶ <skill>` pill, the last genuine user message (never a
-  `<skill-context>` injection), and the last assistant message tagged with its coding-tool provider.
+  `<skill-context>` injection or runtime `<system_reminder>`), and the last assistant message tagged
+  with its coding-tool provider.
   The title is bootstrapped from session metadata on join/rejoin when the ephemeral
   `session.title_changed` event was missed; `assistant.intent` remains optional enrichment when the
-  CLI emits it. Canvas notifications render alongside all footer lines rather than replacing them.
+  CLI emits it. The last-user line is serialized as
+  `UserFooterMessage { Glyph; Text; Timestamp }`. Canvas prompts are projected by
+  `UserMessageFormatting` into concise display text plus `MessageGlyph.Canvas`; the same server
+  classifier suppresses runtime system reminders before ingestion and when projecting retained
+  footer data. Built-in selection actions show their `request`, known actions get action-specific
+  summaries, and unknown valid JSON is formatted structurally without changing string values.
+  Activity titles use the same text projection before duplicate suppression, so a raw canvas title
+  cannot reappear beside its formatted user-message line. Canvas notifications render alongside all
+  footer lines rather than replacing them.
 
 ### Create Worktree
 
@@ -204,6 +213,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
 | `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling, merged-PR reconciliation |
 | `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure fold, SQLite (WAL) store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
+| `src/Server/UserMessageFormatting.fs` | Server-owned system-reminder suppression and canvas prompt projection shared by ingestion, activity, and footer fields |
 | `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, per-worktree provider config |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI, including the bounded recent-closed window |

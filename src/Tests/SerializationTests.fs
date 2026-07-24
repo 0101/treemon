@@ -35,6 +35,14 @@ type WrapperTypeSerializationTests() =
         Assert.That(result, Is.EqualTo(original))
 
     [<Test>]
+    member _.``UserFooterMessage with canvas glyph survives JSON round-trip``() =
+        let original =
+            { Glyph = Some MessageGlyph.Canvas
+              Text = "Why is retry not jittered?"
+              Timestamp = DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero) }
+        Assert.That(roundTrip original, Is.EqualTo(original))
+
+    [<Test>]
     member _.``LaunchRequest with WorktreePath survives JSON round-trip``() =
         let original =
             { Path = WorktreePath @"Q:\code\test"

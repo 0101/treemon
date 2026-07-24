@@ -62,6 +62,15 @@ let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
       OccurredAt = ts t
       Event = ev }
 
+let private storedWithUsage sid worktree status updatedAt usage usageAt =
+    { SessionId = SessionId sid
+      WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+      Provider = CopilotCli
+      Status = { status with ContextUsage = Some usage }
+      UpdatedAt = updatedAt
+      LastSeen = usageAt
+      ContextUsageAt = Some usageAt }
+
 /// A service over a throwaway temp .db, with `knownWorktree` registered as a monitored path on a
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
 /// the restart-rebuild test). Disposing the service disposes the store; the dir is then removed.
@@ -120,6 +129,12 @@ type ParseReportTests() =
         Assert.That((parseOk (baseReq "went_idle")).Event, Is.EqualTo WentIdle)
 
     [<Test>]
+    member _.``user_input_completed maps to UserInputCompleted``() =
+        Assert.That(
+            (parseOk (baseReq "user_input_completed")).Event,
+            Is.EqualTo(UserInputCompleted(ts "2026-03-01T10:00:00Z")))
+
+    [<Test>]
     member _.``user_prompt with a message maps to UserPrompt carrying that message``() =
         let req = { baseReq "user_prompt" with message = msgDto "hello" "2026-03-01T10:00:00Z" }
         Assert.That((parseOk req).Event, Is.EqualTo(UserPrompt(msg "hello" "2026-03-01T10:00:00Z")))
@@ -160,11 +175,18 @@ type ParseReportTests() =
     [<Test>]
     member _.``awaiting_user_input carries the question when a message is present``() =
         let req = { baseReq "awaiting_user_input" with message = msgDto "Which file?" "2026-03-01T10:00:00Z" }
-        Assert.That((parseOk req).Event, Is.EqualTo(AwaitingUserInput(Some(msg "Which file?" "2026-03-01T10:00:00Z"))))
+        Assert.That(
+            (parseOk req).Event,
+            Is.EqualTo(
+                AwaitingUserInput(
+                    Some(msg "Which file?" "2026-03-01T10:00:00Z"),
+                    ts "2026-03-01T10:00:00Z")))
 
     [<Test>]
     member _.``awaiting_user_input with no message maps to AwaitingUserInput None``() =
-        Assert.That((parseOk (baseReq "awaiting_user_input")).Event, Is.EqualTo(AwaitingUserInput None))
+        Assert.That(
+            (parseOk (baseReq "awaiting_user_input")).Event,
+            Is.EqualTo(AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
 
     [<Test>]
     member _.``an unknown kind is rejected (no catch-all)``() =
@@ -294,7 +316,7 @@ type ParseReportTests() =
         let long = String('q', maxTextLength + 1)
         let req = { baseReq "awaiting_user_input" with message = msgDto long "2026-03-01T10:00:00Z" }
         match (parseOk req).Event with
-        | AwaitingUserInput(Some m) -> Assert.That(m.Text.Length, Is.EqualTo maxTextLength)
+        | AwaitingUserInput(Some m, _) -> Assert.That(m.Text.Length, Is.EqualTo maxTextLength)
         | other -> Assert.Fail $"expected AwaitingUserInput Some, got {other}"
 
     [<Test>]
@@ -325,6 +347,17 @@ type TryAcceptReportTests() =
             match runAsync (tryAcceptReport agent { baseReq "turn_started" with worktreePath = "C:/wt/elsewhere" }) with
             | Unmonitored _ -> ()
             | other -> Assert.Fail $"expected Unmonitored, got {other}")
+
+    [<Test>]
+    member _.``a system reminder for a monitored worktree is ignored before ingestion``() =
+        let request =
+            { baseReq "user_prompt" with
+                message = msgDto "<system_reminder>internal runtime guidance" "2026-03-01T10:00:00Z" }
+
+        withService "C:/wt/a" (fun (_, agent, _) ->
+            match runAsync (tryAcceptReport agent request) with
+            | IgnoredSystemReminder -> ()
+            | other -> Assert.Fail $"expected IgnoredSystemReminder, got {other}")
 
     [<Test>]
     member _.``an invalid body is rejected before the guard``() =
@@ -366,6 +399,62 @@ type IngestTests() =
             Assert.That(s.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(s.LastUserMessage, Is.EqualTo(Some(msg "do it" "2026-03-01T10:00:01Z")))
             Assert.That(s.LastAssistantMessage, Is.EqualTo(Some(msg "on it" "2026-03-01T10:00:02Z"))))
+
+    [<Test>]
+    member _.``ask_user state is correct when idle arrives before the earlier request``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            svc.Submit(mkReport "s1" "C:/wt/a" "e2" "2026-03-01T10:00:01Z" WentIdle)
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "e1"
+                    "2026-03-01T10:00:00Z"
+                    (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
+
+            let waiting = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus waiting.Status, Is.EqualTo SessionLevelStatus.WaitingForUser)
+                Assert.That(waiting.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:01Z")))
+
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "e3"
+                    "2026-03-01T10:00:02Z"
+                    (UserInputCompleted(ts "2026-03-01T10:00:02Z")))
+
+            let idle = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus idle.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(effectiveStatus persisted.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(idle.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:02Z"))))
+
+    [<Test>]
+    member _.``a system reminder cannot release a pending ask_user wait``() =
+        withService "C:/wt/a" (fun (svc, agent, _) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "e1"
+                    "2026-03-01T10:00:00Z"
+                    (AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
+
+            let reminder =
+                { baseReq "user_prompt" with
+                    occurredAt = "2026-03-01T10:00:01Z"
+                    message = msgDto "<system_reminder>internal runtime guidance" "2026-03-01T10:00:01Z" }
+
+            match runAsync (tryAcceptReport agent reminder) with
+            | IgnoredSystemReminder -> ()
+            | other -> Assert.Fail $"expected IgnoredSystemReminder, got {other}"
+
+            svc.Submit(mkReport "s1" "C:/wt/a" "e3" "2026-03-01T10:00:02Z" WentIdle)
+            let status = svc.LiveSnapshot() |> Map.find (SessionId "s1") |> _.Status |> effectiveStatus
+            Assert.That(status, Is.EqualTo SessionLevelStatus.WaitingForUser))
 
     [<Test>]
     member _.``ingested events are persisted to the durable mirror``() =
@@ -443,7 +532,9 @@ type IngestTests() =
                   Title = Some(msg "Old title" "2026-03-01T07:59:00Z")
                   LastUserMessage = Some(msg "resume this" "2026-03-01T07:58:30Z")
                   LastAssistantMessage = Some(msg "working on it" "2026-03-01T07:59:30Z")
-                  ContextUsage = None }
+                  ContextUsage = None
+                  AwaitingUserSince = None
+                  UserInputCompletedAt = None }
               UpdatedAt = ts "2026-03-01T08:00:00Z"
               LastSeen = ts "2026-03-01T08:00:00Z"
               ContextUsageAt = None }
@@ -639,6 +730,31 @@ type IngestTests() =
             let events = store.QueryWindow(ts "2026-03-01T09:00:00Z", ts "2026-03-01T11:00:00Z")
             Assert.That(events.Length, Is.EqualTo 0))
 
+    [<Test>]
+    member _.``usage recreates a pruned row from the retained live session``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-pruned-context-worktree")
+        let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
+        let report eventId occurredAt event =
+            { SessionId = SessionId "s1"
+              WorktreePath = normalizedWorktree
+              Provider = CopilotCli
+              EventId = EventId eventId
+              OccurredAt = occurredAt
+              Event = event }
+
+        withService worktree (fun (svc, _, store) ->
+            svc.Submit(report "started" (now.AddMinutes(-1.0)) TurnStarted)
+            svc.LiveSnapshot() |> ignore
+            store.PruneOld now |> ignore
+            Assert.That(store.LoadLiveStatuses now, Is.Empty)
+            svc.Submit(report "usage" now (UsageInfo(90000, 200000)))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let persisted = store.LoadLiveStatuses now |> List.find (fun row -> row.SessionId = SessionId "s1")
+            Assert.That(persisted, Is.EqualTo(live))
+            Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 90000; TokenLimit = 200000 })))
+
 
 // ── restart rebuild ───────────────────────────────────────────────────────────
 [<TestFixture>]
@@ -647,30 +763,106 @@ type IngestTests() =
 type RestartRebuildTests() =
 
     [<Test>]
-    member _.``Start rebuilds live status from the store and feeds the scheduler``() =
+    member _.``Start rebuilds live status and context usage from the store and feeds the scheduler``() =
         let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
+        let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+        let usageAt = now.AddSeconds(-30.0)
+        let status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
 
         let seed (store: SessionActivityStore) =
-            store.UpsertStatus
-                { SessionId = SessionId "s1"
-                  WorktreePath = WorktreePath "C:/wt/a"
-                  Provider = CopilotCli
-                  Status = { emptyStatus with Status = SessionLevelStatus.Working; Skill = Some "investigate" }
-                  UpdatedAt = now.AddMinutes(-1.0)
-                  LastSeen = now.AddMinutes(-1.0)
-                  ContextUsageAt = None }
+            storedWithUsage "s1" worktree status (now.AddMinutes(-1.0)) usage usageAt
+            |> store.UpsertContextUsage
+            |> ignore
 
-        withServiceSeeded "C:/wt/a" seed (fun (svc, agent, _) ->
+        withServiceSeeded worktree seed (fun (svc, agent, _) ->
             svc.Start()
             // The in-memory fold map is primed, so a subsequent event folds onto the rebuilt state.
             let live = svc.LiveSnapshot()
             let restored = live |> Map.find (SessionId "s1")
             Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
             Assert.That(restored.Status.Skill, Is.EqualTo(Some "investigate"))
+            Assert.That(restored.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt))
             // And the card path (scheduler) sees it immediately, before any new event.
             match schedulerStatus agent "s1" with
-            | Some stored -> Assert.That(stored.Status.Skill, Is.EqualTo(Some "investigate"))
+            | Some stored ->
+                Assert.That(stored.Status.Skill, Is.EqualTo(Some "investigate"))
+                Assert.That(stored.Status.ContextUsage, Is.EqualTo(Some usage))
             | None -> Assert.Fail "restart rebuild did not feed the scheduler")
+
+    [<Test>]
+    member _.``An older usage report after restart cannot replace the restored snapshot``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
+        let usage = { CurrentTokens = 150000; TokenLimit = 200000 }
+        let usageAt = now.AddMinutes(-1.0)
+        let status = { emptyStatus with Status = SessionLevelStatus.Working }
+
+        let seed (store: SessionActivityStore) =
+            storedWithUsage "s1" worktree status (now.AddMinutes(-2.0)) usage usageAt
+            |> store.UpsertContextUsage
+            |> ignore
+
+        withServiceSeeded worktree seed (fun (svc, _, _) ->
+            svc.Start()
+            svc.Submit
+                { SessionId = SessionId "s1"
+                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+                  Provider = CopilotCli
+                  EventId = EventId "older-usage"
+                  OccurredAt = usageAt.AddSeconds(-30.0)
+                  Event = UsageInfo(80000, 200000) }
+
+            let restored = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(restored.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(restored.ContextUsageAt, Is.EqualTo(Some usageAt)))
+
+    [<Test>]
+    member _.``A status event revives all retained state outside the live restart window``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-retained-context-worktree")
+        let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
+        let usage = { CurrentTokens = 110000; TokenLimit = 200000 }
+        let usageAt = now - idleWindow - TimeSpan.FromMinutes 5.0
+        let status =
+            { Status = SessionLevelStatus.Idle
+              Skill = Some "investigate"
+              Intent = Some { Text = "diagnosing context persistence"; At = usageAt.AddMinutes(-4.0) }
+              Title = Some { Text = "Persist context info"; At = usageAt.AddMinutes(-3.0) }
+              LastUserMessage = Some { Text = "keep the context"; At = usageAt.AddMinutes(-2.0) }
+              LastAssistantMessage = Some { Text = "working on it"; At = usageAt.AddMinutes(-1.0) }
+              ContextUsage = None
+              AwaitingUserSince = None
+              UserInputCompletedAt = None }
+
+        let seed (store: SessionActivityStore) =
+            storedWithUsage "s1" worktree status (usageAt.AddMinutes(-1.0)) usage usageAt
+            |> store.UpsertContextUsage
+            |> ignore
+
+        withServiceSeeded worktree seed (fun (svc, agent, _) ->
+            svc.Start()
+            Assert.That((svc.LiveSnapshot()).ContainsKey(SessionId "s1"), Is.False)
+
+            svc.Submit
+                { SessionId = SessionId "s1"
+                  WorktreePath = normalizedWorktree
+                  Provider = CopilotCli
+                  EventId = EventId "revive"
+                  OccurredAt = now
+                  Event = TurnStarted }
+
+            let revived = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(revived.Status.Status, Is.EqualTo(SessionLevelStatus.Working))
+            Assert.That(revived.Status.Skill, Is.EqualTo(status.Skill))
+            Assert.That(revived.Status.Intent, Is.EqualTo(status.Intent))
+            Assert.That(revived.Status.Title, Is.EqualTo(status.Title))
+            Assert.That(revived.Status.LastUserMessage, Is.EqualTo(status.LastUserMessage))
+            Assert.That(revived.Status.LastAssistantMessage, Is.EqualTo(status.LastAssistantMessage))
+            Assert.That(revived.Status.ContextUsage, Is.EqualTo(Some usage))
+            Assert.That(revived.ContextUsageAt, Is.EqualTo(Some usageAt))
+            Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some revived)))
 
     [<Test>]
     member _.``a session quiet longer than the idle window is not rebuilt as live``() =

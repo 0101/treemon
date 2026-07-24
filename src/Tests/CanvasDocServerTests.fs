@@ -2,6 +2,7 @@ module Tests.CanvasDocServerTests
 
 open System.IO
 open System.Text.RegularExpressions
+open System.Text.Json
 open NUnit.Framework
 open Shared
 open Server
@@ -9,8 +10,8 @@ open Server.CanvasDocServer
 open Tests.TestUtils
 
 // baseStyle, linkInterceptor and bridgeScript are private to the server module, so we assert on
-// stable, unique fragments of each. The idiomorph runtime and morph controller are public, so we
-// assert on the exact strings the spec/verify task reference (IdiomorphScript.idiomorphJs etc.).
+// stable, unique fragments of each. Shared runtime assets and the idiomorph scripts are public, so
+// tests can also verify their canonical disk sources.
 let private baseStyleMarker = "scrollbar-color"          // unique to baseStyle (CSS)
 let private linkInterceptorMarker = "navigate-canvas-doc" // unique to linkInterceptor
 let private bridgeMarker = "/bridge/heartbeat"            // unique to bridgeScript
@@ -40,12 +41,17 @@ let private styleBlock (injection: string) =
     m.Groups[1].Value
 
 // ── Item 2: injected window.canvasSend helper markers ─────────────────────────
-let private canvasSendMarker = "window.canvasSend="   // unique to canvasSendScript
+let private canvasSendMarker = "window.canvasSend="   // unique to CanvasSendScript.script
 
 // ── Injected window.canvasExpand expand-in-place helper markers ───────────────
 let private canvasExpandMarker = "window.canvasExpand=" // unique to canvasExpandScript
 let private expandActionMarker = "'expand-section'"     // the action canvasExpand posts (skill + client contract)
 let private spinnerMarker = "canvas-spinner"            // the themed spinner the helper swaps the button for
+
+// ── Injected selected-text contextual actions markers ────────────────────────
+let private selectionContextMarker = "__canvasSelectionContextInstalled"
+let private selectionActionMarker = "'canvas-selection'"
+let private selectionProcessingMarker = "canvas-selection-processing-pulse"
 
 // ── Item 3: injected JS error overlay marker ──────────────────────────────────
 let private errorOverlayMarker = "canvas-doc-error"   // the action the overlay posts (unique to errorOverlayScript)
@@ -226,6 +232,61 @@ type BuildInjectionTests() =
                     "A system view has no owner session to expand into, so canvasExpand is omitted")
 
     [<Test>]
+    member _.``AgentDoc injection includes selected-text contextual actions and processing highlight``() =
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain(selectionContextMarker))
+        Assert.That(injection, Does.Contain(selectionActionMarker))
+        Assert.That(injection, Does.Contain(selectionProcessingMarker))
+
+    [<Test>]
+    member _.``SystemView injection omits selected-text contextual actions``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.That(injection, Does.Not.Contain(selectionContextMarker))
+        Assert.That(injection, Does.Not.Contain(selectionActionMarker))
+
+    [<Test>]
+    member _.``server embeds the canonical extension selection runtime without drift``() =
+        let runtimePath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-selection-context.js"))
+        let runtime = File.ReadAllText(runtimePath)
+        Assert.That(CanvasSelectionScript.source, Is.EqualTo(runtime))
+
+    [<Test>]
+    member _.``server embeds the canonical canvasSend runtime without drift``() =
+        let runtimePath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-send.js"))
+        let runtime = File.ReadAllText(runtimePath)
+        Assert.That(CanvasSendScript.source, Is.EqualTo(runtime))
+
+    [<Test>]
+    member _.``browser fallback loads canonical runtimes and document kinds``() =
+        let extensionPath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "extension.mjs"))
+        let extension = File.ReadAllText(extensionPath)
+
+        Assert.That(extension, Does.Contain("canvas-send.js"))
+        Assert.That(extension, Does.Contain("canvas-selection-context.js"))
+        Assert.That(extension, Does.Contain("canvas-doc-kinds.json"))
+        Assert.That(extension, Does.Contain("SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())"))
+        Assert.That(extension, Does.Contain("injectScripts(content, port, canvasRoute.filename)"))
+        Assert.That(extension, Does.Contain("\"Content-Security-Policy\": \"frame-ancestors 'none'\""))
+
+    [<Test>]
+    member _.``shared document-kind configuration matches server classification``() =
+        let configPath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-doc-kinds.json"))
+        let systemViews =
+            JsonSerializer.Deserialize<string array>(File.ReadAllText(configPath))
+            |> Option.ofObj
+            |> Option.defaultValue [||]
+
+        Assert.That(systemViews, Is.Not.Empty)
+        systemViews
+        |> Array.iter (fun filename ->
+            Assert.That(CanvasDocKinds.classify filename, Is.EqualTo(SystemView), filename))
+        Assert.That(CanvasDocKinds.classify "status.html", Is.EqualTo(AgentDoc))
+
+    [<Test>]
     member _.``the canvasSend helper measures the same metric as the client (JSON.stringify length)``() =
         // The client drops on JSON.stringify(me.data).length (UTF-16 code units / JS String.length).
         // The helper must measure the identical metric on the object it posts — NOT a UTF-8 byte
@@ -340,13 +401,13 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``beads.html classifies as a SystemView and gets the stripped injection``() =
-        let injection = buildInjection (CanvasDocKind.classify "beads.html") "beads.html"
+        let injection = buildInjection (CanvasDocKinds.classify "beads.html") "beads.html"
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.morphController))
 
     [<Test>]
     member _.``an agent .html classifies as an AgentDoc and gets the full injection``() =
-        let injection = buildInjection (CanvasDocKind.classify "status.html") "status.html"
+        let injection = buildInjection (CanvasDocKinds.classify "status.html") "status.html"
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController))
 

@@ -173,7 +173,7 @@ type SmokeTests() =
 
     [<Test>]
     member _.``At least one worktree has LastUserMessage populated``() =
-        let hasUserMessage = readyBody.Contains("\"LastUserMessage\":[\"")
+        let hasUserMessage = readyBody.Contains("\"LastUserMessage\":{\"Glyph\":")
         TestContext.Out.WriteLine($"Response contains LastUserMessage: {hasUserMessage}")
 
         if not hasUserMessage then
@@ -181,7 +181,7 @@ type SmokeTests() =
                 "No worktree has LastUserMessage populated. This can happen when all coding-tool sessions " +
                 "are older than 2h (Idle status) or no user messages found within 1MB scan limit.")
         else
-            Assert.That(readyBody, Does.Not.Contain("\"LastUserMessage\":[\"\"]"),
+            Assert.That(readyBody, Does.Not.Contain("\"Text\":\"\""),
                 "LastUserMessage should not be empty string when present")
 
     [<Test>]

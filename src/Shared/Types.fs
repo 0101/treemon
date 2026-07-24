@@ -63,8 +63,8 @@ type CodingToolProvider =
     static member Default = CopilotCli
 
 /// A snapshot of a session's context-window occupancy: the tokens currently in the window and the
-/// model's limit. Sourced from the SDK `session.usage_info` event, which is ephemeral upstream —
-/// so this is live-only (absent until the first event arrives, and not restored after a restart).
+/// model's limit. The SDK `session.usage_info` event is ephemeral upstream, so Treemon persists the
+/// last accepted snapshot for restart recovery.
 type ContextUsage = { CurrentTokens: int; TokenLimit: int }
 
 module ContextUsage =
@@ -84,7 +84,7 @@ module ContextUsage =
 /// is running no recognized skill); the Overview band classifies each session's activity from it
 /// (via Activity.classify) so a worktree's sessions split across activity groups by what each is
 /// actually doing — not the worktree's single collapsed skill. `ContextUsage` is None until the
-/// session reports usage (or after a restart, as it is not persisted), in which case the session
+/// session first reports usage (including migrated rows with no snapshot), in which case the session
 /// renders as a plain status dot rather than a donut.
 type SessionDot =
     { Status: CodingToolStatus
@@ -197,16 +197,6 @@ type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven
     | SystemView    // server-generated; data-driven; no owner (e.g. the beads dashboard)
 
-module CanvasDocKind =
-    /// Classify a canvas doc by filename. System views are server-generated, data-driven docs
-    /// with no owner session; currently only the beads dashboard (beads.html) is one. This is the
-    /// single place to register future generated views (e.g. a CI/build view), keeping the
-    /// discriminator out of CanvasScanner and CanvasDocServer.
-    let classify (filename: string) : CanvasDocKind =
-        match filename.ToLowerInvariant() with
-        | "beads.html" -> SystemView
-        | _ -> AgentDoc
-
 type CanvasDoc =
     { Filename: string
       ContentHash: string
@@ -286,6 +276,15 @@ module AgentActivity =
         | AgentActivity.Intent (text, changedAt) -> AgentActivity.Intent(transform text, changedAt)
         | AgentActivity.SessionTitle (text, changedAt) -> AgentActivity.SessionTitle(transform text, changedAt)
 
+[<RequireQualifiedAccess>]
+type MessageGlyph =
+    | Canvas
+
+type UserFooterMessage =
+    { Glyph: MessageGlyph option
+      Text: string
+      Timestamp: DateTimeOffset }
+
 type WorktreeStatus =
     { Path: WorktreePath
       Branch: string
@@ -308,7 +307,7 @@ type WorktreeStatus =
       /// CodingTool = NoSession, so an empty list renders the single grey dot. The collapsed
       /// CodingTool above still drives the card's overall accent/border.
       Sessions: SessionDot list
-      LastUserMessage: (string * DateTimeOffset) option
+      LastUserMessage: UserFooterMessage option
       /// The agent's last message (or pending ask_user question) + its timestamp — the card's third
       /// footer line. `None` when the session has produced no assistant message yet.
       LastAssistantMessage: (string * DateTimeOffset) option

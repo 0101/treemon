@@ -41,7 +41,7 @@ if (-not $Command) {
     Write-Host "  log                        Tail the production server log"
     Write-Host "  dev [<path>...]            Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
     Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
-    Write-Host "  deploy                     Build frontend and deploy to wwwroot/ (restarts prod if running)"
+    Write-Host "  deploy                     Build frontend, replace the app on the production port, and start this checkout"
     Write-Host "  add <path> [<path>...]     Add watched root(s) via 'tm add' (restarts prod if running)"
     Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
     Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (restarts prod if running)"
@@ -359,6 +359,25 @@ function Stop-ProductionServer {
     Write-Host "Production server stopped" -ForegroundColor Green
 }
 
+function Stop-ProductionPortListeners {
+    $listenerPids = @(
+        Get-NetTCPConnection -LocalPort $DefaultPort -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty OwningProcess -Unique |
+            Where-Object { $_ -gt 0 }
+    )
+
+    $listenerPids | ForEach-Object {
+        Write-Host "Stopping process on production port $DefaultPort (PID: $_)..." -ForegroundColor Yellow
+        Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+    }
+
+    Remove-Item $PidFile -ErrorAction SilentlyContinue
+
+    if (-not (Wait-PortFree $DefaultPort 10)) {
+        throw "Production port $DefaultPort is still in use after stopping its listener"
+    }
+}
+
 function Show-Status {
     $runningPid = Get-RunningPid
     if (-not $runningPid) {
@@ -558,19 +577,30 @@ function Install-Skill {
     }
 }
 
-function Install-CopilotExtension([string]$SrcDir, [string]$DestName, [string]$FriendlyName) {
+function Install-CopilotExtension(
+    [string]$SrcDir,
+    [string]$DestName,
+    [string]$FriendlyName,
+    [string[]]$RequiredFiles
+) {
     $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
     if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
     Get-ChildItem -Path $SrcDir -Filter "*.mjs" -File |
         Where-Object { $_.Name -notlike "*.test.mjs" } |
         Copy-Item -Destination $dest -Force
-    Copy-Item (Join-Path $SrcDir "package.json") $dest -Force
+    $RequiredFiles | ForEach-Object { Copy-Item (Join-Path $SrcDir $_) $dest -Force }
     Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green
 }
 
 function Install-Extension {
     $src = Join-Path $PSScriptRoot "src" "Extension"
-    Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension"
+    $requiredFiles = @(
+        "package.json",
+        "canvas-doc-kinds.json",
+        "canvas-send.js",
+        "canvas-selection-context.js"
+    )
+    Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension" $requiredFiles
 
     # Install canvas authoring skill
     $skillSource = Join-Path $src "skill" "SKILL.md"
@@ -604,7 +634,7 @@ function Install-ReportingExtension {
     # session-activity events to POST /api/session/activity; set TREEMON_PORTS (comma-separated) to
     # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
     $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
-    Install-CopilotExtension $src "treemon-reporting" "Reporting extension"
+    Install-CopilotExtension $src "treemon-reporting" "Reporting extension" @("package.json")
 }
 
 function Test-WorktreeRootPaths([string[]]$Roots) {
@@ -622,22 +652,14 @@ function Test-WorktreeRootPaths([string[]]$Roots) {
 
 function Restart-ServerIfRunning {
     # Restart the production server only when it is currently running, so persisted
-    # config changes (added/removed roots, redeployed frontend) take effect. Roots are
-    # re-read from the global config at startup, so we restart with empty args (@()).
-    # Optional parameters let Deploy-Frontend keep its distinct log text while sharing
-    # the same lifecycle logic.
-    param(
-        [string]$Message = "Restarting server to apply changes...",
-        [string]$NotRunningMessage = ""
-    )
+    # config changes (added/removed roots) take effect. Roots are re-read from the
+    # global config at startup, so we restart with empty args (@()).
     $runningPid = Get-RunningPid
     if ($runningPid) {
-        Write-Host $Message -ForegroundColor Cyan
+        Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
         Stop-ProductionServer
         Start-Sleep -Seconds 1
         Start-ProductionServer @()
-    } elseif ($NotRunningMessage) {
-        Write-Host $NotRunningMessage -ForegroundColor Gray
     }
 }
 
@@ -651,7 +673,8 @@ function Deploy-Frontend {
     try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
     try { Install-ReportingExtension } catch { Write-Host "Warning: reporting extension install failed: $_" -ForegroundColor Yellow }
 
-    Restart-ServerIfRunning -Message "Restarting production server..." -NotRunningMessage "Production server is not running, skipping restart"
+    Stop-ProductionPortListeners
+    Start-ProductionServer @()
 }
 
 switch ($Command) {

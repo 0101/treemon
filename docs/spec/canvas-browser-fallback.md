@@ -11,7 +11,10 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
    - Serves `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
    - After the agent writes a canvas file, sends the serving URL to the session via `session.send()` (the native runtime no longer supports SDK hook callbacks, so `additionalContext` can't be injected from a tool event).
    - Receives `postMessage`-originated interactions at `POST /_message` and forwards them to the agent session via `session.send()`.
-3. **Same HTML, same API**: Canvas docs use `window.parent.postMessage(...)` in both modes. The transport shim intercepts self-posted messages in top-level browser windows and forwards via HTTP. Zero agent-side changes.
+3. **Same HTML, same API**: `canvasSend` is the primary authoring API and raw
+   `window.parent.postMessage(...)` is its transport substrate. In a top-level fallback window, the
+   transport shim intercepts self-posted messages and forwards them via HTTP. Zero agent-side
+   changes.
 4. **Agent controls UX**: The agent decides whether to open the browser or output a ctrl+clickable URL.
 
 ## Technical Approach
@@ -51,9 +54,16 @@ same-origin transport shim posts `/_message` as `application/json`.
 
 ### Injected Scripts
 
-Browser-mode docs receive two scripts injected before `</head>`:
+Browser-mode AgentDocs receive four scripts injected before `</head>`:
 
 - **Transport shim** — in a top-level window (no parent frame) `window.parent.postMessage()` posts to the window itself; the shim listens for those self-posted `{ action, ... }` messages and forwards them via `fetch POST` to `/_message`, so canvas docs need no browser-specific code.
+- **`canvasSend`** — the same canonical `src/Extension/canvas-send.js` runtime embedded by the
+  Treemon server, so authored interactions use one payload merge, size cap, and return contract in
+  both hosts.
+- **Selected-text contextual actions** — the same canonical runtime the Treemon doc server embeds,
+  calling only the shared `canvasSend` helper. SystemView filenames are excluded through the shared
+  `src/Extension/canvas-doc-kinds.json` configuration rather than a fallback-only filename check.
+  Fallback HTML remains unframeable (`frame-ancestors 'none'`).
 - **Content-polling reload** — polls `/canvas/:filename/hash` every 3s and reloads the page when the hash changes.
 
 ### Canvas-write detection (session events)
@@ -81,7 +91,10 @@ from Add/Update/Move headers. In browser mode the extension sends serving URLs f
 
 ## Key Files
 
-- `src/Extension/extension.mjs` — mode detection, HTTP serving, ownership integration, message endpoint
-- `src/Extension/canvas-ownership.mjs` — session-event write watcher and apply-patch destination parsing
+- `src/Extension/extension.mjs` — mode detection, HTTP serving, ownership integration, runtime injection, message endpoint
+- `src/Extension/canvas-send.js` — canonical `window.canvasSend` runtime shared with the server
+- `src/Extension/canvas-selection-context.js` — canonical selected-text interaction runtime shared with the server
+- `src/Extension/canvas-doc-kinds.json` — canonical SystemView filename list shared with the server
+- `src/Extension/canvas-ownership.mjs` — extracted session-event canvas-write watcher and apply-patch destination parsing
 - `src/Server/CanvasDocServer.fs` — `canvasRegisterHandler` returns `{ registered, monitored }`; `isKnownWorktree` checks the scheduler's `KnownPaths`
 - `src/Extension/skill/SKILL.md` — minor update noting browser fallback

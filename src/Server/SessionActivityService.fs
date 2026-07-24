@@ -93,7 +93,14 @@ let private parseMessage (dto: MessageDto) : Result<Message, string> =
 /// The lifecycle/fold kinds plus state-only bootstrap/gauge and liveness heartbeat are the whole
 /// contract. message is mandatory for user_prompt / assistant_message / intent_reported /
 /// title_reported / title_bootstrap, optional for awaiting_user_input, and absent otherwise.
-let internal parseEvent (kind: string) (message: MessageDto) (skillName: string) (currentTokens: int) (tokenLimit: int) : Result<SessionEvent, string> =
+let internal parseEvent
+    (occurredAt: DateTimeOffset)
+    (kind: string)
+    (message: MessageDto)
+    (skillName: string)
+    (currentTokens: int)
+    (tokenLimit: int)
+    : Result<SessionEvent, string> =
     match kind with
     | "turn_started" -> Ok TurnStarted
     | "turn_ended" -> Ok TurnEnded
@@ -104,16 +111,17 @@ let internal parseEvent (kind: string) (message: MessageDto) (skillName: string)
     | "intent_reported" -> parseMessage message |> Result.map IntentReported
     | "title_reported" -> parseMessage message |> Result.map TitleReported
     | "title_bootstrap" -> parseMessage message |> Result.map TitleBootstrap
+    | "user_input_completed" -> Ok(UserInputCompleted occurredAt)
     | "skill_invoked" ->
         if String.IsNullOrWhiteSpace skillName then Error "skill_invoked requires skillName"
         else Ok(SkillInvoked(capText skillName))
     | "awaiting_user_input" ->
         // The question text is optional; a blank/absent message just means "no question to surface".
         if obj.ReferenceEquals(message, null) || String.IsNullOrWhiteSpace message.text then
-            Ok(AwaitingUserInput None)
+            Ok(AwaitingUserInput(None, occurredAt))
         else
             tryParseTimestamp message.at
-            |> Result.map (fun at -> AwaitingUserInput(Some { Text = capText message.text; At = at }))
+            |> Result.map (fun at -> AwaitingUserInput(Some { Text = capText message.text; At = at }, occurredAt))
     | "usage_info" ->
         // A pure gauge. A non-positive limit is degenerate (no meaningful fraction), so reject it
         // rather than store a divide-by-zero snapshot; a negative current is clamped to 0.
@@ -132,6 +140,7 @@ let internal kindText =
     | TitleBootstrap _ -> "title_bootstrap"
     | SkillInvoked _ -> "skill_invoked"
     | AwaitingUserInput _ -> "awaiting_user_input"
+    | UserInputCompleted _ -> "user_input_completed"
     | TurnEnded -> "turn_ended"
     | WentIdle -> "went_idle"
     | Heartbeat -> "heartbeat"
@@ -144,7 +153,9 @@ let private withMessageTimestamp at =
     | IntentReported message -> IntentReported { message with At = at }
     | TitleReported message -> TitleReported { message with At = at }
     | TitleBootstrap message -> TitleBootstrap { message with At = at }
-    | AwaitingUserInput (Some message) -> AwaitingUserInput(Some { message with At = at })
+    | AwaitingUserInput(Some message, _) -> AwaitingUserInput(Some { message with At = at }, at)
+    | AwaitingUserInput(None, _) -> AwaitingUserInput(None, at)
+    | UserInputCompleted _ -> UserInputCompleted at
     | event -> event
 
 /// Validate a wire request and build the domain report, or return a human-readable reason. The
@@ -166,7 +177,7 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
             tryParseTimestamp req.occurredAt
             |> Result.bind (fun rawOccurredAt ->
                 let occurredAt = clampFutureTimestamp now rawOccurredAt
-                parseEvent req.kind req.message req.skillName req.currentTokens req.tokenLimit
+                parseEvent occurredAt req.kind req.message req.skillName req.currentTokens req.tokenLimit
                 |> Result.map (fun ev ->
                     { SessionId = SessionId req.sessionId
                       WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
@@ -187,13 +198,22 @@ let private isKnownWorktree agent path = async {
     return paths |> Set.contains path
 }
 
+let private isSyntheticSystemReminder (report: SessionActivityReport) =
+    match report.Event with
+    | UserPrompt message ->
+        match UserMessageFormatting.classify message.Text with
+        | UserMessageFormatting.UserMessageClassification.SystemReminder -> true
+        | UserMessageFormatting.UserMessageClassification.Display _ -> false
+    | _ -> false
+
 /// The decision for one incoming request, decoupled from HTTP so it is unit-testable exactly like
 /// CanvasDocServer.attributeOwnership: a malformed/invalid body is rejected, a well-formed body for
-/// an unmonitored worktree records nothing (soft accept), and a well-formed body for a monitored
-/// worktree yields the domain report ready for the single writer.
+/// an unmonitored worktree records nothing (soft accept), synthetic system reminders are ignored,
+/// and a well-formed body for a monitored worktree yields the domain report ready for the single writer.
 type AcceptOutcome =
     | Accepted of SessionActivityReport   // validated + monitored — hand to the mailbox
     | Unmonitored of worktreePath: string // well-formed but unmonitored — nothing recorded
+    | IgnoredSystemReminder               // runtime-generated user-channel content — nothing recorded
     | Rejected of reason: string          // invalid body — nothing recorded
 
 /// Validate + guard a request without touching HTTP or the mailbox: parse the DTO to a domain
@@ -206,7 +226,10 @@ let tryAcceptReport (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (req: S
         | Ok report ->
             let path = WorktreePath.value report.WorktreePath
             let! known = isKnownWorktree agent path
-            return (if known then Accepted report else Unmonitored path)
+            return
+                if not known then Unmonitored path
+                elif isSyntheticSystemReminder report then IgnoredSystemReminder
+                else Accepted report
     }
 
 // --- Retention ---------------------------------------------------------------------------------
@@ -238,6 +261,32 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
     // paths; lifecycle events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed
     // the scheduler. Returns the new in-memory live map.
     let apply (live: Map<SessionId, StoredStatus>) (report: SessionActivityReport) : Map<SessionId, StoredStatus> =
+        let foldReportState () =
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+            let status =
+                prior
+                |> Option.map _.Status
+                |> Option.defaultValue emptyStatus
+                |> fun current -> SessionActivity.fold current report.Event
+            let stored =
+                match prior with
+                | Some existing ->
+                    { existing with
+                        Status = status
+                        LastSeen = max existing.LastSeen report.OccurredAt }
+                | None ->
+                    { SessionId = report.SessionId
+                      WorktreePath = report.WorktreePath
+                      Provider = report.Provider
+                      Status = status
+                      UpdatedAt = DateTimeOffset.MinValue
+                      LastSeen = report.OccurredAt
+                      ContextUsageAt = None }
+            status, stored
+
         match report.Event with
         | Heartbeat ->
             // Liveness-only: bump the session's last_seen (the openness signal that keeps an idle-but-open
@@ -245,7 +294,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
             // it off the ordering/append path is what stops a heartbeat from overtaking a slightly-earlier
             // real event and dropping it (F20), and from inflating activity_events with synthetic rows
             // (F14). A heartbeat for a session with no prior event is ignored — there is nothing live to
-            // keep alive (the extension never heartbeats before its first status-bearing event).
+            // keep alive.
             match live |> Map.tryFind report.SessionId with
             | None -> live
             | Some prior ->
@@ -280,86 +329,55 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                             Status.ContextUsage = Some usage
                             ContextUsageAt = Some report.OccurredAt
                             LastSeen = max prior.LastSeen report.OccurredAt }
-                    store.TouchLastSeen(report.SessionId, bumped.LastSeen)
-                    scheduler.Post(RefreshScheduler.UpdateSessionStatus bumped)
-                    live |> Map.add report.SessionId bumped
+                    let persisted = store.UpsertContextUsage bumped
+                    scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+                    live |> Map.add report.SessionId persisted
         | TitleBootstrap _ ->
             // Metadata hydration is current state, not a source event. Persist the title without
             // appending history or advancing the lifecycle UpdatedAt clock. A bootstrap that arrives
             // before delayed replay creates an Idle shell with the minimum ordering timestamp, so
             // every real SDK event can still fold onto it; its join timestamp seeds LastSeen only
             // until a real event/heartbeat takes over.
-            let prior =
-                live
-                |> Map.tryFind report.SessionId
-                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
-            let status =
-                prior
-                |> Option.map _.Status
-                |> Option.defaultValue emptyStatus
-                |> fun current -> SessionActivity.fold current report.Event
-            let stored =
-                match prior with
-                | Some existing ->
-                    { existing with
-                        Status = status
-                        LastSeen = max existing.LastSeen report.OccurredAt }
-                | None ->
-                    { SessionId = report.SessionId
-                      WorktreePath = report.WorktreePath
-                      Provider = report.Provider
-                      Status = status
-                      UpdatedAt = DateTimeOffset.MinValue
-                      LastSeen = report.OccurredAt
-                      ContextUsageAt = None }
+            let _, stored = foldReportState ()
             store.UpsertStatus stored
             scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
             live |> Map.add report.SessionId stored
+        | AwaitingUserInput _
+        | UserInputCompleted _
         | IntentReported _
         | TitleReported _ ->
-            // Activity fields are source events, but they are ordered independently from lifecycle
-            // status. Preserve UpdatedAt so a fire-and-forget report cannot block an older lifecycle
-            // transition or be discarded merely because a newer lifecycle event arrived first.
-            let prior =
-                live
-                |> Map.tryFind report.SessionId
-                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
-            let status =
-                prior
-                |> Option.map _.Status
-                |> Option.defaultValue emptyStatus
-                |> fun current -> SessionActivity.fold current report.Event
-            let stored =
-                match prior with
-                | Some existing ->
-                    { existing with
-                        Status = status
-                        LastSeen = max existing.LastSeen report.OccurredAt }
-                | None ->
-                    { SessionId = report.SessionId
-                      WorktreePath = report.WorktreePath
-                      Provider = report.Provider
-                      Status = status
-                      UpdatedAt = DateTimeOffset.MinValue
-                      LastSeen = report.OccurredAt
-                      ContextUsageAt = None }
+            // Interaction clocks and activity fields are ordered independently from lifecycle status.
+            // Ask events merge even when older while advancing UpdatedAt only forward; activity fields
+            // preserve UpdatedAt so they cannot block an older lifecycle transition.
+            let status, stored = foldReportState ()
+            let orderedStored =
+                match report.Event with
+                | AwaitingUserInput _
+                | UserInputCompleted _ ->
+                    { stored with UpdatedAt = max stored.UpdatedAt report.OccurredAt }
+                | IntentReported _
+                | TitleReported _ -> stored
+                | event -> invalidOp $"unexpected independent event: {event}"
             let eventRow =
                 { EventId = report.EventId
                   SessionId = report.SessionId
                   WorktreePath = report.WorktreePath
                   Provider = report.Provider
                   Kind = kindText report.Event
-                  Status = status.Status
+                  Status = SessionActivity.effectiveStatus status
                   Skill = status.Skill
                   Ts = report.OccurredAt }
 
-            if not (store.AppendAndUpsert(eventRow, stored)) then
-                live
-            else
-                scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
-                live |> Map.add report.SessionId stored
+            match store.AppendAndUpsert(eventRow, orderedStored) with
+            | None -> live
+            | Some persisted ->
+                scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+                live |> Map.add report.SessionId persisted
         | _ ->
-            let prior = live |> Map.tryFind report.SessionId
+            let prior =
+                live
+                |> Map.tryFind report.SessionId
+                |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
             let priorStatus = prior |> Option.map _.Status |> Option.defaultValue emptyStatus
             let newStatus = SessionActivity.fold priorStatus report.Event
 
@@ -380,7 +398,7 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                   WorktreePath = report.WorktreePath
                   Provider = report.Provider
                   Kind = kindText report.Event
-                  Status = rowState.Status
+                  Status = SessionActivity.effectiveStatus rowState
                   Skill = rowState.Skill
                   Ts = report.OccurredAt }
 
@@ -407,17 +425,18 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                   ContextUsageAt = prior |> Option.bind _.ContextUsageAt }
 
             // Append + durable upsert (last-write-wins) in ONE transaction so the history and the
-            // status can never diverge on a mid-pair failure. Returns false for a duplicate event_id
-            // (nothing appended or upserted) → live map unchanged.
-            if not (store.AppendAndUpsert(eventRow, stored)) then
-                live
-            elif isOutOfOrder then
+            // status can never diverge on a mid-pair failure. A duplicate event_id returns None
+            // (nothing appended or upserted), while a new event returns the authoritative persisted
+            // row so retained context cannot diverge from the live maps.
+            match store.AppendAndUpsert(eventRow, stored) with
+            | None -> live
+            | Some _ when isOutOfOrder ->
                 // Mirror the ordering guard in memory: an out-of-order (older) event is recorded in the
                 // history substrate but must not regress the live fold state or the shown card.
                 live
-            else
-                scheduler.Post(RefreshScheduler.UpdateSessionStatus stored)
-                live |> Map.add report.SessionId stored
+            | Some persisted ->
+                scheduler.Post(RefreshScheduler.UpdateSessionStatus persisted)
+                live |> Map.add report.SessionId persisted
 
     let mailbox =
         MailboxProcessor<ServiceMsg>.Start(fun inbox ->
@@ -475,6 +494,9 @@ type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProce
                 | Unmonitored path ->
                     Log.log "Activity" $"Report for unmonitored worktree — {path} (ignored)"
                     return! Successful.ok (json {| recorded = false; monitored = false |}) next ctx
+                | IgnoredSystemReminder ->
+                    Log.log "Activity" "Ignored synthetic system reminder"
+                    return! Successful.ok (json {| recorded = false; monitored = true |}) next ctx
                 | Accepted report ->
                     this.Submit report
                     return! Successful.ok (json {| recorded = true; monitored = true |}) next ctx
