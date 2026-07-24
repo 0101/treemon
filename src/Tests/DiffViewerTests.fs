@@ -318,6 +318,140 @@ let private summaryPathCounts (json: string) =
 
     files.Length, untracked, withStats
 
+let private geometryRow side selector name =
+    {| selector = selector; name = name; side = side; mustWrap = true |}
+
+let private geometryProbe (page: IPage) mode checkAllRows includeMetrics unifiedRows splitRows =
+    task {
+        let config =
+            {| mode = mode; checkAllRows = checkAllRows; includeMetrics = includeMetrics
+               rows = if mode = "unified" then unifiedRows else splitRows |}
+        let! raw =
+            page.Locator("#patch").EvaluateAsync<string>(
+                """(patch, config) => {
+                    const failures = [];
+                    const metrics = {};
+                    const inside = (inner, outer) =>
+                        inner.left >= outer.left - 1 &&
+                        inner.right <= outer.right + 1 &&
+                        inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+                    const noOverflow = (element, name) => {
+                        if (!element) { failures.push(name + ' is missing'); return; }
+                        if (config.includeMetrics) metrics[name] =
+                            { clientWidth: element.clientWidth, scrollWidth: element.scrollWidth };
+                        if (element.scrollWidth > element.clientWidth + 1)
+                            failures.push(name + ' overflows horizontally');
+                    };
+                    const visibleNumberRect = element => {
+                        if (!element || !element.textContent.trim()) return null;
+                        const range = document.createRange(); range.selectNodeContents(element);
+                        return range.getBoundingClientRect();
+                    };
+                    const checkNumbers = (root, name, side) => {
+                        if (!root) { failures.push(name + ' is missing'); return; }
+                        root.querySelectorAll('tr[data-old-line], tr[data-new-line]').forEach(row => {
+                            const checkNumber = (selector, key) => {
+                                const numbers = row.querySelectorAll(selector);
+                                if (numbers.length > 1) failures.push(name + ' row has multiple ' + key + ' numbers');
+                                if (numbers[0] && numbers[0].textContent.trim() !==
+                                    (row.dataset[key + 'Line'] || ''))
+                                    failures.push(name + ' ' + key + ' number does not match row metadata');
+                            };
+                            checkNumber('.line-num1', 'old');
+                            checkNumber('.line-num2', 'new');
+                            const sideNumber = row.querySelector('.d2h-code-side-linenumber');
+                            if (sideNumber) {
+                                const expected = side === 'old' ? row.dataset.oldLine || '' : row.dataset.newLine || '';
+                                if (sideNumber.textContent.trim() !== expected) failures.push(name + ' side number does not match row metadata');
+                            }
+                        });
+                    };
+                    const checkRow = (row, name, mustWrap) => {
+                        if (!row) { failures.push(name + ' is missing'); return; }
+                        const gutter = row.cells[0];
+                        const code = row.cells[1];
+                        if (!gutter || !code) { failures.push(name + ' gutter or code is missing'); return; }
+                        const line = code.querySelector('.d2h-code-line, .d2h-code-side-line');
+                        if (!line && config.includeMetrics) { failures.push(name + ' wrapped content is missing'); return; }
+                        const rowRect = row.getBoundingClientRect(), gutterRect = gutter.getBoundingClientRect();
+                        const codeRect = code.getBoundingClientRect();
+                        const lineRect = line && line.getBoundingClientRect();
+                        const lineHeight = line ? parseFloat(getComputedStyle(line).lineHeight) : 0;
+                        if (config.includeMetrics) metrics[name] = {
+                            row: [rowRect.left, rowRect.top, rowRect.right, rowRect.bottom],
+                            gutter: [gutterRect.left, gutterRect.top, gutterRect.right, gutterRect.bottom],
+                            code: [codeRect.left, codeRect.top, codeRect.right, codeRect.bottom],
+                            line: [lineRect.left, lineRect.top, lineRect.right, lineRect.bottom], lineHeight
+                        };
+                        if (!config.includeMetrics && Math.abs(gutterRect.top - rowRect.top) > 1) failures.push(name + ' gutter is not aligned to the first visual line');
+                        if (gutterRect.right > codeRect.left + 1) failures.push(name + ' gutter overlaps code');
+                        if (lineRect && !inside(lineRect, rowRect)) failures.push(name + ' wrapped content escapes its logical row');
+                        if (mustWrap && rowRect.height < lineHeight * 2) failures.push(name + ' did not wrap');
+
+                        if (!config.includeMetrics) {
+                            [...gutter.children].filter(child => child.textContent.trim()).forEach(number => {
+                                if (!inside(number.getBoundingClientRect(), gutterRect)) failures.push(name + ' number escapes its gutter');
+                            });
+                        } else {
+                            const oldRect = visibleNumberRect(row.querySelector('.line-num1'));
+                            const newRect = visibleNumberRect(row.querySelector('.line-num2'));
+                            [oldRect, newRect].filter(Boolean).forEach(numberRect => {
+                                if (numberRect.left < gutterRect.left - 1 || numberRect.right > gutterRect.right + 1)
+                                    failures.push(name + ' number escapes its gutter');
+                            });
+                            if (oldRect && newRect && oldRect.right > newRect.left + 1) failures.push(name + ' old and new gutters overlap');
+                        }
+                    };
+
+                    if (config.includeMetrics) noOverflow(document.body, config.mode + ' body');
+                    noOverflow(document.querySelector('.content'), config.mode + ' content');
+                    noOverflow(patch, config.mode + ' patch');
+                    noOverflow(patch.querySelector('.d2h-wrapper'), config.mode + ' wrapper');
+
+                    const split = config.mode === 'split';
+                    const roots = split ? [...patch.querySelectorAll('.d2h-file-side-diff')]
+                        : [patch.querySelector('.d2h-file-diff')];
+                    if (split) {
+                        if (config.includeMetrics) metrics.splitColumnCount = roots.length;
+                        if (roots.length !== 2) failures.push('split does not retain two columns');
+                        if (roots.length === 2) {
+                            const leftRect = roots[0].getBoundingClientRect(), rightRect = roots[1].getBoundingClientRect();
+                            if (config.includeMetrics)
+                                metrics.splitColumns = [[leftRect.left, leftRect.right], [rightRect.left, rightRect.right]];
+                            if (leftRect.right > rightRect.left + 1) failures.push('split columns overlap');
+                        }
+                    }
+                    roots.forEach((root, index) => {
+                        const name = split ? 'split side ' + index : 'unified diff';
+                        noOverflow(root, name);
+                        if (config.includeMetrics)
+                            noOverflow(root && root.querySelector('.d2h-diff-table'),
+                                split ? 'split table ' + index : 'unified table');
+                        if (config.checkAllRows) {
+                            const side = split ? index === 0 ? 'old' : 'new' : null;
+                            checkNumbers(root, split ? name : 'unified', side);
+                            root && root.querySelectorAll('tr').forEach((row, rowIndex) =>
+                                checkRow(row, split ? 'split row ' + index + ':' + rowIndex
+                                    : 'unified row ' + rowIndex, false));
+                        }
+                    });
+
+                    config.rows.forEach(spec => {
+                        const root = spec.side < 0 ? roots[0] : roots[spec.side];
+                        checkRow(root && root.querySelector(spec.selector),
+                            spec.name, spec.mustWrap);
+                    });
+                    return JSON.stringify({ viewportWidth: window.innerWidth, mode: config.mode, failures, metrics });
+                }""",
+                config
+            )
+        use document = JsonDocument.Parse(raw)
+        let failures =
+            document.RootElement.GetProperty("failures").EnumerateArray() |> Seq.map _.GetString() |> Seq.toArray
+
+        return raw, failures
+    }
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -2785,109 +2919,16 @@ type DiffViewerE2ETests() =
                     LocatorWaitForOptions(Timeout = 15000.0f)
                 )
 
-            let geometryFailures mode =
-                this.Page.Locator("#patch").EvaluateAsync<string array>(
-                    $"""(patch) => {{
-                        const failures = [];
-                        const close = (left, right) => Math.abs(left - right) <= 1;
-                        const inside = (inner, outer) =>
-                            inner.left >= outer.left - 1 &&
-                            inner.right <= outer.right + 1 &&
-                            inner.top >= outer.top - 1 &&
-                            inner.bottom <= outer.bottom + 1;
-                        const noOverflow = (element, name) => {{
-                            if (element.scrollWidth > element.clientWidth + 1)
-                                failures.push(name + ' overflows horizontally');
-                        }};
-                        const checkRow = (row, name, mustWrap) => {{
-                            if (!row) {{
-                                failures.push(name + ' is missing');
-                                return;
-                            }}
-                            const gutter = row.cells[0];
-                            const code = row.cells[1];
-                            const rowRect = row.getBoundingClientRect();
-                            const gutterRect = gutter.getBoundingClientRect();
-                            const codeRect = code.getBoundingClientRect();
-                            const line = code.querySelector('.d2h-code-line, .d2h-code-side-line');
-                            const lineHeight = line ? parseFloat(getComputedStyle(line).lineHeight) : 0;
-                            if (!close(gutterRect.top, rowRect.top))
-                                failures.push(name + ' gutter is not aligned to the first visual line');
-                            if (gutterRect.right > codeRect.left + 1)
-                                failures.push(name + ' gutter overlaps code');
-                            [...gutter.children].filter(child => child.textContent.trim()).forEach(number => {{
-                                if (!inside(number.getBoundingClientRect(), gutterRect))
-                                    failures.push(name + ' number escapes its gutter');
-                            }});
-                            if (line && !inside(line.getBoundingClientRect(), rowRect))
-                                failures.push(name + ' wrapped content escapes its logical row');
-                            if (mustWrap && rowRect.height < lineHeight * 2)
-                                failures.push(name + ' did not wrap');
-                        }};
-                        const checkNumbers = (root, name, side) => {{
-                            root.querySelectorAll('tr[data-old-line], tr[data-new-line]').forEach(row => {{
-                                const oldNumber = row.querySelector('.line-num1');
-                                const newNumber = row.querySelector('.line-num2');
-                                const sideNumber = row.querySelector('.d2h-code-side-linenumber');
-                                if (row.querySelectorAll('.line-num1').length > 1)
-                                    failures.push(name + ' row has multiple old numbers');
-                                if (row.querySelectorAll('.line-num2').length > 1)
-                                    failures.push(name + ' row has multiple new numbers');
-                                if (oldNumber && oldNumber.textContent.trim() !== (row.dataset.oldLine || ''))
-                                    failures.push(name + ' old number does not match row metadata');
-                                if (newNumber && newNumber.textContent.trim() !== (row.dataset.newLine || ''))
-                                    failures.push(name + ' new number does not match row metadata');
-                                if (sideNumber) {{
-                                    const visible = sideNumber.textContent.trim();
-                                    const expected =
-                                        side === 'old'
-                                            ? row.dataset.oldLine || ''
-                                            : row.dataset.newLine || '';
-                                    if (visible !== expected)
-                                        failures.push(name + ' side number does not match row metadata');
-                                }}
-                            }});
-                        }};
-                        noOverflow(document.querySelector('.content'), '{mode} content');
-                        noOverflow(patch, '{mode} patch');
-                        noOverflow(patch.querySelector('.d2h-wrapper'), '{mode} wrapper');
-                        if ('{mode}' === 'unified') {{
-                            const diff = patch.querySelector('.d2h-file-diff');
-                            noOverflow(diff, 'unified diff');
-                            checkNumbers(diff, 'unified', null);
-                            checkRow(diff.querySelector("tr[data-old-line='1'][data-new-line='1']"), 'unified context', true);
-                            checkRow(diff.querySelector("tr[data-old-line='2']:not([data-new-line])"), 'unified deletion', true);
-                            checkRow(diff.querySelector("tr[data-new-line='2']:not([data-old-line])"), 'unified addition', true);
-                            checkRow(diff.querySelector("tr[data-old-line='10'][data-new-line='10']"), 'unified hunk context', true);
-                            diff.querySelectorAll('tr').forEach((row, index) =>
-                                checkRow(row, 'unified row ' + index, false));
-                        }} else {{
-                            const sides = [...patch.querySelectorAll('.d2h-file-side-diff')];
-                            if (sides.length !== 2) failures.push('split does not retain two columns');
-                            if (sides.length === 2) {{
-                                const leftRect = sides[0].getBoundingClientRect();
-                                const rightRect = sides[1].getBoundingClientRect();
-                                if (leftRect.right > rightRect.left + 1)
-                                    failures.push('split columns overlap');
-                            }}
-                            sides.forEach((side, sideIndex) => {{
-                                noOverflow(side, 'split side ' + sideIndex);
-                                checkNumbers(
-                                    side,
-                                    'split side ' + sideIndex,
-                                    sideIndex === 0 ? 'old' : 'new'
-                                );
-                                side.querySelectorAll('tr').forEach((row, rowIndex) =>
-                                    checkRow(row, 'split row ' + sideIndex + ':' + rowIndex, false));
-                            }});
-                            checkRow(sides[0].querySelector("tr[data-old-line='2']:not([data-new-line])"), 'split deletion', true);
-                            checkRow(sides[1].querySelector("tr[data-new-line='2']:not([data-old-line])"), 'split addition', true);
-                            checkRow(sides[0].querySelector("tr[data-old-line='10'][data-new-line='10']"), 'split hunk context left', true);
-                            checkRow(sides[1].querySelector("tr[data-old-line='10'][data-new-line='10']"), 'split hunk context right', true);
-                        }}
-                        return failures;
-                    }}"""
-                )
+            let geometry mode =
+                geometryProbe this.Page mode true false
+                    [| geometryRow -1 "tr[data-old-line='1'][data-new-line='1']" "unified context"
+                       geometryRow -1 "tr[data-old-line='2']:not([data-new-line])" "unified deletion"
+                       geometryRow -1 "tr[data-new-line='2']:not([data-old-line])" "unified addition"
+                       geometryRow -1 "tr[data-old-line='10'][data-new-line='10']" "unified hunk context" |]
+                    [| geometryRow 0 "tr[data-old-line='2']:not([data-new-line])" "split deletion"
+                       geometryRow 1 "tr[data-new-line='2']:not([data-old-line])" "split addition"
+                       geometryRow 0 "tr[data-old-line='10'][data-new-line='10']" "split hunk context left"
+                       geometryRow 1 "tr[data-old-line='10'][data-new-line='10']" "split hunk context right" |]
 
             let sourceContext selector =
                 this.Page.Locator(selector).EvaluateAsync<string>(
@@ -2901,7 +2942,7 @@ type DiffViewerE2ETests() =
             let expected hunk oldRange newRange =
                 $"""{{"kind":"diff","fileIdentity":"id-1","displayPath":"src/a.txt","oldDisplayPath":null,"hunkHeader":"{hunk}","oldLineRange":{oldRange},"newLineRange":{newRange}}}"""
 
-            let! unifiedFailures = geometryFailures "unified"
+            let! (_, unifiedFailures) = geometry "unified"
             let! unifiedDeletion =
                 sourceContext
                     "tr[data-old-line='2']:not([data-new-line]) .d2h-code-line-ctn"
@@ -2928,7 +2969,7 @@ type DiffViewerE2ETests() =
             do! this.Page.Locator("#split-view").ClickAsync()
             do! this.Page.Locator("#patch .d2h-files-diff").WaitForAsync()
 
-            let! splitFailures = geometryFailures "split"
+            let! (_, splitFailures) = geometry "split"
             let! splitAddition =
                 sourceContext
                     ".d2h-file-side-diff:last-child tr[data-new-line='2']:not([data-old-line]) .d2h-code-line-ctn"
@@ -3003,171 +3044,18 @@ type DiffViewerE2ETests() =
                 )
 
             let geometry mode =
-                this.Page.Locator("#patch").EvaluateAsync<string>(
-                    $"""(patch) => {{
-                        const failures = [];
-                        const metrics = {{}};
-                        const noOverflow = (element, name) => {{
-                            if (!element) {{
-                                failures.push(name + ' is missing');
-                                return;
-                            }}
-                            metrics[name] = {{
-                                clientWidth: element.clientWidth,
-                                scrollWidth: element.scrollWidth
-                            }};
-                            if (element.scrollWidth > element.clientWidth + 1)
-                                failures.push(name + ' overflows horizontally');
-                        }};
-                        const checkRow = (row, name) => {{
-                            if (!row) {{
-                                failures.push(name + ' is missing');
-                                return;
-                            }}
-                            const gutter = row.cells[0];
-                            const code = row.cells[1];
-                            const line = code.querySelector(
-                                '.d2h-code-line, .d2h-code-side-line'
-                            );
-                            const rowRect = row.getBoundingClientRect();
-                            const gutterRect = gutter.getBoundingClientRect();
-                            const codeRect = code.getBoundingClientRect();
-                            const lineRect = line.getBoundingClientRect();
-                            const lineHeight = parseFloat(getComputedStyle(line).lineHeight);
-                            metrics[name] = {{
-                                row: [rowRect.left, rowRect.top, rowRect.right, rowRect.bottom],
-                                gutter: [
-                                    gutterRect.left,
-                                    gutterRect.top,
-                                    gutterRect.right,
-                                    gutterRect.bottom
-                                ],
-                                code: [codeRect.left, codeRect.top, codeRect.right, codeRect.bottom],
-                                line: [lineRect.left, lineRect.top, lineRect.right, lineRect.bottom],
-                                lineHeight
-                            }};
-                            if (gutterRect.right > codeRect.left + 1)
-                                failures.push(name + ' gutter overlaps code');
-                            if (
-                                lineRect.left < rowRect.left - 1 ||
-                                lineRect.right > rowRect.right + 1 ||
-                                lineRect.top < rowRect.top - 1 ||
-                                lineRect.bottom > rowRect.bottom + 1
-                            )
-                                failures.push(name + ' wrapped content escapes its logical row');
-                            if (rowRect.height < lineHeight * 2)
-                                failures.push(name + ' did not wrap');
-                            const oldNumber = row.querySelector('.line-num1');
-                            const newNumber = row.querySelector('.line-num2');
-                            const visibleNumberRect = element => {{
-                                if (!element || !element.textContent.trim()) return null;
-                                const range = document.createRange();
-                                range.selectNodeContents(element);
-                                return range.getBoundingClientRect();
-                            }};
-                            const oldRect = visibleNumberRect(oldNumber);
-                            const newRect = visibleNumberRect(newNumber);
-                            [oldRect, newRect].filter(Boolean).forEach(numberRect => {{
-                                if (
-                                    numberRect.left < gutterRect.left - 1 ||
-                                    numberRect.right > gutterRect.right + 1
-                                )
-                                    failures.push(name + ' number escapes its gutter');
-                            }});
-                            if (oldRect && newRect) {{
-                                if (oldRect.right > newRect.left + 1)
-                                    failures.push(name + ' old and new gutters overlap');
-                            }}
-                        }};
-
-                        noOverflow(document.body, '{mode} body');
-                        noOverflow(document.querySelector('.content'), '{mode} content');
-                        noOverflow(patch, '{mode} patch');
-                        noOverflow(patch.querySelector('.d2h-wrapper'), '{mode} wrapper');
-
-                        if ('{mode}' === 'unified') {{
-                            const diff = patch.querySelector('.d2h-file-diff');
-                            noOverflow(diff, 'unified diff');
-                            noOverflow(diff.querySelector('.d2h-diff-table'), 'unified table');
-                            checkRow(
-                                diff.querySelector(
-                                    "tr[data-old-line='41']:not([data-new-line])"
-                                ),
-                                'unified deletion old 41'
-                            );
-                            checkRow(
-                                diff.querySelector(
-                                    "tr[data-new-line='42']:not([data-old-line])"
-                                ),
-                                'unified addition new 42'
-                            );
-                            checkRow(
-                                diff.querySelector(
-                                    "tr[data-old-line='42'][data-new-line='43']"
-                                ),
-                                'unified following context'
-                            );
-                        }} else {{
-                            const sides = [...patch.querySelectorAll('.d2h-file-side-diff')];
-                            metrics.splitColumnCount = sides.length;
-                            if (sides.length !== 2)
-                                failures.push('split does not retain two columns');
-                            if (sides.length === 2) {{
-                                const leftRect = sides[0].getBoundingClientRect();
-                                const rightRect = sides[1].getBoundingClientRect();
-                                metrics.splitColumns = [
-                                    [leftRect.left, leftRect.right],
-                                    [rightRect.left, rightRect.right]
-                                ];
-                                if (leftRect.right > rightRect.left + 1)
-                                    failures.push('split columns overlap');
-                                sides.forEach((side, index) => {{
-                                    noOverflow(side, 'split side ' + index);
-                                    noOverflow(
-                                        side.querySelector('.d2h-diff-table'),
-                                        'split table ' + index
-                                    );
-                                }});
-                                checkRow(
-                                    sides[0].querySelector(
-                                        "tr[data-old-line='41']:not([data-new-line])"
-                                    ),
-                                    'split deletion old 41'
-                                );
-                                checkRow(
-                                    sides[1].querySelector(
-                                        "tr[data-new-line='42']:not([data-old-line])"
-                                    ),
-                                    'split addition new 42'
-                                );
-                                checkRow(
-                                    sides[1].querySelector(
-                                        "tr[data-old-line='42'][data-new-line='43']"
-                                    ),
-                                    'split following context'
-                                );
-                            }}
-                        }}
-
-                        return JSON.stringify({{
-                            viewportWidth: window.innerWidth,
-                            mode: '{mode}',
-                            failures,
-                            metrics
-                        }});
-                    }}"""
-                )
+                geometryProbe this.Page mode false true
+                    [| geometryRow -1 "tr[data-old-line='41']:not([data-new-line])" "unified deletion old 41"
+                       geometryRow -1 "tr[data-new-line='42']:not([data-old-line])" "unified addition new 42"
+                       geometryRow -1 "tr[data-old-line='42'][data-new-line='43']" "unified following context" |]
+                    [| geometryRow 0 "tr[data-old-line='41']:not([data-new-line])" "split deletion old 41"
+                       geometryRow 1 "tr[data-new-line='42']:not([data-old-line])" "split addition new 42"
+                       geometryRow 1 "tr[data-old-line='42'][data-new-line='43']" "split following context" |]
 
             let expected oldRange newRange =
                 $"""{{"kind":"diff","fileIdentity":"id-1","displayPath":"src/a.txt","oldDisplayPath":null,"hunkHeader":"@@ -40,4 +40,5 @@","oldLineRange":{oldRange},"newLineRange":{newRange}}}"""
 
-            let assertGeometry (width: int) (mode: string) (raw: string) =
-                use document = JsonDocument.Parse(raw)
-                let failures =
-                    document.RootElement.GetProperty("failures").EnumerateArray()
-                    |> Seq.map _.GetString()
-                    |> Seq.toArray
-
+            let assertGeometry (width: int) (mode: string) ((raw, failures): string * string array) =
                 TestContext.Out.WriteLine(
                     $"DIFF_EXACT_GEOMETRY width={width} mode={mode} evidence={raw}"
                 )

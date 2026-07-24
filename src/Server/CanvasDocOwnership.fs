@@ -9,7 +9,6 @@ open Shared
 let private normalizePath = Server.PathUtils.normalizePath
 
 let private defaultFilePath = Path.Combine("data", "canvas-owners.json")
-let private legacyFilePath = Path.Combine("data", "canvas-interaction-owners.json")
 
 type internal Targets = Map<string, Map<string, string>>
 
@@ -126,54 +125,6 @@ let private readTargets filePath =
     with ex ->
         Log.log "CanvasDocOwnership" $"Failed to load {filePath}: {ex.Message}"
         Error ex.Message
-
-let private mergeLegacySystemViews unified legacy =
-    legacy
-    |> Map.fold (fun targets worktreeKey legacyViews ->
-        let existing =
-            targets
-            |> Map.tryFind worktreeKey
-            |> Option.defaultValue Map.empty
-
-        let merged =
-            legacyViews
-            |> Map.fold (fun views filename sessionId ->
-                let alreadyOwned =
-                    views
-                    |> Map.exists (fun existingFilename _ ->
-                        String.Equals(existingFilename, filename, StringComparison.OrdinalIgnoreCase))
-
-                match CanvasDocKinds.classify filename, alreadyOwned with
-                | SystemView, false -> views |> Map.add filename sessionId
-                | _ -> views
-            ) existing
-
-        if merged = existing then targets else targets |> Map.add worktreeKey merged
-    ) unified
-
-let private migrateLegacy filePath legacyPath unified =
-    async {
-        if not (File.Exists legacyPath) then
-            return unified
-        else
-            match readTargets legacyPath with
-            | Error _ -> return unified
-            | Ok legacy ->
-                let merged = mergeLegacySystemViews unified legacy
-                let! migrationPersisted =
-                    if merged = unified then async { return true }
-                    else persist filePath merged
-
-                if migrationPersisted then
-                    try
-                        File.Delete legacyPath
-                    with ex ->
-                        Log.log "CanvasDocOwnership" $"Failed to remove migrated legacy store: {ex.Message}"
-
-                    return merged
-                else
-                    return unified
-    }
 
 type internal OwnershipStore internal (filePath: string, initialTargets: Targets) =
     let agent =
@@ -302,16 +253,11 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
         let normalized = knownWorktrees |> Set.map normalizePath
         agent.PostAndAsyncReply(fun reply -> Prune(normalized, reply))
 
-    member _.Load(legacyPath: string option) =
+    member _.Load() =
         async {
             match readTargets filePath with
             | Error _ -> ()
-            | Ok unified ->
-                let! loaded =
-                    match legacyPath with
-                    | Some path -> migrateLegacy filePath path unified
-                    | None -> async { return unified }
-
+            | Ok loaded ->
                 do! agent.PostAndAsyncReply(fun reply -> Replace(loaded, reply))
                 Log.log "CanvasDocOwnership" $"Loaded targets for {Map.count loaded} worktree(s)"
         }
@@ -323,17 +269,10 @@ let internal createStore filePath =
 
     OwnershipStore(filePath, initialTargets)
 
-let internal loadStore filePath legacyPath =
-    async {
-        let store = OwnershipStore(filePath, Map.empty)
-        do! store.Load(Some legacyPath)
-        return store
-    }
-
 let private defaultStore = OwnershipStore(defaultFilePath, Map.empty)
 
 let load () =
-    defaultStore.Load(Some legacyFilePath)
+    defaultStore.Load()
     |> Async.RunSynchronously
 
 let attribute worktreePath filename sessionId =

@@ -57,11 +57,8 @@ target by filename, so ownership changes made while a message waits are honored.
 
 ### Persistence and Cleanup
 
-Startup performs a bounded idempotent migration from
-`data/canvas-interaction-owners.json`: SystemView entries missing from `data/canvas-owners.json`
-are imported, the unified file is persisted, and the legacy file is no longer written. Ownership is
-removed when a view or worktree disappears, and scheduler reconciliation prunes targets whose
-known canvas file no longer exists.
+Ownership is removed when a view or worktree disappears, and scheduler reconciliation prunes
+targets whose known canvas file no longer exists.
 
 ### Selection Metadata
 
@@ -73,7 +70,7 @@ ranges. Beadspace selections identify the task.
 ## Technical Approach
 
 `CanvasDocOwnership` is the sole mailbox-backed ownership module, providing assignment, lookup,
-removal, pruning, and legacy-import operations. `SessionBridge` owns the sessionId-keyed registry,
+removal, and pruning operations. `SessionBridge` owns the sessionId-keyed registry,
 transport queue, limits, and liveness shared by canvas and agent prompts. `CanvasBridge` layers
 filename-based target resolution and worktree launch policy over that generic transport.
 
@@ -125,7 +122,7 @@ affordance on `CanvasDoc.Kind`.
 
 | File | Purpose |
 |---|---|
-| `src/Server/CanvasDocOwnership.fs` | Unified persistent target store and legacy migration |
+| `src/Server/CanvasDocOwnership.fs` | Unified persistent target store |
 | `src/Server/SessionBridge.fs` | Session registry, prompt transport, queueing, and liveness |
 | `src/Server/CanvasBridge.fs` | Canvas target resolution and worktree launch coordination |
 | `src/Server/WorktreeApi.fs` | Resume, fresh-start, timeout, and recovery behavior |
