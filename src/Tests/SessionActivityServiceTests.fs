@@ -76,8 +76,7 @@ let private storedWithUsage sid worktree status updatedAt usage usageAt =
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
 /// the restart-rebuild test). Program owns the shared store, so the fixture disposes it after the
 /// service.
-let private withServiceSeededAssigningAndPath
-    (assignCanvasTarget: WorktreePath -> string -> string -> Async<unit>)
+let private withServiceSeededAndPathCore
     (knownWorktree: string)
     (seed: SessionActivityStore -> unit)
     (action:
@@ -102,7 +101,7 @@ let private withServiceSeededAssigningAndPath
 
     agent.Post(RefreshScheduler.UpdateWorktreeList(RepoId "svc-test-repo", [ info ]))
 
-    let svc = new SessionActivityService(store, agent, assignCanvasTarget)
+    let svc = new SessionActivityService(store, agent)
 
     try
         action (svc, agent, store, dbPath)
@@ -111,27 +110,16 @@ let private withServiceSeededAssigningAndPath
         (store :> IDisposable).Dispose()
         try Directory.Delete(dir, true) with _ -> ()
 
-let private withServiceSeededAssigning assignCanvasTarget knownWorktree seed action =
-    withServiceSeededAssigningAndPath
-        assignCanvasTarget
+let private withServiceSeeded knownWorktree seed action =
+    withServiceSeededAndPathCore
         knownWorktree
         seed
         (fun (service, agent, store, _) ->
             action (service, agent, store))
 
 let private withServiceSeededAndPath knownWorktree seed action =
-    withServiceSeededAssigningAndPath
-        (fun _ _ _ -> async { return () })
-        knownWorktree
-        seed
-        action
+    withServiceSeededAndPathCore knownWorktree seed action
 
-let private withServiceSeeded knownWorktree seed action =
-    withServiceSeededAssigning
-        (fun _ _ _ -> async { return () })
-        knownWorktree
-        seed
-        action
 
 let private withService knownWorktree action = withServiceSeeded knownWorktree ignore action
 let private withServiceAndPath knownWorktree action =
@@ -175,33 +163,6 @@ let private persistedEvents dbPath =
             List.rev rows
 
     read []
-
-type private AssignmentRecorderMsg =
-    | RecordAssignment of WorktreePath * string * string * AsyncReplyChannel<unit>
-    | ReadAssignments of AsyncReplyChannel<(WorktreePath * string * string) list>
-
-let private createAssignmentRecorder () =
-    let recorder =
-        MailboxProcessor.Start(fun inbox ->
-            let rec loop calls =
-                async {
-                    match! inbox.Receive() with
-                    | RecordAssignment(worktreePath, filename, sessionId, reply) ->
-                        reply.Reply()
-                        return! loop ((worktreePath, filename, sessionId) :: calls)
-                    | ReadAssignments reply ->
-                        reply.Reply(List.rev calls)
-                        return! loop calls
-                }
-
-            loop [])
-
-    let assign worktreePath filename sessionId =
-        recorder.PostAndAsyncReply(fun reply ->
-            RecordAssignment(worktreePath, filename, sessionId, reply))
-
-    let calls () = recorder.PostAndReply ReadAssignments
-    assign, calls
 
 /// The scheduler's live status for a session (fed via UpdateSessionStatus). GetState is a barrier,
 /// so calling it after a LiveSnapshot barrier guarantees the mailbox's feed has been applied.
@@ -536,35 +497,6 @@ type IngestTests() =
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
             let live = svc.LiveSnapshot()
             Assert.That((live |> Map.find (SessionId "s1")).Status.Status, Is.EqualTo SessionLevelStatus.Working))
-
-    [<Test>]
-    member _.``diff target follows real activity while heartbeat usage and Beadspace stays untouched``() =
-        let assign, calls = createAssignmentRecorder ()
-        let worktree = "C:/wt/a"
-        let normalized = WorktreePath(PathUtils.normalizePath worktree)
-
-        withServiceSeededAssigning assign worktree ignore (fun (svc, _, _) ->
-            svc.Submit(
-                mkReport
-                    "metadata-only"
-                    worktree
-                    "metadata-bootstrap"
-                    "2026-03-01T13:00:00Z"
-                    (TitleBootstrap(msg "Metadata only" "2026-03-01T13:00:00Z")))
-            svc.Submit(mkReport "s1" worktree "s1-active" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s2" worktree "s2-older" "2026-03-01T09:00:00Z" TurnStarted)
-            svc.Submit(mkReport "s2" worktree "s2-heartbeat" "2026-03-01T11:00:00Z" Heartbeat)
-            svc.Submit(mkReport "s2" worktree "s2-usage" "2026-03-01T11:30:00Z" (UsageInfo(100, 200)))
-            svc.Submit(mkReport "s2" worktree "s2-active" "2026-03-01T12:00:00Z" TurnStarted)
-            svc.LiveSnapshot() |> ignore
-
-            Assert.That(
-                calls (),
-                Is.EqualTo(
-                    [ normalized, DiffProvisioner.filename, "s1"
-                      normalized, DiffProvisioner.filename, "s2" ]
-                )
-            ))
 
     [<Test>]
     member _.``an ingested status is fed to the scheduler``() =
@@ -1498,33 +1430,6 @@ type IngestTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type RestartRebuildTests() =
-
-    [<Test>]
-    member _.``Start routes diff interactions to the most-recently-active restored session``() =
-        let now = DateTimeOffset.UtcNow
-        let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-owner-worktree")
-        let normalized = WorktreePath(PathUtils.normalizePath worktree)
-        let assign, calls = createAssignmentRecorder ()
-
-        let status sessionId updatedAt =
-            { SessionId = SessionId sessionId
-              WorktreePath = normalized
-              Provider = CopilotCli
-              Status = { emptyStatus with Status = SessionLevelStatus.Idle }
-              UpdatedAt = updatedAt
-              LastSeen = updatedAt
-              ContextUsageAt = None }
-
-        let seed (store: SessionActivityStore) =
-            store.UpsertStatus(status "older" (now.AddMinutes(-2.0)))
-            store.UpsertStatus(status "newer" (now.AddMinutes(-1.0)))
-
-        withServiceSeededAssigning assign worktree seed (fun (svc, _, _) ->
-            svc.Start()
-            svc.LiveSnapshot() |> ignore
-            Assert.That(
-                calls (),
-                Is.EqualTo([ normalized, DiffProvisioner.filename, "newer" ])))
 
     [<Test>]
     member _.``Start rebuilds live status and context usage from the store and feeds the scheduler``() =

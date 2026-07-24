@@ -58,7 +58,6 @@ type SessionEntry =
 type SendResult =
     | Delivered
     | Queued
-    | TransportFailed of SessionEntry
 
 type internal QueuedPrompt =
     { EnqueuedAt: DateTime
@@ -120,18 +119,23 @@ let private enqueue now worktreeKey targetSessionId prompt =
         fun _ existing -> cleanExpired now existing @ [ queued ] |> capQueue)
     |> ignore
 
+/// Which registering session a queued prompt may drain to.
+///
+/// A canvas prompt for an AgentDoc waits for that document's recorded author. A SystemView has no
+/// stored owner, so its queued interaction drains to the next identified session that registers —
+/// which is the session the queue caused to launch.
 let private deliverableTo worktreeKey (sessionId: string option) (queued: QueuedPrompt) =
-    let target =
-        match queued.Prompt.Kind, queued.Prompt.Filename with
-        | PromptKind.Canvas, Some filename ->
-            CanvasDocOwnership.getOwnerSync worktreeKey filename
-        | _ -> queued.TargetSessionId
-
-    match queued.Prompt.Kind, queued.Prompt.Filename, target with
-    | PromptKind.Canvas, Some _, currentTarget ->
-        Option.isSome sessionId && currentTarget = sessionId
-    | _, _, None -> true
-    | _, _, Some targetSessionId -> sessionId = Some targetSessionId
+    match queued.Prompt.Kind, queued.Prompt.Filename with
+    | PromptKind.Canvas, Some filename ->
+        match CanvasDocKinds.classify filename with
+        | SystemView -> Option.isSome sessionId
+        | AgentDoc ->
+            let owner = CanvasDocOwnership.getOwnerSync worktreeKey filename
+            Option.isSome sessionId && owner = sessionId
+    | _ ->
+        match queued.TargetSessionId with
+        | None -> true
+        | Some targetSessionId -> sessionId = Some targetSessionId
 
 let private requeue now (worktreeKey: string) (survivors: QueuedPrompt list) =
     if not (List.isEmpty survivors) then
@@ -211,14 +215,6 @@ let private registryKeyFor normalizedWorktree sessionId =
     | Some value -> "sid:" + value
     | None -> "wt:" + normalizedWorktree
 
-/// Remove only the exact failed entry so a newer concurrent re-registration always survives.
-let internal invalidateRegistration (entry: SessionEntry) =
-    let registryKey = registryKeyFor entry.WorktreePath entry.SessionId
-    let registrations =
-        sessionRegistry :> ICollection<KeyValuePair<string, SessionEntry>>
-
-    registrations.Remove(KeyValuePair(registryKey, entry))
-
 let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
     let now = DateTime.UtcNow
     let sessionId = normalizeSessionId sessionId
@@ -248,11 +244,6 @@ let sessionsForWorktree (worktreePath: string) : SessionEntry list =
     |> Seq.filter (fun entry ->
         String.Equals(entry.WorktreePath, worktreeKey, StringComparison.OrdinalIgnoreCase))
     |> Seq.toList
-
-let internal registrationStamp worktreePath sessionId =
-    sessionsForWorktree worktreePath
-    |> List.tryFind (fun entry -> entry.SessionId = Some sessionId)
-    |> Option.map _.RegisteredAt
 
 let private freshestSession (worktreePath: string) =
     sessionsForWorktree worktreePath
@@ -311,10 +302,7 @@ let send (request: SendRequest) =
 
         match! tryDeliverAt now request with
         | AttemptDelivered -> return SendResult.Delivered
-        | AttemptFailed(entry, PromptDeliveryFailure.Transport) ->
-            return SendResult.TransportFailed entry
-        | AttemptFailed(_, PromptDeliveryFailure.Rejected) ->
-            return SendResult.Queued
+        | AttemptFailed _ -> return SendResult.Queued
         | AttemptNoLiveSession ->
             enqueue now worktreeKey targetSessionId request.Prompt
             return SendResult.Queued

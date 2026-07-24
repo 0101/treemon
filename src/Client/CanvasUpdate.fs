@@ -276,8 +276,7 @@ let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<
         // banner is an independent fact and is left untouched.
         let clearedSendState =
             match model.Canvas.CanvasSendState with
-            | CanvasSendState.Failed _
-            | CanvasSendState.OwnerUnavailable _ -> CanvasSendState.Idle
+            | CanvasSendState.Failed _ -> CanvasSendState.Idle
             | other -> other
         { model with Canvas = { model.Canvas with CanvasSendState = clearedSendState; ShareNotice = None } },
         writeClipboardCmd (buildClipboardPayload shareResult)
@@ -349,41 +348,11 @@ let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (filename
     | CanvasMessageResult.Error msg ->
         Fable.Core.JS.console.error ("Canvas message error:", msg)
         { model with Canvas.CanvasSendState = CanvasSendState.Failed msg }, Cmd.none
-    | CanvasMessageResult.OwnerUnavailable msg ->
-        Fable.Core.JS.console.error ("Canvas interaction owner unavailable:", msg)
-        { model with Canvas.CanvasSendState = CanvasSendState.OwnerUnavailable(msg, scopedKey, filename) }, Cmd.none
     | CanvasMessageResult.Ok ->
         { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
     | CanvasMessageResult.Queued ->
         Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
         { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }, Cmd.none
-
-let reassignCanvasInteraction (scopedKey: string) (filename: string) (model: Model) =
-    match findWorktree scopedKey model with
-    | Some wt when isKnownCanvasDoc model scopedKey filename ->
-        let request: CanvasInteractionRecoveryRequest =
-            { WorktreePath = wt.Path
-              Filename = filename }
-
-        { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey },
-        Cmd.OfAsync.either
-            worktreeApi.Value.reassignCanvasInteraction
-            request
-            (fun result -> ReassignCanvasInteractionResult(scopedKey, filename, result))
-            (fun ex -> ReassignCanvasInteractionResult(scopedKey, filename, Error ex.Message))
-    | _ -> model, Cmd.none
-
-let reassignCanvasInteractionResult
-    (scopedKey: string)
-    (filename: string)
-    (result: Result<unit, string>)
-    (model: Model)
-    =
-    match result with
-    | Ok () ->
-        { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }, Cmd.none
-    | Error msg ->
-        { model with Canvas.CanvasSendState = CanvasSendState.OwnerUnavailable(msg, scopedKey, filename) }, Cmd.none
 
 let dismissCanvasMessageError (model: Model) =
     { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none

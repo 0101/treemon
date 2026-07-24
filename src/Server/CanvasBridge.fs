@@ -3,6 +3,8 @@ module Server.CanvasBridge
 open System
 open System.Threading.Tasks
 open Shared
+open Server.SessionActivity
+open Server.SessionActivityStore
 
 let private normalizePath = Server.PathUtils.normalizePath
 
@@ -14,69 +16,27 @@ type internal PendingLaunch =
     { Role: PendingLaunchResult
       Completion: Task<Result<unit, string>> }
 
-type internal PendingResumeResult =
-    | PendingResumeStarted
-    | PendingResumeJoined
-
-type internal PendingResume =
-    { Role: PendingResumeResult
-      Completion: Task<CanvasMessageResult> }
-
-type internal ActivityTargetAssignment =
-    | ActivityTargetAssigned
-    | ActivityTargetDeferred
-
-type private PendingLaunchState =
-    { Filenames: Set<string>
-      Completion: TaskCompletionSource<Result<unit, string>> }
-
-type private PendingResumeState =
-    { Outcome: TaskCompletionSource<CanvasMessageResult> }
-
-type private ResumeMsg =
-    | BeginPendingResume of
-        worktreeKey: string *
-        sessionId: string *
-        AsyncReplyChannel<PendingResume>
-    | CompletePendingResume of
-        worktreeKey: string *
-        sessionId: string *
-        result: CanvasMessageResult *
-        AsyncReplyChannel<unit>
-
-type private RoutingMsg =
-    | BeginPendingLaunch of worktreeKey: string * filename: string * AsyncReplyChannel<PendingLaunch>
+type private LaunchMsg =
+    | BeginPendingLaunch of worktreeKey: string * AsyncReplyChannel<PendingLaunch>
     | CancelPendingLaunch of worktreeKey: string * reason: string * AsyncReplyChannel<unit>
-    | RegisterSession of
-        worktreeKey: string *
-        injectUrl: string *
-        sessionId: string option *
-        AsyncReplyChannel<Set<string>>
-    | AssignActivityTarget of
-        worktreeKey: string *
-        filename: string *
-        sessionId: string *
-        AsyncReplyChannel<ActivityTargetAssignment>
+    | CompletePendingLaunch of worktreeKey: string * AsyncReplyChannel<unit>
 
-let private routingAgent =
+/// Tracks at most one in-flight session launch per worktree so that repeated interactions arriving
+/// before the launched session registers join that launch instead of spawning another session.
+/// This is only about *our own* spawns; sessions the user starts concurrently are not arbitrated.
+let private launchAgent =
     MailboxProcessor.Start(fun inbox ->
-        let rec loop pending =
+        let rec loop (pending: Map<string, TaskCompletionSource<Result<unit, string>>>) =
             async {
                 match! inbox.Receive() with
-                | BeginPendingLaunch(worktreeKey, filename, reply) ->
+                | BeginPendingLaunch(worktreeKey, reply) ->
                     match pending |> Map.tryFind worktreeKey with
                     | Some existing ->
                         reply.Reply(
                             { Role = PendingLaunchJoined
-                              Completion = existing.Completion.Task })
+                              Completion = existing.Task })
 
-                        return!
-                            loop (
-                                pending
-                                |> Map.add worktreeKey
-                                    { existing with
-                                        Filenames = existing.Filenames |> Set.add filename }
-                            )
+                        return! loop pending
                     | None ->
                         let completion =
                             TaskCompletionSource<Result<unit, string>>(
@@ -86,217 +46,105 @@ let private routingAgent =
                             { Role = PendingLaunchStarted
                               Completion = completion.Task })
 
-                        return!
-                            loop (
-                                pending
-                                |> Map.add worktreeKey
-                                    { Filenames = Set.singleton filename
-                                      Completion = completion }
-                            )
+                        return! loop (pending |> Map.add worktreeKey completion)
 
                 | CancelPendingLaunch(worktreeKey, reason, reply) ->
                     pending
                     |> Map.tryFind worktreeKey
-                    |> Option.iter (fun launch ->
-                        launch.Completion.TrySetResult(Error reason) |> ignore)
+                    |> Option.iter (fun completion -> completion.TrySetResult(Error reason) |> ignore)
 
                     reply.Reply()
                     return! loop (pending |> Map.remove worktreeKey)
 
-                | RegisterSession(worktreeKey, injectUrl, sessionId, reply) ->
-                    match sessionId, pending |> Map.tryFind worktreeKey with
-                    | Some sessionId, Some launch ->
-                        let! assignment =
-                            launch.Filenames
-                            |> Set.toList
-                            |> List.map (fun filename ->
-                                async {
-                                    match CanvasDocKinds.classify filename with
-                                    | SystemView ->
-                                        do! CanvasDocOwnership.assign worktreeKey filename sessionId
-                                        return Some filename
-                                    | AgentDoc ->
-                                        let! assigned =
-                                            CanvasDocOwnership.assignIfCurrentOwner
-                                                worktreeKey
-                                                filename
-                                                None
-                                                sessionId
-
-                                        if not assigned then
-                                            Log.log
-                                                "CanvasBridge"
-                                                $"Preserved existing AgentDoc owner for {filename} in {worktreeKey}"
-
-                                        return if assigned then Some filename else None
-                                })
-                            |> Async.Sequential
-                            |> Async.Catch
-
-                        SessionBridge.registerSession worktreeKey injectUrl (Some sessionId)
-
-                        match assignment with
-                        | Choice1Of2 assigned ->
-                            let assignedFilenames =
-                                assigned
-                                |> Array.choose id
-                                |> Set.ofArray
-
-                            launch.Completion.TrySetResult(Ok ()) |> ignore
-                            reply.Reply(assignedFilenames)
-                        | Choice2Of2 ex ->
-                            launch.Completion.TrySetResult(Error ex.Message) |> ignore
-                            reply.Reply(Set.empty)
-                            Log.log
-                                "CanvasBridge"
-                                $"Could not assign pending canvas targets for {worktreeKey}: {ex.Message}"
-
-                        return! loop (pending |> Map.remove worktreeKey)
-                    | _ ->
-                        SessionBridge.registerSession worktreeKey injectUrl sessionId
-                        reply.Reply(Set.empty)
-                        return! loop pending
-
-                | AssignActivityTarget(worktreeKey, filename, sessionId, reply) ->
-                    match pending |> Map.tryFind worktreeKey with
-                    | Some launch when launch.Filenames |> Set.contains filename ->
-                        reply.Reply(ActivityTargetDeferred)
-                        return! loop pending
-                    | _ ->
-                        do! CanvasDocOwnership.assign worktreeKey filename sessionId
-                        reply.Reply(ActivityTargetAssigned)
-                        return! loop pending
-            }
-
-        loop Map.empty)
-
-let private resumeAgent =
-    MailboxProcessor.Start(fun inbox ->
-        let rec loop pending =
-            async {
-                match! inbox.Receive() with
-                | BeginPendingResume(worktreeKey, sessionId, reply) ->
-                    let key = worktreeKey, sessionId
-
-                    match pending |> Map.tryFind key with
-                    | Some existing ->
-                        reply.Reply(
-                            { Role = PendingResumeJoined
-                              Completion = existing.Outcome.Task })
-
-                        return! loop pending
-                    | None ->
-                        let completion =
-                            TaskCompletionSource<CanvasMessageResult>(
-                                TaskCreationOptions.RunContinuationsAsynchronously)
-
-                        reply.Reply(
-                            { Role = PendingResumeStarted
-                              Completion = completion.Task })
-
-                        return!
-                            loop (
-                                pending
-                                |> Map.add key { Outcome = completion }
-                            )
-
-                | CompletePendingResume(worktreeKey, sessionId, result, reply) ->
-                    let key = worktreeKey, sessionId
-
+                | CompletePendingLaunch(worktreeKey, reply) ->
                     pending
-                    |> Map.tryFind key
-                    |> Option.iter (fun resume ->
-                        resume.Outcome.TrySetResult(result) |> ignore)
+                    |> Map.tryFind worktreeKey
+                    |> Option.iter (fun completion -> completion.TrySetResult(Ok()) |> ignore)
 
                     reply.Reply()
-                    return! loop (pending |> Map.remove key)
+                    return! loop (pending |> Map.remove worktreeKey)
             }
 
         loop Map.empty)
 
-let internal beginPendingLaunch worktreePath filename =
-    routingAgent.PostAndAsyncReply(fun reply ->
-        BeginPendingLaunch(
-            normalizePath worktreePath,
-            filename,
-            reply))
+let internal beginPendingLaunch worktreePath =
+    launchAgent.PostAndAsyncReply(fun reply -> BeginPendingLaunch(normalizePath worktreePath, reply))
 
 let internal cancelPendingLaunch worktreePath reason =
-    routingAgent.PostAndAsyncReply(fun reply ->
+    launchAgent.PostAndAsyncReply(fun reply ->
         CancelPendingLaunch(normalizePath worktreePath, reason, reply))
 
-let internal beginPendingResume worktreePath sessionId =
-    resumeAgent.PostAndAsyncReply(fun reply ->
-        BeginPendingResume(
-            normalizePath worktreePath,
-            sessionId,
-            reply))
-
-let internal completePendingResume worktreePath sessionId result =
-    resumeAgent.PostAndAsyncReply(fun reply ->
-        CompletePendingResume(
-            normalizePath worktreePath,
-            sessionId,
-            result,
-            reply))
-
-let internal assignActivityTarget worktreePath filename sessionId =
-    routingAgent.PostAndAsyncReply(fun reply ->
-        AssignActivityTarget(
-            normalizePath worktreePath,
-            filename,
-            sessionId,
-            reply))
-
-let private registerCoordinatedSession worktreePath injectUrl sessionId =
-    let worktreeKey = normalizePath worktreePath
-
-    let filenames =
-        routingAgent.PostAndReply(fun reply ->
-            RegisterSession(
-                worktreeKey,
-                injectUrl,
-                sessionId,
-                reply))
-
-    match sessionId with
-    | Some sessionId when not (Set.isEmpty filenames) ->
-        Log.log
-            "CanvasBridge"
-            $"Session {sessionId} assigned {Set.count filenames} pending canvas target(s) for {worktreeKey}"
-    | _ -> ()
-
-let private pollUntil (timeout: TimeSpan) condition =
-    let deadline = DateTime.UtcNow + timeout
-
-    let rec wait () =
-        async {
-            if condition () then
-                return true
-            elif DateTime.UtcNow >= deadline then
-                return false
-            else
-                do! Async.Sleep 50
-                return! wait ()
-        }
-
-    wait ()
-
-let internal waitForPendingLaunchCompletion
-    (timeout: TimeSpan)
-    (pendingLaunch: PendingLaunch)
+/// Which session receives an interaction from a canvas document.
+///
+/// An AgentDoc has a real author, so it keeps its persisted owner. A SystemView is server-generated
+/// and has no author: it resolves, per interaction, to the most recently active session that
+/// currently holds a live bridge registration. Nothing is stored for a SystemView, so there is no
+/// routing target that can go stale, be raced, or need pruning.
+///
+/// Liveness and activity are deliberately separate inputs: bridge registration decides whether a
+/// session can receive the prompt at all, while `UpdatedAt` decides which of the reachable sessions
+/// is the most recent (see the `LastSeen` note in `SessionActivityStore`).
+let internal resolveTarget
+    (sessionStatuses: StoredStatus seq)
+    (worktreePath: string)
+    (filename: string)
     =
     async {
-        let! completed =
-            pollUntil timeout (fun () ->
-                pendingLaunch.Completion.IsCompleted)
+        match CanvasDocKinds.classify filename with
+        | AgentDoc -> return! CanvasDocOwnership.getOwner worktreePath filename
+        | SystemView ->
+            let now = DateTime.UtcNow
 
-        if completed then
-            return! pendingLaunch.Completion |> Async.AwaitTask
-        else
+            let liveSessionIds =
+                SessionBridge.sessionsForWorktree worktreePath
+                |> List.filter (SessionBridge.isSessionAlive now)
+                |> List.choose _.SessionId
+                |> Set.ofList
+
             return
-                Error
-                    "the session did not register with Treemon before the timeout"
+                sessionStatuses
+                |> Seq.filter (fun stored ->
+                    liveSessionIds |> Set.contains (SessionId.value stored.SessionId))
+                |> List.ofSeq
+                |> StoredStatus.tryMostRecentActivity
+                |> Option.map (_.SessionId >> SessionId.value)
+    }
+
+/// Sessions for `worktreePath` from a scheduler snapshot, in the shape `resolveTarget` expects.
+let private sessionStatusesFor (worktreePath: string) (statuses: StoredStatus seq) =
+    let worktreeKey = normalizePath worktreePath
+
+    statuses
+    |> Seq.filter (fun stored ->
+        String.Equals(
+            normalizePath (WorktreePath.value stored.WorktreePath),
+            worktreeKey,
+            StringComparison.OrdinalIgnoreCase))
+
+/// Route one canvas interaction. Returns the resolved target alongside the outcome so the caller can
+/// tell "queued because nothing is reachable" (target `None`) from "queued behind a known session".
+let internal sendMessage (sessionStatuses: StoredStatus seq) (request: CanvasMessageRequest) =
+    async {
+        let worktreePath = WorktreePath.value request.WorktreePath
+
+        let! target =
+            sessionStatuses
+            |> sessionStatusesFor worktreePath
+            |> resolveTarget
+            <| worktreePath
+            <| request.Filename
+
+        let! result =
+            SessionBridge.send
+                { WorktreePath = worktreePath
+                  SessionId = target
+                  Prompt = SessionBridge.Prompt.canvasFor request.Filename request.Payload }
+
+        return
+            target,
+            match result with
+            | SessionBridge.SendResult.Delivered -> CanvasMessageResult.Ok
+            | SessionBridge.SendResult.Queued -> CanvasMessageResult.Queued
     }
 
 let registerSession worktreePath injectUrl sessionId =
@@ -305,77 +153,14 @@ let registerSession worktreePath injectUrl sessionId =
         | Some value when not (String.IsNullOrWhiteSpace value) -> Some value
         | _ -> None
 
-    registerCoordinatedSession worktreePath injectUrl normalizedSessionId
+    SessionBridge.registerSession worktreePath injectUrl normalizedSessionId
 
-let internal registrationStamp worktreePath sessionId =
-    SessionBridge.registrationStamp worktreePath sessionId
-
-let internal waitForRegistrationAfter timeout worktreePath sessionId previous =
-    pollUntil timeout (fun () ->
-        registrationStamp worktreePath sessionId
-        |> Option.exists (fun registeredAt ->
-            previous
-            |> Option.forall (fun previousAt ->
-                registeredAt > previousAt)))
-
-type internal TargetState =
-    | NoTarget
-    | LiveTarget of sessionId: string
-    | OfflineTarget of sessionId: string
-
-let internal getTargetState worktreePath filename =
-    async {
-        let! owner = CanvasDocOwnership.getOwner worktreePath filename
-        let now = DateTime.UtcNow
-
-        return
-            match owner with
-            | None -> NoTarget
-            | Some ownerId ->
-                SessionBridge.sessionsForWorktree worktreePath
-                |> List.exists (fun entry ->
-                    entry.SessionId = Some ownerId
-                    && SessionBridge.isSessionAlive now entry)
-                |> function
-                    | true -> LiveTarget ownerId
-                    | false -> OfflineTarget ownerId
-    }
-
-type internal MessageSendResult =
-    | MessageDelivered
-    | MessageQueued of failedRegistration: SessionBridge.SessionEntry option
-
-let internal sendMessageForRecovery (request: CanvasMessageRequest) =
-    async {
-        let worktreePath = WorktreePath.value request.WorktreePath
-        let! owner = CanvasDocOwnership.getOwner worktreePath request.Filename
-
-        let! result =
-            SessionBridge.send
-                { WorktreePath = worktreePath
-                  SessionId = owner
-                  Prompt =
-                    SessionBridge.Prompt.canvasFor
-                        request.Filename
-                        request.Payload }
-
-        return
-            match result with
-            | SessionBridge.SendResult.Delivered -> MessageDelivered
-            | SessionBridge.SendResult.Queued -> MessageQueued None
-            | SessionBridge.SendResult.TransportFailed registration ->
-                MessageQueued(Some registration)
-    }
-
-let internal invalidateFailedRegistration registration =
-    SessionBridge.invalidateRegistration registration
-
-let sendMessage (request: CanvasMessageRequest) =
-    async {
-        match! sendMessageForRecovery request with
-        | MessageDelivered -> return CanvasMessageResult.Ok
-        | MessageQueued _ -> return CanvasMessageResult.Queued
-    }
+    // An identified registration satisfies whatever launch was waiting on it, so queued
+    // interactions drain to it.
+    normalizedSessionId
+    |> Option.iter (fun _ ->
+        launchAgent.PostAndReply(fun reply ->
+            CompletePendingLaunch(normalizePath worktreePath, reply)))
 
 let drainPending worktreePath =
     SessionBridge.drainPendingCanvas worktreePath

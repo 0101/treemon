@@ -11,124 +11,6 @@ open FsToolkit.ErrorHandling
 open Server.GlobalConfig
 open Server.SessionActivityStore
 
-let private canvasRegistrationTimeout = TimeSpan.FromSeconds 15.0
-
-let internal canReassignCanvasInteraction filename =
-    CanvasDocKinds.classify filename = SystemView
-
-let private ownerUnavailable filename reason =
-    let recovery =
-        if canReassignCanvasInteraction filename then
-            "Retry to preserve the current session, or start fresh and reassign."
-        else
-            "Retry after the author session reconnects, or explicitly claim the document from an authoring session."
-
-    CanvasMessageResult.OwnerUnavailable(
-        $"Could not resume the interaction session for {filename}: {reason}. {recovery}")
-
-let internal resumeCanvasTargetWith
-    (spawn: unit -> Async<Result<unit, string>>)
-    (waitForRegistration: unit -> Async<bool>)
-    (filename: string)
-    =
-    async {
-        match! spawn () |> Async.Catch with
-        | Choice2Of2 ex ->
-            return ownerUnavailable filename ex.Message
-        | Choice1Of2 (Error err) ->
-            return ownerUnavailable filename err
-        | Choice1Of2 (Ok ()) ->
-            match! waitForRegistration () |> Async.Catch with
-            | Choice1Of2 true -> return CanvasMessageResult.Queued
-            | Choice1Of2 false -> return ownerUnavailable filename "the session did not register with Treemon before the timeout"
-            | Choice2Of2 ex -> return ownerUnavailable filename ex.Message
-    }
-
-let internal resumeCanvasTargetCoalescedWith
-    (beginResume: unit -> Async<CanvasBridge.PendingResume>)
-    (completeResume: CanvasMessageResult -> Async<unit>)
-    (spawn: unit -> Async<Result<unit, string>>)
-    (waitForRegistration: unit -> Async<bool>)
-    (filename: string)
-    =
-    async {
-        let! pendingResume = beginResume ()
-
-        let awaitCompletion () =
-            pendingResume.Completion |> Async.AwaitTask
-
-        match pendingResume.Role with
-        | CanvasBridge.PendingResumeJoined ->
-            return! awaitCompletion ()
-        | CanvasBridge.PendingResumeStarted ->
-            let! outcome =
-                resumeCanvasTargetWith
-                    spawn
-                    waitForRegistration
-                    filename
-
-            do! completeResume outcome
-            return! awaitCompletion ()
-    }
-
-let internal launchFreshCanvasSessionWith
-    (beginLaunch: unit -> Async<CanvasBridge.PendingLaunch>)
-    (cancelLaunch: string -> Async<unit>)
-    (launch: unit -> Async<Result<unit, string>>)
-    (waitForRegistration: CanvasBridge.PendingLaunch -> Async<Result<unit, string>>)
-    =
-    async {
-        let! pendingLaunch = beginLaunch ()
-
-        let awaitCompletion () =
-            pendingLaunch.Completion |> Async.AwaitTask
-
-        let cancelAndAwait reason =
-            async {
-                do! cancelLaunch reason
-                return! awaitCompletion ()
-            }
-
-        match pendingLaunch.Role with
-        | CanvasBridge.PendingLaunchJoined ->
-            return! awaitCompletion ()
-        | CanvasBridge.PendingLaunchStarted ->
-            match! launch () |> Async.Catch with
-            | Choice2Of2 ex ->
-                return! cancelAndAwait ex.Message
-            | Choice1Of2 (Error err) ->
-                return! cancelAndAwait err
-            | Choice1Of2 (Ok ()) ->
-                match! waitForRegistration pendingLaunch |> Async.Catch with
-                | Choice1Of2 (Ok ()) -> return! awaitCompletion ()
-                | Choice1Of2 (Error err) -> return! cancelAndAwait err
-                | Choice2Of2 ex ->
-                    return! cancelAndAwait ex.Message
-    }
-
-let internal recoverQueuedCanvasMessageWith
-    (failedRegistration: SessionBridge.SessionEntry option)
-    (getTarget: unit -> Async<CanvasBridge.TargetState>)
-    (resumeTarget: string -> Async<CanvasMessageResult>)
-    (startFresh: unit -> Async<Result<unit, string>>)
-    (filename: string)
-    =
-    async {
-        failedRegistration
-        |> Option.iter (CanvasBridge.invalidateFailedRegistration >> ignore)
-
-        match! getTarget () with
-        | CanvasBridge.LiveTarget _ ->
-            return CanvasMessageResult.Queued
-        | CanvasBridge.OfflineTarget sessionId ->
-            return! resumeTarget sessionId
-        | CanvasBridge.NoTarget ->
-            match! startFresh () with
-            | Ok () -> return CanvasMessageResult.Queued
-            | Error err ->
-                return CanvasMessageResult.Error $"Could not start an interaction session for {filename}: {err}"
-    }
-
 let loadFixtures (path: string) : Result<FixtureData, string> =
     try
         let json = File.ReadAllText(path)
@@ -187,7 +69,6 @@ let readOnlyApi
       saveCanvasSize = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Queued }
-      reassignCanvasInteraction = fun _ -> async { return Error $"Canvas interaction recovery is not available in {modeName}" }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
       shareCanvasDoc = fun _ -> async { return Error $"Share canvas doc is not available in {modeName}" }
       saveLastViewedHashes = fun _ -> async { return () }
@@ -995,154 +876,57 @@ let worktreeApi
                   })
           sendCanvasMessage = fun request ->
               async {
-                  let! sendResult = CanvasBridge.sendMessageForRecovery request
+                  let path = WorktreePath.value request.WorktreePath
+                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  match sendResult with
-                  | CanvasBridge.MessageQueued failedRegistration ->
-                      let path = WorktreePath.value request.WorktreePath
+                  let! target, result =
+                      CanvasBridge.sendMessage (state.SessionStatuses |> Map.values) request
 
-                      let resumeTarget ownerSessionId =
-                          let provider = CodingToolStatus.readConfiguredProvider path
-                          let invocation =
-                              CodingToolCli.build provider (CodingToolCli.Resume(Some ownerSessionId))
-                          let previousRegistration =
-                              CanvasBridge.registrationStamp path ownerSessionId
+                  // A SystemView interaction with no reachable session queues; launch one so the
+                  // queue drains. An AgentDoc keeps waiting for its own author instead.
+                  match target, CanvasDocKinds.classify request.Filename with
+                  | None, SystemView ->
+                      let! pendingLaunch = CanvasBridge.beginPendingLaunch path
 
-                          async {
-                              Log.log
-                                  "API"
-                                  $"sendCanvasMessage: resuming target session {ownerSessionId} for {request.Filename}"
+                      match pendingLaunch.Role with
+                      | CanvasBridge.PendingLaunchJoined ->
+                          Log.log
+                              "API"
+                              $"sendCanvasMessage: joined an in-flight launch for {request.Filename}"
 
-                              let! outcome =
-                                  resumeCanvasTargetCoalescedWith
-                                      (fun () ->
-                                          CanvasBridge.beginPendingResume
-                                              path
-                                              ownerSessionId)
-                                      (CanvasBridge.completePendingResume
-                                          path
-                                          ownerSessionId)
-                                      (fun () ->
-                                          SessionManager.spawnSession
-                                              sessionAgent
-                                              request.WorktreePath
-                                              invocation.AsShellString)
-                                      (fun () ->
-                                          CanvasBridge.waitForRegistrationAfter
-                                              canvasRegistrationTimeout
-                                              path
-                                              ownerSessionId
-                                              previousRegistration)
-                                      request.Filename
-
-                              match outcome with
-                              | CanvasMessageResult.OwnerUnavailable err ->
-                                  Log.log
-                                      "API"
-                                      $"sendCanvasMessage: target unavailable; preserving {ownerSessionId} for {request.Filename}: {err}"
-                              | _ ->
-                                  Log.log
-                                      "API"
-                                      $"sendCanvasMessage: target {ownerSessionId} re-registered for {request.Filename}"
-
-                              return outcome
-                          }
-
-                      let startFresh () =
+                          return result
+                      | CanvasBridge.PendingLaunchStarted ->
                           let provider = CodingToolStatus.readConfiguredProvider path
                           let prompt = CanvasPrompt.continueWorking path request.Filename
                           let command =
                               CodingToolCli.build provider (CodingToolCli.Interactive prompt)
 
-                          async {
-                              Log.log
-                                  "API"
-                                  $"sendCanvasMessage: no target for {request.Filename}; joining worktree launch"
-
-                              return!
-                                  launchFreshCanvasSessionWith
-                                      (fun () ->
-                                          CanvasBridge.beginPendingLaunch path request.Filename)
-                                      (CanvasBridge.cancelPendingLaunch path)
-                                      (fun () ->
-                                          SessionManager.launchAction
-                                              sessionAgent
-                                              request.WorktreePath
-                                              command.AsShellString)
-                                      (fun pendingLaunch ->
-                                          CanvasBridge.waitForPendingLaunchCompletion
-                                              canvasRegistrationTimeout
-                                              pendingLaunch)
-                          }
-
-                      return!
-                          recoverQueuedCanvasMessageWith
-                              failedRegistration
-                              (fun () ->
-                                  async {
-                                      let! target =
-                                          CanvasBridge.getTargetState path request.Filename
-
-                                      match target with
-                                      | CanvasBridge.LiveTarget sessionId ->
-                                          Log.log
-                                              "API"
-                                              $"sendCanvasMessage: live target {sessionId} will drain queued {request.Filename}"
-                                      | CanvasBridge.OfflineTarget sessionId ->
-                                          Log.log
-                                              "API"
-                                              $"sendCanvasMessage: target {sessionId} is offline for {request.Filename}"
-                                      | CanvasBridge.NoTarget -> ()
-
-                                      return target
-                                  })
-                              resumeTarget
-                              startFresh
-                              request.Filename
-                  | CanvasBridge.MessageDelivered ->
-                      return CanvasMessageResult.Ok
-              }
-          reassignCanvasInteraction = fun request ->
-              withValidatedPath request.WorktreePath "reassignCanvasInteraction" (fun () ->
-                  async {
-                      let path = WorktreePath.value request.WorktreePath
-
-                      match Server.PathUtils.validateCanvasPath path request.Filename with
-                      | Error _ ->
-                          return Error $"Invalid canvas filename: {request.Filename}"
-                      | Ok viewPath when not (File.Exists viewPath) ->
-                          return Error $"Canvas view not found: {request.Filename}"
-                      | Ok _ when not (canReassignCanvasInteraction request.Filename) ->
-                          return
-                              Error
-                                  "AgentDoc ownership can change only through an author write or explicit ownership claim."
-                      | Ok _ ->
-                          let provider = CodingToolStatus.readConfiguredProvider path
-                          let prompt = CanvasPrompt.continueWorking path request.Filename
-                          let command =
-                              CodingToolCli.build provider (CodingToolCli.Interactive prompt)
+                          Log.log
+                              "API"
+                              $"sendCanvasMessage: no reachable session for {request.Filename}; launching one"
 
                           match!
-                              launchFreshCanvasSessionWith
-                                  (fun () ->
-                                      CanvasBridge.beginPendingLaunch path request.Filename)
-                                  (CanvasBridge.cancelPendingLaunch path)
-                                  (fun () ->
-                                      SessionManager.launchAction
-                                          sessionAgent
-                                          request.WorktreePath
-                                          command.AsShellString)
-                                  (fun pendingLaunch ->
-                                      CanvasBridge.waitForPendingLaunchCompletion
-                                          canvasRegistrationTimeout
-                                          pendingLaunch)
+                              SessionManager.launchAction
+                                  sessionAgent
+                                  request.WorktreePath
+                                  command.AsShellString
+                              |> Async.Catch
                           with
-                          | Ok () -> return Ok ()
-                          | Error err ->
+                          | Choice1Of2(Ok()) -> return result
+                          | Choice1Of2(Error err) ->
+                              do! CanvasBridge.cancelPendingLaunch path err
+
                               return
-                                  Error
-                                      $"Could not start a fresh interaction session for {request.Filename}: {err}"
-                  })
+                                  CanvasMessageResult.Error
+                                      $"Could not start an interaction session for {request.Filename}: {err}"
+                          | Choice2Of2 ex ->
+                              do! CanvasBridge.cancelPendingLaunch path ex.Message
+
+                              return
+                                  CanvasMessageResult.Error
+                                      $"Could not start an interaction session for {request.Filename}: {ex.Message}"
+                  | _ -> return result
+              }
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)

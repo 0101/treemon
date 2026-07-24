@@ -283,15 +283,10 @@ type CanvasMessageRequest =
       Filename: string
       Payload: string }
 
-type CanvasInteractionRecoveryRequest =
-    { WorktreePath: WorktreePath
-      Filename: string }
-
 [<RequireQualifiedAccess>]
 type CanvasMessageResult =
     | Ok
     | Error of string
-    | OwnerUnavailable of string
     | Queued
 
 type BridgeLiveness =

@@ -219,7 +219,6 @@ type CanvasPaneCallbacks =
       DismissError: unit -> unit
       DismissDocError: unit -> unit
       DismissShareNotice: unit -> unit
-      ReassignInteraction: string -> string -> unit
       LaunchSession: unit -> unit }
 
 /// The subset of the canvas `CanvasState` that `view` renders from, bundled into one record so the
@@ -267,7 +266,6 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           DismissError = dismissError
           DismissDocError = dismissDocError
           DismissShareNotice = dismissShareNotice
-          ReassignInteraction = reassignInteraction
           LaunchSession = launchSession } = callbacks
     let { UnviewedByScopedKey = unviewedByScopedKey
           UnviewedFilenames = unviewedFilenames
@@ -350,46 +348,19 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
         ]
 
     let errorBanner =
-        let render (message: string) (recovery: (string * string) option) =
+        match sendState with
+        | CanvasSendState.Failed message ->
             Html.div [
                 prop.className "canvas-error-banner"
                 prop.children [
                     Html.span [ prop.text message ]
-                    Html.div [
-                        prop.className "canvas-error-actions"
-                        prop.children [
-                            match recovery with
-                            | Some (scopedKey, filename) ->
-                                Html.button [
-                                    prop.className "canvas-reassign-btn"
-                                    prop.onClick (fun _ -> reassignInteraction scopedKey filename)
-                                    prop.text "Start fresh and reassign"
-                                ]
-                            | None -> Html.none
-                            Html.button [
-                                prop.className "canvas-error-dismiss"
-                                prop.onClick (fun _ -> dismissError ())
-                                prop.text "✕"
-                            ]
-                        ]
+                    Html.button [
+                        prop.className "canvas-error-dismiss"
+                        prop.onClick (fun _ -> dismissError ())
+                        prop.text "✕"
                     ]
                 ]
             ]
-
-        match sendState with
-        | CanvasSendState.Failed msg ->
-            render msg None
-        | CanvasSendState.OwnerUnavailable(msg, scopedKey, filename) ->
-            let recovery =
-                match focusedDoc with
-                | Some (wt, doc)
-                    when WorktreePath.value wt.Path = scopedKey
-                         && doc.Filename = filename
-                         && doc.Kind = SystemView ->
-                    Some(scopedKey, filename)
-                | _ -> None
-
-            render msg recovery
         | _ -> Html.none
 
     // Doc-side JS error banner — a distinct source from CanvasSendState.Failed (which is a

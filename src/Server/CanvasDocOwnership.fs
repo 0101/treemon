@@ -14,12 +14,6 @@ type internal Targets = Map<string, Map<string, string>>
 
 type private Msg =
     | Assign of worktreeKey: string * filename: string * sessionId: string * AsyncReplyChannel<unit> option
-    | AssignIfCurrentOwner of
-        worktreeKey: string *
-        filename: string *
-        expectedOwner: string option *
-        sessionId: string *
-        AsyncReplyChannel<bool>
     | GetOwner of worktreeKey: string * filename: string * AsyncReplyChannel<string option>
     | GetAll of worktreeKey: string * AsyncReplyChannel<Map<string, string>>
     | RemoveView of worktreeKey: string * filename: string * AsyncReplyChannel<unit>
@@ -48,28 +42,6 @@ let private removeTarget worktreeKey filename targets =
         let remaining = views |> Map.remove filename
         if Map.isEmpty remaining then targets |> Map.remove worktreeKey
         else targets |> Map.add worktreeKey remaining
-
-let private trackedTargetKeys knownWorktrees targets =
-    targets
-    |> Map.toSeq
-    |> Seq.filter (fun (worktreeKey, _) -> knownWorktrees |> Set.contains worktreeKey)
-    |> Seq.collect (fun (worktreeKey, views) ->
-        views
-        |> Map.keys
-        |> Seq.map (fun filename -> worktreeKey, filename))
-    |> Set.ofSeq
-
-let private keepTargets existingTargetKeys targets =
-    targets
-    |> Map.toSeq
-    |> Seq.choose (fun (worktreeKey, views) ->
-        let existing =
-            views
-            |> Map.filter (fun filename _ ->
-                existingTargetKeys |> Set.contains (worktreeKey, filename))
-
-        if Map.isEmpty existing then None else Some(worktreeKey, existing))
-    |> Map.ofSeq
 
 let private persist (filePath: string) (targets: Targets) =
     async {
@@ -141,17 +113,6 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
                         reply |> Option.iter _.Reply()
                         return! loop targets'
 
-                    | AssignIfCurrentOwner(worktreeKey, filename, expectedOwner, sessionId, reply) ->
-                        if ownerFor worktreeKey filename targets = expectedOwner then
-                            let targets' = targets |> addTarget worktreeKey filename sessionId
-                            if targets' <> targets then
-                                do! persist filePath targets' |> Async.Ignore
-                            reply.Reply(true)
-                            return! loop targets'
-                        else
-                            reply.Reply(false)
-                            return! loop targets
-
                     | GetOwner(worktreeKey, filename, reply) ->
                         targets
                         |> ownerFor worktreeKey filename
@@ -182,21 +143,10 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
                         return! loop targets'
 
                     | Prune(knownWorktrees, reply) ->
-                        let! existingKeys =
-                            targets
-                            |> trackedTargetKeys knownWorktrees
-                            |> Set.toList
-                            |> List.map (fun ((worktreeKey, filename) as key) ->
-                                async {
-                                    match Server.PathUtils.validateCanvasPath worktreeKey filename with
-                                    | Ok path when File.Exists path -> return Some key
-                                    | _ -> return None
-                                })
-                            |> Async.Parallel
-
                         let targets' =
                             targets
-                            |> keepTargets (existingKeys |> Array.choose id |> Set.ofArray)
+                            |> Map.filter (fun worktreeKey _ ->
+                                knownWorktrees |> Set.contains worktreeKey)
 
                         if targets' <> targets then
                             do! persist filePath targets' |> Async.Ignore
@@ -216,20 +166,6 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
     member _.Assign(worktreePath: string, filename: string, sessionId: string) =
         agent.PostAndAsyncReply(fun reply ->
             Assign(normalizePath worktreePath, filename, sessionId, Some reply))
-
-    member _.AssignIfCurrentOwner(
-        worktreePath: string,
-        filename: string,
-        expectedOwner: string option,
-        sessionId: string
-    ) =
-        agent.PostAndAsyncReply(fun reply ->
-            AssignIfCurrentOwner(
-                normalizePath worktreePath,
-                filename,
-                expectedOwner,
-                sessionId,
-                reply))
 
     member _.GetOwner(worktreePath: string, filename: string) =
         agent.PostAndAsyncReply(fun reply ->
@@ -280,13 +216,6 @@ let attribute worktreePath filename sessionId =
 
 let assign worktreePath filename sessionId =
     defaultStore.Assign(worktreePath, filename, sessionId)
-
-let internal assignIfCurrentOwner worktreePath filename expectedOwner sessionId =
-    defaultStore.AssignIfCurrentOwner(
-        worktreePath,
-        filename,
-        expectedOwner,
-        sessionId)
 
 let getOwner worktreePath filename =
     defaultStore.GetOwner(worktreePath, filename)

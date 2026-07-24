@@ -298,8 +298,7 @@ let private historyState
 type SessionActivityService internal
     (
         store: SessionActivityStore,
-        scheduler: MailboxProcessor<RefreshScheduler.StateMsg>,
-        assignCanvasTarget: WorktreePath -> string -> string -> Async<unit>
+        scheduler: MailboxProcessor<RefreshScheduler.StateMsg>
     ) =
 
     let dispositionGate = obj ()
@@ -310,24 +309,6 @@ type SessionActivityService internal
         lock dispositionGate (fun () ->
             if disposed then
                 raise (ObjectDisposedException(nameof SessionActivityService)))
-
-    let lastActiveSessionId worktreePath (live: Map<SessionId, StoredStatus>) =
-        live
-        |> Map.values
-        |> Seq.filter (fun stored ->
-            stored.WorktreePath = worktreePath
-            && stored.UpdatedAt <> DateTimeOffset.MinValue)
-        |> List.ofSeq
-        |> StoredStatus.tryMostRecentActivity
-        |> Option.map (_.SessionId >> SessionId.value)
-
-    let syncDiffTarget previous current worktreePath =
-        async {
-            match lastActiveSessionId worktreePath previous, lastActiveSessionId worktreePath current with
-            | previousOwner, Some currentOwner when previousOwner <> Some currentOwner ->
-                do! assignCanvasTarget worktreePath DiffProvisioner.filename currentOwner
-            | _ -> ()
-        }
 
     // Apply one report on the single writer. State-only reports have independent persistence/order
     // paths; source events fold → append (dedupe on event_id) → upsert (last-write-wins) → feed the
@@ -568,19 +549,9 @@ type SessionActivityService internal
                         with ex ->
                             Log.log "Activity" $"Ingest failed (report dropped, mailbox kept alive): {ex.Message}"
                             live
-                    do! syncDiffTarget live next report.WorktreePath
                     return! loop next
                 | Seed loaded ->
                     let seeded = loaded |> List.fold (fun m s -> Map.add s.SessionId s m) live
-                    do!
-                        seeded
-                        |> Map.values
-                        |> Seq.map _.WorktreePath
-                        |> Set.ofSeq
-                        |> Set.toList
-                        |> List.map (syncDiffTarget live seeded)
-                        |> Async.Sequential
-                        |> Async.Ignore
                     return! loop seeded
                 | Snapshot reply ->
                     reply.Reply live
@@ -603,18 +574,6 @@ type SessionActivityService internal
     // same handle.
     let pruneTimer =
         new Timer(TimerCallback(prune), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan)
-
-    new(store, scheduler) =
-        SessionActivityService(
-            store,
-            scheduler,
-            fun worktreePath filename sessionId ->
-                CanvasBridge.assignActivityTarget
-                    (WorktreePath.value worktreePath)
-                    filename
-                    sessionId
-                |> Async.Ignore
-        )
 
     /// POST /api/session/activity. Mirrors canvasRegisterHandler: bind the JSON DTO, validate + map
     /// to the domain report, apply the known-worktree guard, then hand the report to the single

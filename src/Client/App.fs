@@ -734,12 +734,6 @@ let update msg model =
 
     | CanvasSendResult (result, scopedKey, filename) -> CanvasUpdate.canvasSendResult result scopedKey filename model
 
-    | ReassignCanvasInteraction (scopedKey, filename) ->
-        CanvasUpdate.reassignCanvasInteraction scopedKey filename model
-
-    | ReassignCanvasInteractionResult (scopedKey, filename, result) ->
-        CanvasUpdate.reassignCanvasInteractionResult scopedKey filename result model
-
     | DismissCanvasMessageError -> CanvasUpdate.dismissCanvasMessageError model
 
     | CanvasDocError (scopedKey, filename, message) -> CanvasUpdate.canvasDocError scopedKey filename message model

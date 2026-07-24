@@ -126,8 +126,6 @@ type Msg =
     | NavigateCanvasDoc of filename: string
     | CanvasMessageReceived of payload: string
     | CanvasSendResult of CanvasMessageResult * scopedKey: string * filename: string
-    | ReassignCanvasInteraction of scopedKey: string * filename: string
-    | ReassignCanvasInteractionResult of scopedKey: string * filename: string * Result<unit, string>
     | DismissCanvasMessageError
     // Doc-side JS error forwarded from an AgentDoc iframe (window.onerror / unhandledrejection via
     // the injected errorOverlayScript). `scopedKey`+`filename` are the emitting worktree + doc

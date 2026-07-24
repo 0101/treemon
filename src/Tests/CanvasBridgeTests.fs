@@ -23,6 +23,15 @@ let private uniqueSid prefix =
 let private canvasWire payload =
     serializePrompt (Prompt.canvas payload)
 
+// Most of these tests cover AgentDoc routing, which resolves from recorded ownership and ignores
+// session activity — so the activity snapshot defaults to empty. SystemView resolution is covered
+// directly against `resolveTarget` in SystemViewInteractionRoutingTests.
+let private sendMessage request =
+    async {
+        let! _, result = Server.CanvasBridge.sendMessage [] request
+        return result
+    }
+
 // A minimal loopback HTTP sink used to assert *which* inject URL a message reaches.
 // It speaks just enough HTTP/1.1 over a raw TcpListener so no HttpListener URL ACL /
 // admin rights are needed on Windows. Each received request body is recorded and a
@@ -349,47 +358,6 @@ type EnqueueTests() =
 type DrainQueueTests() =
 
     [<Test>]
-    member _.``Registration assigns a pending target before draining its queued message``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 1
-            use sink = new HttpSink(ports[0])
-            sink.Start()
-
-            let path = uniquePath "drain-basic"
-            let sid = uniqueSid "drainer"
-            let req =
-                { WorktreePath = WorktreePath path
-                  Filename = "diff.html"
-                  Payload = "queued-msg" }
-
-            Assert.That(sendMessage req |> Async.RunSynchronously, Is.EqualTo(CanvasMessageResult.Queued))
-            let pendingLaunch =
-                runAsync (beginPendingLaunch path "diff.html")
-
-            Assert.That(pendingLaunch.Role, Is.EqualTo(PendingLaunchStarted))
-
-            let completion =
-                waitForPendingLaunchCompletion
-                    (TimeSpan.FromSeconds 2.0)
-                    pendingLaunch
-                |> Async.StartAsTask
-
-            registerSession path sink.Url (Some sid)
-
-            Assert.That(
-                completion.GetAwaiter().GetResult() |> Result.isOk,
-                Is.True)
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some sid),
-                "Launch completion must not report success before target assignment")
-            Assert.That(
-                SpinWait.SpinUntil((fun () -> sink.Bodies = [ canvasWire "queued-msg" ]), TimeSpan.FromSeconds 5.0),
-                Is.True,
-                "The pending target must be assigned before registration drains the queue")
-            )
-
-    [<Test>]
     member _.``Register with no queued messages works without error``() =
         let path = uniquePath "drain-empty"
 
@@ -400,7 +368,34 @@ type DrainQueueTests() =
         Assert.That(status.Registered, Is.True)
 
     [<Test>]
-    member _.``Anonymous registration cannot consume a pending launch``() =
+    member _.``A queued SystemView interaction drains to the next identified registration``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 1
+            use sink = new HttpSink(ports[0])
+            sink.Start()
+
+            let path = uniquePath "drain-systemview"
+            let sid = uniqueSid "drainer"
+            let req =
+                { WorktreePath = WorktreePath path
+                  Filename = "diff.html"
+                  Payload = "queued-msg" }
+
+            Assert.That(sendMessage req |> Async.RunSynchronously, Is.EqualTo(CanvasMessageResult.Queued))
+
+            registerSession path sink.Url (Some sid)
+
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> sink.Bodies = [ canvasWire "queued-msg" ]), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "A SystemView has no stored owner, so its queued interaction drains to the session that registers")
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(None: string option),
+                "Draining a SystemView interaction must not record an owner for it"))
+
+    [<Test>]
+    member _.``Anonymous registration cannot drain a queued SystemView interaction``() =
         withTempCwd (fun () ->
             let ports = getFreeTcpPorts 2
             use anonymousSink = new HttpSink(ports[0])
@@ -416,144 +411,54 @@ type DrainQueueTests() =
                   Payload = "queued-msg" }
 
             sendMessage req |> Async.RunSynchronously |> ignore
-            runAsync (beginPendingLaunch path "diff.html") |> ignore
 
             registerSession path anonymousSink.Url None
             Assert.That(anonymousSink.Bodies, Is.Empty)
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(None: string option))
 
             registerSession path identifiedSink.Url (Some sid)
             Assert.That(
                 SpinWait.SpinUntil((fun () -> identifiedSink.Bodies = [ canvasWire "queued-msg" ]), TimeSpan.FromSeconds 5.0),
-                Is.True)
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some sid)))
+                Is.True))
 
     [<Test>]
-    member _.``Cancelled pending launch is not consumed by registration``() =
-        withTempCwd (fun () ->
-            let path = uniquePath "drain-cancel"
-            let sid = uniqueSid "session"
+    member _.``A second interaction joins the in-flight launch instead of starting another``() =
+        let path = uniquePath "drain-join"
 
-            let cancelledLaunch =
-                runAsync (beginPendingLaunch path "diff.html")
+        let first = runAsync (beginPendingLaunch path)
+        let second = runAsync (beginPendingLaunch path)
 
-            Assert.That(cancelledLaunch.Role, Is.EqualTo(PendingLaunchStarted))
-            runAsync (cancelPendingLaunch path "cancelled")
-            Assert.That(
-                runAsync (cancelledLaunch.Completion |> Async.AwaitTask),
-                Is.EqualTo(Error "cancelled": Result<unit, string>))
-            registerSession path "http://127.0.0.1:1/inject" (Some sid)
+        Assert.Multiple(fun () ->
+            Assert.That(first.Role, Is.EqualTo(PendingLaunchStarted))
+            Assert.That(second.Role, Is.EqualTo(PendingLaunchJoined), "Only one launch may be in flight per worktree"))
 
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(None: string option))
-            let nextLaunch =
-                runAsync (beginPendingLaunch path "diff.html")
-
-            Assert.That(
-                nextLaunch.Role,
-                Is.EqualTo(PendingLaunchStarted),
-                "Cancelling must release the worktree launch slot")
-
-            runAsync (cancelPendingLaunch path "test cleanup"))
+        runAsync (cancelPendingLaunch path "test cleanup")
 
     [<Test>]
-    member _.``pending launch registration wins over concurrent diff activity before queue drain``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 2
-            use activeSink = new HttpSink(ports[0])
-            use launchedSink = new HttpSink(ports[1])
-            activeSink.Start()
-            launchedSink.Start()
+    member _.``Pending launches never cross worktree boundaries``() =
+        let pathA = uniquePath "launch-a"
+        let pathB = uniquePath "launch-b"
 
-            let path = uniquePath "activity-success"
-            let previousSid = uniqueSid "previous"
-            let activeSid = uniqueSid "active"
-            let launchedSid = uniqueSid "launched"
+        let a = runAsync (beginPendingLaunch pathA)
+        let b = runAsync (beginPendingLaunch pathB)
 
-            registerSession path activeSink.Url (Some activeSid)
-            runAsync (Server.CanvasDocOwnership.assign path "diff.html" previousSid)
+        Assert.Multiple(fun () ->
+            Assert.That(a.Role, Is.EqualTo(PendingLaunchStarted))
+            Assert.That(b.Role, Is.EqualTo(PendingLaunchStarted), "A launch for one worktree must not absorb another's"))
 
-            Assert.That(
-                runAsync (
-                    sendMessage
-                        { WorktreePath = WorktreePath path
-                          Filename = "diff.html"
-                          Payload = "queued-msg" }),
-                Is.EqualTo(CanvasMessageResult.Queued))
-
-            runAsync (beginPendingLaunch path "diff.html") |> ignore
-
-            Assert.That(
-                runAsync (assignActivityTarget path "diff.html" activeSid),
-                Is.EqualTo(ActivityTargetDeferred))
-
-            registerSession path launchedSink.Url (Some launchedSid)
-
-            Assert.That(
-                SpinWait.SpinUntil((fun () -> launchedSink.Bodies = [ canvasWire "queued-msg" ]), TimeSpan.FromSeconds 5.0),
-                Is.True,
-                "The launched registration must retain the target through queue drain")
-            Assert.That(activeSink.Bodies, Is.Empty)
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some launchedSid),
-                "Deferred activity must not replay after successful registration"))
+        runAsync (cancelPendingLaunch pathA "test cleanup")
+        runAsync (cancelPendingLaunch pathB "test cleanup")
 
     [<Test>]
-    member _.``timed out launch discards concurrent diff activity and preserves its prior target``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 1
-            use activeSink = new HttpSink(ports[0])
-            activeSink.Start()
+    member _.``A cancelled launch releases the worktree for a later launch``() =
+        let path = uniquePath "launch-cancel"
 
-            let path = uniquePath "activity-timeout"
-            let previousSid = uniqueSid "previous"
-            let activeSid = uniqueSid "active"
-            let timeoutReason =
-                "the session did not register with Treemon before the timeout"
+        runAsync (beginPendingLaunch path) |> ignore
+        runAsync (cancelPendingLaunch path "spawn failed")
 
-            registerSession path activeSink.Url (Some activeSid)
-            runAsync (Server.CanvasDocOwnership.assign path "diff.html" previousSid)
+        let next = runAsync (beginPendingLaunch path)
+        Assert.That(next.Role, Is.EqualTo(PendingLaunchStarted))
 
-            let result =
-                Server.WorktreeApi.launchFreshCanvasSessionWith
-                    (fun () -> beginPendingLaunch path "diff.html")
-                    (cancelPendingLaunch path)
-                    (fun () -> async { return Ok () })
-                    (fun _ ->
-                        async {
-                            let! assignment =
-                                assignActivityTarget path "diff.html" activeSid
-
-                            let! sendResult =
-                                sendMessage
-                                    { WorktreePath = WorktreePath path
-                                      Filename = "diff.html"
-                                      Payload = "stay-queued" }
-
-                            return
-                                if assignment <> ActivityTargetDeferred then
-                                    Error "activity assignment was not deferred"
-                                elif sendResult <> CanvasMessageResult.Queued then
-                                    Error "the second interaction was not queued"
-                                else
-                                    Error timeoutReason
-                        })
-                |> runAsync
-
-            Assert.That(
-                result,
-                Is.EqualTo(Error timeoutReason: Result<unit, string>))
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some previousSid),
-                "Failed fresh launches must preserve the durable target")
-            Assert.That(activeSink.Bodies, Is.Empty))
+        runAsync (cancelPendingLaunch path "test cleanup")
 
 
 // ── multi-session registry (sessionId-keyed re-key) ─────────────────
@@ -839,318 +744,111 @@ type OwnerRoutingTests() =
 [<NonParallelizable>]
 type SystemViewInteractionRoutingTests() =
 
+    let ts (s: string) = DateTimeOffset.Parse(s, Globalization.CultureInfo.InvariantCulture)
+
+    let storedAt sid wt updatedAt : Server.SessionActivityStore.StoredStatus =
+        { SessionId = Server.SessionActivity.SessionId sid
+          WorktreePath = WorktreePath wt
+          Provider = CopilotCli
+          Status = Server.SessionActivity.emptyStatus
+          UpdatedAt = ts updatedAt
+          LastSeen = ts updatedAt
+          ContextUsageAt = None }
+
     [<Test>]
-    member _.``Polling checks completed conditions before an expired deadline``() =
+    member _.``A SystemView routes to the most recently active live session``() =
         withTempCwd (fun () ->
-            let path = uniquePath "completed-before-deadline"
-            let sid = uniqueSid "owner"
-            let pendingLaunch =
-                runAsync (beginPendingLaunch path "diff.html")
+            let path = uniquePath "sv-recent"
+            let older = uniqueSid "older"
+            let newer = uniqueSid "newer"
+
+            registerSession path "http://127.0.0.1:1/inject" (Some older)
+            registerSession path "http://127.0.0.1:2/inject" (Some newer)
+
+            let statuses =
+                [ storedAt older path "2026-03-01T12:00:00Z"
+                  storedAt newer path "2026-03-01T12:05:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "diff.html")
+            Assert.That(target, Is.EqualTo(Some newer)))
+
+    [<Test>]
+    member _.``A SystemView ignores a more recently active session that is not live``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-dead"
+            let live = uniqueSid "live"
+            let dead = uniqueSid "dead"
+
+            // Only `live` registers with the bridge, so `dead` is unreachable however recent it is.
+            registerSession path "http://127.0.0.1:1/inject" (Some live)
+
+            let statuses =
+                [ storedAt live path "2026-03-01T12:00:00Z"
+                  storedAt dead path "2026-03-01T12:05:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "diff.html")
+            Assert.That(target, Is.EqualTo(Some live), "Reachability gates the choice; activity only orders it"))
+
+    [<Test>]
+    member _.``A SystemView with no live session resolves no target``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-none"
+            let sid = uniqueSid "offline"
+
+            let statuses = [ storedAt sid path "2026-03-01T12:00:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "diff.html")
+            Assert.That(target, Is.EqualTo(None: string option)))
+
+    [<Test>]
+    member _.``A SystemView ignores sessions from another worktree``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-scope"
+            let otherPath = uniquePath "sv-scope-other"
+            let stranger = uniqueSid "stranger"
+
+            registerSession otherPath "http://127.0.0.1:1/inject" (Some stranger)
+
+            let statuses = [ storedAt stranger otherPath "2026-03-01T12:05:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "diff.html")
+            Assert.That(target, Is.EqualTo(None: string option)))
+
+    [<Test>]
+    member _.``An AgentDoc ignores activity and routes to its recorded owner``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "agentdoc-owner"
+            let owner = uniqueSid "author"
+            let active = uniqueSid "active"
+
+            registerSession path "http://127.0.0.1:1/inject" (Some owner)
+            registerSession path "http://127.0.0.1:2/inject" (Some active)
+            runAsync (Server.CanvasDocOwnership.assign path "notes.html" owner)
+
+            // `active` is both live and more recently active, but an AgentDoc has a real author.
+            let statuses =
+                [ storedAt owner path "2026-03-01T12:00:00Z"
+                  storedAt active path "2026-03-01T12:05:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "notes.html")
+            Assert.That(target, Is.EqualTo(Some owner)))
+
+    [<Test>]
+    member _.``A SystemView never records an owner when it resolves a target``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-no-write"
+            let sid = uniqueSid "session"
 
             registerSession path "http://127.0.0.1:1/inject" (Some sid)
+            let statuses = [ storedAt sid path "2026-03-01T12:00:00Z" ]
 
-            Assert.That(
-                waitForPendingLaunchCompletion TimeSpan.Zero pendingLaunch
-                |> runAsync,
-                Is.EqualTo(Ok (): Result<unit, string>))
+            runAsync (resolveTarget statuses path "diff.html") |> ignore
 
-            let previous = registrationStamp path sid
-            registerSession path "http://127.0.0.1:1/inject" (Some sid)
-
-            Assert.That(
-                waitForRegistrationAfter TimeSpan.Zero path sid previous
-                |> runAsync,
-                Is.True))
-
-    [<Test>]
-    member _.``Pending launch completion returns the registration timeout``() =
-        withTempCwd (fun () ->
-            let path = uniquePath "pending-launch-timeout"
-            let pendingLaunch =
-                runAsync (beginPendingLaunch path "diff.html")
-
-            Assert.That(
-                waitForPendingLaunchCompletion TimeSpan.Zero pendingLaunch
-                |> runAsync,
-                Is.EqualTo(
-                    Error
-                        "the session did not register with Treemon before the timeout":
-                        Result<unit, string>))
-
-            runAsync (cancelPendingLaunch path "test cleanup"))
-
-    [<Test>]
-    member _.``owner registration wait requires a newer registration and succeeds on retry``() =
-        let path = uniquePath "registration-wait"
-        let sid = uniqueSid "owner"
-        registerSession path "http://127.0.0.1:1/inject" (Some sid)
-        let previous = registrationStamp path sid
-
-        let timedOut =
-            waitForRegistrationAfter (TimeSpan.FromMilliseconds 100.0) path sid previous
-            |> runAsync
-
-        Assert.That(timedOut, Is.False, "A stale registration must not prove that resume succeeded")
-
-        let retry =
-            waitForRegistrationAfter (TimeSpan.FromSeconds 2.0) path sid previous
-            |> Async.StartAsTask
-
-        registerSession path "http://127.0.0.1:1/inject" (Some sid)
-
-        Assert.That(retry.GetAwaiter().GetResult(), Is.True, "A newer registration must complete the retry")
-
-    [<Test>]
-    member _.``queued message re-resolves the current target when registration drains it``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 2
-            use oldOwnerSink = new HttpSink(ports[0])
-            use currentOwnerSink = new HttpSink(ports[1])
-            oldOwnerSink.Start()
-            currentOwnerSink.Start()
-
-            let path = Path.Combine(Environment.CurrentDirectory, $"system-reassign-{Guid.NewGuid():N}")
-            let oldSid = uniqueSid "old"
-            let currentSid = uniqueSid "current"
-            runAsync (Server.CanvasDocOwnership.assign path "diff.html" oldSid)
-
-            let queued =
-                runAsync (
-                    sendMessage
-                        { WorktreePath = WorktreePath path
-                          Filename = "diff.html"
-                          Payload = "recover-me" })
-
-            Assert.That(queued, Is.EqualTo(CanvasMessageResult.Queued))
-
-            runAsync (Server.CanvasDocOwnership.assign path "diff.html" currentSid)
-
-            registerSession path oldOwnerSink.Url (Some oldSid)
-            Assert.That(
-                oldOwnerSink.Bodies,
-                Is.Empty,
-                "Drain must not use the target captured when the message was queued")
-
-            registerSession path currentOwnerSink.Url (Some currentSid)
-            Assert.That(
-                SpinWait.SpinUntil((fun () -> currentOwnerSink.Bodies = [ canvasWire "recover-me" ]), TimeSpan.FromSeconds 5.0),
-                Is.True,
-                "The current target must receive the queued interaction"))
-
-    [<Test>]
-    member _.``first identified registration after launch assigns before queue drain``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 2
-            use sinkA = new HttpSink(ports[0])
-            use sinkB = new HttpSink(ports[1])
-            sinkA.Start()
-            sinkB.Start()
-
-            let path = Path.Combine(Environment.CurrentDirectory, $"system-view-{Guid.NewGuid():N}")
-            let sidA = uniqueSid "system-a"
-            let sidB = uniqueSid "system-b"
-
-            registerSession path sinkB.Url (Some sidB)
-
-            let first =
-                runAsync (
-                    sendMessage
-                        { WorktreePath = WorktreePath path
-                          Filename = "diff.html"
-                          Payload = "p1" })
-
-            Assert.That(first, Is.EqualTo(CanvasMessageResult.Queued))
-
-            registerSession path sinkB.Url (Some sidB)
-            Assert.That(sinkB.Bodies, Is.Empty)
-
-            Assert.That(
-                (runAsync (beginPendingLaunch path "diff.html")).Role,
-                Is.EqualTo(PendingLaunchStarted))
-
-            // The first identified same-worktree registration after launch wins the bounded race.
-            registerSession path sinkA.Url (Some sidA)
-            Assert.That(
-                SpinWait.SpinUntil((fun () -> List.length sinkA.Bodies = 1), TimeSpan.FromSeconds 5.0),
-                Is.True,
-                "Registration must assign the target before draining the queued interaction")
-            Assert.That(sinkA.Bodies, Is.EqualTo([ canvasWire "p1" ]))
-            Assert.That(sinkB.Bodies, Is.Empty)
             Assert.That(
                 runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some sidA))
-
-            registerSession path sinkB.Url (Some sidB)
-            let second =
-                runAsync (
-                    sendMessage
-                        { WorktreePath = WorktreePath path
-                          Filename = "diff.html"
-                          Payload = "p2" })
-
-            Assert.That(second, Is.EqualTo(CanvasMessageResult.Ok))
-            Assert.That(sinkA.Bodies, Is.EqualTo([ canvasWire "p1"; canvasWire "p2" ]))
-            Assert.That(sinkB.Bodies, Is.Empty)
-
-            runAsync (Server.CanvasDocOwnership.assign path "diff.html" sidB)
-            let third =
-                runAsync (
-                    sendMessage
-                        { WorktreePath = WorktreePath path
-                          Filename = "diff.html"
-                          Payload = "p3" })
-
-            Assert.That(third, Is.EqualTo(CanvasMessageResult.Ok))
-            Assert.That(sinkA.Bodies, Is.EqualTo([ canvasWire "p1"; canvasWire "p2" ]))
-            Assert.That(sinkB.Bodies, Is.EqualTo([ canvasWire "p3" ])))
-
-    [<Test>]
-    member _.``concurrent filenames join one worktree launch and drain to the same registration``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 1
-            use sink = new HttpSink(ports[0])
-            sink.Start()
-
-            let path = Path.Combine(Environment.CurrentDirectory, $"system-concurrent-{Guid.NewGuid():N}")
-            let sid = uniqueSid "shared"
-
-            let diffQueued =
-                runAsync (
-                    sendMessage
-                        { WorktreePath = WorktreePath path
-                          Filename = "diff.html"
-                          Payload = "diff-payload" })
-
-            let beadsQueued =
-                runAsync (
-                    sendMessage
-                        { WorktreePath = WorktreePath path
-                          Filename = "beads.html"
-                          Payload = "beads-payload" })
-
-            Assert.That(diffQueued, Is.EqualTo(CanvasMessageResult.Queued))
-            Assert.That(beadsQueued, Is.EqualTo(CanvasMessageResult.Queued))
-
-            Assert.That(
-                (runAsync (beginPendingLaunch path "diff.html")).Role,
-                Is.EqualTo(PendingLaunchStarted))
-            Assert.That(
-                (runAsync (beginPendingLaunch path "beads.html")).Role,
-                Is.EqualTo(PendingLaunchJoined),
-                "A second filename in the worktree must join the existing launch")
-
-            registerSession path sink.Url (Some sid)
-            Assert.That(
-                SpinWait.SpinUntil((fun () -> List.length sink.Bodies = 2), TimeSpan.FromSeconds 5.0),
-                Is.True,
-                "One registration must drain every pending filename in the worktree")
-            Assert.That(
-                sink.Bodies,
-                Is.EqualTo([ canvasWire "diff-payload"; canvasWire "beads-payload" ]))
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some sid))
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "beads.html"),
-                Is.EqualTo(Some sid)))
-
-    [<Test>]
-    member _.``mixed-case pending filename assigns and drains with its original case``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 1
-            use sink = new HttpSink(ports[0])
-            sink.Start()
-
-            let path = Path.Combine(Environment.CurrentDirectory, $"mixed-pending-{Guid.NewGuid():N}")
-            let sid = uniqueSid "mixed"
-
-            Assert.That(
-                runAsync (
-                    sendMessage
-                        { WorktreePath = WorktreePath path
-                          Filename = "Review.html"
-                          Payload = "mixed-payload" }),
-                Is.EqualTo(CanvasMessageResult.Queued))
-            Assert.That(
-                (runAsync (beginPendingLaunch path "Review.html")).Role,
-                Is.EqualTo(PendingLaunchStarted))
-            Assert.That(
-                runAsync (assignActivityTarget path "Review.html" (uniqueSid "activity")),
-                Is.EqualTo(ActivityTargetDeferred),
-                "Pending-launch arbitration must use the same case-preserving filename identity")
-
-            registerSession path sink.Url (Some sid)
-            Assert.That(
-                SpinWait.SpinUntil((fun () -> sink.Bodies = [ canvasWire "mixed-payload" ]), TimeSpan.FromSeconds 5.0),
-                Is.True)
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "Review.html"),
-                Is.EqualTo(Some sid))
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "review.html"),
-                Is.EqualTo(None: string option)))
-
-    [<Test>]
-    member _.``pending launches never cross worktree boundaries``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 2
-            use sinkA = new HttpSink(ports[0])
-            use sinkB = new HttpSink(ports[1])
-            sinkA.Start()
-            sinkB.Start()
-
-            let pathA = Path.Combine(Environment.CurrentDirectory, $"system-a-{Guid.NewGuid():N}")
-            let pathB = Path.Combine(Environment.CurrentDirectory, $"system-b-{Guid.NewGuid():N}")
-            let sidA = uniqueSid "a"
-            let sidB = uniqueSid "b"
-
-            [ pathA, "payload-a"; pathB, "payload-b" ]
-            |> List.iter (fun (path, payload) ->
-                sendMessage
-                    { WorktreePath = WorktreePath path
-                      Filename = "diff.html"
-                      Payload = payload }
-                |> runAsync
-                |> ignore)
-
-            Assert.That(
-                (runAsync (beginPendingLaunch pathA "diff.html")).Role,
-                Is.EqualTo(PendingLaunchStarted))
-            Assert.That(
-                (runAsync (beginPendingLaunch pathB "diff.html")).Role,
-                Is.EqualTo(PendingLaunchStarted))
-
-            registerSession pathA sinkA.Url (Some sidA)
-            Assert.That(
-                SpinWait.SpinUntil((fun () -> sinkA.Bodies = [ canvasWire "payload-a" ]), TimeSpan.FromSeconds 5.0),
-                Is.True)
-            Assert.That(sinkB.Bodies, Is.Empty)
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner pathB "diff.html"),
                 Is.EqualTo(None: string option),
-                "A registration may consume only its own worktree's pending launch")
+                "Resolution is read-only: nothing about a SystemView target is persisted"))
 
-            registerSession pathB sinkB.Url (Some sidB)
-            Assert.That(
-                SpinWait.SpinUntil((fun () -> sinkB.Bodies = [ canvasWire "payload-b" ]), TimeSpan.FromSeconds 5.0),
-                Is.True)
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner pathA "diff.html"),
-                Is.EqualTo(Some sidA))
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner pathB "diff.html"),
-                Is.EqualTo(Some sidB)))
-
-// ── scanner fallback-only attribution (RefreshScheduler.CanvasWatchers) ──────
-// The scanner is the *fallback* attribution path only: it may attribute a no-owner changed
-// doc to the worktree's bridge session ONLY when exactly one session is registered. The
-// original bug attributed every changed doc to the last-registered session
-// (getSessionForWorktree), cross-crediting docs whenever two sessions shared a worktree.
-// These guard the fix end-to-end (through the real SessionBridge registry + CanvasDocOwnership)
-// and the pure single-session decision in isolation.
-
-// A doc as the scanner would surface it: OwnerSessionId carries the owner read from the
-// ownership map during the scan (None = no declared owner yet).
 let private scannedDoc (owner: string option) filename : CanvasDoc =
     { Filename = filename
       ContentHash = "h-" + filename
