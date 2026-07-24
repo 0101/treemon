@@ -26,6 +26,10 @@ type DashboardTests() =
             return! locator.CountAsync()
         }
 
+    let settleBrowserEvents (page: IPage) =
+        page.EvaluateAsync<obj>(
+            "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
     override this.ContextOptions() =
         let opts = base.ContextOptions()
         opts.IgnoreHTTPSErrors <- true
@@ -653,6 +657,7 @@ type DashboardTests() =
         }
 
     [<Test>]
+    [<Category("AutoSyncUiVerification")>]
     member this.``Auto-sync toggle appears on behind up-to-date clean and dirty cards``() =
         task {
             let fullCards = this.Page.Locator(".wt-card:not(.compact)")
@@ -696,30 +701,18 @@ type DashboardTests() =
                 Assert.That(title, Is.EqualTo("Auto-sync with main (S)"), "Tooltip should name the base branch"))
         }
 
-    [<Test>]
-    member this.``Auto-sync toggle stays enabled while Copilot is working``() =
+    [<TestCase("working")>]
+    [<TestCase("waiting")>]
+    member this.``Auto-sync toggle stays enabled while Copilot session is busy``(status: string) =
         task {
-            let workingCards = this.Page.Locator(".wt-card.ct-working:not(.compact)")
-            do! workingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let toggle = workingCards.First.Locator(".auto-sync-btn")
+            let busyCards = this.Page.Locator($".wt-card.ct-{status}:not(.compact)")
+            do! busyCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let toggle = busyCards.First.Locator(".auto-sync-btn")
             let! count = toggle.CountAsync()
             let! isDisabled = toggle.EvaluateAsync<bool>("el => el.disabled")
             Assert.Multiple(fun () ->
-                Assert.That(count, Is.EqualTo(1), "Working cards should render the auto-sync toggle")
+                Assert.That(count, Is.EqualTo(1), $"{status} cards should render the auto-sync toggle")
                 Assert.That(isDisabled, Is.False, "Busy sessions should not disable auto-sync"))
-        }
-
-    [<Test>]
-    member this.``Auto-sync toggle stays enabled while Copilot waits for user``() =
-        task {
-            let waitingCards = this.Page.Locator(".wt-card.ct-waiting:not(.compact)")
-            do! waitingCards.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let toggle = waitingCards.First.Locator(".auto-sync-btn")
-            let! count = toggle.CountAsync()
-            let! isDisabled = toggle.EvaluateAsync<bool>("el => el.disabled")
-            Assert.Multiple(fun () ->
-                Assert.That(count, Is.EqualTo(1), "Waiting cards should render the auto-sync toggle")
-                Assert.That(isDisabled, Is.False, "Waiting sessions should not disable auto-sync"))
         }
 
     [<Test>]
@@ -765,18 +758,6 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Auto-sync toggle appears on every compact card``() =
-        task {
-            do! (compactBtn this.Page).ClickAsync()
-
-            let cards = this.Page.Locator(".wt-card.compact")
-            let toggles = cards.Locator(".auto-sync-btn")
-            let! cardCount = cards.CountAsync()
-            let! toggleCount = toggles.CountAsync()
-            Assert.That(toggleCount, Is.EqualTo(cardCount), "Every compact card should render one auto-sync toggle")
-        }
-
-    [<Test>]
     member this.``Event log hidden in compact mode``() =
         task {
             do! (compactBtn this.Page).ClickAsync()
@@ -787,19 +768,7 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Main-behind-row contains auto-sync toggle next to behind text``() =
-        task {
-            let behindRows = this.Page.Locator(".wt-card:not(.compact) .main-behind-row:has(.main-behind:not(.up-to-date))")
-            do! behindRows.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = behindRows.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has worktrees behind main; behind rows should be present")
-
-            let btns = behindRows.First.Locator(".auto-sync-btn")
-            let! btnCount = btns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Behind-main row should contain exactly one auto-sync toggle")
-        }
-
-    [<Test>]
+    [<Category("AutoSyncUiVerification")>]
     member this.``Enabled auto-sync reuses the active-terminal glow``() =
         task {
             let card = this.Page.Locator(".wt-card.has-session:has(.auto-sync-btn.active)").First
@@ -820,17 +789,19 @@ type DashboardTests() =
         task {
             do! (compactBtn this.Page).ClickAsync()
 
+            let compactCards = this.Page.Locator(".wt-card.compact")
             let mainBehind = this.Page.Locator(".wt-card.compact .main-behind")
             let! count = mainBehind.CountAsync()
             Assert.That(count, Is.GreaterThanOrEqualTo(1), "Compact cards should show main-behind indicator")
 
             let mainBehindRow = this.Page.Locator(".wt-card.compact .main-behind-row")
             let! rowCount = mainBehindRow.CountAsync()
-            let autoSync = this.Page.Locator(".wt-card.compact .auto-sync-btn")
-            let! toggleCount = autoSync.CountAsync()
+            let! everyCardHasOneToggle =
+                compactCards.EvaluateAllAsync<bool>(
+                    "cards => cards.every(card => card.querySelectorAll('.auto-sync-btn').length === 1)")
             Assert.Multiple(fun () ->
                 Assert.That(rowCount, Is.EqualTo(0), "Compact cards should keep their compact-detail layout")
-                Assert.That(toggleCount, Is.GreaterThanOrEqualTo(1), "Compact cards should still expose auto-sync"))
+                Assert.That(everyCardHasOneToggle, Is.True, "Every compact card should render one auto-sync toggle"))
         }
 
     [<Test>]
@@ -1048,19 +1019,6 @@ type DashboardTests() =
 
             let! fontStyle = dirtyWarnings.First |> computedStyle "fontStyle"
             Assert.That(fontStyle, Is.EqualTo("italic"), "Dirty warning should be italic")
-        }
-
-    [<Test>]
-    member this.``Dirty worktree row keeps auto-sync toggle``() =
-        task {
-            let dirtyRow = this.Page.Locator(".wt-card .main-behind-row:has(.dirty-warning)")
-            do! dirtyRow.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! count = dirtyRow.CountAsync()
-            Assert.That(count, Is.GreaterThanOrEqualTo(1), "Fixture has dirty worktree behind main; row with dirty warning should exist")
-
-            let toggles = dirtyRow.First.Locator(".auto-sync-btn")
-            let! btnCount = toggles.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(1), "Row with dirty warning should keep the auto-sync toggle")
         }
 
     [<Test>]
@@ -2021,17 +1979,20 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Local")>]
-    member this.``Auto-sync serializes input and rolls back on API error``() =
+    [<Category("AutoSyncUiVerification")>]
+    member this.``Auto-sync isolates pending requests and rolls back errors``() =
         task {
             let! page = this.Context.NewPageAsync()
 
-            let toggleFulfill = System.Threading.Tasks.TaskCompletionSource<IRoute>()
+            let toggleRoutes = System.Threading.Channels.Channel.CreateUnbounded<IRoute>()
+            let nextRoute () =
+                toggleRoutes.Reader.ReadAsync().AsTask().WaitAsync(System.TimeSpan.FromSeconds 5.0)
             // Mutable because Playwright's route callback is an impure event boundary.
             let mutable toggleRequests = 0
 
             do! page.RouteAsync("**/IWorktreeApi/toggleAutoSync", fun route ->
                 toggleRequests <- toggleRequests + 1
-                toggleFulfill.TrySetResult(route) |> ignore
+                toggleRoutes.Writer.TryWrite(route) |> ignore
                 System.Threading.Tasks.Task.CompletedTask)
 
             let! _ = page.GotoAsync(baseUrl)
@@ -2039,23 +2000,87 @@ type DashboardTests() =
 
             let treemonSection = page.Locator(".repo-section:has(.repo-name:text-is('treemon'))")
             let multirepoCard = treemonSection.Locator(".wt-card:has(.branch-name:text-is('multirepo'))")
+            let secondCard = treemonSection.Locator(".wt-card:has(.branch-name:text-is('test/add-health-endpoint'))")
             do! multirepoCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! secondCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let toggle = multirepoCard.Locator(".auto-sync-btn")
+            let secondToggle = secondCard.Locator(".auto-sync-btn")
+            let toggleRow = toggle.Locator("xpath=ancestor::*[contains(@class,'main-behind-row')]")
+
+            let! toggleRowCount = toggleRow.CountAsync()
+            Assert.That(toggleRowCount, Is.EqualTo(1), "Auto-sync toggle should be inside main-behind-row")
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "false")
+            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn")
+            do! Assertions.Expect(toggle).ToBeEnabledAsync()
+            do! Assertions.Expect(secondToggle).ToHaveAttributeAsync("aria-pressed", "false")
 
             do! toggle.ClickAsync()
-            let! route = toggleFulfill.Task
+            let! firstRoute = nextRoute ()
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
             do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn active")
             do! Assertions.Expect(toggle).ToBeDisabledAsync()
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-disabled", "true")
 
+            let! _ = toggle.EvaluateAsync<obj>("el => el.click()")
+            let! _ = settleBrowserEvents page
+            Assert.That(toggleRequests, Is.EqualTo(1), "Programmatic click while pending must not start another request")
+
             do! multirepoCard.ClickAsync()
             do! page.Keyboard.PressAsync("s")
-            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
-            Assert.That(toggleRequests, Is.EqualTo(1), "A second input must not start another persistence request")
+            let! _ = settleBrowserEvents page
+            Assert.That(toggleRequests, Is.EqualTo(1), "Keyboard input while pending must not start another request")
 
-            do! route.FulfillAsync(
+            do! secondToggle.ClickAsync()
+            let! secondRoute = nextRoute ()
+            do! Assertions.Expect(secondToggle).ToHaveAttributeAsync("aria-pressed", "true")
+            do! Assertions.Expect(secondToggle).ToBeDisabledAsync()
+            do! Assertions.Expect(toggle).ToBeDisabledAsync()
+            Assert.That(toggleRequests, Is.EqualTo(2), "A different worktree should start its own request")
+
+            do! secondRoute.FulfillAsync(
+                RouteFulfillOptions(
+                    ContentType = "application/json",
+                    Body = """{"Ok":null}"""))
+            do! Assertions.Expect(secondToggle).ToBeEnabledAsync()
+            do! Assertions.Expect(toggle).ToBeDisabledAsync()
+
+            do! firstRoute.FulfillAsync(
+                RouteFulfillOptions(
+                    ContentType = "application/json",
+                    Body = """{"Ok":null}"""))
+            do! Assertions.Expect(toggle).ToBeEnabledAsync()
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
+
+            do! toggle.ClickAsync()
+            let! disableRoute = nextRoute ()
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "false")
+            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn")
+            do! Assertions.Expect(toggle).ToBeDisabledAsync()
+            do! disableRoute.FulfillAsync(
+                RouteFulfillOptions(
+                    ContentType = "application/json",
+                    Body = """{"Ok":null}"""))
+            do! Assertions.Expect(toggle).ToBeEnabledAsync()
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-disabled", "false")
+
+            let! _ =
+                page.EvaluateAsync<obj>("""() => {
+                    window.__autoSyncErrorSurfaceObserved = Boolean(document.querySelector('#eye-shape'));
+                    const observer = new MutationObserver(() => {
+                        if (document.querySelector('#eye-shape')) {
+                            window.__autoSyncErrorSurfaceObserved = true;
+                            observer.disconnect();
+                        }
+                    });
+                    observer.observe(document.documentElement, { childList: true, subtree: true });
+                }""")
+
+            do! multirepoCard.ClickAsync()
+            do! page.Keyboard.PressAsync("s")
+            let! enableRoute = nextRoute ()
+            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
+            do! Assertions.Expect(toggle).ToBeDisabledAsync()
+            do! enableRoute.FulfillAsync(
                 RouteFulfillOptions(
                     ContentType = "application/json",
                     Body = """{"Error":"persist failed"}"""))
@@ -2068,37 +2093,11 @@ type DashboardTests() =
             do! Assertions.Expect(toggle).ToBeEnabledAsync()
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-disabled", "false")
 
-            do! page.CloseAsync()
-        }
-
-    [<Test>]
-    [<Category("Local")>]
-    member this.``S key toggles auto-sync on the focused card``() =
-        task {
-            let! page = this.Context.NewPageAsync()
-
-            let toggleFulfill = System.Threading.Tasks.TaskCompletionSource<IRoute>()
-
-            do! page.RouteAsync("**/IWorktreeApi/toggleAutoSync", fun route ->
-                toggleFulfill.TrySetResult(route) |> ignore
-                System.Threading.Tasks.Task.CompletedTask)
-
-            let! _ = page.GotoAsync(baseUrl)
-            do! page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
-
-            let treemonSection = page.Locator(".repo-section:has(.repo-name:text-is('treemon'))")
-            let multirepoCard = treemonSection.Locator(".wt-card:has(.branch-name:text-is('multirepo'))")
-            do! multirepoCard.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let toggle = multirepoCard.Locator(".auto-sync-btn")
-            do! multirepoCard.ClickAsync()
-            do! page.Keyboard.PressAsync("s")
-
-            let! route = toggleFulfill.Task
-            do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
-            do! route.FulfillAsync(
-                RouteFulfillOptions(
-                    ContentType = "application/json",
-                    Body = """{"Error":"persist failed"}"""))
+            let! _ = page.WaitForFunctionAsync(
+                "() => window.__autoSyncErrorSurfaceObserved === true",
+                null,
+                PageWaitForFunctionOptions(Timeout = 5000.0f))
+            Assert.That(toggleRequests, Is.EqualTo(4), "The complete lifecycle should issue four requests")
 
             do! page.CloseAsync()
         }

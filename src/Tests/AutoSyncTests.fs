@@ -37,12 +37,6 @@ let private gitData path branch behind revision dirty : GitWorktree.GitData =
       IsDirty = dirty
       WorkMetrics = None }
 
-let private emitVerification name fields =
-    let details = String.concat "; " fields
-    TestContext.Out.WriteLine($"VERIFICATION {name}: {details}")
-
-let private optionText = Option.defaultValue "<none>"
-
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -238,12 +232,6 @@ type AutoSyncTriggerTests() =
         let upToDateRevision = revision true upToDate
         let disabledRevision = revision false dirtyBehind
 
-        emitVerification
-            "eligibility"
-            [ $"dirtyBehindRevision={dirtyBehindRevision |> optionText}"
-              $"upToDateRevision={upToDateRevision |> optionText}"
-              $"disabledRevision={disabledRevision |> optionText}" ]
-
         Assert.Multiple(fun () ->
             Assert.That(dirtyBehindRevision, Is.EqualTo(Some "base-a"))
             Assert.That(upToDateRevision, Is.EqualTo None)
@@ -302,12 +290,6 @@ type AutoSyncSchedulerDispatchTests() =
 
             let schedulerCompleted = schedulerStep.IsCompletedSuccessfully
             let deliveryCompletedBeforeRelease = deliveryCompleted.Task.IsCompleted
-
-            emitVerification
-                "nonblocking-refresh-dispatch"
-                [ $"schedulerCompleted={schedulerCompleted}"
-                  $"deliveryStarted={deliveryStarted.Task.IsCompletedSuccessfully}"
-                  $"deliveryCompletedBeforeRelease={deliveryCompletedBeforeRelease}" ]
 
             Assert.Multiple(fun () ->
                 Assert.That(schedulerCompleted, Is.True)
@@ -417,12 +399,6 @@ type AutoSyncDeliveryTests() =
                     { request with SessionId = sessionId }
                 |> Async.RunSynchronously
 
-            emitVerification
-                "open-idle-over-retained"
-                [ $"selectedSession={sessionId |> optionText}"
-                  $"accepted={accepted}"
-                  "fallbackLaunch=false" ]
-
             Assert.Multiple(fun () ->
                 Assert.That(sessionId, Is.EqualTo(Some "open-idle"))
                 Assert.That(accepted, Is.True))
@@ -466,14 +442,6 @@ type AutoSyncDeliveryTests() =
                     })
                 request
             |> Async.RunSynchronously
-
-        emitVerification
-            "registration-grace"
-            [ $"deliveryAttempts={attempts}"
-              $"graceCalls={graceCalls}"
-              $"graceMilliseconds={registrationGraceMilliseconds}"
-              $"launchAttempts={launchAttempts}"
-              $"accepted={accepted}" ]
 
         Assert.Multiple(fun () ->
             Assert.That(accepted, Is.True)
@@ -640,13 +608,6 @@ type AutoSyncDeliveryTests() =
             SessionBridge.serializePrompt(
                 SessionBridge.Prompt.agentPrompt request.Prompt)
 
-        emitVerification
-            "known-live-post-retry"
-            [ $"initialDeliveryAccepted={accepted}"
-              $"retryBodyMatched={body = expectedBody}"
-              $"fallbackGuardAttempts={fallbackGuardAttempts}"
-              $"fallbackLaunchAttempts={fallbackLaunchAttempts}" ]
-
         Assert.Multiple(fun () ->
             Assert.That(accepted, Is.True)
             Assert.That(body, Is.EqualTo expectedBody)
@@ -673,6 +634,7 @@ type AutoSyncEndpointTests() =
         if Directory.Exists root then Directory.Delete(root, true)
 
     [<Test>]
+    [<Category("AutoSyncVerification")>]
     member _.``Differently-cased disable lets the same base revision trigger again``() =
         let normalizedPath = PathUtils.normalizePath worktree
         let differentlyCasedPath = normalizedPath.ToUpperInvariant()
@@ -724,10 +686,10 @@ type AutoSyncEndpointTests() =
                 "1.0"
                 None
 
-        let enableAndReceive () =
+        let enableAndReceive apiWorktreePath =
             let receive = listener.GetContextAsync()
             let toggleTask =
-                api.toggleAutoSync (WorktreePath normalizedPath) true
+                api.toggleAutoSync apiWorktreePath true
                 |> Async.StartAsTask
 
             let context = receive.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
@@ -737,11 +699,16 @@ type AutoSyncEndpointTests() =
             context.Response.Close()
             body, toggleTask.GetAwaiter().GetResult()
 
-        let body, result = enableAndReceive ()
+        let body, result = enableAndReceive (WorktreePath differentlyCasedPath)
         let dashboard = api.getWorktrees () |> Async.RunSynchronously
         let status = dashboard.Repos |> List.collect _.Worktrees |> List.exactlyOne
+        let enabledState = agent.PostAndReply(GetState)
+        let duplicateRefreshClaim =
+            agent.PostAndReply(fun reply ->
+                ClaimAutoSyncTrigger(normalizedPath, "base-a", reply))
 
         Assert.Multiple(fun () ->
+            Assert.That(differentlyCasedPath, Is.Not.EqualTo(normalizedPath))
             Assert.That(Result.isOk result, Is.True)
             Assert.That(
                 TreemonConfig.readAutoSyncBranchSet (Some root),
@@ -751,19 +718,23 @@ type AutoSyncEndpointTests() =
                 Is.EqualTo(
                     SessionBridge.serializePrompt(
                     SessionBridge.Prompt.agentPrompt(prompt "origin" "main"))))
-            Assert.That(status.AutoSyncEnabled, Is.True))
+            Assert.That(status.AutoSyncEnabled, Is.True)
+            Assert.That(
+                enabledState.AutoSyncTriggeredRevisions
+                |> Map.toList
+                |> List.map fst,
+                Is.EqualTo([ normalizedPath ]))
+            Assert.That(duplicateRefreshClaim, Is.False))
 
         let disableResult =
             api.toggleAutoSync (WorktreePath differentlyCasedPath) false
             |> Async.RunSynchronously
-
         let disabledBranches = TreemonConfig.readAutoSyncBranchSet (Some root)
         let disabledState = agent.PostAndReply(GetState)
-        let secondBody, reenableResult = enableAndReceive ()
+        let secondBody, reenableResult = enableAndReceive (WorktreePath normalizedPath)
         let finalState = agent.PostAndReply(GetState)
 
         Assert.Multiple(fun () ->
-            Assert.That(differentlyCasedPath, Is.Not.EqualTo(normalizedPath))
             Assert.That(Result.isOk disableResult, Is.True)
             Assert.That(disabledBranches, Is.Empty)
             Assert.That(Map.containsKey normalizedPath disabledState.AutoSyncTriggeredRevisions, Is.False)
@@ -778,100 +749,6 @@ type AutoSyncEndpointTests() =
 [<Category("Fast")>]
 [<Category("AutoSyncVerification")>]
 type AutoSyncVerificationTests() =
-
-    [<Test>]
-    member _.``Verification differently cased API input stores one canonical trigger key``() =
-        let root = tempDirectory ()
-        let worktree = Path.Combine(root, "feature-a")
-        Directory.CreateDirectory(worktree) |> ignore
-        let normalizedPath = PathUtils.normalizePath worktree
-        let differentlyCasedPath = normalizedPath.ToUpperInvariant()
-        let repoId = PathUtils.toRepoId root
-        let agent = createAgent ()
-        let sessionAgent = SessionManager.createAgent ()
-        let port = TestUtils.getFreeTcpPort ()
-
-        use listener = new HttpListener()
-        listener.Prefixes.Add($"http://127.0.0.1:{port}/")
-        listener.Start()
-
-        try
-            let now = DateTimeOffset.UtcNow
-
-            agent.Post(
-                UpdateWorktreeList(
-                    repoId,
-                    [ { GitWorktree.WorktreeInfo.Path = normalizedPath
-                        Head = "head"
-                        Branch = Some "feature-a" } ]))
-
-            agent.Post(
-                UpdateGit(
-                    repoId,
-                    normalizedPath,
-                    gitData normalizedPath "feature-a" 2 (Some "base-a") true))
-
-            agent.Post(
-                UpdateSessionStatus(
-                    storedSession
-                        "selected-working"
-                        normalizedPath
-                        SessionLevelStatus.Working
-                        now
-                        now))
-
-            SessionBridge.registerSession
-                normalizedPath
-                $"http://127.0.0.1:{port}/"
-                (Some "selected-working")
-
-            let api =
-                WorktreeApi.worktreeApi
-                    agent
-                    (CardEventLog.createAgent ())
-                    sessionAgent
-                    None
-                    [ root ]
-                    None
-                    "1.0"
-                    None
-
-            let request = listener.GetContextAsync()
-            let toggle =
-                api.toggleAutoSync (WorktreePath differentlyCasedPath) true
-                |> Async.StartAsTask
-
-            let context =
-                request.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
-            context.Response.StatusCode <- 200
-            context.Response.Close()
-
-            let toggleResult = toggle.GetAwaiter().GetResult()
-            let state = agent.PostAndReply(GetState)
-            let duplicateRefreshClaim =
-                agent.PostAndReply(fun reply ->
-                    ClaimAutoSyncTrigger(normalizedPath, "base-a", reply))
-            let triggerKeys =
-                state.AutoSyncTriggeredRevisions
-                |> Map.toList
-                |> List.map fst
-            let canonicalKeyMatched = triggerKeys = [ normalizedPath ]
-
-            emitVerification
-                "canonical-trigger-path"
-                [ $"apiPathDiffered={differentlyCasedPath <> normalizedPath}"
-                  $"toggleAccepted={Result.isOk toggleResult}"
-                  $"triggerKeyCount={triggerKeys.Length}"
-                  $"canonicalKeyMatched={canonicalKeyMatched}"
-                  $"duplicateRefreshClaim={duplicateRefreshClaim}" ]
-
-            Assert.Multiple(fun () ->
-                Assert.That(differentlyCasedPath, Is.Not.EqualTo(normalizedPath))
-                Assert.That(Result.isOk toggleResult, Is.True)
-                Assert.That(canonicalKeyMatched, Is.True)
-                Assert.That(duplicateRefreshClaim, Is.False))
-        finally
-            if Directory.Exists root then Directory.Delete(root, true)
 
     [<Test>]
     member _.``Verification selected working session receives one configured generic prompt``() =
@@ -968,19 +845,6 @@ type AutoSyncVerificationTests() =
                     SessionBridge.Prompt.agentPrompt expectedPrompt)
             let otherReceived = otherRequest.IsCompleted
             let duplicateDelivery = duplicateSelectedRequest.IsCompleted
-            let isAgentPromptEnvelope =
-                body.StartsWith("{\"kind\":\"agent-prompt\"", StringComparison.Ordinal)
-            let canvasPrefixPresent =
-                body.Contains("[canvas]", StringComparison.Ordinal)
-
-            emitVerification
-                "selected-working-session"
-                [ $"toggleAccepted={Result.isOk result}"
-                  $"promptMatched={body = expectedBody}"
-                  $"agentPromptEnvelope={isAgentPromptEnvelope}"
-                  $"canvasPrefixPresent={canvasPrefixPresent}"
-                  $"otherSessionReceived={otherReceived}"
-                  $"duplicateDelivery={duplicateDelivery}" ]
 
             Assert.Multiple(fun () ->
                 Assert.That(Result.isOk result, Is.True)
@@ -1035,16 +899,6 @@ type AutoSyncVerificationTests() =
             |> Async.RunSynchronously
 
             let expectedLaunches = [ WorktreePath path, expectedPrompt ]
-            let pathMatched =
-                (launches |> List.map fst) = (expectedLaunches |> List.map fst)
-            let promptMatched =
-                (launches |> List.map snd) = (expectedLaunches |> List.map snd)
-
-            emitVerification
-                "repeated-no-live-observations"
-                [ $"launchCount={launches.Length}"
-                  $"pathMatched={pathMatched}"
-                  $"promptMatched={promptMatched}" ]
 
             Assert.That(
                 launches,
@@ -1111,19 +965,6 @@ type AutoSyncVerificationTests() =
             let custom = config.RootElement.GetProperty("custom").GetProperty("keep").GetBoolean()
             let finalState = agent.PostAndReply(GetState)
             let expectedPrompt = prompt "upstream" "develop"
-
-            emitVerification
-                "revision-disable-reenable-persistence"
-                [ $"afterRepeated={afterRepeated}"
-                  $"afterAdvance={afterAdvance}"
-                  $"afterDisable={afterDisable}"
-                  $"afterReenable={afterReenable}"
-                  $"promptCount={deliveries.Length}"
-                  $"autoSyncBranches={TreemonConfig.readAutoSyncBranchSet (Some root)}"
-                  $"archivedBranches={TreemonConfig.readArchivedBranches root}"
-                  $"baseBranch={TreemonConfig.readBaseBranch root}"
-                  $"customPreserved={custom}"
-                  $"triggerRevision={finalState.AutoSyncTriggeredRevisions |> Map.tryFind path |> optionText}" ]
 
             Assert.Multiple(fun () ->
                 Assert.That(afterRepeated, Is.EqualTo(1))
