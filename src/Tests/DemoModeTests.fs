@@ -203,18 +203,6 @@ type DemoModeTests() =
 
             Assert.That(allProviders, Does.Contain(CopilotCli), "Copilot provider should appear on at least one worktree")
 
-            // Also verify the provider appears in UI sync button titles (a non-dirty Working card behind main)
-            let copilotIndicators = this.Page.Locator("[title*='Copilot is active']")
-            let deadline = DateTime.UtcNow.AddSeconds(12.0)
-            let mutable copilotFound = false
-
-            while DateTime.UtcNow < deadline && not copilotFound do
-                let! copilotCount = copilotIndicators.CountAsync()
-                if copilotCount > 0 then copilotFound <- true
-                if not copilotFound then
-                    do! System.Threading.Tasks.Task.Delay(500)
-
-            Assert.That(copilotFound, Is.True, "Copilot provider indicator should appear in sync button title")
         }
 
     [<Test>]

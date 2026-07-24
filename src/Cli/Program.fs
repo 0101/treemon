@@ -107,7 +107,6 @@ let launchCmd =
             promptFile: string option,
             fixPr: string option,
             fixBuild: string option,
-            fixTests: bool,
             createPr: bool,
             port: int option
         ) =
@@ -116,7 +115,6 @@ let launchCmd =
                 [ promptFile |> Option.map Choice1Of2
                   fixPr |> Option.map (FixPr >> Choice2Of2)
                   fixBuild |> Option.map (FixBuild >> Choice2Of2)
-                  (if fixTests then Some(Choice2Of2 FixTests) else None)
                   (if createPr then Some(Choice2Of2 CreatePr) else None) ]
                 |> List.choose id
 
@@ -142,7 +140,7 @@ let launchCmd =
                 | Choice2Of2 action ->
                     runApi port (fun api -> api.launchAction { Path = wtPath; Action = action }) "Action launched"
             | _ ->
-                eprintfn "Error: Provide exactly one of: --prompt-file, --fix-pr, --fix-build, --fix-tests, or --create-pr"
+                eprintfn "Error: Provide exactly one of: --prompt-file, --fix-pr, --fix-build, or --create-pr"
                 1)
 
     command "launch" {
@@ -153,7 +151,6 @@ let launchCmd =
             optionMaybe<string> "--prompt-file" |> desc "Path to a prompt file (e.g. instructions.md)",
             optionMaybe<string> "--fix-pr" |> desc "Fix PR comments (provide PR URL)",
             optionMaybe<string> "--fix-build" |> desc "Fix failed build (provide build URL)",
-            option<bool> "--fix-tests" |> def false |> desc "Fix failing tests",
             option<bool> "--create-pr" |> def false |> desc "Create a pull request",
             optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)"
         )

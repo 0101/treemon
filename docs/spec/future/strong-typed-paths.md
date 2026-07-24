@@ -78,7 +78,7 @@ module AbsolutePath =
 
 ### No RelativePath needed
 
-Relative paths appear only in `.treemon.json` `testCommand` (a shell command string, not a path — no resolution needed) and `logs/server.log` (hardcoded at startup). Neither needs a type.
+The remaining relative path is `logs/server.log`, hardcoded at startup; it does not need a domain type.
 
 ## Decisions
 
@@ -94,6 +94,6 @@ Relative paths appear only in `.treemon.json` `testCommand` (a shell command str
 
 **Core conversion** (must change atomically): `src/Shared/Types.fs`, `src/Server/GitWorktree.fs`, `src/Server/RefreshScheduler.fs`, `src/Server/WorktreeApi.fs`, `src/Server/Program.fs`, `src/Client/App.fs`.
 
-**Leaf conversions**: `src/Server/ClaudeDetector.fs`, `src/Server/CopilotDetector.fs`, `src/Server/CodingToolStatus.fs`, `src/Server/SyncEngine.fs`, `src/Server/BeadsStatus.fs`, `src/Server/PrStatus.fs`.
+**Leaf conversions**: `src/Server/ClaudeDetector.fs`, `src/Server/CopilotDetector.fs`, `src/Server/CodingToolStatus.fs`, `src/Server/BeadsStatus.fs`, `src/Server/PrStatus.fs`.
 
 **Not converted**: `src/Server/Log.fs`, `src/Server/ProcessRunner.fs`, `src/Server/GithubPrStatus.fs`.

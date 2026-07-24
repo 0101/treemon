@@ -9,6 +9,7 @@ open System.Net.Sockets
 open System.Collections.Concurrent
 open NUnit.Framework
 open Shared
+open Server.SessionBridge
 open Server.CanvasBridge
 open Server.RefreshScheduler.CanvasWatchers
 open Tests.TestUtils
@@ -24,6 +25,9 @@ let private uniquePath prefix =
 let private uniqueSid prefix =
     let id = Guid.NewGuid().ToString("N")[..7]
     $"{prefix}-{id}"
+
+let private canvasWire payload =
+    serializePrompt (Prompt.canvas payload)
 
 // A minimal loopback HTTP sink used to assert *which* inject URL a message reaches.
 // It speaks just enough HTTP/1.1 over a raw TcpListener so no HttpListener URL ACL /
@@ -530,7 +534,7 @@ type OwnerRoutingTests() =
             let result = runAsync (sendMessage request)
 
             Assert.That(result, Is.EqualTo(CanvasMessageResult.Ok), "Owner is live, so delivery should succeed")
-            Assert.That(ownerSink.Bodies, Is.EqualTo([ "p1" ]), "Owner session must receive the message")
+            Assert.That(ownerSink.Bodies, Is.EqualTo([ canvasWire "p1" ]), "Owner session must receive the message")
             Assert.That(otherSink.Bodies, Is.Empty, "Non-owner in the same worktree must never receive it"))
 
     [<Test>]
@@ -555,8 +559,8 @@ type OwnerRoutingTests() =
 
             Assert.That(rA, Is.EqualTo(CanvasMessageResult.Ok))
             Assert.That(rB, Is.EqualTo(CanvasMessageResult.Ok))
-            Assert.That(sinkA.Bodies, Is.EqualTo([ "pa" ]), "a.html delivers to owner A only")
-            Assert.That(sinkB.Bodies, Is.EqualTo([ "pb" ]), "b.html delivers to owner B only"))
+            Assert.That(sinkA.Bodies, Is.EqualTo([ canvasWire "pa" ]), "a.html delivers to owner A only")
+            Assert.That(sinkB.Bodies, Is.EqualTo([ canvasWire "pb" ]), "b.html delivers to owner B only"))
 
     [<Test>]
     member _.``Owner offline queues and never falls back to a live non-owner``() =
@@ -672,7 +676,7 @@ type OwnerRoutingTests() =
 
             waitForDelivery ()
 
-            Assert.That(ownerSink.Bodies, Is.EqualTo([ "p1" ]), "Owner must receive its queued message on re-register")
+            Assert.That(ownerSink.Bodies, Is.EqualTo([ canvasWire "p1" ]), "Owner must receive its queued message on re-register")
             Assert.That(otherSink.Bodies, Is.Empty, "Non-owner still must not have received it"))
 
 
@@ -681,7 +685,7 @@ type OwnerRoutingTests() =
 // doc to the worktree's bridge session ONLY when exactly one session is registered. The
 // original bug attributed every changed doc to the last-registered session
 // (getSessionForWorktree), cross-crediting docs whenever two sessions shared a worktree.
-// These guard the fix end-to-end (through the real CanvasBridge registry + CanvasDocOwnership)
+// These guard the fix end-to-end (through the real SessionBridge registry + CanvasDocOwnership)
 // and the pure single-session decision in isolation.
 
 // A doc as the scanner would surface it: OwnerSessionId carries the owner read from the
@@ -772,7 +776,7 @@ type ScannerFallbackAttributionTests() =
 
 
 // ── Verification tm-canvas48-gbjq: owner-correct canvas routing (multi-session) ──────────────
-// In-process integration of the 4-step verification scenario through the REAL CanvasBridge
+// In-process integration of the 4-step verification scenario through the REAL SessionBridge
 // registry + CanvasDocOwnership, with two loopback HTTP sinks standing in for the agent inject
 // bridges L_A / L_B. Each test maps to numbered step(s) in the task description and asserts the
 // observable OUTCOME (which inject URL actually received the POST), not just the result code.
@@ -808,14 +812,14 @@ type VerifyGbjqOwnerCorrectRoutingTests() =
             // Step 1: sendMessage {W,'a.html',p1} -> L_A gets exactly one POST with p1; L_B gets zero.
             let r1 = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "a.html"; Payload = "p1" })
             Assert.That(r1, Is.EqualTo(CanvasMessageResult.Ok), "Step1: owner A live -> Ok")
-            Assert.That(lA.Bodies, Is.EqualTo([ "p1" ]), "Step1: L_A gets exactly one POST with p1")
+            Assert.That(lA.Bodies, Is.EqualTo([ canvasWire "p1" ]), "Step1: L_A gets exactly one POST with p1")
             Assert.That(lB.Bodies, Is.Empty, "Step1: L_B gets zero (FAIL if L_B receives it)")
 
             // Step 2: sendMessage {W,'b.html',p2} -> L_B receives p2; L_A unchanged.
             let r2 = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "b.html"; Payload = "p2" })
             Assert.That(r2, Is.EqualTo(CanvasMessageResult.Ok), "Step2: owner B live -> Ok")
-            Assert.That(lB.Bodies, Is.EqualTo([ "p2" ]), "Step2: L_B receives p2")
-            Assert.That(lA.Bodies, Is.EqualTo([ "p1" ]), "Step2: L_A unchanged (still only p1)"))
+            Assert.That(lB.Bodies, Is.EqualTo([ canvasWire "p2" ]), "Step2: L_B receives p2")
+            Assert.That(lA.Bodies, Is.EqualTo([ canvasWire "p1" ]), "Step2: L_A unchanged (still only p1)"))
 
     // Step 3: with owner A's bridge stopped, a.html's message must QUEUE (never fall back to the
     // co-located non-owner B). The task's literal wording "drainPending W returns p3" predates the
@@ -845,7 +849,7 @@ type VerifyGbjqOwnerCorrectRoutingTests() =
                 // Sanity: while A is live, a.html delivers to L_A only (precondition for "Stop L_A").
                 let warm = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "a.html"; Payload = "p1" })
                 Assert.That(warm, Is.EqualTo(CanvasMessageResult.Ok), "owner A live -> Ok")
-                Assert.That(lA.Bodies, Is.EqualTo([ "p1" ]), "owner A receives p1")
+                Assert.That(lA.Bodies, Is.EqualTo([ canvasWire "p1" ]), "owner A receives p1")
                 Assert.That(lB.Bodies, Is.Empty, "non-owner B receives nothing")
             finally
                 // Stop L_A (owner offline): the listener dies; A's registry entry remains.
@@ -876,7 +880,7 @@ type VerifyGbjqOwnerCorrectRoutingTests() =
                     waitForDelivery ()
 
             waitForDelivery ()
-            Assert.That(lA2.Bodies, Is.EqualTo([ "p3" ]), "Step3: owner A re-register drains p3 to A (message not lost)")
+            Assert.That(lA2.Bodies, Is.EqualTo([ canvasWire "p3" ]), "Step3: owner A re-register drains p3 to A (message not lost)")
             Assert.That(lB.Bodies, Is.Empty, "Step3: B still never received p3"))
 
     // Step 4: doc c.html has NO declared owner and exactly one live session (B). The single-session
