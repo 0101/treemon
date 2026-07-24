@@ -592,7 +592,7 @@ type AttributeOwnershipTests() =
                         "getOwner must return the sessionId the authoring session declared"))
 
     [<Test>]
-    member _.``a SystemView declaration reassigns interaction ownership without author ownership``() =
+    member _.``a SystemView declaration reassigns the unified routing target``() =
         withTempCwd (fun () ->
             let worktree = uniquePath "attr-system"
             let agent = agentKnowing worktree
@@ -608,8 +608,8 @@ type AttributeOwnershipTests() =
                 "The second explicit declaration must reassign the interaction target")
             Assert.That(
                 runAsync (CanvasDocOwnership.getOwner worktree "diff.html"),
-                Is.EqualTo(None: string option),
-                "SystemViews must not acquire authored-document ownership"))
+                Is.EqualTo(Some second),
+                "Both document kinds must persist their routing target in the unified store"))
 
     [<Test>]
     member _.``an unknown worktree is rejected and records no ownership``() =

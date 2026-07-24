@@ -2,13 +2,9 @@ module Server.CanvasInteractionOwnership
 
 open System
 open System.IO
-open System.Text
-open System.Text.Json
 
 let private normalizePath = Server.PathUtils.normalizePath
 let private normalizeFilename (filename: string) = filename.ToLowerInvariant()
-
-let private defaultFilePath = Path.Combine("data", "canvas-interaction-owners.json")
 
 type private PendingClaim =
     | Initial of token: Guid
@@ -18,10 +14,6 @@ type internal InitialClaim =
     | ExistingOwner of sessionId: string
     | ClaimStarted of token: Guid
 
-type private OwnershipState =
-    { Owners: Map<string, Map<string, string>>
-      Pending: Map<string, Map<string, PendingClaim>> }
-
 type internal Reassignment =
     { Token: Guid
       PreviousOwner: string option }
@@ -30,6 +22,13 @@ type FollowResult =
     | Assigned
     | Unchanged
     | Deferred
+
+type internal TargetStore =
+    { Assign: string -> string -> string -> Async<unit>
+      GetOwner: string -> string -> Async<string option>
+      RemoveView: string -> string -> Async<unit>
+      RemoveWorktree: string -> Async<unit>
+      Prune: Set<string> -> Async<unit> }
 
 type private Msg =
     | Assign of worktreeKey: string * filename: string * sessionId: string * AsyncReplyChannel<unit>
@@ -45,32 +44,6 @@ type private Msg =
     | RemoveWorktree of worktreeKey: string * AsyncReplyChannel<unit>
     | Prune of knownWorktrees: Set<string> * AsyncReplyChannel<unit>
 
-let private emptyState =
-    { Owners = Map.empty
-      Pending = Map.empty }
-
-let private ownerFor worktreeKey filename owners =
-    owners
-    |> Map.tryFind worktreeKey
-    |> Option.bind (Map.tryFind filename)
-
-let private addOwner worktreeKey filename sessionId owners =
-    let views =
-        owners
-        |> Map.tryFind worktreeKey
-        |> Option.defaultValue Map.empty
-        |> Map.add filename sessionId
-
-    owners |> Map.add worktreeKey views
-
-let private removeOwner worktreeKey filename owners =
-    match owners |> Map.tryFind worktreeKey with
-    | None -> owners
-    | Some views ->
-        let remaining = views |> Map.remove filename
-        if Map.isEmpty remaining then owners |> Map.remove worktreeKey
-        else owners |> Map.add worktreeKey remaining
-
 let private removePendingView worktreeKey filename pending =
     match pending |> Map.tryFind worktreeKey with
     | None -> pending
@@ -79,29 +52,17 @@ let private removePendingView worktreeKey filename pending =
         if Map.isEmpty remaining then pending |> Map.remove worktreeKey
         else pending |> Map.add worktreeKey remaining
 
-let private trackedViewKeys knownWorktrees viewsByWorktree =
-    viewsByWorktree
+let private trackedPendingKeys knownWorktrees pending =
+    pending
     |> Map.toSeq
     |> Seq.filter (fun (worktreeKey, _) -> knownWorktrees |> Set.contains worktreeKey)
     |> Seq.collect (fun (worktreeKey, views) ->
         views
-        |> Map.toSeq
-        |> Seq.map (fun (filename, _) -> worktreeKey, filename))
+        |> Map.keys
+        |> Seq.map (fun filename -> worktreeKey, filename))
     |> Set.ofSeq
 
-let private pruneViews existingViewKeys viewsByWorktree =
-    viewsByWorktree
-    |> Map.toSeq
-    |> Seq.choose (fun (worktreeKey, views) ->
-        let existing =
-            views
-            |> Map.filter (fun filename _ ->
-                existingViewKeys |> Set.contains (worktreeKey, filename))
-
-        if Map.isEmpty existing then None else Some(worktreeKey, existing))
-    |> Map.ofSeq
-
-let private prunePending existingViewKeys pending =
+let private keepPending existingViewKeys pending =
     pending
     |> Map.toSeq
     |> Seq.choose (fun (worktreeKey, views) ->
@@ -113,234 +74,166 @@ let private prunePending existingViewKeys pending =
         if Map.isEmpty existing then None else Some(worktreeKey, existing))
     |> Map.ofSeq
 
-let private persist (filePath: string) (owners: Map<string, Map<string, string>>) =
-    async {
-        try
-            let dir = Path.GetDirectoryName(filePath)
-            if not (String.IsNullOrEmpty dir) then Directory.CreateDirectory(dir) |> ignore
-
-            let options = JsonWriterOptions(Indented = true)
-            use stream = new MemoryStream()
-            use writer = new Utf8JsonWriter(stream, options)
-            writer.WriteStartObject()
-
-            owners
-            |> Map.iter (fun worktreeKey views ->
-                writer.WritePropertyName(worktreeKey)
-                writer.WriteStartObject()
-                views |> Map.iter (fun filename sessionId -> writer.WriteString(filename, sessionId))
-                writer.WriteEndObject())
-
-            writer.WriteEndObject()
-            writer.Flush()
-
-            let tempPath = filePath + ".tmp"
-            let json = Encoding.UTF8.GetString(stream.ToArray())
-            do! File.WriteAllTextAsync(tempPath, json) |> Async.AwaitTask
-            File.Move(tempPath, filePath, overwrite = true)
-        with ex ->
-            Log.log "CanvasInteractionOwnership" $"Failed to persist: {ex.Message}"
-    }
-
-let private readOwners filePath =
-    try
-        if not (File.Exists filePath) then
-            Map.empty
-        else
-            use doc = JsonDocument.Parse(File.ReadAllText filePath)
-
-            doc.RootElement.EnumerateObject()
-            |> Seq.fold (fun owners worktreeProp ->
-                let views =
-                    worktreeProp.Value.EnumerateObject()
-                    |> Seq.choose (fun viewProp ->
-                        viewProp.Value.GetString()
-                        |> Option.ofObj
-                        |> Option.map (fun sessionId -> normalizeFilename viewProp.Name, sessionId))
-                    |> Map.ofSeq
-
-                owners |> Map.add (normalizePath worktreeProp.Name) views
-            ) Map.empty
-    with ex ->
-        Log.log "CanvasInteractionOwnership" $"Failed to load: {ex.Message}"
-        Map.empty
-
-let private createAgent filePath owners =
+let private createAgent targets =
     MailboxProcessor.Start(fun inbox ->
-        let rec loop state =
+        let rec loop pending =
             async {
                 let! msg = inbox.Receive()
 
                 match msg with
                 | Assign(worktreeKey, filename, sessionId, reply) ->
-                    let state' =
-                        { Owners = state.Owners |> addOwner worktreeKey filename sessionId
-                          Pending = state.Pending |> removePendingView worktreeKey filename }
-
-                    do! persist filePath state'.Owners
+                    do! targets.Assign worktreeKey filename sessionId
                     reply.Reply()
-                    return! loop state'
+                    return! loop (pending |> removePendingView worktreeKey filename)
 
                 | FollowLastActive(worktreeKey, filename, sessionId, reply) ->
-                    let pending =
-                        state.Pending
+                    let hasPending =
+                        pending
                         |> Map.tryFind worktreeKey
                         |> Option.bind (Map.tryFind filename)
+                        |> Option.isSome
 
-                    match pending, ownerFor worktreeKey filename state.Owners with
-                    | Some _, _ ->
+                    if hasPending then
                         reply.Reply(Deferred)
-                        return! loop state
-                    | None, Some owner when owner = sessionId ->
-                        reply.Reply(Unchanged)
-                        return! loop state
-                    | None, _ ->
-                        let owners = state.Owners |> addOwner worktreeKey filename sessionId
-                        do! persist filePath owners
-                        reply.Reply(Assigned)
-                        return! loop { state with Owners = owners }
+                        return! loop pending
+                    else
+                        let! owner = targets.GetOwner worktreeKey filename
+                        if owner = Some sessionId then
+                            reply.Reply(Unchanged)
+                        else
+                            do! targets.Assign worktreeKey filename sessionId
+                            reply.Reply(Assigned)
+
+                        return! loop pending
 
                 | BeginClaim(worktreeKey, filename, reply) ->
-                    match ownerFor worktreeKey filename state.Owners with
-                    | Some owner ->
-                        reply.Reply(ExistingOwner owner)
-                        return! loop state
+                    let! owner = targets.GetOwner worktreeKey filename
+                    match owner with
+                    | Some sessionId ->
+                        reply.Reply(ExistingOwner sessionId)
+                        return! loop pending
                     | None ->
                         let token = Guid.NewGuid()
                         let views =
-                            state.Pending
+                            pending
                             |> Map.tryFind worktreeKey
                             |> Option.defaultValue Map.empty
                             |> Map.add filename (Initial token)
 
                         reply.Reply(ClaimStarted token)
-                        return! loop { state with Pending = state.Pending |> Map.add worktreeKey views }
+                        return! loop (pending |> Map.add worktreeKey views)
 
                 | CancelClaim(worktreeKey, filename, token, reply) ->
-                    let pending =
-                        match state.Pending |> Map.tryFind worktreeKey |> Option.bind (Map.tryFind filename) with
+                    let pending' =
+                        match pending |> Map.tryFind worktreeKey |> Option.bind (Map.tryFind filename) with
                         | Some (Initial existingToken) when existingToken = token ->
-                            state.Pending |> removePendingView worktreeKey filename
-                        | _ -> state.Pending
+                            pending |> removePendingView worktreeKey filename
+                        | _ -> pending
 
                     reply.Reply()
-                    return! loop { state with Pending = pending }
+                    return! loop pending'
 
                 | BeginReassignment(worktreeKey, filename, reply) ->
                     let views =
-                        state.Pending
+                        pending
                         |> Map.tryFind worktreeKey
                         |> Option.defaultValue Map.empty
 
                     match views |> Map.tryFind filename with
                     | Some _ ->
                         reply.Reply(Error "An interaction-session start is already in progress")
-                        return! loop state
+                        return! loop pending
                     | None ->
+                        let! owner = targets.GetOwner worktreeKey filename
                         let reassignment =
                             { Token = Guid.NewGuid()
-                              PreviousOwner = ownerFor worktreeKey filename state.Owners }
+                              PreviousOwner = owner }
 
-                        let pending =
-                            state.Pending
-                            |> Map.add worktreeKey (views |> Map.add filename (Reassignment(reassignment.Token, reassignment.PreviousOwner)))
+                        let pending' =
+                            pending
+                            |> Map.add worktreeKey (views |> Map.add filename (Reassignment(reassignment.Token, owner)))
 
                         reply.Reply(Ok reassignment)
-                        return! loop { state with Pending = pending }
+                        return! loop pending'
 
                 | CancelReassignment(worktreeKey, filename, token, reply) ->
-                    let pending =
-                        match state.Pending |> Map.tryFind worktreeKey |> Option.bind (Map.tryFind filename) with
+                    let pending' =
+                        match pending |> Map.tryFind worktreeKey |> Option.bind (Map.tryFind filename) with
                         | Some (Reassignment(existingToken, _)) when existingToken = token ->
-                            state.Pending |> removePendingView worktreeKey filename
-                        | _ -> state.Pending
+                            pending |> removePendingView worktreeKey filename
+                        | _ -> pending
 
                     reply.Reply()
-                    return! loop { state with Pending = pending }
+                    return! loop pending'
 
                 | ClaimPending(worktreeKey, token, sessionId, reply) ->
-                    let pendingViews =
-                        state.Pending
+                    let pendingClaim =
+                        pending
                         |> Map.tryFind worktreeKey
                         |> Option.defaultValue Map.empty
-
-                    let claimed =
-                        pendingViews
                         |> Map.toList
-                        |> List.tryPick (fun (filename, pendingClaim) ->
-                            let owner = ownerFor worktreeKey filename state.Owners
-                            match pendingClaim with
-                            | Initial existingToken when existingToken = token && owner.IsNone ->
-                                Some filename
-                            | Reassignment(existingToken, previousOwner)
-                                when existingToken = token
-                                     && owner = previousOwner
-                                     && Some sessionId <> previousOwner ->
-                                Some filename
+                        |> List.tryPick (fun (filename, claim) ->
+                            match claim with
+                            | Initial existingToken when existingToken = token -> Some(filename, claim)
+                            | Reassignment(existingToken, _) when existingToken = token -> Some(filename, claim)
                             | _ -> None)
 
-                    match claimed with
+                    match pendingClaim with
                     | None ->
                         reply.Reply(None)
-                        return! loop state
-                    | Some filename ->
-                        let state' =
-                            { Owners = state.Owners |> addOwner worktreeKey filename sessionId
-                              Pending = state.Pending |> removePendingView worktreeKey filename }
+                        return! loop pending
+                    | Some(filename, claim) ->
+                        let! owner = targets.GetOwner worktreeKey filename
+                        let canClaim =
+                            match claim with
+                            | Initial _ -> owner.IsNone
+                            | Reassignment(_, previousOwner) ->
+                                owner = previousOwner && Some sessionId <> previousOwner
 
-                        do! persist filePath state'.Owners
-                        reply.Reply(Some filename)
-                        return! loop state'
+                        if canClaim then
+                            do! targets.Assign worktreeKey filename sessionId
+                            reply.Reply(Some filename)
+                            return! loop (pending |> removePendingView worktreeKey filename)
+                        else
+                            reply.Reply(None)
+                            return! loop pending
 
                 | GetOwner(worktreeKey, filename, reply) ->
-                    state.Owners
-                    |> ownerFor worktreeKey filename
-                    |> reply.Reply
-
-                    return! loop state
+                    let! owner = targets.GetOwner worktreeKey filename
+                    reply.Reply(owner)
+                    return! loop pending
 
                 | GetDeliveryOwner(worktreeKey, filename, reply) ->
                     let reassignmentPending =
-                        state.Pending
+                        pending
                         |> Map.tryFind worktreeKey
                         |> Option.bind (Map.tryFind filename)
                         |> Option.exists (function Reassignment _ -> true | Initial _ -> false)
 
-                    let owner =
-                        if reassignmentPending then None
-                        else ownerFor worktreeKey filename state.Owners
+                    if reassignmentPending then
+                        reply.Reply(None)
+                    else
+                        let! owner = targets.GetOwner worktreeKey filename
+                        reply.Reply(owner)
 
-                    reply.Reply(owner)
-                    return! loop state
+                    return! loop pending
 
                 | RemoveView(worktreeKey, filename, reply) ->
-                    let owners = state.Owners |> removeOwner worktreeKey filename
-                    let state' =
-                        { Owners = owners
-                          Pending = state.Pending |> removePendingView worktreeKey filename }
-
-                    if owners <> state.Owners then do! persist filePath owners
+                    do! targets.RemoveView worktreeKey filename
                     reply.Reply()
-                    return! loop state'
+                    return! loop (pending |> removePendingView worktreeKey filename)
 
                 | RemoveWorktree(worktreeKey, reply) ->
-                    let owners = state.Owners |> Map.remove worktreeKey
-                    let state' =
-                        { Owners = owners
-                          Pending = state.Pending |> Map.remove worktreeKey }
-
-                    if owners <> state.Owners then do! persist filePath owners
+                    do! targets.RemoveWorktree worktreeKey
                     reply.Reply()
-                    return! loop state'
+                    return! loop (pending |> Map.remove worktreeKey)
 
                 | Prune(knownWorktrees, reply) ->
-                    let trackedKeys =
-                        Set.union
-                            (state.Owners |> trackedViewKeys knownWorktrees)
-                            (state.Pending |> trackedViewKeys knownWorktrees)
+                    do! targets.Prune knownWorktrees
 
                     let! existingKeys =
-                        trackedKeys
+                        pending
+                        |> trackedPendingKeys knownWorktrees
                         |> Set.toList
                         |> List.map (fun ((worktreeKey, filename) as key) ->
                             async {
@@ -350,23 +243,28 @@ let private createAgent filePath owners =
                             })
                         |> Async.Parallel
 
-                    let existingViewKeys = existingKeys |> Array.choose id |> Set.ofArray
-                    let owners = state.Owners |> pruneViews existingViewKeys
-                    let state' =
-                        { Owners = owners
-                          Pending = state.Pending |> prunePending existingViewKeys }
-
-                    if owners <> state.Owners then do! persist filePath owners
                     reply.Reply()
-                    return! loop state'
+                    return! loop (pending |> keepPending (existingKeys |> Array.choose id |> Set.ofArray))
             }
 
-        loop
-            { emptyState with
-                Owners = owners })
+        loop Map.empty)
 
-type internal OwnershipStore(filePath: string) =
-    let agent = createAgent filePath (readOwners filePath)
+let private targetsFromStore (store: CanvasDocOwnership.OwnershipStore) =
+    { Assign = fun worktreePath filename sessionId -> store.Assign(worktreePath, filename, sessionId)
+      GetOwner = fun worktreePath filename -> store.GetOwner(worktreePath, filename)
+      RemoveView = fun worktreePath filename -> store.RemoveView(worktreePath, filename)
+      RemoveWorktree = fun worktreePath -> store.RemoveWorktree(worktreePath)
+      Prune = fun knownWorktrees -> store.Prune(knownWorktrees) }
+
+let private defaultTargets =
+    { Assign = CanvasDocOwnership.assign
+      GetOwner = CanvasDocOwnership.getOwner
+      RemoveView = CanvasDocOwnership.removeView
+      RemoveWorktree = CanvasDocOwnership.removeWorktree
+      Prune = CanvasDocOwnership.prune }
+
+type internal OwnershipStore internal (targets: TargetStore) =
+    let agent = createAgent targets
 
     member _.Assign(worktreePath: string, filename: string, sessionId: string) =
         agent.PostAndAsyncReply(fun reply ->
@@ -424,9 +322,12 @@ type internal OwnershipStore(filePath: string) =
         let normalized = knownWorktrees |> Set.map normalizePath
         agent.PostAndAsyncReply(fun reply -> Prune(normalized, reply))
 
-let internal createStore filePath = OwnershipStore(filePath)
+let internal createStore filePath =
+    CanvasDocOwnership.createStore filePath
+    |> targetsFromStore
+    |> OwnershipStore
 
-let private defaultStore = lazy (OwnershipStore(defaultFilePath))
+let private defaultStore = lazy (OwnershipStore(defaultTargets))
 
 let load () =
     defaultStore.Force() |> ignore

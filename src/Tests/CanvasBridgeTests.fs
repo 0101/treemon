@@ -777,7 +777,6 @@ type SystemViewInteractionRoutingTests() =
             let sidB = uniqueSid "system-b"
 
             registerSession path sinkB.Url (Some sidB)
-            Server.CanvasDocOwnership.attribute path "diff.html" sidB
 
             let first =
                 runAsync (
@@ -815,8 +814,7 @@ type SystemViewInteractionRoutingTests() =
                 runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
                 Is.EqualTo(Some sidA))
 
-            // The author-ownership store says B, but SystemView routing remains on the separate
-            // interaction owner A. Re-registering B cannot steal or duplicate the drained message.
+            // Re-registering B cannot steal the unified target from A or duplicate the drained message.
             registerSession path sinkB.Url (Some sidB)
             let second =
                 runAsync (
@@ -964,7 +962,7 @@ type ScannerFallbackAttributionTests() =
                 "A single registered session is the unambiguous fallback owner"))
 
     [<Test>]
-    member _.``scanner fallback never assigns author ownership to a SystemView``() =
+    member _.``scanner fallback never assigns a routing target to a SystemView``() =
         withTempCwd (fun () ->
             let path = uniquePath "scan-system"
             registerSession path "http://localhost:1/inject" (Some(uniqueSid "solo"))
@@ -974,29 +972,43 @@ type ScannerFallbackAttributionTests() =
             Assert.That(
                 runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
                 Is.EqualTo(None: string option),
-                "Generated views must never route through CanvasDoc author ownership")
+                "A generated file scan must not assign a routing target")
             Assert.That(
                 runAsync (Server.CanvasInteractionOwnership.getOwner path "diff.html"),
                 Is.EqualTo(None: string option),
                 "A file scan is not an explicit interaction claim"))
 
     [<Test>]
-    member _.``CanvasScanner never surfaces a stale author owner on a SystemView``() =
+    member _.``CanvasScanner never surfaces a SystemView routing target as its owner``() =
         withTempCwd (fun () ->
             let path = Path.Combine(Environment.CurrentDirectory, $"scan-system-owner-{Guid.NewGuid():N}")
             let canvasDir = Path.Combine(path, ".agents", "canvas")
             Directory.CreateDirectory(canvasDir) |> ignore
             File.WriteAllText(Path.Combine(canvasDir, "diff.html"), "<html></html>")
-            Server.CanvasDocOwnership.attribute path "diff.html" (uniqueSid "stale-author")
+            File.WriteAllText(Path.Combine(canvasDir, "report.html"), "<html></html>")
+            let systemTarget = uniqueSid "system-target"
+            let agentTarget = uniqueSid "agent-target"
+            Server.CanvasDocOwnership.attribute path "diff.html" systemTarget
+            Server.CanvasDocOwnership.attribute path "report.html" agentTarget
 
             let docs = runAsync (Server.CanvasScanner.scan path)
             let diff = docs |> List.find (fun doc -> doc.Filename = "diff.html")
+            let report = docs |> List.find (fun doc -> doc.Filename = "report.html")
 
             Assert.That(diff.Kind, Is.EqualTo(SystemView))
             Assert.That(
                 diff.OwnerSessionId,
                 Is.EqualTo(None: string option),
-                "SystemView interaction ownership must never leak through CanvasDoc.OwnerSessionId"))
+                "SystemView interaction ownership must never leak through CanvasDoc.OwnerSessionId")
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some systemTarget),
+                "The SystemView routing target must remain available internally")
+            Assert.That(report.Kind, Is.EqualTo(AgentDoc))
+            Assert.That(
+                report.OwnerSessionId,
+                Is.EqualTo(Some agentTarget),
+                "AgentDoc author ownership remains exposed from the same target store"))
 
     [<Test>]
     member _.``A pre-declared owner is never overwritten by the scanner``() =
