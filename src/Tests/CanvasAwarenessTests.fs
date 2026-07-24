@@ -85,6 +85,7 @@ let private defaultModel : Model =
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
+      OverviewAgentsStuck = false
       SelectedOverviewGroup = None
       OverviewHistoryWindow = None
       OverviewHistory = None

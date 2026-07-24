@@ -47,6 +47,7 @@ type Model =
       Mascot: MascotState.MascotState
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
+      OverviewAgentsStuck: bool
       SelectedOverviewGroup: OverviewSelection option
       // None is the client-only Hidden state; only a concrete shared HistoryWindow can cross the API.
       // RequestedAt throttles every request attempt, while the request identity prevents overlapping
@@ -91,6 +92,7 @@ type Msg =
     | UserActivity of now: float
     | ToggleCanvasPane
     | ToggleOverviewPanel
+    | SetOverviewAgentsStuck of bool
     // Overview drill-down (spec: docs/spec/overview-drilldown.md). SelectOverviewGroup toggles the
     // clicked group's breakdown panel (re-selecting the current group clears it). SelectOverviewWorktree
     // is the arrow-nav-parity handler: it focuses/expands/scrolls the clicked member card WITHOUT

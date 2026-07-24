@@ -90,6 +90,7 @@ let init () =
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
+      OverviewAgentsStuck = false
       SelectedOverviewGroup = None
       OverviewHistoryWindow = None
       OverviewHistory = None
@@ -245,13 +246,16 @@ let update msg model =
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
             |> (fun m ->
                 // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
-                // the selected group (its count fell to 0), clear it so the panel closes.
-                match m.SelectedOverviewGroup with
-                | Some selection ->
-                    let overview = m.Repos |> List.map toRepoWorktrees |> OverviewData.aggregate
-                    if OverviewPresentation.selectionPresent selection overview then m
-                    else { m with SelectedOverviewGroup = None }
-                | _ -> m)
+                // the selected group (its count fell to 0), clear it so the panel closes. Removing
+                // every agent group also resets the pinned state before its observer is disposed.
+                let overview = m.Repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+                let selection =
+                    match m.SelectedOverviewGroup with
+                    | Some selection when not (OverviewPresentation.selectionPresent selection overview) -> None
+                    | selection -> selection
+                { m with
+                    OverviewAgentsStuck = m.OverviewAgentsStuck && not (List.isEmpty overview.Agents)
+                    SelectedOverviewGroup = selection })
             |> (fun m ->
                 if isFirstLoad then
                     let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
@@ -571,20 +575,38 @@ let update msg model =
         let newState = not model.OverviewPanelOpen
         // Closing the band drops any drill-down selection so it can't linger while hidden.
         let selection = if newState then model.SelectedOverviewGroup else None
-        { model with OverviewPanelOpen = newState; SelectedOverviewGroup = selection },
+        { model with
+            OverviewPanelOpen = newState
+            OverviewAgentsStuck = if newState then model.OverviewAgentsStuck else false
+            SelectedOverviewGroup = selection },
         Cmd.OfAsync.attempt worktreeApi.Value.saveOverviewPanelOpen newState (fun _ -> NoOp)
+
+    | SetOverviewAgentsStuck isStuck ->
+        if isStuck = model.OverviewAgentsStuck then
+            model, Cmd.none
+        else
+            let selection =
+                match isStuck, model.SelectedOverviewGroup with
+                | true, Some (OverviewSelection.Agents _) -> None
+                | _ -> model.SelectedOverviewGroup
+            { model with OverviewAgentsStuck = isStuck; SelectedOverviewGroup = selection }, Cmd.none
 
     | SelectOverviewGroup selection ->
         // Toggle: re-selecting the already-selected group clears it (closes the panel).
         let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
         // Mutual exclusivity: opening a drill-down group hides the history chart.
         let historyWindow = if Option.isSome next then None else model.OverviewHistoryWindow
+        let scrollCmd =
+            match model.OverviewAgentsStuck, next with
+            | true, Some (OverviewSelection.Agents _) ->
+                Cmd.ofEffect (fun _ -> scrollDashboardToTop ())
+            | _ -> Cmd.none
         { model with
             SelectedOverviewGroup = next
             OverviewHistoryWindow = historyWindow
             OverviewHistory = if Option.isSome next then None else model.OverviewHistory
             OverviewHistoryRequestInFlight = if Option.isSome next then None else model.OverviewHistoryRequestInFlight },
-        Cmd.none
+        scrollCmd
 
     | CycleOverviewChart now ->
         let next = nextHistoryWindow model.OverviewHistoryWindow
@@ -780,11 +802,20 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Dom.document.removeEventListener ("keydown", handler) }
 
-    let subs =
+    let overviewSticky (dispatch: Dispatch<Msg>) =
+        OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
+
+    let baseSubs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
           [ "canvas-messages" ], CanvasUpdate.messageListener
           [ "focus-reclaim" ], focusReclaim ]
+
+    let subs =
+        if model.OverviewPanelOpen && OverviewBand.hasAgentGroups model.Repos then
+            ([ "overview-sticky" ], overviewSticky) :: baseSubs
+        else
+            baseSubs
 
     if hasSyncRunning model.BranchEvents then
         ([ "sync-polling" ], syncPolling) :: subs
@@ -997,6 +1028,7 @@ let view model dispatch =
             prop.children [
                 if model.OverviewPanelOpen then
                     OverviewBand.view
+                        model.OverviewAgentsStuck
                         model.SelectedOverviewGroup
                         (SelectOverviewGroup >> dispatch)
                         (SelectOverviewWorktree >> dispatch)

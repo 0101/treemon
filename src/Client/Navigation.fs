@@ -195,15 +195,24 @@ let private headerHeight = 36.0
 let private scrollPadding = 50.0
 let private headerOffset = headerHeight + scrollPadding
 
+let private withDashboardOnNextFrame (action: Browser.Types.Element -> unit) =
+    Dom.window?requestAnimationFrame(fun (_: float) ->
+        Dom.document.querySelector ".dashboard"
+        |> Option.ofObj
+        |> Option.iter action)
+
+let scrollDashboardToTop () =
+    withDashboardOnNextFrame (fun dashboard ->
+        dashboard?scrollTo(createObj [ "top" ==> 0; "behavior" ==> "smooth" ]))
+
 let scrollFocusedIntoView (hint: ScrollHint) (target: FocusTarget option) =
     match target with
     | None -> ()
     | Some _ ->
-        Dom.window?requestAnimationFrame(fun (_: float) ->
-            let dashboardEl = Dom.document.querySelector ".dashboard"
-            match Option.ofObj (Dom.document.querySelector ".focused"), Option.ofObj dashboardEl with
-            | None, _ | _, None -> ()
-            | Some el, Some container ->
+        withDashboardOnNextFrame (fun container ->
+            match Dom.document.querySelector ".focused" |> Option.ofObj with
+            | None -> ()
+            | Some el ->
                 let rect = el?getBoundingClientRect()
                 let containerRect = container?getBoundingClientRect()
                 let rectTop: float = rect?top
