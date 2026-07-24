@@ -743,6 +743,7 @@ type AutoSyncEndpointTests() =
                 (CardEventLog.createAgent ())
                 sessionAgent
                 None
+                None
                 [ root ]
                 None
                 "1.0"
@@ -880,6 +881,7 @@ type AutoSyncVerificationTests() =
                     agent
                     (CardEventLog.createAgent ())
                     sessionAgent
+                    None
                     None
                     [ root ]
                     None

@@ -4,6 +4,7 @@ open System
 open NUnit.Framework
 open Newtonsoft.Json
 open Shared
+open OverviewData
 
 let private converter = Fable.Remoting.Json.FableJsonConverter()
 
@@ -168,3 +169,48 @@ type CanvasDocKindSerializationTests() =
             |> List.iter (fun wt ->
                 Assert.That(obj.ReferenceEquals(wt.Planning, null), Is.False,
                             $"worktree '{wt.Branch}' must have a non-null Planning after load"))
+
+// The count-only snapshots, explicit requested windows, and anchored response all cross the
+// Fable.Remoting boundary and must survive its converter unchanged.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type OverviewSnapshotSerializationTests() =
+
+    let sample: OverviewSnapshot =
+        { Timestamp = DateTimeOffset(2026, 7, 14, 9, 30, 0, TimeSpan.Zero)
+          Tasks =
+            [ { Kind = TaskBucketKind.Planned; Count = 3 }
+              { Kind = TaskBucketKind.InProgress; Count = 2 }
+              { Kind = TaskBucketKind.Unattended; Count = 1 } ]
+          Agents =
+            [ { Kind = AgentGroupKind.Activity CurrentActivity.Executing; Count = 4 }
+              { Kind = AgentGroupKind.Waiting; Count = 1 } ] }
+
+    [<Test>]
+    member _.``OverviewSnapshot survives JSON round-trip``() =
+        let result = roundTrip sample
+        Assert.That(result, Is.EqualTo(sample))
+
+    [<Test>]
+    member _.``OverviewSnapshot list survives JSON round-trip``() =
+        let original = [ sample; { sample with Tasks = []; Agents = [] } ]
+        let result = roundTrip original
+        Assert.That(result, Is.EqualTo(original))
+
+    [<Test>]
+    member _.``all Overview history windows survive JSON round-trip``() =
+        let original =
+            [ HistoryWindow.Hours12
+              HistoryWindow.Hours24
+              HistoryWindow.Hours72 ]
+
+        Assert.That(roundTrip original, Is.EqualTo(original))
+
+    [<Test>]
+    member _.``anchored Overview history response survives JSON round-trip``() =
+        let original =
+            { Anchor = DateTimeOffset(2026, 7, 14, 10, 0, 0, TimeSpan.Zero)
+              Snapshots = [ sample ] }
+
+        Assert.That(roundTrip original, Is.EqualTo(original))
