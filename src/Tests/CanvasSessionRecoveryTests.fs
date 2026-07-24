@@ -24,6 +24,7 @@ type CanvasSessionRecoveryTests() =
 
     [<Test>]
     member _.``comment with no target queues and starts a fresh session``() =
+        // Test-confined queues observe fixed async callbacks whose result types cannot carry an immutable accumulator.
         let freshStarts = ConcurrentQueue<unit>()
         let resumed = ConcurrentQueue<string>()
 
