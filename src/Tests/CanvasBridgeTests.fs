@@ -369,15 +369,22 @@ type DrainQueueTests() =
                 runAsync (beginPendingLaunch path "diff.html"),
                 Is.EqualTo(PendingLaunchStarted))
 
+            let completion =
+                waitForPendingLaunchCompletion (TimeSpan.FromSeconds 2.0) path
+                |> Async.StartAsTask
+
             registerSession path sink.Url (Some sid)
 
+            Assert.That(completion.GetAwaiter().GetResult(), Is.True)
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some sid),
+                "Launch completion must not report success before target assignment")
             Assert.That(
                 SpinWait.SpinUntil((fun () -> sink.Bodies = [ "queued-msg" ]), TimeSpan.FromSeconds 5.0),
                 Is.True,
                 "The pending target must be assigned before registration drains the queue")
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(Some sid)))
+            )
 
     [<Test>]
     member _.``Register with no queued messages works without error``() =

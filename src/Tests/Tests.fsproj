@@ -66,6 +66,7 @@
     <Compile Include="CanvasDocOwnershipTests.fs" />
     <Compile Include="CanvasInteractionOwnershipTests.fs" />
     <Compile Include="CanvasBridgeTests.fs" />
+    <Compile Include="CanvasSessionRecoveryTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />
     <Compile Include="DiffViewerTests.fs" />

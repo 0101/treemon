@@ -90,7 +90,8 @@ type internal PendingLaunchResult =
 type private PendingLaunchMsg =
     | BeginPendingLaunch of worktreeKey: string * filename: string * AsyncReplyChannel<PendingLaunchResult>
     | CancelPendingLaunch of worktreeKey: string * AsyncReplyChannel<unit>
-    | TakePendingLaunch of worktreeKey: string * AsyncReplyChannel<Set<string>>
+    | AssignPendingLaunch of worktreeKey: string * sessionId: string * AsyncReplyChannel<Set<string>>
+    | HasPendingLaunch of worktreeKey: string * AsyncReplyChannel<bool>
 
 let private pendingLaunchAgent =
     MailboxProcessor.Start(fun inbox ->
@@ -116,13 +117,26 @@ let private pendingLaunchAgent =
                     reply.Reply()
                     return! loop (pending |> Map.remove worktreeKey)
 
-                | TakePendingLaunch(worktreeKey, reply) ->
-                    pending
-                    |> Map.tryFind worktreeKey
-                    |> Option.defaultValue Set.empty
-                    |> reply.Reply
+                | AssignPendingLaunch(worktreeKey, sessionId, reply) ->
+                    let filenames =
+                        pending
+                        |> Map.tryFind worktreeKey
+                        |> Option.defaultValue Set.empty
 
+                    if not (Set.isEmpty filenames) then
+                        do!
+                            filenames
+                            |> Set.toList
+                            |> List.map (fun filename -> CanvasDocOwnership.assign worktreeKey filename sessionId)
+                            |> Async.Sequential
+                            |> Async.Ignore
+
+                    reply.Reply(filenames)
                     return! loop (pending |> Map.remove worktreeKey)
+
+                | HasPendingLaunch(worktreeKey, reply) ->
+                    reply.Reply(pending |> Map.containsKey worktreeKey)
+                    return! loop pending
             }
 
         loop Map.empty)
@@ -135,23 +149,35 @@ let internal cancelPendingLaunch worktreePath =
     pendingLaunchAgent.PostAndAsyncReply(fun reply ->
         CancelPendingLaunch(normalizePath worktreePath, reply))
 
-let private takePendingLaunch worktreeKey =
-    pendingLaunchAgent.PostAndReply(fun reply -> TakePendingLaunch(worktreeKey, reply))
-
 let private assignPendingLaunch worktreeKey sessionId =
-    let filenames = takePendingLaunch worktreeKey
+    let filenames =
+        pendingLaunchAgent.PostAndReply(fun reply ->
+            AssignPendingLaunch(worktreeKey, sessionId, reply))
 
     if not (Set.isEmpty filenames) then
-        filenames
-        |> Set.toList
-        |> List.map (fun filename -> CanvasDocOwnership.assign worktreeKey filename sessionId)
-        |> Async.Sequential
-        |> Async.Ignore
-        |> Async.RunSynchronously
-
         Log.log
             "CanvasBridge"
             $"Session {sessionId} assigned {Set.count filenames} pending canvas target(s) for {worktreeKey}"
+
+let private hasPendingLaunch worktreePath =
+    pendingLaunchAgent.PostAndReply(fun reply ->
+        HasPendingLaunch(normalizePath worktreePath, reply))
+
+let internal waitForPendingLaunchCompletion (timeout: TimeSpan) worktreePath =
+    let deadline = DateTime.UtcNow + timeout
+
+    let rec wait () =
+        async {
+            if not (hasPendingLaunch worktreePath) then
+                return true
+            elif DateTime.UtcNow >= deadline then
+                return false
+            else
+                do! Async.Sleep 50
+                return! wait ()
+        }
+
+    wait ()
 
 let private drainQueue (key: string) (entry: SessionEntry) =
     match messageQueue.TryRemove(key) with
@@ -345,6 +371,26 @@ let private postPayload (entry: SessionEntry) (payload: string) (key: string) : 
 
 let getTargetOwner (worktreePath: string) (filename: string) =
     CanvasDocOwnership.getOwner worktreePath filename
+
+type internal TargetState =
+    | NoTarget
+    | LiveTarget of sessionId: string
+    | OfflineTarget of sessionId: string
+
+let internal getTargetState worktreePath filename =
+    async {
+        let! owner = getTargetOwner worktreePath filename
+
+        return
+            match owner with
+            | None -> NoTarget
+            | Some ownerId ->
+                sessionsForWorktree worktreePath
+                |> List.tryFind (fun entry -> entry.SessionId = Some ownerId)
+                |> Option.filter isSessionAlive
+                |> Option.map (fun _ -> LiveTarget ownerId)
+                |> Option.defaultValue (OfflineTarget ownerId)
+    }
 
 /// Route a canvas-doc message through the unified persistent target store.
 ///
