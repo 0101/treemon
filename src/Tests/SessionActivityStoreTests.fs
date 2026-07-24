@@ -10,9 +10,9 @@ open Shared
 open Tests.TestUtils
 
 // These exercise the SQLite (WAL) durable mirror behind the push-model live state: last-write-wins
-// upserts, INSERT OR IGNORE event dedupe, the restart rebuild (loadLiveStatuses within the idle
-// window), the history-substrate window query, and retention pruning. Each test runs against a fresh
-// temp .db file that is disposed + deleted in teardown.
+// upserts, INSERT OR IGNORE event dedupe, the base-status restart rebuild (loadLiveStatuses within
+// the idle window), the history-substrate window query, and retention pruning. Each test runs
+// against a fresh temp .db file that is disposed + deleted in teardown.
 
 /// A fresh store over a throwaway temp .db, disposed (releasing the file handle) and its dir deleted
 /// afterwards. Store construction creates the schema, so the DB is ready to use inside `action`.
@@ -48,26 +48,6 @@ let private withDbPath (action: string -> unit) =
 let private connStr (dbPath: string) =
     SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
 
-let private lifecycleRowCount (dbPath: string) sessionId =
-    use conn = new SqliteConnection(connStr dbPath)
-    conn.Open()
-    use cmd = conn.CreateCommand()
-    cmd.CommandText <- "SELECT COUNT(*) FROM background_agent_lifecycle WHERE session_id = $sid;"
-    cmd.Parameters.AddWithValue("$sid", sessionId) |> ignore
-    cmd.ExecuteScalar() :?> int64 |> int
-
-let private replayAfter (dbPath: string) sessionId =
-    use conn = new SqliteConnection(connStr dbPath)
-    conn.Open()
-    use cmd = conn.CreateCommand()
-    cmd.CommandText <- "SELECT background_agent_replay_after FROM session_status WHERE session_id = $sid;"
-    cmd.Parameters.AddWithValue("$sid", sessionId) |> ignore
-
-    match cmd.ExecuteScalar() with
-    | null
-    | :? DBNull -> None
-    | value -> Some(ts (value :?> string))
-
 let private contextWorktree = Path.Combine(Path.GetTempPath(), "treemon-context-worktree")
 let private otherWorktree = Path.Combine(Path.GetTempPath(), "treemon-other-worktree")
 
@@ -95,10 +75,6 @@ let private eventOf eid sid kind status skill t : ActivityEventRow =
       Status = status
       Skill = skill
       Ts = ts t }
-
-let private lifecycle startedAt finishedAt =
-    { StartedAt = startedAt |> Option.map ts
-      FinishedAt = finishedAt |> Option.map ts }
 
 let private find sid (rows: StoredStatus list) =
     rows |> List.find (fun r -> r.SessionId = SessionId sid)
@@ -181,7 +157,7 @@ type UpsertStatusTests() =
                   ContextUsage = None
                   AwaitingUserSince = Some(ts "2026-03-01T10:00:30Z")
                   UserInputCompletedAt = Some(ts "2026-03-01T10:00:00Z")
-                  BackgroundAgents = Map.empty }
+                  BackgroundAgentClocks = Map.empty }
 
             store.UpsertStatus(storedOf "s1" "C:/wt/a" rich "2026-03-01T10:01:00Z" "2026-03-01T12:00:00Z")
 
@@ -265,175 +241,6 @@ type ContextUsagePersistenceTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type BackgroundAgentLifecyclePersistenceTests() =
-
-    [<Test>]
-    member _.``Lifecycle writes persist and return the authoritative session aggregate``() =
-        withStore (fun store ->
-            store.UpsertStatus(
-                storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
-            )
-
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "s1",
-                "tool-1",
-                lifecycle (Some "2026-03-01T10:01:00Z") None
-            )
-            |> ignore
-
-            let aggregate =
-                store.UpsertBackgroundAgentLifecycle(
-                    SessionId "s1",
-                    "tool-2",
-                    lifecycle None (Some "2026-03-01T10:02:00Z")
-                )
-
-            Assert.That(
-                aggregate,
-                Is.EqualTo(
-                    Map.ofList
-                        [ "tool-1", ts "2026-03-01T10:01:00Z" ]
-                )
-            )
-
-            let stored = store.StatusBySession(SessionId "s1") |> Option.get
-            Assert.That(stored.Status.BackgroundAgents, Is.EqualTo(aggregate))
-            Assert.That(effectiveStatus stored.Status, Is.EqualTo SessionLevelStatus.Working))
-
-    [<Test>]
-    member _.``Duplicate and out-of-order lifecycle writes merge each clock by maximum event time``() =
-        withStore (fun store ->
-            store.UpsertStatus(
-                storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
-            )
-
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "s1",
-                "tool-1",
-                lifecycle None (Some "2026-03-01T10:05:00Z")
-            )
-            |> ignore
-
-            let completionBeforeStart =
-                store.UpsertBackgroundAgentLifecycle(
-                    SessionId "s1",
-                    "tool-1",
-                    lifecycle (Some "2026-03-01T10:04:00Z") None
-                )
-
-            Assert.That(
-                completionBeforeStart,
-                Is.Empty,
-                "an older late start must not resurrect an already-finished agent"
-            )
-
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "s1",
-                "tool-1",
-                lifecycle (Some "2026-03-01T10:06:00Z") (Some "2026-03-01T10:03:00Z")
-            )
-            |> ignore
-
-            let authoritative =
-                store.UpsertBackgroundAgentLifecycle(
-                    SessionId "s1",
-                    "tool-1",
-                    lifecycle (Some "2026-03-01T10:04:00Z") (Some "2026-03-01T10:05:00Z")
-                )
-
-            Assert.That(
-                authoritative,
-                Is.EqualTo(
-                    Map.ofList
-                        [ "tool-1", ts "2026-03-01T10:06:00Z" ]
-                ),
-                "the return value must be reread from persisted winners, not echo the stale input"
-            )
-
-            Assert.That(
-                effectiveStatus
-                    { emptyStatus with
-                        BackgroundAgents = authoritative },
-                Is.EqualTo SessionLevelStatus.Working
-            ))
-
-    [<Test>]
-    member _.``Closing active lifecycle persists terminal clocks and permits later resumed starts``() =
-        withStore (fun store ->
-            store.UpsertStatus(
-                storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
-            )
-
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "s1",
-                "tool-1",
-                lifecycle (Some "2026-03-01T10:01:00Z") None
-            )
-            |> ignore
-
-            let closed =
-                store.TouchLastSeenAfterStale(
-                    SessionId "s1",
-                    ts "2026-03-01T10:10:00Z",
-                    ts "2026-03-01T10:09:59.9999999Z"
-                )
-
-            let afterDelayedOldStart =
-                store.UpsertBackgroundAgentLifecycle(
-                    SessionId "s1",
-                    "tool-1",
-                    lifecycle (Some "2026-03-01T10:05:00Z") None
-                )
-
-            let afterResumedStart =
-                store.UpsertBackgroundAgentLifecycle(
-                    SessionId "s1",
-                    "tool-1",
-                    lifecycle (Some "2026-03-01T10:10:00Z") None
-                )
-
-            Assert.Multiple(fun () ->
-                Assert.That(closed.Status.BackgroundAgents, Is.Empty)
-                Assert.That(closed.LastSeen, Is.EqualTo(ts "2026-03-01T10:10:00Z"))
-                Assert.That(afterDelayedOldStart, Is.Empty, "the persisted terminal dominates old delayed starts")
-                Assert.That(
-                    afterResumedStart,
-                    Is.EqualTo(Map.ofList [ "tool-1", ts "2026-03-01T10:10:00Z" ]),
-                    "a genuinely new start after the closure boundary remains active"
-                )))
-
-    [<Test>]
-    member _.``Background lifecycle survives restart reconstruction for live sessions``() =
-        withDbPath (fun dbPath ->
-            (use store = new SessionActivityStore(dbPath)
-             store.UpsertStatus(
-                 storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z"
-             )
-
-             store.UpsertBackgroundAgentLifecycle(
-                 SessionId "s1",
-                 "tool-1",
-                 lifecycle (Some "2026-03-01T11:31:00Z") None
-             )
-             |> ignore)
-
-            use reopened = new SessionActivityStore(dbPath)
-            let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
-
-            Assert.That(
-                row.Status.BackgroundAgents,
-                Is.EqualTo(
-                    Map.ofList
-                        [ "tool-1", ts "2026-03-01T11:31:00Z" ]
-                )
-            )
-
-            Assert.That(effectiveStatus row.Status, Is.EqualTo SessionLevelStatus.Working))
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
 type AppendEventTests() =
 
     [<Test>]
@@ -483,7 +290,7 @@ type AppendAndUpsertTests() =
             let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working (Some "review") "2026-03-01T10:00:00Z"
             let stored = storedOf "s1" "C:/wt/a" status "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
 
-            Assert.That(store.AppendAndUpsert(e, stored, None), Is.EqualTo(Some stored), "a new event returns the persisted row")
+            Assert.That(store.AppendAndUpsert(e, stored), Is.EqualTo(Some stored), "a new event returns the persisted row")
 
             let events = store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-02T00:00:00Z")
             Assert.That(events.Length, Is.EqualTo 1, "the event was appended")
@@ -496,7 +303,7 @@ type AppendAndUpsertTests() =
             let first = { emptyStatus with Status = SessionLevelStatus.Working }
             let e = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T10:00:00Z"
             Assert.That(
-                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" first "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z", None)
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" first "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z")
                 |> Option.isSome,
                 Is.True
             )
@@ -505,7 +312,7 @@ type AppendAndUpsertTests() =
             // the append, so the status can never advance off a deduped event.
             let laterStatus = { emptyStatus with Status = SessionLevelStatus.WaitingForUser }
             Assert.That(
-                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" laterStatus "2026-03-01T10:05:00Z" "2026-03-01T10:05:00Z", None)
+                store.AppendAndUpsert(e, storedOf "s1" "C:/wt/a" laterStatus "2026-03-01T10:05:00Z" "2026-03-01T10:05:00Z")
                 |> Option.isNone,
                 Is.True,
                 "a duplicate event_id reports ignored"
@@ -581,64 +388,29 @@ type LoadLiveStatusesTests() =
             Assert.That(store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z"), Is.Empty))
 
     [<Test>]
-    member _.``Restart hydration reads active lifecycle once for every live session``() =
+    member _.``Restart forgets lifecycle clocks and falls back to the persisted base status``() =
         withDbPath (fun dbPath ->
+            let withActiveAgent =
+                fold
+                    emptyStatus
+                    (BackgroundAgentStarted("tool-active", ts "2026-03-01T11:31:00Z"))
+
             (use store = new SessionActivityStore(dbPath)
-             let waiting =
-                 { emptyStatus with
-                     AwaitingUserSince = Some(ts "2026-03-01T11:30:00Z") }
+             store.UpsertStatus(
+                 storedOf
+                     "active"
+                     contextWorktree
+                     withActiveAgent
+                     "2026-03-01T11:31:00Z"
+                     "2026-03-01T11:31:00Z"
+             ))
 
-             [ storedOf "active" contextWorktree emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z"
-               storedOf "finished" contextWorktree emptyStatus "2026-03-01T11:31:00Z" "2026-03-01T11:31:00Z"
-               storedOf "waiting" otherWorktree waiting "2026-03-01T11:32:00Z" "2026-03-01T11:32:00Z" ]
-             |> List.iter store.UpsertStatus
-
-             store.UpsertBackgroundAgentLifecycle(
-                 SessionId "active",
-                 "tool-active",
-                 lifecycle (Some "2026-03-01T11:33:00Z") None
-             )
-             |> ignore
-
-             store.UpsertBackgroundAgentLifecycle(
-                 SessionId "finished",
-                 "tool-finished",
-                 lifecycle (Some "2026-03-01T11:34:00Z") (Some "2026-03-01T11:35:00Z")
-             )
-             |> ignore
-
-             store.UpsertBackgroundAgentLifecycle(
-                 SessionId "waiting",
-                 "tool-waiting",
-                 lifecycle (Some "2026-03-01T11:36:00Z") None
-             )
-             |> ignore)
-
-            // Mutation is confined to the test callback boundary so query-count behavior is observable.
-            let mutable backgroundAgentReads = 0
-            let observeRead () = backgroundAgentReads <- backgroundAgentReads + 1
-
-            use reopened =
-                SessionActivityStore.CreateWithBackgroundAgentReadObserver(dbPath, observeRead)
-            let rows = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z")
-
+            use reopened = new SessionActivityStore(dbPath)
+            let restored = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "active"
             Assert.Multiple(fun () ->
-                Assert.That(backgroundAgentReads, Is.EqualTo 1, "bulk restart hydration must stay O(1)")
-                Assert.That(
-                    (find "active" rows).Status.BackgroundAgents,
-                    Is.EqualTo(Map.ofList [ "tool-active", ts "2026-03-01T11:33:00Z" ])
-                )
-                Assert.That(effectiveStatus (find "active" rows).Status, Is.EqualTo SessionLevelStatus.Working)
-                Assert.That((find "finished" rows).Status.BackgroundAgents, Is.Empty)
-                Assert.That(effectiveStatus (find "finished" rows).Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(
-                    (find "waiting" rows).Status.BackgroundAgents,
-                    Is.EqualTo(Map.ofList [ "tool-waiting", ts "2026-03-01T11:36:00Z" ])
-                )
-                Assert.That(
-                    effectiveStatus (find "waiting" rows).Status,
-                    Is.EqualTo SessionLevelStatus.WaitingForUser
-                )))
+                Assert.That(restored.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(effectiveStatus restored.Status, Is.EqualTo SessionLevelStatus.Idle)))
 
 
 [<TestFixture>]
@@ -653,27 +425,13 @@ type LatestSessionIdForWorktreeTests() =
             (use store = new SessionActivityStore(dbPath)
              store.UpsertStatus(storedOf "heartbeat" contextWorktree emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
              store.UpsertStatus(storedOf "activity" contextWorktree emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
-             store.UpsertBackgroundAgentLifecycle(
-                 SessionId "activity",
-                 "tool-active",
-                 lifecycle (Some "2026-03-01T09:01:00Z") None
-             )
-             |> ignore
              Assert.That(store.LoadLiveStatuses now, Is.Empty, "both sessions are outside the idle window"))
 
-            // Mutation is confined to the test callback boundary so query-count behavior is observable.
-            let mutable backgroundAgentReads = 0
-            let observeRead () = backgroundAgentReads <- backgroundAgentReads + 1
-
-            use reopened =
-                SessionActivityStore.CreateWithBackgroundAgentReadObserver(dbPath, observeRead)
-
-            Assert.Multiple(fun () ->
-                Assert.That(
-                    reopened.LatestSessionIdForWorktree(WorktreePath contextWorktree),
-                    Is.EqualTo(Some "activity")
-                )
-                Assert.That(backgroundAgentReads, Is.Zero, "resume identity must not hydrate lifecycle")))
+            use reopened = new SessionActivityStore(dbPath)
+            Assert.That(
+                reopened.LatestSessionIdForWorktree(WorktreePath contextWorktree),
+                Is.EqualTo(Some "activity")
+            ))
 
     [<Test>]
     member _.``Latest session query is scoped by worktree and uses session id as tie breaker``() =
@@ -715,31 +473,6 @@ type RetainedByWorktreeTests() =
     member _.``An empty store yields no retained rows``() =
         withStore (fun store ->
             Assert.That(store.RetainedByWorktree() |> Map.isEmpty, Is.True))
-
-    [<Test>]
-    member _.``Retained footer representatives do not hydrate lifecycle``() =
-        withDbPath (fun dbPath ->
-            (use store = new SessionActivityStore(dbPath)
-             store.UpsertStatus(storedOf "s1" contextWorktree emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
-             store.UpsertBackgroundAgentLifecycle(
-                 SessionId "s1",
-                 "tool-active",
-                 lifecycle (Some "2026-03-01T09:01:00Z") None
-             )
-             |> ignore)
-
-            // Mutation is confined to the test callback boundary so query-count behavior is observable.
-            let mutable backgroundAgentReads = 0
-            let observeRead () = backgroundAgentReads <- backgroundAgentReads + 1
-
-            use reopened =
-                SessionActivityStore.CreateWithBackgroundAgentReadObserver(dbPath, observeRead)
-            let retained = reopened.RetainedByWorktree()
-
-            Assert.Multiple(fun () ->
-                Assert.That(retained[contextWorktree].Status.BackgroundAgents, Is.Empty)
-                Assert.That(backgroundAgentReads, Is.Zero, "footer fallback must not hydrate lifecycle")))
-
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -785,129 +518,6 @@ type QueryWindowTests() =
 type PruneOldTests() =
 
     [<Test>]
-    member _.``the received replay floor blocks resurrection after the old session row is pruned``() =
-        withDbPath (fun dbPath ->
-            use store = new SessionActivityStore(dbPath)
-            let cutoff = ts "2026-03-01T10:00:00Z"
-
-            store.UpsertStatus(
-                storedOf "expired-session" "C:/wt/a" emptyStatus "2026-03-01T08:00:00Z" "2026-03-01T08:00:00Z"
-            )
-
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "expired-session",
-                "tool-1",
-                lifecycle (Some "2026-03-01T08:00:00Z") (Some "2026-03-01T09:00:00Z")
-            )
-            |> ignore
-
-            Assert.That(store.PruneOld cutoff, Is.EqualTo 2, "the old status and its tombstone are removed")
-
-            let lateStart = lifecycle (Some "2026-03-01T08:30:00Z") None
-            let lateStartStatus =
-                fold emptyStatus (BackgroundAgentStarted("tool-1", ts "2026-03-01T08:30:00Z"))
-
-            let stored =
-                storedOf
-                    "expired-session"
-                    "C:/wt/a"
-                    lateStartStatus
-                    "2026-03-01T08:30:00Z"
-                    "2026-03-01T08:30:00Z"
-
-            let row = eventOf "late-start" "expired-session" "background_agent_started" SessionLevelStatus.Working None "2026-03-01T08:30:00Z"
-
-            let persisted =
-                store.AppendBackgroundAgentAndUpsert(row, stored, "tool-1", lateStart, cutoff, None)
-                |> Option.get
-
-            Assert.Multiple(fun () ->
-                Assert.That(persisted.Status.BackgroundAgents, Is.Empty)
-                Assert.That(effectiveStatus persisted.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(lifecycleRowCount dbPath "expired-session", Is.EqualTo 0)
-                Assert.That(replayAfter dbPath "expired-session", Is.EqualTo(Some cutoff))))
-
-    [<Test>]
-    member _.``pruneOld expires terminal tombstones and the replay floor blocks older starts``() =
-        withDbPath (fun dbPath ->
-            use store = new SessionActivityStore(dbPath)
-            let cutoff = ts "2026-03-01T10:00:00Z"
-
-            store.UpsertStatus(
-                storedOf "live" "C:/wt/a" emptyStatus "2026-03-01T12:00:00Z" "2026-03-01T12:00:00Z"
-            )
-
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "live",
-                "expired",
-                lifecycle (Some "2026-03-01T08:00:00Z") (Some "2026-03-01T09:00:00Z")
-            )
-            |> ignore
-
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "live",
-                "retained",
-                lifecycle (Some "2026-03-01T10:15:00Z") (Some "2026-03-01T10:30:00Z")
-            )
-            |> ignore
-
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "live",
-                "active",
-                lifecycle (Some "2026-03-01T08:30:00Z") None
-            )
-            |> ignore
-
-            Assert.That(lifecycleRowCount dbPath "live", Is.EqualTo 3)
-            Assert.That(store.PruneOld cutoff, Is.EqualTo 1)
-
-            Assert.Multiple(fun () ->
-                Assert.That(lifecycleRowCount dbPath "live", Is.EqualTo 2, "only the expired terminal row is removed")
-                Assert.That(replayAfter dbPath "live", Is.EqualTo(Some cutoff)))
-
-            let afterLateStart =
-                store.UpsertBackgroundAgentLifecycle(
-                    SessionId "live",
-                    "expired",
-                    lifecycle (Some "2026-03-01T08:30:00Z") None
-                )
-
-            Assert.Multiple(fun () ->
-                Assert.That(
-                    afterLateStart,
-                    Is.EqualTo(Map.ofList [ "active", ts "2026-03-01T08:30:00Z" ]),
-                    "a delayed start outside the replay window must not resurrect the expired tombstone"
-                )
-                Assert.That(lifecycleRowCount dbPath "live", Is.EqualTo 2, "the rejected clock is not persisted"))
-
-            let afterDelayedTerminal =
-                store.UpsertBackgroundAgentLifecycle(
-                    SessionId "live",
-                    "active",
-                    lifecycle None (Some "2026-03-01T09:00:00Z")
-                )
-
-            Assert.Multiple(fun () ->
-                Assert.That(afterDelayedTerminal, Is.Empty, "an old terminal remains safe because it only deactivates state")
-                Assert.That(store.PruneOld cutoff, Is.EqualTo 1, "the newly completed old row expires immediately"))
-
-            let afterSupportedStart =
-                store.UpsertBackgroundAgentLifecycle(
-                    SessionId "live",
-                    "expired",
-                    lifecycle (Some "2026-03-01T10:00:01Z") None
-                )
-
-            Assert.That(
-                afterSupportedStart,
-                Is.EqualTo(
-                    Map.ofList
-                        [ "expired", ts "2026-03-01T10:00:01Z" ]
-                ),
-                "a genuinely newer start inside the supported replay window remains valid"
-            ))
-
-    [<Test>]
     member _.``pruneOld drops events and session rows older than the cutoff and returns the count``() =
         withStore (fun store ->
             store.AppendEvent(eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T01:00:00Z") |> ignore
@@ -916,23 +526,11 @@ type PruneOldTests() =
 
             store.UpsertStatus(storedOf "old" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
             store.UpsertStatus(storedOf "recent" "C:/wt/a" emptyStatus "2026-03-01T03:00:00Z" "2026-03-01T03:00:00Z")
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "old",
-                "old-tool",
-                lifecycle (Some "2026-03-01T01:00:00Z") None
-            )
-            |> ignore
-            store.UpsertBackgroundAgentLifecycle(
-                SessionId "recent",
-                "recent-tool",
-                lifecycle (Some "2026-03-01T03:00:00Z") None
-            )
-            |> ignore
 
-            // cutoff 02:30 → e1(01:00), e2(02:00), old(01:00), and old-tool go;
-            // e3(03:00), recent(03:00), and recent-tool stay.
+            // cutoff 02:30 → e1(01:00), e2(02:00), and old(01:00) go;
+            // e3(03:00) and recent(03:00) stay.
             let deleted = store.PruneOld(ts "2026-03-01T02:30:00Z")
-            Assert.That(deleted, Is.EqualTo(4))
+            Assert.That(deleted, Is.EqualTo(3))
 
             let remainingEvents =
                 store.QueryWindow(ts "2026-03-01T00:00:00Z", ts "2026-03-01T23:59:59Z")
@@ -945,14 +543,6 @@ type PruneOldTests() =
             Assert.That(
                 remainingSessions |> List.map (_.SessionId >> SessionId.value),
                 Is.EqualTo([ "recent" ])
-            )
-
-            Assert.That(
-                (find "recent" remainingSessions).Status.BackgroundAgents,
-                Is.EqualTo(
-                    Map.ofList
-                        [ "recent-tool", ts "2026-03-01T03:00:00Z" ]
-                )
             ))
 
     [<Test>]
@@ -1074,7 +664,7 @@ VALUES
              let legacy = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
              Assert.That(legacy.Status.Intent, Is.EqualTo(None))
              Assert.That(legacy.Status.Title, Is.EqualTo(None))
-             Assert.That(legacy.Status.BackgroundAgents, Is.Empty)
+             Assert.That(legacy.Status.BackgroundAgentClocks, Is.Empty)
 
              let intent = msg "investigating the fold" "2026-03-01T11:45:00Z"
              let title = msg "Investigate the fold" "2026-03-01T11:46:00Z"

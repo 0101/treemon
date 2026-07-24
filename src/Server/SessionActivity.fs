@@ -84,8 +84,7 @@ type SessionLevelStatus =
     | WaitingForUser
     | Idle
 
-/// Durable per-tool ordering clocks. Completed lifecycles stay in SQLite only for the bounded
-/// replay window; live SessionStatus projects active starts alone.
+/// Per-tool ordering clocks retained for the lifetime of the server process.
 type BackgroundAgentLifecycle =
     { StartedAt: DateTimeOffset option
       FinishedAt: DateTimeOffset option }
@@ -113,9 +112,9 @@ type SessionStatus =
       ContextUsage: ContextUsage option
       AwaitingUserSince: DateTimeOffset option
       UserInputCompletedAt: DateTimeOffset option
-      /// Active tool calls only. Durable terminal clocks remain store-owned so completed agents do
-      /// not make the live status snapshot grow with session history.
-      BackgroundAgents: Map<string, DateTimeOffset> }
+      /// Per-tool lifecycle clocks. Completed clocks remain until the session is stale/removed or
+      /// the server process restarts so delayed reports can be merged deterministically.
+      BackgroundAgentClocks: Map<string, BackgroundAgentLifecycle> }
 
 /// The starting state for a session with no events yet.
 let emptyStatus =
@@ -128,7 +127,7 @@ let emptyStatus =
       ContextUsage = None
       AwaitingUserSince = None
       UserInputCompletedAt = None
-      BackgroundAgents = Map.empty }
+      BackgroundAgentClocks = Map.empty }
 
 let private retainLatestChange current next =
     match current with
@@ -141,7 +140,8 @@ let private latestTimestamp current next =
     | _ -> Some next
 
 let private hasActiveBackgroundAgent status =
-    status.BackgroundAgents |> Map.isEmpty |> not
+    status.BackgroundAgentClocks
+    |> Map.exists (fun _ lifecycle -> lifecycle.StartedAt > lifecycle.FinishedAt)
 
 let effectiveStatus (status: SessionStatus) =
     match status.AwaitingUserSince, status.UserInputCompletedAt with
@@ -151,13 +151,18 @@ let effectiveStatus (status: SessionStatus) =
     | None, _ ->
         if hasActiveBackgroundAgent status then SessionLevelStatus.Working else status.Status
 
-let private startBackgroundAgent toolCallId at status =
+let private updateBackgroundAgent toolCallId update status =
+    let current =
+        status.BackgroundAgentClocks
+        |> Map.tryFind toolCallId
+        |> Option.defaultValue
+            { StartedAt = None
+              FinishedAt = None }
+
     { status with
-        BackgroundAgents =
-            status.BackgroundAgents
-            |> Map.change toolCallId (function
-                | Some previous when previous > at -> Some previous
-                | _ -> Some at) }
+        BackgroundAgentClocks =
+            status.BackgroundAgentClocks
+            |> Map.add toolCallId (update current) }
 
 /// Pure, append-friendly fold. Folding a later batch onto an earlier result equals folding the whole
 /// stream, which is what the durable-mirror + live-Map ingestion relies on.
@@ -190,9 +195,13 @@ let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
     | UserInputCompleted at ->
         { s with UserInputCompletedAt = latestTimestamp s.UserInputCompletedAt at }
     | BackgroundAgentStarted(toolCallId, at) ->
-        startBackgroundAgent toolCallId at s
-    | BackgroundAgentFinished(toolCallId, _) ->
-        { s with BackgroundAgents = s.BackgroundAgents |> Map.remove toolCallId }
+        s
+        |> updateBackgroundAgent toolCallId (fun lifecycle ->
+            { lifecycle with StartedAt = latestTimestamp lifecycle.StartedAt at })
+    | BackgroundAgentFinished(toolCallId, at) ->
+        s
+        |> updateBackgroundAgent toolCallId (fun lifecycle ->
+            { lifecycle with FinishedAt = latestTimestamp lifecycle.FinishedAt at })
     | TurnEnded -> { s with Status = SessionLevelStatus.Idle }
     | WentIdle -> { s with Status = SessionLevelStatus.Idle }
     | Heartbeat -> s
@@ -254,7 +263,7 @@ let freshnessAdjusted (now: DateTimeOffset) (lastSeen: DateTimeOffset) (s: Sessi
             UserInputCompletedAt =
                 s.AwaitingUserSince
                 |> Option.fold latestTimestamp s.UserInputCompletedAt
-            BackgroundAgents = Map.empty }
+            BackgroundAgentClocks = Map.empty }
     else
         s
 

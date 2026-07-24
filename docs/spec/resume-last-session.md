@@ -47,8 +47,9 @@ When clicked:
 
 `SessionActivityStore.LatestSessionIdForWorktree` reads only the newest durable session id for the
 worktree, independent of the two-hour live window. The query orders by `(UpdatedAt, SessionId)` and
-does not hydrate status content or background-agent lifecycle. `LastSeen` remains the liveness,
-freshness, and retention clock and cannot influence resume selection.
+does not hydrate status content. Background-agent lifecycle is process-local and therefore has no
+resume-store projection. `LastSeen` remains the liveness, freshness, and retention clock and cannot
+influence resume selection.
 
 `CodingToolCli.build` in `CodingToolCli.fs` unifies all coding-tool CLI invocations across the server (Interactive prompts, Resume, NonInteractive). For the resume case, it takes a provider and an optional session ID via the `Resume` `InvocationMode`:
 - With session ID: `copilot --yolo --resume <id>` (targets the exact session)

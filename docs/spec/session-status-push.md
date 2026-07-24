@@ -15,13 +15,13 @@ an open CLI session between turns), or **NoSession** (grey — no live session).
   `ClaudeDetector`, `VsCodeCopilotDetector`) are deleted; the build is push-only.
 - **Passive.** The extension only subscribes, never calls `session.send`
   or injects context. The transcript is identical with reporting on or off.
-- **Durable.** Live status and footer data survive a server restart (rebuilt from SQLite); the
-  lifecycle/content event stream is persisted so the historical Overview can be aggregated from it.
-  The last context-window gauge is persisted for donut recovery. Usage, title bootstrap, and
-  heartbeat reports update current state without being appended to history.
+- **Durable where useful.** Parent/base status, footer data, ask-user clocks, and context usage
+  survive a server restart; the lifecycle/content event stream is persisted for historical
+  Overview aggregation. Background-agent ordering clocks are intentionally process-local and are
+  forgotten on restart to keep the store and recovery path simple.
 - **Simple.** Events are a closed union; the server logic is a tiny pure fold with no branching for
   inferred bracket depth or synthetic messages. Sub-agent content is filtered at the extension
-  boundary; explicit background-agent lifecycle reaches the durable F# fold as closed events.
+  boundary; explicit background-agent lifecycle reaches the process-local F# fold as closed events.
 - **Four-way status dot** driven purely by push state (below).
 
 ## Expected Behavior
@@ -67,8 +67,7 @@ Working session drops out of openness (→ grey) before the crash-net would rewr
 never lingers blue. The crash-net (a quiet Working/WaitingForUser → Idle) remains as a defensive net
 but rarely fires. Its stale projection suppresses both pending-user-input and background-agent
 overlays, so old lifecycle clocks cannot keep a dead session active. A longer **idle window** (2 h)
-bounds the in-memory live map; durable rows remain available for footer/resume until retention
-pruning.
+bounds restart hydration; durable rows remain available for footer/resume until retention pruning.
 
 ### Footer persists (decoupled from the dot)
 
@@ -111,17 +110,16 @@ ago) and issues `copilot --resume <id>`, or `--continue` when the worktree never
 
 ### Restart
 
-On server start, live per-session status, active background-agent lifecycle, user-input clocks,
-intent/title metadata, footer messages, and last known context usage are rebuilt from SQLite before
-serving. A session with an unfinished background agent therefore returns as Working without waiting
-for a new SDK event. A session that has never reported usage (including a row migrated from the old
-schema) still renders the plain status dot.
+On server start, persisted parent/base status, user-input clocks, intent/title metadata, footer
+messages, and last known context usage are rebuilt from SQLite before serving. Background-agent
+start/finish clocks are deliberately not persisted: an unfinished agent is forgotten and the card
+falls back to the persisted parent/base status, typically Idle after the parent turn ended. This
+matches the pre-background-agent restart behavior and is an intentional simplicity trade-off.
 
-If that session later goes stale because the CLI crashed, the first accepted report for the resumed
-session closes every previously-active background lifecycle before refreshing `LastSeen` and folding
-the new report. The cleanup is persisted and mirrored into the live map, so old agents cannot
-reappear merely because `--resume` reused the same session id; later `turn_ended` or `went_idle`
-reports can settle Idle normally.
+An already-persisted lifecycle event replayed after restart remains an `EventId` duplicate and does
+not reconstruct forgotten state. A genuinely new lifecycle report starts a new in-memory clock.
+Within one server process, the first report after a stale gap clears the old in-memory lifecycle
+before folding, so a resumed session does not retain crashed work.
 
 ## Technical Approach
 
@@ -168,7 +166,7 @@ type SessionStatus =
       ContextUsage: ContextUsage option
       AwaitingUserSince: DateTimeOffset option
       UserInputCompletedAt: DateTimeOffset option
-      BackgroundAgents: Map<string, DateTimeOffset> } // active starts only
+      BackgroundAgentClocks: Map<string, BackgroundAgentLifecycle> }
 ```
 
 `fold`: `TurnStarted` / `AssistantMessage` / `UserPrompt` → Working, `SkillInvoked` → set skill,
@@ -177,11 +175,13 @@ preserving the original change time when identical text is re-emitted and reject
 after a newer one, and `TurnEnded` / `WentIdle` → base Idle. `AwaitingUserInput` and
 `UserInputCompleted` advance independent monotonic clocks; `effectiveStatus` overlays WaitingForUser
 when the latest request is newer than the latest completion, regardless of report arrival order.
-Otherwise it overlays Working while the active background-agent map is non-empty. The live fold
-removes an agent immediately on its terminal event; completed lifecycle clocks never accumulate in
-`SessionStatus`. A genuine `UserPrompt` also advances the completion clock, keeps a running ask-user
-skill, and sets the base status to Working. `UsageInfo` updates only `ContextUsage`, and `Heartbeat`
-→ no-op.
+Otherwise it overlays Working while any tool's start clock is newer than its finish clock.
+Background lifecycle reports merge each per-tool clock by maximum event time, so duplicate and
+out-of-order delivery is deterministic in both directions within one server process. Completed
+clocks remain in the live state so a delayed older start cannot resurrect an agent; they are cleared
+after a stale gap or server restart. A genuine `UserPrompt` also advances the completion clock,
+keeps a running ask-user skill, and sets the base status to Working. `UsageInfo` updates only
+`ContextUsage`, and `Heartbeat` → no-op.
 Background-agent events change only lifecycle clocks and effective status; they never replace the
 parent skill, intent, title, or footer messages.
 `effectiveActivity` selects the newer intent/title and returns a source-tagged
@@ -189,14 +189,13 @@ parent skill, intent, title, or footer messages.
 intent. The fold is pure and append-friendly — folding a later batch onto an earlier result equals
 folding the whole stream.
 
-The persisted `StoredStatus` carries `UpdatedAt` for lifecycle ordering and representative-session
-selection, and `ContextUsageAt` for usage ordering; user-input clocks, per-tool background-agent
-start/terminal clocks, and intent/title message times are persisted independently. Durable
-background clocks merge by maximum event time, then project active starts only into
-`SessionStatus`, so fire-and-forget arrival order remains irrelevant without retaining completed
-agents in live memory. A completion received before its older start cannot resurrect an agent, and
-a slightly-earlier ask-user request can still override a later-arriving idle report. Metadata or
-usage cannot block lifecycle state, and heartbeats only advance `LastSeen`.
+The persisted `StoredStatus` carries `UpdatedAt` for base lifecycle ordering and representative
+selection, and `ContextUsageAt` for usage ordering; user-input clocks and intent/title message times
+are persisted independently. Background-agent clocks remain only in the service's live map and are
+overlaid after authoritative store rereads. A completion received before its older start cannot
+resurrect an agent during that process lifetime, and a slightly-earlier ask-user request can still
+override a later-arriving idle report. Metadata or usage cannot block lifecycle state, and
+heartbeats only advance `LastSeen`.
 Equal `UpdatedAt` values use `SessionId` as a stable tie-breaker.
 
 `freshnessAdjusted` is the **crash net** only: a Working/WaitingForUser status whose `last_seen` is
@@ -248,8 +247,9 @@ The extension and server ingestion boundary ensure only genuine lifecycle events
   An unknown `kind` is a validation error, never silently dropped.
 - A dedicated `SessionActivity` `MailboxProcessor` is the **single writer** (the only mutable
   boundary). History-bearing reports append + upsert atomically, then feed `RefreshScheduler`.
-  Transactional writes reread the authoritative persisted row, which becomes the scheduler/map
-  value; duplicate `EventId`s are complete no-ops.
+  Transactional writes reread the authoritative persisted row; the service overlays its
+  process-local background clocks before publishing that row to the scheduler/live map. Duplicate
+  `EventId`s are complete no-ops.
 - Lifecycle reports use `UpdatedAt`: an older report is appended to `activity_events` for historical
   reconstruction but cannot regress the live aggregate. `IntentReported` and `TitleReported` are
   also appended, but load any retained durable aggregate, preserve `UpdatedAt`, and resolve
@@ -258,23 +258,21 @@ The extension and server ingestion boundary ensure only genuine lifecycle events
   their clocks by maximum event time while advancing `UpdatedAt` monotonically. Fire-and-forget
   delivery order therefore cannot change whether the session is waiting or regress representative
   activity ordering.
-- Background-agent lifecycle uses the same order-independent discipline per `toolCallId`: start and
-  terminal clocks merge by maximum event time, effective status reads an agent as active only when
-  its start is newer than its terminal, and lifecycle changes append event-time history separately
-  from current-state reconstruction. In-order rows use the running fold; delayed rows use the same
+- Background-agent lifecycle uses the same order-independent discipline per `toolCallId` in the
+  live fold: start and terminal clocks merge by maximum event time, and an agent is active only when
+  its start is newer than its terminal. Lifecycle changes append event-time history separately from
+  current-state reconstruction. In-order rows use the running fold; delayed rows use the same
   event-local stale-event policy as other history-bearing reports (folding the event onto an empty
-  state), so a newer live status or skill is never attributed to an older event. Merged lifecycle
-  clocks affect only the authoritative current aggregate.
+  state), so a newer live status or skill is never attributed to an older event.
 - A lifecycle report may be the first report received for a session because POST delivery is
   fire-and-forget. A start creates an Idle-base shell whose effective status is Working; a terminal
-  creates or updates an inactive lifecycle row. A later older start cannot resurrect it.
+  creates or updates an inactive in-memory clock. A later older start cannot resurrect it during the
+  same server process.
 - Accepted lifecycle reports advance `UpdatedAt` and `LastSeen` monotonically for representative
   selection and openness, while preserving all parent-authored footer and activity fields.
-- Before any report path advances a stale session's `LastSeen`, the service terminalizes all known
-  active background-agent rows in one store transaction and folds the report onto the returned
-  authoritative projection. The terminal boundary is immediately before the incoming event time,
-  so delayed starts from the crashed run remain inactive while the incoming report may itself begin
-  new background work.
+- Before any report path advances a stale session's `LastSeen`, the service clears its process-local
+  background clocks and folds the incoming report onto that clean state. The incoming report may
+  itself begin new background work.
 - `heartbeat` is liveness-only: it advances `last_seen` for an existing session without folding,
   changing `updated_at`, influencing representative-session selection, or appending history.
   `usage_info` arrives only on the live SDK stream but is durably status-preserving: it persists
@@ -307,11 +305,7 @@ session_status(session_id PK, worktree_path, provider, status, current_skill,
   last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
   intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
   context_current_tokens NULL, context_token_limit NULL, context_usage_at NULL,
-  awaiting_user_since NULL, user_input_completed_at NULL,
-  background_agent_replay_after NULL);
-background_agent_lifecycle(
-  session_id, tool_call_id, started_at NULL, finished_at NULL,
-  PRIMARY KEY(session_id, tool_call_id));
+  awaiting_user_since NULL, user_input_completed_at NULL);
 activity_events(event_id PK, session_id, worktree_path, provider, kind, status, skill, ts);
 ```
 
@@ -320,9 +314,7 @@ short-lived connection (thread-safe against the single-writer mailbox and concur
 Construction inspects `PRAGMA table_info(session_status)` and individually adds any missing
 `intent_text`, `intent_ts`, `title_text`, `title_ts`, `context_current_tokens`,
 `context_token_limit`, `context_usage_at`, `awaiting_user_since`, or
-`user_input_completed_at`, or `background_agent_replay_after` column. The background-agent
-lifecycle table and terminal-time index are created idempotently. Legacy rows begin with no active
-background agents or persisted replay floor.
+`user_input_completed_at` column. Background-agent lifecycle has no durable schema.
 
 All timestamps persist as UTC round-trip (`"O"`) strings, so lexical comparison equals chronological
 order. Lifecycle upserts use `updated_at`, metadata retains the newest per-field timestamp, and
@@ -332,27 +324,19 @@ preserves existing context columns on conflict.
 pruned row, otherwise atomically replaces the three context fields and advances `last_seen` only for
 an equal-or-newer usage timestamp. Transactional history-bearing writes and context writes reread
 and return the authoritative persisted row, which is then used for the scheduler and service maps so
-persisted metadata/context winners cannot diverge from live state. `appendEvent` is `INSERT OR
-IGNORE`; usage remains a last-known gauge and is not appended to history.
-Background lifecycle writes append the already-classified history row unchanged, update the per-tool
-row, and reread the authoritative active projection in the same single-writer flow. Completed rows
-remain durable terminal tombstones for the same 14-day window as retained activity history.
-Lifecycle ingestion applies the later of the server's current `now − 14d` cutoff and the session's
-persisted replay floor. The hourly prune transaction advances that floor before deleting completed
-tombstones at or before it; start clocks at or before the effective floor can still be recorded as
-history but cannot recreate current state, even after the old session row itself was pruned.
-Terminal clocks remain accepted because they only deactivate state. This keeps SQLite bounded for
-heartbeat-kept sessions and prevents an expired tombstone's delayed start from resurrecting the agent.
-`pruneOld` also trims old status, event, and remaining associated background-lifecycle rows.
-`loadLiveStatuses` rebuilds status, usage, user-input clocks, active background-agent projection,
-intent/title metadata, and their ordering state on restart for rows within the idle window. It reads
-all active lifecycle rows for that live set in one set-based query and groups them in memory, so
-restart/dashboard hydration stays O(1) database reads rather than one lifecycle query per session.
+persisted metadata/context winners cannot diverge from live state; the service then restores its
+process-local lifecycle clocks on the returned row. `appendEvent` is `INSERT OR IGNORE`; usage
+remains a last-known gauge and is not appended to history. Background lifecycle events use the same
+append/upsert path as other independently ordered events: history and persisted base state remain
+durable, while start/finish clocks remain in memory only. `pruneOld` trims old status and event rows.
+`loadLiveStatuses` rebuilds persisted status, usage, user-input clocks, intent/title metadata, and
+their ordering state on restart for rows within the idle window; every loaded lifecycle map starts
+empty by design.
 `RetainedByWorktree` selects one greatest-`(UpdatedAt, SessionId)` footer representative per
-worktree in SQLite and does not hydrate lifecycle state. Resume uses a dedicated scalar query for
-that same ordering and likewise does not load status content or lifecycle rows. Retained rows
-outside the live window remain available until pruning. The service is started only in the real
-monitoring path — demo/fixture mode serves synthetic data and takes no posts.
+worktree in SQLite. Resume uses a dedicated scalar query for that same ordering and does not load
+status content. Retained rows outside the live window remain available until pruning. The service is
+started only in the real monitoring path — demo/fixture mode serves synthetic data and takes no
+posts.
 
 ### Collapse to card fields (`CodingToolStatus.fs`)
 
@@ -426,7 +410,8 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   map directly to background-agent lifecycle wire reports carrying `data.toolCallId`. The extension
   drops blank or over-512-code-unit IDs before POST without trimming or truncating accepted IDs. It
   keeps no active-agent set and performs no status suppression; the server fold and persistence own
-  ordering, deduplication, restart recovery, and effective-status precedence.
+  live ordering, source-event deduplication/history, and effective-status precedence. Lifecycle
+  clocks are intentionally not recovered after a Treemon restart.
 - **Title bootstrap:** after live subscriptions are installed and persisted history is replayed,
   the extension installs heartbeat/cleanup handling and reads `session.rpc.metadata.snapshot()` in
   a caught background task. If no nonblank live `session.title_changed` arrived during startup, a
@@ -457,9 +442,11 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   Explicit background-agent lifecycle is forwarded because it affects status.
   Runtime system reminders are filtered by the server's shared user-message classifier before
   ingestion, so display policy and state policy cannot diverge.
-- **Lifecycle state stays in the durable F# fold.** Ask-user clocks and background-agent lifecycle
-  are order-sensitive, restart-sensitive state. The extension forwards facts without local state;
-  the server fold and store own effective status and recovery.
+- **Background lifecycle is intentionally process-local.** The extension forwards facts without
+  local state; the server fold keeps per-tool start/finish clocks and effective-status precedence
+  while Treemon is running. Those clocks are not stored or reconstructed after restart. This
+  knowingly allows a mid-agent restart to fall back to the persisted parent/base status, chosen to
+  avoid a lifecycle table, replay floor, tombstone pruning, hydration, and special transaction paths.
 - **Opaque lifecycle IDs are bounded, never transformed.** Both producer and server enforce the same
   512-code-unit `toolCallId` limit. The producer drops overlong events and the server rejects them;
   accepted IDs are preserved exactly because truncation could merge distinct agents.
@@ -468,14 +455,13 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   whether WaitingForUser or Working still overlays it.
 - **WaitingForUser outranks background Working.** An outstanding user-input request remains the
   effective status even while background agents run; background activity only overrides base Idle.
-- **Completed background agents are durable tombstones, not live status.** `SessionStatus` contains
-  active starts only. Terminal clocks remain in SQLite for the 14-day activity-history/replay
-  window; pruning atomically advances a persisted floor before deleting them, so reports outside
-  the supported window cannot resurrect completed agents.
-- **A stale resume ends the crashed run before restoring liveness.** Every report path shares one
-  pre-fold stale-session check. Known active agents receive durable terminal clocks immediately
-  before the resumed report and the cleaned row replaces the live projection, preventing the reused
-  session id from reviving crashed work while preserving genuinely new starts.
+- **Completed clocks remain only in live memory.** Keeping both start and terminal clocks preserves
+  full duplicate/out-of-order behavior during one process lifetime. They may accumulate during a
+  long continuously-active session, but are cleared by the next report after a stale gap or by a
+  restart. This accepted memory trade-off is preferred over durable lifecycle machinery.
+- **A stale resume clears the crashed run in memory.** Every report path shares one pre-fold
+  stale-session check. It drops the prior process-local lifecycle before folding the resumed report,
+  preventing the reused session id from retaining crashed work while preserving genuinely new starts.
 - **No durable `Done`.** A finished turn (`turn_ended`) reads as Idle; the next `turn_start` re-asserts
   Working within ≤0.1 s, so the mid-loop Idle window is invisible to polling. This matches what the CLI
   actually models (Working / WaitingForUser / Idle).
@@ -490,10 +476,8 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
   session with the greatest `UpdatedAt`; retained fallback covers sessions outside the live window.
 - **Display pick ≠ footer pick ≠ resume pick.** Display = greatest-`UpdatedAt` *open active*; footer =
   active winner or greatest-`UpdatedAt` fallback; resume = greatest-`UpdatedAt` session from the
-  durable store via a scalar query. Retained footer and resume reads do not hydrate background-agent
-  lifecycle; only live-status reconstruction needs that projection. `LastSeen` continues to drive
-  openness, freshness, retention, and per-session dot ordering, but never representative
-  footer/resume selection.
+  durable store via a scalar query. `LastSeen` continues to drive openness, freshness, retention,
+  and per-session dot ordering, but never representative footer/resume selection.
 - **Future timestamps are normalized, not trusted; free text is length-capped server-side** (see
   Technical Approach) — the loopback endpoint clamps `occurredAt` and uses it for nested message
   timestamps before folding or comparing activity freshness.
@@ -519,7 +503,7 @@ A passive reporting-only extension (`extension.mjs` + `reporting-core.mjs` +
 | File | Role |
 |------|------|
 | `src/Server/SessionActivity.fs` | Domain (`SessionEvent`, `SessionActivityReport`), `SessionStatus`, pure `fold`, `freshnessAdjusted`, `pickActive`; the `openWindow` / `stalenessTimeout` / `idleWindow` timings. |
-| `src/Server/SessionActivityStore.fs` | SQLite (WAL) session state + per-tool background-agent lifecycle table; set-based live hydration, retained-footer and scalar-resume queries, pruning, and history. |
+| `src/Server/SessionActivityStore.fs` | SQLite (WAL) persisted base state, retained-footer and scalar-resume queries, pruning, source-event dedupe, and history. |
 | `src/Server/SessionActivityService.fs` | Wire parsing and single-writer integration for root, user-input, and background-agent lifecycle plus independent metadata, context, and liveness paths. |
 | `src/Server/UserMessageFormatting.fs` | Server-owned user-message classification: suppress system reminders and project canvas prompts for activity and footer display. |
 | `src/Server/CodingToolStatus.fs` | `fromPushSessions` / `collapseByWorktree` (openness dot + decoupled footer), `readConfiguredProvider`. |
