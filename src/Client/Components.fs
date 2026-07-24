@@ -33,8 +33,6 @@ let stepStatusClassName (status: StepStatus option) =
     | Some StepStatus.Running -> "event-status running"
     | Some StepStatus.Succeeded -> "event-status success"
     | Some (StepStatus.Failed _) -> "event-status failed"
-    | Some StepStatus.Cancelled -> "event-status cancelled"
-    | Some StepStatus.NotConfigured -> "event-status not-configured"
     | Some StepStatus.Pending -> "event-status"
     | None -> "event-status"
 
@@ -43,8 +41,6 @@ let stepStatusText (status: StepStatus option) =
     | Some StepStatus.Running -> "running"
     | Some StepStatus.Succeeded -> "success"
     | Some (StepStatus.Failed msg) -> match msg with "" -> "failed" | _ -> $"failed: {msg}"
-    | Some StepStatus.Cancelled -> "cancelled"
-    | Some StepStatus.NotConfigured -> "not configured"
     | _ -> ""
 
 let relativeEventTime (dt: System.DateTimeOffset) =

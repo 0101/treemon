@@ -54,7 +54,7 @@ type ReadConfiguredProviderTests() =
 
     [<Test>]
     member _.``Returns None when codingTool field is absent``() =
-        File.WriteAllText(Path.Combine(tempDir, ".treemon.json"), """{"testCommand": "dotnet test tests.sln"}""")
+        File.WriteAllText(Path.Combine(tempDir, ".treemon.json"), """{"customSetting": "preserved"}""")
 
         let result = readConfiguredProvider tempDir
 

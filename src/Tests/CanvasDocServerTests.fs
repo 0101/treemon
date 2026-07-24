@@ -412,7 +412,7 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController))
 
 // ── injectUrl loopback guard (Finding 10 / SSRF) ──────────────────────────────
-// injectUrl is registered then used as a POST target by CanvasBridge, so a non-loopback value
+// injectUrl is registered then used as a POST target by SessionBridge, so a non-loopback value
 // would turn /api/canvas/register into an SSRF primitive. Only loopback hosts are accepted.
 [<TestFixture>]
 [<Category("Unit")>]

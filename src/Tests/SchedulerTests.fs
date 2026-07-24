@@ -228,6 +228,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   UpstreamBranch = None
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   WorkMetrics = None }
 
@@ -267,6 +268,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   UpstreamBranch = None
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   WorkMetrics = None }
 
@@ -362,6 +364,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   UpstreamBranch = None
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   WorkMetrics = None }
 
@@ -432,6 +435,7 @@ type StateAgentTests() =
                   LastCommitTime = DateTimeOffset.UtcNow
                   UpstreamBranch = None
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
                   WorkMetrics = None }
 

@@ -19,7 +19,6 @@ let private snapshot timestamp count : OverviewSnapshot =
 let private createApi store =
     WorktreeApi.worktreeApi
         (RefreshScheduler.createAgent ())
-        (SyncEngine.createSyncAgent ())
         (CardEventLog.createAgent ())
         (SessionManager.createAgent ())
         None

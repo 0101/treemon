@@ -35,6 +35,7 @@ let private baseReq kind : SessionActivityRequest =
       kind = kind
       message = noMsg
       skillName = null
+      toolCallId = null
       currentTokens = 0
       tokenLimit = 0 }
 
@@ -129,11 +130,53 @@ let private eventStatusCount dbPath eventId status =
     command.Parameters.AddWithValue("$status", status) |> ignore
     Convert.ToInt32(command.ExecuteScalar())
 
+type private PersistedEvent =
+    { EventId: string
+      Kind: string
+      Status: string
+      Skill: string option }
+
+let private persistedEvents dbPath =
+    use connection = SqliteTestDatabase.openConnection dbPath
+    use command = connection.CreateCommand()
+    command.CommandText <-
+        "SELECT event_id, kind, status, skill FROM activity_events ORDER BY ts, rowid;"
+    use reader = command.ExecuteReader()
+
+    let rec read rows =
+        if reader.Read() then
+            let row =
+                { EventId = reader.GetString 0
+                  Kind = reader.GetString 1
+                  Status = reader.GetString 2
+                  Skill = if reader.IsDBNull 3 then None else Some(reader.GetString 3) }
+
+            read (row :: rows)
+        else
+            List.rev rows
+
+    read []
+
 /// The scheduler's live status for a session (fed via UpdateSessionStatus). GetState is a barrier,
 /// so calling it after a LiveSnapshot barrier guarantees the mailbox's feed has been applied.
 let private schedulerStatus (agent: MailboxProcessor<RefreshScheduler.StateMsg>) sid =
     let state = agent.PostAndReply RefreshScheduler.GetState
     state.SessionStatuses |> Map.tryFind (SessionId sid)
+
+let private resumePathEvent path at =
+    match path with
+    | "status" -> TurnStarted
+    | "heartbeat" -> Heartbeat
+    | "usage" -> UsageInfo(120000, 200000)
+    | "activity" -> TitleReported { Text = "Resumed session"; At = at }
+    | "background" -> BackgroundAgentFinished("other-tool", at)
+    | other -> invalidArg (nameof path) $"unknown resume path: {other}"
+
+let private idleEvent kind =
+    match kind with
+    | "turn_ended" -> TurnEnded
+    | "went_idle" -> WentIdle
+    | other -> invalidArg (nameof kind) $"unknown idle event: {other}"
 
 
 // ── DTO → domain parse ────────────────────────────────────────────────────────
@@ -159,6 +202,48 @@ type ParseReportTests() =
         Assert.That(
             (parseOk (baseReq "user_input_completed")).Event,
             Is.EqualTo(UserInputCompleted(ts "2026-03-01T10:00:00Z")))
+
+    [<TestCase("background_agent_started")>]
+    [<TestCase("background_agent_finished")>]
+    member _.``background-agent lifecycle requires and carries toolCallId``(kind: string) =
+        let req = { baseReq kind with toolCallId = "tool-42" }
+        let expected =
+            match kind with
+            | "background_agent_started" ->
+                BackgroundAgentStarted("tool-42", ts "2026-03-01T10:00:00Z")
+            | "background_agent_finished" ->
+                BackgroundAgentFinished("tool-42", ts "2026-03-01T10:00:00Z")
+            | other -> failwith $"unexpected test kind: {other}"
+
+        Assert.That((parseOk req).Event, Is.EqualTo expected)
+
+    [<TestCase("background_agent_started")>]
+    [<TestCase("background_agent_finished")>]
+    member _.``background-agent lifecycle without toolCallId is rejected``(kind: string) =
+        Assert.That(parseErr (baseReq kind), Does.Contain "toolCallId")
+
+    [<TestCase("background_agent_started")>]
+    [<TestCase("background_agent_finished")>]
+    member _.``background-agent lifecycle preserves a maximum-length toolCallId``(kind: string) =
+        let toolCallId = $" {String('x', maxToolCallIdLength - 2)} "
+        let event = (parseOk { baseReq kind with toolCallId = toolCallId }).Event
+
+        let actual =
+            match event with
+            | BackgroundAgentStarted(id, _)
+            | BackgroundAgentFinished(id, _) -> id
+            | other -> failwith $"unexpected event: {other}"
+
+        Assert.That(actual, Is.EqualTo toolCallId)
+
+    [<TestCase("background_agent_started")>]
+    [<TestCase("background_agent_finished")>]
+    member _.``background-agent lifecycle rejects an overlong toolCallId``(kind: string) =
+        let req =
+            { baseReq kind with
+                toolCallId = String('x', maxToolCallIdLength + 1) }
+
+        Assert.That(parseErr req, Does.Contain $"{maxToolCallIdLength}")
 
     [<Test>]
     member _.``user_prompt with a message maps to UserPrompt carrying that message``() =
@@ -483,6 +568,477 @@ type IngestTests() =
             Assert.That(status, Is.EqualTo SessionLevelStatus.WaitingForUser))
 
     [<Test>]
+    member _.``a background start as the first report creates a Working shell and publishes the authoritative row``() =
+        withService "C:/wt/a" (fun (svc, agent, store) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-start"
+                    "2026-03-01T10:00:00Z"
+                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
+            let latestSessionId =
+                store.LatestSessionIdForWorktree(WorktreePath(PathUtils.normalizePath "C:/wt/a"))
+            let retained = store.RetainedByWorktree() |> Map.find (PathUtils.normalizePath "C:/wt/a")
+
+            Assert.Multiple(fun () ->
+                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Idle, "the parent base is an Idle shell")
+                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(
+                    live.Status.BackgroundAgentClocks,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ "tool-1",
+                              { StartedAt = Some(ts "2026-03-01T10:00:00Z")
+                                FinishedAt = None } ]))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
+                Assert.That(persisted.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(
+                    persisted,
+                    Is.EqualTo(
+                        { live with
+                            Status.BackgroundAgentClocks = Map.empty }
+                    )
+                )
+                Assert.That(latestSessionId, Is.EqualTo(Some "s1"))
+                Assert.That(retained, Is.EqualTo persisted)
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
+
+    [<Test>]
+    member _.``a terminal first stays inactive and an older late start cannot resurrect it``() =
+        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-finish"
+                    "2026-03-01T10:00:05Z"
+                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:05Z")))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-start"
+                    "2026-03-01T10:00:04Z"
+                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:04Z")))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
+            let events = persistedEvents dbPath
+
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(
+                    live.Status.BackgroundAgentClocks["tool-1"],
+                    Is.EqualTo(
+                        { StartedAt = Some(ts "2026-03-01T10:00:04Z")
+                          FinishedAt = Some(ts "2026-03-01T10:00:05Z") }))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z"))
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"))
+                Assert.That(
+                    persisted,
+                    Is.EqualTo(
+                        { live with
+                            Status.BackgroundAgentClocks = Map.empty }
+                    )
+                )
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))
+                Assert.That(events |> List.map _.Status, Is.EqualTo([ "working"; "idle" ]))))
+
+    [<Test>]
+    member _.``heartbeats expire completed clocks without removing active agents or accepting older starts``() =
+        withServiceAndPath "C:/wt/a" (fun (svc, agent, _, dbPath) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "completed-start"
+                    "2026-03-01T10:00:00Z"
+                    (BackgroundAgentStarted("completed", ts "2026-03-01T10:00:00Z")))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "completed-finish"
+                    "2026-03-01T10:00:10Z"
+                    (BackgroundAgentFinished("completed", ts "2026-03-01T10:00:10Z")))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "active-start"
+                    "2026-03-01T10:00:20Z"
+                    (BackgroundAgentStarted("active", ts "2026-03-01T10:00:20Z")))
+            svc.Submit(mkReport "s1" "C:/wt/a" "heartbeat-1" "2026-03-01T10:04:00Z" Heartbeat)
+            svc.Submit(mkReport "s1" "C:/wt/a" "heartbeat-2" "2026-03-01T10:06:00Z" Heartbeat)
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "expired-start"
+                    "2026-03-01T10:00:05Z"
+                    (BackgroundAgentStarted("completed", ts "2026-03-01T10:00:05Z")))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let events = persistedEvents dbPath
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    live.Status.BackgroundAgentClocks,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ "active",
+                              { StartedAt = Some(ts "2026-03-01T10:00:20Z")
+                                FinishedAt = None } ])
+                )
+                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:06:00Z"))
+                Assert.That(events |> List.exists (fun row -> row.EventId = "expired-start"), Is.False)
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
+
+    [<Test>]
+    member _.``an older terminal after a newer start cannot finish the active agent``() =
+        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-start"
+                    "2026-03-01T10:00:06Z"
+                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:06Z")))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-finish"
+                    "2026-03-01T10:00:05Z"
+                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:05Z")))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
+            let events = persistedEvents dbPath
+
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(
+                    live.Status.BackgroundAgentClocks["tool-1"],
+                    Is.EqualTo(
+                        { StartedAt = Some(ts "2026-03-01T10:00:06Z")
+                          FinishedAt = Some(ts "2026-03-01T10:00:05Z") }))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:06Z"))
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z"))
+                Assert.That(persisted.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))
+                Assert.That(events |> List.map _.Status, Is.EqualTo([ "idle"; "working" ]))))
+
+    [<Test>]
+    member _.``a delayed finish within retention records event-time history without regressing newer root work``() =
+        withServiceAndPath "C:/wt/a" (fun (svc, agent, store, dbPath) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-start"
+                    "2026-03-01T10:55:00Z"
+                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:55:00Z")))
+            svc.Submit(mkReport "s1" "C:/wt/a" "root-start" "2026-03-01T11:00:00Z" TurnStarted)
+            svc.Submit(mkReport "s1" "C:/wt/a" "root-skill" "2026-03-01T11:00:01Z" (SkillInvoked "review"))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-finish"
+                    "2026-03-01T10:56:00Z"
+                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:56:00Z")))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let persisted = store.StatusBySession(SessionId "s1") |> Option.get
+            let finishRow =
+                persistedEvents dbPath
+                |> List.find (fun row -> row.EventId = "bg-finish")
+
+            Assert.Multiple(fun () ->
+                Assert.That(finishRow.Status, Is.EqualTo "idle")
+                Assert.That(finishRow.Skill, Is.EqualTo(None))
+                Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(live.Status.Skill, Is.EqualTo(Some "review"))
+                Assert.That(
+                    live.Status.BackgroundAgentClocks["tool-1"],
+                    Is.EqualTo(
+                        { StartedAt = Some(ts "2026-03-01T10:55:00Z")
+                          FinishedAt = Some(ts "2026-03-01T10:56:00Z") }))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
+                Assert.That(
+                    persisted,
+                    Is.EqualTo(
+                        { live with
+                            Status.BackgroundAgentClocks = Map.empty }
+                    )
+                )
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
+
+    [<Test>]
+    member _.``a duplicate background event id changes neither lifecycle nor history``() =
+        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "same-event"
+                    "2026-03-01T10:00:00Z"
+                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "same-event"
+                    "2026-03-01T10:10:00Z"
+                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:10:00Z")))
+
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let events = persistedEvents dbPath
+
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(
+                    live.Status.BackgroundAgentClocks,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ "tool-1",
+                              { StartedAt = Some(ts "2026-03-01T10:00:00Z")
+                                FinishedAt = None } ]))
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
+                Assert.That(events |> List.map _.Kind, Is.EqualTo([ "background_agent_started" ]))))
+
+    [<TestCase("status", "turn_ended")>]
+    [<TestCase("status", "went_idle")>]
+    [<TestCase("heartbeat", "turn_ended")>]
+    [<TestCase("heartbeat", "went_idle")>]
+    [<TestCase("usage", "turn_ended")>]
+    [<TestCase("usage", "went_idle")>]
+    [<TestCase("activity", "turn_ended")>]
+    [<TestCase("activity", "went_idle")>]
+    [<TestCase("background", "turn_ended")>]
+    [<TestCase("background", "went_idle")>]
+    member _.``the first report after a stale crash closes old agents and later idle settles``(
+        resumePath: string,
+        terminalKind: string
+    ) =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), $"treemon-stale-resume-{Guid.NewGuid()}")
+        let oldStart = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
+
+        withService worktree (fun (svc, agent, store) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "old-start"
+                    (oldStart.ToString("O"))
+                    (BackgroundAgentStarted("crashed-tool", oldStart)))
+            svc.LiveSnapshot() |> ignore
+            svc.Submit(mkReport "s1" worktree "resume" (now.ToString("O")) (resumePathEvent resumePath now))
+            let resumed = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let durableAfterResume = store.StatusBySession(SessionId "s1") |> Option.get
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    resumed.Status.BackgroundAgentClocks
+                    |> Map.containsKey "crashed-tool",
+                    Is.False,
+                    "the live fold drops the crashed agent"
+                )
+                Assert.That(durableAfterResume.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(resumed.LastSeen, Is.EqualTo now, "the resume report refreshes liveness only after cleanup")
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some resumed)))
+
+            svc.Submit(mkReport "s1" worktree "new-turn" (now.AddSeconds(1.0).ToString("O")) TurnStarted)
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "settle"
+                    (now.AddSeconds(2.0).ToString("O"))
+                    (idleEvent terminalKind))
+
+            let settled = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let durableSettled = store.StatusBySession(SessionId "s1") |> Option.get
+
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(effectiveStatus durableSettled.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some settled))))
+
+    [<Test>]
+    member _.``fresh reports preserve an active background agent``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), $"treemon-fresh-background-{Guid.NewGuid()}")
+        let startedAt = now.AddSeconds(-30.0)
+
+        withService worktree (fun (svc, _, store) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "start"
+                    (startedAt.ToString("O"))
+                    (BackgroundAgentStarted("tool-1", startedAt)))
+            svc.Submit(mkReport "s1" worktree "idle" (now.ToString("O")) TurnEnded)
+            let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let durable = store.StatusBySession(SessionId "s1") |> Option.get
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    live.Status.BackgroundAgentClocks,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ "tool-1",
+                              { StartedAt = Some startedAt
+                                FinishedAt = None } ])
+                )
+                Assert.That(durable.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)))
+
+    [<Test>]
+    member _.``a stale resume may start new background work with the same tool id``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), $"treemon-stale-restart-{Guid.NewGuid()}")
+        let oldStart = now - stalenessTimeout - TimeSpan.FromMinutes 1.0
+
+        withService worktree (fun (svc, _, store) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "old-start"
+                    (oldStart.ToString("O"))
+                    (BackgroundAgentStarted("tool-1", oldStart)))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "resumed-start"
+                    (now.ToString("O"))
+                    (BackgroundAgentStarted("tool-1", now)))
+
+            let resumed = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            Assert.That(
+                resumed.Status.BackgroundAgentClocks,
+                Is.EqualTo(
+                    Map.ofList
+                        [ "tool-1",
+                          { StartedAt = Some now
+                            FinishedAt = None } ])
+            )
+
+            svc.Submit(
+                mkReport
+                    "s1"
+                    worktree
+                    "resumed-finish"
+                    (now.AddSeconds(1.0).ToString("O"))
+                    (BackgroundAgentFinished("tool-1", now.AddSeconds(1.0))))
+            svc.Submit(mkReport "s1" worktree "idle" (now.AddSeconds(2.0).ToString("O")) WentIdle)
+
+            let settled = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+            let durable = store.StatusBySession(SessionId "s1") |> Option.get
+            Assert.Multiple(fun () ->
+                Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(effectiveStatus durable.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(durable.Status.BackgroundAgentClocks, Is.Empty)))
+
+    [<Test>]
+    member _.``background lifecycle preserves parent activity and footer fields``() =
+        let parent =
+            { SessionId = SessionId "s1"
+              WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
+              Provider = CopilotCli
+              Status =
+                { Status = SessionLevelStatus.Idle
+                  Skill = Some "review"
+                  Intent = Some(msg "reviewing the implementation" "2026-03-01T09:55:00Z")
+                  Title = Some(msg "Review lifecycle integration" "2026-03-01T09:56:00Z")
+                  LastUserMessage = Some(msg "review this" "2026-03-01T09:57:00Z")
+                  LastAssistantMessage = Some(msg "on it" "2026-03-01T09:58:00Z")
+                  ContextUsage = Some { CurrentTokens = 50000; TokenLimit = 200000 }
+                  AwaitingUserSince = None
+                  UserInputCompletedAt = None
+                  BackgroundAgentClocks = Map.empty }
+              UpdatedAt = ts "2026-03-01T09:59:00Z"
+              LastSeen = ts "2026-03-01T09:59:00Z"
+              ContextUsageAt = Some(ts "2026-03-01T09:58:30Z") }
+
+        withServiceSeeded
+            "C:/wt/a"
+            (fun store -> store.UpsertContextUsage parent |> ignore)
+            (fun (svc, agent, store) ->
+                svc.Submit(
+                    mkReport
+                        "s1"
+                        "C:/wt/a"
+                        "bg-start"
+                        "2026-03-01T10:00:00Z"
+                        (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
+
+                let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+                let persisted = store.StatusBySession(SessionId "s1") |> Option.get
+
+                Assert.Multiple(fun () ->
+                    Assert.That(live.Status.Skill, Is.EqualTo parent.Status.Skill)
+                    Assert.That(live.Status.Intent, Is.EqualTo parent.Status.Intent)
+                    Assert.That(live.Status.Title, Is.EqualTo parent.Status.Title)
+                    Assert.That(live.Status.LastUserMessage, Is.EqualTo parent.Status.LastUserMessage)
+                    Assert.That(live.Status.LastAssistantMessage, Is.EqualTo parent.Status.LastAssistantMessage)
+                    Assert.That(live.Status.ContextUsage, Is.EqualTo parent.Status.ContextUsage)
+                    Assert.That(live.ContextUsageAt, Is.EqualTo parent.ContextUsageAt)
+                    Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
+                    Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
+                    Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
+                    Assert.That(
+                        persisted,
+                        Is.EqualTo(
+                            { live with
+                                Status.BackgroundAgentClocks = Map.empty }
+                        )
+                    )
+                    Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
+
+    [<Test>]
+    member _.``background lifecycle history records the resulting effective status``() =
+        withServiceAndPath "C:/wt/a" (fun (svc, _, _, dbPath) ->
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-start"
+                    "2026-03-01T10:00:00Z"
+                    (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:00:00Z")))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "bg-finish"
+                    "2026-03-01T10:00:05Z"
+                    (BackgroundAgentFinished("tool-1", ts "2026-03-01T10:00:05Z")))
+            svc.LiveSnapshot() |> ignore
+
+            let history =
+                persistedEvents dbPath
+                |> List.map (fun row -> row.Kind, row.Status)
+
+            Assert.That(
+                history,
+                Is.EqualTo(
+                    [ "background_agent_started", "working"
+                      "background_agent_finished", "idle" ])))
+
+    [<Test>]
     member _.``ingested events are persisted to the durable mirror``() =
         withServiceAndPath "C:/wt/a" (fun (svc, _, store, dbPath) ->
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
@@ -556,15 +1112,16 @@ type IngestTests() =
                   LastAssistantMessage = Some(msg "working on it" "2026-03-01T07:59:30Z")
                   ContextUsage = None
                   AwaitingUserSince = None
-                  UserInputCompletedAt = None }
+                  UserInputCompletedAt = None
+                  BackgroundAgentClocks = Map.empty }
               UpdatedAt = ts "2026-03-01T08:00:00Z"
               LastSeen = ts "2026-03-01T08:00:00Z"
               ContextUsageAt = None }
 
-        withServiceSeeded
+        withServiceSeededAndPath
             "C:/wt/a"
             (fun store -> store.UpsertStatus retained)
-            (fun (svc, _, store) ->
+            (fun (svc, _, store, dbPath) ->
                 let title = msg "Current metadata title" "2026-03-01T10:30:00Z"
                 svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:30:00Z" (TitleBootstrap title))
 
@@ -576,11 +1133,17 @@ type IngestTests() =
                     Assert.That(hydrated.Status.Title, Is.EqualTo(Some title))
                     Assert.That(hydrated.Status.LastUserMessage, Is.EqualTo retained.Status.LastUserMessage)
                     Assert.That(hydrated.Status.LastAssistantMessage, Is.EqualTo retained.Status.LastAssistantMessage)
+                    Assert.That(hydrated.Status.BackgroundAgentClocks, Is.Empty)
                     Assert.That(hydrated.UpdatedAt, Is.EqualTo retained.UpdatedAt)
                     Assert.That(hydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:30:00Z")))
 
                 let durable = store.StatusBySession(SessionId "s1") |> Option.get
-                Assert.That(durable, Is.EqualTo hydrated, "mailbox and durable store must use the same hydrated row"))
+                Assert.That(durable, Is.EqualTo hydrated, "mailbox and durable store must use the same hydrated row")
+                Assert.That(eventCount dbPath, Is.Zero)
+
+                svc.Submit(mkReport "s1" "C:/wt/a" "idle" "2026-03-01T10:30:01Z" WentIdle)
+                let settled = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+                Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle))
 
     [<Test>]
     member _.``an older title bootstrap cannot overwrite a newer live title``() =
@@ -891,6 +1454,35 @@ type RestartRebuildTests() =
             | None -> Assert.Fail "restart rebuild did not feed the scheduler")
 
     [<Test>]
+    member _.``Start forgets background lifecycle and publishes the persisted base status``() =
+        let now = DateTimeOffset.UtcNow
+        let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-background-worktree")
+        let status =
+            fold
+                emptyStatus
+                (BackgroundAgentStarted("tool-1", now.AddSeconds(-45.0)))
+
+        let seed (store: SessionActivityStore) =
+            store.UpsertStatus
+                { SessionId = SessionId "s1"
+                  WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
+                  Provider = CopilotCli
+                  Status = status
+                  UpdatedAt = now.AddMinutes(-1.0)
+                  LastSeen = now.AddSeconds(-30.0)
+                  ContextUsageAt = None }
+
+        withServiceSeeded worktree seed (fun (svc, agent, _) ->
+            svc.Start()
+            let restored = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+
+            Assert.Multiple(fun () ->
+                Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(effectiveStatus restored.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(restored.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some restored))))
+
+    [<Test>]
     member _.``An older usage report after restart cannot replace the restored snapshot``() =
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-worktree")
@@ -933,7 +1525,8 @@ type RestartRebuildTests() =
               LastAssistantMessage = Some { Text = "working on it"; At = usageAt.AddMinutes(-1.0) }
               ContextUsage = None
               AwaitingUserSince = None
-              UserInputCompletedAt = None }
+              UserInputCompletedAt = None
+              BackgroundAgentClocks = Map.empty }
 
         let seed (store: SessionActivityStore) =
             storedWithUsage "s1" worktree status (usageAt.AddMinutes(-1.0)) usage usageAt

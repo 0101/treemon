@@ -10,8 +10,7 @@ type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: WorktreePath -> Async<unit>
       openEditor: WorktreePath -> Async<unit>
-      startSync: WorktreePath -> Async<Result<unit, string>>
-      cancelSync: WorktreePath -> Async<unit>
+      toggleAutoSync: WorktreePath -> bool -> Async<Result<unit, string>>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
       deleteWorktree: WorktreePath -> Async<Result<unit, string>>
       launchSession: LaunchRequest -> Async<Result<unit, string>>

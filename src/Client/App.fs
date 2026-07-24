@@ -59,13 +59,6 @@ let installOverviewHistory
               Response = loaded }
     | _ -> current
 
-let hasSyncRunning (events: Map<string, CardEvent list>) =
-    events
-    |> Map.exists (fun _ evts ->
-        evts
-        |> List.exists (fun e ->
-            e.Status = Some StepStatus.Running))
-
 let init () =
     { Repos = []
       IsLoading = true
@@ -75,7 +68,6 @@ let init () =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
-      SyncPending = Set.empty
       AppVersion = None
       EditorName = "VS Code"
       WorktreeSkills = []
@@ -86,6 +78,7 @@ let init () =
       DeployBranch = None
       SystemMetrics = None
       ActionCooldowns = Set.empty
+      AutoSyncPending = Set.empty
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
@@ -111,6 +104,31 @@ let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
     |> List.map (fun r ->
         { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
 
+let setAutoSyncEnabled (path: WorktreePath) enabled (repos: RepoModel list) =
+    let update wt =
+        if wt.Path = path then { wt with AutoSyncEnabled = enabled } else wt
+
+    repos
+    |> List.map (fun repo ->
+        { repo with
+            Worktrees = repo.Worktrees |> List.map update
+            ArchivedWorktrees = repo.ArchivedWorktrees |> List.map update })
+
+let private tryAutoSyncEnabled path repos =
+    repos
+    |> List.tryPick (fun repo ->
+        repo.Worktrees @ repo.ArchivedWorktrees
+        |> List.tryFind (fun worktree -> worktree.Path = path))
+    |> Option.map _.AutoSyncEnabled
+
+let preservePendingAutoSync (model: Model) repos =
+    model.AutoSyncPending
+    |> Set.fold (fun refreshed path ->
+        model.Repos
+        |> tryAutoSyncEnabled path
+        |> Option.map (fun enabled -> setAutoSyncEnabled path enabled refreshed)
+        |> Option.defaultValue refreshed) repos
+
 let markDeleted (path: WorktreePath) (deletedPaths: Set<string>) =
     deletedPaths |> Set.add (WorktreePath.value path)
 
@@ -128,7 +146,7 @@ let terminalAction (wt: WorktreeStatus) =
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
-    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Path, scopedKey))
+    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (_.Path >> ToggleAutoSync)
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "r" -> findWorktree scopedKey model |> Option.bind (fun wt -> if canResumeSession wt then Some (ResumeSession wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
@@ -176,6 +194,7 @@ let update msg model =
                           else existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false
                       Provider = r.Provider
                       BaseBranch = r.BaseBranch })
+                |> preservePendingAutoSync model
                 |> filterDeletedPaths stillPending
             let currentCanvasHashes = canvasHashesByScopedKey repos
             let currentCanvasModified = canvasModifiedByScopedKey repos
@@ -334,9 +353,42 @@ let update msg model =
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
+    | ToggleAutoSync path ->
+        if model.AutoSyncPending.Contains path then
+            model, Cmd.none
+        else
+            match findWorktree (WorktreePath.value path) model with
+            | None -> model, Cmd.none
+            | Some wt ->
+                let previousEnabled = wt.AutoSyncEnabled
+                let enabled = not previousEnabled
+                { model with
+                    Repos = setAutoSyncEnabled path enabled model.Repos
+                    AutoSyncPending = model.AutoSyncPending.Add path },
+                Cmd.OfAsync.either
+                    (fun () -> worktreeApi.Value.toggleAutoSync path enabled)
+                    ()
+                    (fun result -> AutoSyncToggleResult (path, previousEnabled, result))
+                    (fun ex -> AutoSyncToggleResult (path, previousEnabled, Error ex.Message))
+
+    | AutoSyncToggleResult (path, _, Ok ()) ->
+        { model with AutoSyncPending = model.AutoSyncPending.Remove path }, Cmd.none
+
+    | AutoSyncToggleResult (path, previousEnabled, Error _) ->
+        let attemptedEnabled = not previousEnabled
+        let completed =
+            { model with
+                HasError = true
+                AutoSyncPending = model.AutoSyncPending.Remove path }
+        match findWorktree (WorktreePath.value path) completed with
+        | Some wt when wt.AutoSyncEnabled = attemptedEnabled ->
+            { completed with Repos = setAutoSyncEnabled path previousEnabled completed.Repos }, Cmd.none
+        | _ ->
+            completed, Cmd.none
+
     | Tick now ->
         // Tick stays in the root update because it also expires canvas events and drives the
-        // worktree/sync poll; only the activity-recompute delegates to ActivityUpdate.
+        // worktree/card-event poll; only the activity-recompute delegates to ActivityUpdate.
         let activity, reportCmd = ActivityUpdate.tickActivity now model.Activity
         let nowDto = System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)
         let expiredEvents = expireCanvasEvents nowDto model.Canvas.CanvasEvents
@@ -381,38 +433,8 @@ let update msg model =
 
     | UserActivity now -> ActivityUpdate.userActivity now model
 
-    | StartSync (path, key) ->
-        let syntheticEvent =
-            { Source = "Sync"
-              Message = "Sync starting"
-              Timestamp = System.DateTimeOffset.Now
-              Status = Some StepStatus.Running
-              Duration = None }
-        let updatedEvents =
-            model.BranchEvents
-            |> Map.add key [ syntheticEvent ]
-        { model with
-            SyncPending = model.SyncPending |> Set.add key
-            BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.Value.startSync path (fun r -> SyncStarted (key, r))
-
-    | SyncStarted (key, Ok _) ->
-        { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
-
-    | SyncStarted (key, Error _) ->
-        { model with
-            SyncPending = model.SyncPending |> Set.remove key
-            BranchEvents = model.BranchEvents |> Map.remove key },
-        Cmd.none
-
     | SyncStatusUpdate events ->
         { model with BranchEvents = events }, Cmd.none
-
-    | CancelSync path ->
-        model, Cmd.OfAsync.attempt worktreeApi.Value.cancelSync path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
-
-    | SyncTick ->
-        model, fetchSyncStatus ()
 
     | ConfirmDeleteWorktree scopedKey ->
         match findWorktree scopedKey model with
@@ -775,12 +797,6 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
-    let syncPolling (dispatch: Dispatch<Msg>) =
-        let intervalId =
-            Fable.Core.JS.setInterval (fun () -> dispatch SyncTick) 2000
-        { new System.IDisposable with
-            member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
-
     // Global "reclaim navigation focus" shortcut. The dashboard's own onKeyDown only fires while
     // DOM focus is on (or inside) the dashboard subtree; once focus escapes to a sibling (canvas
     // pane, header, mascot) or <body>, arrow navigation goes dead. This document-level listener
@@ -817,10 +833,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         else
             baseSubs
 
-    if hasSyncRunning model.BranchEvents then
-        ([ "sync-polling" ], syncPolling) :: subs
-    else
-        subs
+    subs
 
 let hasAnyActive (repos: RepoModel list) =
     repos |> List.exists (fun r ->
@@ -990,8 +1003,8 @@ let view model dispatch =
           IsCompact = model.IsCompact
           FocusedElement = model.FocusedElement
           BranchEvents = model.BranchEvents
-          SyncPending = model.SyncPending
           ActionCooldowns = model.ActionCooldowns
+          AutoSyncPending = model.AutoSyncPending
           CanvasEvents = model.Canvas.CanvasEvents
           CanvasPaneOpen = model.Canvas.CanvasPaneOpen }
 
@@ -1005,8 +1018,7 @@ let view model dispatch =
           ResumeSession = fun wt -> dispatch (ResumeSession wt.Path)
           DeleteWorktree = fun key -> dispatch (ConfirmDeleteWorktree key)
           ArchiveWorktree = fun key -> dispatch (ConfirmArchiveWorktree key)
-          StartSync = fun path key -> dispatch (StartSync (path, key))
-          CancelSync = fun path -> dispatch (CancelSync path)
+          ToggleAutoSync = fun wt -> dispatch (ToggleAutoSync wt.Path)
           LaunchAction = fun path action -> dispatch (LaunchAction (path, action))
           OpenCanvasDoc = fun key filename -> dispatch (OpenCanvasDoc (key, filename))
           DispatchArchive = ArchiveMsg >> dispatch }

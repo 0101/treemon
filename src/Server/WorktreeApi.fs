@@ -53,8 +53,7 @@ let readOnlyApi
       getSyncStatus = getSyncStatus
       openTerminal = fun _ -> async { return () }
       openEditor = fun _ -> async { return () }
-      startSync = fun _ -> async { return Error $"Sync is not available in {modeName}" }
-      cancelSync = fun _ -> async { return () }
+      toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
       deleteWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
       launchSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       focusSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
@@ -187,7 +186,7 @@ let internal assembleFromState
     (now: DateTimeOffset)
     (activeSessions: Set<string>)
     (archivedBranches: Set<string>)
-    (hasTestFailureLog: bool)
+    (autoSyncBranches: Set<string>)
     (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
     (codingToolSince: Map<string, DateTimeOffset>)
     (repo: RefreshScheduler.PerRepoState)
@@ -215,10 +214,13 @@ let internal assembleFromState
       LastAssistantMessage = fields.CodingToolData.LastAssistantMessage
       Pr = pr
       MainBehindCount = gitData |> Option.map (_.MainBehindCount) |> Option.defaultValue 0
+      AutoSyncEnabled =
+        wt.Branch
+        |> Option.map (fun branch -> Set.contains branch autoSyncBranches)
+        |> Option.defaultValue false
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
-      HasTestFailureLog = hasTestFailureLog
       IsMainWorktree = Directory.Exists(Path.Combine(wt.Path, ".git"))
       IsArchived = fields.IsArchived
       CanvasDocs = repo.CanvasData |> Map.tryFind wt.Path |> Option.defaultValue [] }
@@ -263,7 +265,7 @@ type RepoAssemblyInputs =
       IgnorePredicate: string -> bool
       RetainedByWorktree: Map<string, SessionActivityStore.StoredStatus>
       ArchivedBranches: Map<RepoId, Set<string>>
-      TestFailureLogPaths: Set<string> }
+      AutoSyncBranches: Map<RepoId, Set<string>> }
 
 type OverviewAssemblyInputs =
     { Now: DateTimeOffset
@@ -313,16 +315,8 @@ let loadRepoAssemblyInputs
     (now: DateTimeOffset)
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (rootPaths: Map<RepoId, string>)
-    (state: RefreshScheduler.DashboardState)
     =
     let overviewInputs = loadOverviewAssemblyInputs now rootPaths
-    let testFailureLogPaths =
-        state.Repos
-        |> Map.values
-        |> Seq.collect _.WorktreeList
-        |> Seq.map _.Path
-        |> Seq.filter (SyncEngine.testFailureLogPath >> File.Exists)
-        |> Set.ofSeq
 
     { Now = overviewInputs.Now
       IgnorePredicate = overviewInputs.IgnorePredicate
@@ -331,15 +325,19 @@ let loadRepoAssemblyInputs
         |> Option.map _.RetainedByWorktree()
         |> Option.defaultValue Map.empty
       ArchivedBranches = overviewInputs.ArchivedBranches
-      TestFailureLogPaths = testFailureLogPaths }
+      AutoSyncBranches =
+        rootPaths
+        |> Map.map (fun _ root -> TreemonConfig.readAutoSyncBranchSet (Some root)) }
 
 let private assembleReposCore
     (ignorePredicate: string -> bool)
     (archivedBranchesByRepo: Map<RepoId, Set<string>>)
+    (autoSyncBranchesByRepo: Map<RepoId, Set<string>>)
     (rootPaths: Map<RepoId, string>)
     (state: RefreshScheduler.DashboardState)
     (assembleStatus:
         Set<string> ->
+            Set<string> ->
             RefreshScheduler.PerRepoState ->
             GitWorktree.WorktreeInfo ->
             WorktreeStatus)
@@ -352,10 +350,15 @@ let private assembleReposCore
             |> Map.tryFind repoId
             |> Option.defaultValue Set.empty
 
+        let autoSyncBranches =
+            autoSyncBranchesByRepo
+            |> Map.tryFind repoId
+            |> Option.defaultValue Set.empty
+
         let statuses =
             repo.WorktreeList
             |> List.filter (RefreshScheduler.isWorktreeIgnored ignorePredicate >> not)
-            |> List.map (assembleStatus archivedBranches repo)
+            |> List.map (assembleStatus archivedBranches autoSyncBranches repo)
 
         let originalPath = rootPaths |> Map.tryFind repoId |> Option.defaultValue (RepoId.value repoId)
 
@@ -382,14 +385,15 @@ let assembleRepos
     assembleReposCore
         inputs.IgnorePredicate
         inputs.ArchivedBranches
+        inputs.AutoSyncBranches
         rootPaths
         state
-        (fun archivedBranches repo wt ->
+        (fun archivedBranches autoSyncBranches repo wt ->
             assembleFromState
                 inputs.Now
                 activeSessionPaths
                 archivedBranches
-                (Set.contains wt.Path inputs.TestFailureLogPaths)
+                autoSyncBranches
                 pushByWorktree
                 state.CodingToolSinceByWorktree
                 repo
@@ -422,16 +426,16 @@ let internal assembleOverviewFromState
       LastAssistantMessage = fields.CodingToolData.LastAssistantMessage
       Pr = NoPr
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
       WorkMetrics = None
       HasActiveSession = false
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = fields.IsArchived
       CanvasDocs = [] }
 
 /// Lean canonical-Overview assembly for snapshot capture. It shares the live task/session/archive
-/// projection while omitting card-only retained footers, terminal decoration, test-log probes,
+/// projection while omitting card-only retained footers, terminal decoration, auto-sync state,
 /// Git/PR fields, and canvas data.
 let assembleOverviewRepos
     (inputs: OverviewAssemblyInputs)
@@ -444,9 +448,10 @@ let assembleOverviewRepos
     assembleReposCore
         inputs.IgnorePredicate
         inputs.ArchivedBranches
+        Map.empty
         rootPaths
         state
-        (fun archivedBranches repo wt ->
+        (fun archivedBranches _ repo wt ->
             assembleOverviewFromState
                 inputs.Now
                 archivedBranches
@@ -468,7 +473,7 @@ let getWorktrees
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
-        let inputs = loadRepoAssemblyInputs DateTimeOffset.UtcNow activityStore rootPaths state
+        let inputs = loadRepoAssemblyInputs DateTimeOffset.UtcNow activityStore rootPaths
         let repos = assembleRepos inputs rootPaths activeSessionPaths state
 
         return
@@ -584,7 +589,6 @@ let private updateArchivedBranches
 
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
-    (syncAgent: MailboxProcessor<SyncEngine.SyncMsg>)
     (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (activityStore: SessionActivityStore.SessionActivityStore option)
@@ -597,6 +601,10 @@ let worktreeApi
     let fixtures = testFixtures |> Option.bind (fun p -> loadFixtures p |> Result.toOption)
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
+    let schedulerServices : RefreshScheduler.SchedulerServices =
+        { SessionAgent = sessionAgent
+          ActivityStore = activityStore }
+    let autoSyncDependencies = RefreshScheduler.autoSyncDependencies agent schedulerServices
 
     let validatePath path =
         async {
@@ -630,77 +638,70 @@ let worktreeApi
         { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           openEditor = openEditor validatePath
-          startSync = fun wtPath ->
-              let path = WorktreePath.value wtPath
-              asyncResult {
-                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
-
-                  let! ctx, branch =
-                      match tryResolveWorktreeContext rootPaths state path with
-                      | None -> Error $"No worktree found at path '{path}'"
-                      | Some { Branch = None } -> Error $"Cannot sync worktree at '{path}': detached HEAD (no branch)"
-                      | Some ({ Branch = Some branch } as ctx) -> Ok (ctx, branch)
-                  let syncKey = scopedBranchKey ctx.RepoId branch
-                  let provider = CodingToolStatus.readConfiguredProvider ctx.Worktree.Path
-
-                  let! ct = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.BeginSync (syncKey, reply))
-                  cardLog.Post(CardEventLog.SyncStarted syncKey)
-
-                  let sinks : SyncEngine.PipelineSinks =
-                      { PushEvent = fun key event -> cardLog.Post(CardEventLog.SyncStep (key, event))
-                        SetProcessState = fun key state -> syncAgent.Post(SyncEngine.UpdateProcessState (key, state))
-                        Complete = fun key ->
-                            syncAgent.Post(SyncEngine.CompleteSync key)
-                            cardLog.Post(CardEventLog.SyncEnded key) }
-                  let repo = state.Repos |> Map.tryFind ctx.RepoId |> Option.defaultValue RefreshScheduler.PerRepoState.empty
-                  let upstreamBranch = repo.GitData |> Map.tryFind ctx.Worktree.Path |> Option.bind _.UpstreamBranch
-                  let prStatus = PrStatus.lookupPrStatus repo.PrData upstreamBranch
-                  Async.Start(SyncEngine.executeSyncPipeline sinks syncKey ctx.Worktree.Path ctx.RepoRoot provider repo.UpstreamRemote repo.BaseBranch prStatus ct, ct)
-              }
-          cancelSync = fun wtPath ->
+          toggleAutoSync = fun wtPath enabled ->
               let path = WorktreePath.value wtPath
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
                   match tryResolveWorktreeContext rootPaths state path with
-                  | None ->
-                      Log.log "API" $"cancelSync: no worktree found at path '{path}'"
-                  | Some { Branch = None } ->
-                      Log.log "API" $"cancelSync: worktree at '{path}' has detached HEAD, nothing to cancel"
+                  | None -> return Error $"No worktree found at path '{path}'"
+                  | Some { Branch = None; Worktree = wt } ->
+                      return Error $"Worktree at '{wt.Path}' has no branch (detached HEAD)"
                   | Some ({ Branch = Some branch } as ctx) ->
-                      let syncKey = scopedBranchKey ctx.RepoId branch
-                      let! wasRunning = syncAgent.PostAndAsyncReply(fun reply -> SyncEngine.CancelSync (syncKey, reply))
-                      if wasRunning then
-                          cardLog.Post(CardEventLog.SyncCancelled syncKey)
+                      try
+                          TreemonConfig.modifyAutoSyncBranches ctx.RepoRoot (fun existing ->
+                              existing
+                              |> Set.ofList
+                              |> (if enabled then Set.add branch else Set.remove branch)
+                              |> Set.toList)
+
+                          if not enabled then
+                              agent.Post(RefreshScheduler.StateMsg.ClearAutoSyncTrigger ctx.Worktree.Path)
+                          else
+                              match state.Repos |> Map.tryFind ctx.RepoId with
+                              | Some repo ->
+                                  match repo.GitData |> Map.tryFind ctx.Worktree.Path with
+                                  | Some gitData ->
+                                      do!
+                                          AutoSync.trigger
+                                              autoSyncDependencies
+                                              ctx.RepoRoot
+                                              repo.UpstreamRemote
+                                              repo.BaseBranch
+                                              gitData
+                                  | None -> ()
+                              | None -> ()
+
+                          return Ok ()
+                      with ex ->
+                          Log.log "API" $"toggleAutoSync failed for '{path}': {ex.Message}"
+                          return Error $"Failed to persist auto-sync preference: {ex.Message}"
               }
           getSyncStatus = fun () ->
               async {
                   let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  let syncKeyToPath =
+                  let eventKeyToPath =
                       state.Repos
                       |> Map.toList
                       |> List.collect (fun (repoId, repo) ->
                           repo.WorktreeList
                           |> List.map (fun wt ->
                               let branch = wt.Branch |> Option.defaultValue (detachedBranchLabel wt.Path)
-                              let syncKey = scopedBranchKey repoId branch
-                              syncKey, wt.Path))
+                              let eventKey = scopedBranchKey repoId branch
+                              eventKey, wt.Path))
                       |> Map.ofList
 
-                  let! syncEvents = cardLog.PostAndAsyncReply(CardEventLog.GetAll)
+                  let! cardEvents = cardLog.PostAndAsyncReply(CardEventLog.GetAll)
 
-                  // The card's event log carries only sync/pipeline events. The last-assistant message
-                  // is now its own dedicated footer line (assistantMsgLineView, fed by
-                  // WorktreeStatus.LastAssistantMessage) — injecting it here too would render it twice.
                   return
-                      syncEvents
+                      cardEvents
                       |> Map.toList
-                      |> List.choose (fun (syncKey, syncEvts) ->
-                          match syncKeyToPath |> Map.tryFind syncKey, syncEvts with
+                      |> List.choose (fun (eventKey, branchEvents) ->
+                          match eventKeyToPath |> Map.tryFind eventKey, branchEvents with
                           | Some path, (_ :: _) ->
                               let recent =
-                                  syncEvts
+                                  branchEvents
                                   |> List.sortByDescending _.Timestamp
                                   |> List.truncate 2
                                   |> List.rev
@@ -792,19 +793,19 @@ let worktreeApi
                       | _ -> ()
 
                   // Post-fork setup (junctions, bd init, npm install) can take minutes, so run it in
-                  // the background and surface its lifecycle on the worktree card via the sync event
-                  // log — the create call returns as soon as `git worktree add` succeeds, closing the
+                  // the background and surface its lifecycle on the worktree card via CardEventLog —
+                  // the create call returns as soon as `git worktree add` succeeds, closing the
                   // modal promptly. The prompt auto-launch waits for deps, so it runs once post-fork
                   // finishes (success or failure); with no post-fork script there is nothing to wait
                   // for, so launch immediately.
                   match GitWorktree.postForkScriptPath root with
                   | None -> launchPromptSession ()
                   | Some _ ->
-                      let syncKey = scopedBranchKey repoId branchName
+                      let eventKey = scopedBranchKey repoId branchName
                       Async.Start(
                           async {
                               try
-                                  cardLog.Post(CardEventLog.PostForkStarted syncKey)
+                                  cardLog.Post(CardEventLog.PostForkStarted eventKey)
                                   let! result = GitWorktree.runPostFork root fork.WorktreePath fork.BaseRef branchName
                                   let status =
                                       match result with
@@ -812,11 +813,11 @@ let worktreeApi
                                       | Error msg ->
                                           Log.log "API" $"post-fork setup failed for {branchName}: {msg}"
                                           StepStatus.Failed msg
-                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, status))
+                                  cardLog.Post(CardEventLog.PostForkEnded(eventKey, status))
                                   agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
                               with ex ->
                                   Log.log "API" $"post-fork background task faulted for {branchName}: {ex.Message}"
-                                  cardLog.Post(CardEventLog.PostForkEnded(syncKey, StepStatus.Failed ex.Message))
+                                  cardLog.Post(CardEventLog.PostForkEnded(eventKey, StepStatus.Failed ex.Message))
                               launchPromptSession ()
                           })
 
@@ -829,14 +830,8 @@ let worktreeApi
               withValidatedPath req.Path "launchAction" (fun () ->
                   async {
                       let path = WorktreePath.value req.Path
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
                       let provider = CodingToolStatus.readConfiguredProvider path
-                      let prompt =
-                          match req.Action with
-                          | ConfigureTests ->
-                              let root = tryResolveWorktreeContext rootPaths state path |> Option.map _.RepoRoot |> Option.defaultValue path
-                              CodingToolStatus.configureTestsPrompt root
-                          | action -> CodingToolStatus.actionPrompt provider action
+                      let prompt = CodingToolStatus.actionPrompt provider req.Action
                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
                       return! SessionManager.launchAction sessionAgent req.Path command.AsShellString
                   })
@@ -851,24 +846,15 @@ let worktreeApi
                   async {
                       let path = WorktreePath.value wtPath
                       let provider = CodingToolStatus.readConfiguredProvider path
-                      // Resume pick is the most-recent session for this worktree regardless of
-                      // active/idle (distinct from the display pick). Read from the DURABLE store,
-                      // not the idle-window live cache (state.SessionStatuses): after a restart a
-                      // session last active >2h ago is absent from that cache, so the pick returned
-                      // None and resume wrongly fell back to `--continue` instead of `--resume <id>`
-                      // (F10/C-02). session_status keeps the row until the 14d retention prune, so
-                      // the resume identity survives a restart.
-                      let sessions =
-                          activityStore
-                          |> Option.map _.StatusesForWorktree(PathUtils.toWorktreePath path)
-                          |> Option.defaultValue []
                       // Only resume by stored ID when it belongs to the configured provider. Push
                       // Per-provider resume policy: the Copilot CLI resumes by stored session id. A
                       // future provider that resumes differently (or can't) gets its own arm — the
                       // compiler flags this match when a new provider case is added.
                       let sessionId =
                           match provider |> Option.defaultValue CodingToolProvider.Default with
-                          | CodingToolProvider.CopilotCli -> CodingToolStatus.getLastSessionId sessions
+                          | CodingToolProvider.CopilotCli ->
+                              activityStore
+                              |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
@@ -928,7 +914,7 @@ let worktreeApi
                   shareCanvasDocImpl req)
           saveLastViewedHashes = fun hashes -> async { writeLastViewedHashes hashes }
           loadLastViewedHashes = fun () -> async { return readLastViewedHashes () }
-          getBridgeLiveness = fun paths -> async { return CanvasBridge.getAllLiveness paths }
+          getBridgeLiveness = fun paths -> async { return SessionBridge.getAllLiveness paths }
           // Roots are managed restart-to-apply: persist to global config only (no scheduler
           // message, no live-roots read). getWorktrees/createWorktree/path-validation keep using
           // the `rootPaths` captured at startup above — correct, since roots only change across

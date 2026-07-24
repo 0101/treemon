@@ -13,7 +13,9 @@ titles, context usage, and session resume all use this shared state; no session-
 - Preserve live status, footer activity, messages, context usage, and resume identity across server
   restarts.
 - Support multiple concurrent sessions in one worktree without losing per-session activity.
+- Keep a parent session Working while any reported background agent is still active.
 - Keep liveness independent from representative-session selection.
+- Let auto-sync target an existing session through `SessionBridge` before launching another CLI.
 - Filter synthetic user-channel content before it can change durable session state.
 - Bound untrusted input and durable storage while keeping the fold deterministic.
 
@@ -33,7 +35,12 @@ titles, context usage, and session resume all use this shared state; no session-
 - `turn_start`, genuine user prompts, and assistant messages set Working. An input request opens an
   independent wait clock. Input completion, a genuine reply, or a subsequent assistant message
   closes it. `turn_end` and `session.idle` set the base status to Idle, but an unresolved newer
-  request still projects as WaitingForUser. There is no durable Done state.
+  request still projects as WaitingForUser. Otherwise, an active background agent overlays Working
+  on an Idle parent until its matching completion or failure. WaitingForUser has higher priority
+  than background Working. There is no durable Done state.
+- Background lifecycle is keyed by the SDK `toolCallId`. Start and terminal timestamps merge
+  independently, so duplicate and out-of-order delivery is deterministic. Sub-agent content remains
+  excluded; only explicit Copilot background-agent lifecycle affects the parent status.
 - A session is open while its latest event or liveness observation is newer than `openWindow`
   (3 minutes). A defensive `stalenessTimeout` (5 minutes) can downgrade stale active state, and
   `idleWindow` (2 hours) bounds the in-memory session map.
@@ -66,6 +73,9 @@ titles, context usage, and session resume all use this shared state; no session-
   to several activity groups at once.
 - `CodingToolSince` is captured when the collapsed worktree status changes and remains stable while
   Idle heartbeats advance `last_seen`.
+- Auto-sync selects the active open winner, then the greatest-`UpdatedAt` open Idle session, and
+  only then a retained identity when no session is open. This delivery-aware ordering avoids
+  launching a second CLI while an existing bridge can accept the prompt.
 
 ### Context usage, resume, and restart
 
@@ -82,19 +92,24 @@ titles, context usage, and session resume all use this shared state; no session-
   events arrive. Durable titles, intents, skill, footer messages, context gauges, and their ordering
   clocks are restored. Retained rows outside the live window remain available for footer and resume
   selection and can re-enter live state through heartbeat, usage, title, or lifecycle reports.
+- Background-agent clocks are intentionally process-local. Restart restores the durable parent/base
+  state but not unfinished background work; a new lifecycle report establishes new in-memory state.
 
 ## Technical Approach
 
 ### Reporting extension
 
 `src/Extension/reporting/extension.mjs` joins the current Copilot session passively, replays prior
-events, subscribes to live events, and posts the same wire format for both paths. It drops sub-agent
-events, skill-context injections, blank messages, and invalid usage gauges before sending.
+events, subscribes to live events, and posts the same wire format for both paths. It forwards
+`subagent.started`, `subagent.completed`, and `subagent.failed` as explicit background lifecycle,
+then drops all other sub-agent content. It also drops skill-context injections, blank messages,
+invalid usage gauges, and invalid or overlong background tool-call IDs before sending.
 
 The extension maps lifecycle, skill, message, `assistant.intent`, `session.title_changed`, ask-user,
-and usage events onto the closed wire contract. It forwards ask-user request, completion, and idle
-events as facts; the server's persisted request/completion clocks resolve their effective status
-independently of delivery order.
+background-agent, and usage events onto the closed wire contract. Background reports use
+`background_agent_started` / `background_agent_finished` with an opaque `toolCallId` of at most 512
+UTF-16 code units. It forwards ask-user request, completion, and idle events as facts; the server's
+persisted request/completion clocks resolve their effective status independently of delivery order.
 
 After subscriptions and replay are active, the extension reads
 `session.rpc.metadata.snapshot().summary` in a non-blocking background task and emits
@@ -109,6 +124,11 @@ intent, title, last messages, context usage, and independent ask-user request/co
 Repeated identical intent/title text keeps its original change timestamp; older values cannot
 replace newer ones. `effectiveActivity` chooses the newer intent or title while preserving its
 `AgentActivity` source.
+
+The fold also retains process-local background lifecycle clocks per `toolCallId`. A background
+agent is active only when its latest start is newer than its latest terminal event. Active clocks
+keep an otherwise-Idle parent Working; an outstanding ask-user request still wins. Background
+events never replace parent-authored skill, title, intent, or footer messages.
 
 `POST /api/session/activity` validates the DTO, provider, known worktree, event-specific fields, and
 CSRF origin. Future timestamps beyond five minutes are clamped to server time, and nested message
@@ -129,6 +149,9 @@ activity, interaction, usage, bootstrap, and liveness reports use independent or
   without blocking older lifecycle transitions.
 - Ask-user request/completion reports merge their monotonic clocks and advance `UpdatedAt` only
   forward, so arrival order cannot change the effective wait.
+- Background lifecycle reports merge start/terminal clocks independently, append their event IDs,
+  and advance `UpdatedAt` only forward. Completed clocks remain for the five-minute late-event
+  window; stale lifecycle reports are ignored so an old start cannot resurrect a finished agent.
 - Title bootstrap hydrates durable state without appending an event or advancing lifecycle time.
 - Usage persists only the latest gauge on its own ordering clock and advances `last_seen` forward.
 - Heartbeats only advance `last_seen`; because representative selection uses `UpdatedAt`, they
@@ -136,7 +159,8 @@ activity, interaction, usage, bootstrap, and liveness reports use independent or
 
 Ingestion paths consult the live map and then the durable row by session id whenever prior state is
 needed. This preserves retained state when a heartbeat, usage report, title bootstrap, activity
-report, or later lifecycle event arrives after restart.
+report, or later lifecycle event arrives after restart. Before advancing a session after a stale
+gap, the service clears its old process-local background clocks.
 
 ### Persistence
 
@@ -147,6 +171,8 @@ report, or later lifecycle event arrives after restart.
 - `activity_events` retains accepted history-bearing events under unique event IDs so duplicate
   reports remain full no-ops. Canonical Overview history uses direct 30-second snapshots and never
   reads this table.
+- Background-agent start/finish clocks have no durable columns and are not reconstructed from
+  `activity_events`; the table remains an idempotency record, not a status-rebuild log.
 
 Store construction creates the current schema, applies missing additive columns idempotently, then
 runs bounded legacy normalization. This order lets databases predating activity, context, or
@@ -166,6 +192,12 @@ infrastructure is not part of this store.
 candidate set before collapsing it. The representative's own `LastSeen` still decides whether it
 contributes an open dot, while its `UpdatedAt` keeps it eligible for footer and resume ownership.
 
+The remoting contract exposes `toggleAutoSync`. When enabled and the branch falls behind, `AutoSync`
+uses the same live and retained session state to select a target identity, then sends a typed
+agent-prompt through `SessionBridge`. A matching live registration receives it directly; transient
+delivery failure queues it for retry, while no live target triggers the guarded fallback launch.
+The passive reporting extension never sends prompts.
+
 The projection keeps the activity source through the `AgentActivity` union and exposes every open
 session for status/context rendering. Overview snapshot capture uses the same live session
 projection but persists the complete count-only aggregate independently; see
@@ -182,11 +214,13 @@ projection but persists the complete count-only aggregate independently; see
 | Liveness | Heartbeats and accepted usage update `last_seen` without lifecycle event writes. |
 | Representative ordering | Use `(UpdatedAt, SessionId)`; never let heartbeat-only `LastSeen` choose footer or resume ownership. |
 | Multiple sessions | Preserve per-session status, skill, and context usage; collapse only card-level fields. |
+| Background agents | Keep per-tool start/finish clocks in memory; WaitingForUser outranks background Working; restart clears the clocks. |
 | Footer | Decouple from the status dot and merge a retained durable representative. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |
 | Context usage | Persist the last-known gauge and ordering timestamp; do not append it to activity events. |
 | Persistence | Store latest session state plus idempotent accepted events in SQLite WAL. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
+| Auto-sync | Prefer an active/open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Resume | Query durable most-recent activity identity, not the bounded live cache or heartbeat recency. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
@@ -196,8 +230,8 @@ projection but persists the complete count-only aggregate independently; see
 | File | Role |
 |---|---|
 | `src/Extension/reporting/extension.mjs` | SDK filtering, wire mapping, replay, metadata bootstrap, usage, and heartbeat. |
-| `src/Extension/reporting/reporting-core.mjs` | Pure nonblank message-report construction. |
-| `src/Server/SessionActivity.fs` | Event domain, pure fold, effective activity/status, freshness, and active selection. |
+| `src/Extension/reporting/reporting-core.mjs` | Pure message, usage, and background-lifecycle wire mapping. |
+| `src/Server/SessionActivity.fs` | Event domain, pure fold, background lifecycle, effective activity/status, freshness, and active selection. |
 | `src/Server/SessionActivityService.fs` | Request validation, synthetic filtering, independent ordering paths, mailbox ingestion, and lifecycle. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
@@ -205,7 +239,10 @@ projection but persists the complete count-only aggregate independently; see
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
 | `src/Server/RefreshScheduler.fs` | Live session state and `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |
+| `src/Server/SessionBridge.fs` | Session registration, targeted prompt delivery, retry queue, and bridge liveness. |
+| `src/Server/AutoSync.fs` | Delivery-aware session selection and guarded sync-prompt fallback launch. |
 | `src/Shared/Types.fs` | `AgentActivity`, context usage, per-session markers, and worktree wire types. |
+| `src/Shared/WorktreeApi.fs` | Remoting contract, including `toggleAutoSync` and direct Overview history. |
 | `src/Shared/OverviewData.fs` | Shared per-session Overview grouping. |
 | `src/Client/OverviewPresentation.fs` | Client-only Overview selection and visual mappings. |
 | `src/Client/CardViews.fs` | Status dots, activity/footer text, and per-session context display. |

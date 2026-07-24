@@ -18,6 +18,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -33,6 +34,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -48,6 +50,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -63,6 +66,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -78,6 +82,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -94,6 +99,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -109,6 +115,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -123,6 +130,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -137,6 +145,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -151,6 +160,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -165,6 +175,7 @@
             "HasActiveSession": true,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           }
         ],

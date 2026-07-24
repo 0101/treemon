@@ -575,7 +575,7 @@ type OverviewSnapshotCaptureTests() =
                   IgnorePredicate = ignorePredicate
                   RetainedByWorktree = Map.ofList [ retainedPath, retainedFooter ]
                   ArchivedBranches = archivedBranches
-                  TestFailureLogPaths = Set.singleton activePath }
+                  AutoSyncBranches = Map.ofList [ repoId, Set.singleton "active" ] }
                 rootPaths
                 (Set.singleton activePath)
                 state
@@ -609,9 +609,9 @@ type OverviewSnapshotCaptureTests() =
             Assert.That(worktrees leanRepos |> List.map _.Branch, Does.Not.Contain("ignored"))
             Assert.That((status "archived" leanRepos).IsArchived, Is.True)
             Assert.That(completeActive.HasActiveSession, Is.True)
-            Assert.That(completeActive.HasTestFailureLog, Is.True)
             Assert.That(leanActive.HasActiveSession, Is.False)
-            Assert.That(leanActive.HasTestFailureLog, Is.False)
+            Assert.That(completeActive.AutoSyncEnabled, Is.True)
+            Assert.That(leanActive.AutoSyncEnabled, Is.False)
             Assert.That(completeRetained.LastUserMessage.IsSome, Is.True)
             Assert.That(leanRetained.LastUserMessage, Is.EqualTo None))
 

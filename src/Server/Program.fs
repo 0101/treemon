@@ -293,7 +293,6 @@ let main args =
             buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None
         else
             let agent = RefreshScheduler.createAgent ()
-            let syncAgent = SyncEngine.createSyncAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
@@ -308,7 +307,16 @@ let main args =
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
 
-                WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent None None worktreeRoots config.TestFixtures appVersion deployBranch
+                WorktreeApi.worktreeApi
+                    agent
+                    cardLog
+                    sessionAgent
+                    None
+                    None
+                    worktreeRoots
+                    config.TestFixtures
+                    appVersion
+                    deployBranch
                 |> buildRemotingHandler,
                 Some agent,
                 None,
@@ -324,10 +332,17 @@ let main args =
                         rootPaths
                 let store = activity.Components.Store
 
+                let schedulerServices: RefreshScheduler.SchedulerServices =
+                    { SessionAgent = sessionAgent
+                      ActivityStore = Some store }
+
                 let scheduler =
                     try
                         BackgroundLoop.start
-                            (RefreshScheduler.run agent worktreeRoots)
+                            (RefreshScheduler.run
+                                agent
+                                schedulerServices
+                                worktreeRoots)
                     with _ ->
                         SessionActivityRuntime.shutdown activity None
                         reraise ()
@@ -339,7 +354,6 @@ let main args =
 
                     WorktreeApi.worktreeApi
                         agent
-                        syncAgent
                         cardLog
                         sessionAgent
                         (Some store)
