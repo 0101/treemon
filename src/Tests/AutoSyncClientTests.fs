@@ -1,5 +1,6 @@
 module Tests.AutoSyncClientTests
 
+open System
 open NUnit.Framework
 open Shared
 open Shared.EventUtils
@@ -54,6 +55,27 @@ let private enabled (model: Model) =
 let private pending (model: Model) =
     model.AutoSyncPending.Contains path
 
+let private response enabled : DashboardResponse =
+    { Repos =
+        [ { RepoId = RepoId "repo"
+            RootFolderName = "repo"
+            Worktrees = [ { baseWt with Path = path; AutoSyncEnabled = enabled } ]
+            IsReady = true
+            Provider = None
+            BaseBranch = "main" } ]
+      SchedulerEvents = []
+      LatestByCategory = Map.empty
+      AppVersion = "test"
+      DeployBranch = None
+      SystemMetrics = None
+      EditorName = "VS Code"
+      WorktreeSkills = []
+      CollapsedRepos = Set.empty
+      CanvasPaneOpen = false
+      OverviewPanelOpen = false
+      CanvasPosition = CanvasPosition.Right
+      CanvasSize = CanvasSize.Ratio1To1 }
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -95,6 +117,23 @@ type AutoSyncMvuTests() =
         Assert.Multiple(fun () ->
             Assert.That(enabled updated, Is.EqualTo(Some true))
             Assert.That(pending updated, Is.False)
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``Stale poll preserves pending optimistic auto-sync until success``() =
+        let optimistic = { model true with AutoSyncPending = Set.singleton path }
+        let afterPoll, _ =
+            update
+                (DataLoaded(response false, DateTimeOffset(2026, 7, 24, 10, 0, 0, TimeSpan.Zero)))
+                optimistic
+        let afterSuccess, cmd =
+            update (AutoSyncToggleResult(path, false, Ok ())) afterPoll
+
+        Assert.Multiple(fun () ->
+            Assert.That(enabled afterPoll, Is.EqualTo(Some true))
+            Assert.That(pending afterPoll, Is.True)
+            Assert.That(enabled afterSuccess, Is.EqualTo(Some true))
+            Assert.That(pending afterSuccess, Is.False)
             Assert.That(cmd, Is.Empty))
 
     [<Test>]

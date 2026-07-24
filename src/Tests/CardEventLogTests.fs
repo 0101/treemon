@@ -55,6 +55,16 @@ type CardEventLogTests() =
         Assert.That(events[0].Status, Is.EqualTo(Some(StepStatus.Failed "boom")))
 
     [<Test>]
+    member _.``New post-fork lifecycle removes the prior failure``() =
+        let events =
+            { Events = Map.ofList [ "feature", [ makeEvent (StepStatus.Failed "old failure") ] ] }
+            |> fun state -> processMessage state (PostForkStarted "feature")
+            |> fun state -> processMessage state (PostForkEnded("feature", StepStatus.Succeeded))
+            |> branchEvents "feature"
+
+        Assert.That(events |> List.map _.Status, Is.EqualTo [ Some StepStatus.Succeeded ])
+
+    [<Test>]
     member _.``GetAll replies with post-fork events``() =
         let agent = createAgent ()
         agent.Post(PostForkStarted "feature")

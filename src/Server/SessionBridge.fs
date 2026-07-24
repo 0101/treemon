@@ -76,6 +76,9 @@ let internal cleanExpired (now: DateTime) (prompts: QueuedPrompt list) =
     let cutoff = now - queueTtl
     prompts |> List.filter (fun prompt -> prompt.EnqueuedAt > cutoff)
 
+let internal formatPostFailure statusCode (body: string) =
+    $"bridge returned status={statusCode}, bodyLength={body.Length}"
+
 let private capQueue prompts =
     let excess = List.length prompts - maxQueueSize
     if excess > 0 then prompts |> List.skip excess else prompts
@@ -117,8 +120,9 @@ let private postPrompt (entry: SessionEntry) (prompt: Prompt) (worktreeKey: stri
                 return Ok()
             else
                 let! body = response.Content.ReadAsStringAsync() |> Async.AwaitTask
-                Log.log "SessionBridge" $"Prompt forward failed: status={int response.StatusCode}, body={body}"
-                return Error $"bridge returned {int response.StatusCode}: {body}"
+                let failure = formatPostFailure (int response.StatusCode) body
+                Log.log "SessionBridge" $"Prompt forward failed: {failure}"
+                return Error failure
         with ex ->
             Log.log "SessionBridge" $"Prompt forward error: {ex.Message}"
             return Error ex.Message
@@ -211,12 +215,13 @@ let internal isSessionAlive now (entry: SessionEntry) =
 let internal isPollAlive now (lastHeartbeat: DateTime) =
     now - lastHeartbeat < livenessTtl
 
-let private liveTarget now (worktreePath: string) (targetSessionId: string option) =
-    targetSessionId
-    |> Option.bind (fun target ->
-        sessionsForWorktree worktreePath
-        |> List.filter (isSessionAlive now)
-        |> List.tryFind (fun entry -> entry.SessionId = Some target))
+let internal selectLiveTarget now promptKind targetSessionId entries =
+    let live = entries |> List.filter (isSessionAlive now)
+
+    match targetSessionId, promptKind, live with
+    | Some target, _, _ -> live |> List.tryFind (fun entry -> entry.SessionId = Some target)
+    | None, PromptKind.AgentPrompt, [ entry ] -> Some entry
+    | _ -> None
 
 /// Attempt immediate delivery to the selected live session. A failed POST is queued for that
 /// session, while an absent live target remains distinct so auto-sync can apply its fallback policy.
@@ -224,14 +229,17 @@ let private tryDeliverAt now (request: SendRequest) =
     async {
         let worktreeKey = normalizePath request.WorktreePath
         let targetSessionId = normalizeSessionId request.SessionId
+        let target =
+            sessionsForWorktree request.WorktreePath
+            |> selectLiveTarget now request.Prompt.Kind targetSessionId
 
-        match liveTarget now request.WorktreePath targetSessionId with
+        match target with
         | None -> return DeliveryResult.NoLiveSession
         | Some entry ->
             match! postPrompt entry request.Prompt worktreeKey with
             | Ok () -> return DeliveryResult.Delivered
             | Error _ ->
-                enqueue now worktreeKey targetSessionId request.Prompt
+                enqueue now worktreeKey entry.SessionId request.Prompt
                 return DeliveryResult.DeliveryFailed
     }
 

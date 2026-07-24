@@ -7,7 +7,7 @@ open Shared
 type CardEventLogState = { Events: Map<string, CardEvent list> }
 
 type CardEventLogMsg =
-    /// Post-fork setup begins: append a running marker.
+    /// Post-fork setup begins: replace the prior lifecycle with a running marker.
     | PostForkStarted of key: string
     /// Post-fork setup ends: prepend the terminal event, dropping post-fork running markers.
     | PostForkEnded of key: string * status: StepStatus
@@ -27,7 +27,7 @@ let private setBranchEvents key events (state: CardEventLogState) =
 let processMessage (state: CardEventLogState) (msg: CardEventLogMsg) : CardEventLogState =
     match msg with
     | PostForkStarted key ->
-        setBranchEvents key (mkEvent EventSource.PostFork "setup" StepStatus.Running :: branchEvents key state) state
+        setBranchEvents key [ mkEvent EventSource.PostFork "setup" StepStatus.Running ] state
     | PostForkEnded (key, status) ->
         let cleared = branchEvents key state |> clearRunning
         setBranchEvents key (mkEvent EventSource.PostFork "setup" status :: cleared) state

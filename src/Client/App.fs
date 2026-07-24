@@ -72,6 +72,21 @@ let setAutoSyncEnabled (path: WorktreePath) enabled (repos: RepoModel list) =
             Worktrees = repo.Worktrees |> List.map update
             ArchivedWorktrees = repo.ArchivedWorktrees |> List.map update })
 
+let private tryAutoSyncEnabled path repos =
+    repos
+    |> List.tryPick (fun repo ->
+        repo.Worktrees @ repo.ArchivedWorktrees
+        |> List.tryFind (fun worktree -> worktree.Path = path))
+    |> Option.map _.AutoSyncEnabled
+
+let preservePendingAutoSync (model: Model) repos =
+    model.AutoSyncPending
+    |> Set.fold (fun refreshed path ->
+        model.Repos
+        |> tryAutoSyncEnabled path
+        |> Option.map (fun enabled -> setAutoSyncEnabled path enabled refreshed)
+        |> Option.defaultValue refreshed) repos
+
 let markDeleted (path: WorktreePath) (deletedPaths: Set<string>) =
     deletedPaths |> Set.add (WorktreePath.value path)
 
@@ -137,6 +152,7 @@ let update msg model =
                           else existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false
                       Provider = r.Provider
                       BaseBranch = r.BaseBranch })
+                |> preservePendingAutoSync model
                 |> filterDeletedPaths stillPending
             let currentCanvasHashes = canvasHashesByScopedKey repos
             let currentCanvasModified = canvasModifiedByScopedKey repos

@@ -2,6 +2,8 @@ module Tests.SessionBridgeTests
 
 open System
 open System.IO
+open System.Net
+open System.Threading.Tasks
 open NUnit.Framework
 open Server.SessionBridge
 
@@ -79,6 +81,88 @@ type PromptTransportTests() =
             Is.EqualTo("""{"kind":"agent-prompt","prompt":"Sync with upstream/main when safe."}"""))
 
     [<Test>]
+    member _.``Untargeted agent prompt uses the only live bridge``() =
+        let path = uniquePath "unique-live"
+        let sessionId = $"session-{Guid.NewGuid():N}"
+        let port = Tests.TestUtils.getFreeTcpPort ()
+
+        use listener = new HttpListener()
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/")
+        listener.Start()
+        registerSession path $"http://127.0.0.1:{port}/" (Some sessionId)
+
+        let received = listener.GetContextAsync()
+        let delivery =
+            tryDeliver
+                { WorktreePath = path
+                  SessionId = None
+                  Prompt = Prompt.agentPrompt "sync" }
+            |> Async.StartAsTask
+
+        let context = received.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+        context.Response.StatusCode <- 200
+        context.Response.Close()
+
+        Assert.That(delivery.GetAwaiter().GetResult(), Is.EqualTo(DeliveryResult.Delivered))
+
+    [<Test>]
+    member _.``Untargeted agent prompt remains ambiguous with multiple live bridges``() =
+        let path = uniquePath "ambiguous-live"
+        let firstPort, secondPort =
+            match Tests.TestUtils.getFreeTcpPorts 2 with
+            | [ first; second ] -> first, second
+            | ports -> failwith $"expected two free ports, got {ports.Length}"
+
+        use first = new HttpListener()
+        use second = new HttpListener()
+        first.Prefixes.Add($"http://127.0.0.1:{firstPort}/")
+        second.Prefixes.Add($"http://127.0.0.1:{secondPort}/")
+        first.Start()
+        second.Start()
+        registerSession path $"http://127.0.0.1:{firstPort}/" (Some $"first-{Guid.NewGuid():N}")
+        registerSession path $"http://127.0.0.1:{secondPort}/" (Some $"second-{Guid.NewGuid():N}")
+
+        let result =
+            tryDeliver
+                { WorktreePath = path
+                  SessionId = None
+                  Prompt = Prompt.agentPrompt "sync" }
+            |> Async.RunSynchronously
+
+        Assert.That(result, Is.EqualTo(DeliveryResult.NoLiveSession))
+
+    [<Test>]
+    member _.``Anonymous canvas prompt still queues for canvas polling``() =
+        let path = uniquePath "canvas-poll"
+        let payload = """{"action":"refresh"}"""
+        let port = Tests.TestUtils.getFreeTcpPort ()
+
+        use listener = new HttpListener()
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/")
+        listener.Start()
+        registerSession path $"http://127.0.0.1:{port}/" (Some $"canvas-{Guid.NewGuid():N}")
+
+        let unexpectedPost = listener.GetContextAsync()
+        let sending =
+            send
+                { WorktreePath = path
+                  SessionId = None
+                  Prompt = Prompt.canvas payload }
+            |> Async.StartAsTask
+        let firstCompleted =
+            Task.WhenAny(sending, unexpectedPost).WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+
+        if Object.ReferenceEquals(firstCompleted, unexpectedPost) then
+            let context = unexpectedPost.GetAwaiter().GetResult()
+            context.Response.StatusCode <- 200
+            context.Response.Close()
+
+        let result = sending.GetAwaiter().GetResult()
+
+        Assert.That(result, Is.EqualTo(SendResult.Queued))
+        Assert.That(drainPendingCanvas path, Is.EqualTo [ Prompt.canvas payload ])
+
+    [<Test>]
     member _.``Canvas heartbeat drain does not consume generic agent prompts``() =
         let path = uniquePath "kind-drain"
 
@@ -91,3 +175,14 @@ type PromptTransportTests() =
 
         Assert.That(result, Is.EqualTo(SendResult.Queued))
         Assert.That(drainPendingCanvas path, Is.Empty)
+
+    [<Test>]
+    member _.``Bridge failure formatting excludes the response body``() =
+        let secretBody = $"first line{Environment.NewLine}secret-token=abc123"
+        let failure = formatPostFailure 503 secretBody
+
+        Assert.Multiple(fun () ->
+            Assert.That(failure, Does.Contain("status=503"))
+            Assert.That(failure, Does.Contain($"bodyLength={secretBody.Length}"))
+            Assert.That(failure, Does.Not.Contain("first line"))
+            Assert.That(failure, Does.Not.Contain("secret-token")))

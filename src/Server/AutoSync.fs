@@ -66,11 +66,6 @@ let deliver
               SessionId = request.SessionId
               Prompt = SessionBridge.Prompt.agentPrompt request.Prompt }
 
-        let tryDelivery () =
-            match request.SessionId with
-            | Some _ -> tryDeliver sendRequest
-            | None -> async { return SessionBridge.DeliveryResult.NoLiveSession }
-
         let launchFallback () =
             async {
                 let! canLaunch = tryBeginLaunch path
@@ -81,7 +76,12 @@ let deliver
                     try
                         try
                             let! result = launch request.WorktreePath request.Prompt
-                            return Result.isOk result
+                            match result with
+                            | Ok () ->
+                                do! waitForRegistration ()
+                                return true
+                            | Error _ ->
+                                return false
                         with ex ->
                             Log.log "AutoSync" $"Fallback launch failed for {path}: {ex.Message}"
                             return false
@@ -89,14 +89,14 @@ let deliver
                         completeLaunch path
             }
 
-        match! tryDelivery () with
+        match! tryDeliver sendRequest with
         | SessionBridge.DeliveryResult.Delivered
         | SessionBridge.DeliveryResult.DeliveryFailed ->
             return true
         | SessionBridge.DeliveryResult.NoLiveSession when Option.isSome request.SessionId ->
             do! waitForRegistration ()
 
-            match! tryDelivery () with
+            match! tryDeliver sendRequest with
             | SessionBridge.DeliveryResult.Delivered
             | SessionBridge.DeliveryResult.DeliveryFailed ->
                 return true

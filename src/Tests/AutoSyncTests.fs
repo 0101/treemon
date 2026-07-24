@@ -451,61 +451,87 @@ type AutoSyncDeliveryTests() =
             Assert.That(launchAttempts, Is.Zero))
 
     [<Test>]
-    member _.``Registration grace expiry launches exactly one prompted session and releases the guard``() =
+    member _.``Successful fallback holds the launch guard through registration grace``() =
         // Callback probes cross async boundaries, so immutable values cannot capture invocation counts.
-        let mutable deliveryAttempts = 0
-        let mutable launchAttempts = 0
-        let launched =
-            TaskCompletionSource<WorktreePath * string>(TaskCreationOptions.RunContinuationsAsynchronously)
-        let completed =
-            TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let mutable guardHeld = false
+        let mutable completions = 0
+        let graceStarted =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+        let releaseGrace =
+            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
 
-        let launch path prompt =
+        let tryBeginLaunch _ =
             async {
-                launchAttempts <- launchAttempts + 1
-
-                if not (launched.TrySetResult(path, prompt)) then
-                    failwith "fallback launch must run exactly once"
-
-                return Ok ()
+                if guardHeld then
+                    return false
+                else
+                    guardHeld <- true
+                    return true
             }
 
-        let accepted =
+        let delivery =
             deliver
-                (fun _ ->
+                (fun value ->
                     async {
-                        deliveryAttempts <- deliveryAttempts + 1
+                        Assert.That(value.SessionId, Is.EqualTo None)
                         return SessionBridge.DeliveryResult.NoLiveSession
                     })
-                (fun () -> async { return () })
-                (fun _ -> async { return true })
-                (fun path ->
-                    if not (completed.TrySetResult path) then
-                        failwith "launch completion must run exactly once")
-                launch
-                request
-            |> Async.RunSynchronously
+                (fun () ->
+                    async {
+                        graceStarted.TrySetResult(()) |> ignore
+                        do! releaseGrace.Task |> Async.AwaitTask
+                    })
+                tryBeginLaunch
+                (fun _ ->
+                    completions <- completions + 1
+                    guardHeld <- false)
+                (fun path prompt ->
+                    async {
+                        Assert.That(path, Is.EqualTo(WorktreePath "/repo/wt"))
+                        Assert.That(prompt, Is.EqualTo("Sync with upstream/main."))
+                        return Ok ()
+                    })
+                { request with SessionId = None }
+            |> Async.StartAsTask
+
+        graceStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+        let duplicateAccepted = tryBeginLaunch "/repo/wt" |> Async.RunSynchronously
+
+        Assert.Multiple(fun () ->
+            Assert.That(duplicateAccepted, Is.False)
+            Assert.That(guardHeld, Is.True)
+            Assert.That(completions, Is.Zero)
+            Assert.That(delivery.IsCompleted, Is.False))
+
+        releaseGrace.TrySetResult(()) |> ignore
+        let accepted =
+            delivery.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+        let acceptedAfterGrace = tryBeginLaunch "/repo/wt" |> Async.RunSynchronously
 
         Assert.Multiple(fun () ->
             Assert.That(accepted, Is.True)
-            Assert.That(deliveryAttempts, Is.EqualTo(2))
-            Assert.That(launchAttempts, Is.EqualTo(1))
-            Assert.That(
-                launched.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(),
-                Is.EqualTo((WorktreePath "/repo/wt", "Sync with upstream/main.")))
-            Assert.That(
-                completed.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult(),
-                Is.EqualTo("/repo/wt")))
+            Assert.That(completions, Is.EqualTo(1))
+            Assert.That(acceptedAfterGrace, Is.True))
 
     [<Test>]
-    member _.``No selected session launches immediately without registration grace``() =
+    member _.``No selected session attempts bridge before fallback launch``() =
         // The async launch callback is the impure boundary under test.
+        let mutable deliveryAttempts = 0
+        let mutable graceCalls = 0
         let mutable launchAttempts = 0
 
         let accepted =
             deliver
-                (fun _ -> failwith "delivery must not run without a selected session")
-                (fun () -> failwith "registration grace must not run without a selected session")
+                (fun value ->
+                    async {
+                        deliveryAttempts <- deliveryAttempts + 1
+                        Assert.That(value.SessionId, Is.EqualTo None)
+                        return SessionBridge.DeliveryResult.NoLiveSession
+                    })
+                (fun () ->
+                    async {
+                        graceCalls <- graceCalls + 1
+                    })
                 (fun _ -> async { return true })
                 ignore
                 (fun _ _ ->
@@ -518,7 +544,43 @@ type AutoSyncDeliveryTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(accepted, Is.True)
+            Assert.That(deliveryAttempts, Is.EqualTo(1))
+            Assert.That(graceCalls, Is.EqualTo(1))
             Assert.That(launchAttempts, Is.EqualTo(1)))
+
+    [<TestCase("error")>]
+    [<TestCase("exception")>]
+    member _.``Failed fallback releases the launch guard immediately``(failureKind: string) =
+        // Callback probes cross async boundaries, so immutable values cannot capture guard state.
+        let mutable guardHeld = false
+        let mutable completions = 0
+
+        let accepted =
+            deliver
+                (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })
+                (fun () -> failwith "registration grace must not run after failed launch")
+                (fun _ ->
+                    async {
+                        guardHeld <- true
+                        return true
+                    })
+                (fun _ ->
+                    completions <- completions + 1
+                    guardHeld <- false)
+                (fun _ _ ->
+                    async {
+                        if failureKind = "exception" then
+                            return raise (InvalidOperationException "launch failed")
+                        else
+                            return Error "launch failed"
+                    })
+                { request with SessionId = None }
+            |> Async.RunSynchronously
+
+        Assert.Multiple(fun () ->
+            Assert.That(accepted, Is.False)
+            Assert.That(guardHeld, Is.False)
+            Assert.That(completions, Is.EqualTo(1)))
 
     [<Test>]
     member _.``Delivery failure is accepted for queued retry without fallback launch``() =
