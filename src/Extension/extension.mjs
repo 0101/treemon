@@ -291,8 +291,11 @@ async function declareOwnership(worktreePath, filename, sessionId) {
     }
     const outcome = await res.json().catch(() => ({}));
     const attributed = outcome?.attributed === true;
+    // `monitored` distinguishes the two non-attributed cases: an unmonitored worktree (nothing
+    // recorded) from a SystemView, which has no author to record.
+    const monitored = outcome?.monitored === true;
     log(`declared ownership: ${filename} → ${sessionId} (attributed=${attributed})`);
-    return { ok: true, attributed };
+    return { ok: true, attributed, monitored };
   } catch (err) {
     log(`could not declare ownership for ${filename}: ${err.message}`);
     return { ok: false, error: err.message };
@@ -365,7 +368,7 @@ const worktreePath = process.cwd();
 const extensionState = { browserMode: false, port: 0, sessionId: null, worktreePath };
 
 // Explicit routing tool the agent can call on demand. AgentDocs assign author ownership;
-// SystemViews assign/reassign their separate interaction target. It stamps THIS session's id,
+// SystemViews are not claimable - their interactions resolve to a live session. It stamps THIS session's id,
 // so the agent only supplies the filename.
 const takeOwnershipTool = {
   name: "canvas_take_ownership",
@@ -397,6 +400,11 @@ const takeOwnershipTool = {
       throw new Error(`Ownership declaration failed: ${result.error}`);
     }
     if (!result.attributed) {
+      if (result.monitored) {
+        throw new Error(
+          `"${name}" is a generated SystemView, so it has no author to claim. Its interactions always reach the worktree's most recently active session.`,
+        );
+      }
       throw new Error(`Treemon is not monitoring this worktree, so ownership was not recorded for ${name}.`);
     }
     return `Replies from "${name}" now route to this session.`;

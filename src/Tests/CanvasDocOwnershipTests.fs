@@ -48,17 +48,19 @@ type PersistenceTests() =
                 Is.EquivalentTo([ "Review.html"; "diff.html" ])))
 
     [<Test>]
-    member _.``prune drops worktrees that are no longer known and keeps the rest``() =
+    member _.``prune drops unknown worktrees and documents whose file is gone``() =
         withOwnershipFiles (fun dir filePath ->
             let knownWorktree = Path.Combine(dir, "known")
             let removedWorktree = Path.Combine(dir, "removed")
+            let canvasDir = Path.Combine(knownWorktree, ".agents", "canvas")
+            Directory.CreateDirectory(canvasDir) |> ignore
+            File.WriteAllText(Path.Combine(canvasDir, "notes.html"), "<html></html>")
 
             let store = CanvasDocOwnership.createStore filePath
-            runAsync (store.Assign(knownWorktree, "report.html", "agent-session"))
-            runAsync (store.Assign(knownWorktree, "notes.html", "other-session"))
-            runAsync (store.Assign(removedWorktree, "report.html", "removed-session"))
+            runAsync (store.Assign(knownWorktree, "notes.html", "author"))
+            runAsync (store.Assign(knownWorktree, "deleted.html", "stale-author"))
+            runAsync (store.Assign(removedWorktree, "notes.html", "removed-session"))
 
-            runAsync (store.RemoveView(knownWorktree, "report.html"))
             runAsync (store.Prune(Set.singleton knownWorktree))
 
             let pruned = CanvasDocOwnership.createStore filePath
@@ -66,14 +68,14 @@ type PersistenceTests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     runAsync (pruned.GetOwner(knownWorktree, "notes.html")),
-                    Is.EqualTo(Some "other-session"),
-                    "A known worktree's ownership survives pruning")
+                    Is.EqualTo(Some "author"),
+                    "An existing document keeps its author")
                 Assert.That(
-                    runAsync (pruned.GetOwner(knownWorktree, "report.html")),
+                    runAsync (pruned.GetOwner(knownWorktree, "deleted.html")),
                     Is.EqualTo(None: string option),
-                    "RemoveView drops the entry it was given")
+                    "A deleted document releases its entry — the only per-document reclaim path")
                 Assert.That(
-                    runAsync (pruned.GetOwner(removedWorktree, "report.html")),
+                    runAsync (pruned.GetOwner(removedWorktree, "notes.html")),
                     Is.EqualTo(None: string option),
                     "An unknown worktree is pruned entirely"))
 

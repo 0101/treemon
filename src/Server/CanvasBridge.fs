@@ -12,67 +12,53 @@ type internal PendingLaunchResult =
     | PendingLaunchStarted
     | PendingLaunchJoined
 
-type internal PendingLaunch =
-    { Role: PendingLaunchResult
-      Completion: Task<Result<unit, string>> }
-
 type private LaunchMsg =
-    | BeginPendingLaunch of worktreeKey: string * AsyncReplyChannel<PendingLaunch>
-    | CancelPendingLaunch of worktreeKey: string * reason: string * AsyncReplyChannel<unit>
-    | CompletePendingLaunch of worktreeKey: string * AsyncReplyChannel<unit>
+    | BeginPendingLaunch of worktreeKey: string * now: DateTime * AsyncReplyChannel<PendingLaunchResult>
+    | CancelPendingLaunch of worktreeKey: string * AsyncReplyChannel<unit>
 
-/// Tracks at most one in-flight session launch per worktree so that repeated interactions arriving
-/// before the launched session registers join that launch instead of spawning another session.
-/// This is only about *our own* spawns; sessions the user starts concurrently are not arbitrated.
+/// How long a started launch suppresses another one for the same worktree. A spawn that never
+/// registers must not block future interactions, so the entry expires rather than waiting to be
+/// cleared by a registration — correlating registrations back to a launch is exactly the
+/// bookkeeping this design set out to remove.
+let private launchSuppressionWindow = TimeSpan.FromSeconds 30.0
+
+/// Suppresses a second session spawn for the same worktree while one is starting up, so repeated
+/// interactions arriving before the new session registers do not each spawn an agent. It bounds
+/// only Treemon's own spawns; sessions the user starts concurrently are not arbitrated.
 let private launchAgent =
     MailboxProcessor.Start(fun inbox ->
-        let rec loop (pending: Map<string, TaskCompletionSource<Result<unit, string>>>) =
+        let rec loop (startedAt: Map<string, DateTime>) =
             async {
                 match! inbox.Receive() with
-                | BeginPendingLaunch(worktreeKey, reply) ->
-                    match pending |> Map.tryFind worktreeKey with
-                    | Some existing ->
-                        reply.Reply(
-                            { Role = PendingLaunchJoined
-                              Completion = existing.Task })
+                | BeginPendingLaunch(worktreeKey, now, reply) ->
+                    let recentlyStarted =
+                        startedAt
+                        |> Map.tryFind worktreeKey
+                        |> Option.exists (fun started -> now - started < launchSuppressionWindow)
 
-                        return! loop pending
-                    | None ->
-                        let completion =
-                            TaskCompletionSource<Result<unit, string>>(
-                                TaskCreationOptions.RunContinuationsAsynchronously)
+                    if recentlyStarted then
+                        reply.Reply(PendingLaunchJoined)
+                        return! loop startedAt
+                    else
+                        reply.Reply(PendingLaunchStarted)
+                        return! loop (startedAt |> Map.add worktreeKey now)
 
-                        reply.Reply(
-                            { Role = PendingLaunchStarted
-                              Completion = completion.Task })
-
-                        return! loop (pending |> Map.add worktreeKey completion)
-
-                | CancelPendingLaunch(worktreeKey, reason, reply) ->
-                    pending
-                    |> Map.tryFind worktreeKey
-                    |> Option.iter (fun completion -> completion.TrySetResult(Error reason) |> ignore)
-
+                | CancelPendingLaunch(worktreeKey, reply) ->
                     reply.Reply()
-                    return! loop (pending |> Map.remove worktreeKey)
-
-                | CompletePendingLaunch(worktreeKey, reply) ->
-                    pending
-                    |> Map.tryFind worktreeKey
-                    |> Option.iter (fun completion -> completion.TrySetResult(Ok()) |> ignore)
-
-                    reply.Reply()
-                    return! loop (pending |> Map.remove worktreeKey)
+                    return! loop (startedAt |> Map.remove worktreeKey)
             }
 
         loop Map.empty)
 
+/// `PendingLaunchStarted` when the caller should spawn a session, `PendingLaunchJoined` when one is
+/// already starting for this worktree.
 let internal beginPendingLaunch worktreePath =
-    launchAgent.PostAndAsyncReply(fun reply -> BeginPendingLaunch(normalizePath worktreePath, reply))
-
-let internal cancelPendingLaunch worktreePath reason =
     launchAgent.PostAndAsyncReply(fun reply ->
-        CancelPendingLaunch(normalizePath worktreePath, reason, reply))
+        BeginPendingLaunch(normalizePath worktreePath, DateTime.UtcNow, reply))
+
+/// Release the suppression after a spawn fails, so the next interaction can try again immediately.
+let internal cancelPendingLaunch worktreePath =
+    launchAgent.PostAndAsyncReply(fun reply -> CancelPendingLaunch(normalizePath worktreePath, reply))
 
 /// Which session receives an interaction from a canvas document.
 ///
@@ -81,9 +67,11 @@ let internal cancelPendingLaunch worktreePath reason =
 /// currently holds a live bridge registration. Nothing is stored for a SystemView, so there is no
 /// routing target that can go stale, be raced, or need pruning.
 ///
-/// Liveness and activity are deliberately separate inputs: bridge registration decides whether a
-/// session can receive the prompt at all, while `UpdatedAt` decides which of the reachable sessions
-/// is the most recent (see the `LastSeen` note in `SessionActivityStore`).
+/// Liveness and activity are deliberately separate inputs, and they arrive from two independent
+/// extensions: the bridge registry says which sessions can receive a prompt at all, while the
+/// activity snapshot only *orders* them. A reachable session that has not reported activity is
+/// therefore still a valid target — falling back to the freshest registration keeps Treemon from
+/// spawning a second session next to a perfectly usable one.
 let internal resolveTarget
     (sessionStatuses: StoredStatus seq)
     (worktreePath: string)
@@ -95,19 +83,27 @@ let internal resolveTarget
         | SystemView ->
             let now = DateTime.UtcNow
 
-            let liveSessionIds =
+            let liveSessions =
                 SessionBridge.sessionsForWorktree worktreePath
                 |> List.filter (SessionBridge.isSessionAlive now)
-                |> List.choose _.SessionId
-                |> Set.ofList
 
-            return
+            let liveSessionIds = liveSessions |> List.choose _.SessionId |> Set.ofList
+
+            let mostRecentlyActive =
                 sessionStatuses
                 |> Seq.filter (fun stored ->
                     liveSessionIds |> Set.contains (SessionId.value stored.SessionId))
                 |> List.ofSeq
                 |> StoredStatus.tryMostRecentActivity
                 |> Option.map (_.SessionId >> SessionId.value)
+
+            let freshestReachable () =
+                liveSessions
+                |> List.filter (fun entry -> entry.SessionId |> Option.isSome)
+                |> List.sortByDescending _.RegisteredAt
+                |> List.tryPick _.SessionId
+
+            return mostRecentlyActive |> Option.orElseWith freshestReachable
     }
 
 /// Sessions for `worktreePath` from a scheduler snapshot, in the shape `resolveTarget` expects.
@@ -154,13 +150,6 @@ let registerSession worktreePath injectUrl sessionId =
         | _ -> None
 
     SessionBridge.registerSession worktreePath injectUrl normalizedSessionId
-
-    // An identified registration satisfies whatever launch was waiting on it, so queued
-    // interactions drain to it.
-    normalizedSessionId
-    |> Option.iter (fun _ ->
-        launchAgent.PostAndReply(fun reply ->
-            CompletePendingLaunch(normalizePath worktreePath, reply)))
 
 let drainPending worktreePath =
     SessionBridge.drainPendingCanvas worktreePath

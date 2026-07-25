@@ -122,13 +122,17 @@ let private enqueue now worktreeKey targetSessionId prompt =
 /// Which registering session a queued prompt may drain to.
 ///
 /// A canvas prompt for an AgentDoc waits for that document's recorded author. A SystemView has no
-/// stored owner, so its queued interaction drains to the next identified session that registers —
-/// which is the session the queue caused to launch.
+/// stored owner: if resolution picked a target before the send failed, the queued copy stays bound
+/// to that session; if nothing was reachable, it drains to the next identified session — the one
+/// the queue caused to launch.
 let private deliverableTo worktreeKey (sessionId: string option) (queued: QueuedPrompt) =
     match queued.Prompt.Kind, queued.Prompt.Filename with
     | PromptKind.Canvas, Some filename ->
         match CanvasDocKinds.classify filename with
-        | SystemView -> Option.isSome sessionId
+        | SystemView ->
+            match queued.TargetSessionId with
+            | Some target -> sessionId = Some target
+            | None -> Option.isSome sessionId
         | AgentDoc ->
             let owner = CanvasDocOwnership.getOwnerSync worktreeKey filename
             Option.isSome sessionId && owner = sessionId

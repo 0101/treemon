@@ -143,10 +143,37 @@ type internal OwnershipStore internal (filePath: string, initialTargets: Targets
                         return! loop targets'
 
                     | Prune(knownWorktrees, reply) ->
+                        // Worktree removal is handled by the known-worktree filter; the file check
+                        // reclaims entries for individual documents that were deleted, which is the
+                        // only path that releases a per-document entry.
+                        let! survivingKeys =
+                            targets
+                            |> Map.toList
+                            |> List.filter (fun (worktreeKey, _) ->
+                                knownWorktrees |> Set.contains worktreeKey)
+                            |> List.collect (fun (worktreeKey, views) ->
+                                views |> Map.keys |> List.ofSeq |> List.map (fun f -> worktreeKey, f))
+                            |> List.map (fun ((worktreeKey, filename) as key) ->
+                                async {
+                                    match Server.PathUtils.validateCanvasPath worktreeKey filename with
+                                    | Ok path when File.Exists path -> return Some key
+                                    | _ -> return None
+                                })
+                            |> Async.Parallel
+
+                        let surviving = survivingKeys |> Array.choose id |> Set.ofArray
+
                         let targets' =
                             targets
-                            |> Map.filter (fun worktreeKey _ ->
-                                knownWorktrees |> Set.contains worktreeKey)
+                            |> Map.toList
+                            |> List.choose (fun (worktreeKey, views) ->
+                                let kept =
+                                    views
+                                    |> Map.filter (fun filename _ ->
+                                        surviving |> Set.contains (worktreeKey, filename))
+
+                                if Map.isEmpty kept then None else Some(worktreeKey, kept))
+                            |> Map.ofList
 
                         if targets' <> targets then
                             do! persist filePath targets' |> Async.Ignore

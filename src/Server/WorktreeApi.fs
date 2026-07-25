@@ -641,6 +641,19 @@ let worktreeApi
                 return! action ()
         }
 
+    /// Same guard for an endpoint whose result type is its own DU rather than `Result`.
+    let withValidatedPathValue (wtPath: WorktreePath) opName (reject: string -> 'a) (action: unit -> Async<'a>) =
+        let path = WorktreePath.value wtPath
+        async {
+            let! isValid = validatePath path
+
+            if not isValid then
+                Log.log "API" $"{opName}: rejected unknown path '{path}'"
+                return reject $"Unknown worktree path: {path}"
+            else
+                return! action ()
+        }
+
     match fixtures with
     | Some f ->
         { readOnlyApi
@@ -875,58 +888,57 @@ let worktreeApi
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
           sendCanvasMessage = fun request ->
-              async {
-                  let path = WorktreePath.value request.WorktreePath
-                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+              withValidatedPathValue request.WorktreePath "sendCanvasMessage" CanvasMessageResult.Error (fun () ->
+                  async {
+                      let path = WorktreePath.value request.WorktreePath
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                  let! target, result =
-                      CanvasBridge.sendMessage (state.SessionStatuses |> Map.values) request
+                      let! target, result =
+                          CanvasBridge.sendMessage (state.SessionStatuses |> Map.values) request
 
-                  // A SystemView interaction with no reachable session queues; launch one so the
-                  // queue drains. An AgentDoc keeps waiting for its own author instead.
-                  match target, CanvasDocKinds.classify request.Filename with
-                  | None, SystemView ->
-                      let! pendingLaunch = CanvasBridge.beginPendingLaunch path
+                      // A SystemView interaction with no reachable session queues; launch one so the
+                      // queue drains. An AgentDoc keeps waiting for its own author instead.
+                      match target, CanvasDocKinds.classify request.Filename with
+                      | None, SystemView ->
+                          match! CanvasBridge.beginPendingLaunch path with
+                          | CanvasBridge.PendingLaunchJoined ->
+                              Log.log
+                                  "API"
+                                  $"sendCanvasMessage: a launch is already starting for {request.Filename}"
 
-                      match pendingLaunch.Role with
-                      | CanvasBridge.PendingLaunchJoined ->
-                          Log.log
-                              "API"
-                              $"sendCanvasMessage: joined an in-flight launch for {request.Filename}"
+                              return result
+                          | CanvasBridge.PendingLaunchStarted ->
+                              let provider = CodingToolStatus.readConfiguredProvider path
+                              let prompt = CanvasPrompt.continueWorking path request.Filename
+                              let command =
+                                  CodingToolCli.build provider (CodingToolCli.Interactive prompt)
 
-                          return result
-                      | CanvasBridge.PendingLaunchStarted ->
-                          let provider = CodingToolStatus.readConfiguredProvider path
-                          let prompt = CanvasPrompt.continueWorking path request.Filename
-                          let command =
-                              CodingToolCli.build provider (CodingToolCli.Interactive prompt)
+                              Log.log
+                                  "API"
+                                  $"sendCanvasMessage: no reachable session for {request.Filename}; launching one"
 
-                          Log.log
-                              "API"
-                              $"sendCanvasMessage: no reachable session for {request.Filename}; launching one"
+                              match!
+                                  SessionManager.launchAction
+                                      sessionAgent
+                                      request.WorktreePath
+                                      command.AsShellString
+                                  |> Async.Catch
+                              with
+                              | Choice1Of2(Ok()) -> return result
+                              | Choice1Of2(Error err) ->
+                                  do! CanvasBridge.cancelPendingLaunch path
 
-                          match!
-                              SessionManager.launchAction
-                                  sessionAgent
-                                  request.WorktreePath
-                                  command.AsShellString
-                              |> Async.Catch
-                          with
-                          | Choice1Of2(Ok()) -> return result
-                          | Choice1Of2(Error err) ->
-                              do! CanvasBridge.cancelPendingLaunch path err
+                                  return
+                                      CanvasMessageResult.Error
+                                          $"Could not start an interaction session for {request.Filename}: {err}"
+                              | Choice2Of2 ex ->
+                                  do! CanvasBridge.cancelPendingLaunch path
 
-                              return
-                                  CanvasMessageResult.Error
-                                      $"Could not start an interaction session for {request.Filename}: {err}"
-                          | Choice2Of2 ex ->
-                              do! CanvasBridge.cancelPendingLaunch path ex.Message
-
-                              return
-                                  CanvasMessageResult.Error
-                                      $"Could not start an interaction session for {request.Filename}: {ex.Message}"
-                  | _ -> return result
-              }
+                                  return
+                                      CanvasMessageResult.Error
+                                          $"Could not start an interaction session for {request.Filename}: {ex.Message}"
+                      | _ -> return result
+                  })
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)

@@ -17,7 +17,7 @@
 Every `CanvasDoc` carries a `Kind` (`src/Shared/Types.fs`), set when `CanvasScanner` scans the file via `CanvasDocKinds.classify filename`. The classifier reads the shared `src/Extension/canvas-doc-kinds.json` list also used by browser fallback:
 
 - **`AgentDoc`** — authored and owned by a coding session; interactive and file-driven. This is the default for any `.html` an agent writes to `.agents/canvas/`.
-- **`SystemView`** — server-generated and data-driven. It may have an internal interaction target, but never an authored-document owner exposed to the client. The beads dashboard and worktree diff viewer use this kind. `classify` is the single place to register generated views.
+- **`SystemView`** — server-generated and data-driven. Its interactions resolve to a live session per interaction; it never has a stored target or an authored-document owner exposed to the client. The beads dashboard and worktree diff viewer use this kind. `classify` is the single place to register generated views.
 
 The session-document machinery exists for an interactive document authored and owned by a live session. A `SystemView` is none of those, so the behaviors below are gated on `Kind` — making misfit states (a permanently "dead" liveness dot, a meaningless Start-session, a morph that stomps a self-rendering dashboard) unrepresentable rather than emergent from `OwnerSessionId = None`:
 
@@ -30,7 +30,7 @@ The session-document machinery exists for an interactive document authored and o
 | `▶ Start session` button | yes | no |
 | Author heartbeat bridge | yes | no |
 | `canvasSend` + selected-text Explain / Remove / Comment actions | yes | yes |
-| Interaction-session routing | explicitly assigned author | persistent target in the shared ownership store |
+| Interaction-session routing | explicitly assigned author | resolved per interaction from live session activity |
 | DOM morph (idiomorph runtime + controller + signal) | yes | no |
 | Content-hash awareness (unviewed badge, auto-display, card notification) | yes | no — beads "newness" lives on the card as `BeadsSummary` |
 | Archive button | yes | no (server-regenerated, not user-owned) |

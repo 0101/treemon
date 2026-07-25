@@ -428,10 +428,10 @@ type DrainQueueTests() =
         let second = runAsync (beginPendingLaunch path)
 
         Assert.Multiple(fun () ->
-            Assert.That(first.Role, Is.EqualTo(PendingLaunchStarted))
-            Assert.That(second.Role, Is.EqualTo(PendingLaunchJoined), "Only one launch may be in flight per worktree"))
+            Assert.That(first, Is.EqualTo(PendingLaunchStarted))
+            Assert.That(second, Is.EqualTo(PendingLaunchJoined), "Only one launch may be in flight per worktree"))
 
-        runAsync (cancelPendingLaunch path "test cleanup")
+        runAsync (cancelPendingLaunch path)
 
     [<Test>]
     member _.``Pending launches never cross worktree boundaries``() =
@@ -442,23 +442,40 @@ type DrainQueueTests() =
         let b = runAsync (beginPendingLaunch pathB)
 
         Assert.Multiple(fun () ->
-            Assert.That(a.Role, Is.EqualTo(PendingLaunchStarted))
-            Assert.That(b.Role, Is.EqualTo(PendingLaunchStarted), "A launch for one worktree must not absorb another's"))
+            Assert.That(a, Is.EqualTo(PendingLaunchStarted))
+            Assert.That(b, Is.EqualTo(PendingLaunchStarted), "A launch for one worktree must not absorb another's"))
 
-        runAsync (cancelPendingLaunch pathA "test cleanup")
-        runAsync (cancelPendingLaunch pathB "test cleanup")
+        runAsync (cancelPendingLaunch pathA)
+        runAsync (cancelPendingLaunch pathB)
 
     [<Test>]
     member _.``A cancelled launch releases the worktree for a later launch``() =
         let path = uniquePath "launch-cancel"
 
         runAsync (beginPendingLaunch path) |> ignore
-        runAsync (cancelPendingLaunch path "spawn failed")
+        runAsync (cancelPendingLaunch path)
 
         let next = runAsync (beginPendingLaunch path)
-        Assert.That(next.Role, Is.EqualTo(PendingLaunchStarted))
+        Assert.That(next, Is.EqualTo(PendingLaunchStarted))
 
-        runAsync (cancelPendingLaunch path "test cleanup")
+        runAsync (cancelPendingLaunch path)
+
+    [<Test>]
+    member _.``A registration does not release the launch guard``() =
+        let path = uniquePath "launch-heartbeat"
+
+        runAsync (beginPendingLaunch path) |> ignore
+
+        // Every live session re-registers periodically; an unrelated heartbeat must not be mistaken
+        // for the launch completing, or the guard would let a second spawn through immediately.
+        registerSession path "http://127.0.0.1:1/inject" (Some(uniqueSid "unrelated"))
+
+        Assert.That(
+            runAsync (beginPendingLaunch path),
+            Is.EqualTo(PendingLaunchJoined),
+            "Only expiry or cancellation releases the launch guard")
+
+        runAsync (cancelPendingLaunch path)
 
 
 // ── multi-session registry (sessionId-keyed re-key) ─────────────────
@@ -832,6 +849,23 @@ type SystemViewInteractionRoutingTests() =
 
             let target = runAsync (resolveTarget statuses path "notes.html")
             Assert.That(target, Is.EqualTo(Some owner)))
+
+    [<Test>]
+    member _.``A SystemView falls back to the freshest reachable session when none has reported activity``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-no-activity"
+            let older = uniqueSid "older"
+            let newer = uniqueSid "newer"
+
+            registerSession path "http://127.0.0.1:1/inject" (Some older)
+            Threading.Thread.Sleep 15
+            registerSession path "http://127.0.0.1:2/inject" (Some newer)
+
+            // Bridge registrations and activity reports come from two independent extensions, so a
+            // reachable session may have no activity row at all. It is still a usable target —
+            // treating it as "no target" would spawn a second session next to a working one.
+            let target = runAsync (resolveTarget [] path "diff.html")
+            Assert.That(target, Is.EqualTo(Some newer)))
 
     [<Test>]
     member _.``A SystemView never records an owner when it resolves a target``() =

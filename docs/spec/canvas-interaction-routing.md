@@ -22,10 +22,12 @@ through another author write or another explicit claim.
 
 A **SystemView** is server-generated and has no author, so nothing is persisted for it. Each
 interaction resolves, at send time, to the most recently active session that currently holds a live
-bridge registration for that worktree. Liveness and activity are separate inputs: bridge
-registration decides which sessions can receive the prompt at all, and `StoredStatus.UpdatedAt`
-orders those reachable sessions. Heartbeat and usage timestamps never decide the target, preserving
-the rule that `LastSeen` is liveness-only.
+bridge registration for that worktree. Liveness and activity are separate inputs, fed by two
+independent extensions: the bridge registry says which sessions can receive a prompt at all, and
+`StoredStatus.UpdatedAt` only *orders* them. A reachable session that has not reported activity is
+therefore still a valid target — resolution falls back to the freshest registration rather than
+reporting "no target", so Treemon does not spawn a second session beside a usable one. Heartbeat and
+usage timestamps never decide the target, preserving the rule that `LastSeen` is liveness-only.
 
 Because a SystemView target is computed rather than stored, it cannot go stale, be raced by
 concurrent activity, or need pruning. A SystemView's owner is likewise absent from
@@ -37,23 +39,27 @@ morph behavior continue to depend only on `CanvasDoc.Kind`.
 A resolved live target receives the payload immediately. Otherwise the interaction is queued.
 
 When a SystemView interaction resolves no target, Treemon starts one session for that worktree and
-the queued interaction drains to it. At most one launch per worktree is in flight; interactions
-arriving while it is pending join it instead of starting competing sessions. Sessions the user
-starts concurrently are not arbitrated — the launch guard covers only Treemon's own spawns. A failed
-or cancelled launch releases the worktree so a later interaction can launch again.
+the queued interaction drains to it. A started launch suppresses another spawn for the same worktree
+for 30 seconds; the suppression **expires on time** rather than waiting to be cleared by a
+registration, so a spawn that never registers cannot block later interactions, and an unrelated
+session's periodic heartbeat cannot be mistaken for the launch completing. A spawn that fails
+releases the suppression immediately. Sessions the user starts concurrently are not arbitrated — the
+guard covers only Treemon's own spawns.
 
 An AgentDoc interaction with no reachable author is queued without launching, because a new session
 would not be that document's author.
 
 Queued messages retain the existing cap of 10 and five-minute TTL. On drain, an AgentDoc prompt goes
-only to its recorded owner, so ownership changes made while a message waits are honored. A
-SystemView prompt drains to the next identified registration for the worktree — the session the
-queue caused to launch. An anonymous (session-less) registration never drains either kind.
+only to its recorded owner, so ownership changes made while a message waits are honored. A SystemView
+prompt stays bound to the session resolution picked, if any; when nothing was reachable it drains to
+the next identified registration — the session the queue caused to launch. An anonymous
+(session-less) registration never drains either kind.
 
 ### Persistence and Cleanup
 
-Only AgentDoc ownership is persisted. It is removed when a view or worktree disappears, and
-scheduler reconciliation prunes entries for worktrees that are no longer known.
+Only AgentDoc ownership is persisted. It is removed when a view or worktree disappears; scheduler
+reconciliation prunes entries for worktrees that are no longer known **and** for documents whose file
+is gone, which is the only path that reclaims a per-document entry.
 
 ### Selection Metadata
 
@@ -70,15 +76,16 @@ limits, and liveness shared by canvas and agent prompts. `CanvasBridge` layers t
 worktree launch policy over that generic transport.
 
 `CanvasBridge.resolveTarget` branches on `CanvasDocKinds.classify`: an AgentDoc reads
-`CanvasDocOwnership`, while a SystemView intersects the worktree's live bridge registrations with
-the scheduler's `SessionStatuses` snapshot and takes the most recent by
-`StoredStatus.activityOrderKey`. `CanvasBridge.sendMessage` returns the resolved target alongside the
-outcome so the caller can distinguish "queued because nothing is reachable" from "queued behind a
-known session".
+`CanvasDocOwnership`, while a SystemView intersects the worktree's live bridge registrations with the
+scheduler's `SessionStatuses` snapshot, takes the most recent by `StoredStatus.activityOrderKey`, and
+falls back to the freshest live registration when no reachable session has an activity row.
+`CanvasBridge.sendMessage` returns the resolved target alongside the outcome so the caller can
+distinguish "queued because nothing is reachable" from "queued behind a known session".
 
-The launch coordinator is an in-memory map from normalized worktree to one shared completion,
-serializing Treemon's own spawns per worktree. An identified registration completes whatever launch
-was waiting on it; queue drain then delivers to it.
+The launch guard is a map from normalized worktree to the time a spawn started, suppressing another
+spawn for `launchSuppressionWindow`. It is time-bounded by design: correlating a later registration
+back to a specific launch is exactly the bookkeeping this model set out to remove, and an
+expiry cannot deadlock the way an uncleared entry can.
 
 `CanvasScanner` continues exposing `OwnerSessionId` only for AgentDocs, and the client continues
 gating every lifecycle affordance on `CanvasDoc.Kind`.
@@ -100,8 +107,9 @@ gating every lifecycle affordance on `CanvasDoc.Kind`.
   case-sensitive hosts.
 - **Kind controls behavior:** a SystemView never acquires authored-document UI or lifecycle
   behavior.
-- **One launch per worktree, no wider arbitration:** the guard prevents Treemon from spawning
-  duplicate sessions for concurrent interactions. It deliberately does not arbitrate against
+- **One launch per worktree, time-bounded, no wider arbitration:** the guard prevents Treemon from
+  spawning duplicate sessions for concurrent interactions, and expires on a timer so a spawn that
+  never registers cannot block later interactions. It deliberately does not arbitrate against
   sessions the user starts, which is accepted rather than defended.
 - **Pinning is out of scope:** choosing a fixed session for a SystemView is a separate feature; the
   resolution rule above is the only policy today.
