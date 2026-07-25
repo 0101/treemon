@@ -216,7 +216,7 @@ let internal assembleFromState
         |> Option.map (fun branch -> Set.contains branch autoSyncBranches)
         |> Option.defaultValue false
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
-      HasDiff = gitData |> Option.map (_.HasDiff) |> Option.defaultValue false
+      HasDiff = gitData |> Option.exists (fun data -> data.Comparison = GitWorktree.HasContent)
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
       IsMainWorktree = Directory.Exists(Path.Combine(wt.Path, ".git"))

@@ -673,8 +673,8 @@ let internal executeTask
                 repo.BaseBranch
                 gitData
 
-            DiffProvisioner.provisionViewer path gitData.HasDiff
-            |> Option.iter (Log.log "DiffProvisioner")
+            let! provisioning = DiffProvisioner.provisionViewer path gitData.Comparison
+            provisioning |> Option.iter (Log.log "DiffProvisioner")
 
             let! canvasDocs = CanvasScanner.scan path
             let branch = Path.GetFileName(path)

@@ -854,7 +854,7 @@ type WorktreeDiffIntegrationTests() =
         | _ -> Assert.Fail($"Expected composed replacement, got {result}")
 
     [<Test>]
-    member _.``HasDiff_untracked stays independent from tracked dirty``() =
+    member _.``Comparison_untracked stays independent from tracked dirty``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initializeDiffRepo repoDir
 
@@ -898,7 +898,7 @@ type WorktreeDiffIntegrationTests() =
             Assert.That(GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync, Is.True))
 
     [<Test>]
-    member _.``HasDiff_net follows committed comparison content``() =
+    member _.``Comparison_net follows committed comparison content``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
         writeText repoDir "tracked.txt" "base"
@@ -914,7 +914,7 @@ type WorktreeDiffIntegrationTests() =
             |> TestUtils.runAsync
 
         Assert.Multiple(fun () ->
-            Assert.That(committed.HasDiff, Is.True)
+            Assert.That(committed.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(committed.IsDirty, Is.False)
             Assert.That(committed.WorkMetrics.IsSome, Is.True))
 
@@ -925,7 +925,7 @@ type WorktreeDiffIntegrationTests() =
             |> TestUtils.runAsync
 
         Assert.Multiple(fun () ->
-            Assert.That(reverted.HasDiff, Is.False)
+            Assert.That(reverted.Comparison, Is.EqualTo(GitWorktree.Clean))
             Assert.That(reverted.IsDirty, Is.False)
             Assert.That(reverted.WorkMetrics, Is.EqualTo(None)))
 
@@ -935,7 +935,7 @@ type WorktreeDiffIntegrationTests() =
         initRepoOnMain repoDir
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        DiffProvisioner.provisionViewer repoDir true |> ignore
+        DiffProvisioner.provisionViewer repoDir GitWorktree.HasContent |> TestUtils.runAsync |> ignore
 
         let directUntracked =
             gitText
@@ -965,8 +965,8 @@ type WorktreeDiffIntegrationTests() =
         Assert.That(
             (collectWorktreeGitData repoDir (Some "feature") "origin" "main"
              |> TestUtils.runAsync)
-                .HasDiff,
-            Is.False
+                .Comparison,
+            Is.EqualTo(GitWorktree.Clean)
         )
 
         writeText repoDir (Path.Combine(".agents", "canvas", "diff.html.backup")) "content"
@@ -1006,7 +1006,7 @@ type WorktreeDiffIntegrationTests() =
         Assert.Multiple(fun () ->
             Assert.That(summary.BaseRef, Is.EqualTo("main"))
             Assert.That(summary.Files |> List.map _.Path, Is.EqualTo([ "tracked.txt" ]))
-            Assert.That(gitData.HasDiff, Is.True)
+            Assert.That(gitData.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(gitData.MainBehindCount, Is.EqualTo(0))
             Assert.That(
                 gitData.WorkMetrics,
@@ -1054,7 +1054,7 @@ type WorktreeDiffIntegrationTests() =
             exitCode = 0
 
         Assert.Multiple(fun () ->
-            Assert.That(gitData.HasDiff, Is.True)
+            Assert.That(gitData.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(gitData.IsDirty, Is.False)
             Assert.That(
                 gitData.WorkMetrics,
@@ -1074,7 +1074,7 @@ type WorktreeDiffIntegrationTests() =
         initRepoOnMain repoDir
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        DiffProvisioner.provisionViewer repoDir true |> ignore
+        DiffProvisioner.provisionViewer repoDir GitWorktree.HasContent |> TestUtils.runAsync |> ignore
         gitOk repoDir [ "add"; "--"; generatedDiffViewerGitPath ]
         gitOk repoDir [ "commit"; "-m"; "generated diff viewer" ]
 
@@ -1089,7 +1089,7 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(viewerOnlySummary.Files, Is.Empty)
-            Assert.That(viewerOnlyGitData.HasDiff, Is.False)
+            Assert.That(viewerOnlyGitData.Comparison, Is.EqualTo(GitWorktree.Clean))
             Assert.That(viewerOnlyGitData.IsDirty, Is.False)
             Assert.That(viewerOnlyGitData.WorkMetrics, Is.EqualTo(None)))
 
@@ -1109,9 +1109,50 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(backupSummary.Files |> List.map _.Path, Is.EqualTo([ backupGitPath ]))
-            Assert.That(backupGitData.HasDiff, Is.True)
+            Assert.That(backupGitData.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(backupGitData.IsDirty, Is.False)
             Assert.That(backupGitData.WorkMetrics.IsSome, Is.True))
+
+    [<Test>]
+    member _.``a committed generated viewer survives a clean provisioning pass``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        gitOk repoDir [ "checkout"; "-b"; "feature" ]
+
+        DiffProvisioner.provisionViewer repoDir GitWorktree.HasContent |> TestUtils.runAsync |> ignore
+        gitOk repoDir [ "add"; "--"; generatedDiffViewerGitPath ]
+        gitOk repoDir [ "commit"; "-m"; "generated diff viewer" ]
+
+        let outcome = DiffProvisioner.provisionViewer repoDir GitWorktree.Clean |> TestUtils.runAsync
+
+        let gitData =
+            collectWorktreeGitData repoDir (Some "feature") "origin" "main"
+            |> TestUtils.runAsync
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                File.Exists(Path.Combine(repoDir, ".agents", "canvas", "diff.html")),
+                Is.True,
+                "Provisioning must never delete repository content Git tracks")
+            Assert.That(outcome.IsSome, Is.True, "Skipping a tracked viewer is worth reporting")
+            Assert.That(gitData.IsDirty, Is.False, "Skipping the removal leaves the worktree clean"))
+
+    [<Test>]
+    member _.``GitMetrics_missing_base keeps committed work out of the clean verdict``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        writeText repoDir "committed.txt" "work"
+        gitOk repoDir [ "add"; "--"; "committed.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "committed work" ]
+
+        let gitData =
+            collectWorktreeGitData repoDir (Some "main") "origin" "missing"
+            |> TestUtils.runAsync
+
+        Assert.That(
+            gitData.Comparison,
+            Is.EqualTo(GitWorktree.Undetermined),
+            "An unresolvable base hides committed work, so the worktree is not known to be clean")
 
     [<Test>]
     member _.``GitMetrics_missing_base keeps local changes without committed metrics``() =
@@ -1126,7 +1167,7 @@ type WorktreeDiffIntegrationTests() =
         Assert.Multiple(fun () ->
             Assert.That(gitData.LastCommitMessage, Is.EqualTo("init"))
             Assert.That(gitData.IsDirty, Is.False)
-            Assert.That(gitData.HasDiff, Is.True)
+            Assert.That(gitData.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(gitData.WorkMetrics, Is.EqualTo(None))
             Assert.That(gitData.MainBehindCount, Is.Zero))
 
@@ -1147,7 +1188,7 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(gitData.MainBehindCount, Is.EqualTo(1))
-            Assert.That(gitData.HasDiff, Is.False)
+            Assert.That(gitData.Comparison, Is.EqualTo(GitWorktree.Clean))
             Assert.That(gitData.WorkMetrics, Is.EqualTo(None)))
 
     [<Test>]
@@ -1161,7 +1202,7 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "commit"; "-m"; "track stale diff viewer" ]
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        DiffProvisioner.provisionViewer repoDir true |> ignore
+        DiffProvisioner.provisionViewer repoDir GitWorktree.HasContent |> TestUtils.runAsync |> ignore
 
         let directTracked =
             gitText repoDir [ "diff"; "--name-only"; "main"; "--" ]

@@ -16,6 +16,14 @@ type CommitInfo =
       Message: string
       Time: DateTimeOffset }
 
+/// What a refresh could establish about a worktree's content relative to its base.
+/// `Undetermined` is not `Clean`: the base ref could not be resolved, so committed work is invisible
+/// to this refresh. Callers that act destructively on emptiness must act only on `Clean`.
+type ComparisonContent =
+    | HasContent
+    | Clean
+    | Undetermined
+
 type GitData =
     { Path: string
       Branch: string
@@ -25,7 +33,7 @@ type GitData =
       MainBehindCount: int
       BaseRevision: string option
       IsDirty: bool
-      HasDiff: bool
+      Comparison: ComparisonContent
       WorkMetrics: Shared.WorkMetrics option }
 
 /// Result of a successful worktree creation: the path of the new worktree (so
@@ -176,8 +184,36 @@ let parseDirtyStatus (output: string option) =
     output
     |> Option.exists (String.IsNullOrWhiteSpace >> not)
 
+/// Repo-relative path of the viewer Treemon generates into every worktree with comparison content.
+let generatedDiffViewerPath = ".agents/canvas/diff.html"
+
 let private generatedDiffViewerExclusionPathspec =
-    ":(top,exclude).agents/canvas/diff.html"
+    $":(top,exclude){generatedDiffViewerPath}"
+
+/// Whether Git tracks the generated diff viewer. Provisioning must never delete repository content,
+/// so a Git process that fails to run at all counts as tracked; a non-zero exit is Git's own answer
+/// that the path is untracked (which includes "not a repository").
+let tracksGeneratedDiffViewer (worktreePath: string) =
+    async {
+        let! result =
+            ProcessRunner.runArgumentList
+                1024
+                1024
+                "Git"
+                "git"
+                [ "-C"
+                  worktreePath
+                  "ls-files"
+                  "--error-unmatch"
+                  "--"
+                  generatedDiffViewerPath ]
+                None
+
+        return
+            match result with
+            | Ok output -> output.ExitCode = 0
+            | Error _ -> true
+    }
 
 let isDirty (worktreePath: string) =
     async {
@@ -472,7 +508,7 @@ let private collectWorktreeGitDataForBaseRef
               MainBehindCount = mainBehind
               BaseRevision = baseRevision
               IsDirty = common.IsDirty
-              HasDiff = hasCommittedDiff || common.HasLocalDiff
+              Comparison = if hasCommittedDiff || common.HasLocalDiff then HasContent else Clean
               WorkMetrics = createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved }
     }
 
@@ -501,7 +537,7 @@ let collectWorktreeGitData
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = common.IsDirty
-                  HasDiff = common.HasLocalDiff
+                  Comparison = if common.HasLocalDiff then HasContent else Undetermined
                   WorkMetrics = None }
         | Ok baseRef ->
             return!

@@ -88,7 +88,9 @@ type RefreshGitTaskTests() =
         async {
             let repoDir = Path.Combine(tempDir, "repo")
             initRepoOnMain repoDir
-            Server.DiffProvisioner.provisionViewer repoDir true |> ignore
+            Server.DiffProvisioner.provisionViewer repoDir HasContent
+            |> Async.RunSynchronously
+            |> ignore
 
             let agent = createAgent ()
             let worktree = { Path = repoDir; Head = "abc123"; Branch = Some "main" }
@@ -329,7 +331,7 @@ type StateAgentTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
-                  HasDiff = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/main", gitData))
@@ -398,7 +400,7 @@ type StateAgentTests() =
               MainBehindCount = 0
               BaseRevision = None
               IsDirty = false
-              HasDiff = true
+              Comparison = HasContent
               WorkMetrics = None }
 
         let repo =
@@ -451,7 +453,7 @@ type StateAgentTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
-                  HasDiff = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/feature", gitData))
@@ -547,7 +549,7 @@ type StateAgentTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
-                  HasDiff = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/unknown", gitData))
@@ -621,7 +623,7 @@ type StateAgentTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
-                  HasDiff = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, oldPath, gitData))
