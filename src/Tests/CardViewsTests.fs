@@ -308,6 +308,21 @@ let private cardByBranch (page: IPage) branch =
         ".wt-card",
         PageLocatorOptions(Has = page.Locator(".branch-name", PageLocatorOptions(HasText = branch))))
 
+/// Click a card and wait until it is actually marked focused. Focus is applied by an Elmish update
+/// and a re-render, so asserting on the class straight after the click races the render — reliably
+/// on a loaded CI machine, intermittently everywhere else.
+let private focusCardAndWait (page: IPage) branch =
+    task {
+        do! (cardByBranch page branch).ClickAsync()
+
+        let focused =
+            page.Locator(
+                ".wt-card.focused",
+                PageLocatorOptions(Has = page.Locator(".branch-name", PageLocatorOptions(HasText = branch))))
+
+        do! focused.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+    }
+
 [<TestFixture>]
 [<Category("E2E")>]
 type WorktreeDiffActionTests() =
@@ -333,7 +348,7 @@ type WorktreeDiffActionTests() =
             let focusedCard = cardByBranch this.Page "feature-active"
             let firstTarget = cardByBranch this.Page "feature-recent"
             let secondTarget = cardByBranch this.Page "feature-stale"
-            do! focusedCard.ClickAsync()
+            do! focusCardAndWait this.Page "feature-active"
 
             let! closedCount = this.Page.Locator(".canvas-pane.open").CountAsync()
             Assert.That(closedCount, Is.EqualTo(0), "Canvas pane should start closed")
@@ -374,7 +389,7 @@ type WorktreeDiffActionTests() =
 
             let focusedCard = cardByBranch this.Page "feature-active"
             let targetCard = cardByBranch this.Page "feature-stale"
-            do! focusedCard.ClickAsync()
+            do! focusCardAndWait this.Page "feature-active"
 
             let diffButton = targetCard.Locator(".diff-action-btn")
             do! diffButton.FocusAsync()
