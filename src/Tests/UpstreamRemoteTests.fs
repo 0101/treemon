@@ -497,6 +497,7 @@ type SchedulerUpstreamTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
+                  HasDiff = false
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/main", gitData))

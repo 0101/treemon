@@ -252,11 +252,25 @@ type CollectWorktreeGitDataTests() =
             gitAssert repoDir "merge --no-ff side -m merge"
             let mergeHead = gitOut repoDir "rev-parse HEAD"
 
-            let data = collectWorktreeGitData repoDir (Some "main") "main" |> runAsync
+            let data = collectWorktreeGitData repoDir (Some "main") "origin" "main" |> runAsync
 
             Assert.That(data.HeadCommit, Is.EqualTo(mergeHead))
             Assert.That(data.HeadCommit, Is.Not.EqualTo(nonMergeHead)))
 
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ParseDirtyStatusTests() =
+
+    [<TestCase(null, false)>]
+    [<TestCase("", false)>]
+    [<TestCase("   ", false)>]
+    [<TestCase(" M tracked.txt", true)>]
+    [<TestCase("?? untracked.txt", true)>]
+    member _.``Porcelain status detects any returned change``(output: string, expected: bool) =
+        let result = output |> Option.ofObj |> parseDirtyStatus
+        Assert.That(result, Is.EqualTo(expected))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -266,47 +280,52 @@ type ParseDiffStatsTests() =
     [<Test>]
     member _.``Insertions and deletions both present``() =
         let result = parseDiffStats (Some " 5 files changed, 120 insertions(+), 45 deletions(-)")
-        Assert.That(result, Is.EqualTo((120, 45)))
+        Assert.That(result, Is.EqualTo((true, 120, 45)))
 
     [<Test>]
     member _.``Insertions only``() =
         let result = parseDiffStats (Some " 3 files changed, 80 insertions(+)")
-        Assert.That(result, Is.EqualTo((80, 0)))
+        Assert.That(result, Is.EqualTo((true, 80, 0)))
 
     [<Test>]
     member _.``Deletions only``() =
         let result = parseDiffStats (Some " 2 files changed, 30 deletions(-)")
-        Assert.That(result, Is.EqualTo((0, 30)))
+        Assert.That(result, Is.EqualTo((true, 0, 30)))
 
     [<Test>]
-    member _.``None input returns zero pair``() =
+    member _.``None input reports no committed diff``() =
         let result = parseDiffStats None
-        Assert.That(result, Is.EqualTo((0, 0)))
+        Assert.That(result, Is.EqualTo((false, 0, 0)))
 
     [<Test>]
-    member _.``Empty string returns zero pair``() =
+    member _.``Empty string reports no committed diff``() =
         let result = parseDiffStats (Some "")
-        Assert.That(result, Is.EqualTo((0, 0)))
+        Assert.That(result, Is.EqualTo((false, 0, 0)))
 
     [<Test>]
-    member _.``Whitespace-only string returns zero pair``() =
+    member _.``Whitespace-only string reports no committed diff``() =
         let result = parseDiffStats (Some "   ")
-        Assert.That(result, Is.EqualTo((0, 0)))
+        Assert.That(result, Is.EqualTo((false, 0, 0)))
 
     [<Test>]
     member _.``Single insertion singular form``() =
         let result = parseDiffStats (Some " 1 file changed, 1 insertion(+)")
-        Assert.That(result, Is.EqualTo((1, 0)))
+        Assert.That(result, Is.EqualTo((true, 1, 0)))
 
     [<Test>]
     member _.``Single deletion singular form``() =
         let result = parseDiffStats (Some " 1 file changed, 1 deletion(-)")
-        Assert.That(result, Is.EqualTo((0, 1)))
+        Assert.That(result, Is.EqualTo((true, 0, 1)))
 
     [<Test>]
     member _.``Large numbers parsed correctly``() =
         let result = parseDiffStats (Some " 50 files changed, 12345 insertions(+), 6789 deletions(-)")
-        Assert.That(result, Is.EqualTo((12345, 6789)))
+        Assert.That(result, Is.EqualTo((true, 12345, 6789)))
+
+    [<Test>]
+    member _.``Commits with no net base diff produce no work metrics``() =
+        let result = createWorkMetrics false 3 0 0
+        Assert.That(result.IsNone, Is.True)
 
 // classifyUpstream turns a `git rev-parse --abbrev-ref @{u}` result into the three cases the
 // merged-PR prune logic needs (see worktree-monitor.md, Merged-PR Persistence): a
@@ -319,7 +338,7 @@ type ClassifyUpstreamTests() =
 
     [<Test>]
     member _.``a clean read yields Upstream with the full tracking-ref name``() =
-        // The remote prefix is stripped later in collectWorktreeGitData, not here.
+        // The remote prefix is stripped by getUpstreamBranch, not by this classification step.
         Assert.That(classifyUpstream (Ok "origin/main"), Is.EqualTo(Upstream "origin/main"))
 
     [<Test>]
@@ -409,6 +428,7 @@ type PrBranchNameTests() =
           MainBehindCount = 0
           BaseRevision = None
           IsDirty = false
+          HasDiff = false
           WorkMetrics = None }
 
     [<Test>]
@@ -439,7 +459,7 @@ type DeletedUpstreamTests() =
             gitAssert repoDir "fetch --prune origin"
 
             let gitData =
-                collectWorktreeGitData repoDir (Some "local-name") "origin/main"
+                collectWorktreeGitData repoDir (Some "local-name") "origin" "main"
                 |> runAsync
 
             Assert.That(gitData.Upstream, Is.EqualTo(Upstream "provider-name"))

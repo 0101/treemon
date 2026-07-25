@@ -47,14 +47,14 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Per-Worktree Card
 
-- Branch name header with work metrics (commit grid + diff stats)
+- Branch name header with work metrics (commit grid + diff stats) only when committed history has a net diff from the base
 - Coding tool status dots — one per live session (Working / WaitingForUser / Idle), each a context-usage donut (arc = remaining context) when that session has reported usage, else a plain dot; the last known gauge survives server restart for sessions restored from the durable live window. A worktree with no live session shows the single grey NoSession dot. Tooltip shows the status.
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
-- "N behind {base}" with an always-visible two-arrow auto-sync toggle; dirty indicator
+- "N behind {base}" with an always-visible two-arrow auto-sync toggle and tracked staged/unstaged dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
 - PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
-- Event log (up to the last 2 events), terminal/delete actions
+- Event log (up to the last 2 events), diff/auto-sync/terminal/delete actions
 - Green left border on cards with active terminal sessions
 - Contextual action buttons: fix PR comments, fix failed builds, and create PRs
 
@@ -200,7 +200,7 @@ For fork workflows (push to fork, PRs in upstream repo), treemon auto-detects an
 
 - **Resolution order**: `.treemon.json` `"upstreamRemote"` field → auto-detect `upstream` remote → fall back to `origin`
 - **Affects**: PR fetching (remote URL), base branch comparisons (`{remote}/{baseBranch}`), fetch cycle, auto-sync prompt target
-- **Stored** per-repo in `PerRepoState.UpstreamRemote`, resolved during worktree list refresh
+- **Stored** per-repo in `PerRepoState.UpstreamRemote`, resolved during worktree list refresh. Generated diff summaries consume this stored value for every root or linked worktree in the repo rather than re-reading config from the selected worktree path.
 - **Config example**: `{ "upstreamRemote": "upstream" }` in `.treemon.json` at repo root
 
 ### Base Branch Resolution
@@ -208,8 +208,8 @@ For fork workflows (push to fork, PRs in upstream repo), treemon auto-detects an
 Each repo can configure which branch is considered the "base" for ahead/behind counts, diff stats, fetch, fast-forward, and auto-sync prompts:
 
 - **Resolution**: `.treemon.json` `"baseBranch"` field → default `"main"`
-- **Affects**: `git rev-list` behind/commit counts, `git diff --shortstat`, `git fetch`, fast-forward, auto-sync prompt target, branch sort priority
-- **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh
+- **Affects**: committed `git rev-list`/`git diff --shortstat` metrics use the remote-tracking ref when available and otherwise the local branch. Behind count and auto-sync target use only the remote-tracking ref; a local fallback or missing base reports zero behind. Missing-base refreshes retain last-commit, upstream, tracked-dirty, and local/untracked diff data while omitting committed metrics.
+- **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh. The dashboard and generated diff viewer therefore expose the same base branch, including for linked worktrees without their own `.treemon.json`.
 - **Config example**: `{ "baseBranch": "dev" }` in `.treemon.json` at repo root
 
 ### CommentSummary

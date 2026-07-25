@@ -80,9 +80,15 @@ module DashboardState =
           AutoSyncTriggeredRevisions = Map.empty
           AutoSyncLaunchesInFlight = Set.empty }
 
+type RepositoryDiscovery =
+    { Worktrees: GitWorktree.WorktreeInfo list option
+      UpstreamRemote: string
+      BaseBranch: string }
+
 type StateMsg =
     | InitializeRepo of repoId: RepoId
     | UpdateWorktreeList of repoId: RepoId * GitWorktree.WorktreeInfo list
+    | UpdateRepositoryDiscovery of repoId: RepoId * RepositoryDiscovery
     | UpdateGit of repoId: RepoId * path: string * GitWorktree.GitData
     | UpdateBeads of repoId: RepoId * path: string * BeadsSummary * BeadsPlanning
     | UpdateCanvasDoc of repoId: RepoId * path: string * CanvasDoc list
@@ -193,6 +199,47 @@ let internal codingToolPushEvent (stored: SessionActivityStore.StoredStatus) : C
       Status = Some StepStatus.Succeeded
       Duration = None }
 
+let private updateWorktreeList
+    (repoId: RepoId)
+    (worktrees: GitWorktree.WorktreeInfo list)
+    (state: DashboardState)
+    =
+    let repo = getRepo repoId state
+    let newPaths = worktrees |> List.map _.Path |> Set.ofList
+    let removedPaths = Set.difference repo.KnownPaths newPaths
+
+    let cleaned =
+        removedPaths
+        |> Set.fold (fun r path -> removeWorktreeData path r) repo
+
+    let updated =
+        { cleaned with
+            WorktreeList = worktrees
+            KnownPaths = newPaths
+            IsReady = true }
+
+    // Prune the GLOBAL time-since-idle stamps for the removed worktrees. CodingToolSinceByWorktree
+    // hangs off DashboardState (not PerRepoState), so it cannot be pruned inside removeWorktreeData;
+    // without this a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince
+    // freezes existing keys), overstating the chip on reuse (F10/C-13).
+    let prunedSince =
+        removedPaths
+        |> Set.fold (fun m path -> Map.remove path m) state.CodingToolSinceByWorktree
+
+    let prunedAutoSync =
+        removedPaths
+        |> Set.fold (fun revisions path -> Map.remove path revisions) state.AutoSyncTriggeredRevisions
+
+    let prunedLaunches =
+        removedPaths
+        |> Set.fold (fun launches path -> Set.remove path launches) state.AutoSyncLaunchesInFlight
+
+    updateRepo repoId updated
+        { state with
+            CodingToolSinceByWorktree = prunedSince
+            AutoSyncTriggeredRevisions = prunedAutoSync
+            AutoSyncLaunchesInFlight = prunedLaunches }
+
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
     | InitializeRepo repoId ->
@@ -202,41 +249,22 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             updateRepo repoId PerRepoState.empty state
 
     | UpdateWorktreeList(repoId, worktrees) ->
-        let repo = getRepo repoId state
-        let newPaths = worktrees |> List.map _.Path |> Set.ofList
-        let removedPaths = Set.difference repo.KnownPaths newPaths
+        updateWorktreeList repoId worktrees state
 
-        let cleaned =
-            removedPaths
-            |> Set.fold (fun r path -> removeWorktreeData path r) repo
+    | UpdateRepositoryDiscovery(repoId, discovery) ->
+        let discoveredState =
+            discovery.Worktrees
+            |> Option.map (fun worktrees -> updateWorktreeList repoId worktrees state)
+            |> Option.defaultValue state
 
-        let updated =
-            { cleaned with
-                WorktreeList = worktrees
-                KnownPaths = newPaths
-                IsReady = true }
+        let repo = getRepo repoId discoveredState
 
-        // Prune the GLOBAL time-since-idle stamps for the removed worktrees. CodingToolSinceByWorktree
-        // hangs off DashboardState (not PerRepoState), so it cannot be pruned inside removeWorktreeData;
-        // without this a removed-then-recreated path inherits a stale FROZEN idle stamp (stampIdleSince
-        // freezes existing keys), overstating the chip on reuse (F10/C-13).
-        let prunedSince =
-            removedPaths
-            |> Set.fold (fun m path -> Map.remove path m) state.CodingToolSinceByWorktree
-
-        let prunedAutoSync =
-            removedPaths
-            |> Set.fold (fun m path -> Map.remove path m) state.AutoSyncTriggeredRevisions
-
-        let prunedLaunches =
-            removedPaths
-            |> Set.fold (fun launches path -> Set.remove path launches) state.AutoSyncLaunchesInFlight
-
-        updateRepo repoId updated
-            { state with
-                CodingToolSinceByWorktree = prunedSince
-                AutoSyncTriggeredRevisions = prunedAutoSync
-                AutoSyncLaunchesInFlight = prunedLaunches }
+        updateRepo
+            repoId
+            { repo with
+                UpstreamRemote = discovery.UpstreamRemote
+                BaseBranch = discovery.BaseBranch }
+            discoveredState
 
     | UpdateGit(repoId, path, gitData) ->
         let repo = getRepo repoId state
@@ -633,11 +661,18 @@ let buildPhase2Tasks (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
 let buildPhase3Tasks (repos: Map<RepoId, PerRepoState>) =
     repos |> Map.toList |> List.map (fun (repoId, _) -> RefreshPr repoId)
 
-/// Maps a worktree-discovery result to the state update to post. `None` means the
-/// git call failed, so no update is produced and the repo's last-known-good worktree
-/// list is retained rather than blanked by a transient git hiccup.
-let worktreeListUpdate (repoId: RepoId) (discovered: GitWorktree.WorktreeInfo list option) : StateMsg option =
-    discovered |> Option.map (fun worktrees -> UpdateWorktreeList(repoId, worktrees))
+let repositoryDiscoveryUpdate
+    (repoId: RepoId)
+    (worktrees: GitWorktree.WorktreeInfo list option)
+    upstreamRemote
+    baseBranch
+    =
+    UpdateRepositoryDiscovery(
+        repoId,
+        { Worktrees = worktrees
+          UpstreamRemote = upstreamRemote
+          BaseBranch = baseBranch }
+    )
 
 let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
@@ -645,7 +680,7 @@ let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, Dat
     |> Option.map (fun t -> t + intervalOf activity task)
     |> Option.defaultValue DateTimeOffset.MinValue
 
-let private executeTask
+let internal executeTask
     (agent: MailboxProcessor<StateMsg>)
     (services: SchedulerServices)
     (rootPaths: Map<RepoId, string>)
@@ -657,10 +692,8 @@ let private executeTask
             let root = rootPaths |> Map.find repoId
             let! worktrees = GitWorktree.listWorktrees root
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
-            worktreeListUpdate repoId worktrees |> Option.iter agent.Post
-            agent.Post(UpdateUpstreamRemote(repoId, upstreamRemote))
             let baseBranch = TreemonConfig.readBaseBranch root
-            agent.Post(UpdateBaseBranch(repoId, baseBranch))
+            agent.Post(repositoryDiscoveryUpdate repoId worktrees upstreamRemote baseBranch)
             let! state = agent.PostAndAsyncReply(GetState)
             let alreadyDetected = state.Repos |> Map.tryFind repoId |> Option.bind _.Provider |> Option.isSome
             if not alreadyDetected then
@@ -671,14 +704,19 @@ let private executeTask
         | RefreshGit(repoId, path) ->
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-            let mainRef = GitWorktree.mainRef repo.UpstreamRemote repo.BaseBranch
 
             let branch =
                 repo.WorktreeList
                 |> List.tryFind (fun wt -> wt.Path = path)
                 |> Option.bind _.Branch
 
-            let! gitData = GitWorktree.collectWorktreeGitData path branch mainRef
+            let! gitData =
+                GitWorktree.collectWorktreeGitData
+                    path
+                    branch
+                    repo.UpstreamRemote
+                    repo.BaseBranch
+
             agent.Post(UpdateGit(repoId, path, gitData))
             let repoRoot = rootPaths |> Map.find repoId
             AutoSync.triggerInBackground
@@ -687,6 +725,9 @@ let private executeTask
                 repo.UpstreamRemote
                 repo.BaseBranch
                 gitData
+
+            DiffProvisioner.provisionViewer path
+            |> Option.iter (Log.log "DiffProvisioner")
 
             let! canvasDocs = CanvasScanner.scan path
             let branch = Path.GetFileName(path)
@@ -920,12 +961,13 @@ module CanvasWatchers =
         | [ single ] -> single.SessionId
         | _ -> None
 
-    /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. A doc is
+    /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. An AgentDoc is
     /// attributed to the worktree's single registered session only when it is new-or-changed
     /// (relative to the watcher's previous baseline) *and* has no declared owner. Ownership is
-    /// surfaced as `CanvasDoc.OwnerSessionId` by the scan, so a doc that already has an owner —
+    /// surfaced as `CanvasDoc.OwnerSessionId` by the scan, so an AgentDoc that already has an owner —
     /// declared via the endpoint or previously attributed — is skipped: the scanner never
-    /// overwrites it. With zero or many registered sessions, nothing is attributed.
+    /// overwrites it. SystemViews never participate. With zero or many registered sessions,
+    /// nothing is attributed.
     let attributeChangedDocs
         (sessions: SessionBridge.SessionEntry list)
         (worktreePath: string)
@@ -943,7 +985,9 @@ module CanvasWatchers =
                     | None -> true
                     | Some prevHash -> prevHash <> doc.ContentHash
                 if isNewOrChanged && Option.isNone doc.OwnerSessionId then
-                    CanvasDocOwnership.attribute worktreePath doc.Filename sessionId)
+                    match doc.Kind with
+                    | AgentDoc -> CanvasDocOwnership.attribute worktreePath doc.Filename sessionId
+                    | SystemView -> ())
 
     let reconcile
         (agent: MailboxProcessor<StateMsg>)
@@ -956,6 +1000,10 @@ module CanvasWatchers =
                 |> Map.toSeq
                 |> Seq.collect (fun (_, repo) -> repo.KnownPaths)
                 |> Set.ofSeq
+
+            if repos |> Map.forall (fun _ repo -> repo.IsReady) then
+                do! CanvasDocOwnership.prune allPaths
+                do! WorktreeDiffApi.prune allPaths
 
             let removed =
                 current

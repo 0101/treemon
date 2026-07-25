@@ -344,5 +344,5 @@ Recording both here so each is a documented decision, not a blind spot:
 ## Related Specs
 
 - `docs/spec/canvas-pane.md` — the canvas pane this Share button lives in (tab bar, AgentDoc vs SystemView, archive precedent)
-- `docs/spec/canvas-doc-ownership.md` — per-doc ownership/routing (the Share button is AgentDoc-scoped like liveness/archive)
+- `docs/spec/canvas-interaction-routing.md` — per-doc ownership/routing (the Share button is AgentDoc-scoped like liveness/archive)
 - `.agents/canvas-sharing-investigation.md` — the investigation this spec derives from (options analysis, manual Azure prototype)

@@ -198,13 +198,15 @@ let update msg model =
                 |> filterDeletedPaths stillPending
             let currentCanvasHashes = canvasHashesByScopedKey repos
             let currentCanvasModified = canvasModifiedByScopedKey repos
+            let existingCanvasEvents =
+                retainAgentDocEvents currentCanvasHashes model.Canvas.CanvasEvents
             let canvasEvents =
-                if isFirstLoad then model.Canvas.CanvasEvents
+                if isFirstLoad then existingCanvasEvents
                 else
                     let newEvents =
                         detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
                         |> gateCanvasEventsByFreshness now currentCanvasModified
-                    mergeCanvasEvents model.Canvas.CanvasEvents newEvents
+                    mergeCanvasEvents existingCanvasEvents newEvents
                     |> expireCanvasEvents now
             let changedDocs =
                 if isFirstLoad then []
@@ -712,6 +714,8 @@ let update msg model =
 
     | OpenCanvasDoc (scopedKey, filename) -> CanvasUpdate.openCanvasDoc scopedKey filename model
 
+    | OpenWorktreeDiff scopedKey -> CanvasUpdate.openWorktreeDiff scopedKey model
+
     | ArchiveCanvasDoc (scopedKey, filename) -> CanvasUpdate.archiveCanvasDoc scopedKey filename model
 
     | ArchiveCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.archiveCanvasDocResult scopedKey filename result model
@@ -728,7 +732,7 @@ let update msg model =
 
     | CanvasMessageReceived payload -> CanvasUpdate.canvasMessageReceived payload model
 
-    | CanvasSendResult (result, scopedKey) -> CanvasUpdate.canvasSendResult result scopedKey model
+    | CanvasSendResult (result, scopedKey, filename) -> CanvasUpdate.canvasSendResult result scopedKey filename model
 
     | DismissCanvasMessageError -> CanvasUpdate.dismissCanvasMessageError model
 
@@ -1021,6 +1025,7 @@ let view model dispatch =
           ToggleAutoSync = fun wt -> dispatch (ToggleAutoSync wt.Path)
           LaunchAction = fun path action -> dispatch (LaunchAction (path, action))
           OpenCanvasDoc = fun key filename -> dispatch (OpenCanvasDoc (key, filename))
+          OpenDiff = OpenWorktreeDiff >> dispatch
           DispatchArchive = ArchiveMsg >> dispatch }
 
     let dashboardEl =

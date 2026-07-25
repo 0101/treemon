@@ -108,6 +108,7 @@ type Msg =
     | SelectCanvasDoc of scopedKey: string * filename: string
     | FocusOverviewCard of scopedKey: string
     | OpenCanvasDoc of scopedKey: string * filename: string
+    | OpenWorktreeDiff of scopedKey: string
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     // Share the focused AgentDoc: publish it (server mints a per-doc read-only SAS URL + returns the
@@ -124,7 +125,7 @@ type Msg =
     | DismissShareNotice
     | NavigateCanvasDoc of filename: string
     | CanvasMessageReceived of payload: string
-    | CanvasSendResult of CanvasMessageResult * scopedKey: string
+    | CanvasSendResult of CanvasMessageResult * scopedKey: string * filename: string
     | DismissCanvasMessageError
     // Doc-side JS error forwarded from an AgentDoc iframe (window.onerror / unhandledrejection via
     // the injected errorOverlayScript). `scopedKey`+`filename` are the emitting worktree + doc

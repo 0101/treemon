@@ -27,6 +27,7 @@ type CanvasAttributeRequest =
 /// unmonitored worktree records nothing, so a later getOwner stays None.
 type AttributeOutcome =
     | Attributed                  // ownership recorded + persisted
+    | NotAttributable             // a SystemView has no author — routing is resolved, not stored
     | UnknownWorktree             // well-formed but unmonitored worktree — nothing recorded
     | Invalid of reason: string   // missing/blank field — nothing recorded
 
@@ -42,19 +43,38 @@ let private isSafeSessionIdChar (c: char) =
 let internal isValidSessionId (sessionId: string) =
     not (System.String.IsNullOrWhiteSpace sessionId) && sessionId |> Seq.forall isSafeSessionIdChar
 
-let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
-    let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
-    return
-        state.Repos
-        |> Map.values
-        |> Seq.collect _.KnownPaths
-        |> Set.ofSeq
-}
+let internal tryFindDiffComparisonContext
+    (state: RefreshScheduler.DashboardState)
+    (selectedWorktreePath: string)
+    =
+    let normalizedPath = PathUtils.normalizePath selectedWorktreePath
 
-let private isKnownWorktree agent path = async {
-    let! paths = allKnownPaths agent
-    return paths |> Set.contains path
-}
+    state.Repos
+    |> Map.values
+    |> Seq.tryPick (fun repo ->
+        if repo.KnownPaths |> Set.contains normalizedPath then
+            Some
+                ({ WorktreePath = normalizedPath
+                   UpstreamRemote = repo.UpstreamRemote
+                   BaseBranch = repo.BaseBranch }
+                 : WorktreeDiff.DiffComparisonContext)
+        else
+            None)
+
+let private getDiffComparisonContext
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    path
+    =
+    async {
+        let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
+        return tryFindDiffComparisonContext state path
+    }
+
+let private isKnownWorktree agent path =
+    async {
+        let! context = getDiffComparisonContext agent path
+        return context |> Option.isSome
+    }
 
 /// injectUrl is stored and later used as an HTTP POST target by SessionBridge (send /
 /// drainQueue), so a non-local value would let a registrant make the server POST to arbitrary
@@ -64,10 +84,7 @@ let isLoopbackInjectUrl (injectUrl: string) : bool =
     match System.Uri.TryCreate(injectUrl, System.UriKind.Absolute) with
     | true, uri ->
         (uri.Scheme = System.Uri.UriSchemeHttp || uri.Scheme = System.Uri.UriSchemeHttps)
-        && (System.String.Equals(uri.Host, "localhost", System.StringComparison.OrdinalIgnoreCase)
-            || (match System.Net.IPAddress.TryParse uri.Host with
-                | true, ip -> System.Net.IPAddress.IsLoopback ip
-                | false, _ -> false))
+        && HttpSecurity.isLoopbackHost uri.Host
     | false, _ -> false
 
 let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) : HttpHandler =
@@ -98,17 +115,16 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
                     // mirror attributeOwnership's IsNullOrWhiteSpace treatment of sessionId.
                     let sessionId =
                         if System.String.IsNullOrWhiteSpace body.sessionId then None else Some body.sessionId
-                    SessionBridge.registerSession worktreePath body.injectUrl sessionId
+                    CanvasBridge.registerSession worktreePath body.injectUrl sessionId
                     return! Successful.ok (json {| registered = true; monitored = true |}) next ctx
         with ex ->
             Log.log "Canvas" $"Registration failed: malformed JSON — {ex.Message}"
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
     }
 
-/// Validate a declared ownership and, only for a known (monitored) worktree, record it via
-/// CanvasDocOwnership.attribute. Returns the decision so canvasAttributeHandler can map it to an
-/// HTTP response and tests can assert it without HTTP plumbing. A missing field or an unmonitored
-/// worktree records nothing — the caller's getOwner stays None.
+/// Validate a declared author and, only for a known (monitored) worktree, record it. Ownership is an
+/// AgentDoc concept: a SystemView has no author and its routing is resolved per interaction, so a
+/// claim for one is reported as `NotAttributable` rather than stored.
 let attributeOwnership
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (worktreePath: string)
@@ -124,6 +140,9 @@ let attributeOwnership
             return Invalid "missing sessionId"
         elif not (isValidSessionId sessionId) then
             return Invalid "invalid sessionId format"
+        elif CanvasDocKinds.classify filename = SystemView then
+            // Nothing reads a stored SystemView target, so recording one would silently mislead.
+            return NotAttributable
         else
             let worktreePath = worktreePath |> Server.PathUtils.normalizePath
             let! isKnown = isKnownWorktree agent worktreePath
@@ -131,13 +150,13 @@ let attributeOwnership
             if not isKnown then
                 return UnknownWorktree
             else
-                CanvasDocOwnership.attribute worktreePath filename sessionId
+                do! CanvasDocOwnership.assign worktreePath filename sessionId
                 return Attributed
     }
 
 /// POST /api/canvas/attribute {worktreePath, filename, sessionId}: the authoring session's
-/// extension declares which session owns a canvas doc. Validates the body and known-worktree
-/// guard exactly like canvasRegisterHandler, then records ownership for a monitored worktree.
+/// extension declares which session owns an AgentDoc or handles interactions for a SystemView.
+/// Repeating this call explicitly reassigns the target.
 let canvasAttributeHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) : HttpHandler =
     fun next ctx -> task {
         try
@@ -151,6 +170,9 @@ let canvasAttributeHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) 
             | UnknownWorktree ->
                 Log.log "Canvas" $"Attribution: unmonitored worktree — {body.worktreePath} (nothing recorded)"
                 return! Successful.ok (json {| attributed = false; monitored = false |}) next ctx
+            | NotAttributable ->
+                Log.log "Canvas" $"Attribution skipped: {body.filename} is a SystemView (routing is resolved, not stored)"
+                return! Successful.ok (json {| attributed = false; monitored = true |}) next ctx
             | Attributed ->
                 Log.log "Canvas" $"Attribution recorded: {body.filename} -> {body.sessionId} for {body.worktreePath}"
                 return! Successful.ok (json {| attributed = true; monitored = true |}) next ctx
@@ -322,18 +344,23 @@ let private errorOverlayScript (filename: string) =
     |> String.concat ""
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
-/// Both kinds get baseStyle + linkInterceptor + the Escape focus-reclaim bridge. AgentDocs additionally
-/// get the message-bridge heartbeat, canvasSend/canvasExpand helpers, the generic selected-text
-/// contextual actions, the JS error overlay, and the idiomorph runtime + morph controller.
+/// Both kinds get baseStyle, link interception, Escape focus reclaim, canvasSend, and the generic
+/// selected-text contextual actions. AgentDocs additionally get the message-bridge heartbeat,
+/// canvasExpand helper, JS error overlay, and the idiomorph runtime + morph controller.
 /// `filename` is embedded into the error overlay so a doc-side error carries its own identity.
-/// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no owner
-/// session: they drive their own refresh and must never morph (a morph would stomp the live,
-/// JS-rendered dashboard back to the empty template shell), nothing routes session→doc messages to
-/// them, and the only message they post back is the shared Escape focus-reclaim bridge — the session
-/// bridge (heartbeat), canvasSend, and morph pieces are all omitted.
+/// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no authored
+/// owner: they drive their own refresh and must never morph (a morph would stomp the live,
+/// JS-rendered dashboard back to the empty template shell). An internal routing target in the
+/// unified store does not change their kind, so the author heartbeat, canvasExpand, error overlay,
+/// and morph pieces remain omitted.
 let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     match kind with
-    | SystemView -> CanvasExport.baseStyle + linkInterceptor + reclaimFocusScript
+    | SystemView ->
+        CanvasExport.baseStyle
+        + linkInterceptor
+        + reclaimFocusScript
+        + CanvasSendScript.script
+        + CanvasSelectionScript.script
     | AgentDoc ->
         CanvasExport.baseStyle
         + linkInterceptor
@@ -347,7 +374,12 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
         + IdiomorphScript.idiomorphJs
         + IdiomorphScript.morphController
 
-let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
+let private handleCanvasRequest
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (diffHandlers: WorktreeDiffApi.Handlers)
+    diffResponseDeadlineMs
+    (ctx: HttpContext)
+    : System.Threading.Tasks.Task = task {
     let catchAll = ctx.Request.RouteValues["path"] :?> string
     let lastSlash = catchAll.LastIndexOf('/')
     if lastSlash < 1 then
@@ -358,10 +390,20 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
         let worktreePathEncoded = catchAll.Substring(0, lastSlash)
         let filename = catchAll.Substring(lastSlash + 1)
         let worktreePath = System.Net.WebUtility.UrlDecode worktreePathEncoded |> Server.PathUtils.normalizePath
+        let diffDeadline =
+            ProcessRunner.createResponseDeadline diffResponseDeadlineMs
 
-        let! isKnown = (isKnownWorktree agent worktreePath) |> Async.StartAsTask
+        let! comparisonContext =
+            getDiffComparisonContext agent worktreePath
+            |> Async.StartAsTask
 
-        if filename = "beads-data" then
+        let isKnown = comparisonContext |> Option.isSome
+
+        if filename = "diff-summary" then
+            do! diffHandlers.Summary diffDeadline comparisonContext ctx
+        elif filename = "diff-file" then
+            do! diffHandlers.File diffDeadline comparisonContext ctx
+        elif filename = "beads-data" then
             if not isKnown then
                 ctx.Response.StatusCode <- 404
                 do! ctx.Response.WriteAsync("Unknown worktree")
@@ -412,19 +454,85 @@ let private handleCanvasRequest (agent: MailboxProcessor<RefreshScheduler.StateM
                 Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
 }
 
+let private handleDiffAsset (ctx: HttpContext) : System.Threading.Tasks.Task = task {
+    match DiffAssets.tryFind ctx.Request.Path.Value with
+    | Some asset ->
+        do! DiffAssets.writeResponse asset ctx
+    | None ->
+        ctx.Response.StatusCode <- 404
+        do! ctx.Response.WriteAsync("Asset not found")
+}
+
+let private requireLoopbackHost
+    (ctx: HttpContext)
+    (next: RequestDelegate)
+    : System.Threading.Tasks.Task = task {
+    if HttpSecurity.isLoopbackHost ctx.Request.Host.Host then
+        do! next.Invoke(ctx)
+    else
+        ctx.Response.StatusCode <- StatusCodes.Status400BadRequest
+        do! ctx.Response.WriteAsync("Invalid Host header")
+        Log.log "Canvas" "Rejected non-loopback Host header"
+}
+
+let internal createHostWithDiffDeadline
+    diffResponseDeadlineMs
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (service: WorktreeDiffApi.Service)
+    newIdentity
+    (canvasPort: int)
+    =
+    let diffHandlers =
+        WorktreeDiffApi.createHandlers service newIdentity
+
+    Microsoft.AspNetCore.Hosting.WebHostBuilder()
+        .UseKestrel(_.Listen(System.Net.IPAddress.Loopback, canvasPort))
+        .ConfigureServices(fun services ->
+            services.AddRouting() |> ignore)
+        .Configure(fun (app: IApplicationBuilder) ->
+            app.Use(fun ctx next -> requireLoopbackHost ctx next) |> ignore
+            app.UseRouting() |> ignore
+            app.UseEndpoints(fun endpoints ->
+                endpoints.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
+                endpoints.MapGet(
+                    "/assets/diff2html/{version}/{filename}",
+                    RequestDelegate(handleDiffAsset)
+                )
+                |> ignore
+                endpoints.MapGet(
+                    "/{**path}",
+                    RequestDelegate(
+                        handleCanvasRequest
+                            agent
+                            diffHandlers
+                            diffResponseDeadlineMs
+                    )
+                )
+                |> ignore)
+            |> ignore)
+        .Build()
+
+let internal createHost
+    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (service: WorktreeDiffApi.Service)
+    newIdentity
+    (canvasPort: int)
+    =
+    createHostWithDiffDeadline
+        ProcessRunner.argumentListResponseDeadlineMs
+        agent
+        service
+        newIdentity
+        canvasPort
+
 let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int) =
     let host =
-        Microsoft.AspNetCore.Hosting.WebHostBuilder()
-            .UseKestrel(fun opts ->
-                opts.Listen(System.Net.IPAddress.Loopback, canvasPort))
-            .ConfigureServices(fun services ->
-                services.AddRouting() |> ignore)
-            .Configure(fun (app: IApplicationBuilder) ->
-                app.UseRouting() |> ignore
-                app.UseEndpoints(fun endpoints ->
-                    endpoints.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
-                    endpoints.MapGet("/{**path}", RequestDelegate(handleCanvasRequest agent)) |> ignore) |> ignore)
-            .Build()
+        createHost
+            agent
+            WorktreeDiffApi.liveService
+            WorktreeDiffApi.newOpaqueIdentity
+            canvasPort
+
     Log.log "Startup" $"Canvas doc server starting on http://127.0.0.1:{canvasPort}"
     host.Start()
     host

@@ -201,6 +201,71 @@ type CanvasDoc =
       OwnerSessionId: string option
       Kind: CanvasDocKind }
 
+[<RequireQualifiedAccess>]
+type DiffChangeKind =
+    | Added
+    | Modified
+    | Deleted
+    | Renamed
+    | Untracked
+
+type DiffFileSummary =
+    { Identity: string
+      DisplayPath: string
+      OldDisplayPath: string option
+      LinesAdded: int option
+      LinesRemoved: int option
+      Change: DiffChangeKind }
+
+type DiffSummaryDetails =
+    { BaseRef: string
+      FileCount: int
+      Files: DiffFileSummary list }
+
+[<RequireQualifiedAccess>]
+type DiffLayerCountResult =
+    | Available of fileCount: int
+    | BaseError
+    | TimedOut
+    | GitError
+
+type DiffLayerCounts =
+    { AlreadyCommitted: DiffLayerCountResult
+      LocalChanges: DiffLayerCountResult
+      Untracked: DiffLayerCountResult }
+
+[<RequireQualifiedAccess>]
+type DiffSummaryResult =
+    | Ready of DiffSummaryDetails
+    | Clean of baseRef: string
+    | FilteredEmpty
+    | Stale
+    | BaseError
+    | TimedOut
+    | GitError
+    | TooManyFiles of minimumFileCount: int
+
+[<RequireQualifiedAccess>]
+type DiffReplacementKind =
+    | Binary
+    | Symlink
+
+[<RequireQualifiedAccess>]
+type DiffFileResult =
+    | Text of file: DiffFileSummary * patch: string
+    | Deleted of file: DiffFileSummary * patch: string
+    | Replacement of
+        file: DiffFileSummary *
+        patch: string *
+        replacement: DiffReplacementKind
+    | Binary of file: DiffFileSummary
+    | Oversized of file: DiffFileSummary
+    | Truncated of file: DiffFileSummary
+    | Symlink of file: DiffFileSummary * patch: string option
+    | Unavailable of file: DiffFileSummary
+    | TimedOut of file: DiffFileSummary
+    | GitError of file: DiffFileSummary
+
 /// Single source of truth for the canvas-session launch prompt, shared by the client
 /// (LaunchCanvasSession) and the server (sendCanvasMessage) so the two cannot drift.
 module CanvasPrompt =
@@ -310,6 +375,7 @@ type WorktreeStatus =
       MainBehindCount: int
       AutoSyncEnabled: bool
       IsDirty: bool
+      HasDiff: bool
       WorkMetrics: WorkMetrics option
       HasActiveSession: bool
       IsMainWorktree: bool

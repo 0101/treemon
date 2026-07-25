@@ -7,6 +7,7 @@ open Feliz
 open Components
 open ActionButtons
 open CanvasAwareness
+open CanvasState
 
 let ctClassName =
     function
@@ -155,6 +156,7 @@ type CardCallbacks =
       ToggleAutoSync: WorktreeStatus -> unit
       LaunchAction: WorktreePath -> ActionKind -> unit
       OpenCanvasDoc: string -> string -> unit
+      OpenDiff: string -> unit
       DispatchArchive: ArchiveViews.Msg -> unit }
 
 let mainBehindIndicator (baseBranch: string) (count: int) =
@@ -172,8 +174,8 @@ let mainBehindIndicator (baseBranch: string) (count: int) =
 /// Post-fork setup is routine when it works, so a successful or still-running run is noise on the
 /// card — only its failures (including timeouts) are worth surfacing.
 let isVisibleCardEvent (evt: CardEvent) =
-    evt.Source = EventSource.PostFork
-    && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
+    evt.Source <> EventSource.PostFork
+    || (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
 
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
@@ -197,6 +199,25 @@ let autoSyncIcon () =
         ]
     ]
 
+let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: string) =
+    let ready = hasSystemView WorktreeDiffFilename wt
+
+    if wt.IsArchived || not ready || not wt.HasDiff then
+        Html.none
+    else
+        Html.button [
+            prop.className "action-btn diff-action-btn"
+            prop.custom ("aria-label", "Open worktree diff")
+            prop.onKeyDown (fun e ->
+                if e.key = "Enter" || e.key = " " then
+                    e.stopPropagation())
+            prop.onClick (fun e ->
+                e.stopPropagation()
+                callbacks.OpenDiff scopedKey)
+            prop.title "Open worktree diff"
+            prop.children [ diffIcon ]
+        ]
+
 let autoSyncButton (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
     let isPending = pendingPaths.Contains wt.Path
     Html.button [
@@ -210,7 +231,13 @@ let autoSyncButton (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) 
         prop.children [ autoSyncIcon () ]
     ]
 
-let mainBehindRow (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
+let mainBehindRow
+    (pendingPaths: Set<WorktreePath>)
+    (callbacks: CardCallbacks)
+    (baseBranch: string)
+    (wt: WorktreeStatus)
+    (scopedKey: string)
+    =
     Html.div [
         prop.className "main-behind-row"
         prop.children [
@@ -221,6 +248,7 @@ let mainBehindRow (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (
                     prop.text "uncommitted changes"
                 ]
             autoSyncButton pendingPaths callbacks baseBranch wt
+            diffButton callbacks wt scopedKey
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -650,6 +678,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator baseBranch wt.MainBehindCount
+                    diffButton callbacks wt scopedKey
                     autoSyncButton props.AutoSyncPending callbacks baseBranch wt
                     prSection callbacks props.ActionCooldowns wt repoName
                 ]
@@ -704,7 +733,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             ]
                         ]
 
-                    mainBehindRow props.AutoSyncPending callbacks baseBranch wt
+                    mainBehindRow props.AutoSyncPending callbacks baseBranch wt scopedKey
 
                     prRow callbacks props.ActionCooldowns wt repoName
                 ]

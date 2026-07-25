@@ -22,8 +22,8 @@ chosen by `buildInjection` (`src/Server/CanvasDocServer.fs`):
 
 | Doc kind | Injected runtime |
 |---|---|
-| `SystemView` | `baseStyle` + `linkInterceptor` + `reclaimFocusScript` |
-| `AgentDoc` | the above + `bridgeScript`, `canvasSend`, `canvasExpand`, selected-text contextual actions, JS error overlay, idiomorph runtime, and morph controller |
+| `SystemView` | `baseStyle` + `linkInterceptor` + `reclaimFocusScript`, `canvasSend`, and selected-text contextual actions |
+| `AgentDoc` | the above + `bridgeScript`, `canvasExpand`, JS error overlay, idiomorph runtime, and morph controller |
 
 ### 1. Base dark-theme CSS reset (Phase 6.1)
 
@@ -116,20 +116,24 @@ from the message-delivery failures already shown via `CanvasSendState.Failed`.
 
 ### 4. Selected-text contextual actions
 
-Selecting ordinary, non-editable text in an AgentDoc shows a shadow-DOM context box beside the
+Selecting ordinary, non-editable text in an AgentDoc or SystemView shows a shadow-DOM context box beside the
 selection with **Explain**, **Remove**, and **Comment**. Clearing the selection hides the normal
 box. Comment expands to an Enter-to-submit input and pins the captured selection until a new
 selection or Escape.
 
-All three actions send `action: "canvas-selection"` with an `intent` discriminator, the document
-filename, and ordered `contextBefore`, `selectedText`, `contextAfter` fields. The nearest safe
+All three actions send `action: "canvas-selection"` with an `intent` discriminator and the document
+filename. By default the payload contains ordered `contextBefore`, `selectedText`, `contextAfter`
+fields; a trusted document may set
+`window.canvasSelectionConfig = { includeSurroundingContext: false }` before an action is sent to
+omit the two surrounding-context fields while retaining `selectedText`. The nearest safe
 `data-section`/`id` is included when available. Comments appear once in the human-readable
 `request`; selected document text stays in separate data fields so it cannot become instruction
 text.
 
 After submission, a pointer-inert overlay pulses over the selected range until the document updates
-or the user starts another selection. The runtime is AgentDoc-only: SystemViews and static shared
-exports have no owning session and receive no selection UI.
+or the user starts another selection. Static shared exports receive no selection UI. SystemViews
+use resolved per-interaction routing and may enrich the payload with structured
+`sourceContext`; see `docs/spec/canvas-interaction-routing.md`.
 
 ### 5. Always-visible doc tab with last-modified age (Phase 8)
 

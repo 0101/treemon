@@ -111,8 +111,12 @@ let private withServiceSeededAndPath
         try Directory.Delete(dir, true) with _ -> ()
 
 let private withServiceSeeded knownWorktree seed action =
-    withServiceSeededAndPath knownWorktree seed (fun (service, agent, store, _) ->
-        action (service, agent, store))
+    withServiceSeededAndPath
+        knownWorktree
+        seed
+        (fun (service, agent, store, _) ->
+            action (service, agent, store))
+
 
 let private withService knownWorktree action = withServiceSeeded knownWorktree ignore action
 let private withServiceAndPath knownWorktree action =

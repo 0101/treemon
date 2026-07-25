@@ -169,6 +169,7 @@ let private wtAzDoMain: WorktreeStatus =
       MainBehindCount = 0
       AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
       IsMainWorktree = true
@@ -196,6 +197,7 @@ let private wtRetryLogic: WorktreeStatus =
       MainBehindCount = 2
       AutoSyncEnabled = true
       IsDirty = true
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 8; LinesAdded = 342; LinesRemoved = 67 }
       HasActiveSession = true
       IsMainWorktree = false
@@ -221,6 +223,7 @@ let private wtConfigLoading: WorktreeStatus =
       MainBehindCount = 5
       AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 3; LinesAdded = 128; LinesRemoved = 89 }
       HasActiveSession = true
       IsMainWorktree = false
@@ -246,6 +249,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       MainBehindCount = 1
       AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 5; LinesAdded = 210; LinesRemoved = 34 }
       HasActiveSession = false
       IsMainWorktree = false
@@ -271,6 +275,7 @@ let private wtArchived: WorktreeStatus =
       MainBehindCount = 12
       AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 15; LinesAdded = 890; LinesRemoved = 234 }
       HasActiveSession = false
       IsMainWorktree = false
@@ -296,6 +301,7 @@ let private wtGithubMain: WorktreeStatus =
       MainBehindCount = 0
       AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
       IsMainWorktree = true
@@ -324,6 +330,7 @@ let private wtStreaming: WorktreeStatus =
       MainBehindCount = 1
       AutoSyncEnabled = true
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 12; LinesAdded = 567; LinesRemoved = 123 }
       HasActiveSession = true
       IsMainWorktree = false
@@ -349,6 +356,7 @@ let private wtCsvFix: WorktreeStatus =
       MainBehindCount = 0
       AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = true
       WorkMetrics = Some { CommitCount = 4; LinesAdded = 45; LinesRemoved = 12 }
       HasActiveSession = false
       IsMainWorktree = false
