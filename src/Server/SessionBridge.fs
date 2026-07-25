@@ -64,15 +64,10 @@ type internal QueuedPrompt =
       TargetSessionId: string option
       Prompt: Prompt }
 
-[<RequireQualifiedAccess>]
-type private PromptDeliveryFailure =
-    | Rejected
-    | Transport
-
 type private DeliveryAttempt =
     | AttemptDelivered
     | AttemptNoLiveSession
-    | AttemptFailed of SessionEntry * PromptDeliveryFailure
+    | AttemptFailed of SessionEntry
 
 // Mutable: ConcurrentDictionary is the thread-safe boundary for bridge registration and queueing.
 // Separate session and poll maps prevent canvas-document heartbeats from overwriting live sessions.
@@ -153,7 +148,7 @@ let private postPrompt
     (entry: SessionEntry)
     (prompt: Prompt)
     (worktreeKey: string)
-    : Async<Result<unit, PromptDeliveryFailure>> =
+    : Async<Result<unit, unit>> =
     async {
         try
             use content = new StringContent(serializePrompt prompt, Encoding.UTF8, "application/json")
@@ -167,10 +162,10 @@ let private postPrompt
                 let! body = response.Content.ReadAsStringAsync() |> Async.AwaitTask
                 let failure = formatPostFailure (int response.StatusCode) body
                 Log.log "SessionBridge" $"Prompt forward failed: {failure}"
-                return Error PromptDeliveryFailure.Rejected
+                return Error()
         with ex ->
             Log.log "SessionBridge" $"Prompt forward error: {ex.Message}"
-            return Error PromptDeliveryFailure.Transport
+            return Error()
     }
 
 let private drainQueue now (worktreeKey: string) (entry: SessionEntry) =
@@ -283,9 +278,9 @@ let private tryDeliverAt now (request: SendRequest) =
         | Some entry ->
             match! postPrompt entry request.Prompt worktreeKey with
             | Ok () -> return AttemptDelivered
-            | Error failure ->
+            | Error () ->
                 enqueue now worktreeKey entry.SessionId request.Prompt
-                return AttemptFailed(entry, failure)
+                return AttemptFailed entry
     }
 
 let tryDeliver (request: SendRequest) =

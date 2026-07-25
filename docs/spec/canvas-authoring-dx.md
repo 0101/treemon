@@ -132,7 +132,7 @@ text.
 
 After submission, a pointer-inert overlay pulses over the selected range until the document updates
 or the user starts another selection. Static shared exports receive no selection UI. SystemViews
-use persistent interaction-session ownership and may enrich the payload with structured
+use resolved per-interaction routing and may enrich the payload with structured
 `sourceContext`; see `docs/spec/canvas-interaction-routing.md`.
 
 ### 5. Always-visible doc tab with last-modified age (Phase 8)

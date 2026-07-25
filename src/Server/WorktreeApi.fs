@@ -893,13 +893,12 @@ let worktreeApi
                       let path = WorktreePath.value request.WorktreePath
                       let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
-                      let! target, result =
+                      let! outcome =
                           CanvasBridge.sendMessage (state.SessionStatuses |> Map.values) request
 
-                      // A SystemView interaction with no reachable session queues; launch one so the
-                      // queue drains. An AgentDoc keeps waiting for its own author instead.
-                      match target, CanvasDocKinds.classify request.Filename with
-                      | None, SystemView ->
+                      match outcome with
+                      | CanvasBridge.Routed result -> return result
+                      | CanvasBridge.QueuedNeedingSession result ->
                           match! CanvasBridge.beginPendingLaunch path with
                           | CanvasBridge.PendingLaunchJoined ->
                               Log.log
@@ -937,7 +936,6 @@ let worktreeApi
                                   return
                                       CanvasMessageResult.Error
                                           $"Could not start an interaction session for {request.Filename}: {ex.Message}"
-                      | _ -> return result
                   })
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->

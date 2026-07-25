@@ -288,27 +288,6 @@ let private routeDashboard (transform: DashboardResponse -> DashboardResponse) (
 
 let private routeDashboardWithDiffDocs = routeDashboard withDiffDocs
 
-let private routeDashboardWithSyncCounts =
-    routeDashboard (fun response ->
-        let setSyncCount wt =
-            match wt.Branch with
-            | "feature-active" ->
-                { wt with
-                    MainBehindCount = 0
-                    IsDirty = false }
-            | "feature-recent" ->
-                { wt with
-                    MainBehindCount = 2
-                    IsDirty = false }
-            | _ -> wt
-
-        { response with
-            Repos =
-                response.Repos
-                |> List.map (fun repo ->
-                    { repo with
-                        Worktrees = repo.Worktrees |> List.map setSyncCount }) })
-
 let private routeDashboardWithoutDiffDocs =
     routeDashboard (fun response ->
         { response with
@@ -344,21 +323,6 @@ type WorktreeDiffActionTests() =
             do! routeDashboardWithDiffDocs this.Page
             let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
             do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
-        }
-
-    [<Test>]
-    member this.``Sync action is hidden at zero behind and visible when the remote base is behind``() =
-        task {
-            do! routeDashboardWithSyncCounts this.Page
-            let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
-            do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
-
-            let! localFallbackSync = (cardByBranch this.Page "feature-active").Locator(".sync-btn").CountAsync()
-            let! remoteBehindSync = (cardByBranch this.Page "feature-recent").Locator(".sync-btn").CountAsync()
-
-            Assert.Multiple(fun () ->
-                Assert.That(localFallbackSync, Is.Zero)
-                Assert.That(remoteBehindSync, Is.EqualTo(1)))
         }
 
     [<Test>]

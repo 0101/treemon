@@ -72,6 +72,9 @@ let internal cancelPendingLaunch worktreePath =
 /// activity snapshot only *orders* them. A reachable session that has not reported activity is
 /// therefore still a valid target — falling back to the freshest registration keeps Treemon from
 /// spawning a second session next to a perfectly usable one.
+/// Session ids scoped to `worktreePath` already make the activity snapshot worktree-correct — a
+/// status row for another worktree carries a session id this worktree never registered — so the
+/// snapshot is consumed unfiltered.
 let internal resolveTarget
     (sessionStatuses: StoredStatus seq)
     (worktreePath: string)
@@ -106,41 +109,36 @@ let internal resolveTarget
             return mostRecentlyActive |> Option.orElseWith freshestReachable
     }
 
-/// Sessions for `worktreePath` from a scheduler snapshot, in the shape `resolveTarget` expects.
-let private sessionStatusesFor (worktreePath: string) (statuses: StoredStatus seq) =
-    let worktreeKey = normalizePath worktreePath
+/// What routing decided, in the caller's terms. `QueuedNeedingSession` means nothing could receive
+/// the interaction *and* the document kind allows starting one — the caller owns session lifecycle,
+/// so it decides whether to spawn, without re-deriving the document kind.
+type internal CanvasSendOutcome =
+    | Routed of CanvasMessageResult
+    | QueuedNeedingSession of CanvasMessageResult
 
-    statuses
-    |> Seq.filter (fun stored ->
-        String.Equals(
-            normalizePath (WorktreePath.value stored.WorktreePath),
-            worktreeKey,
-            StringComparison.OrdinalIgnoreCase))
-
-/// Route one canvas interaction. Returns the resolved target alongside the outcome so the caller can
-/// tell "queued because nothing is reachable" (target `None`) from "queued behind a known session".
+/// Route one canvas interaction.
 let internal sendMessage (sessionStatuses: StoredStatus seq) (request: CanvasMessageRequest) =
     async {
         let worktreePath = WorktreePath.value request.WorktreePath
+        let! target = resolveTarget sessionStatuses worktreePath request.Filename
 
-        let! target =
-            sessionStatuses
-            |> sessionStatusesFor worktreePath
-            |> resolveTarget
-            <| worktreePath
-            <| request.Filename
-
-        let! result =
+        let! sendResult =
             SessionBridge.send
                 { WorktreePath = worktreePath
                   SessionId = target
                   Prompt = SessionBridge.Prompt.canvasFor request.Filename request.Payload }
 
-        return
-            target,
-            match result with
+        let result =
+            match sendResult with
             | SessionBridge.SendResult.Delivered -> CanvasMessageResult.Ok
             | SessionBridge.SendResult.Queued -> CanvasMessageResult.Queued
+
+        // Only a SystemView may be served by a freshly started session; an AgentDoc waits for the
+        // author that owns it, so a new session would be the wrong recipient.
+        return
+            match target, CanvasDocKinds.classify request.Filename with
+            | None, SystemView -> QueuedNeedingSession result
+            | _ -> Routed result
     }
 
 let registerSession worktreePath injectUrl sessionId =

@@ -76,7 +76,7 @@ let private storedWithUsage sid worktree status updatedAt usage usageAt =
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
 /// the restart-rebuild test). Program owns the shared store, so the fixture disposes it after the
 /// service.
-let private withServiceSeededAndPathCore
+let private withServiceSeededAndPath
     (knownWorktree: string)
     (seed: SessionActivityStore -> unit)
     (action:
@@ -111,14 +111,11 @@ let private withServiceSeededAndPathCore
         try Directory.Delete(dir, true) with _ -> ()
 
 let private withServiceSeeded knownWorktree seed action =
-    withServiceSeededAndPathCore
+    withServiceSeededAndPath
         knownWorktree
         seed
         (fun (service, agent, store, _) ->
             action (service, agent, store))
-
-let private withServiceSeededAndPath knownWorktree seed action =
-    withServiceSeededAndPathCore knownWorktree seed action
 
 
 let private withService knownWorktree action = withServiceSeeded knownWorktree ignore action

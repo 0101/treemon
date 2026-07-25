@@ -28,8 +28,9 @@ let private canvasWire payload =
 // directly against `resolveTarget` in SystemViewInteractionRoutingTests.
 let private sendMessage request =
     async {
-        let! _, result = Server.CanvasBridge.sendMessage [] request
-        return result
+        match! Server.CanvasBridge.sendMessage [] request with
+        | Server.CanvasBridge.Routed result
+        | Server.CanvasBridge.QueuedNeedingSession result -> return result
     }
 
 // A minimal loopback HTTP sink used to assert *which* inject URL a message reaches.
