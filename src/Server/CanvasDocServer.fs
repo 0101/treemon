@@ -122,9 +122,9 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
             return! RequestErrors.BAD_REQUEST $"malformed JSON: {ex.Message}" next ctx
     }
 
-/// Validate a declared target and, only for a known (monitored) worktree, record it in the unified
-/// target store. AgentDocs declare author ownership; SystemViews explicitly assign/reassign their
-/// interaction target without acquiring authored-document behavior.
+/// Validate a declared author and, only for a known (monitored) worktree, record it. Ownership is an
+/// AgentDoc concept: a SystemView has no author and its routing is resolved per interaction, so a
+/// claim for one is reported as `NotAttributable` rather than stored.
 let attributeOwnership
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (worktreePath: string)

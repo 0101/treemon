@@ -343,16 +343,27 @@ let canvasMessageReceived (payload: string) (model: Model) =
         Fable.Core.JS.console.warn "[canvas] Message DROPPED: no active visible doc"
         model, Cmd.none
 
+/// `CanvasSendState` is pane-global, but a send result arrives asynchronously and may belong to a
+/// document the user has since navigated away from. Applying it anyway would show "Waiting for
+/// session…" over an unrelated worktree, or let a stale `Ok` clear a newer wait. Only the document
+/// that is still visible may move the banner.
 let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (filename: string) (model: Model) =
-    match result with
-    | CanvasMessageResult.Error msg ->
-        Fable.Core.JS.console.error ("Canvas message error:", msg)
-        { model with Canvas.CanvasSendState = CanvasSendState.Failed msg }, Cmd.none
-    | CanvasMessageResult.Ok ->
-        { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
-    | CanvasMessageResult.Queued ->
-        Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
-        { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }, Cmd.none
+    match activeVisibleDoc model with
+    | Some(activeKey, activeFilename) when activeKey = scopedKey && activeFilename = filename ->
+        match result with
+        | CanvasMessageResult.Error msg ->
+            Fable.Core.JS.console.error ("Canvas message error:", msg)
+            { model with Canvas.CanvasSendState = CanvasSendState.Failed msg }, Cmd.none
+        | CanvasMessageResult.Ok ->
+            { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
+        | CanvasMessageResult.Queued ->
+            Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
+            { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }, Cmd.none
+    | _ ->
+        Fable.Core.JS.console.log
+            $"[canvas] Send result for '{scopedKey}/{filename}' ignored — that doc is no longer visible"
+
+        model, Cmd.none
 
 let dismissCanvasMessageError (model: Model) =
     { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none

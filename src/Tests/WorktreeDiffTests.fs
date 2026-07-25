@@ -1156,7 +1156,7 @@ type WorktreeDiffIntegrationTests() =
         initRepoOnMain repoDir
         let relativeDiffPath = Path.Combine(".agents", "canvas", "diff.html")
         let diffPath = Path.Combine(repoDir, relativeDiffPath)
-        writeText repoDir relativeDiffPath "stale"
+        writeText repoDir relativeDiffPath "<!doctype html><link href=\"/assets/diff2html/3.4.52/diff2html.min.css\">"
         gitOk repoDir [ "add"; "--"; generatedDiffViewerGitPath ]
         gitOk repoDir [ "commit"; "-m"; "track stale diff viewer" ]
         gitOk repoDir [ "checkout"; "-b"; "feature" ]

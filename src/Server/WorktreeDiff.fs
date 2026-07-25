@@ -711,6 +711,15 @@ let private readFileBounded
 
             try
                 use stream = new FileStream(path, options)
+
+                // `inspectUntrackedFile` checked the path, not this handle, so a concurrent process
+                // could have swapped the file for a link in between. .NET exposes no portable
+                // no-follow open, so re-check after opening: an attacker must now win a far tighter
+                // race, and if they do the content is discarded instead of served.
+                if File.ResolveLinkTarget(path, returnFinalTarget = false) <> null then
+                    return FileReadFailed
+                else
+
                 let! result =
                     readStreamBounded cts.Token stream
                     |> Async.AwaitTask
@@ -1202,10 +1211,16 @@ let private combineTrackedAndUntrackedFiles tracked untracked =
       | Symlink(Some untrackedPatch)) ->
         combinePatchText trackedPatch untrackedPatch
 
+/// Git-derived paths are fed back to Git as pathspecs. `--` only ends option parsing; it does not
+/// disable pathspec magic, so a tracked file literally named `:(top)**` would be reinterpreted as a
+/// pattern and could return an unrelated patch. `:(literal)` pins each path to itself.
+let private literalPathspec (path: string) = $":(literal){path}"
+
 let private trackedDiffPaths (entry: WorktreeDiffEntry) =
     match entry.OldPath with
     | Some oldPath when oldPath <> entry.Path -> [ oldPath; entry.Path ]
     | _ -> [ entry.Path ]
+    |> List.map literalPathspec
 
 let private getTrackedDiffFile
     (deadline: ProcessRunner.ResponseDeadline)
