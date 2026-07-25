@@ -308,12 +308,16 @@ let private cardByBranch (page: IPage) branch =
         ".wt-card",
         PageLocatorOptions(Has = page.Locator(".branch-name", PageLocatorOptions(HasText = branch))))
 
-/// Click a card and wait until it is actually marked focused. Focus is applied by an Elmish update
-/// and a re-render, so asserting on the class straight after the click races the render — reliably
-/// on a loaded CI machine, intermittently everywhere else.
+/// Focus a card and wait until it is actually marked focused.
+///
+/// Clicks the branch name rather than the card: a card-centre click lands on whichever child
+/// happens to sit at the midpoint, and the action buttons (diff, auto-sync, terminal) all
+/// `stopPropagation`, so the card's own `FocusCard` handler never fires. Layout differences make
+/// that land differently per machine, which is why it passed locally and failed on CI. The branch
+/// name is a plain `span` with no handler, so the click always bubbles to the card.
 let private focusCardAndWait (page: IPage) branch =
     task {
-        do! (cardByBranch page branch).ClickAsync()
+        do! (cardByBranch page branch).Locator(".branch-name").ClickAsync()
 
         let focused =
             page.Locator(
