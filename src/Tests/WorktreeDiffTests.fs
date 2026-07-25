@@ -935,7 +935,7 @@ type WorktreeDiffIntegrationTests() =
         initRepoOnMain repoDir
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        DiffProvisioner.provisionViewer repoDir |> ignore
+        DiffProvisioner.provisionViewer repoDir true |> ignore
 
         let directUntracked =
             gitText
@@ -1074,7 +1074,7 @@ type WorktreeDiffIntegrationTests() =
         initRepoOnMain repoDir
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        DiffProvisioner.provisionViewer repoDir |> ignore
+        DiffProvisioner.provisionViewer repoDir true |> ignore
         gitOk repoDir [ "add"; "--"; generatedDiffViewerGitPath ]
         gitOk repoDir [ "commit"; "-m"; "generated diff viewer" ]
 
@@ -1161,7 +1161,7 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "commit"; "-m"; "track stale diff viewer" ]
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        DiffProvisioner.provisionViewer repoDir |> ignore
+        DiffProvisioner.provisionViewer repoDir true |> ignore
 
         let directTracked =
             gitText repoDir [ "diff"; "--name-only"; "main"; "--" ]

@@ -83,6 +83,41 @@ type RefreshGitTaskTests() =
         }
         |> Async.RunSynchronously
 
+    [<Test>]
+    member _.``Worktree without comparison content loses its generated diff viewer``() =
+        async {
+            let repoDir = Path.Combine(tempDir, "repo")
+            initRepoOnMain repoDir
+            Server.DiffProvisioner.provisionViewer repoDir true |> ignore
+
+            let agent = createAgent ()
+            let worktree = { Path = repoDir; Head = "abc123"; Branch = Some "main" }
+            agent.Post(UpdateWorktreeList(testRepoId, [ worktree ]))
+            agent.Post(UpdateBaseBranch(testRepoId, "main"))
+
+            let services =
+                { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
+                  ActivityStore = None }
+
+            do!
+                executeTask
+                    agent
+                    services
+                    (Map.ofList [ testRepoId, repoDir ])
+                    (RefreshGit(testRepoId, repoDir))
+
+            let! state = agent.PostAndAsyncReply(GetState)
+            let repo = state.Repos |> Map.find testRepoId
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    File.Exists(Path.Combine(repoDir, ".agents", "canvas", "diff.html")),
+                    Is.False
+                )
+                Assert.That(repo.CanvasData |> Map.find repoDir, Is.Empty))
+        }
+        |> Async.RunSynchronously
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
