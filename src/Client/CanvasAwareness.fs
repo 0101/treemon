@@ -105,6 +105,23 @@ let canvasHashesByScopedKey (repos: RepoModel list) : Map<string, Map<string, st
 let canvasModifiedByScopedKey (repos: RepoModel list) : Map<string, Map<string, System.DateTimeOffset>> =
     repos |> canvasDocFieldByScopedKey _.LastModified
 
+let retainAgentDocEvents
+    (currentAgentDocHashes: Map<string, Map<string, string>>)
+    (events: Map<string, CanvasEvent list>)
+    : Map<string, CanvasEvent list> =
+    events
+    |> Map.toList
+    |> List.choose (fun (scopedKey, scopedEvents) ->
+        let currentDocs =
+            currentAgentDocHashes
+            |> Map.tryFind scopedKey
+            |> Option.defaultValue Map.empty
+        let retained =
+            scopedEvents
+            |> List.filter (fun event -> currentDocs |> Map.containsKey event.Filename)
+        if List.isEmpty retained then None else Some (scopedKey, retained))
+    |> Map.ofList
+
 let canvasEventExpiryMs = 24.0 * 60.0 * 60.0 * 1000.0
 
 /// How recently a doc's file must have been written for a detected hash change to count as a real

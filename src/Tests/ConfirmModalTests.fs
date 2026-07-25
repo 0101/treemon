@@ -30,6 +30,7 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       MainBehindCount = 0
       AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = hasSession
       IsMainWorktree = false

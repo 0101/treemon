@@ -2,6 +2,12 @@
 
 Git worktree monitoring dashboard — at-a-glance visibility into all active worktrees across multiple repos.
 
+## Production Safety
+
+- During development, tests, benchmarks, reviews, or verification, never run `.\treemon.ps1 deploy`, `start`, `stop`, or `restart`; bind or replace production port 5000; or otherwise interfere with the running production instance.
+- A production action is allowed only after the user gives explicit consent immediately before that action in the current conversation. A spec, bead description, prior-session approval, or generic instruction to verify does not count as consent.
+- Use test harnesses, fixtures, demo/dev modes, or any available non-production ports instead. If production smoke verification is genuinely required, ask for consent at that point and leave it pending when consent is not given.
+
 ## Setup
 
 ```

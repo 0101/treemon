@@ -26,6 +26,7 @@ let baseWt: WorktreeStatus =
       MainBehindCount = 0
       AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
       IsMainWorktree = false

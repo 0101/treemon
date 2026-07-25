@@ -10,6 +10,8 @@
     <Compile Include="SqliteTestDatabase.fs" />
     <Compile Include="WorktreeFixtures.fs" />
     <Compile Include="GitTestHelpers.fs" />
+    <Compile Include="WorktreeDiffTests.fs" />
+    <Compile Include="DiffEndpointTests.fs" />
     <Compile Include="ServerFixture.fs" />
     <Compile Include="MultiRepoApiTests.fs" />
     <Compile Include="DashboardTests.fs" />
@@ -62,11 +64,13 @@
     <Compile Include="CanvasAwarenessTests.fs" />
     <Compile Include="CanvasShareClientTests.fs" />
     <Compile Include="FormattingTests.fs" />
+    <Compile Include="CanvasDocOwnershipTests.fs" />
     <Compile Include="SessionBridgeTests.fs" />
     <Compile Include="AutoSyncTests.fs" />
     <Compile Include="CanvasBridgeTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />
+    <Compile Include="DiffViewerTests.fs" />
     <Compile Include="BeadsPlanningTests.fs" />
     <Compile Include="ActivityClassifierTests.fs" />
     <Compile Include="OverviewDataTests.fs" />

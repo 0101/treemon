@@ -1,7 +1,6 @@
 module Server.WorktreeApi
 
 open System
-open System.Collections.Concurrent
 open System.IO
 open System.Text.RegularExpressions
 open Shared
@@ -11,8 +10,6 @@ open Newtonsoft.Json
 open FsToolkit.ErrorHandling
 open Server.GlobalConfig
 open Server.SessionActivityStore
-
-let private canvasSpawnInFlight = ConcurrentDictionary<string, bool>()
 
 let loadFixtures (path: string) : Result<FixtureData, string> =
     try
@@ -219,6 +216,7 @@ let internal assembleFromState
         |> Option.map (fun branch -> Set.contains branch autoSyncBranches)
         |> Option.defaultValue false
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
+      HasDiff = gitData |> Option.map (_.HasDiff) |> Option.defaultValue false
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
       IsMainWorktree = Directory.Exists(Path.Combine(wt.Path, ".git"))
@@ -428,6 +426,7 @@ let internal assembleOverviewFromState
       MainBehindCount = 0
       AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
       IsMainWorktree = false
@@ -537,23 +536,40 @@ let private openTerminal
             | Error msg -> Log.log "API" $"openTerminal: failed for '{path}': {msg}"
     }
 
-let private deleteWorktree
+let internal deleteWorktreeWith
+    (removeGitWorktree: string -> string -> string option -> Async<Result<unit, string>>)
+    (removeInteractionOwnership: string -> Async<unit>)
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (wtPath: WorktreePath)
     =
     let path = WorktreePath.value wtPath
-    async {
+    asyncResult {
         let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
 
         match tryResolveWorktreeContext rootPaths state path with
-        | None -> return Error $"No worktree found at path '{path}'"
+        | None -> return! Error $"No worktree found at path '{path}'"
         | Some ctx when Directory.Exists(Path.Combine(ctx.Worktree.Path, ".git")) ->
-            return Error "Cannot delete the main worktree"
+            return! Error "Cannot delete the main worktree"
         | Some ctx ->
+            do! removeGitWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
             agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
-            return! GitWorktree.removeWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
+            do! removeInteractionOwnership ctx.Worktree.Path
     }
+
+let private deleteWorktree agent rootPaths wtPath =
+    let removeWorktreeState path =
+        async {
+            do! CanvasDocOwnership.removeWorktree path
+            do! WorktreeDiffApi.removeWorktree path
+        }
+
+    deleteWorktreeWith
+        GitWorktree.removeWorktree
+        removeWorktreeState
+        agent
+        rootPaths
+        wtPath
 
 let private updateArchivedBranches
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
@@ -621,6 +637,19 @@ let worktreeApi
             if not isValid then
                 Log.log "API" $"{opName}: rejected unknown path '{path}'"
                 return Error $"Unknown worktree path: {path}"
+            else
+                return! action ()
+        }
+
+    /// Same guard for an endpoint whose result type is its own DU rather than `Result`.
+    let withValidatedPathValue (wtPath: WorktreePath) opName (reject: string -> 'a) (action: unit -> Async<'a>) =
+        let path = WorktreePath.value wtPath
+        async {
+            let! isValid = validatePath path
+
+            if not isValid then
+                Log.log "API" $"{opName}: rejected unknown path '{path}'"
+                return reject $"Unknown worktree path: {path}"
             else
                 return! action ()
         }
@@ -859,53 +888,55 @@ let worktreeApi
                       return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
                   })
           sendCanvasMessage = fun request ->
-              async {
-                  let! result = CanvasBridge.sendMessage request
-                  match result with
-                  | CanvasMessageResult.Queued ->
+              withValidatedPathValue request.WorktreePath "sendCanvasMessage" CanvasMessageResult.Error (fun () ->
+                  async {
                       let path = WorktreePath.value request.WorktreePath
-                      let guardKey = path
-                      if canvasSpawnInFlight.TryAdd(guardKey, true) then
-                          try
-                              let! owner = CanvasDocOwnership.getOwner path request.Filename
+                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+
+                      let! outcome =
+                          CanvasBridge.sendMessage (state.SessionStatuses |> Map.values) request
+
+                      match outcome with
+                      | CanvasBridge.Routed result -> return result
+                      | CanvasBridge.QueuedNeedingSession result ->
+                          match! CanvasBridge.beginPendingLaunch path with
+                          | CanvasBridge.PendingLaunchJoined ->
+                              Log.log
+                                  "API"
+                                  $"sendCanvasMessage: a launch is already starting for {request.Filename}"
+
+                              return result
+                          | CanvasBridge.PendingLaunchStarted ->
                               let provider = CodingToolStatus.readConfiguredProvider path
-                              // Open a new tab in the live session window when one is tracked, and
-                              // spawn only when none exists (launchAction semantics). This path is
-                              // reached automatically by a canvas-iframe postMessage and has no
-                              // resume identity to preserve, so it must never kill a live session
-                              // window by path the way spawnSession (via spawnAndTrack) does.
-                              let startOrContinueSession () =
-                                  async {
-                                      let prompt = CanvasPrompt.continueWorking path request.Filename
-                                      let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
-                                      let! _ = SessionManager.launchAction sessionAgent request.WorktreePath command.AsShellString
-                                      ()
-                                  }
-                              match owner with
-                              | Some ownerSessionId ->
-                                  // Resume intentionally uses spawnSession (kill-by-path then respawn),
-                                  // mirroring the user-initiated resumeSession flow: replacing the
-                                  // worktree's window with a fresh resume of the owner session is the
-                                  // desired behavior when there is a resume identity to preserve.
-                                  Log.log "API" $"sendCanvasMessage: resuming owner session {ownerSessionId} for {request.Filename}"
-                                  let inv = CodingToolCli.build provider (CodingToolCli.Resume (Some ownerSessionId))
-                                  let! resumeResult = SessionManager.spawnSession sessionAgent request.WorktreePath inv.AsShellString
-                                  match resumeResult with
-                                  | Ok () ->
-                                      Log.log "API" $"sendCanvasMessage: resume succeeded for {request.Filename}"
-                                  | Error err ->
-                                      Log.log "API" $"sendCanvasMessage: resume failed ({err}), starting/continuing session for {request.Filename}"
-                                      do! startOrContinueSession ()
-                              | None ->
-                                  Log.log "API" $"sendCanvasMessage: no owner for {request.Filename}, starting/continuing session"
-                                  do! startOrContinueSession ()
-                          finally
-                              canvasSpawnInFlight.TryRemove(guardKey) |> ignore
-                      else
-                          Log.log "API" $"sendCanvasMessage: resume/spawn already in flight for {path}, skipping"
-                  | _ -> ()
-                  return result
-              }
+                              let prompt = CanvasPrompt.continueWorking path request.Filename
+                              let command =
+                                  CodingToolCli.build provider (CodingToolCli.Interactive prompt)
+
+                              Log.log
+                                  "API"
+                                  $"sendCanvasMessage: no reachable session for {request.Filename}; launching one"
+
+                              match!
+                                  SessionManager.launchAction
+                                      sessionAgent
+                                      request.WorktreePath
+                                      command.AsShellString
+                                  |> Async.Catch
+                              with
+                              | Choice1Of2(Ok()) -> return result
+                              | Choice1Of2(Error err) ->
+                                  do! CanvasBridge.cancelPendingLaunch path
+
+                                  return
+                                      CanvasMessageResult.Error
+                                          $"Could not start an interaction session for {request.Filename}: {err}"
+                              | Choice2Of2 ex ->
+                                  do! CanvasBridge.cancelPendingLaunch path
+
+                                  return
+                                      CanvasMessageResult.Error
+                                          $"Could not start an interaction session for {request.Filename}: {ex.Message}"
+                  })
           archiveCanvasDoc = fun req ->
               withValidatedPath req.WorktreePath "archiveCanvasDoc" (fun () ->
                   archiveCanvasDocImpl req)

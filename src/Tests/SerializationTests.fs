@@ -36,6 +36,15 @@ type WrapperTypeSerializationTests() =
         Assert.That(result, Is.EqualTo(original))
 
     [<Test>]
+    member _.``HasDiff_serialization survives WorktreeStatus JSON round-trip``() =
+        let original =
+            { Tests.WorktreeFixtures.baseWt with
+                HasDiff = true }
+
+        let result = roundTrip original
+        Assert.That(result.HasDiff, Is.True)
+
+    [<Test>]
     member _.``UserFooterMessage with canvas glyph survives JSON round-trip``() =
         let original =
             { Glyph = Some MessageGlyph.Canvas

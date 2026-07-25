@@ -15,7 +15,7 @@ open Browser
 open AppTypes
 
 let activeVisibleDoc (model: Model) : (string * string) option =
-    CanvasState.activeVisibleDoc model.Repos model.FocusedElement model.Canvas.ActiveCanvasDoc
+    CanvasState.activeVisibleDoc model.Repos model.FocusedElement model.Canvas.TargetWorktree model.Canvas.ActiveCanvasDoc
 
 /// True when `filename` names a real CanvasDoc of the worktree `scopedKey`. Gates in-doc link
 /// navigation (NavigateCanvasDoc), whose filename arrives via an untrusted in-iframe postMessage:
@@ -28,7 +28,7 @@ let isKnownCanvasDoc (model: Model) (scopedKey: string) (filename: string) : boo
     |> Option.defaultValue false
 
 let markVisibleDocCmd (model: Model) : Cmd<Msg> =
-    CanvasState.markVisibleDocCmd MarkDocViewed model.Repos model.FocusedElement model.Canvas.ActiveCanvasDoc
+    CanvasState.markVisibleDocCmd MarkDocViewed model.Repos model.FocusedElement model.Canvas.TargetWorktree model.Canvas.ActiveCanvasDoc
 
 let launchCanvasSession (scopedKey: string) (model: Model) =
     match findWorktree scopedKey model with
@@ -70,6 +70,9 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         // leaving into the one we're showing, so clear it here (it reappears only if the new
         // doc throws again).
         Canvas.DocError = None
+        Canvas.TargetWorktree =
+            if model.Canvas.TargetWorktree.IsSome then Some scopedKey
+            else None
         Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
         Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
     Cmd.batch [
@@ -80,18 +83,35 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         if wasAlreadyVisited && CanvasState.canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
     ]
 
-/// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus genuinely
-/// transitions onto a worktree card, that card's active doc is retargeted to its most recently
+/// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus selects a
+/// worktree card, that card's active doc is retargeted to its most recently
 /// published *unviewed* AgentDoc (the "select the worktree shows THAT doc" path) — a no-op when the
-/// card was already focused or nothing is unviewed. An open pane shows the doc, so it routes through
-/// `selectCanvasDoc` (marks it viewed); a closed pane sets it silently. The idle auto-display passes
-/// `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
+/// card was already focused or nothing is unviewed, except that a sticky worktree diff is replaced
+/// by another available doc because Diff is explicit-only. An open pane shows the doc, so it routes
+/// through `selectCanvasDoc` (marks it viewed); a closed pane sets it silently. The idle auto-display
+/// passes `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
 let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
     let previousFocus = model.FocusedElement
-    let focused = { model with FocusedElement = newFocus }
+    let focused =
+        { model with
+            FocusedElement = newFocus
+            Canvas.TargetWorktree = None }
     match retarget, newFocus with
-    | true, Some (Card scopedKey) when previousFocus <> Some (Card scopedKey) ->
-        match CanvasAwareness.mostRecentUnviewedDoc focused.Repos focused.Canvas.LastViewedHashes scopedKey, focused.Canvas.CanvasPaneOpen with
+    | true, Some (Card scopedKey) ->
+        let unviewedDoc =
+            if previousFocus <> Some (Card scopedKey) then
+                CanvasAwareness.mostRecentUnviewedDoc focused.Repos focused.Canvas.LastViewedHashes scopedKey
+            else
+                None
+        let nonDiffFallback =
+            match focused.Canvas.ActiveCanvasDoc |> Map.tryFind scopedKey with
+            | Some filename when CanvasState.isWorktreeDiffFilename filename ->
+                findWorktree scopedKey focused
+                |> Option.bind CanvasState.preferredAutomaticDoc
+                |> Option.filter (fun doc -> not (CanvasState.isWorktreeDiffFilename doc.Filename))
+                |> Option.map _.Filename
+            | _ -> None
+        match unviewedDoc |> Option.orElse nonDiffFallback, focused.Canvas.CanvasPaneOpen with
         | Some filename, true -> selectCanvasDoc scopedKey filename focused
         | Some filename, false ->
             { focused with
@@ -108,6 +128,7 @@ let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         Repos = repos
         FocusedElement = Some (Card scopedKey)
         Canvas.CanvasPaneOpen = true
+        Canvas.TargetWorktree = None
         Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
         Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
     Cmd.batch [
@@ -115,6 +136,23 @@ let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         if expanded then saveCollapsedReposCmd repos
         Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
     ]
+
+let openWorktreeDiff (scopedKey: string) (model: Model) =
+    let filename = CanvasState.WorktreeDiffFilename
+    if CanvasState.isKnownSystemView model.Repos scopedKey filename then
+        let openPane = not model.Canvas.CanvasPaneOpen
+        { model with
+            Canvas.CanvasPaneOpen = true
+            Canvas.DocError = None
+            Canvas.TargetWorktree = Some scopedKey
+            Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+            Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
+        Cmd.batch [
+            if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
+            Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
+        ]
+    else
+        model, Cmd.none
 
 let archiveCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     match findWorktree scopedKey model with
@@ -270,10 +308,11 @@ let dismissShareNotice (model: Model) =
     { model with Canvas = { model.Canvas with ShareNotice = None } }, Cmd.none
 
 let navigateCanvasDoc (filename: string) (model: Model) =
-    match model.FocusedElement with
-    | Some (Card scopedKey) ->
+    match CanvasState.activeCanvasWorktree model.FocusedElement model.Canvas.TargetWorktree with
+    | Some scopedKey ->
         // Defense-in-depth: filename arrives via an in-iframe postMessage (untrusted, '*' origin).
-        // Only switch tabs when it names a real CanvasDoc of the focused worktree — committing an
+        // Only switch tabs when it names a real CanvasDoc of the worktree driving the pane —
+        // including an explicit SystemView target that differs from card focus. Committing an
         // unknown filename (e.g. one still carrying a ?query/#hash) to ActiveCanvasDoc would
         // silently fall back to the first doc (see activeVisibleDoc), landing on the wrong tab.
         if isKnownCanvasDoc model scopedKey filename then
@@ -282,7 +321,7 @@ let navigateCanvasDoc (filename: string) (model: Model) =
             Fable.Core.JS.console.warn ($"[canvas] navigate-canvas-doc DROPPED: unknown doc '{filename}'")
             model, Cmd.none
     | _ ->
-        Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: no focused card"
+        Fable.Core.JS.console.warn "[canvas] navigate-canvas-doc DROPPED: no active canvas worktree"
         model, Cmd.none
 
 let canvasMessageReceived (payload: string) (model: Model) =
@@ -291,7 +330,12 @@ let canvasMessageReceived (payload: string) (model: Model) =
     match visibleDoc, worktree with
     | Some (scopedKey, filename), Some wt ->
         Fable.Core.JS.console.log ($"[canvas] Forwarding message to {WorktreePath.value wt.Path} doc={filename} (payload length={payload.Length})")
-        model, Cmd.OfAsync.either worktreeApi.Value.sendCanvasMessage { WorktreePath = wt.Path; Filename = filename; Payload = payload } (fun r -> CanvasSendResult(r, scopedKey)) (fun e -> CanvasSendResult(CanvasMessageResult.Error e.Message, scopedKey))
+        model,
+        Cmd.OfAsync.either
+            worktreeApi.Value.sendCanvasMessage
+            { WorktreePath = wt.Path; Filename = filename; Payload = payload }
+            (fun result -> CanvasSendResult(result, scopedKey, filename))
+            (fun ex -> CanvasSendResult(CanvasMessageResult.Error ex.Message, scopedKey, filename))
     | Some (scopedKey, _), None ->
         Fable.Core.JS.console.warn ($"[canvas] Message DROPPED: focused card '{scopedKey}' has no matching worktree")
         model, Cmd.none
@@ -299,16 +343,27 @@ let canvasMessageReceived (payload: string) (model: Model) =
         Fable.Core.JS.console.warn "[canvas] Message DROPPED: no active visible doc"
         model, Cmd.none
 
-let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (model: Model) =
-    match result with
-    | CanvasMessageResult.Error msg ->
-        Fable.Core.JS.console.error ("Canvas message error:", msg)
-        { model with Canvas.CanvasSendState = CanvasSendState.Failed msg }, Cmd.none
-    | CanvasMessageResult.Ok ->
-        { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
-    | CanvasMessageResult.Queued ->
-        Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
-        { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }, Cmd.none
+/// `CanvasSendState` is pane-global, but a send result arrives asynchronously and may belong to a
+/// document the user has since navigated away from. Applying it anyway would show "Waiting for
+/// session…" over an unrelated worktree, or let a stale `Ok` clear a newer wait. Only the document
+/// that is still visible may move the banner.
+let canvasSendResult (result: CanvasMessageResult) (scopedKey: string) (filename: string) (model: Model) =
+    match activeVisibleDoc model with
+    | Some(activeKey, activeFilename) when activeKey = scopedKey && activeFilename = filename ->
+        match result with
+        | CanvasMessageResult.Error msg ->
+            Fable.Core.JS.console.error ("Canvas message error:", msg)
+            { model with Canvas.CanvasSendState = CanvasSendState.Failed msg }, Cmd.none
+        | CanvasMessageResult.Ok ->
+            { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
+        | CanvasMessageResult.Queued ->
+            Fable.Core.JS.console.log "[canvas] Message queued — waiting for session"
+            { model with Canvas.CanvasSendState = CanvasSendState.Waiting scopedKey }, Cmd.none
+    | _ ->
+        Fable.Core.JS.console.log
+            $"[canvas] Send result for '{scopedKey}/{filename}' ignored — that doc is no longer visible"
+
+        model, Cmd.none
 
 let dismissCanvasMessageError (model: Model) =
     { model with Canvas.CanvasSendState = CanvasSendState.Idle }, Cmd.none
