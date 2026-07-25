@@ -6,6 +6,7 @@ open Server.PrStatus
 
 let private mkPr branch prId isMerged closedDate =
     { BranchName = branch
+      HeadSha = Some $"sha-{prId}"
       PrId = prId
       Title = $"PR for {branch}"
       IsDraft = false

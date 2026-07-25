@@ -148,6 +148,14 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 - GitHub Actions workflow runs mapped to `BuildInfo` / `BuildStatus`; failed runs fetch job details for step name
 - Per open PR, an extra detail fetch (`/repos/{owner}/{repo}/pulls/{number}`) retrieves `mergeable` status; run in parallel with Actions fetch, adding no sequential latency
 
+### Merged-PR Persistence
+
+- Live provider results are authoritative. PR association uses the resolved provider branch. When a deleted remote ref makes `@{u}` unresolvable, Treemon reads Git's still-configured upstream name; only if both reads fail does it fall back to the local branch while disabling pruning. This keeps merged PRs linked when the provider deletes their source branch, including differently named local/provider branches. When the bounded PR fetch no longer returns the branch, a persisted merged record supplies a fallback `HasPr`; live open PRs and identity-matched merged PRs take precedence. Only the terminal merged fact is retained — open PRs and volatile builds, comments, draft, and conflict state are not persisted.
+- `MergedPrStore` keeps `repo → upstream branch → { Id; Title; Url; HeadSha }` in port-scoped gitignored runtime state at `data/merged-prs-{port}.json`. Each server instance owns its store; missing, corrupt, identity-less, or older incompatible records start empty, and failed writes remain dirty in memory until a retry succeeds.
+- Records are pruned to live branches only from a trustworthy enumeration: at least one eligible worktree and branch exist, every eligible worktree has collected git data, and no eligible worktree's upstream read failed. Archived worktrees are exempt from the completeness requirement — the steady-state refresh skips them, so one first seen while already archived never collects git data; its worktree-list branch enters the enumeration instead, keeping its record safe without blocking pruning. Otherwise live merge upserts and fallback overlay still run, but pruning is skipped.
+- The provider branch identifies the association; `HeadSha` is the immutable provider-reported PR source commit. A merged provider result or persisted fallback is accepted only when its SHA matches a current worktree tip when both are known. A present mismatch evicts or suppresses the stale result so branch-name reuse or later unmerged commits cannot inherit an old merged badge.
+- Failed upstream reads still make branch enumeration untrustworthy and disable pruning when only the local fallback branch is available for PR discovery and card lookup.
+
 ### Merge Conflict Detection
 
 - `HasConflicts: bool` on `PrInfo` — `true` when the PR has merge conflicts
@@ -225,7 +233,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 |------|---------|
 | `src/Shared/Types.fs` | Domain types: `DashboardResponse`, `CodingToolStatus`, `CodingToolProvider`, `CommentSummary` |
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
-| `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling |
+| `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling, merged-PR reconciliation |
 | `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure live fold, SQLite (WAL) base-state/history store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
 | `src/Server/UserMessageFormatting.fs` | Server-owned system-reminder suppression and canvas prompt projection shared by ingestion, activity, and footer fields |
 | `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, and per-worktree provider config |
@@ -234,8 +242,9 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/SessionBridge.fs` | Generic session registration, liveness, queued prompt delivery, and forwarding |
 | `src/Extension/extension.mjs`, `session-prompt.mjs` | Session bridge HTTP receiver, serialized `session.send` queue, and typed prompt-transport decoding |
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
-| `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI |
-| `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, observed base revision, dirty detection, work metrics |
+| `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI, including the bounded recent-closed window |
+| `src/Server/MergedPrStore.fs` | Durable merged-PR fallback reconciliation, identity checks, and runtime-state persistence |
+| `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, upstream-read state, HEAD identity, observed base revision, dirty detection, work metrics |
 | `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, and upstream remote |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |

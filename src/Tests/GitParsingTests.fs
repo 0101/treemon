@@ -5,6 +5,8 @@ open System.IO
 open NUnit.Framework
 open Server.GitWorktree
 open Server.PathUtils
+open Tests.GitTestHelpers
+open Tests.TestUtils
 
 [<SetUpFixture>]
 type LogDirSetup() =
@@ -233,6 +235,28 @@ type ParseCommitOutputTests() =
         Assert.That(result.IsSome, Is.True)
         Assert.That(result.Value.Hash, Is.EqualTo("abc123"))
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CollectWorktreeGitDataTests() =
+
+    [<Test>]
+    member _.``HeadCommit is the actual merge HEAD rather than the last non-merge display commit``() =
+        withTempDir "treemon-head-identity" (fun repoDir ->
+            initRepoOnMain repoDir
+            gitAssert repoDir "checkout -b side"
+            gitAssert repoDir "commit --allow-empty -m side"
+            gitAssert repoDir "checkout main"
+            gitAssert repoDir "commit --allow-empty -m main-work"
+            let nonMergeHead = gitOut repoDir "rev-parse HEAD"
+            gitAssert repoDir "merge --no-ff side -m merge"
+            let mergeHead = gitOut repoDir "rev-parse HEAD"
+
+            let data = collectWorktreeGitData repoDir (Some "main") "origin" "main" |> runAsync
+
+            Assert.That(data.HeadCommit, Is.EqualTo(mergeHead))
+            Assert.That(data.HeadCommit, Is.Not.EqualTo(nonMergeHead)))
+
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -302,3 +326,141 @@ type ParseDiffStatsTests() =
     member _.``Commits with no net base diff produce no work metrics``() =
         let result = createWorkMetrics false 3 0 0
         Assert.That(result.IsNone, Is.True)
+
+// classifyUpstream turns a `git rev-parse --abbrev-ref @{u}` result into the three cases the
+// merged-PR prune logic needs (see worktree-monitor.md, Merged-PR Persistence): a
+// clean upstream, git's deterministic "no upstream", or a transient read failure that must NOT be
+// mistaken for "no upstream". Pure, so no setup.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ClassifyUpstreamTests() =
+
+    [<Test>]
+    member _.``a clean read yields Upstream with the full tracking-ref name``() =
+        // The remote prefix is stripped by getUpstreamBranch, not by this classification step.
+        Assert.That(classifyUpstream (Ok "origin/main"), Is.EqualTo(Upstream "origin/main"))
+
+    [<Test>]
+    member _.``a clean read trims surrounding whitespace``() =
+        Assert.That(classifyUpstream (Ok "  origin/feature/x \n"), Is.EqualTo(Upstream "origin/feature/x"))
+
+    [<Test>]
+    member _.``an anomalous empty success is a read failure, never a no-upstream``() =
+        // exit 0 with no output should never happen for @{u}; treat it as unknown, not "no branch".
+        Assert.That(classifyUpstream (Ok "   "), Is.EqualTo(UpstreamReadFailed))
+
+    [<Test>]
+    member _.``git's no-upstream-configured fatal is a clean NoUpstream``() =
+        Assert.That(
+            classifyUpstream (Error "fatal: no upstream configured for branch 'main'"),
+            Is.EqualTo(NoUpstream))
+
+    [<Test>]
+    member _.``a detached HEAD fatal is a clean NoUpstream``() =
+        Assert.That(
+            classifyUpstream (Error "fatal: HEAD does not point to a branch"),
+            Is.EqualTo(NoUpstream))
+
+    [<Test>]
+    member _.``an unborn branch (no such branch) is a clean NoUpstream``() =
+        // git emits this when HEAD points to a branch with no commits yet - a stable no-branch state
+        // carrying no merged-PR record, so it is safe to prune against (unlike "ambiguous argument").
+        Assert.That(
+            classifyUpstream (Error "fatal: no such branch: 'master'"),
+            Is.EqualTo(NoUpstream))
+
+    [<Test>]
+    member _.``a configured-but-unresolvable upstream is a read failure, not a no-upstream``() =
+        // git emits this when @{u} is configured but its remote-tracking ref is gone (e.g. a
+        // merged-then-deleted branch after fetch --prune). The branch is UNKNOWN, not absent, so we
+        // must skip pruning and keep its merged-PR record - not mistake it for "no branch".
+        Assert.That(
+            classifyUpstream (Error "fatal: ambiguous argument '@{u}': unknown revision or path not in the working tree."),
+            Is.EqualTo(UpstreamReadFailed))
+
+    [<Test>]
+    member _.``no-upstream detection is case-insensitive``() =
+        Assert.That(
+            classifyUpstream (Error "FATAL: No Upstream Configured For Branch 'main'"),
+            Is.EqualTo(NoUpstream))
+
+    [<Test>]
+    member _.``a timeout is a transient read failure, not a no-upstream``() =
+        Assert.That(classifyUpstream (Error "Timed out after 60000ms"), Is.EqualTo(UpstreamReadFailed))
+
+    [<Test>]
+    member _.``an unrecognized git error is a transient read failure``() =
+        // An index.lock / IO error must never be read as "no upstream" - that would wrongly prune.
+        Assert.That(
+            classifyUpstream (Error "fatal: Unable to create '/repo/.git/index.lock': File exists"),
+            Is.EqualTo(UpstreamReadFailed))
+
+    [<Test>]
+    member _.``configured upstream survives deletion of a differently named remote branch``() =
+        let refs =
+            String.concat "\n"
+                [ "local-name\torigin/provider-name"
+                  "main\torigin/main" ]
+
+        Assert.That(parseConfiguredUpstream "local-name" refs, Is.EqualTo(Some "origin/provider-name"))
+
+    [<Test>]
+    member _.``configured branch without tracking yields no fallback identity``() =
+        Assert.That(parseConfiguredUpstream "local-name" "local-name\t", Is.EqualTo(None))
+
+    [<Test>]
+    member _.``missing configured branch yields no fallback identity``() =
+        Assert.That(parseConfiguredUpstream "missing" "main\torigin/main", Is.EqualTo(None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type PrBranchNameTests() =
+
+    let gitData branch upstream =
+        { Path = "/repo/worktree"
+          Branch = branch
+          HeadCommit = "abc123"
+          LastCommitMessage = "message"
+          LastCommitTime = DateTimeOffset.UtcNow
+          Upstream = upstream
+          MainBehindCount = 0
+          BaseRevision = None
+          IsDirty = false
+          HasDiff = false
+          WorkMetrics = None }
+
+    [<Test>]
+    member _.``resolved provider branch wins over the local branch``() =
+        Assert.That(prBranchName (gitData "local-name" (Upstream "provider-name")), Is.EqualTo(Some "provider-name"))
+
+    [<Test>]
+    member _.``failed read falls back to the local branch``() =
+        Assert.That(prBranchName (gitData "feature/deleted" UpstreamReadFailed), Is.EqualTo(Some "feature/deleted"))
+
+    [<Test>]
+    member _.``clean no-upstream state has no PR branch identity``() =
+        Assert.That(prBranchName (gitData "feature/local" NoUpstream), Is.EqualTo(None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DeletedUpstreamTests() =
+
+    [<Test>]
+    member _.``collect keeps configured provider branch after remote deletion``() =
+        withTempDir "treemon-deleted-upstream" (fun tempDir ->
+            let repoDir, _ = initRepoWithOrigin tempDir
+            gitAssert repoDir "switch -c local-name"
+            gitAssert repoDir "commit --allow-empty -m feature"
+            gitAssert repoDir "push -u origin HEAD:provider-name"
+            gitAssert repoDir "push origin --delete provider-name"
+            gitAssert repoDir "fetch --prune origin"
+
+            let gitData =
+                collectWorktreeGitData repoDir (Some "local-name") "origin" "main"
+                |> runAsync
+
+            Assert.That(gitData.Upstream, Is.EqualTo(Upstream "provider-name"))
+            Assert.That(prBranchName gitData, Is.EqualTo(Some "provider-name")))

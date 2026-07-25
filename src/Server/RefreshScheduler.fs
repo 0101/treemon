@@ -454,9 +454,14 @@ let createAgent () =
 
 type SchedulerServices =
     { SessionAgent: SessionManager.SessionAgent
-      ActivityStore: SessionActivityStore.SessionActivityStore option }
+      ActivityStore: SessionActivityStore.SessionActivityStore option
+      MergedPrStore: MergedPrStore.Store }
 
-let internal autoSyncDependencies (agent: MailboxProcessor<StateMsg>) (services: SchedulerServices) : AutoSync.TriggerDependencies =
+let internal autoSyncDependencies
+    (agent: MailboxProcessor<StateMsg>)
+    (sessionAgent: SessionManager.SessionAgent)
+    (activityStore: SessionActivityStore.SessionActivityStore option)
+    : AutoSync.TriggerDependencies =
     let tryBeginLaunch path =
         agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply))
 
@@ -464,7 +469,7 @@ let internal autoSyncDependencies (agent: MailboxProcessor<StateMsg>) (services:
         let provider = CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
         let command =
             CodingToolCli.build provider (CodingToolCli.Interactive text)
-        SessionManager.launchAction services.SessionAgent worktreePath command.AsShellString
+        SessionManager.launchAction sessionAgent worktreePath command.AsShellString
 
     { ClaimRevision =
         fun path baseRevision -> agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reply))
@@ -473,7 +478,7 @@ let internal autoSyncDependencies (agent: MailboxProcessor<StateMsg>) (services:
         fun path ->
             async {
                 let! state = agent.PostAndAsyncReply(GetState)
-                return AutoSync.selectSessionId services.ActivityStore (state.SessionStatuses |> Map.values) path
+                return AutoSync.selectSessionId activityStore (state.SessionStatuses |> Map.values) path
             }
       Deliver =
         AutoSync.deliver
@@ -529,32 +534,32 @@ let readArchivedBranchSets (rootPaths: Map<RepoId, string>) =
     rootPaths
     |> Map.map (fun _ root -> TreemonConfig.readArchivedBranchSet (Some root))
 
+let archivedPathsFor (archivedBranches: Set<string>) (repo: PerRepoState) =
+    repo.WorktreeList
+    |> List.filter (fun wt -> wt.Branch |> Option.exists (fun b -> Set.contains b archivedBranches))
+    |> List.map _.Path
+    |> Set.ofList
+
 let resolveArchivedPaths (archivedBranchSets: Map<RepoId, Set<string>>) (repos: Map<RepoId, PerRepoState>) =
     repos
     |> Map.map (fun repoId repo ->
         let archivedBranches =
-            archivedBranchSets
-            |> Map.tryFind repoId
-            |> Option.defaultValue Set.empty
+            archivedBranchSets |> Map.tryFind repoId |> Option.defaultValue Set.empty
 
-        repo.WorktreeList
-        |> List.choose (fun wt ->
-            wt.Branch
-            |> Option.filter (fun b -> Set.contains b archivedBranches)
-            |> Option.map (fun _ -> wt.Path))
-        |> Set.ofList)
+        archivedPathsFor archivedBranches repo)
 
 let isWorktreeIgnored (ignorePredicate: string -> bool) (wt: GitWorktree.WorktreeInfo) =
     (wt.Branch |> Option.exists ignorePredicate)
     || (wt.Path |> Path.GetFileName |> ignorePredicate)
 
+let ignoredPathsFor (ignorePredicate: string -> bool) (repo: PerRepoState) =
+    repo.WorktreeList
+    |> List.filter (isWorktreeIgnored ignorePredicate)
+    |> List.map _.Path
+    |> Set.ofList
+
 let resolveIgnoredPaths (ignorePredicate: string -> bool) (repos: Map<RepoId, PerRepoState>) =
-    repos
-    |> Map.map (fun _ repo ->
-        repo.WorktreeList
-        |> List.filter (isWorktreeIgnored ignorePredicate)
-        |> List.map _.Path
-        |> Set.ofList)
+    repos |> Map.map (fun _ repo -> ignoredPathsFor ignorePredicate repo)
 
 type PathFilters =
     { Archived: Map<RepoId, Set<string>>
@@ -562,6 +567,54 @@ type PathFilters =
 
 let private isPathInSet (paths: Map<RepoId, Set<string>>) repoId path =
     paths |> Map.tryFind repoId |> Option.map (Set.contains path) |> Option.defaultValue false
+
+type MergedPrBranchScope =
+    { GitData: Map<string, GitWorktree.GitData>
+      KnownBranches: Set<string>
+      PruneBranches: Set<string> option }
+
+/// Branch scope for one repo's merged-PR reconciliation. Archived worktrees are skipped by the
+/// steady-state refresh, so one first seen while already archived never collects `GitData`. Its
+/// worktree-list branch stands in and its path is exempt from the completeness check — otherwise a
+/// single such worktree would block pruning for the rest of the process lifetime.
+let internal mergedPrBranchScope (ignoredPaths: Set<string>) (archivedPaths: Set<string>) (repo: PerRepoState) =
+    let eligiblePaths = Set.difference repo.KnownPaths ignoredPaths
+
+    let eligibleGitData =
+        repo.GitData |> Map.filter (fun path _ -> Set.contains path eligiblePaths)
+
+    let collectedGitPaths = eligibleGitData |> Map.keys |> Set.ofSeq
+
+    let uncollectedArchivedPaths =
+        Set.difference (Set.intersect eligiblePaths archivedPaths) collectedGitPaths
+
+    let archivedFallbackBranches =
+        repo.WorktreeList
+        |> List.filter (fun wt -> Set.contains wt.Path uncollectedArchivedPaths)
+        |> List.choose _.Branch
+        |> Set.ofList
+
+    let knownBranches =
+        eligibleGitData
+        |> Map.values
+        |> Seq.choose GitWorktree.prBranchName
+        |> Set.ofSeq
+        |> Set.union archivedFallbackBranches
+
+    let readFailedPaths =
+        eligibleGitData
+        |> Map.filter (fun _ gitData -> gitData.Upstream = GitWorktree.UpstreamReadFailed)
+        |> Map.keys
+        |> Set.ofSeq
+
+    { GitData = eligibleGitData
+      KnownBranches = knownBranches
+      PruneBranches =
+        MergedPrStore.pruneScope
+            (Set.difference eligiblePaths uncollectedArchivedPaths)
+            collectedGitPaths
+            readFailedPaths
+            knownBranches }
 
 let buildTaskList (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
     let repoList = repos |> Map.toList
@@ -667,7 +720,7 @@ let internal executeTask
             agent.Post(UpdateGit(repoId, path, gitData))
             let repoRoot = rootPaths |> Map.find repoId
             AutoSync.triggerInBackground
-                (autoSyncDependencies agent services)
+                (autoSyncDependencies agent services.SessionAgent services.ActivityStore)
                 repoRoot
                 repo.UpstreamRemote
                 repo.BaseBranch
@@ -711,14 +764,54 @@ let internal executeTask
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
 
-            let knownBranches =
-                repo.GitData
-                |> Map.values
-                |> Seq.choose _.UpstreamBranch
-                |> set
+            let ignorePredicate =
+                GlobalConfig.readIgnoreWorktreePatterns () |> GlobalConfig.buildIgnorePredicate
 
-            let! prMap = PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote knownBranches
-            agent.Post(UpdatePr(repoId, prMap))
+            let branchScope =
+                mergedPrBranchScope
+                    (ignoredPathsFor ignorePredicate repo)
+                    (archivedPathsFor (TreemonConfig.readArchivedBranchSet (Some root)) repo)
+                    repo
+
+            let! livePrObservations =
+                PrStatus.fetchPrStatusesByRepoRoot root repo.UpstreamRemote branchScope.KnownBranches
+
+            let livePrMap = livePrObservations |> Map.map (fun _ (status, _) -> status)
+
+            let liveHeadShas =
+                livePrObservations
+                |> Map.toSeq
+                |> Seq.choose (fun (branch, (_, headSha)) ->
+                    headSha
+                    |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                    |> Option.map (fun sha -> branch, sha))
+                |> Map.ofSeq
+
+            let! persisted = MergedPrStore.getForRepo services.MergedPrStore repoId
+
+            let worktreeHeads =
+                branchScope.GitData
+                |> Map.values
+                |> Seq.choose (fun gitData ->
+                    match GitWorktree.prBranchName gitData with
+                    | Some branch when gitData.HeadCommit <> "" -> Some(branch, gitData.HeadCommit)
+                    | _ -> None)
+                |> Seq.groupBy fst
+                |> Seq.map (fun (branch, pairs) -> branch, pairs |> Seq.map snd |> Set.ofSeq)
+                |> Map.ofSeq
+
+            let effectiveMap, newPersisted =
+                MergedPrStore.reconcileMergedPrs
+                    livePrMap
+                    liveHeadShas
+                    persisted
+                    worktreeHeads
+                    branchScope.PruneBranches
+
+            if newPersisted <> persisted then
+                MergedPrStore.setForRepo services.MergedPrStore repoId newPersisted
+
+            agent.Post(UpdatePr(repoId, effectiveMap))
 
         | RefreshFetch repoId ->
             let root = rootPaths |> Map.find repoId

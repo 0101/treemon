@@ -287,10 +287,10 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
-    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop =
+    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, mergedPrStore =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
-            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None, None
         else
             let agent = RefreshScheduler.createAgent ()
             let cardLog = CardEventLog.createAgent ()
@@ -320,6 +320,7 @@ let main args =
                 |> buildRemotingHandler,
                 Some agent,
                 None,
+                None,
                 None
             | None ->
                 let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
@@ -332,9 +333,17 @@ let main args =
                         rootPaths
                 let store = activity.Components.Store
 
+                let mergedStore =
+                    let path = MergedPrStore.filePathForPort config.Port
+                    Log.log "Startup" $"Merged PR store: {path}"
+                    let created = MergedPrStore.create path
+                    created.Load()
+                    created
+
                 let schedulerServices: RefreshScheduler.SchedulerServices =
                     { SessionAgent = sessionAgent
-                      ActivityStore = Some store }
+                      ActivityStore = Some store
+                      MergedPrStore = mergedStore }
 
                 let scheduler =
                     try
@@ -365,7 +374,8 @@ let main args =
                     |> buildRemotingHandler,
                     Some agent,
                     Some activity,
-                    Some scheduler
+                    Some scheduler,
+                    Some mergedStore
                 with _ ->
                     SessionActivityRuntime.shutdown activity (Some scheduler)
                     reraise ()
@@ -452,5 +462,14 @@ let main args =
         |> Option.iter (fun runtime ->
             Log.log "Shutdown" "Stopping session activity"
             SessionActivityRuntime.shutdown runtime schedulerLoop)
+
+        mergedPrStore
+        |> Option.iter (fun store ->
+            try
+                match Async.RunSynchronously(store.Flush(), timeout = 5000) with
+                | Ok() -> ()
+                | Error error -> Log.log "Shutdown" error
+            with :? System.TimeoutException ->
+                Log.log "Shutdown" "Timed out flushing merged PR store")
 
     0
