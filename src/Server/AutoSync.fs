@@ -10,9 +10,14 @@ type DeliveryRequest =
       SessionId: string option
       Prompt: string }
 
+/// `ClaimRevision`/`ReleaseRevision` are the in-process claim; the accepted-revision operations are
+/// the durable, restart-safe layer on top of it (`AutoSyncStore`).
 type TriggerDependencies =
     { ClaimRevision: string -> string -> Async<bool>
       ReleaseRevision: string -> string -> unit
+      ReadAcceptedRevision: string -> Async<AutoSyncStore.AcceptedSyncRecord option>
+      RecordAcceptedRevision: string -> string -> unit
+      ClearAcceptedRevision: string -> unit
       SelectSessionId: string -> Async<string option>
       Deliver: DeliveryRequest -> Async<bool> }
 
@@ -21,6 +26,22 @@ let prompt upstreamRemote baseBranch =
 
 let revision enabled (gitData: GitWorktree.GitData) =
     if enabled && gitData.MainBehindCount > 0 then gitData.BaseRevision else None
+
+/// How long an accepted prompt suppresses the same base revision. The confirmed incident's sync ran
+/// for 23 minutes, so anything shorter re-prompts a session that is still working; the bound exists
+/// at all so a prompt that was accepted but never acted on is eventually retried.
+let acceptedRetryAge = TimeSpan.FromHours 1.0
+
+/// A durable record suppresses only the revision it was written for, and only inside the retry
+/// window — a different base revision is the legitimate case where the base advanced again.
+let internal isAlreadyAccepted
+    (now: DateTimeOffset)
+    baseRevision
+    (record: AutoSyncStore.AcceptedSyncRecord option)
+    =
+    match record with
+    | Some record -> record.BaseRevision = baseRevision && now - record.AcceptedAt < acceptedRetryAge
+    | None -> false
 
 let internal selectTargetSessionId (now: DateTimeOffset) (sessions: StoredStatus list) =
     let openSessions =
@@ -119,27 +140,37 @@ let trigger
             |> Set.contains gitData.Branch
 
         match revision enabled gitData with
-        | None -> ()
+        | None ->
+            // Catching up ends an accepted prompt's life: falling behind the same base revision
+            // again is new work, so it must be able to prompt again.
+            if gitData.MainBehindCount = 0 then
+                dependencies.ClearAcceptedRevision gitData.Path
         | Some baseRevision ->
-            let! claimed = dependencies.ClaimRevision gitData.Path baseRevision
+            let! acceptedRecord = dependencies.ReadAcceptedRevision gitData.Path
 
-            if claimed then
-                try
-                    let! sessionId = dependencies.SelectSessionId gitData.Path
+            if not (isAlreadyAccepted DateTimeOffset.UtcNow baseRevision acceptedRecord) then
+                let! claimed = dependencies.ClaimRevision gitData.Path baseRevision
 
-                    let! accepted =
-                        dependencies.Deliver
-                            { WorktreePath = WorktreePath gitData.Path
-                              SessionId = sessionId
-                              Prompt = prompt upstreamRemote baseBranch }
+                if claimed then
+                    try
+                        let! sessionId = dependencies.SelectSessionId gitData.Path
 
-                    if accepted then
-                        Log.log "AutoSync" $"Prompt accepted for {gitData.Branch} at base revision {baseRevision}"
-                    else
+                        let! accepted =
+                            dependencies.Deliver
+                                { WorktreePath = WorktreePath gitData.Path
+                                  SessionId = sessionId
+                                  Prompt = prompt upstreamRemote baseBranch }
+
+                        // Recorded only once acceptance is certain: a crash or rejection before this
+                        // point must leave no record, so the prompt can be retried.
+                        if accepted then
+                            dependencies.RecordAcceptedRevision gitData.Path baseRevision
+                            Log.log "AutoSync" $"Prompt accepted for {gitData.Branch} at base revision {baseRevision}"
+                        else
+                            dependencies.ReleaseRevision gitData.Path baseRevision
+                    with ex ->
+                        Log.log "AutoSync" $"Trigger failed for {gitData.Branch}: {ex.Message}"
                         dependencies.ReleaseRevision gitData.Path baseRevision
-                with ex ->
-                    Log.log "AutoSync" $"Trigger failed for {gitData.Branch}: {ex.Message}"
-                    dependencies.ReleaseRevision gitData.Path baseRevision
     }
 
 let internal startGuarded onError workflow =

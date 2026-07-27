@@ -37,6 +37,7 @@ let private createApi agent roots =
         (SessionManager.createAgent ())
         None
         None
+        None
         roots
         None
         "1.0"

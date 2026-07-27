@@ -39,6 +39,34 @@ let private gitData path branch behind revision dirty : GitWorktree.GitData =
       Comparison = GitWorktree.Clean
       WorkMetrics = None }
 
+/// Trigger dependencies with no durable layer: nothing is ever recorded, so only the in-process
+/// claim deduplicates. Tests override the fields whose behavior they assert on.
+let private withoutAcceptedRecords: TriggerDependencies =
+    { ClaimRevision = fun _ _ -> async { return true }
+      ReleaseRevision = fun _ _ -> ()
+      ReadAcceptedRevision = fun _ -> async { return None }
+      RecordAcceptedRevision = fun _ _ -> ()
+      ClearAcceptedRevision = ignore
+      SelectSessionId = fun _ -> async { return None }
+      Deliver = fun _ -> async { return true } }
+
+/// The production wiring against a real durable store, with only the delivery outcome faked, so the
+/// read/record/clear functions the scheduler injects are the ones under test.
+let private withAcceptedRecords agent store deliver =
+    { autoSyncDependencies agent (SessionManager.createAgent ()) None (Some store) with
+        SelectSessionId = fun _ -> async { return Some "session-a" }
+        Deliver = deliver }
+
+let private acceptedRecord revision acceptedAt : AutoSyncStore.AcceptedSyncRecord =
+    { BaseRevision = revision
+      AcceptedAt = acceptedAt }
+
+/// A durable store rooted in `dir`, loaded from disk exactly as server startup loads it.
+let private loadedStore dir =
+    let store = AutoSyncStore.create (Path.Combine(dir, "auto-sync.json"))
+    store.Load()
+    store
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -239,6 +267,178 @@ type AutoSyncTriggerTests() =
             Assert.That(upToDateRevision, Is.EqualTo None)
             Assert.That(disabledRevision, Is.EqualTo None))
 
+    [<Test>]
+    member _.``Only the same revision inside the retry age counts as already accepted``() =
+        let now = DateTimeOffset(2026, 7, 27, 12, 0, 0, TimeSpan.Zero)
+        let inWindow = acceptedRecord "base-a" (now - acceptedRetryAge + TimeSpan.FromMinutes 1.0)
+        let expired = acceptedRecord "base-a" (now - acceptedRetryAge - TimeSpan.FromMinutes 1.0)
+
+        Assert.Multiple(fun () ->
+            Assert.That(isAlreadyAccepted now "base-a" (Some inWindow), Is.True)
+            Assert.That(
+                isAlreadyAccepted now "base-a" (Some expired),
+                Is.False,
+                "an expired record must allow one more attempt rather than suppress forever")
+            Assert.That(
+                isAlreadyAccepted now "base-b" (Some inWindow),
+                Is.False,
+                "a different base revision is new work and must trigger immediately")
+            Assert.That(isAlreadyAccepted now "base-a" None, Is.False))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``An accepted revision stays suppressed when the store is reloaded after a restart``() =
+        TestUtils.withTempDir "treemon-auto-sync-restart" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+
+            let deliver _ =
+                async {
+                    deliveries <- deliveries + 1
+                    return true
+                }
+
+            let observation = gitData worktree "feature-a" 2 (Some "base-a") false
+
+            let observeWith store =
+                trigger (withAcceptedRecords (createAgent ()) store deliver) root "origin" "main" observation
+                |> TestUtils.runAsync
+
+            let store = loadedStore root
+            observeWith store
+            TestUtils.assertOk (TestUtils.runAsync (store.Flush())) "persisting the accepted record"
+
+            // A restart recreates every in-process claim empty; only the durable record survives it.
+            observeWith (loadedStore root)
+
+            Assert.That(
+                deliveries,
+                Is.EqualTo(1),
+                "a revision accepted before the restart must not be prompted again after it"))
+
+    [<Test>]
+    member _.``A rejected delivery leaves no durable record so the revision can be retried``() =
+        TestUtils.withTempDir "treemon-auto-sync-rejected" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+
+            let deliver _ =
+                async {
+                    deliveries <- deliveries + 1
+                    return false
+                }
+
+            let store = loadedStore root
+            let dependencies = withAcceptedRecords (createAgent ()) store deliver
+            let observation = gitData worktree "feature-a" 2 (Some "base-a") false
+
+            trigger dependencies root "origin" "main" observation |> TestUtils.runAsync
+            let rejectedRecord = TestUtils.runAsync (store.Get worktree)
+            trigger dependencies root "origin" "main" observation |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    rejectedRecord,
+                    Is.EqualTo(None),
+                    "a prompt that was never accepted must leave nothing to suppress the retry")
+                Assert.That(deliveries, Is.EqualTo(2), "the same revision must be retried")))
+
+    [<Test>]
+    member _.``A newer base revision is delivered once and replaces the record``() =
+        TestUtils.withTempDir "treemon-auto-sync-advance" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+
+            let deliver _ =
+                async {
+                    deliveries <- deliveries + 1
+                    return true
+                }
+
+            let store = loadedStore root
+            let dependencies = withAcceptedRecords (createAgent ()) store deliver
+
+            let observe baseRevision =
+                gitData worktree "feature-a" 2 (Some baseRevision) false
+                |> trigger dependencies root "origin" "main"
+                |> TestUtils.runAsync
+
+            observe "base-a"
+            observe "base-b"
+            observe "base-b"
+
+            Assert.Multiple(fun () ->
+                Assert.That(deliveries, Is.EqualTo(2), "each new base revision prompts exactly once")
+                Assert.That(
+                    TestUtils.runAsync (store.Get worktree) |> Option.map _.BaseRevision,
+                    Is.EqualTo(Some "base-b"))))
+
+    [<Test>]
+    member _.``Catching up with the base clears the durable record``() =
+        TestUtils.withTempDir "treemon-auto-sync-catchup" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            let store = loadedStore root
+
+            let dependencies =
+                withAcceptedRecords (createAgent ()) store (fun _ -> async { return true })
+
+            let observe behind =
+                gitData worktree "feature-a" behind (Some "base-a") false
+                |> trigger dependencies root "origin" "main"
+                |> TestUtils.runAsync
+
+            observe 2
+            let recordWhileBehind = TestUtils.runAsync (store.Get worktree)
+            observe 0
+
+            Assert.Multiple(fun () ->
+                Assert.That(recordWhileBehind |> Option.map _.BaseRevision, Is.EqualTo(Some "base-a"))
+                Assert.That(
+                    TestUtils.runAsync (store.Get worktree),
+                    Is.EqualTo(None),
+                    "falling behind the same revision again is new work and must prompt again")))
+
+    [<Test>]
+    member _.``A record older than the retry age allows one more prompt``() =
+        TestUtils.withTempDir "treemon-auto-sync-expiry" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+
+            let deliver _ =
+                async {
+                    deliveries <- deliveries + 1
+                    return true
+                }
+
+            let store = loadedStore root
+            let expiredAt = DateTimeOffset.UtcNow - acceptedRetryAge - TimeSpan.FromMinutes 1.0
+            AutoSyncStore.setAccepted store worktree (acceptedRecord "base-a" expiredAt)
+
+            gitData worktree "feature-a" 2 (Some "base-a") false
+            |> trigger (withAcceptedRecords (createAgent ()) store deliver) root "origin" "main"
+            |> TestUtils.runAsync
+
+            let refreshedAt =
+                TestUtils.runAsync (store.Get worktree)
+                |> Option.map _.AcceptedAt
+                |> Option.defaultValue DateTimeOffset.MinValue
+
+            Assert.Multiple(fun () ->
+                Assert.That(deliveries, Is.EqualTo(1), "an accepted prompt that was never acted on is retried")
+                Assert.That(
+                    refreshedAt,
+                    Is.GreaterThan(expiredAt),
+                    "the retry restarts the suppression window")))
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -261,17 +461,16 @@ type AutoSyncSchedulerDispatchTests() =
             TreemonConfig.setAutoSyncBranches root [ "feature" ]
 
             let dependencies =
-                { ClaimRevision = fun _ _ -> async { return true }
-                  ReleaseRevision = fun _ _ -> ()
-                  SelectSessionId = fun _ -> async { return Some "session-a" }
-                  Deliver =
-                    fun _ ->
-                        async {
-                            deliveryStarted.TrySetResult(()) |> ignore
-                            do! releaseDelivery.Task |> Async.AwaitTask
-                            deliveryCompleted.TrySetResult(()) |> ignore
-                            return true
-                        } }
+                { withoutAcceptedRecords with
+                    SelectSessionId = fun _ -> async { return Some "session-a" }
+                    Deliver =
+                        fun _ ->
+                            async {
+                                deliveryStarted.TrySetResult(()) |> ignore
+                                do! releaseDelivery.Task |> Async.AwaitTask
+                                deliveryCompleted.TrySetResult(()) |> ignore
+                                return true
+                            } }
 
             let schedulerStep =
                 async {
@@ -739,6 +938,9 @@ type AutoSyncEndpointTests() =
             $"http://127.0.0.1:{port}/"
             (Some "session-a")
 
+        let store = AutoSyncStore.create (Path.Combine(root, "auto-sync.json"))
+        store.Load()
+
         let api =
             WorktreeApi.worktreeApi
                 agent
@@ -746,6 +948,7 @@ type AutoSyncEndpointTests() =
                 sessionAgent
                 None
                 None
+                (Some store)
                 [ root ]
                 None
                 "1.0"
@@ -768,6 +971,7 @@ type AutoSyncEndpointTests() =
         let dashboard = api.getWorktrees () |> Async.RunSynchronously
         let status = dashboard.Repos |> List.collect _.Worktrees |> List.exactlyOne
         let enabledState = agent.PostAndReply(GetState)
+        let enabledRecord = TestUtils.runAsync (store.Get normalizedPath)
         let duplicateRefreshClaim =
             agent.PostAndReply(fun reply ->
                 ClaimAutoSyncTrigger(normalizedPath, "base-a", reply))
@@ -789,6 +993,10 @@ type AutoSyncEndpointTests() =
                 |> Map.toList
                 |> List.map fst,
                 Is.EqualTo([ normalizedPath ]))
+            Assert.That(
+                enabledRecord |> Option.map _.BaseRevision,
+                Is.EqualTo(Some "base-a"),
+                "the durable record must be keyed by the resolved canonical path")
             Assert.That(duplicateRefreshClaim, Is.False))
 
         let disableResult =
@@ -796,6 +1004,7 @@ type AutoSyncEndpointTests() =
             |> Async.RunSynchronously
         let disabledBranches = TreemonConfig.readAutoSyncBranchSet (Some root)
         let disabledState = agent.PostAndReply(GetState)
+        let disabledRecord = TestUtils.runAsync (store.Get normalizedPath)
         let secondBody, reenableResult = enableAndReceive (WorktreePath normalizedPath)
         let finalState = agent.PostAndReply(GetState)
 
@@ -803,6 +1012,10 @@ type AutoSyncEndpointTests() =
             Assert.That(Result.isOk disableResult, Is.True)
             Assert.That(disabledBranches, Is.Empty)
             Assert.That(Map.containsKey normalizedPath disabledState.AutoSyncTriggeredRevisions, Is.False)
+            Assert.That(
+                disabledRecord,
+                Is.EqualTo(None),
+                "disabling must clear the durable record so re-enabling can prompt again")
             Assert.That(Result.isOk reenableResult, Is.True)
             Assert.That(secondBody, Is.EqualTo(body))
             Assert.That(
@@ -885,6 +1098,7 @@ type AutoSyncVerificationTests() =
                     sessionAgent
                     None
                     None
+                    None
                     [ root ]
                     None
                     "1.0"
@@ -936,27 +1150,28 @@ type AutoSyncVerificationTests() =
             TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
 
             let dependencies =
-                { ClaimRevision =
-                    fun worktreePath baseRevision ->
-                        agent.PostAndAsyncReply(fun reply ->
-                            ClaimAutoSyncTrigger(worktreePath, baseRevision, reply))
-                  ReleaseRevision =
-                    fun worktreePath baseRevision ->
-                        agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
-                  SelectSessionId = fun _ -> async { return Some "retained-session" }
-                  Deliver =
-                    deliver
-                        (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })
-                        (fun () -> async { return () })
-                        (fun worktreePath ->
+                { withoutAcceptedRecords with
+                    ClaimRevision =
+                        fun worktreePath baseRevision ->
                             agent.PostAndAsyncReply(fun reply ->
-                                TryBeginAutoSyncLaunch(worktreePath, reply)))
-                        (CompleteAutoSyncLaunch >> agent.Post)
-                        (fun worktreePath promptText ->
-                            async {
-                                launches <- (worktreePath, promptText) :: launches
-                                return Ok ()
-                            }) }
+                                ClaimAutoSyncTrigger(worktreePath, baseRevision, reply))
+                    ReleaseRevision =
+                        fun worktreePath baseRevision ->
+                            agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
+                    SelectSessionId = fun _ -> async { return Some "retained-session" }
+                    Deliver =
+                        deliver
+                            (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })
+                            (fun () -> async { return () })
+                            (fun worktreePath ->
+                                agent.PostAndAsyncReply(fun reply ->
+                                    TryBeginAutoSyncLaunch(worktreePath, reply)))
+                            (CompleteAutoSyncLaunch >> agent.Post)
+                            (fun worktreePath promptText ->
+                                async {
+                                    launches <- (worktreePath, promptText) :: launches
+                                    return Ok ()
+                                }) }
 
             let observation = gitData path "feature-a" 2 (Some "base-a") true
             trigger dependencies root "upstream" "develop" observation
@@ -989,20 +1204,21 @@ type AutoSyncVerificationTests() =
             TreemonConfig.modifyAutoSyncBranches root (Set.ofList >> Set.add "feature-a" >> Set.toList)
 
             let dependencies =
-                { ClaimRevision =
-                    fun worktreePath baseRevision ->
-                        agent.PostAndAsyncReply(fun reply ->
-                            ClaimAutoSyncTrigger(worktreePath, baseRevision, reply))
-                  ReleaseRevision =
-                    fun worktreePath baseRevision ->
-                        agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
-                  SelectSessionId = fun _ -> async { return Some "selected-working" }
-                  Deliver =
-                    fun request ->
-                        async {
-                            deliveries <- request :: deliveries
-                            return true
-                        } }
+                { withoutAcceptedRecords with
+                    ClaimRevision =
+                        fun worktreePath baseRevision ->
+                            agent.PostAndAsyncReply(fun reply ->
+                                ClaimAutoSyncTrigger(worktreePath, baseRevision, reply))
+                    ReleaseRevision =
+                        fun worktreePath baseRevision ->
+                            agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
+                    SelectSessionId = fun _ -> async { return Some "selected-working" }
+                    Deliver =
+                        fun request ->
+                            async {
+                                deliveries <- request :: deliveries
+                                return true
+                            } }
 
             let observe revision =
                 gitData path "feature-a" 2 (Some revision) true

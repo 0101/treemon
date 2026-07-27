@@ -23,6 +23,7 @@ let private createApi store =
         (SessionManager.createAgent ())
         None
         (Some store)
+        None
         []
         None
         "test"

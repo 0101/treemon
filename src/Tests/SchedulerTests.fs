@@ -139,6 +139,64 @@ type RefreshGitTaskTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type WorktreeListRefreshTests() =
+
+    [<Test>]
+    member _.``A disappeared worktree drops its durable accepted-sync record``() =
+        TestUtils.withTempDir "treemon-worktree-list" (fun tempDir ->
+            async {
+                let repoDir = Path.Combine(tempDir, "repo")
+                initRepoOnMain repoDir
+                let agent = createAgent ()
+                let rootPaths = Map.ofList [ testRepoId, repoDir ]
+
+                let store = Server.AutoSyncStore.create (Path.Combine(tempDir, "auto-sync.json"))
+                store.Load()
+
+                let services =
+                    { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
+                      ActivityStore = None
+                      MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json"))
+                      AutoSyncStore = store }
+
+                // A first discovery establishes the paths exactly as Git reports them.
+                do! executeTask agent services rootPaths (RefreshWorktreeList testRepoId)
+                let! discovered = agent.PostAndAsyncReply(GetState)
+                let livePath = (discovered.Repos |> Map.find testRepoId).WorktreeList |> List.exactlyOne |> _.Path
+                let deletedPath = Path.Combine(tempDir, "deleted")
+
+                agent.Post(
+                    UpdateWorktreeList(
+                        testRepoId,
+                        [ makeWorktree livePath "main"; makeWorktree deletedPath "feature" ]))
+
+                let accepted revision : Server.AutoSyncStore.AcceptedSyncRecord =
+                    { BaseRevision = revision
+                      AcceptedAt = DateTimeOffset.UtcNow }
+
+                Server.AutoSyncStore.setAccepted store livePath (accepted "base-a")
+                Server.AutoSyncStore.setAccepted store deletedPath (accepted "base-b")
+
+                do! executeTask agent services rootPaths (RefreshWorktreeList testRepoId)
+
+                let! liveRecord = store.Get livePath
+                let! deletedRecord = store.Get deletedPath
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        deletedRecord,
+                        Is.EqualTo(None),
+                        "a worktree that is gone must not keep suppressing a sync for its reused path")
+                    Assert.That(
+                        liveRecord |> Option.map _.BaseRevision,
+                        Is.EqualTo(Some "base-a"),
+                        "a still-listed worktree keeps its accepted record"))
+            }
+            |> Async.RunSynchronously)
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type PickMostOverdueTests() =
 
     [<Test>]

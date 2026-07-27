@@ -462,6 +462,7 @@ let internal autoSyncDependencies
     (agent: MailboxProcessor<StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (activityStore: SessionActivityStore.SessionActivityStore option)
+    (autoSyncStore: AutoSyncStore.Store option)
     : AutoSync.TriggerDependencies =
     let tryBeginLaunch path =
         agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply))
@@ -475,6 +476,24 @@ let internal autoSyncDependencies
     { ClaimRevision =
         fun path baseRevision -> agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reply))
       ReleaseRevision = fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
+      // Without a durable store (fixture mode) nothing is ever recorded, so nothing is suppressed:
+      // the in-process claim remains the only deduplication.
+      ReadAcceptedRevision =
+        fun path ->
+            match autoSyncStore with
+            | Some store -> store.Get path
+            | None -> async { return None }
+      RecordAcceptedRevision =
+        fun path baseRevision ->
+            autoSyncStore
+            |> Option.iter (fun store ->
+                AutoSyncStore.setAccepted
+                    store
+                    path
+                    { BaseRevision = baseRevision
+                      AcceptedAt = DateTimeOffset.UtcNow })
+      ClearAcceptedRevision =
+        fun path -> autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clear store path)
       SelectSessionId =
         fun path ->
             async {
@@ -675,6 +694,13 @@ let repositoryDiscoveryUpdate
           BaseBranch = baseBranch }
     )
 
+/// Known paths a fresh listing no longer contains. A failed listing (`None`) reports nothing gone:
+/// the previous list is retained, so those worktrees are not known to have disappeared.
+let internal disappearedPaths (known: Set<string>) (discovered: GitWorktree.WorktreeInfo list option) =
+    discovered
+    |> Option.map (fun worktrees -> Set.difference known (worktrees |> List.map _.Path |> Set.ofList))
+    |> Option.defaultValue Set.empty
+
 let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
     |> Map.tryFind task
@@ -694,9 +720,17 @@ let internal executeTask
             let! worktrees = GitWorktree.listWorktrees root
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
             let baseBranch = TreemonConfig.readBaseBranch root
-            agent.Post(repositoryDiscoveryUpdate repoId worktrees upstreamRemote baseBranch)
+            // Read before the discovery update, while the previously known paths are still visible.
             let! state = agent.PostAndAsyncReply(GetState)
-            let alreadyDetected = state.Repos |> Map.tryFind repoId |> Option.bind _.Provider |> Option.isSome
+            agent.Post(repositoryDiscoveryUpdate repoId worktrees upstreamRemote baseBranch)
+            let repo = state.Repos |> Map.tryFind repoId
+
+            // The state fold prunes its own per-worktree maps, but the durable accepted-sync records
+            // live outside DashboardState, so a disappeared worktree drops its record here.
+            disappearedPaths (repo |> Option.map _.KnownPaths |> Option.defaultValue Set.empty) worktrees
+            |> Set.iter (AutoSyncStore.clear services.AutoSyncStore)
+
+            let alreadyDetected = repo |> Option.bind _.Provider |> Option.isSome
             if not alreadyDetected then
                 let! remoteUrl = PrStatus.getRemoteUrl root upstreamRemote
                 let provider = remoteUrl |> Option.bind PrStatus.detectProvider |> Option.map PrStatus.toRepoProvider |> Option.defaultValue UnknownProvider
@@ -721,7 +755,11 @@ let internal executeTask
             agent.Post(UpdateGit(repoId, path, gitData))
             let repoRoot = rootPaths |> Map.find repoId
             AutoSync.triggerInBackground
-                (autoSyncDependencies agent services.SessionAgent services.ActivityStore)
+                (autoSyncDependencies
+                    agent
+                    services.SessionAgent
+                    services.ActivityStore
+                    (Some services.AutoSyncStore))
                 repoRoot
                 repo.UpstreamRemote
                 repo.BaseBranch

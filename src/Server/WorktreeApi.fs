@@ -546,7 +546,7 @@ let private openTerminal
 
 let internal deleteWorktreeWith
     (removeGitWorktree: string -> string -> string option -> Async<Result<unit, string>>)
-    (removeInteractionOwnership: string -> Async<unit>)
+    (removeWorktreeState: string -> Async<unit>)
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (wtPath: WorktreePath)
@@ -562,14 +562,15 @@ let internal deleteWorktreeWith
         | Some ctx ->
             do! removeGitWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
             agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
-            do! removeInteractionOwnership ctx.Worktree.Path
+            do! removeWorktreeState ctx.Worktree.Path
     }
 
-let private deleteWorktree agent rootPaths wtPath =
+let private deleteWorktree agent (clearAcceptedSync: string -> unit) rootPaths wtPath =
     let removeWorktreeState path =
         async {
             do! CanvasDocOwnership.removeWorktree path
             do! WorktreeDiffApi.removeWorktree path
+            clearAcceptedSync path
         }
 
     deleteWorktreeWith
@@ -617,6 +618,7 @@ let worktreeApi
     (sessionAgent: SessionManager.SessionAgent)
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (snapshotStore: OverviewSnapshotStore.OverviewSnapshotStore option)
+    (autoSyncStore: AutoSyncStore.Store option)
     (worktreeRoots: string list)
     (testFixtures: string option)
     (appVersion: string)
@@ -625,7 +627,8 @@ let worktreeApi
     let fixtures = testFixtures |> Option.bind (fun p -> loadFixtures p |> Result.toOption)
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
-    let autoSyncDependencies = RefreshScheduler.autoSyncDependencies agent sessionAgent activityStore
+    let autoSyncDependencies =
+        RefreshScheduler.autoSyncDependencies agent sessionAgent activityStore autoSyncStore
 
     let validatePath path =
         async {
@@ -691,6 +694,7 @@ let worktreeApi
 
                           if not enabled then
                               agent.Post(RefreshScheduler.StateMsg.ClearAutoSyncTrigger ctx.Worktree.Path)
+                              autoSyncDependencies.ClearAcceptedRevision ctx.Worktree.Path
                           else
                               match state.Repos |> Map.tryFind ctx.RepoId with
                               | Some repo ->
@@ -744,7 +748,7 @@ let worktreeApi
                           | _ -> None)
                       |> Map.ofList
               }
-          deleteWorktree = deleteWorktree agent rootPaths
+          deleteWorktree = deleteWorktree agent autoSyncDependencies.ClearAcceptedRevision rootPaths
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
                   async {

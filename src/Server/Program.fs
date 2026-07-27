@@ -337,6 +337,7 @@ let main args =
                     sessionAgent
                     None
                     None
+                    None
                     worktreeRoots
                     config.TestFixtures
                     appVersion
@@ -397,6 +398,7 @@ let main args =
                         sessionAgent
                         (Some store)
                         (Some activity.SnapshotStore)
+                        (Some autoSyncStore)
                         worktreeRoots
                         config.TestFixtures
                         appVersion
