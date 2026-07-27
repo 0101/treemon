@@ -716,6 +716,9 @@ var FILTER_KEY = 'treemon.diff.layers:' + location.pathname.replace(/\/diff\.htm
 var HIGHLIGHTER_URL = '/assets/diff2html/3.4.52/diff2html-ui-slim.min.js';
 var OTHER_CATEGORY = 'Other';
 var CATEGORY_WARNING = 'Diff groups are not applied';
+// The one size that decides every initial disclosure: a group holding more than this many files, or
+// a branch with more direct children than this, opens as a header instead of exposed rows.
+var CATEGORY_DISCLOSURE_LIMIT = 5;
 var VIEWER_ID = crypto.randomUUID();
 var state = {
     summary: null,
@@ -728,7 +731,11 @@ var state = {
     fileAbort: null,
     summaryRequest: 0,
     selectedButton: null,
-    panel: null
+    panel: null,
+    // Explicit expand/collapse choices for this page instance only, keyed by a JSON-serialized
+    // category path so a name containing a delimiter cannot collide with a different path. Never
+    // written to browser storage: a reload deliberately returns to the computed defaults.
+    categoryToggles: new Map()
 };
 var highlighterPromise = null;
 
@@ -1038,14 +1045,20 @@ function createFileItem(file, index) {
 // category paths, so a configured category without changes never renders. Unmatched files collect
 // in the synthetic trailing Other group.
 function categoryRoots(files) {
-    var root = { children: new Map(), files: [] };
+    var root = { children: new Map(), files: [], path: [] };
 
     files.forEach(function(file, index) {
         var path = Array.isArray(file.categoryPath) ? file.categoryPath : [];
         var category = path.reduce(function(parent, name) {
             var child = parent.children.get(name);
             if (!child) {
-                child = { name: name, children: new Map(), files: [], count: 0 };
+                child = {
+                    name: name,
+                    path: parent.path.concat([name]),
+                    children: new Map(),
+                    files: [],
+                    count: 0
+                };
                 parent.children.set(name, child);
             }
             child.count += 1;
@@ -1059,6 +1072,7 @@ function categoryRoots(files) {
     return configured.concat([
         {
             name: OTHER_CATEGORY,
+            path: [OTHER_CATEGORY],
             children: new Map(),
             files: root.files,
             count: root.files.length
@@ -1066,7 +1080,33 @@ function categoryRoots(files) {
     ]);
 }
 
-function createCategorySection(node, depth) {
+// The intrinsic default of one category, independent of its ancestors: a leaf (including the
+// synthetic Other group) opens while its files fit the limit, and a branch closes only when it has
+// more direct children than the limit, so a wide branch shows a summary instead of a wall of headers.
+function categoryOpensByDefault(node) {
+    if (node.children.size) return node.children.size <= CATEGORY_DISCLOSURE_LIMIT;
+    return node.files.length <= CATEGORY_DISCLOSURE_LIMIT;
+}
+
+// An expanded branch holding more files than the limit shows its children as headers only. The
+// forcing reaches exactly one level and is computed from the intrinsic tree, so every descendant
+// keeps the state it would have had without it and opening a forced category reveals its normal
+// outline rather than a fully collapsed subtree.
+function forcesChildrenCollapsed(node) {
+    return categoryOpensByDefault(node) && node.count > CATEGORY_DISCLOSURE_LIMIT;
+}
+
+function categoryToggleKey(path) {
+    return JSON.stringify(path);
+}
+
+function categoryExpanded(node, forcedCollapsed) {
+    var explicit = state.categoryToggles.get(categoryToggleKey(node.path));
+    if (explicit !== undefined) return explicit;
+    return forcedCollapsed ? false : categoryOpensByDefault(node);
+}
+
+function createCategorySection(node, depth, forcedCollapsed) {
     var section = document.createElement('section');
     section.className = 'category-item';
     section.style.setProperty('--category-depth', String(depth));
@@ -1074,7 +1114,7 @@ function createCategorySection(node, depth) {
     var button = document.createElement('button');
     button.type = 'button';
     button.className = 'category-entry';
-    button.setAttribute('aria-expanded', 'true');
+    button.setAttribute('aria-expanded', String(categoryExpanded(node, forcedCollapsed)));
     button.title = node.name;
 
     var name = document.createElement('span');
@@ -1088,16 +1128,16 @@ function createCategorySection(node, depth) {
 
     button.append(name, count);
     button.addEventListener('click', function() {
-        button.setAttribute(
-            'aria-expanded',
-            String(button.getAttribute('aria-expanded') !== 'true')
-        );
+        var expanded = button.getAttribute('aria-expanded') !== 'true';
+        button.setAttribute('aria-expanded', String(expanded));
+        state.categoryToggles.set(categoryToggleKey(node.path), expanded);
     });
 
     var panel = document.createElement('div');
     panel.className = 'category-panel';
+    var forcesChildren = forcesChildrenCollapsed(node);
     var children = Array.from(node.children.values(), function(child) {
-        return createCategorySection(child, depth + 1);
+        return createCategorySection(child, depth + 1, forcesChildren);
     });
     var rows = node.files.map(function(entry) {
         return createFileItem(entry.file, entry.index);
@@ -1110,8 +1150,10 @@ function createCategorySection(node, depth) {
 
 function renderCategoryTree(files) {
     var list = document.getElementById('file-list');
+    // Top-level categories are evaluated individually; nothing forces them collapsed on behalf of
+    // the diff as a whole.
     var sections = categoryRoots(files).map(function(node) {
-        return createCategorySection(node, 1);
+        return createCategorySection(node, 1, false);
     });
     list.replaceChildren.apply(list, sections);
 }

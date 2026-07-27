@@ -196,6 +196,48 @@ let private invalidSummaryJson reason files =
         1
         files
 
+/// Builds `count` changed files that all classify into `path`; an empty path leaves them unmatched
+/// so they collect in the synthetic trailing Other group.
+let private categoryFiles (path: string list) (count: int) =
+    let label =
+        match path with
+        | [] -> "unmatched"
+        | names -> String.concat "-" names
+
+    Array.init count (fun index ->
+        categorizedFileJson
+            $"id-{label}-{index}"
+            $"src/{label}/file{index}.fs"
+            (None: string option)
+            "modified"
+            path)
+
+/// Reads the rendered disclosure state as `Ancestor > Child|aria-expanded` lines in document order,
+/// which is the whole observable contract of the initial-disclosure rules.
+let private categoryDisclosureScript =
+    """() => {
+        const lines = [];
+        const walk = (section, ancestors) => {
+            const button = section.querySelector(':scope > .category-entry');
+            const path = ancestors.concat([button.querySelector('.category-name').textContent]);
+            lines.push(path.join(' > ') + '|' + button.getAttribute('aria-expanded'));
+            section
+                .querySelectorAll(':scope > .category-panel > .category-item')
+                .forEach(child => walk(child, path));
+        };
+        document
+            .querySelectorAll('#file-list > .category-item')
+            .forEach(section => walk(section, []));
+        return lines;
+    }"""
+
+/// File rows the reader can actually see, so collapsed categories are proven to hide their files
+/// rather than merely to flip an attribute.
+let private visibleFileRowsScript =
+    """() => [...document.querySelectorAll('.file-entry')]
+        .filter(entry => entry.offsetParent !== null)
+        .map(entry => entry.querySelector('.file-path').textContent)"""
+
 let private fileResultJsonWithPatch patch status identity displayPath oldDisplayPath change =
     let file = fileJson identity displayPath oldDisplayPath change
 
@@ -796,6 +838,56 @@ type DiffViewerE2ETests() =
             do! entry.WaitForAsync()
             do! entry.ClickAsync()
         }
+
+    member private this.ToggleCategory(name: string) =
+        task {
+            let header =
+                this.Page.Locator($".category-entry:has(.category-name:text-is('{name}'))")
+
+            do! header.WaitForAsync()
+            do! header.ClickAsync()
+        }
+
+    /// Marks the rendered tree, runs an action that reloads the summary, and waits for the
+    /// replacement tree, so an assertion can never read the pre-refresh DOM.
+    member private this.RerenderCategories(act: unit -> Task) =
+        task {
+            let! _ =
+                this.Page.EvaluateAsync<obj>(
+                    """() => document
+                        .querySelectorAll('#file-list > *')
+                        .forEach(node => { node.dataset.stale = 'true'; })"""
+                )
+
+            do! act ()
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """() => document.querySelectorAll('#file-list [data-stale]').length === 0
+                        && document.querySelectorAll('#file-list .category-entry').length > 0"""
+                )
+
+            ()
+        }
+
+    member private this.RefreshCategories() =
+        this.RerenderCategories(fun () -> this.Page.Locator("#refresh").ClickAsync())
+
+    member private this.ToggleUntrackedLayer() =
+        this.RerenderCategories(fun () ->
+            task {
+                let! _ =
+                    this.Page.EvaluateAsync<obj>(
+                        """() => {
+                            const untracked = document.getElementById('filter-untracked');
+                            untracked.checked = !untracked.checked;
+                            untracked.dispatchEvent(new Event('change', { bubbles: true }));
+                        }"""
+                    )
+
+                ()
+            }
+            :> Task)
 
     member private this.SetupLayerFilterPage() =
         task {
@@ -2136,6 +2228,454 @@ type DiffViewerE2ETests() =
                     afterRefresh,
                     Is.EqualTo([| ""; "0"; "Production code"; "0" |])
                 ))
+        }
+
+    [<Test>]
+    member this.``initial disclosure opens the worked example as an architectural outline``() =
+        task {
+            let files =
+                Array.concat
+                    [ categoryFiles [ "Production code"; "Client" ] 3
+                      categoryFiles [ "Production code"; "Server" ] 4
+                      categoryFiles [ "Production code"; "Shared" ] 1
+                      categoryFiles [ "Tests" ] 6
+                      categoryFiles [ "Docs" ] 2
+                      categoryFiles [ "Instructions" ] 1 ]
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(6).WaitForAsync()
+
+            let! disclosure =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! visible =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    disclosure,
+                    Is.EqualTo(
+                        [| "Production code|true"
+                           "Production code > Client|false"
+                           "Production code > Server|false"
+                           "Production code > Shared|false"
+                           "Tests|false"
+                           "Docs|true"
+                           "Instructions|true" |]
+                    )
+                )
+                Assert.That(
+                    visible,
+                    Is.EqualTo(
+                        [| "src/Docs/file0.fs"
+                           "src/Docs/file1.fs"
+                           "src/Instructions/file0.fs" |]
+                    )
+                ))
+        }
+
+    [<Test>]
+    member this.``leaf categories expand at five files and collapse at six``() =
+        task {
+            let files =
+                Array.concat
+                    [ categoryFiles [ "Five" ] 5; categoryFiles [ "Six" ] 6 ]
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(1).WaitForAsync()
+
+            let! disclosure =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! visible =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    disclosure,
+                    Is.EqualTo([| "Five|true"; "Six|false" |])
+                )
+                Assert.That(
+                    visible,
+                    Is.EqualTo(
+                        [| "src/Five/file0.fs"
+                           "src/Five/file1.fs"
+                           "src/Five/file2.fs"
+                           "src/Five/file3.fs"
+                           "src/Five/file4.fs" |]
+                    )
+                ))
+        }
+
+    [<Test>]
+    member this.``branches expand at five direct children and collapse at six``() =
+        task {
+            let childFiles parent count =
+                Array.init count (fun index ->
+                    categoryFiles [ parent; $"Child{index}" ] 1)
+                |> Array.concat
+
+            let files = Array.append (childFiles "Narrow" 5) (childFiles "Wide" 6)
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(6).WaitForAsync()
+
+            let! disclosure =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! visible =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    disclosure,
+                    Is.EqualTo(
+                        [| "Narrow|true"
+                           "Narrow > Child0|true"
+                           "Narrow > Child1|true"
+                           "Narrow > Child2|true"
+                           "Narrow > Child3|true"
+                           "Narrow > Child4|true"
+                           "Wide|false"
+                           "Wide > Child0|true"
+                           "Wide > Child1|true"
+                           "Wide > Child2|true"
+                           "Wide > Child3|true"
+                           "Wide > Child4|true"
+                           "Wide > Child5|true" |]
+                    )
+                )
+                Assert.That(visible.Length, Is.EqualTo(5)))
+        }
+
+    [<Test>]
+    member this.``a branch over the file limit forces only its direct children collapsed``() =
+        task {
+            let files =
+                Array.concat
+                    [ categoryFiles [ "Production code"; "Client"; "Views" ] 2
+                      categoryFiles [ "Production code"; "Client"; "State" ] 1
+                      categoryFiles [ "Production code"; "Server" ] 4
+                      categoryFiles [ "Production code"; "Shared"; "Contracts" ] 4
+                      categoryFiles [ "Production code"; "Shared"; "Utils" ] 3 ]
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do!
+                this.Page.Locator(
+                    ".category-entry:has(.category-name:text-is('Shared'))"
+                ).WaitForAsync()
+
+            let! forced =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! hidden =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            // Opening a forced-collapsed branch must reveal its normal outline: the small subtree
+            // under Client opens through to its files, while Shared keeps forcing its own children.
+            do! this.ToggleCategory("Client")
+            let! openedSmall =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            do! this.ToggleCategory("Shared")
+            let! opened =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! openedLarge =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    forced,
+                    Is.EqualTo(
+                        [| "Production code|true"
+                           "Production code > Client|false"
+                           "Production code > Client > Views|true"
+                           "Production code > Client > State|true"
+                           "Production code > Server|false"
+                           "Production code > Shared|false"
+                           "Production code > Shared > Contracts|false"
+                           "Production code > Shared > Utils|false" |]
+                    )
+                )
+                Assert.That(hidden, Is.Empty)
+                Assert.That(
+                    openedSmall,
+                    Is.EqualTo(
+                        [| "src/Production code-Client-Views/file0.fs"
+                           "src/Production code-Client-Views/file1.fs"
+                           "src/Production code-Client-State/file0.fs" |]
+                    )
+                )
+                Assert.That(
+                    opened,
+                    Is.EqualTo(
+                        [| "Production code|true"
+                           "Production code > Client|true"
+                           "Production code > Client > Views|true"
+                           "Production code > Client > State|true"
+                           "Production code > Server|false"
+                           "Production code > Shared|true"
+                           "Production code > Shared > Contracts|false"
+                           "Production code > Shared > Utils|false" |]
+                    )
+                )
+                Assert.That(openedLarge, Is.EqualTo(openedSmall)))
+        }
+
+    [<Test>]
+    member this.``the other group follows the leaf disclosure rule``() =
+        task {
+            let summaries =
+                [| configuredSummaryJson (
+                       Array.append (categoryFiles [ "Tests" ] 1) (categoryFiles [] 6)
+                   )
+                   configuredSummaryJson (
+                       Array.append (categoryFiles [ "Tests" ] 1) (categoryFiles [] 5)
+                   ) |]
+            // The route callback owns the sequence of summaries served to Refresh.
+            let mutable summaryIndex = 0
+
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-summary?*",
+                    fun route ->
+                        let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
+                        summaryIndex <- summaryIndex + 1
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                )
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(1).WaitForAsync()
+
+            let! overLimit =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! visibleOverLimit =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            do! this.RefreshCategories()
+
+            let! atLimit =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! visibleAtLimit =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    overLimit,
+                    Is.EqualTo([| "Tests|true"; "Other|false" |])
+                )
+                Assert.That(
+                    visibleOverLimit,
+                    Is.EqualTo([| "src/Tests/file0.fs" |])
+                )
+                Assert.That(atLimit, Is.EqualTo([| "Tests|true"; "Other|true" |]))
+                Assert.That(visibleAtLimit.Length, Is.EqualTo(6)))
+        }
+
+    [<Test>]
+    member this.``explicit toggles are keyed by path so delimiters in names cannot collide``() =
+        task {
+            let files =
+                [| categorizedFileJson
+                       "id-slash-parent"
+                       "src/slash-parent.fs"
+                       None
+                       "modified"
+                       [ "A/B"; "C" ]
+                   categorizedFileJson
+                       "id-slash-child"
+                       "src/slash-child.fs"
+                       None
+                       "modified"
+                       [ "A"; "B/C" ] |]
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(3).WaitForAsync()
+
+            let! before =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            do! this.ToggleCategory("C")
+
+            let! afterToggle =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! visible =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            do! this.RefreshCategories()
+
+            let! afterRefresh =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    before,
+                    Is.EqualTo(
+                        [| "A/B|true"
+                           "A/B > C|true"
+                           "A|true"
+                           "A > B/C|true" |]
+                    )
+                )
+                Assert.That(
+                    afterToggle,
+                    Is.EqualTo(
+                        [| "A/B|true"
+                           "A/B > C|false"
+                           "A|true"
+                           "A > B/C|true" |]
+                    )
+                )
+                Assert.That(visible, Is.EqualTo([| "src/slash-child.fs" |]))
+                Assert.That(afterRefresh, Is.EqualTo(afterToggle)))
+        }
+
+    [<Test>]
+    member this.``explicit toggles survive refresh, a layer filter change, and a category returning``() =
+        task {
+            let full =
+                configuredSummaryJson (
+                    Array.concat
+                        [ categoryFiles [ "Production code"; "Client" ] 2
+                          categoryFiles [ "Production code"; "Server" ] 1
+                          categoryFiles [ "Tests" ] 6
+                          categoryFiles [ "Docs" ] 1 ]
+                )
+
+            let withoutDocs =
+                configuredSummaryJson (
+                    Array.concat
+                        [ categoryFiles [ "Production code"; "Client" ] 2
+                          categoryFiles [ "Production code"; "Server" ] 1
+                          categoryFiles [ "Tests" ] 6 ]
+                )
+
+            // Load, Refresh, layer-filter change, Refresh: Docs disappears from the third summary
+            // and returns in the fourth.
+            let summaries = [| full; full; withoutDocs; full |]
+            let mutable summaryIndex = 0
+
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-summary?*",
+                    fun route ->
+                        let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
+                        summaryIndex <- summaryIndex + 1
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                )
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(4).WaitForAsync()
+
+            let! computed =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            do! this.ToggleCategory("Tests")
+            do! this.ToggleCategory("Docs")
+            do! this.ToggleCategory("Production code")
+
+            let! chosen =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            do! this.RefreshCategories()
+
+            let! afterRefresh =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            do! this.ToggleUntrackedLayer()
+
+            let! afterFilter =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            do! this.RefreshCategories()
+
+            let! afterReturn =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            let expectedChoices =
+                [| "Production code|false"
+                   "Production code > Client|true"
+                   "Production code > Server|true"
+                   "Tests|true"
+                   "Docs|false" |]
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    computed,
+                    Is.EqualTo(
+                        [| "Production code|true"
+                           "Production code > Client|true"
+                           "Production code > Server|true"
+                           "Tests|false"
+                           "Docs|true" |]
+                    )
+                )
+                Assert.That(chosen, Is.EqualTo(expectedChoices))
+                Assert.That(afterRefresh, Is.EqualTo(expectedChoices))
+                Assert.That(
+                    afterFilter,
+                    Is.EqualTo(
+                        [| "Production code|false"
+                           "Production code > Client|true"
+                           "Production code > Server|true"
+                           "Tests|true" |]
+                    )
+                )
+                Assert.That(afterReturn, Is.EqualTo(expectedChoices)))
+        }
+
+    [<Test>]
+    member this.``reloading the page returns categories to their computed defaults``() =
+        task {
+            let files =
+                Array.append (categoryFiles [ "Tests" ] 6) (categoryFiles [ "Docs" ] 1)
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(1).WaitForAsync()
+
+            do! this.ToggleCategory("Tests")
+            do! this.ToggleCategory("Docs")
+
+            let! chosen =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            let! _ =
+                this.Page.ReloadAsync(
+                    PageReloadOptions(WaitUntil = WaitUntilState.Load)
+                )
+
+            do! this.Page.Locator(".category-entry").Nth(1).WaitForAsync()
+
+            let! afterReload =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! storage =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const keys = [...Object.keys(localStorage), ...Object.keys(sessionStorage)];
+                        return [
+                            String(keys.filter(key => /categor/i.test(key)).length),
+                            String(sessionStorage.length)
+                        ];
+                    }"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(chosen, Is.EqualTo([| "Tests|true"; "Docs|false" |]))
+                Assert.That(
+                    afterReload,
+                    Is.EqualTo([| "Tests|false"; "Docs|true" |])
+                )
+                Assert.That(storage, Is.EqualTo([| "0"; "0" |])))
         }
 
     [<Test>]
