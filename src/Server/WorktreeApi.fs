@@ -685,35 +685,45 @@ let worktreeApi
                   | Some { Branch = None; Worktree = wt } ->
                       return Error $"Worktree at '{wt.Path}' has no branch (detached HEAD)"
                   | Some ({ Branch = Some branch } as ctx) ->
-                      try
-                          TreemonConfig.modifyAutoSyncBranches ctx.RepoRoot (fun existing ->
-                              existing
-                              |> Set.ofList
-                              |> (if enabled then Set.add branch else Set.remove branch)
-                              |> Set.toList)
+                      let repo = state.Repos |> Map.tryFind ctx.RepoId
+                      let worktreeGit =
+                          repo |> Option.bind (fun repo -> repo.GitData |> Map.tryFind ctx.Worktree.Path)
+                      let prStatus = RefreshScheduler.prStatusForPath state ctx.Worktree.Path
 
-                          if not enabled then
-                              agent.Post(RefreshScheduler.StateMsg.ClearAutoSyncTrigger ctx.Worktree.Path)
-                              autoSyncDependencies.ClearAcceptedRevision ctx.Worktree.Path
-                          else
-                              match state.Repos |> Map.tryFind ctx.RepoId with
-                              | Some repo ->
-                                  match repo.GitData |> Map.tryFind ctx.Worktree.Path with
-                                  | Some gitData ->
+                      if enabled && AutoSync.isMergedPr prStatus then
+                          // Rejected rather than silently ignored: the client's optimistic toggle
+                          // rolls back onto its normal error surface instead of showing an enabled
+                          // state that the next PR refresh would immediately remove again.
+                          Log.log "API" $"toggleAutoSync: rejected merged branch '{branch}'"
+                          return Error $"'{branch}' is merged, so auto-sync can no longer be enabled for it"
+                      else
+                          try
+                              TreemonConfig.modifyAutoSyncBranches ctx.RepoRoot (fun existing ->
+                                  existing
+                                  |> Set.ofList
+                                  |> (if enabled then Set.add branch else Set.remove branch)
+                                  |> Set.toList)
+
+                              if not enabled then
+                                  agent.Post(RefreshScheduler.StateMsg.ClearAutoSyncTrigger ctx.Worktree.Path)
+                                  autoSyncDependencies.ClearAcceptedRevision ctx.Worktree.Path
+                              else
+                                  match repo, worktreeGit with
+                                  | Some repo, Some gitData ->
                                       do!
                                           AutoSync.trigger
                                               autoSyncDependencies
                                               ctx.RepoRoot
                                               repo.UpstreamRemote
                                               repo.BaseBranch
+                                              prStatus
                                               gitData
-                                  | None -> ()
-                              | None -> ()
+                                  | _ -> ()
 
-                          return Ok ()
-                      with ex ->
-                          Log.log "API" $"toggleAutoSync failed for '{path}': {ex.Message}"
-                          return Error $"Failed to persist auto-sync preference: {ex.Message}"
+                              return Ok ()
+                          with ex ->
+                              Log.log "API" $"toggleAutoSync failed for '{path}': {ex.Message}"
+                              return Error $"Failed to persist auto-sync preference: {ex.Message}"
               }
           getSyncStatus = fun () ->
               async {

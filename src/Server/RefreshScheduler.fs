@@ -458,6 +458,17 @@ type SchedulerServices =
       MergedPrStore: MergedPrStore.Store
       AutoSyncStore: AutoSyncStore.Store }
 
+/// The PR status of the branch checked out at `path`, resolved inside that worktree's own repo:
+/// PR data is keyed by provider branch, which is only unambiguous within one repository.
+let internal prStatusForPath (state: DashboardState) (path: string) =
+    state.Repos
+    |> Map.values
+    |> Seq.tryPick (fun repo ->
+        repo.GitData
+        |> Map.tryFind path
+        |> Option.map (fun gitData -> PrStatus.lookupPrStatus repo.PrData (GitWorktree.prBranchName gitData)))
+    |> Option.defaultValue NoPr
+
 let internal autoSyncDependencies
     (agent: MailboxProcessor<StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
@@ -494,6 +505,12 @@ let internal autoSyncDependencies
                       AcceptedAt = DateTimeOffset.UtcNow })
       ClearAcceptedRevision =
         fun path -> autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clear store path)
+      ReadPrStatus =
+        fun path ->
+            async {
+                let! state = agent.PostAndAsyncReply(GetState)
+                return prStatusForPath state path
+            }
       SelectSessionId =
         fun path ->
             async {
@@ -763,6 +780,7 @@ let internal executeTask
                 repoRoot
                 repo.UpstreamRemote
                 repo.BaseBranch
+                (PrStatus.lookupPrStatus repo.PrData (GitWorktree.prBranchName gitData))
                 gitData
 
             DiffProvisioner.provisionViewer path
@@ -851,6 +869,28 @@ let internal executeTask
                 MergedPrStore.setForRepo services.MergedPrStore repoId newPersisted
 
             agent.Post(UpdatePr(repoId, effectiveMap))
+
+            // Merged is terminal, and this is the only place holding the reconciled map, so the
+            // preference is retired here — one config write per repo, then the per-worktree trigger
+            // and durable accepted state that would otherwise keep prompting a merged branch.
+            let mergedTargets =
+                AutoSync.mergedAutoSyncTargets
+                    effectiveMap
+                    (TreemonConfig.readAutoSyncBranchSet (Some root))
+                    branchScope.GitData
+
+            if not (List.isEmpty mergedTargets) then
+                let mergedBranches = mergedTargets |> List.map _.Branch |> Set.ofList
+
+                TreemonConfig.modifyAutoSyncBranches root (fun existing ->
+                    Set.difference (Set.ofList existing) mergedBranches |> Set.toList)
+
+                for target in mergedTargets do
+                    agent.Post(ClearAutoSyncTrigger target.Path)
+                    AutoSyncStore.clear services.AutoSyncStore target.Path
+
+                let disabled = mergedBranches |> String.concat ", "
+                Log.log "AutoSync" $"Disabled auto-sync for merged branches in {RepoId.value repoId}: {disabled}"
 
         | RefreshFetch repoId ->
             let root = rootPaths |> Map.find repoId

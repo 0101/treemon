@@ -197,6 +197,127 @@ type WorktreeListRefreshTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type PrRefreshAutoSyncCleanupTests() =
+
+    let repoAId = RepoId "RepoA"
+    let repoBId = RepoId "RepoB"
+
+    let trackedGitData path branch headCommit : GitData =
+        { Path = path
+          Branch = branch
+          HeadCommit = headCommit
+          LastCommitMessage = ""
+          LastCommitTime = DateTimeOffset.MinValue
+          Upstream = Upstream branch
+          MainBehindCount = 3
+          BaseRevision = Some "base-a"
+          IsDirty = false
+          HasDiff = false
+          WorkMetrics = None }
+
+    [<Test>]
+    member _.``RefreshPr disables auto-sync only for merged branches in the refreshed repo``() =
+        TestUtils.withTempDir "treemon-pr-refresh-auto-sync" (fun tempDir ->
+            // The ignore-pattern read is machine-level, so the refreshed scope must not depend on
+            // whatever the developer's real config happens to ignore.
+            TestUtils.withTempConfigDir "treemon-pr-refresh-config" (fun _ ->
+                async {
+                    let repoA = Path.Combine(tempDir, "repoA")
+                    let repoB = Path.Combine(tempDir, "repoB")
+                    let mergedPath = Path.Combine(repoA, "merged")
+                    let unmergedPath = Path.Combine(repoA, "unmerged")
+                    let otherRepoPath = Path.Combine(repoB, "shared")
+
+                    [ repoA; repoB; mergedPath; unmergedPath; otherRepoPath ]
+                    |> List.iter (Directory.CreateDirectory >> ignore)
+
+                    Server.TreemonConfig.setAutoSyncBranches repoA [ "shared-branch"; "unmerged-branch" ]
+                    Server.TreemonConfig.setAutoSyncBranches repoB [ "shared-branch" ]
+
+                    let agent = createAgent ()
+
+                    agent.Post(
+                        UpdateWorktreeList(
+                            repoAId,
+                            [ makeWorktree mergedPath "shared-branch"
+                              makeWorktree unmergedPath "unmerged-branch" ]))
+                    agent.Post(UpdateGit(repoAId, mergedPath, trackedGitData mergedPath "shared-branch" "sha-merged"))
+                    agent.Post(
+                        UpdateGit(repoAId, unmergedPath, trackedGitData unmergedPath "unmerged-branch" "sha-unmerged"))
+
+                    agent.Post(UpdateWorktreeList(repoBId, [ makeWorktree otherRepoPath "shared-branch" ]))
+                    agent.Post(
+                        UpdateGit(repoBId, otherRepoPath, trackedGitData otherRepoPath "shared-branch" "sha-other"))
+
+                    // No remote is reachable from a temp directory, so the merged fact can only come
+                    // from the durable store — exactly the reconciled map RefreshPr must act on.
+                    let mergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json"))
+
+                    let mergedRecord: Server.MergedPrStore.MergedPrRecord =
+                        { Id = 7
+                          Title = "Merged work"
+                          Url = "https://example.test/pr/7"
+                          HeadSha = "sha-merged" }
+
+                    Server.MergedPrStore.setForRepo mergedPrStore repoAId (Map.ofList [ "shared-branch", mergedRecord ])
+
+                    let autoSyncStore = Server.AutoSyncStore.create (Path.Combine(tempDir, "auto-sync.json"))
+                    autoSyncStore.Load()
+
+                    let accepted revision : Server.AutoSyncStore.AcceptedSyncRecord =
+                        { BaseRevision = revision
+                          AcceptedAt = DateTimeOffset.UtcNow }
+
+                    Server.AutoSyncStore.setAccepted autoSyncStore mergedPath (accepted "base-a")
+                    Server.AutoSyncStore.setAccepted autoSyncStore unmergedPath (accepted "base-a")
+
+                    let! _ = agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(mergedPath, "base-a", reply))
+                    let! _ = agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(unmergedPath, "base-a", reply))
+
+                    let services =
+                        { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
+                          ActivityStore = None
+                          MergedPrStore = mergedPrStore
+                          AutoSyncStore = autoSyncStore }
+
+                    do!
+                        executeTask
+                            agent
+                            services
+                            (Map.ofList [ repoAId, repoA; repoBId, repoB ])
+                            (RefreshPr repoAId)
+
+                    let! state = agent.PostAndAsyncReply(GetState)
+                    let! mergedAccepted = autoSyncStore.Get mergedPath
+                    let! unmergedAccepted = autoSyncStore.Get unmergedPath
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(
+                            Server.TreemonConfig.readAutoSyncBranchSet (Some repoA),
+                            Is.EqualTo(Set.singleton "unmerged-branch"),
+                            "only the merged branch loses its preference")
+                        Assert.That(
+                            Server.TreemonConfig.readAutoSyncBranchSet (Some repoB),
+                            Is.EqualTo(Set.singleton "shared-branch"),
+                            "a merged branch must never disable a same-named branch in another repo")
+                        Assert.That(
+                            state.AutoSyncTriggeredRevisions |> Map.tryFind mergedPath,
+                            Is.EqualTo None,
+                            "the merged branch's trigger state must be cleared")
+                        Assert.That(
+                            state.AutoSyncTriggeredRevisions |> Map.tryFind unmergedPath,
+                            Is.EqualTo(Some "base-a"))
+                        Assert.That(
+                            mergedAccepted,
+                            Is.EqualTo None,
+                            "the merged branch's durable accepted record must be cleared")
+                        Assert.That(unmergedAccepted |> Option.map _.BaseRevision, Is.EqualTo(Some "base-a")))
+                }
+                |> Async.RunSynchronously))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type PickMostOverdueTests() =
 
     [<Test>]

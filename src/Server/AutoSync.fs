@@ -18,14 +18,53 @@ type TriggerDependencies =
       ReadAcceptedRevision: string -> Async<AutoSyncStore.AcceptedSyncRecord option>
       RecordAcceptedRevision: string -> string -> unit
       ClearAcceptedRevision: string -> unit
+      /// The worktree's current PR status, keyed by canonical worktree path so the lookup resolves
+      /// inside that worktree's own repo and a same-named branch elsewhere can never answer for it.
+      /// Read again at action boundaries because `RefreshPr` runs on its own cadence.
+      ReadPrStatus: string -> Async<PrStatus>
       SelectSessionId: string -> Async<string option>
       Deliver: DeliveryRequest -> Async<bool> }
+
+/// One merged-and-still-enabled branch. The local branch name is the `.treemon.json` preference
+/// key; the canonical worktree path is the trigger and durable-record key.
+type MergedAutoSyncTarget =
+    { Branch: string
+      Path: string }
 
 let prompt upstreamRemote baseBranch =
     $"Sync this worktree with {upstreamRemote}/{baseBranch} when safe. Preserve any in-progress work, resolve conflicts carefully, and run the appropriate checks before considering the sync complete."
 
-let revision enabled (gitData: GitWorktree.GitData) =
-    if enabled && gitData.MainBehindCount > 0 then gitData.BaseRevision else None
+/// Merged is terminal: nothing remains to be synced into a branch whose PR is already merged, so a
+/// leftover `.treemon.json` entry must not keep it syncing.
+let isMergedPr (prStatus: PrStatus) =
+    match prStatus with
+    | HasPr pr -> pr.IsMerged
+    | NoPr -> false
+
+/// The single eligibility rule, shared by the first observation and every pre-action re-check.
+let isEligible enabled prStatus = enabled && not (isMergedPr prStatus)
+
+let internal readEnabledPreference repoRoot branch =
+    TreemonConfig.readAutoSyncBranchSet (Some repoRoot) |> Set.contains branch
+
+/// Branches whose reconciled PR is merged while auto-sync is still enabled for them. PRs are matched
+/// by provider branch and preferences are keyed by local branch, both read from one repo's own Git
+/// data, so a merged branch can never disable a same-named branch in another repo.
+let mergedAutoSyncTargets
+    (effectivePrMap: Map<string, PrStatus>)
+    (enabledBranches: Set<string>)
+    (gitData: Map<string, GitWorktree.GitData>)
+    =
+    gitData
+    |> Map.values
+    |> Seq.filter (fun data ->
+        Set.contains data.Branch enabledBranches
+        && isMergedPr (PrStatus.lookupPrStatus effectivePrMap (GitWorktree.prBranchName data)))
+    |> Seq.map (fun data -> { Branch = data.Branch; Path = data.Path })
+    |> Seq.toList
+
+let revision eligible (gitData: GitWorktree.GitData) =
+    if eligible && gitData.MainBehindCount > 0 then gitData.BaseRevision else None
 
 /// How long an accepted prompt suppresses the same base revision. The confirmed incident's sync ran
 /// for 23 minutes, so anything shorter re-prompts a session that is still working; the bound exists
@@ -70,6 +109,16 @@ let selectSessionId
     |> selectTargetSessionId DateTimeOffset.UtcNow
 
 let internal registrationGraceMilliseconds = 3000
+
+/// The gate an operation must re-pass immediately before it acts. `RefreshPr` runs on its own
+/// cadence, so it can remove the preference — or learn the PR merged — after the Git observation
+/// that started this operation. Cancelling here is safe because nothing has been delivered yet;
+/// nothing may cancel once a prompt has been accepted or a Git command is already running.
+let isStillEligible (dependencies: TriggerDependencies) (repoRoot: string) (gitData: GitWorktree.GitData) =
+    async {
+        let! prStatus = dependencies.ReadPrStatus gitData.Path
+        return isEligible (readEnabledPreference repoRoot gitData.Branch) prStatus
+    }
 
 let deliver
     (tryDeliver: SessionBridge.SendRequest -> Async<SessionBridge.DeliveryResult>)
@@ -132,14 +181,14 @@ let trigger
     (repoRoot: string)
     (upstreamRemote: string)
     (baseBranch: string)
+    (prStatus: PrStatus)
     (gitData: GitWorktree.GitData)
     =
     async {
-        let enabled =
-            TreemonConfig.readAutoSyncBranchSet (Some repoRoot)
-            |> Set.contains gitData.Branch
+        let eligible =
+            isEligible (readEnabledPreference repoRoot gitData.Branch) prStatus
 
-        match revision enabled gitData with
+        match revision eligible gitData with
         | None ->
             // Catching up ends an accepted prompt's life: falling behind the same base revision
             // again is new work, so it must be able to prompt again.
@@ -154,20 +203,25 @@ let trigger
                 if claimed then
                     try
                         let! sessionId = dependencies.SelectSessionId gitData.Path
+                        let! stillEligible = isStillEligible dependencies repoRoot gitData
 
-                        let! accepted =
-                            dependencies.Deliver
-                                { WorktreePath = WorktreePath gitData.Path
-                                  SessionId = sessionId
-                                  Prompt = prompt upstreamRemote baseBranch }
-
-                        // Recorded only once acceptance is certain: a crash or rejection before this
-                        // point must leave no record, so the prompt can be retried.
-                        if accepted then
-                            dependencies.RecordAcceptedRevision gitData.Path baseRevision
-                            Log.log "AutoSync" $"Prompt accepted for {gitData.Branch} at base revision {baseRevision}"
-                        else
+                        if not stillEligible then
+                            Log.log "AutoSync" $"Dropped sync for {gitData.Branch}: no longer eligible"
                             dependencies.ReleaseRevision gitData.Path baseRevision
+                        else
+                            let! accepted =
+                                dependencies.Deliver
+                                    { WorktreePath = WorktreePath gitData.Path
+                                      SessionId = sessionId
+                                      Prompt = prompt upstreamRemote baseBranch }
+
+                            // Recorded only once acceptance is certain: a crash or rejection before
+                            // this point must leave no record, so the prompt can be retried.
+                            if accepted then
+                                dependencies.RecordAcceptedRevision gitData.Path baseRevision
+                                Log.log "AutoSync" $"Prompt accepted for {gitData.Branch} at base revision {baseRevision}"
+                            else
+                                dependencies.ReleaseRevision gitData.Path baseRevision
                     with ex ->
                         Log.log "AutoSync" $"Trigger failed for {gitData.Branch}: {ex.Message}"
                         dependencies.ReleaseRevision gitData.Path baseRevision
@@ -182,7 +236,7 @@ let internal startGuarded onError workflow =
     }
     |> Async.Start
 
-let triggerInBackground dependencies repoRoot upstreamRemote baseBranch (gitData: GitWorktree.GitData) =
+let triggerInBackground dependencies repoRoot upstreamRemote baseBranch prStatus (gitData: GitWorktree.GitData) =
     startGuarded
         (fun ex -> Log.log "AutoSync" $"Background trigger failed for {gitData.Branch}: {ex.Message}")
-        (trigger dependencies repoRoot upstreamRemote baseBranch gitData)
+        (trigger dependencies repoRoot upstreamRemote baseBranch prStatus gitData)

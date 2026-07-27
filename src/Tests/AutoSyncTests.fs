@@ -39,6 +39,12 @@ let private gitData path branch behind revision dirty : GitWorktree.GitData =
       Comparison = GitWorktree.Clean
       WorkMetrics = None }
 
+/// The same observation with a provider branch, so a PR lookup — which is keyed by the upstream
+/// name — resolves instead of falling back to `NoPr`.
+let private trackedGitData path branch upstream behind revision dirty =
+    { gitData path branch behind revision dirty with
+        Upstream = GitWorktree.Upstream upstream }
+
 /// Trigger dependencies with no durable layer: nothing is ever recorded, so only the in-process
 /// claim deduplicates. Tests override the fields whose behavior they assert on.
 let private withoutAcceptedRecords: TriggerDependencies =
@@ -47,8 +53,23 @@ let private withoutAcceptedRecords: TriggerDependencies =
       ReadAcceptedRevision = fun _ -> async { return None }
       RecordAcceptedRevision = fun _ _ -> ()
       ClearAcceptedRevision = ignore
+      ReadPrStatus = fun _ -> async { return NoPr }
       SelectSessionId = fun _ -> async { return None }
       Deliver = fun _ -> async { return true } }
+
+let private prInfo isMerged : PrStatus =
+    HasPr
+        { Id = 42
+          Title = "Sync worktree"
+          Url = "https://example.test/pr/42"
+          IsDraft = false
+          Comments = CommentSummary.WithResolution(0, 0)
+          Builds = []
+          IsMerged = isMerged
+          HasConflicts = false }
+
+let private mergedPr = prInfo true
+let private openPr = prInfo false
 
 /// The production wiring against a real durable store, with only the delivery outcome faked, so the
 /// read/record/clear functions the scheduler injects are the ones under test.
@@ -268,6 +289,125 @@ type AutoSyncTriggerTests() =
             Assert.That(disabledRevision, Is.EqualTo None))
 
     [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A known merged PR makes a behind worktree ineligible``() =
+        TestUtils.withTempDir "treemon-auto-sync-merged" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    Deliver =
+                        fun _ ->
+                            async {
+                                deliveries <- deliveries + 1
+                                return true
+                            } }
+
+            let observation = gitData worktree "feature-a" 2 (Some "base-a") false
+
+            trigger dependencies root "origin" "main" mergedPr observation |> TestUtils.runAsync
+            let afterMerged = deliveries
+            trigger dependencies root "origin" "main" openPr observation |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(revision (isEligible true mergedPr) observation, Is.EqualTo None)
+                Assert.That(revision (isEligible true openPr) observation, Is.EqualTo(Some "base-a"))
+                Assert.That(
+                    afterMerged,
+                    Is.Zero,
+                    "a merged PR leaves nothing to sync, even while the branch is still listed")
+                Assert.That(
+                    deliveries,
+                    Is.EqualTo(1),
+                    "an unmerged PR on the same enabled branch still syncs")))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``Disabling during target selection delivers nothing and releases the claim``() =
+        TestUtils.withTempDir "treemon-auto-sync-disable-race" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            let agent = createAgent ()
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    ClaimRevision =
+                        fun path baseRevision ->
+                            agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reply))
+                    ReleaseRevision =
+                        fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
+                    SelectSessionId =
+                        fun _ ->
+                            async {
+                                // Stands in for the RefreshPr cleanup landing mid-operation.
+                                TreemonConfig.modifyAutoSyncBranches
+                                    root
+                                    (Set.ofList >> Set.remove "feature-a" >> Set.toList)
+
+                                return Some "session-a"
+                            }
+                    Deliver =
+                        fun _ ->
+                            async {
+                                deliveries <- deliveries + 1
+                                return true
+                            } }
+
+            gitData worktree "feature-a" 2 (Some "base-a") false
+            |> trigger dependencies root "origin" "main" NoPr
+            |> TestUtils.runAsync
+
+            let state = agent.PostAndReply(GetState)
+
+            Assert.Multiple(fun () ->
+                Assert.That(deliveries, Is.Zero, "a branch disabled mid-operation must not be prompted")
+                Assert.That(
+                    state.AutoSyncTriggeredRevisions |> Map.tryFind worktree,
+                    Is.EqualTo None,
+                    "the claim must be released so a re-enable can trigger the same revision")))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A PR reconciled merged during target selection delivers nothing``() =
+        TestUtils.withTempDir "treemon-auto-sync-merged-race" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Mutable because both the observed PR state and delivery are impure boundaries here.
+            let mutable observedPr = NoPr
+            let mutable deliveries = 0
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    ReadPrStatus = fun _ -> async { return observedPr }
+                    SelectSessionId =
+                        fun _ ->
+                            async {
+                                // The PR refresh reconciles the merge while the target is chosen.
+                                observedPr <- mergedPr
+                                return Some "session-a"
+                            }
+                    Deliver =
+                        fun _ ->
+                            async {
+                                deliveries <- deliveries + 1
+                                return true
+                            } }
+
+            gitData worktree "feature-a" 2 (Some "base-a") false
+            |> trigger dependencies root "origin" "main" NoPr
+            |> TestUtils.runAsync
+
+            Assert.That(
+                deliveries,
+                Is.Zero,
+                "the pre-delivery gate must re-read the merged state, not trust the starting observation"))
+
+    [<Test>]
     member _.``Only the same revision inside the retry age counts as already accepted``() =
         let now = DateTimeOffset(2026, 7, 27, 12, 0, 0, TimeSpan.Zero)
         let inWindow = acceptedRecord "base-a" (now - acceptedRetryAge + TimeSpan.FromMinutes 1.0)
@@ -303,7 +443,7 @@ type AutoSyncTriggerTests() =
             let observation = gitData worktree "feature-a" 2 (Some "base-a") false
 
             let observeWith store =
-                trigger (withAcceptedRecords (createAgent ()) store deliver) root "origin" "main" observation
+                trigger (withAcceptedRecords (createAgent ()) store deliver) root "origin" "main" NoPr observation
                 |> TestUtils.runAsync
 
             let store = loadedStore root
@@ -336,9 +476,9 @@ type AutoSyncTriggerTests() =
             let dependencies = withAcceptedRecords (createAgent ()) store deliver
             let observation = gitData worktree "feature-a" 2 (Some "base-a") false
 
-            trigger dependencies root "origin" "main" observation |> TestUtils.runAsync
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
             let rejectedRecord = TestUtils.runAsync (store.Get worktree)
-            trigger dependencies root "origin" "main" observation |> TestUtils.runAsync
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
 
             Assert.Multiple(fun () ->
                 Assert.That(
@@ -366,7 +506,7 @@ type AutoSyncTriggerTests() =
 
             let observe baseRevision =
                 gitData worktree "feature-a" 2 (Some baseRevision) false
-                |> trigger dependencies root "origin" "main"
+                |> trigger dependencies root "origin" "main" NoPr
                 |> TestUtils.runAsync
 
             observe "base-a"
@@ -391,7 +531,7 @@ type AutoSyncTriggerTests() =
 
             let observe behind =
                 gitData worktree "feature-a" behind (Some "base-a") false
-                |> trigger dependencies root "origin" "main"
+                |> trigger dependencies root "origin" "main" NoPr
                 |> TestUtils.runAsync
 
             observe 2
@@ -424,7 +564,7 @@ type AutoSyncTriggerTests() =
             AutoSyncStore.setAccepted store worktree (acceptedRecord "base-a" expiredAt)
 
             gitData worktree "feature-a" 2 (Some "base-a") false
-            |> trigger (withAcceptedRecords (createAgent ()) store deliver) root "origin" "main"
+            |> trigger (withAcceptedRecords (createAgent ()) store deliver) root "origin" "main" NoPr
             |> TestUtils.runAsync
 
             let refreshedAt =
@@ -479,6 +619,7 @@ type AutoSyncSchedulerDispatchTests() =
                         root
                         "origin"
                         "main"
+                        NoPr
                         (gitData (Path.Combine(root, "feature")) "feature" 1 (Some "base-a") false)
 
                     nextTaskRan.TrySetResult(()) |> ignore
@@ -898,6 +1039,68 @@ type AutoSyncEndpointTests() =
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
+    member _.``Enabling auto-sync on a merged branch is rejected and persists nothing``() =
+        let normalizedPath = PathUtils.normalizePath worktree
+        let repoId = PathUtils.toRepoId root
+        let agent = createAgent ()
+
+        agent.Post(
+            UpdateWorktreeList(
+                repoId,
+                [ { GitWorktree.WorktreeInfo.Path = normalizedPath
+                    Head = "head"
+                    Branch = Some "feature-a" } ]))
+
+        agent.Post(
+            UpdateGit(
+                repoId,
+                normalizedPath,
+                trackedGitData normalizedPath "feature-a" "provider/feature-a" 2 (Some "base-a") false))
+
+        agent.Post(UpdatePr(repoId, Map.ofList [ "provider/feature-a", mergedPr ]))
+
+        let store = AutoSyncStore.create (Path.Combine(root, "auto-sync.json"))
+        store.Load()
+
+        let api =
+            WorktreeApi.worktreeApi
+                agent
+                (CardEventLog.createAgent ())
+                (SessionManager.createAgent ())
+                None
+                None
+                (Some store)
+                [ root ]
+                None
+                "1.0"
+                None
+
+        let enableResult =
+            api.toggleAutoSync (WorktreePath normalizedPath) true |> Async.RunSynchronously
+
+        let state = agent.PostAndReply(GetState)
+
+        Assert.Multiple(fun () ->
+            Assert.That(Result.isError enableResult, Is.True)
+            Assert.That(
+                TreemonConfig.readAutoSyncBranchSet (Some root),
+                Is.Empty,
+                "a rejected enable must persist nothing for the optimistic toggle to roll back onto")
+            Assert.That(state.AutoSyncTriggeredRevisions, Is.Empty)
+            Assert.That(TestUtils.runAsync (store.Get normalizedPath), Is.EqualTo None))
+
+        // A leftover preference from before the merge must still be removable by hand.
+        TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+
+        let disableResult =
+            api.toggleAutoSync (WorktreePath normalizedPath) false |> Async.RunSynchronously
+
+        Assert.Multiple(fun () ->
+            Assert.That(Result.isOk disableResult, Is.True)
+            Assert.That(TreemonConfig.readAutoSyncBranchSet (Some root), Is.Empty))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
     member _.``Differently-cased disable lets the same base revision trigger again``() =
         let normalizedPath = PathUtils.normalizePath worktree
         let differentlyCasedPath = normalizedPath.ToUpperInvariant()
@@ -1174,9 +1377,9 @@ type AutoSyncVerificationTests() =
                                 }) }
 
             let observation = gitData path "feature-a" 2 (Some "base-a") true
-            trigger dependencies root "upstream" "develop" observation
+            trigger dependencies root "upstream" "develop" NoPr observation
             |> Async.RunSynchronously
-            trigger dependencies root "upstream" "develop" observation
+            trigger dependencies root "upstream" "develop" NoPr observation
             |> Async.RunSynchronously
 
             let expectedLaunches = [ WorktreePath path, expectedPrompt ]
@@ -1222,7 +1425,7 @@ type AutoSyncVerificationTests() =
 
             let observe revision =
                 gitData path "feature-a" 2 (Some revision) true
-                |> trigger dependencies root "upstream" "develop"
+                |> trigger dependencies root "upstream" "develop" NoPr
                 |> Async.RunSynchronously
 
             observe "base-a"
