@@ -230,6 +230,30 @@ let internal persistResolvedRoots (resolution: RootsResolution) =
 let internal usesSessionActivity (config: ServerConfig) =
     not config.Demo && config.TestFixtures.IsNone
 
+/// Creates one port-scoped runtime store and seeds it from disk, logging the path so a stale or
+/// unexpected file is visible in the startup log.
+let private loadRuntimeStore
+    (label: string)
+    (path: string)
+    (create: string -> PersistentStore.Store<'K, 'V>)
+    : PersistentStore.Store<'K, 'V> =
+    Log.log "Startup" $"{label}: {path}"
+    let store = create path
+    store.Load()
+    store
+
+/// Flushes runtime stores at shutdown, bounded so a wedged disk cannot hang exit. Each store
+/// contributes a labelled flush rather than its own copy of this timeout handling.
+let private flushRuntimeStores (stores: (string * (unit -> Async<Result<unit, string>>)) list) =
+    stores
+    |> List.iter (fun (label, flush) ->
+        try
+            match Async.RunSynchronously(flush (), timeout = 5000) with
+            | Ok() -> ()
+            | Error error -> Log.log "Shutdown" error
+        with :? System.TimeoutException ->
+            Log.log "Shutdown" $"Timed out flushing {label}")
+
 let internal runHostWithCapture
     (startHost: unit -> unit)
     (waitForShutdown: unit -> unit)
@@ -287,10 +311,10 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
-    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, mergedPrStore =
+    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, runtimeStoreFlushes =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
-            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None, None
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None, []
         else
             let agent = RefreshScheduler.createAgent ()
             let cardLog = CardEventLog.createAgent ()
@@ -321,7 +345,7 @@ let main args =
                 Some agent,
                 None,
                 None,
-                None
+                []
             | None ->
                 let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
                 Log.log "Startup" $"Session activity store db: {dbPath}"
@@ -334,16 +358,22 @@ let main args =
                 let store = activity.Components.Store
 
                 let mergedStore =
-                    let path = MergedPrStore.filePathForPort config.Port
-                    Log.log "Startup" $"Merged PR store: {path}"
-                    let created = MergedPrStore.create path
-                    created.Load()
-                    created
+                    loadRuntimeStore
+                        "Merged PR store"
+                        (MergedPrStore.filePathForPort config.Port)
+                        MergedPrStore.create
+
+                let autoSyncStore =
+                    loadRuntimeStore
+                        "Auto-sync store"
+                        (AutoSyncStore.filePathForPort config.Port)
+                        AutoSyncStore.create
 
                 let schedulerServices: RefreshScheduler.SchedulerServices =
                     { SessionAgent = sessionAgent
                       ActivityStore = Some store
-                      MergedPrStore = mergedStore }
+                      MergedPrStore = mergedStore
+                      AutoSyncStore = autoSyncStore }
 
                 let scheduler =
                     try
@@ -375,7 +405,8 @@ let main args =
                     Some agent,
                     Some activity,
                     Some scheduler,
-                    Some mergedStore
+                    [ "merged PR store", mergedStore.Flush
+                      "auto-sync store", autoSyncStore.Flush ]
                 with _ ->
                     SessionActivityRuntime.shutdown activity (Some scheduler)
                     reraise ()
@@ -463,13 +494,6 @@ let main args =
             Log.log "Shutdown" "Stopping session activity"
             SessionActivityRuntime.shutdown runtime schedulerLoop)
 
-        mergedPrStore
-        |> Option.iter (fun store ->
-            try
-                match Async.RunSynchronously(store.Flush(), timeout = 5000) with
-                | Ok() -> ()
-                | Error error -> Log.log "Shutdown" error
-            with :? System.TimeoutException ->
-                Log.log "Shutdown" "Timed out flushing merged PR store")
+        flushRuntimeStores runtimeStoreFlushes
 
     0

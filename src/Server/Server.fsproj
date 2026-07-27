@@ -43,6 +43,7 @@
     <Compile Include="CanvasDocKinds.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
     <Compile Include="MergedPrStore.fs" />
+    <Compile Include="AutoSyncStore.fs" />
     <Compile Include="SessionBridge.fs" />
     <Compile Include="AutoSync.fs" />
     <Compile Include="CanvasBridge.fs" />

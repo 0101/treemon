@@ -51,6 +51,7 @@
     <Compile Include="ConfigWriterTests.fs" />
     <Compile Include="PersistentStoreTests.fs" />
     <Compile Include="MergedPrStoreTests.fs" />
+    <Compile Include="AutoSyncStoreTests.fs" />
     <Compile Include="SerializationTests.fs" />
     <Compile Include="WorktreeRootsConfigTests.fs" />
     <Compile Include="ServerStartupResolutionTests.fs" />

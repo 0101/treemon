@@ -455,7 +455,8 @@ let createAgent () =
 type SchedulerServices =
     { SessionAgent: SessionManager.SessionAgent
       ActivityStore: SessionActivityStore.SessionActivityStore option
-      MergedPrStore: MergedPrStore.Store }
+      MergedPrStore: MergedPrStore.Store
+      AutoSyncStore: AutoSyncStore.Store }
 
 let internal autoSyncDependencies
     (agent: MailboxProcessor<StateMsg>)
