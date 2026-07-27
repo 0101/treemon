@@ -463,17 +463,15 @@ let private handleCanvasRequest
             // than caching it in scheduler state: Refresh must show an edited or agent-written
             // `.treemon.json` immediately instead of at the next scheduler cycle. The read is keyed
             // by the owning repository root, so a linked worktree gets the shared configuration.
-            let categorization =
+            let summaryTarget =
                 diffTarget
-                |> Option.map (fst >> RepoId.value >> DiffCategories.read)
-                |> Option.defaultValue DiffCategories.Missing
+                |> Option.map (fun (repoId, comparison) ->
+                    ({ Comparison = comparison
+                       Categorization =
+                        repoId |> RepoId.value |> DiffCategories.read }
+                     : WorktreeDiffApi.DiffSummaryTarget))
 
-            do!
-                diffHandlers.Summary
-                    diffDeadline
-                    categorization
-                    comparisonContext
-                    ctx
+            do! diffHandlers.Summary diffDeadline summaryTarget ctx
         elif filename = "diff-file" then
             do! diffHandlers.File diffDeadline comparisonContext ctx
         elif filename = "beads-data" then

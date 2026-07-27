@@ -451,8 +451,9 @@ let private summaryResponse
         ""
         (handlers.Summary
             (handlerDeadline ())
-            categorization
-            (Some(diffContext worktree)))
+            (Some
+                { Comparison = diffContext worktree
+                  Categorization = categorization }))
 
 let private fileResponse
     (handlers: WorktreeDiffApi.Handlers)

@@ -32,11 +32,17 @@ type internal Service =
                  >
              > }
 
+/// What one diff summary request is about: the comparison to run and the categorization that
+/// orders its result. Both are derived from the same resolved repository, so pairing them in one
+/// value keeps a context from one repository and a categorization from another unrepresentable.
+type internal DiffSummaryTarget =
+    { Comparison: WorktreeDiff.DiffComparisonContext
+      Categorization: DiffCategories.Configuration }
+
 type internal Handlers =
     { Summary:
         ProcessRunner.ResponseDeadline
-            -> DiffCategories.Configuration
-            -> WorktreeDiff.DiffComparisonContext option
+            -> DiffSummaryTarget option
             -> HttpContext
             -> System.Threading.Tasks.Task<unit>
       File:
@@ -818,15 +824,15 @@ let private handleSummary
     (store: DiffIdentityStore)
     newIdentity
     deadline
-    (categorization: DiffCategories.Configuration)
-    (comparisonContext: WorktreeDiff.DiffComparisonContext option)
+    (target: DiffSummaryTarget option)
     (ctx: HttpContext)
     =
     task {
-        match comparisonContext with
+        match target with
         | None ->
             do! writeError deadline ctx 404 "Unknown worktree"
-        | Some comparisonContext ->
+        | Some { Comparison = comparisonContext
+                 Categorization = categorization } ->
             let worktreePath = comparisonContext.WorktreePath
 
             match viewerInstance ctx, summaryLayers ctx with
