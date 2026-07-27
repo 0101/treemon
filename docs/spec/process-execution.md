@@ -148,6 +148,7 @@ not a settled one.
 | `src/Server/PrStatus.fs` | `runAz` wrapper, `buildRemoteUrlArgs`, Azure DevOps PR/build queries |
 | `src/Server/GithubPrStatus.fs` | `runGh` wrapper, GitHub REST and GraphQL queries |
 | `src/Server/BeadsStatus.fs` | `bd list --json` invocation |
+| `src/Server/Program.fs` | Startup deploy-branch read (`git rev-parse --abbrev-ref HEAD`) |
 | `src/Server/WorktreeDiff.fs` | Byte-level argument-list caller; per-operation error mapping and capture-limit constants |
 | `src/Tests/WorktreeDiffTests.fs` | Argument-list execution, limits, timeout, and start-failure tests |
 | `src/Tests/CreateWorktreeServerTests.fs` | Git worktree and post-fork argv regression tests |

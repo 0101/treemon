@@ -8,8 +8,17 @@ open Microsoft.Extensions.Hosting
 open Shared
 open Server
 
+/// A branch name is a short line, so both streams share the small cap.
+let private startupCaptureLimitBytes = 64 * 1024
+
 let readDeployBranch () =
-    ProcessRunner.run "Startup" "git" "rev-parse --abbrev-ref HEAD"
+    ProcessRunner.runArgumentListText
+        startupCaptureLimitBytes
+        startupCaptureLimitBytes
+        "Startup"
+        "git"
+        [ "rev-parse"; "--abbrev-ref"; "HEAD" ]
+        None
     |> Async.RunSynchronously
     |> Option.bind (fun branch ->
         match branch with
