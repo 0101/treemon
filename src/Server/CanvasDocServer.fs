@@ -451,7 +451,12 @@ let private handleCanvasRequest
         let isKnown = comparisonContext |> Option.isSome
 
         if filename = "diff-summary" then
-            do! diffHandlers.Summary diffDeadline comparisonContext ctx
+            do!
+                diffHandlers.Summary
+                    diffDeadline
+                    DiffCategories.Missing
+                    comparisonContext
+                    ctx
         elif filename = "diff-file" then
             do! diffHandlers.File diffDeadline comparisonContext ctx
         elif filename = "beads-data" then

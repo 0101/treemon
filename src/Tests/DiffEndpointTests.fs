@@ -9,12 +9,44 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
 open System.Threading.Tasks
+open Microsoft.AspNetCore.Http
+open Microsoft.Extensions.Primitives
 open NUnit.Framework
 open Shared
 open global.Server
 
+/// The categorization every response carries for a repository that declares none: an empty path on
+/// each file and a `missing` status on a ready summary. Expectations that are not about
+/// categorization omit both, so this fills them in centrally; an expectation that states either one
+/// keeps it.
+let private withCategorizationDefaults (json: string) =
+    let root = JsonNode.Parse(json).AsObject()
+
+    let withEmptyCategoryPath (file: JsonNode) =
+        match file with
+        | :? JsonObject as file when not (file.ContainsKey("categoryPath")) ->
+            file["categoryPath"] <- JsonArray()
+        | _ -> ()
+
+    match root["files"] with
+    | :? JsonArray as files -> files |> Seq.iter withEmptyCategoryPath
+    | _ -> ()
+
+    withEmptyCategoryPath root["file"]
+
+    match root["status"] with
+    | :? JsonValue as status when
+        status.GetValue<string>() = "ready"
+        && not (root.ContainsKey("categorization"))
+        ->
+        root["categorization"] <-
+            JsonNode.Parse("""{"status":"missing","reason":null}""")
+    | _ -> ()
+
+    root.ToJsonString()
+
 let private assertJson (expected: string) (actual: string) =
-    let expectedNode = JsonNode.Parse(expected)
+    let expectedNode = JsonNode.Parse(expected |> withCategorizationDefaults)
     let actualNode = JsonNode.Parse(actual)
 
     Assert.That(
@@ -245,6 +277,30 @@ let private summaryPaths (json: string) =
     |> Seq.map _.GetProperty("displayPath").GetString()
     |> Set.ofSeq
 
+/// Every file of a summary as the browser reads it: display path with its category path, in
+/// response order, so a test states grouping and ordering as one expectation.
+let private summaryCategoryPaths (json: string) =
+    use doc = JsonDocument.Parse(json)
+
+    doc.RootElement.GetProperty("files").EnumerateArray()
+    |> Seq.map (fun file ->
+        file.GetProperty("displayPath").GetString(),
+        file.GetProperty("categoryPath").EnumerateArray()
+        |> Seq.map _.GetString()
+        |> List.ofSeq)
+    |> List.ofSeq
+
+let private summaryCategorization (json: string) =
+    use doc = JsonDocument.Parse(json)
+    let categorization = doc.RootElement.GetProperty("categorization")
+    let reason = categorization.GetProperty("reason")
+
+    categorization.GetProperty("status").GetString(),
+    (if reason.ValueKind = JsonValueKind.Null then
+         None
+     else
+         Some(reason.GetString()))
+
 let private layerQuery committed local untracked =
     let value enabled = if enabled then "true" else "false"
 
@@ -292,7 +348,8 @@ let private fileSummary
       OldDisplayPath = oldPath
       LinesAdded = None
       LinesRemoved = None
-      Change = change }
+      Change = change
+      CategoryPath = [] }
 
 let private replaceIdentity
     (store: WorktreeDiffApi.DiffIdentityStore)
@@ -318,6 +375,61 @@ let private replaceIdentity
               DiffChangeKind.Modified,
           changed ]
     )
+
+let private diffContext worktreePath : WorktreeDiff.DiffComparisonContext =
+    { WorktreePath = worktreePath
+      UpstreamRemote = "origin"
+      BaseBranch = "main" }
+
+/// Sends one request through a diff handler in-process. The canvas server does not resolve a
+/// repository's categorization yet, so the configuration a summary is classified against is
+/// reachable only through the handler contract.
+let private handlerResponse
+    (viewer: Guid)
+    (query: string)
+    (handle: HttpContext -> Task<unit>)
+    =
+    let ctx = DefaultHttpContext()
+
+    ctx.Request.Headers[WorktreeDiffApi.viewerHeaderName] <-
+        StringValues(viewer.ToString("D"))
+
+    ctx.Request.QueryString <- QueryString(query)
+    use body = new MemoryStream()
+    ctx.Response.Body <- body
+
+    handle ctx |> Async.AwaitTask |> TestUtils.runAsync
+
+    body.ToArray() |> Text.Encoding.UTF8.GetString
+
+let private handlerDeadline () =
+    ProcessRunner.createResponseDeadline
+        ProcessRunner.argumentListResponseDeadlineMs
+
+let private summaryResponse
+    (handlers: WorktreeDiffApi.Handlers)
+    categorization
+    worktree
+    viewer
+    =
+    handlerResponse
+        viewer
+        ""
+        (handlers.Summary
+            (handlerDeadline ())
+            categorization
+            (Some(diffContext worktree)))
+
+let private fileResponse
+    (handlers: WorktreeDiffApi.Handlers)
+    worktree
+    viewer
+    identity
+    =
+    handlerResponse
+        viewer
+        $"?identity={identity}"
+        (handlers.File (handlerDeadline ()) (Some(diffContext worktree)))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -463,7 +575,7 @@ type DiffSerializationTests() =
                    { BaseRef = "origin/main"
                      FileCount = 1
                      Files = [ file ] },
-               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"}],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed","categoryPath":[]}],"categorization":{"status":"missing","reason":null},"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.Clean "main",
                """{"status":"clean","baseRef":"main","fileCount":0,"files":[],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.FilteredEmpty,
@@ -482,8 +594,55 @@ type DiffSerializationTests() =
         cases
         |> List.iter (fun (result, expected) ->
             result
-            |> WorktreeDiffApi.serializeSummaryResult serializedLayerCounts
+            |> WorktreeDiffApi.serializeSummaryResult
+                serializedLayerCounts
+                DiffCategories.Missing
             |> assertJson expected)
+
+    [<Test>]
+    member _.``ready summaries report the categorization state without exposing patterns``() =
+        let ready categoryPath =
+            DiffSummaryResult.Ready
+                { BaseRef = "origin/main"
+                  FileCount = 1
+                  Files = [ { file with CategoryPath = categoryPath } ] }
+
+        let configured =
+            DiffCategories.Configured
+                [ DiffCategories.Branch
+                      { Name = "Production code"
+                        Children =
+                          [ DiffCategories.Leaf
+                                { Name = "Server"
+                                  Patterns = [ "src/Server/**" ] } ] } ]
+
+        let cases =
+            [ (DiffCategories.Missing,
+               ready [],
+               """{"status":"missing","reason":null}""",
+               "[]")
+              (configured,
+               ready [ "Production code"; "Server" ],
+               """{"status":"configured","reason":null}""",
+               """["Production code","Server"]""")
+              (DiffCategories.Invalid "each category needs a name",
+               ready [],
+               """{"status":"invalid","reason":"each category needs a name"}""",
+               "[]") ]
+
+        cases
+        |> List.iter (fun (categorization, result, expectedCategorization, expectedPath) ->
+            result
+            |> WorktreeDiffApi.serializeSummaryResult
+                serializedLayerCounts
+                categorization
+            |> assertJson (
+                $"""{{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed","categoryPath":{expectedPath}}}],"categorization":{expectedCategorization}}}"""
+                |> withLayerCounts
+                    (ExpectedLayerCount.Available 2)
+                    (ExpectedLayerCount.Available 3)
+                    (ExpectedLayerCount.Error "base-error")
+            ))
 
     [<Test>]
     member _.``file results serialize every semantic state without renderer concepts``() =
@@ -518,6 +677,149 @@ type DiffSerializationTests() =
             result
             |> WorktreeDiffApi.serializeFileResult
             |> assertJson expected)
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffEndpointCategorizationTests() =
+
+    let worktree =
+        Path.Combine(Path.GetTempPath(), "treemon-diff-categorization")
+
+    // Git order, deliberately unrelated to configuration order, so grouping is visible in the response.
+    let changed =
+        [ entry "docs/plan.md" None WorktreeDiff.Modified
+          entry "README.md" None WorktreeDiff.Modified
+          entry "src/Server/Api.fs" None WorktreeDiff.Modified
+          entry "src/Tests/ApiTests.fs" None WorktreeDiff.Added
+          entry
+              "src/Client/App.fs"
+              (Some "src/Client/Old.fs")
+              WorktreeDiff.Renamed ]
+
+    let categorization =
+        DiffCategories.Configured
+            [ DiffCategories.Branch
+                  { Name = "Production code"
+                    Children =
+                      [ DiffCategories.Leaf
+                            { Name = "Client"
+                              Patterns = [ "src/Client/**" ] }
+                        DiffCategories.Leaf
+                            { Name = "Server"
+                              Patterns = [ "src/Server/**" ] } ] }
+              DiffCategories.Leaf
+                  { Name = "Tests"
+                    Patterns = [ "src/Tests/**" ] }
+              DiffCategories.Leaf
+                  { Name = "Docs"
+                    Patterns = [ "docs/**" ] } ]
+
+    let service: WorktreeDiffApi.Service =
+        { GetSummary = fun _ _ _ -> async.Return(Ok(summary changed))
+          GetLayerCounts =
+            fun _ _ -> async.Return(uniformLayerCounts changed.Length)
+          GetFile =
+            fun _ _ _ _ requested ->
+                async.Return(Ok(WorktreeDiff.Text requested.Path)) }
+
+    let newHandlers () =
+        WorktreeDiffApi.createHandlersWithStore
+            (WorktreeDiffApi.createIdentityStore ())
+            service
+            (fun _ -> Guid.NewGuid().ToString("N"))
+
+    [<Test>]
+    member _.``configured summaries group files in configuration order and carry each category path``() =
+        let body =
+            summaryResponse
+                (newHandlers ())
+                categorization
+                worktree
+                (Guid.NewGuid())
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                summaryCategoryPaths body,
+                Is.EqualTo(
+                    [ "src/Client/App.fs", [ "Production code"; "Client" ]
+                      "src/Server/Api.fs", [ "Production code"; "Server" ]
+                      "src/Tests/ApiTests.fs", [ "Tests" ]
+                      "docs/plan.md", [ "Docs" ]
+                      "README.md", [] ]
+                )
+            )
+
+            Assert.That(
+                summaryCategorization body,
+                Is.EqualTo(("configured", Option<string>.None))
+            ))
+
+    [<Test>]
+    member _.``missing and invalid categorizations keep the ungrouped order and empty category paths``() =
+        let ungrouped =
+            changed |> List.map (fun file -> file.Path, ([]: string list))
+
+        let reason = "each category needs a name"
+
+        let missingBody =
+            summaryResponse
+                (newHandlers ())
+                DiffCategories.Missing
+                worktree
+                (Guid.NewGuid())
+
+        let invalidBody =
+            summaryResponse
+                (newHandlers ())
+                (DiffCategories.Invalid reason)
+                worktree
+                (Guid.NewGuid())
+
+        Assert.Multiple(fun () ->
+            Assert.That(summaryCategoryPaths missingBody, Is.EqualTo(ungrouped))
+
+            Assert.That(
+                summaryCategorization missingBody,
+                Is.EqualTo(("missing", Option<string>.None))
+            )
+
+            Assert.That(summaryCategoryPaths invalidBody, Is.EqualTo(ungrouped))
+
+            Assert.That(
+                summaryCategorization invalidBody,
+                Is.EqualTo(("invalid", Some reason))
+            ))
+
+    [<Test>]
+    member _.``identities issued after grouping still resolve the grouped file``() =
+        let handlers = newHandlers ()
+        let viewer = Guid.NewGuid()
+        let body = summaryResponse handlers categorization worktree viewer
+        let moved = summaryIdentity "src/Client/App.fs" body
+
+        let identities =
+            use doc = JsonDocument.Parse(body)
+
+            doc.RootElement.GetProperty("files").EnumerateArray()
+            |> Seq.map _.GetProperty("identity").GetString()
+            |> Set.ofSeq
+
+        Assert.That(identities.Count, Is.EqualTo(changed.Length))
+
+        fileResponse handlers worktree viewer moved
+        |> assertJson (
+            DiffFileResult.Text(
+                { fileSummary
+                      moved
+                      "src/Client/App.fs"
+                      (Some "src/Client/Old.fs")
+                      DiffChangeKind.Renamed with
+                    CategoryPath = [ "Production code"; "Client" ] },
+                "src/Client/App.fs"
+            )
+            |> WorktreeDiffApi.serializeFileResult
+        )
 
 [<TestFixture>]
 [<Category("Unit")>]

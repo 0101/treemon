@@ -35,6 +35,7 @@ type internal Service =
 type internal Handlers =
     { Summary:
         ProcessRunner.ResponseDeadline
+            -> DiffCategories.Configuration
             -> WorktreeDiff.DiffComparisonContext option
             -> HttpContext
             -> System.Threading.Tasks.Task<unit>
@@ -463,7 +464,17 @@ let private diffFileJson (file: DiffFileSummary) =
        oldDisplayPath = file.OldDisplayPath
        linesAdded = file.LinesAdded
        linesRemoved = file.LinesRemoved
-       change = diffChangeName file.Change |}
+       change = diffChangeName file.Change
+       categoryPath = file.CategoryPath |}
+
+/// The categorization state of the repository, without a single repository-authored pattern: the
+/// browser receives only the status and, for an invalid configuration, the fixed validation reason.
+let private categorizationJson (categorization: DiffCategories.Configuration) =
+    match categorization with
+    | DiffCategories.Missing -> {| status = "missing"; reason = None |}
+    | DiffCategories.Configured _ -> {| status = "configured"; reason = None |}
+    | DiffCategories.Invalid reason ->
+        {| status = "invalid"; reason = Some reason |}
 
 let private diffReplacementName =
     function
@@ -502,7 +513,7 @@ let private layerCountsJson (counts: DiffLayerCounts) =
        local = layerCountJson counts.LocalChanges
        untracked = layerCountJson counts.Untracked |}
 
-let internal serializeSummaryResult counts =
+let internal serializeSummaryResult counts categorization =
     let countsJson = layerCountsJson counts
 
     function
@@ -512,6 +523,7 @@ let internal serializeSummaryResult counts =
                baseRef = details.BaseRef
                fileCount = details.FileCount
                files = details.Files |> List.map diffFileJson
+               categorization = categorizationJson categorization
                layerCounts = countsJson |}
         )
     | DiffSummaryResult.Clean baseRef ->
@@ -612,6 +624,7 @@ let internal serializeFileResult =
 
 let private issueFile
     (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
+    categoryPath
     (entry: WorktreeDiff.WorktreeDiffEntry)
     =
     { Identity = newIdentity entry
@@ -619,7 +632,8 @@ let private issueFile
       OldDisplayPath = entry.OldPath
       LinesAdded = entry.LinesAdded
       LinesRemoved = entry.LinesRemoved
-      Change = diffChangeKind entry.Status }
+      Change = diffChangeKind entry.Status
+      CategoryPath = categoryPath }
 
 let private summaryErrorResult =
     function
@@ -804,6 +818,7 @@ let private handleSummary
     (store: DiffIdentityStore)
     newIdentity
     deadline
+    (categorization: DiffCategories.Configuration)
     (comparisonContext: WorktreeDiff.DiffComparisonContext option)
     (ctx: HttpContext)
     =
@@ -844,7 +859,9 @@ let private handleSummary
                 do!
                     DiffSummaryResult.FilteredEmpty
                     |> summaryResultIfCurrent isCurrent
-                    |> serializeSummaryResult (layerCounts counts)
+                    |> serializeSummaryResult
+                        (layerCounts counts)
+                        categorization
                     |> writeJson deadline ctx
             | Some viewer, Some layers ->
                 let! generation =
@@ -891,10 +908,24 @@ let private handleSummary
                                 DiffSummaryResult.Clean summary.BaseRef
                                 |> summaryResultIfCurrent isCurrent
                         | Ok summary ->
+                            let entryPaths
+                                (entry: WorktreeDiff.WorktreeDiffEntry)
+                                =
+                                entry.Path, entry.OldPath
+
+                            // Classified before identities are issued, so the stored snapshot and
+                            // the browser agree on both file order and grouping.
                             let issued =
                                 summary.Files
-                                |> List.map (fun entry ->
-                                    issueFile newIdentity entry, entry)
+                                |> DiffCategories.classifyAndOrder
+                                    categorization
+                                    entryPaths
+                                |> List.map (fun (entry, categoryPath) ->
+                                    issueFile
+                                        newIdentity
+                                        categoryPath
+                                        entry,
+                                    entry)
 
                             let! isCurrent =
                                 store.ReplaceCurrent(
@@ -930,7 +961,9 @@ let private handleSummary
 
                 do!
                     response
-                    |> serializeSummaryResult (layerCounts counts)
+                    |> serializeSummaryResult
+                        (layerCounts counts)
+                        categorization
                     |> writeJson deadline ctx
     }
 

@@ -218,7 +218,10 @@ type DiffFileSummary =
       OldDisplayPath: string option
       LinesAdded: int option
       LinesRemoved: int option
-      Change: DiffChangeKind }
+      Change: DiffChangeKind
+      /// Category names from the root to the matching leaf. Empty when the file matched no category
+      /// and for every file of a repository whose categorization is missing or invalid.
+      CategoryPath: string list }
 
 type DiffSummaryDetails =
     { BaseRef: string
