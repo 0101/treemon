@@ -935,7 +935,7 @@ type WorktreeDiffIntegrationTests() =
         initRepoOnMain repoDir
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        DiffProvisioner.provisionViewer repoDir GitWorktree.HasContent |> TestUtils.runAsync |> ignore
+        DiffProvisioner.provisionViewer repoDir |> ignore
 
         let directUntracked =
             gitText
@@ -1074,7 +1074,7 @@ type WorktreeDiffIntegrationTests() =
         initRepoOnMain repoDir
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        DiffProvisioner.provisionViewer repoDir GitWorktree.HasContent |> TestUtils.runAsync |> ignore
+        DiffProvisioner.provisionViewer repoDir |> ignore
         gitOk repoDir [ "add"; "--"; generatedDiffViewerGitPath ]
         gitOk repoDir [ "commit"; "-m"; "generated diff viewer" ]
 
@@ -1112,30 +1112,6 @@ type WorktreeDiffIntegrationTests() =
             Assert.That(backupGitData.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(backupGitData.IsDirty, Is.False)
             Assert.That(backupGitData.WorkMetrics.IsSome, Is.True))
-
-    [<Test>]
-    member _.``a committed generated viewer survives a clean provisioning pass``() =
-        let repoDir = Path.Combine(tempDir, "repo")
-        initRepoOnMain repoDir
-        gitOk repoDir [ "checkout"; "-b"; "feature" ]
-
-        DiffProvisioner.provisionViewer repoDir GitWorktree.HasContent |> TestUtils.runAsync |> ignore
-        gitOk repoDir [ "add"; "--"; generatedDiffViewerGitPath ]
-        gitOk repoDir [ "commit"; "-m"; "generated diff viewer" ]
-
-        let outcome = DiffProvisioner.provisionViewer repoDir GitWorktree.Clean |> TestUtils.runAsync
-
-        let gitData =
-            collectWorktreeGitData repoDir (Some "feature") "origin" "main"
-            |> TestUtils.runAsync
-
-        Assert.Multiple(fun () ->
-            Assert.That(
-                File.Exists(Path.Combine(repoDir, ".agents", "canvas", "diff.html")),
-                Is.True,
-                "Provisioning must never delete repository content Git tracks")
-            Assert.That(outcome.IsSome, Is.True, "Skipping a tracked viewer is worth reporting")
-            Assert.That(gitData.IsDirty, Is.False, "Skipping the removal leaves the worktree clean"))
 
     [<Test>]
     member _.``a worktree Git cannot read is undetermined rather than clean``() =
@@ -1222,7 +1198,7 @@ type WorktreeDiffIntegrationTests() =
         gitOk repoDir [ "commit"; "-m"; "track stale diff viewer" ]
         gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
-        DiffProvisioner.provisionViewer repoDir GitWorktree.HasContent |> TestUtils.runAsync |> ignore
+        DiffProvisioner.provisionViewer repoDir |> ignore
 
         let directTracked =
             gitText repoDir [ "diff"; "--name-only"; "main"; "--" ]

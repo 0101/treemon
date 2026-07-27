@@ -197,36 +197,11 @@ let parseDirtyStatus (output: string option) =
     output
     |> Option.exists (String.IsNullOrWhiteSpace >> not)
 
-/// Repo-relative path of the viewer Treemon generates into every worktree with comparison content.
+/// Repo-relative path of the viewer Treemon generates into every worktree.
 let generatedDiffViewerPath = ".agents/canvas/diff.html"
 
 let private generatedDiffViewerExclusionPathspec =
     $":(top,exclude){generatedDiffViewerPath}"
-
-/// Whether Git tracks the generated diff viewer. Provisioning must never delete repository content,
-/// so a Git process that fails to run at all counts as tracked; a non-zero exit is Git's own answer
-/// that the path is untracked (which includes "not a repository").
-let tracksGeneratedDiffViewer (worktreePath: string) =
-    async {
-        let! result =
-            ProcessRunner.runArgumentList
-                1024
-                1024
-                "Git"
-                "git"
-                [ "-C"
-                  worktreePath
-                  "ls-files"
-                  "--error-unmatch"
-                  "--"
-                  generatedDiffViewerPath ]
-                None
-
-        return
-            match result with
-            | Ok output -> output.ExitCode = 0
-            | Error _ -> true
-    }
 
 let isDirty (worktreePath: string) =
     async {
