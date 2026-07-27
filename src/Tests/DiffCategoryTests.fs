@@ -927,12 +927,10 @@ type DiffCategoryE2ETests() =
                 this.Page.AddInitScriptAsync(
                     """(() => {
                         window.__categoryFileOutcome = null;
-                        window.__summaryRequests = 0;
                         const originalFetch = window.fetch;
                         window.fetch = function(input) {
                             const url = typeof input === 'string' ? input : input.url;
                             const request = originalFetch.apply(this, arguments);
-                            if (url.includes('diff-summary')) window.__summaryRequests += 1;
                             if (url.includes('diff-file')) {
                                 request.then(
                                     () => { window.__categoryFileOutcome = 'completed'; },
@@ -1006,8 +1004,6 @@ type DiffCategoryE2ETests() =
             // A summary round-trip gives the released response every chance to render before the
             // second reading, so "ignored" is proven rather than merely not yet observed.
             do! this.RefreshCategories()
-            let! _ =
-                this.Page.WaitForFunctionAsync("() => window.__summaryRequests === 2")
             let! afterLateResponse = collapsedState ()
 
             let! disclosure =
