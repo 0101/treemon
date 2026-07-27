@@ -333,6 +333,154 @@ let localComparisonContent (worktreePath: string) =
             | Error _ -> Undetermined
     }
 
+/// What Treemon's own mechanical sync of a worktree onto its base branch did. A closed set carrying
+/// no Git text: the caller turns a failure case into an agent prompt, and a prompt must never quote
+/// stdout, stderr, refs, or paths (see `docs/spec/worktree-monitor.md`, Branch Sync).
+[<RequireQualifiedAccess>]
+type BranchSyncOutcome =
+    | FastForwarded
+    | Merged
+    | AlreadyCurrent
+    | RefusedDirty
+    | Conflicted
+    /// The conflicted merge could not be aborted, so a merge may still be in progress.
+    | AbortFailed
+    | CommandFailed
+
+/// A sync fetches over the network from background work that no HTTP response is waiting on, so it
+/// gets its own timeout instead of the interactive response deadline `runArgumentList` applies.
+let private branchSyncTimeoutMs = 120_000
+
+/// Nothing in the sync reads Git's output; the bound only stops a pathological repository from
+/// streaming megabytes through the server process.
+let private branchSyncCaptureLimitBytes = 64 * 1024
+
+/// Every sync command goes through an argument list, so a remote or branch name can never be parsed
+/// as part of a command string, and any process-level failure collapses to `CommandFailed`.
+let private runBranchSyncGit (worktreePath: string) (arguments: string list) =
+    ProcessRunner.runArgumentListWithTimeout
+        branchSyncTimeoutMs
+        branchSyncCaptureLimitBytes
+        branchSyncCaptureLimitBytes
+        "Git"
+        "git"
+        ("-C" :: worktreePath :: arguments)
+        None
+    |> AsyncResult.mapError (fun _ -> BranchSyncOutcome.CommandFailed)
+
+let private branchSyncExitCode worktreePath arguments =
+    runBranchSyncGit worktreePath arguments |> AsyncResult.map _.ExitCode
+
+/// The revision this worktree just fetched. `FETCH_HEAD` is per-worktree, so it is exactly what the
+/// preceding fetch wrote; resolving it once means the merge and the ancestry check afterwards refer
+/// to the same revision even if the base advances again mid-operation.
+let private fetchedBaseRevision worktreePath =
+    asyncResult {
+        let! output = runBranchSyncGit worktreePath [ "rev-parse"; "--verify"; "FETCH_HEAD" ]
+
+        let revision =
+            Text.Encoding.UTF8.GetString(output.Stdout).Trim()
+
+        if output.ExitCode <> 0 || revision = "" then
+            return! Error BranchSyncOutcome.CommandFailed
+        else
+            return revision
+    }
+
+/// `merge-base --is-ancestor` answers 0 or 1 and reserves every other exit code for a real failure,
+/// so a broken command is never read as "the base has not reached HEAD".
+let private headContains worktreePath revision =
+    asyncResult {
+        let! exitCode =
+            branchSyncExitCode worktreePath [ "merge-base"; "--is-ancestor"; revision; "HEAD" ]
+
+        return!
+            match exitCode with
+            | 0 -> Ok true
+            | 1 -> Ok false
+            | _ -> Error BranchSyncOutcome.CommandFailed
+    }
+
+/// A merge that did not complete either left a conflict behind or refused before touching anything.
+/// `MERGE_HEAD` is git's own record of a merge in progress, so the two are told apart without reading
+/// any message text, and `AbortFailed` keeps meaning "a merge may still be in progress".
+let private failedMergeOutcome worktreePath =
+    async {
+        match! branchSyncExitCode worktreePath [ "rev-parse"; "--verify"; "--quiet"; "MERGE_HEAD" ] with
+        | Ok 0 ->
+            match! branchSyncExitCode worktreePath [ "merge"; "--abort" ] with
+            | Ok 0 -> return BranchSyncOutcome.Conflicted
+            | _ -> return BranchSyncOutcome.AbortFailed
+        | Ok _ -> return BranchSyncOutcome.CommandFailed
+        | Error outcome -> return outcome
+    }
+
+let private mergeFetchedBase worktreePath revision =
+    asyncResult {
+        let! fastForwardExit =
+            branchSyncExitCode worktreePath [ "merge"; "--ff-only"; "--quiet"; revision ]
+
+        if fastForwardExit = 0 then
+            return BranchSyncOutcome.FastForwarded
+        else
+            // A refused fast-forward leaves the worktree untouched, so a real merge can still follow
+            // it. `--no-edit` keeps git from opening an editor in a background server process.
+            let! mergeExit =
+                branchSyncExitCode worktreePath [ "merge"; "--no-edit"; "--quiet"; revision ]
+
+            if mergeExit = 0 then
+                return BranchSyncOutcome.Merged
+            else
+                let! failure = failedMergeOutcome worktreePath
+                return! Error failure
+    }
+
+/// Treemon's own bounded sync of a worktree onto its base branch, for when no coding session is open
+/// to do it. It refuses a worktree holding local work, fetches that worktree's own base rather than
+/// the repo root's (`fetchUpstream` also fast-forwards the base worktree, an unrelated side effect),
+/// prefers a fast-forward over a merge commit, aborts a conflict it created, and confirms the fetched
+/// revision actually reached `HEAD` instead of trusting an exit code.
+let syncWithBase (worktreePath: string) (upstreamRemote: string) (baseBranch: string) =
+    async {
+        let! result =
+            asyncResult {
+                let! dirty = hasLocalDiff worktreePath
+
+                if dirty then
+                    return! Error BranchSyncOutcome.RefusedDirty
+
+                let! fetchExit =
+                    branchSyncExitCode
+                        worktreePath
+                        [ "fetch"; "--quiet"; upstreamRemote; "--"; baseBranch ]
+
+                if fetchExit <> 0 then
+                    return! Error BranchSyncOutcome.CommandFailed
+
+                let! baseRevision = fetchedBaseRevision worktreePath
+                let! alreadyCurrent = headContains worktreePath baseRevision
+
+                if alreadyCurrent then
+                    return BranchSyncOutcome.AlreadyCurrent
+                else
+                    let! outcome = mergeFetchedBase worktreePath baseRevision
+                    let! verified = headContains worktreePath baseRevision
+
+                    if verified then
+                        return outcome
+                    else
+                        return! Error BranchSyncOutcome.CommandFailed
+            }
+
+        let outcome =
+            match result with
+            | Ok outcome
+            | Error outcome -> outcome
+
+        Log.log "Git" $"Branch sync of {worktreePath}: {outcome}"
+        return outcome
+    }
+
 let getCommitCount (worktreePath: string) (baseRef: string) =
     async {
         let! output = runGit worktreePath $"rev-list --count --no-merges {baseRef}..HEAD"
