@@ -673,6 +673,20 @@ type DiffAssetsTests() =
             Assert.That(template, Does.Not.Contain("unpkg.com")))
 
     [<Test>]
+    member _.``template restates the schema the validator enforces``() =
+        // The configure prompt spells out the depth bound and the reserved top-level name as prose.
+        // Pinning it to the validator's own constants is what keeps the two from drifting apart.
+        let template = File.ReadAllText(templatePath)
+
+        Assert.Multiple(fun () ->
+            Assert.That(template, Does.Contain($"at most {DiffCategories.maxDepth} levels"))
+            Assert.That(template, Does.Contain($"var OTHER_CATEGORY = '{DiffCategories.reservedTopLevelName}'"))
+
+            Assert.That(
+                template,
+                Does.Contain($"Do not use \"{DiffCategories.reservedTopLevelName}\" as a top-level name")))
+
+    [<Test>]
     member _.``embedded pinned assets match the vendored files exactly``() =
         let cases =
             [ DiffAssets.cssPath, "diff2html.min.css"

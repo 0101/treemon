@@ -29,14 +29,17 @@ let nodeName node =
     | Leaf leaf -> leaf.Name
     | Branch branch -> branch.Name
 
-let private maxDepth = 4
+// `internal` rather than `private`: the viewer template repeats the depth bound in its configure
+// prompt, and a test pins that prose to this constant.
+let internal maxDepth = 4
 let private maxNodes = 200
 let private maxNameLength = 100
 let private maxPatternsPerLeaf = 50
 let private maxPatternLength = 200
 
-/// The trailing group label the viewer reserves for unmatched files.
-let private reservedTopLevelName = "Other"
+/// The trailing group label the viewer reserves for unmatched files. `internal` for the same reason
+/// as `maxDepth`: the template names it too, and a test holds the two together.
+let internal reservedTopLevelName = "Other"
 
 // Reasons reach the browser, so they are fixed sentences: no filesystem path, no raw configuration
 // text, no exception message can travel out of validation.
