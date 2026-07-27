@@ -1,0 +1,11 @@
+[
+  {
+    "number": 214,
+    "title": "Sync worktree with base",
+    "state": "open",
+    "draft": false,
+    "merged_at": null,
+    "head": { "ref": "feature/sync", "sha": "sha-feature-sync" },
+    "base": { "ref": "main" }
+  }
+]

@@ -5,6 +5,7 @@ open System.Text.Json
 open System.Text.RegularExpressions
 open Shared
 open Server.JsonHelpers
+open Server.PrOpenState
 
 type GithubRemote = { Owner: string; Repo: string }
 
@@ -289,4 +290,26 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                 |> Async.Parallel
 
             return Map entries
+    }
+
+/// Reads the branch a pull request is merging *from*; GitHub's own name for it.
+let private headBranch (pr: JsonElement) =
+    pr |> tryProp "head" |> Option.bind (tryStringValue "ref")
+
+/// Asks GitHub only whether this branch currently heads an open pull request - one page, and no
+/// review threads, workflow runs, or mergeability - because the push decision needs presence and
+/// nothing else. The `owner:branch` head filter makes GitHub do the filtering, so a response holding
+/// any other branch means the filter did not apply and the state stays unknown.
+let internal openPrQueryArgs (remote: GithubRemote) (branch: string) =
+    [ "api"
+      $"/repos/{remote.Owner}/{remote.Repo}/pulls?state=open&head={Uri.EscapeDataString(remote.Owner)}:{Uri.EscapeDataString(branch)}&per_page=1" ]
+
+let internal parseOpenPrState (branch: string) (json: string) =
+    classifyResponse "GH" headBranch branch json
+
+let queryOpenPrState (remote: GithubRemote) (branch: string) =
+    async {
+        match! runQuery "GH" "gh" (openPrQueryArgs remote branch) with
+        | Ok response -> return parseOpenPrState branch response
+        | Error state -> return state
     }

@@ -5,6 +5,7 @@ open System.IO
 open System.Text.Json
 open Shared
 open Server.JsonHelpers
+open Server.PrOpenState
 
 type AzDoRemote =
     { Org: string
@@ -90,6 +91,13 @@ type internal ParsedPr =
       HasConflicts: bool
       ClosedDate: DateTimeOffset option }
 
+/// Azure DevOps names branches by full ref; every branch Treemon knows is a short name.
+let private branchFromRef (sourceRef: string) =
+    if sourceRef.StartsWith("refs/heads/") then
+        sourceRef["refs/heads/".Length..]
+    else
+        sourceRef
+
 let internal parsePrList (json: string) =
     try
         use doc = JsonDocument.Parse(json)
@@ -110,12 +118,7 @@ let internal parsePrList (json: string) =
                     let isDraft = el.GetProperty("isDraft").GetBoolean()
 
                     let sourceRef = el.GetProperty("sourceRefName").GetString()
-
-                    let branchName =
-                        if sourceRef.StartsWith("refs/heads/") then
-                            sourceRef["refs/heads/".Length..]
-                        else
-                            sourceRef
+                    let branchName = branchFromRef sourceRef
 
                     let status = el.GetProperty("status").GetString()
                     let isMerged = status = "completed"
@@ -453,6 +456,64 @@ let fetchPrStatusesByRepoRoot (repoRoot: string) (upstreamRemote: string) (known
         | Some(AzureDevOps remote) -> return! fetchPrStatuses remote knownBranches
         | Some(GitHub remote) -> return! GithubPrStatus.fetchGithubPrStatuses remote knownBranches
         | None -> return Map.empty
+    }
+
+/// Asks Azure DevOps only whether this branch currently sources an active pull request - no threads,
+/// builds, or completed pull requests - because the push decision needs presence and nothing else.
+/// `--source-branch` makes the service do the filtering, so a response holding any other branch means
+/// the filter did not apply and the state stays unknown.
+let internal openPrQueryArgs (remote: AzDoRemote) (branch: string) =
+    [ "repos"
+      "pr"
+      "list"
+      "--org"
+      $"https://dev.azure.com/{remote.Org}"
+      "--project"
+      remote.Project
+      "--repository"
+      remote.Repo
+      "--status"
+      "active"
+      "--source-branch"
+      $"refs/heads/{branch}"
+      "--top"
+      "1"
+      "-o"
+      "json" ]
+
+/// Reads the branch a pull request is merging *from*, as the short name Treemon knows it by.
+let private sourceBranch (pr: JsonElement) =
+    pr |> tryStringValue "sourceRefName" |> Option.map branchFromRef
+
+let internal parseOpenPrState (branch: string) (json: string) =
+    classifyResponse "PR" sourceBranch branch json
+
+let queryOpenPrState (remote: AzDoRemote) (branch: string) =
+    async {
+        match azPythonExe.Value with
+        | None ->
+            Log.log "PR" "Open PR lookup could not locate Azure CLI python.exe via PATH"
+            return UnknownPrState
+        | Some python ->
+            match! runQuery "PR" python ("-IBm" :: "azure.cli" :: openPrQueryArgs remote branch) with
+            | Ok response -> return parseOpenPrState branch response
+            | Error state -> return state
+    }
+
+/// The live push decision for a mechanically synced branch. It reuses provider detection and the
+/// configured upstream remote but never the dashboard's cached PR map: that map is eventually
+/// consistent, and on GitHub a closed-unmerged pull request there is indistinguishable from an open
+/// one. An unsupported remote is unknown, not an absence.
+let queryOpenPrStateByRepoRoot (repoRoot: string) (upstreamRemote: string) (branch: string) =
+    async {
+        let! remoteUrl = getRemoteUrl repoRoot upstreamRemote
+
+        match remoteUrl |> Option.bind detectProvider with
+        | Some(AzureDevOps remote) -> return! queryOpenPrState remote branch
+        | Some(GitHub remote) -> return! GithubPrStatus.queryOpenPrState remote branch
+        | None ->
+            Log.log "PR" "Open PR lookup found no supported provider on the upstream remote"
+            return UnknownPrState
     }
 
 let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =

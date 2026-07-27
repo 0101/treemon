@@ -25,6 +25,7 @@
     <Compile Include="GithubParsingTests.fs" />
     <Compile Include="GithubFixtureTests.fs" />
     <Compile Include="AzDoFixtureTests.fs" />
+    <Compile Include="PrOpenStateTests.fs" />
     <Compile Include="SessionActivityTests.fs" />
     <Compile Include="SessionActivityStoreTests.fs" />
     <Compile Include="SessionActivityServiceTests.fs" />

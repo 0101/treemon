@@ -4,6 +4,7 @@ open System
 open System.IO
 open NUnit.Framework
 open Server.PrStatus
+open Server.PrOpenState
 open Shared
 
 let private fixtureDir =
@@ -215,3 +216,57 @@ type ParseBuildLogFixtureTests() =
     member _.``Invalid JSON returns None``() =
         let result = parseBuildLog "not json"
         Assert.That(result, Is.EqualTo(None))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type AzDoOpenPrQueryTests() =
+
+    let branch = "feature/sync"
+    let args = openPrQueryArgs testRemote branch
+
+    let argValue (flag: string) =
+        args
+        |> List.pairwise
+        |> List.tryPick (fun (name, value) -> if name = flag then Some value else None)
+
+    [<Test>]
+    member _.``Query asks Azure DevOps for active pull requests from the branch``() =
+        Assert.That(argValue "--source-branch", Is.EqualTo(Some $"refs/heads/{branch}"))
+        Assert.That(argValue "--status", Is.EqualTo(Some "active"))
+        Assert.That(argValue "--repository", Is.EqualTo(Some testRemote.Repo))
+
+    [<Test>]
+    member _.``Query asks for no threads, builds, or completed pull requests``() =
+        let command = String.concat " " args
+        Assert.That(command, Does.Not.Contain("pullRequestThreads"))
+        Assert.That(command, Does.Not.Contain("build"))
+        Assert.That(command, Does.Not.Contain("completed"))
+        Assert.That(argValue "--top", Is.EqualTo(Some "1"))
+
+    [<Test>]
+    member _.``An active pull request from the branch is reported as open``() =
+        let state = readFixture "active-pr-for-branch.json" |> parseOpenPrState branch
+        Assert.That(state, Is.EqualTo(OpenPr))
+
+    [<Test>]
+    member _.``An empty response is a confirmed absence``() =
+        let state = parseOpenPrState branch "[]"
+        Assert.That(state, Is.EqualTo(NoOpenPr))
+
+    [<Test>]
+    member _.``An unparseable response leaves the state unknown``() =
+        let state = parseOpenPrState branch "not json"
+        Assert.That(state, Is.EqualTo(UnknownPrState))
+
+    [<Test>]
+    member _.``A response naming other branches leaves the state unknown``() =
+        let state = readFixture "pr-list.json" |> parseOpenPrState branch
+        Assert.That(state, Is.EqualTo(UnknownPrState))
+
+    [<Test>]
+    member _.``A pull request without a source branch leaves the state unknown``() =
+        let state = parseOpenPrState branch """[{"pullRequestId":7}]"""
+        Assert.That(state, Is.EqualTo(UnknownPrState))
+

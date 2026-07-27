@@ -37,6 +37,7 @@
     <Compile Include="SessionActivityStore.fs" />
     <Compile Include="CodingToolStatus.fs" />
     <Compile Include="CodingToolCli.fs" />
+    <Compile Include="PrOpenState.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
     <Compile Include="EmbeddedResource.fs" />

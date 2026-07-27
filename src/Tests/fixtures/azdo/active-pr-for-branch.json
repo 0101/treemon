@@ -1,0 +1,13 @@
+[
+  {
+    "pullRequestId": 214,
+    "title": "Sync worktree with base",
+    "isDraft": false,
+    "sourceRefName": "refs/heads/feature/sync",
+    "targetRefName": "refs/heads/main",
+    "status": "active",
+    "mergeStatus": "succeeded",
+    "lastMergeSourceCommit": { "commitId": "sha-feature-sync" },
+    "repository": { "id": "abc12345-def6-7890-abcd-ef1234567890" }
+  }
+]
