@@ -73,4 +73,13 @@ let setAccepted (store: Store) path (record: AcceptedSyncRecord) =
     store.Update path (fun _ ->
         if String.IsNullOrWhiteSpace record.BaseRevision then None else Some record)
 
+/// Records an accepted prompt and completes only once the record is readable: `Update` is a post, so
+/// a caller that must not publish anything derived from the acceptance ahead of the record itself
+/// needs this read-back to know the store applied it.
+let publishAccepted (store: Store) path record =
+    async {
+        setAccepted store path record
+        do! store.Get path |> Async.Ignore
+    }
+
 let clear (store: Store) path = store.Update path (fun _ -> None)

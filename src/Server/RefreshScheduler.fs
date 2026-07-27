@@ -119,6 +119,10 @@ type StateMsg =
     /// The delivery this claim was taken for was accepted: suppression passes to the durable record,
     /// which is the only layer that can retire it again.
     | AcceptAutoSyncTrigger of path: string * baseRevision: string
+    /// The durable record was cleared, so the accepted claim paired with it goes too — otherwise it
+    /// would suppress the same revision for the rest of the process with no record left to age out.
+    /// Only an accepted claim: a delivery still in flight owns its revision and is never superseded.
+    | ClearAcceptedAutoSyncTrigger of path: string
     | ReleaseAutoSyncTrigger of path: string * baseRevision: string
     | ClearAutoSyncTrigger of path: string
     | TryBeginAutoSyncLaunch of path: string * AsyncReplyChannel<bool>
@@ -443,6 +447,13 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
                     |> Map.add path (AutoSync.Accepted baseRevision) }
         | _ -> state
 
+    | ClearAcceptedAutoSyncTrigger path ->
+        match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
+        | Some(AutoSync.Accepted _) ->
+            { state with
+                AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
+        | _ -> state
+
     | ReleaseAutoSyncTrigger(path, baseRevision) ->
         match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
         | Some(AutoSync.Delivering held) when held = baseRevision ->
@@ -524,19 +535,26 @@ let internal autoSyncDependencies
             | None -> async { return None }
       RecordAcceptedRevision =
         fun path baseRevision ->
-            // Both layers move together: the claim stops being an operation in flight, and the
-            // durable record starts the one retry window that is allowed to retire it.
-            agent.Post(AcceptAutoSyncTrigger(path, baseRevision))
+            async {
+                // Both layers move together, and in this order: a claim made retryable ahead of its
+                // record would let a concurrent trigger that began from the expired record take the
+                // claim over, re-read the stale record it had already seen, and prompt twice.
+                match autoSyncStore with
+                | Some store ->
+                    do!
+                        AutoSyncStore.publishAccepted
+                            store
+                            path
+                            { BaseRevision = baseRevision
+                              AcceptedAt = DateTimeOffset.UtcNow }
+                | None -> ()
 
-            autoSyncStore
-            |> Option.iter (fun store ->
-                AutoSyncStore.setAccepted
-                    store
-                    path
-                    { BaseRevision = baseRevision
-                      AcceptedAt = DateTimeOffset.UtcNow })
+                agent.Post(AcceptAutoSyncTrigger(path, baseRevision))
+            }
       ClearAcceptedRevision =
-        fun path -> autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clear store path)
+        fun path ->
+            agent.Post(ClearAcceptedAutoSyncTrigger path)
+            autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clear store path)
       ReadPrStatus =
         fun path ->
             async {

@@ -44,14 +44,16 @@ type ClaimReason =
     | RetryExpiredAccept
 
 /// `ClaimRevision`/`ReleaseRevision` are the in-process claim; the accepted-revision operations are
-/// the durable, restart-safe layer on top of it (`AutoSyncStore`). `RecordAcceptedRevision` writes
-/// both sides of the acceptance — the durable record and the claim's stage — so the two layers age
-/// out together.
+/// the durable, restart-safe layer on top of it (`AutoSyncStore`). `RecordAcceptedRevision` and
+/// `ClearAcceptedRevision` each write both sides of an acceptance — the durable record and the
+/// claim's stage — so the two layers age out and are forgotten together.
 type TriggerDependencies =
     { ClaimRevision: string -> string -> ClaimReason -> Async<bool>
       ReleaseRevision: string -> string -> unit
       ReadAcceptedRevision: string -> Async<AutoSyncStore.AcceptedSyncRecord option>
-      RecordAcceptedRevision: string -> string -> unit
+      /// Completes only once the record is published, because the same call then makes the claim
+      /// retryable and the record is what a retry re-reads to learn the prompt already happened.
+      RecordAcceptedRevision: string -> string -> Async<unit>
       ClearAcceptedRevision: string -> unit
       /// The worktree's current PR status, keyed by canonical worktree path so the lookup resolves
       /// inside that worktree's own repo and a same-named branch elsewhere can never answer for it.
@@ -244,7 +246,7 @@ let trigger
         match revision eligible gitData with
         | None ->
             // Catching up ends an accepted prompt's life: falling behind the same base revision
-            // again is new work, so it must be able to prompt again.
+            // again is new work, so both suppression layers must forget it and prompt again.
             if gitData.MainBehindCount = 0 then
                 dependencies.ClearAcceptedRevision gitData.Path
         | Some baseRevision ->
@@ -283,7 +285,7 @@ let trigger
                             // Recorded only once acceptance is certain: a crash or rejection before
                             // this point must leave no record, so the prompt can be retried.
                             if accepted then
-                                dependencies.RecordAcceptedRevision gitData.Path baseRevision
+                                do! dependencies.RecordAcceptedRevision gitData.Path baseRevision
                                 Log.log "AutoSync" $"Prompt accepted for {gitData.Branch} at base revision {baseRevision}"
                             else
                                 dependencies.ReleaseRevision gitData.Path baseRevision

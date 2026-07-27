@@ -51,7 +51,7 @@ let private withoutAcceptedRecords: TriggerDependencies =
     { ClaimRevision = fun _ _ _ -> async { return true }
       ReleaseRevision = fun _ _ -> ()
       ReadAcceptedRevision = fun _ -> async { return None }
-      RecordAcceptedRevision = fun _ _ -> ()
+      RecordAcceptedRevision = fun _ _ -> async { return () }
       ClearAcceptedRevision = ignore
       ReadPrStatus = fun _ -> async { return NoPr }
       SelectTarget = fun _ -> async { return NoOpenSession None }
@@ -593,14 +593,23 @@ type AutoSyncTriggerTests() =
                     Is.EqualTo(Some "base-b"))))
 
     [<Test>]
-    member _.``Catching up with the base clears the durable record``() =
+    [<Category("AutoSyncVerification")>]
+    member _.``Catching up clears both layers so the same revision prompts again``() =
         TestUtils.withTempDir "treemon-auto-sync-catchup" (fun root ->
             let worktree = Path.Combine(root, "feature-a")
             TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
-            let store = loadedStore root
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
 
-            let dependencies =
-                withAcceptedRecords (createAgent ()) store (fun _ -> async { return true })
+            let deliver _ =
+                async {
+                    deliveries <- deliveries + 1
+                    return true
+                }
+
+            let store = loadedStore root
+            let agent = createAgent ()
+            let dependencies = withAcceptedRecords agent store deliver
 
             let observe behind =
                 gitData worktree "feature-a" behind (Some "base-a") false
@@ -610,12 +619,22 @@ type AutoSyncTriggerTests() =
             observe 2
             let recordWhileBehind = TestUtils.runAsync (store.Get worktree)
             observe 0
+            // Read back through the same agent so the catch-up's own post is ordered ahead of it.
+            let claimAfterCatchUp =
+                (agent.PostAndReply(GetState)).AutoSyncTriggeredRevisions |> Map.tryFind worktree
+            let recordAfterCatchUp = TestUtils.runAsync (store.Get worktree)
+            observe 2
 
             Assert.Multiple(fun () ->
                 Assert.That(recordWhileBehind |> Option.map _.BaseRevision, Is.EqualTo(Some "base-a"))
+                Assert.That(recordAfterCatchUp, Is.EqualTo(None))
                 Assert.That(
-                    TestUtils.runAsync (store.Get worktree),
+                    claimAfterCatchUp,
                     Is.EqualTo(None),
+                    "an accepted claim that outlived its record would suppress the revision for the rest of the process")
+                Assert.That(
+                    deliveries,
+                    Is.EqualTo(2),
                     "falling behind the same revision again is new work and must prompt again")))
 
     [<Test>]
@@ -699,6 +718,83 @@ type AutoSyncTriggerTests() =
                     deliveries,
                     Is.EqualTo(2),
                     "the retry restarts the window instead of prompting on every later refresh")))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``Two triggers holding the same expired record prompt once``() =
+        TestUtils.withTempDir "treemon-auto-sync-concurrent-expiry" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+            // Mutable because the store write is an impure boundary, and the claim it observes there
+            // is the ordering under test.
+            let mutable claimWhenPublished = None
+
+            let deliver _ =
+                async {
+                    deliveries <- deliveries + 1
+                    return true
+                }
+
+            let store = loadedStore root
+            let agent = createAgent ()
+
+            // Reading the claim from inside the record's own write makes the ordering exact instead
+            // of a race: the writing thread cannot observe a claim transition it has not posted yet.
+            let observedStore =
+                { store with
+                    Update =
+                        fun path change ->
+                            claimWhenPublished <-
+                                (agent.PostAndReply(GetState)).AutoSyncTriggeredRevisions
+                                |> Map.tryFind worktree
+
+                            store.Update path change }
+
+            let dependencies = withAcceptedRecords agent observedStore deliver
+            let staleRecordRead = TaskCompletionSource()
+            let firstTriggerFinished = TaskCompletionSource()
+
+            // The concurrency under test: a second trigger that read the same expired record and
+            // only reaches the claim once the first one has re-prompted and recorded that prompt.
+            let concurrent =
+                { dependencies with
+                    ReadAcceptedRevision =
+                        fun path ->
+                            async {
+                                let! record = dependencies.ReadAcceptedRevision path
+                                staleRecordRead.TrySetResult() |> ignore
+                                return record
+                            }
+                    ClaimRevision =
+                        fun path baseRevision reason ->
+                            async {
+                                do! Async.AwaitTask firstTriggerFinished.Task
+                                return! dependencies.ClaimRevision path baseRevision reason
+                            } }
+
+            let expiredAt = DateTimeOffset.UtcNow - acceptedRetryAge - TimeSpan.FromMinutes 1.0
+            AutoSyncStore.setAccepted store worktree (acceptedRecord "base-a" expiredAt)
+            let observation = gitData worktree "feature-a" 2 (Some "base-a") false
+
+            let concurrentTrigger =
+                trigger concurrent root "origin" "main" NoPr observation |> Async.StartAsTask
+
+            TestUtils.runAsync (Async.AwaitTask staleRecordRead.Task)
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+            firstTriggerFinished.SetResult()
+            TestUtils.runAsync (Async.AwaitTask concurrentTrigger)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    claimWhenPublished,
+                    Is.EqualTo(Some(Delivering "base-a")),
+                    "the refreshed record must be readable before the claim becomes retryable, or the second trigger reads the record it already saw")
+                Assert.That(
+                    deliveries,
+                    Is.EqualTo(1),
+                    "an expired record licenses one retry, not one per trigger that read it")))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1650,7 +1746,7 @@ type AutoSyncVerificationTests() =
                             agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
                     RecordAcceptedRevision =
                         fun worktreePath baseRevision ->
-                            agent.Post(AcceptAutoSyncTrigger(worktreePath, baseRevision))
+                            async { agent.Post(AcceptAutoSyncTrigger(worktreePath, baseRevision)) }
                     SelectTarget = fun _ -> async { return OpenSession "selected-working" }
                     Deliver =
                         fun request ->
