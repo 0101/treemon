@@ -80,6 +80,7 @@ type SessionManagerSpawnTests() =
 
         let killResult = runAsync (killSession a testPath)
         assertOk killResult "killSession should return Ok"
+        Assert.That(Server.Win32.isWindowValid hwnd1, Is.False, "First HWND should be invalid after kill")
 
         let result2 = runAsync (spawnTerminal a testPath)
         assertOk result2 "Re-spawn should return Ok"
@@ -89,5 +90,4 @@ type SessionManagerSpawnTests() =
         let hwnd2 = sessions2[testPathStr]
         TestContext.Out.WriteLine($"Re-spawn: HWND={hwnd2}")
 
-        Assert.That(hwnd2, Is.Not.EqualTo(hwnd1), "Re-spawned window should have a different HWND")
         Assert.That(Server.Win32.isWindowValid hwnd2, Is.True, "Re-spawned HWND should be valid")

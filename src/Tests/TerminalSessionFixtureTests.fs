@@ -3,23 +3,20 @@ module Tests.TerminalSessionFixtureTests
 open System
 open System.Diagnostics
 open System.IO
-open System.Text
 open NUnit.Framework
 open Server.SessionManager
 open Tests.TerminalSessionFixture
 open Tests.TestUtils
 
+let private encodedScript path command =
+    buildScript path command |> Server.SessionManager.encodeCommand
+
 let private encodedCommand path =
-    buildScript path (Some "copilot --yolo")
-    |> Encoding.Unicode.GetBytes
-    |> Convert.ToBase64String
+    encodedScript path (Some "copilot --yolo")
     |> fun encoded -> $"pwsh -NoExit -EncodedCommand {encoded}"
 
 let private startShell path =
-    let encoded =
-        buildScript path None
-        |> Encoding.Unicode.GetBytes
-        |> Convert.ToBase64String
+    let encoded = encodedScript path None
 
     let psi =
         ProcessStartInfo(
@@ -66,6 +63,32 @@ type TerminalSessionFixtureTests() =
                 commandLine,
             Is.False
         )
+
+    [<Test>]
+    member _.``ownership matching rejects encoded-command text after another execution mode``() =
+        let path = @"C:\Temp\treemon-session-spawn-123\repo"
+        let encoded = encodedScript path None
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                isOwnedPowerShellCommand
+                    path
+                    $"pwsh -File helper.ps1 -- -EncodedCommand {encoded}",
+                Is.False
+            )
+
+            Assert.That(
+                isOwnedPowerShellCommand
+                    path
+                    $"pwsh -Command \"Write-Host '-EncodedCommand {encoded}'\"",
+                Is.False
+            ))
+
+[<TestFixture>]
+[<Category("Local")>]
+[<Explicit("Spawns PowerShell processes - run manually during terminal cleanup development")>]
+[<NonParallelizable>]
+type TerminalSessionProcessCleanupTests() =
 
     [<Test>]
     member _.``fallback stops only the shell owned by the fixture path``() =

@@ -90,10 +90,16 @@ let private queryPowerShellProcesses () =
             return Error "Timed out while enumerating PowerShell processes"
     }
 
+let private encodedCommandLine =
+    Regex(
+        @"^\s*(?:""[^""]*pwsh(?:\.exe)?""|[^\s""]*pwsh(?:\.exe)?)\s+(?:(?:-NoProfile|-NoLogo|-NonInteractive|-NoExit)\s+)*-EncodedCommand\s+([A-Za-z0-9+/]+={0,2})\s*$",
+        RegexOptions.IgnoreCase
+    )
+
 let internal isOwnedPowerShellCommand (worktreePath: string) (commandLine: string) =
     let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
     let expectedScriptPrefix = buildScript nativePath None
-    let matched = Regex.Match(commandLine, @"(?i)-EncodedCommand\s+([^\s]+)")
+    let matched = encodedCommandLine.Match(commandLine)
 
     if not matched.Success then
         false
