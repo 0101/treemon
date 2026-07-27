@@ -272,8 +272,12 @@ type PrRefreshAutoSyncCleanupTests() =
                     Server.AutoSyncStore.setAccepted autoSyncStore mergedPath (accepted "base-a")
                     Server.AutoSyncStore.setAccepted autoSyncStore unmergedPath (accepted "base-a")
 
-                    let! _ = agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(mergedPath, "base-a", reply))
-                    let! _ = agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(unmergedPath, "base-a", reply))
+                    let! _ =
+                        agent.PostAndAsyncReply(fun reply ->
+                            ClaimAutoSyncTrigger(mergedPath, "base-a", Server.AutoSync.FirstAttempt, reply))
+                    let! _ =
+                        agent.PostAndAsyncReply(fun reply ->
+                            ClaimAutoSyncTrigger(unmergedPath, "base-a", Server.AutoSync.FirstAttempt, reply))
 
                     let services =
                         { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
@@ -307,7 +311,7 @@ type PrRefreshAutoSyncCleanupTests() =
                             "the merged branch's trigger state must be cleared")
                         Assert.That(
                             state.AutoSyncTriggeredRevisions |> Map.tryFind unmergedPath,
-                            Is.EqualTo(Some "base-a"))
+                            Is.EqualTo(Some(Server.AutoSync.Delivering "base-a")))
                         Assert.That(
                             mergedAccepted,
                             Is.EqualTo None,

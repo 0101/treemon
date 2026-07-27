@@ -27,10 +27,28 @@ type DeliveryRequest =
       Target: SyncTarget
       Prompt: string }
 
+/// The in-process claim one worktree's revision is held under. The stage is what keeps the two
+/// deduplication layers from cancelling each other out: `Delivering` is a live operation nothing may
+/// take over, while `Accepted` has handed suppression to the durable record and may be taken over
+/// exactly when that record says its retry window has passed — without which the claim would outlive
+/// every expiry and block the retry for as long as the server runs.
+type ClaimedRevision =
+    | Delivering of baseRevision: string
+    | Accepted of baseRevision: string
+
+/// Why a claim is being asked for. Only the durable record can prove that an accepted prompt aged
+/// out, so the caller carries that proof here; the claim itself still refuses while a delivery for
+/// the same revision is in flight.
+type ClaimReason =
+    | FirstAttempt
+    | RetryExpiredAccept
+
 /// `ClaimRevision`/`ReleaseRevision` are the in-process claim; the accepted-revision operations are
-/// the durable, restart-safe layer on top of it (`AutoSyncStore`).
+/// the durable, restart-safe layer on top of it (`AutoSyncStore`). `RecordAcceptedRevision` writes
+/// both sides of the acceptance — the durable record and the claim's stage — so the two layers age
+/// out together.
 type TriggerDependencies =
-    { ClaimRevision: string -> string -> Async<bool>
+    { ClaimRevision: string -> string -> ClaimReason -> Async<bool>
       ReleaseRevision: string -> string -> unit
       ReadAcceptedRevision: string -> Async<AutoSyncStore.AcceptedSyncRecord option>
       RecordAcceptedRevision: string -> string -> unit
@@ -98,6 +116,14 @@ let internal isAlreadyAccepted
     match record with
     | Some record -> record.BaseRevision = baseRevision && now - record.AcceptedAt < acceptedRetryAge
     | None -> false
+
+/// Where the durable expiry meets the in-process claim. A record for this exact revision can only be
+/// an expired one by the time this is asked — a live one already suppressed the trigger — and it is
+/// the only proof that licenses taking over the claim an accepted prompt still holds.
+let internal claimReason baseRevision (record: AutoSyncStore.AcceptedSyncRecord option) =
+    match record with
+    | Some record when record.BaseRevision = baseRevision -> RetryExpiredAccept
+    | _ -> FirstAttempt
 
 /// The open winner decides the target; retained identity is consulted only once no session is open,
 /// so an open idle CLI can never be mistaken for an offline one that merely left an id behind.
@@ -225,16 +251,28 @@ let trigger
             let! acceptedRecord = dependencies.ReadAcceptedRevision gitData.Path
 
             if not (isAlreadyAccepted DateTimeOffset.UtcNow baseRevision acceptedRecord) then
-                let! claimed = dependencies.ClaimRevision gitData.Path baseRevision
+                let! claimed =
+                    dependencies.ClaimRevision gitData.Path baseRevision (claimReason baseRevision acceptedRecord)
 
                 if claimed then
+                    let drop reason =
+                        Log.log "AutoSync" $"Dropped sync for {gitData.Branch}: {reason}"
+                        dependencies.ReleaseRevision gitData.Path baseRevision
+
                     try
                         let! target = dependencies.SelectTarget gitData.Path
                         let! stillEligible = isStillEligible dependencies repoRoot gitData
+                        // The durable record is re-read at the same boundary as eligibility because
+                        // the claim taken above may have been an accepted one: a concurrent trigger
+                        // that started from the same expired record could have delivered and
+                        // recorded meanwhile, and its fresh record is the proof that this delivery
+                        // would be a repeat.
+                        let! currentRecord = dependencies.ReadAcceptedRevision gitData.Path
 
                         if not stillEligible then
-                            Log.log "AutoSync" $"Dropped sync for {gitData.Branch}: no longer eligible"
-                            dependencies.ReleaseRevision gitData.Path baseRevision
+                            drop "no longer eligible"
+                        elif isAlreadyAccepted DateTimeOffset.UtcNow baseRevision currentRecord then
+                            drop "already accepted by a concurrent trigger"
                         else
                             let! accepted =
                                 dependencies.Deliver

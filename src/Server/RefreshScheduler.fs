@@ -62,7 +62,7 @@ type DashboardState =
       // time-since-last-write), and cleared when the status leaves Idle (a new Working turn moves it).
       // In-memory only: a restart rebuilds it from the reloaded sessions (re-stamping at reload time).
       CodingToolSinceByWorktree: Map<string, DateTimeOffset>
-      AutoSyncTriggeredRevisions: Map<string, string>
+      AutoSyncTriggeredRevisions: Map<string, AutoSync.ClaimedRevision>
       AutoSyncLaunchesInFlight: Set<string> }
 
 module DashboardState =
@@ -111,7 +111,14 @@ type StateMsg =
     /// oldest-replayed row, which the per-row UpdateSessionStatus path would freeze in, overstating the
     /// chip for the whole post-restart idle span (F11/C-14).
     | SeedSessionStatuses of SessionActivityStore.StoredStatus list
-    | ClaimAutoSyncTrigger of path: string * baseRevision: string * AsyncReplyChannel<bool>
+    | ClaimAutoSyncTrigger of
+        path: string *
+        baseRevision: string *
+        reason: AutoSync.ClaimReason *
+        AsyncReplyChannel<bool>
+    /// The delivery this claim was taken for was accepted: suppression passes to the durable record,
+    /// which is the only layer that can retire it again.
+    | AcceptAutoSyncTrigger of path: string * baseRevision: string
     | ReleaseAutoSyncTrigger of path: string * baseRevision: string
     | ClearAutoSyncTrigger of path: string
     | TryBeginAutoSyncLaunch of path: string * AsyncReplyChannel<bool>
@@ -405,20 +412,40 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             LatestByCategory = latestByCategory
             CodingToolSinceByWorktree = idleSince }
 
-    | ClaimAutoSyncTrigger(path, baseRevision, reply) ->
-        let claimed = state.AutoSyncTriggeredRevisions |> Map.tryFind path <> Some baseRevision
+    | ClaimAutoSyncTrigger(path, baseRevision, reason, reply) ->
+        let claimed =
+            match state.AutoSyncTriggeredRevisions |> Map.tryFind path, reason with
+            | None, _ -> true
+            // A newer base revision is new work: it supersedes whatever is held for the old one.
+            | Some(AutoSync.Delivering held), _ -> held <> baseRevision
+            | Some(AutoSync.Accepted held), AutoSync.FirstAttempt -> held <> baseRevision
+            // The durable record aged out, and nothing is in flight to duplicate.
+            | Some(AutoSync.Accepted _), AutoSync.RetryExpiredAccept -> true
+
         reply.Reply claimed
 
         if claimed then
             { state with
                 AutoSyncTriggeredRevisions =
-                    state.AutoSyncTriggeredRevisions |> Map.add path baseRevision }
+                    state.AutoSyncTriggeredRevisions
+                    |> Map.add path (AutoSync.Delivering baseRevision) }
         else
             state
 
+    | AcceptAutoSyncTrigger(path, baseRevision) ->
+        // Only the claim this delivery still holds may be marked: a newer revision claimed while it
+        // was in flight owns the entry now and must not inherit the older prompt's acceptance.
+        match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
+        | Some(AutoSync.Delivering held) when held = baseRevision ->
+            { state with
+                AutoSyncTriggeredRevisions =
+                    state.AutoSyncTriggeredRevisions
+                    |> Map.add path (AutoSync.Accepted baseRevision) }
+        | _ -> state
+
     | ReleaseAutoSyncTrigger(path, baseRevision) ->
         match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
-        | Some current when current = baseRevision ->
+        | Some(AutoSync.Delivering held) when held = baseRevision ->
             { state with
                 AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
         | _ -> state
@@ -485,10 +512,11 @@ let internal autoSyncDependencies
         SessionManager.launchAction sessionAgent worktreePath command.AsShellString
 
     { ClaimRevision =
-        fun path baseRevision -> agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reply))
+        fun path baseRevision reason ->
+            agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reason, reply))
       ReleaseRevision = fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
-      // Without a durable store (fixture mode) nothing is ever recorded, so nothing is suppressed:
-      // the in-process claim remains the only deduplication.
+      // Without a durable store (fixture mode) nothing is ever recorded, so nothing can expire and
+      // nothing licenses a retry: the in-process claim remains the only deduplication.
       ReadAcceptedRevision =
         fun path ->
             match autoSyncStore with
@@ -496,6 +524,10 @@ let internal autoSyncDependencies
             | None -> async { return None }
       RecordAcceptedRevision =
         fun path baseRevision ->
+            // Both layers move together: the claim stops being an operation in flight, and the
+            // durable record starts the one retry window that is allowed to retire it.
+            agent.Post(AcceptAutoSyncTrigger(path, baseRevision))
+
             autoSyncStore
             |> Option.iter (fun store ->
                 AutoSyncStore.setAccepted

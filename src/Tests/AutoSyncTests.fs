@@ -48,7 +48,7 @@ let private trackedGitData path branch upstream behind revision dirty =
 /// Trigger dependencies with no durable layer: nothing is ever recorded, so only the in-process
 /// claim deduplicates. Tests override the fields whose behavior they assert on.
 let private withoutAcceptedRecords: TriggerDependencies =
-    { ClaimRevision = fun _ _ -> async { return true }
+    { ClaimRevision = fun _ _ _ -> async { return true }
       ReleaseRevision = fun _ _ -> ()
       ReadAcceptedRevision = fun _ -> async { return None }
       RecordAcceptedRevision = fun _ _ -> ()
@@ -245,18 +245,60 @@ type AutoSyncTriggerTests() =
             let path = "/repo/wt"
 
             let! first =
-                agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, "base-a", reply))
+                agent.PostAndAsyncReply(fun reply ->
+                    ClaimAutoSyncTrigger(path, "base-a", FirstAttempt, reply))
 
             let! repeated =
-                agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, "base-a", reply))
+                agent.PostAndAsyncReply(fun reply ->
+                    ClaimAutoSyncTrigger(path, "base-a", FirstAttempt, reply))
 
             let! advanced =
-                agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, "base-b", reply))
+                agent.PostAndAsyncReply(fun reply ->
+                    ClaimAutoSyncTrigger(path, "base-b", FirstAttempt, reply))
 
             Assert.Multiple(fun () ->
                 Assert.That(first, Is.True)
                 Assert.That(repeated, Is.False)
                 Assert.That(advanced, Is.True))
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``Only an accepted claim, never a delivery in flight, is retried after expiry``() =
+        async {
+            let agent = createAgent ()
+            let path = "/repo/wt"
+
+            let claim reason =
+                agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, "base-a", reason, reply))
+
+            let! _ = claim FirstAttempt
+            let! retryWhileDelivering = claim RetryExpiredAccept
+
+            agent.Post(AcceptAutoSyncTrigger(path, "base-a"))
+
+            let! repeatedAfterAccept = claim FirstAttempt
+            let! retryAfterExpiry = claim RetryExpiredAccept
+            let! retriedTwice = claim RetryExpiredAccept
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    retryWhileDelivering,
+                    Is.False,
+                    "an expired record must never take over a delivery that is still running")
+                Assert.That(
+                    repeatedAfterAccept,
+                    Is.False,
+                    "an ordinary refresh must not re-prompt an accepted revision")
+                Assert.That(
+                    retryAfterExpiry,
+                    Is.True,
+                    "the durable expiry must be able to retire the accepted claim in the same process")
+                Assert.That(
+                    retriedTwice,
+                    Is.False,
+                    "the retry itself is a delivery in flight and must not be duplicated"))
         }
         |> Async.RunSynchronously
 
@@ -267,12 +309,14 @@ type AutoSyncTriggerTests() =
             let path = "/repo/wt"
 
             let! _ =
-                agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, "base-a", reply))
+                agent.PostAndAsyncReply(fun reply ->
+                    ClaimAutoSyncTrigger(path, "base-a", FirstAttempt, reply))
 
             agent.Post(ClearAutoSyncTrigger path)
 
             let! afterDisable =
-                agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, "base-a", reply))
+                agent.PostAndAsyncReply(fun reply ->
+                    ClaimAutoSyncTrigger(path, "base-a", FirstAttempt, reply))
 
             Assert.That(afterDisable, Is.True)
         }
@@ -365,8 +409,9 @@ type AutoSyncTriggerTests() =
             let dependencies =
                 { withoutAcceptedRecords with
                     ClaimRevision =
-                        fun path baseRevision ->
-                            agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reply))
+                        fun path baseRevision reason ->
+                            agent.PostAndAsyncReply(fun reply ->
+                                ClaimAutoSyncTrigger(path, baseRevision, reason, reply))
                     ReleaseRevision =
                         fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
                     SelectTarget =
@@ -606,6 +651,54 @@ type AutoSyncTriggerTests() =
                     refreshedAt,
                     Is.GreaterThan(expiredAt),
                     "the retry restarts the suppression window")))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``An expired record retries once without restarting the server``() =
+        TestUtils.withTempDir "treemon-auto-sync-live-expiry" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+
+            let deliver _ =
+                async {
+                    deliveries <- deliveries + 1
+                    return true
+                }
+
+            let store = loadedStore root
+            // One long-running server: the same scheduler agent — and so the same in-process claim —
+            // spans every observation below.
+            let dependencies = withAcceptedRecords (createAgent ()) store deliver
+            let observation = gitData worktree "feature-a" 2 (Some "base-a") false
+
+            let observe () =
+                trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            observe ()
+            let afterAccept = deliveries
+            observe ()
+            let insideWindow = deliveries
+
+            let expiredAt = DateTimeOffset.UtcNow - acceptedRetryAge - TimeSpan.FromMinutes 1.0
+            AutoSyncStore.setAccepted store worktree (acceptedRecord "base-a" expiredAt)
+
+            observe ()
+            let afterExpiry = deliveries
+            observe ()
+
+            Assert.Multiple(fun () ->
+                Assert.That(afterAccept, Is.EqualTo(1))
+                Assert.That(insideWindow, Is.EqualTo(1), "the same revision stays suppressed inside the retry window")
+                Assert.That(
+                    afterExpiry,
+                    Is.EqualTo(2),
+                    "an accepted revision whose record expired must be retried in the same process")
+                Assert.That(
+                    deliveries,
+                    Is.EqualTo(2),
+                    "the retry restarts the window instead of prompting on every later refresh")))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1208,7 +1301,7 @@ type AutoSyncEndpointTests() =
         let enabledRecord = TestUtils.runAsync (store.Get normalizedPath)
         let duplicateRefreshClaim =
             agent.PostAndReply(fun reply ->
-                ClaimAutoSyncTrigger(normalizedPath, "base-a", reply))
+                ClaimAutoSyncTrigger(normalizedPath, "base-a", FirstAttempt, reply))
 
         Assert.Multiple(fun () ->
             Assert.That(differentlyCasedPath, Is.Not.EqualTo(normalizedPath))
@@ -1254,7 +1347,7 @@ type AutoSyncEndpointTests() =
             Assert.That(secondBody, Is.EqualTo(body))
             Assert.That(
                 finalState.AutoSyncTriggeredRevisions |> Map.tryFind normalizedPath,
-                Is.EqualTo(Some "base-a")))
+                Is.EqualTo(Some(Accepted "base-a"))))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1386,9 +1479,9 @@ type AutoSyncVerificationTests() =
             let dependencies =
                 { withoutAcceptedRecords with
                     ClaimRevision =
-                        fun worktreePath baseRevision ->
+                        fun worktreePath baseRevision reason ->
                             agent.PostAndAsyncReply(fun reply ->
-                                ClaimAutoSyncTrigger(worktreePath, baseRevision, reply))
+                                ClaimAutoSyncTrigger(worktreePath, baseRevision, reason, reply))
                     ReleaseRevision =
                         fun worktreePath baseRevision ->
                             agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
@@ -1440,12 +1533,15 @@ type AutoSyncVerificationTests() =
             let dependencies =
                 { withoutAcceptedRecords with
                     ClaimRevision =
-                        fun worktreePath baseRevision ->
+                        fun worktreePath baseRevision reason ->
                             agent.PostAndAsyncReply(fun reply ->
-                                ClaimAutoSyncTrigger(worktreePath, baseRevision, reply))
+                                ClaimAutoSyncTrigger(worktreePath, baseRevision, reason, reply))
                     ReleaseRevision =
                         fun worktreePath baseRevision ->
                             agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
+                    RecordAcceptedRevision =
+                        fun worktreePath baseRevision ->
+                            agent.Post(AcceptAutoSyncTrigger(worktreePath, baseRevision))
                     SelectTarget = fun _ -> async { return OpenSession "selected-working" }
                     Deliver =
                         fun request ->
@@ -1498,6 +1594,6 @@ type AutoSyncVerificationTests() =
                 Assert.That(custom, Is.True)
                 Assert.That(
                     finalState.AutoSyncTriggeredRevisions |> Map.tryFind path,
-                    Is.EqualTo(Some "base-b")))
+                    Is.EqualTo(Some(Accepted "base-b"))))
         finally
             if Directory.Exists root then Directory.Delete(root, true)
