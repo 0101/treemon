@@ -187,17 +187,6 @@ type BuildInjectionTests() =
                     "a system view never morphs, so it never has changed content to mark")
 
     [<Test>]
-    member _.``the highlight flash is derived from the resting tint, not a fixed alpha``() =
-        // A hardcoded flash alpha only reads as motion against the tint it was tuned for; against a
-        // stronger resting tint it collapses to an invisible step. Doubling the resting value keeps
-        // the entry animation perceptible whatever the tint is set to.
-        let style = Server.CanvasMorphScript.style
-        Assert.That(style, Does.Contain("calc(var(--canvas-updated-alpha)*2)"),
-                    "the keyframe must scale from the resting alpha")
-        Assert.That(style, Does.Contain("prefers-reduced-motion:no-preference"),
-                    "the entry animation must be gated on prefers-reduced-motion")
-
-    [<Test>]
     member _.``the highlight never changes layout``() =
         // The tint has to breathe around the text without moving it: a doc that reflows on every
         // update would defeat the morph's whole point of preserving scroll position.

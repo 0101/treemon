@@ -188,11 +188,19 @@ changed rows already use).
   are attribute mutations; excluding them removes all self-interference without a filter.
 - **A morph that changes nothing re-applies the previous set.** Tab switching dispatches
   `MorphActiveDoc` unconditionally (see Decisions), so without this a tab switch would clear a
-  highlight no edit had superseded.
-- **Whitespace-only changes are ignored**, both as edited text and as text nodes *inserted* between
-  blocks — a whole-file rewrite that only re-indents otherwise reports most of the doc as changed.
-- **A flood highlights nothing.** Past 60% of the doc's top-level blocks the edit is a rewrite, and
-  tinting everything says nothing.
+  highlight no edit had superseded. A morph that *does* change something but leaves nothing to tint
+  — a pure deletion — clears instead, so the tint never marks content the latest edit did not touch.
+- **Whitespace-only and comment changes are ignored**, both as edited text and as nodes *inserted*
+  between blocks — a whole-file rewrite that only re-indents otherwise reports most of the doc as
+  changed.
+- **A flood highlights nothing.** Past 60% of the doc's blocks the edit is a rewrite, and tinting
+  everything says nothing. Both sides of that ratio count blocks at *any* depth: measuring hits
+  (which land on the nearest block, however deeply nested) against only the top-level children
+  compares different populations, can exceed 1, and would suppress ordinary edits — permanently so
+  for a doc wrapped in a single container.
+- **Only the newest signal's response is applied.** Signals can overlap (a tab re-select racing a
+  poll delta), and two fetches have no completion order, so a generation counter drops superseded
+  responses rather than morphing the doc back to older content.
 - **Fresh loads are not covered.** The highlight is computed during a morph, so a doc opened fresh
   (first open, worktree switch, past the 3-iframe LRU cap, or after a restart) shows none even if it
   changed. Accepted limitation; closing it would mean snapshotting each doc's last-seen body.
