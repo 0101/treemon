@@ -1083,7 +1083,7 @@ let view model dispatch =
         | CanvasPosition.Right
         | CanvasPosition.Bottom -> [ dashboardEl; canvasEl ]
 
-    React.fragment [
+    React.Fragment [
         viewAppHeader model dispatch
         Html.div [
             prop.className layoutClass

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
@@ -38,7 +38,7 @@
     <PackageReference Include="Fable.Elmish" Version="4.*" />
     <PackageReference Include="Fable.Elmish.React" Version="4.*" />
     <PackageReference Include="Fable.Remoting.Client" Version="7.*" />
-    <PackageReference Include="Feliz" Version="2.*" />
+    <PackageReference Include="Feliz" Version="3.*" />
   </ItemGroup>
 
   <ItemGroup>

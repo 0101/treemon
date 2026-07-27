@@ -627,7 +627,7 @@ let private useFrameCoalescedHover geometryBuildCount (hoverSamples: HoverSample
         frameQueue.current <- emptyHoverFrameQueue ()
 
     React.useEffect(
-        (fun () -> React.createDisposable clearPendingFrame),
+        (fun () -> clearPendingFrame),
         [| box geometryBuildCount |]
     )
 
