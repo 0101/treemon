@@ -280,52 +280,56 @@ type ParseDiffStatsTests() =
     [<Test>]
     member _.``Insertions and deletions both present``() =
         let result = parseDiffStats (Some " 5 files changed, 120 insertions(+), 45 deletions(-)")
-        Assert.That(result, Is.EqualTo((true, 120, 45)))
+        Assert.That(result, Is.EqualTo((HasContent, 120, 45)))
 
     [<Test>]
     member _.``Insertions only``() =
         let result = parseDiffStats (Some " 3 files changed, 80 insertions(+)")
-        Assert.That(result, Is.EqualTo((true, 80, 0)))
+        Assert.That(result, Is.EqualTo((HasContent, 80, 0)))
 
     [<Test>]
     member _.``Deletions only``() =
         let result = parseDiffStats (Some " 2 files changed, 30 deletions(-)")
-        Assert.That(result, Is.EqualTo((true, 0, 30)))
+        Assert.That(result, Is.EqualTo((HasContent, 0, 30)))
 
     [<Test>]
-    member _.``None input reports no committed diff``() =
+    member _.``A failed diff command is undetermined rather than empty``() =
         let result = parseDiffStats None
-        Assert.That(result, Is.EqualTo((false, 0, 0)))
+        Assert.That(result, Is.EqualTo((Undetermined, 0, 0)))
 
     [<Test>]
     member _.``Empty string reports no committed diff``() =
         let result = parseDiffStats (Some "")
-        Assert.That(result, Is.EqualTo((false, 0, 0)))
+        Assert.That(result, Is.EqualTo((Clean, 0, 0)))
 
     [<Test>]
     member _.``Whitespace-only string reports no committed diff``() =
         let result = parseDiffStats (Some "   ")
-        Assert.That(result, Is.EqualTo((false, 0, 0)))
+        Assert.That(result, Is.EqualTo((Clean, 0, 0)))
 
     [<Test>]
     member _.``Single insertion singular form``() =
         let result = parseDiffStats (Some " 1 file changed, 1 insertion(+)")
-        Assert.That(result, Is.EqualTo((true, 1, 0)))
+        Assert.That(result, Is.EqualTo((HasContent, 1, 0)))
 
     [<Test>]
     member _.``Single deletion singular form``() =
         let result = parseDiffStats (Some " 1 file changed, 1 deletion(-)")
-        Assert.That(result, Is.EqualTo((true, 0, 1)))
+        Assert.That(result, Is.EqualTo((HasContent, 0, 1)))
 
     [<Test>]
     member _.``Large numbers parsed correctly``() =
         let result = parseDiffStats (Some " 50 files changed, 12345 insertions(+), 6789 deletions(-)")
-        Assert.That(result, Is.EqualTo((true, 12345, 6789)))
+        Assert.That(result, Is.EqualTo((HasContent, 12345, 6789)))
 
     [<Test>]
     member _.``Commits with no net base diff produce no work metrics``() =
-        let result = createWorkMetrics false 3 0 0
-        Assert.That(result.IsNone, Is.True)
+        Assert.Multiple(fun () ->
+            Assert.That((createWorkMetrics Clean 3 0 0).IsNone, Is.True)
+            Assert.That(
+                (createWorkMetrics Undetermined 3 10 5).IsNone,
+                Is.True,
+                "An unreadable comparison must not be reported as measured work"))
 
 // classifyUpstream turns a `git rev-parse --abbrev-ref @{u}` result into the three cases the
 // merged-PR prune logic needs (see worktree-monitor.md, Merged-PR Persistence): a
@@ -416,6 +420,33 @@ type ClassifyUpstreamTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type ComparisonContentTests() =
+
+    [<TestCase(true)>]
+    [<TestCase(false)>]
+    member _.``Content found in any layer wins over an unreadable one``(contentFirst: bool) =
+        let combined =
+            if contentFirst then ComparisonContent.combine HasContent Undetermined
+            else ComparisonContent.combine Undetermined HasContent
+
+        Assert.That(combined, Is.EqualTo(HasContent))
+
+    [<TestCase(true)>]
+    [<TestCase(false)>]
+    member _.``An unreadable layer keeps the worktree out of the clean verdict``(undeterminedFirst: bool) =
+        let combined =
+            if undeterminedFirst then ComparisonContent.combine Undetermined Clean
+            else ComparisonContent.combine Clean Undetermined
+
+        Assert.That(combined, Is.EqualTo(Undetermined))
+
+    [<Test>]
+    member _.``Only every layer reading empty is clean``() =
+        Assert.That(ComparisonContent.combine Clean Clean, Is.EqualTo(Clean))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type PrBranchNameTests() =
 
     let gitData branch upstream =
@@ -428,7 +459,7 @@ type PrBranchNameTests() =
           MainBehindCount = 0
           BaseRevision = None
           IsDirty = false
-          HasDiff = false
+          Comparison = Clean
           WorkMetrics = None }
 
     [<Test>]

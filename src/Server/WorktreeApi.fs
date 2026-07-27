@@ -192,6 +192,10 @@ let internal assembleFromState
     let fields =
         overviewWorktreeFields now archivedBranches pushByWorktree codingToolSince repo wt
     let gitData = repo.GitData |> Map.tryFind wt.Path
+    let comparison =
+        gitData
+        |> Option.map _.Comparison
+        |> Option.defaultValue GitWorktree.Undetermined
     let prBranch = gitData |> Option.bind GitWorktree.prBranchName
     let pr = PrStatus.lookupPrStatus repo.PrData prBranch
 
@@ -216,12 +220,16 @@ let internal assembleFromState
         |> Option.map (fun branch -> Set.contains branch autoSyncBranches)
         |> Option.defaultValue false
       IsDirty = gitData |> Option.map (_.IsDirty) |> Option.defaultValue false
-      HasDiff = gitData |> Option.map (_.HasDiff) |> Option.defaultValue false
+      HasDiff = comparison = GitWorktree.HasContent
       WorkMetrics = gitData |> Option.bind _.WorkMetrics
       HasActiveSession = Set.contains wt.Path activeSessions
       IsMainWorktree = Directory.Exists(Path.Combine(wt.Path, ".git"))
       IsArchived = fields.IsArchived
-      CanvasDocs = repo.CanvasData |> Map.tryFind wt.Path |> Option.defaultValue [] }
+      CanvasDocs =
+        repo.CanvasData
+        |> Map.tryFind wt.Path
+        |> Option.defaultValue []
+        |> DiffProvisioner.visibleDocs comparison }
 
 type WorktreeContext =
     { Worktree: GitWorktree.WorktreeInfo
