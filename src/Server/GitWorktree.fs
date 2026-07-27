@@ -348,16 +348,18 @@ type BranchSyncOutcome =
     | CommandFailed
 
 /// A sync fetches over the network from background work that no HTTP response is waiting on, so it
-/// gets its own timeout instead of the interactive response deadline `runArgumentList` applies.
+/// gets its own timeout instead of the interactive response deadline `runArgumentList` applies. The
+/// push after a sync talks to the same remote, so it shares the bound.
 let private branchSyncTimeoutMs = 120_000
 
 /// Nothing in the sync reads Git's output; the bound only stops a pathological repository from
 /// streaming megabytes through the server process.
 let private branchSyncCaptureLimitBytes = 64 * 1024
 
-/// Every sync command goes through an argument list, so a remote or branch name can never be parsed
-/// as part of a command string, and any process-level failure collapses to `CommandFailed`.
-let private runBranchSyncGit (worktreePath: string) (arguments: string list) =
+/// Every sync and push command goes through an argument list, so a remote or branch name can never
+/// be parsed as part of a command string. Callers collapse the process-level failure into their own
+/// outcome, since a timed-out or unstartable git is indistinguishable from a failed one to them.
+let private runBranchGit (worktreePath: string) (arguments: string list) =
     ProcessRunner.runArgumentListWithTimeout
         branchSyncTimeoutMs
         branchSyncCaptureLimitBytes
@@ -366,6 +368,15 @@ let private runBranchSyncGit (worktreePath: string) (arguments: string list) =
         "git"
         ("-C" :: worktreePath :: arguments)
         None
+
+/// The trimmed first line of a command's stdout, for the few commands whose single-token answer the
+/// caller needs. Reading it here keeps decoding out of the callers and never leaks further: no
+/// outcome and no log line carries it.
+let private singleLineStdout (output: ProcessRunner.ArgumentListOutput) =
+    Text.Encoding.UTF8.GetString(output.Stdout).Trim()
+
+let private runBranchSyncGit (worktreePath: string) (arguments: string list) =
+    runBranchGit worktreePath arguments
     |> AsyncResult.mapError (fun _ -> BranchSyncOutcome.CommandFailed)
 
 let private branchSyncExitCode worktreePath arguments =
@@ -377,9 +388,7 @@ let private branchSyncExitCode worktreePath arguments =
 let private fetchedBaseRevision worktreePath =
     asyncResult {
         let! output = runBranchSyncGit worktreePath [ "rev-parse"; "--verify"; "FETCH_HEAD" ]
-
-        let revision =
-            Text.Encoding.UTF8.GetString(output.Stdout).Trim()
+        let revision = singleLineStdout output
 
         if output.ExitCode <> 0 || revision = "" then
             return! Error BranchSyncOutcome.CommandFailed
@@ -478,6 +487,95 @@ let syncWithBase (worktreePath: string) (upstreamRemote: string) (baseBranch: st
             | Error outcome -> outcome
 
         Log.log "Git" $"Branch sync of {worktreePath}: {outcome}"
+        return outcome
+    }
+
+/// What Treemon's own push of a just-synced branch did. Two cases on purpose: a refusal (a detached
+/// HEAD, no configured upstream) and a failure (authentication, a diverged remote, a broken command)
+/// mean the same thing to the caller — Treemon could not finish the sync mechanically, so an agent
+/// takes over — and neither may carry Git text into a prompt (see `docs/spec/worktree-monitor.md`,
+/// Branch Sync).
+[<RequireQualifiedAccess>]
+type BranchPushOutcome =
+    | Pushed
+    | PushFailed
+
+let private runBranchPushGit worktreePath arguments =
+    runBranchGit worktreePath arguments
+    |> AsyncResult.mapError (fun _ -> BranchPushOutcome.PushFailed)
+
+/// A command whose single-token answer the push needs. An empty answer is a failure rather than a
+/// value to push with, so an unconfigured or unreadable setting can never become part of a refspec.
+let private branchPushValue worktreePath arguments =
+    asyncResult {
+        let! output = runBranchPushGit worktreePath arguments
+        let value = singleLineStdout output
+
+        if output.ExitCode <> 0 || value = "" then
+            return! Error BranchPushOutcome.PushFailed
+        else
+            return value
+    }
+
+/// The branch this worktree has checked out. A detached HEAD answers the literal `HEAD`, which names
+/// no branch to push, so it fails like any other unusable state.
+let private checkedOutBranch worktreePath =
+    asyncResult {
+        let! branch = branchPushValue worktreePath [ "rev-parse"; "--abbrev-ref"; "HEAD" ]
+
+        if branch = "HEAD" then
+            return! Error BranchPushOutcome.PushFailed
+        else
+            return branch
+    }
+
+/// Where the branch has to go, taken from the two config keys git itself writes for a tracking
+/// branch. Reading `remote` and `merge` separately avoids splitting a combined `origin/feature` at a
+/// slash, which guesses wrong for any branch name that contains one; an unconfigured upstream is just
+/// a missing key, and returning its failure is what stops a push to a guessed default.
+let private configuredUpstreamTarget worktreePath branch =
+    asyncResult {
+        let! remote = branchPushValue worktreePath [ "config"; "--get"; $"branch.{branch}.remote" ]
+        let! mergeRef = branchPushValue worktreePath [ "config"; "--get"; $"branch.{branch}.merge" ]
+
+        let remoteRef =
+            if mergeRef.StartsWith("refs/", StringComparison.Ordinal) then
+                mergeRef
+            else
+                $"refs/heads/{mergeRef}"
+
+        return remote, remoteRef
+    }
+
+/// Advances an open pull request with the branch a mechanical sync just updated. Both halves of the
+/// refspec are spelled out, so neither `push.default`, nor `HEAD`, nor a remote-side default picks
+/// what moves. There is deliberately no `--force` and no `--force-with-lease`: a remote that has
+/// moved on is exactly the case Treemon must not resolve by itself, so the push fails with both sides
+/// untouched and the caller hands the worktree to an agent.
+let pushCurrentBranch (worktreePath: string) =
+    async {
+        let! result =
+            asyncResult {
+                let! branch = checkedOutBranch worktreePath
+                let! remote, remoteRef = configuredUpstreamTarget worktreePath branch
+
+                let! output =
+                    runBranchPushGit
+                        worktreePath
+                        [ "push"; "--quiet"; remote; "--"; $"refs/heads/{branch}:{remoteRef}" ]
+
+                if output.ExitCode = 0 then
+                    return BranchPushOutcome.Pushed
+                else
+                    return! Error BranchPushOutcome.PushFailed
+            }
+
+        let outcome =
+            match result with
+            | Ok outcome
+            | Error outcome -> outcome
+
+        Log.log "Git" $"Branch push of {worktreePath}: {outcome}"
         return outcome
     }
 
