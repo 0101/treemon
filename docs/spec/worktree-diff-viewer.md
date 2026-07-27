@@ -54,7 +54,7 @@ The summary route is `GET /<encoded-known-worktree>/diff-summary?committed=<bool
 - Diff content always wraps and never scrolls horizontally. Split view preserves two columns and wraps each side rather than changing layout at narrow widths.
 - The file navigator is an at-most-one-open accordion because file paths and content form one browsing flow; users may collapse the current file to leave no patch visible.
 - Card and in-view controls use icon-only SVG glyphs with accessible text. File statuses use compact symbols plus semantic color while retaining full accessible labels.
-- diff2html 3.4.52 is vendored and served from a versioned immutable local route; no renderer asset is fetched from a third-party origin.
+- diff2html 3.4.52 is vendored and served from a versioned immutable local route; no renderer asset is fetched from a third-party origin. The viewer's own stylesheet and script are self-hosted the same way but from stable, unversioned routes, so they are served revalidating rather than immutable — an edited viewer must not be shadowed by a frozen cache entry.
 - Over-limit summaries and patches are rejected as explicit states; partial patches are not rendered because an incomplete patch is not reliable input for diff2html.
 - Agent-mediated review uses generic SystemView selection interactions rather than renderer-specific comment widgets.
 - Diff selection interactions resolve, per interaction, to the most recently active session holding
@@ -90,9 +90,11 @@ The summary route is `GET /<encoded-known-worktree>/diff-summary?committed=<bool
 | `src/Server/WorktreeDiff.fs` | Renderer-neutral diff types and exact live-worktree comparison |
 | `src/Server/WorktreeDiffApi.fs` | Opaque identity snapshots, tagged JSON mapping, and guarded diff route handlers |
 | `src/Server/CanvasDocServer.fs` | Known-worktree diff data routes and generated view serving |
-| `src/Server/DiffAssets.fs` | Versioned self-hosted renderer asset routes |
+| `src/Server/DiffAssets.fs` | Self-hosted asset routes: versioned immutable renderer bundle, revalidating viewer assets |
 | `src/Server/DiffProvisioner.fs` | Keeps `diff.html` synchronized with the embedded template and gates its visibility on comparison content |
-| `src/Server/DiffTemplate.html` | File navigator and diff2html rendering shell |
+| `src/Server/DiffTemplate.html` | Viewer document structure; links the renderer bundle and the viewer assets |
+| `src/Server/Assets/diff/viewer.css` | Viewer styling: shell, toolbar, file navigator, categories, and diff2html layout overrides |
+| `src/Server/Assets/diff/viewer.js` | Viewer behavior: summary loading, file accordion, layers, highlighting, categories |
 | `src/Client/CardViews.fs` | Content/readiness-gated worktree-card Diff action |
 | `src/Client/CanvasPane.fs` | Diff SystemView tab glyph and hosting |
 

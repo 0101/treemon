@@ -532,6 +532,7 @@ let internal createHostWithDiffDeadline
     app.UseRouting() |> ignore
     app.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
     app.MapGet("/assets/diff2html/{version}/{filename}", RequestDelegate(handleDiffAsset)) |> ignore
+    app.MapGet("/assets/diff/{filename}", RequestDelegate(handleDiffAsset)) |> ignore
     app.MapGet(
         "/{**path}",
         RequestDelegate(

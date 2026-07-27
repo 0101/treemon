@@ -18,6 +18,9 @@ let private serverPath name =
 let private assetPath name =
     serverPath (Path.Combine("Assets", "diff2html", DiffAssets.Version, name))
 
+let private viewerAssetPath name =
+    serverPath (Path.Combine("Assets", "diff", name))
+
 let private templatePath = serverPath "DiffTemplate.html"
 
 let private verificationArtifactPath filename =
@@ -661,29 +664,35 @@ type DiffViewerVisibilityTests() =
 type DiffAssetsTests() =
 
     [<Test>]
-    member _.``template pins only self-hosted diff2html assets``() =
+    member _.``template and viewer assets pin only self-hosted bundles``() =
         let template = File.ReadAllText(templatePath)
-        let expectedRoot = $"/assets/diff2html/{DiffAssets.Version}/"
+        let viewerCss = File.ReadAllText(viewerAssetPath "viewer.css")
+        let viewerScript = File.ReadAllText(viewerAssetPath "viewer.js")
 
         Assert.Multiple(fun () ->
-            Assert.That(template, Does.Contain(expectedRoot + "diff2html.min.css"))
-            Assert.That(template, Does.Contain(expectedRoot + "diff2html.min.js"))
-            Assert.That(template, Does.Contain(expectedRoot + "diff2html-ui-slim.min.js"))
-            Assert.That(template, Does.Not.Contain("cdn.jsdelivr.net"))
-            Assert.That(template, Does.Not.Contain("unpkg.com")))
+            Assert.That(template, Does.Contain(DiffAssets.cssPath))
+            Assert.That(template, Does.Contain(DiffAssets.rendererPath))
+            Assert.That(template, Does.Contain(DiffAssets.viewerCssPath))
+            Assert.That(template, Does.Contain(DiffAssets.viewerScriptPath))
+            Assert.That(viewerScript, Does.Contain(DiffAssets.highlighterPath))
+
+            [ template; viewerCss; viewerScript ]
+            |> List.iter (fun source ->
+                Assert.That(source, Does.Not.Contain("cdn.jsdelivr.net"))
+                Assert.That(source, Does.Not.Contain("unpkg.com"))))
 
     [<Test>]
-    member _.``template restates the schema the validator enforces``() =
+    member _.``viewer script restates the schema the validator enforces``() =
         // The configure prompt spells out the depth bound and the reserved top-level name as prose.
         // Pinning it to the validator's own constants is what keeps the two from drifting apart.
-        let template = File.ReadAllText(templatePath)
+        let script = File.ReadAllText(viewerAssetPath "viewer.js")
 
         Assert.Multiple(fun () ->
-            Assert.That(template, Does.Contain($"at most {DiffCategories.maxDepth} levels"))
-            Assert.That(template, Does.Contain($"var OTHER_CATEGORY = '{DiffCategories.reservedTopLevelName}'"))
+            Assert.That(script, Does.Contain($"at most {DiffCategories.maxDepth} levels"))
+            Assert.That(script, Does.Contain($"var OTHER_CATEGORY = '{DiffCategories.reservedTopLevelName}'"))
 
             Assert.That(
-                template,
+                script,
                 Does.Contain($"Do not use \"{DiffCategories.reservedTopLevelName}\" as a top-level name")))
 
     [<Test>]
@@ -701,6 +710,22 @@ type DiffAssetsTests() =
 
             Assert.That(asset.Content, Is.EqualTo(File.ReadAllText(assetPath filename)), filename))
 
+    [<Test>]
+    member _.``embedded viewer assets match the authored files exactly``() =
+        // The browser tests load these from disk while the server serves the embedded copies, so
+        // the two have to be the same bytes for a routed page to behave like the served one.
+        let cases =
+            [ DiffAssets.viewerCssPath, "viewer.css"
+              DiffAssets.viewerScriptPath, "viewer.js" ]
+
+        cases
+        |> List.iter (fun (url, filename) ->
+            let asset =
+                DiffAssets.tryFind url
+                |> Option.defaultWith (fun () -> failwith $"Missing embedded asset {url}")
+
+            Assert.That(asset.Content, Is.EqualTo(File.ReadAllText(viewerAssetPath filename)), filename))
+
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Canvas")>]
@@ -714,6 +739,8 @@ type DiffViewerE2ETests() =
     let css = File.ReadAllText(assetPath "diff2html.min.css")
     let renderer = File.ReadAllText(assetPath "diff2html.min.js")
     let highlighter = File.ReadAllText(assetPath "diff2html-ui-slim.min.js")
+    let viewerCss = File.ReadAllText(viewerAssetPath "viewer.css")
+    let viewerScript = File.ReadAllText(viewerAssetPath "viewer.js")
 
     override this.ContextOptions() =
         let options = base.ContextOptions()
@@ -1101,6 +1128,13 @@ type DiffViewerE2ETests() =
                     "text/javascript",
                     renderer
                 )
+            do! this.RouteBody($"**{DiffAssets.viewerCssPath}", "text/css", viewerCss)
+            do!
+                this.RouteBody(
+                    $"**{DiffAssets.viewerScriptPath}",
+                    "text/javascript",
+                    viewerScript
+                )
         }
 
     [<Test>]
@@ -1118,6 +1152,29 @@ type DiffViewerE2ETests() =
                     response.Headers.CacheControl.ToString(),
                     Is.EqualTo("public, max-age=31536000, immutable")
                 ))
+        }
+
+    [<Test>]
+    member this.``canvas server serves viewer assets that must be revalidated``() =
+        task {
+            // The viewer stylesheet and script live at a stable URL, so a frozen cache entry would
+            // outlive the code it belongs to. They are served revalidating, never immutable.
+            use client = new HttpClient()
+
+            let! cssResponse =
+                client.GetAsync($"{ServerFixture.canvasUrl}{DiffAssets.viewerCssPath}")
+            let! cssBody = cssResponse.Content.ReadAsStringAsync()
+            let! scriptResponse =
+                client.GetAsync($"{ServerFixture.canvasUrl}{DiffAssets.viewerScriptPath}")
+            let! scriptBody = scriptResponse.Content.ReadAsStringAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(int cssResponse.StatusCode, Is.EqualTo(200))
+                Assert.That(cssBody, Is.EqualTo(viewerCss))
+                Assert.That(cssResponse.Headers.CacheControl.ToString(), Is.EqualTo("no-cache"))
+                Assert.That(int scriptResponse.StatusCode, Is.EqualTo(200))
+                Assert.That(scriptBody, Is.EqualTo(viewerScript))
+                Assert.That(scriptResponse.Headers.CacheControl.ToString(), Is.EqualTo("no-cache")))
         }
 
     [<Test>]

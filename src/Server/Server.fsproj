@@ -81,6 +81,14 @@
     <EmbeddedResource Include="DiffTemplate.html">
       <LogicalName>DiffTemplate.html</LogicalName>
     </EmbeddedResource>
+    <!-- The viewer's own stylesheet and script, self-hosted next to the pinned diff2html bundle
+         and embedded so the runtime serves exactly what the browser tests load from disk. -->
+    <EmbeddedResource Include="Assets\diff\viewer.css">
+      <LogicalName>DiffViewerCss</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\diff\viewer.js">
+      <LogicalName>DiffViewerScript</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="Assets\diff2html\3.4.52\diff2html.min.css">
       <LogicalName>Diff2HtmlCss</LogicalName>
     </EmbeddedResource>
