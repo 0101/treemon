@@ -66,19 +66,36 @@ let private azPythonExe =
             let python = Path.Combine(Path.GetDirectoryName(cmd), "..", "python.exe") |> Path.GetFullPath
             if File.Exists(python) then Some python else None)
 
-let private runAz (arguments: string) =
+/// Azure DevOps JSON payloads are bounded by PR and build counts rather than a known constant;
+/// stderr only ever carries a CLI message.
+let private stdoutLimitBytes = 16 * 1024 * 1024
+let private stderrLimitBytes = 64 * 1024
+
+let private runAz (arguments: string list) =
     match azPythonExe.Value with
     | Some python ->
-        ProcessRunner.run "PR" python $"-IBm azure.cli {arguments}"
+        ProcessRunner.runArgumentListText
+            stdoutLimitBytes
+            stderrLimitBytes
+            "PR"
+            python
+            ("-IBm" :: "azure.cli" :: arguments)
+            None
     | None ->
         Log.log "PR" "Could not locate Azure CLI python.exe via PATH"
         async { return None }
 
 let buildRemoteUrlArgs (repoRoot: string) (remoteName: string) =
-    $"""-C "{repoRoot}" remote get-url {remoteName}"""
+    [ "-C"; repoRoot; "remote"; "get-url"; remoteName ]
 
 let getRemoteUrl (repoRoot: string) (remoteName: string) =
-    ProcessRunner.run "PR" "git" (buildRemoteUrlArgs repoRoot remoteName)
+    ProcessRunner.runArgumentListText
+        stdoutLimitBytes
+        stderrLimitBytes
+        "PR"
+        "git"
+        (buildRemoteUrlArgs repoRoot remoteName)
+        None
 
 type internal ParsedPr =
     { BranchName: string
@@ -294,7 +311,13 @@ let internal parseBuildLog (json: string) =
 let private fetchBuildFailure (remote: AzDoRemote) (buildId: int) =
     async {
         let timelineArgs =
-            $"devops invoke --area build --resource timeline --route-parameters project={remote.Project} buildId={buildId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+            [ "devops"; "invoke"
+              "--area"; "build"
+              "--resource"; "timeline"
+              "--route-parameters"; $"project={remote.Project}"; $"buildId={buildId}"
+              "--org"; $"https://dev.azure.com/{remote.Org}"
+              "--api-version"; "7.1"
+              "-o"; "json" ]
 
         let! timelineOutput = runAz timelineArgs
 
@@ -302,7 +325,13 @@ let private fetchBuildFailure (remote: AzDoRemote) (buildId: int) =
         | None -> return None
         | Some(stepName, logId) ->
             let logArgs =
-                $"devops invoke --area build --resource logs --route-parameters project={remote.Project} buildId={buildId} logId={logId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+                [ "devops"; "invoke"
+                  "--area"; "build"
+                  "--resource"; "logs"
+                  "--route-parameters"; $"project={remote.Project}"; $"buildId={buildId}"; $"logId={logId}"
+                  "--org"; $"https://dev.azure.com/{remote.Org}"
+                  "--api-version"; "7.1"
+                  "-o"; "json" ]
 
             let! logOutput = runAz logArgs
 
@@ -320,7 +349,13 @@ let private fetchBuildFailure (remote: AzDoRemote) (buildId: int) =
 let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
     async {
         let args =
-            $"devops invoke --area git --resource pullRequestThreads --route-parameters project={remote.Project} repositoryId={remote.Repo} pullRequestId={prId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+            [ "devops"; "invoke"
+              "--area"; "git"
+              "--resource"; "pullRequestThreads"
+              "--route-parameters"; $"project={remote.Project}"; $"repositoryId={remote.Repo}"; $"pullRequestId={prId}"
+              "--org"; $"https://dev.azure.com/{remote.Org}"
+              "--api-version"; "7.1"
+              "-o"; "json" ]
 
         let! output = runAz args
 
@@ -333,7 +368,15 @@ let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
 let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int) =
     async {
         let args =
-            $"devops invoke --area build --resource builds --route-parameters project={remote.Project} --query-parameters \"repositoryId={repoGuid}&repositoryType=TfsGit&branchName=refs/pull/{prId}/merge&queryOrder=queueTimeDescending&$top=10\" --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+            [ "devops"; "invoke"
+              "--area"; "build"
+              "--resource"; "builds"
+              "--route-parameters"; $"project={remote.Project}"
+              "--query-parameters"
+              $"repositoryId={repoGuid}&repositoryType=TfsGit&branchName=refs/pull/{prId}/merge&queryOrder=queueTimeDescending&$top=10"
+              "--org"; $"https://dev.azure.com/{remote.Org}"
+              "--api-version"; "7.1"
+              "-o"; "json" ]
 
         let! output = runAz args
 
@@ -370,9 +413,17 @@ let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedPr list)
 
 let private fetchPrList (remote: AzDoRemote) (status: string) (top: int option) =
     async {
-        let topArg = top |> Option.map (fun n -> $" --top {n}") |> Option.defaultValue ""
+        let topArguments =
+            top |> Option.map (fun n -> [ "--top"; string n ]) |> Option.defaultValue []
+
         let args =
-            $"repos pr list --org https://dev.azure.com/{remote.Org} --project \"{remote.Project}\" --repository \"{remote.Repo}\" --status {status}{topArg} -o json"
+            [ "repos"; "pr"; "list"
+              "--org"; $"https://dev.azure.com/{remote.Org}"
+              "--project"; remote.Project
+              "--repository"; remote.Repo
+              "--status"; status ]
+            @ topArguments
+            @ [ "-o"; "json" ]
 
         let! output = runAz args
         return
