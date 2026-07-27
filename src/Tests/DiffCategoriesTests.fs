@@ -317,6 +317,20 @@ type DiffCategoriesValidationTests() =
         assertInvalid (categoriesJson [ leafJson "Docs" [ String('a', 201) ] ]) "at most 200 characters"
 
     [<Test>]
+    member _.``a name of one hundred characters is allowed``() =
+        let name = String('n', 100)
+        Assert.That(readFrom (categoriesJson [ leafJson name [ "a/**" ] ]) |> outlineOf, Is.EqualTo([ $"{name} [a/**]" ]))
+
+    [<Test>]
+    member _.``a longer name is invalid``() =
+        assertInvalid (categoriesJson [ leafJson (String('n', 101)) [ "a/**" ] ]) "name may be at most 100 characters"
+
+    [<Test>]
+    member _.``the name bound applies to the trimmed name``() =
+        let padded = $"  {String('n', 100)}  "
+        Assert.That(readFrom (categoriesJson [ leafJson padded [ "a/**" ] ]) |> outlineOf |> List.length, Is.EqualTo(1))
+
+    [<Test>]
     member _.``malformed JSON is invalid rather than missing``() =
         assertInvalid "{ this is not json" "could not be parsed"
 

@@ -31,6 +31,7 @@ let nodeName node =
 
 let private maxDepth = 4
 let private maxNodes = 200
+let private maxNameLength = 100
 let private maxPatternsPerLeaf = 50
 let private maxPatternLength = 200
 
@@ -52,6 +53,7 @@ let private depthReason = $"categories may nest at most {maxDepth} levels deep"
 let private nodeCountReason = $"a repository may declare at most {maxNodes} categories"
 let private patternCountReason = $"a category may list at most {maxPatternsPerLeaf} patterns"
 let private patternLengthReason = $"a pattern may be at most {maxPatternLength} characters long"
+let private nameLengthReason = $"a name may be at most {maxNameLength} characters long"
 
 /// Ordinal case-insensitive equality, the comparison sibling uniqueness and the reserved top-level
 /// name are defined in terms of.
@@ -77,11 +79,14 @@ let private tryProperty (propertyName: string) (element: JsonElement) =
 let private arrayItems (element: JsonElement) =
     if element.ValueKind = JsonValueKind.Array then element.EnumerateArray() |> List.ofSeq else []
 
+/// The name bound applies to the trimmed value, which is what is stored, displayed, and repeated in
+/// every file's `categoryPath`.
 let private validateName (element: JsonElement) =
     match tryProperty "name" element with
     | Some name when name.ValueKind = JsonValueKind.String ->
         match name.GetString().Trim() with
         | "" -> Error nameReason
+        | trimmed when trimmed.Length > maxNameLength -> Error nameLengthReason
         | trimmed -> Ok trimmed
     | _ -> Error nameReason
 
@@ -116,10 +121,14 @@ let rec private validateNode depth (element: JsonElement) =
             | _ -> return! Error exclusiveReason
         }
 
+/// The node bound is enforced per sibling array as well as against the whole tree: more siblings than
+/// the whole repository may declare is already invalid, and rejecting it here keeps the quadratic
+/// duplicate-name scan below off an oversized array.
 and private validateNodeArray emptyReason depth (element: JsonElement) =
     let items = arrayItems element
 
     if items.IsEmpty then Error emptyReason
+    elif items.Length > maxNodes then Error nodeCountReason
     else
         result {
             let! nodes = items |> List.traverseResultM (validateNode depth)
