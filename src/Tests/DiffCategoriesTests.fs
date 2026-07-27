@@ -50,6 +50,30 @@ let rec private nestedChain depth =
     if depth <= 1 then leafJson $"Level{depth}" [ "**" ]
     else $"""{{ "name": "Level{depth}", "children": [{nestedChain (depth - 1)}] }}"""
 
+let private leafNode name patterns = Leaf { Name = name; Patterns = patterns }
+
+/// Renders classification as `path -> Parent > Child`, with nothing after the arrow for an unmatched
+/// file, in the order `classifyAndOrder` returns the files.
+let private classifyPaths configuration (files: (string * string option) list) =
+    DiffCategories.classifyAndOrder configuration id files
+    |> List.map (fun ((path, _), categoryPath) -> $"""{path} -> {String.Join(" > ", categoryPath)}""")
+
+/// Classifies plain paths (no renames) against a configuration.
+let private classifyNames configuration paths =
+    classifyPaths configuration (paths |> List.map (fun path -> path, None))
+
+/// Whether `pattern` matches `path`, exercised through the classifier with a one-leaf configuration.
+let private matchesPattern (pattern: string) (path: string) =
+    classifyNames (Configured [ leafNode "C" [ pattern ] ]) [ path ] = [ $"{path} -> C" ]
+
+let private assertMatches (pattern: string) (paths: string list) =
+    paths
+    |> List.iter (fun path -> Assert.That(matchesPattern pattern path, Is.True, $"'{pattern}' should match '{path}'"))
+
+let private assertDoesNotMatch (pattern: string) (paths: string list) =
+    paths
+    |> List.iter (fun path -> Assert.That(matchesPattern pattern path, Is.False, $"'{pattern}' should not match '{path}'"))
+
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -314,3 +338,167 @@ type DiffCategoriesValidationTests() =
     member _.``a validation reason leaks no repository-authored name``() =
         let reason = readFrom (categoriesJson [ leafJson "S3cretName" [] ]) |> reasonOf
         Assert.That(reason, Does.Not.Contain("S3cretName"))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffCategoriesMatchingTests() =
+
+    [<Test>]
+    member _.``question mark matches exactly one character and never a separator``() =
+        assertMatches "src/?.fs" [ "src/A.fs" ]
+        assertDoesNotMatch "src/?.fs" [ "src/.fs"; "src/App.fs" ]
+        assertDoesNotMatch "src?App.fs" [ "src/App.fs" ]
+
+    [<Test>]
+    member _.``star matches zero or more characters inside one segment``() =
+        assertMatches "src/*.fs" [ "src/App.fs"; "src/.fs" ]
+        assertMatches "src/App*.fs" [ "src/App.fs"; "src/AppModule.fs" ]
+        assertMatches "*" [ "App.fs" ]
+
+    [<Test>]
+    member _.``star does not cross a separator``() =
+        assertDoesNotMatch "src/*.fs" [ "src/Client/App.fs" ]
+        assertDoesNotMatch "*" [ "src/App.fs" ]
+        assertDoesNotMatch "src/*" [ "src/Client/App.fs" ]
+
+    [<Test>]
+    member _.``double star spans zero, one, or many segments``() =
+        assertMatches "src/**/File.fs" [ "src/File.fs"; "src/A/File.fs"; "src/A/B/C/File.fs" ]
+        assertDoesNotMatch "src/**/File.fs" [ "File.fs"; "other/File.fs"; "src/File.fsx" ]
+
+    [<Test>]
+    member _.``a leading double star also matches a file at the repository root``() =
+        assertMatches "**/*.fs" [ "App.fs"; "src/App.fs"; "src/Client/App.fs" ]
+        assertDoesNotMatch "**/*.fs" [ "App.md"; "src/App.fsproj" ]
+
+    [<Test>]
+    member _.``a trailing double star matches everything below a directory``() =
+        assertMatches "src/Client/**" [ "src/Client/App.fs"; "src/Client/Views/Card.fs" ]
+        assertDoesNotMatch "src/Client/**" [ "src/Server/App.fs"; "Client/App.fs" ]
+
+    [<Test>]
+    member _.``patterns match the whole path, never a substring``() =
+        assertMatches "src/App.fs" [ "src/App.fs" ]
+        assertDoesNotMatch "src" [ "src/App.fs" ]
+        assertDoesNotMatch "App.fs" [ "src/App.fs" ]
+        assertDoesNotMatch "rc/App" [ "src/App.fs" ]
+
+    [<Test>]
+    member _.``matching is ordinal and case-sensitive``() =
+        assertMatches "src/App.fs" [ "src/App.fs" ]
+        assertDoesNotMatch "src/App.fs" [ "SRC/App.fs"; "src/app.fs" ]
+        assertDoesNotMatch "src/*.fs" [ "src/App.FS" ]
+
+    [<Test>]
+    member _.``backslashes in a path are normalized before matching``() =
+        assertMatches "src/Client/**" [ @"src\Client\App.fs"; @"src\Client/Views\Card.fs" ]
+
+    [<Test>]
+    member _.``regex metacharacters in a pattern are literal text``() =
+        assertMatches "src/a+b.fs" [ "src/a+b.fs" ]
+        assertDoesNotMatch "src/a+b.fs" [ "src/aab.fs"; "src/ab.fs" ]
+        assertMatches "src/(a|b).fs" [ "src/(a|b).fs" ]
+        assertDoesNotMatch "src/(a|b).fs" [ "src/a.fs" ]
+        assertMatches "src/[ab].fs" [ "src/[ab].fs" ]
+        assertDoesNotMatch "src/[ab].fs" [ "src/a.fs" ]
+        assertDoesNotMatch "src/a.fs" [ "src/axfs" ]
+        assertDoesNotMatch "^src/App.fs$" [ "src/App.fs" ]
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffCategoriesClassificationTests() =
+
+    /// Two nested leaves plus a sibling leaf, so tests can exercise depth-first order and grouping.
+    let configuration =
+        Configured
+            [ Branch
+                  { Name = "Production code"
+                    Children = [ leafNode "Client" [ "src/Client/**" ]; leafNode "Server" [ "src/Server/**" ] ] }
+              leafNode "Docs" [ "docs/**"; "**/*.md" ] ]
+
+    [<Test>]
+    member _.``a category path holds the node names from the root to the matching leaf``() =
+        let classified = classifyNames configuration [ "src/Server/App.fs"; "docs/spec/a.md" ]
+
+        Assert.That(
+            classified,
+            Is.EqualTo([ "src/Server/App.fs -> Production code > Server"; "docs/spec/a.md -> Docs" ]))
+
+    [<Test>]
+    member _.``a file matching no leaf gets an empty category path``() =
+        Assert.That(classifyNames configuration [ "scripts/build.ps1" ], Is.EqualTo([ "scripts/build.ps1 -> " ]))
+
+    [<Test>]
+    member _.``the first matching leaf in depth-first configuration order wins``() =
+        let overlapping =
+            Configured
+                [ Branch { Name = "Code"; Children = [ leafNode "Server" [ "src/Server/**" ] ] }
+                  leafNode "Tests" [ "**/*Tests.fs" ] ]
+
+        Assert.That(
+            classifyNames overlapping [ "src/Server/DiffTests.fs" ],
+            Is.EqualTo([ "src/Server/DiffTests.fs -> Code > Server" ]),
+            "the earlier leaf claims a file both leaves match")
+
+    [<Test>]
+    member _.``reordering the configuration reorders precedence``() =
+        let overlapping =
+            Configured
+                [ leafNode "Tests" [ "**/*Tests.fs" ]
+                  Branch { Name = "Code"; Children = [ leafNode "Server" [ "src/Server/**" ] ] } ]
+
+        Assert.That(classifyNames overlapping [ "src/Server/DiffTests.fs" ], Is.EqualTo([ "src/Server/DiffTests.fs -> Tests" ]))
+
+    [<Test>]
+    member _.``a rename is classified by its new path``() =
+        let classified = classifyPaths configuration [ "src/Client/App.fs", Some "docs/App.md" ]
+        Assert.That(classified, Is.EqualTo([ "src/Client/App.fs -> Production code > Client" ]))
+
+    [<Test>]
+    member _.``a rename falls back to its old path only when the new path matches nothing``() =
+        let classified = classifyPaths configuration [ "scripts/App.ps1", Some "docs/App.md" ]
+        Assert.That(classified, Is.EqualTo([ "scripts/App.ps1 -> Docs" ]))
+
+    [<Test>]
+    member _.``a rename matching neither path is unmatched``() =
+        let classified = classifyPaths configuration [ "scripts/b.ps1", Some "scripts/a.ps1" ]
+        Assert.That(classified, Is.EqualTo([ "scripts/b.ps1 -> " ]))
+
+    [<Test>]
+    member _.``groups follow leaf configuration order with unmatched files last``() =
+        let classified =
+            classifyNames
+                configuration
+                [ "notes.txt"; "src/Server/B.fs"; "docs/a.md"; "src/Client/A.fs"; "src/Server/A.fs"; "build.ps1" ]
+
+        Assert.That(
+            classified,
+            Is.EqualTo(
+                [ "src/Client/A.fs -> Production code > Client"
+                  "src/Server/B.fs -> Production code > Server"
+                  "src/Server/A.fs -> Production code > Server"
+                  "docs/a.md -> Docs"
+                  "notes.txt -> "
+                  "build.ps1 -> " ]),
+            "files keep their original relative order inside every group")
+
+    [<Test>]
+    member _.``a Missing configuration leaves order untouched and every path empty``() =
+        let paths = [ "src/Server/B.fs"; "docs/a.md"; "src/Client/A.fs" ]
+
+        Assert.That(
+            classifyNames Missing paths,
+            Is.EqualTo([ "src/Server/B.fs -> "; "docs/a.md -> "; "src/Client/A.fs -> " ]))
+
+    [<Test>]
+    member _.``an Invalid configuration leaves order untouched and every path empty``() =
+        let paths = [ "src/Server/B.fs"; "docs/a.md"; "src/Client/A.fs" ]
+
+        Assert.That(
+            classifyNames (Invalid "categories sharing a parent need distinct names") paths,
+            Is.EqualTo([ "src/Server/B.fs -> "; "docs/a.md -> "; "src/Client/A.fs -> " ]))
+

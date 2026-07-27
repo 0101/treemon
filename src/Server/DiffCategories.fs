@@ -154,3 +154,118 @@ let read (repoRoot: string) : Configuration =
     | TreemonConfig.Absent -> Missing
     | TreemonConfig.Unreadable -> Invalid unreadableReason
     | TreemonConfig.Present element -> validate element
+
+/// One segment of a compiled pattern. `**` stands for whole segments; any other segment is matched
+/// character by character, so `*` and `?` can never cross a `/`.
+type private GlobSegment =
+    | AnySegments
+    | SegmentPattern of char[]
+
+/// A leaf lifted out of the tree with its patterns already compiled, its display path from the root,
+/// and its position in depth-first configuration order — the order that decides both which
+/// overlapping leaf wins and how matched files are grouped.
+type private CompiledLeaf =
+    { Order: int
+      CategoryPath: string list
+      Globs: GlobSegment[] list }
+
+/// The pattern positions reachable from `position` without consuming an item, because a star is
+/// allowed to stand for nothing at all.
+let rec private reachableThroughStars isStar (pattern: 'a[]) position =
+    if position < pattern.Length && isStar pattern[position] then
+        position :: reachableThroughStars isStar pattern (position + 1)
+    else
+        [ position ]
+
+/// Matches a star pattern against `items` by simulating it as an automaton whose state is the set of
+/// reachable pattern positions. Repository-authored patterns therefore cost pattern length times item
+/// count even when crowded with stars, instead of backtracking exponentially.
+let private matchesWildcard isStar matchesItem (pattern: 'a[]) (items: 'b[]) =
+    let advance positions item =
+        positions
+        |> Seq.collect (fun position ->
+            if position >= pattern.Length then []
+            elif isStar pattern[position] then [ position ]
+            elif matchesItem pattern[position] item then [ position + 1 ]
+            else [])
+        |> Seq.collect (reachableThroughStars isStar pattern)
+        |> Set.ofSeq
+
+    items
+    |> Array.fold advance (reachableThroughStars isStar pattern 0 |> Set.ofList)
+    |> Set.contains pattern.Length
+
+/// Ordinal, case-sensitive matching of one path segment: `?` stands for one character and `*` for any
+/// run of characters, both confined to this segment.
+let private matchesSegment (pattern: char[]) (segment: string) =
+    matchesWildcard
+        (fun patternChar -> patternChar = '*')
+        (fun patternChar character -> patternChar = '?' || patternChar = character)
+        pattern
+        (segment.ToCharArray())
+
+let private matchesGlob (glob: GlobSegment[]) (segments: string[]) =
+    let matchesOneSegment globSegment segment =
+        match globSegment with
+        | AnySegments -> true
+        | SegmentPattern pattern -> matchesSegment pattern segment
+
+    matchesWildcard (fun globSegment -> globSegment = AnySegments) matchesOneSegment glob segments
+
+/// Splits a pattern into segments once per configuration read, so classifying a file never re-parses
+/// it. Everything outside `**`, `*`, and `?` is literal text, including regular-expression syntax.
+let private compileGlob (pattern: string) =
+    pattern.Split('/')
+    |> Array.map (fun segment -> if segment = "**" then AnySegments else SegmentPattern(segment.ToCharArray()))
+
+let rec private compileNode ancestors node =
+    match node with
+    | Leaf leaf -> [ ancestors @ [ leaf.Name ], leaf.Patterns |> List.map compileGlob ]
+    | Branch branch -> branch.Children |> List.collect (compileNode (ancestors @ [ branch.Name ]))
+
+let private compileLeaves nodes =
+    nodes
+    |> List.collect (compileNode [])
+    |> List.mapi (fun order (categoryPath, globs) ->
+        { Order = order
+          CategoryPath = categoryPath
+          Globs = globs })
+
+/// Patterns are repository-relative and always matched against the whole path, so a Windows-style
+/// separator is normalized away before the path is split into segments.
+let private segmentsOf (path: string) = path.Replace('\\', '/').Split('/')
+
+let private tryMatch leaves (path: string) =
+    let segments = segmentsOf path
+    leaves |> List.tryFind (fun leaf -> leaf.Globs |> List.exists (fun glob -> matchesGlob glob segments))
+
+/// Classifies every changed file and pairs it with the category path the viewer renders — the trimmed
+/// node names from the root to the matching leaf, empty when nothing matched and for every file of a
+/// `Missing` or `Invalid` configuration. `pathsOf` yields a file's current repository-relative path
+/// and, for a rename, the path it moved from; the new path is matched first so a moved file lands in
+/// its destination category, and the old path is consulted only when the new path matches nothing.
+///
+/// Files come back grouped: groups follow leaf configuration order, unmatched files come last so the
+/// viewer's trailing `Other` group is contiguous, and files keep their original relative order inside
+/// a group. Patterns compile once per call rather than once per file.
+let classifyAndOrder (configuration: Configuration) (pathsOf: 'a -> string * string option) (items: 'a list) =
+    match configuration with
+    | Missing
+    | Invalid _ -> items |> List.map (fun item -> item, [])
+    | Configured nodes ->
+        let leaves = compileLeaves nodes
+        let unmatchedOrder = leaves.Length
+
+        items
+        |> List.map (fun item ->
+            let path, oldPath = pathsOf item
+
+            let matched =
+                tryMatch leaves path
+                |> Option.orElseWith (fun () -> oldPath |> Option.bind (tryMatch leaves))
+
+            let order = matched |> Option.map _.Order |> Option.defaultValue unmatchedOrder
+            order, (item, matched |> Option.map _.CategoryPath |> Option.defaultValue []))
+        // Sorting a list is stable, which is what keeps files in their original order inside a group.
+        |> List.sortBy fst
+        |> List.map snd
