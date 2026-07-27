@@ -76,6 +76,11 @@ Before implementing a helper, utility, or any non-trivial logic, **search the co
 - Do not test trivial property accessors or simple constructors
 - E2E tests use Playwright + NUnit against live data
 - Tests should assert on CSS classes and DOM structure, not specific data values
+- Tests or verification harnesses that exercise real session spawning must use an isolated temporary
+  worktree and session store, call `killSession` for every tracked worktree before stopping or
+  restarting the test server, and fail when cleanup is incomplete. A crash fallback may stop only
+  `pwsh.exe` PIDs whose decoded `-EncodedCommand` starts in that unique fixture path; never terminate
+  the shared `WindowsTerminal.exe`/HWND-owner PID.
 
 ## Ports
 

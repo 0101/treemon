@@ -9,7 +9,9 @@ open System.Runtime.InteropServices
 open System.Text.RegularExpressions
 open System.Threading.Tasks
 open NUnit.Framework
+open Shared
 open Server.SessionActivity
+open Server.SessionManager
 
 /// Parse an ISO-8601 timestamp string as a DateTimeOffset using the invariant culture. Shared by the
 /// SessionActivity domain/store/service tests, which all build fixtures from literal timestamps.
@@ -145,8 +147,199 @@ let withTempConfigDir (prefix: string) (action: string -> unit) =
         Environment.SetEnvironmentVariable("TREEMON_CONFIG_DIR", original)
         try Directory.Delete(tempDir, recursive = true) with _ -> ()
 
+let runAsyncWithTimeout timeoutMs (a: Async<'T>) =
+    Async.RunSynchronously(a, timeout = timeoutMs)
+
 let runAsync (a: Async<'T>) =
-    Async.RunSynchronously(a, timeout = 30_000)
+    runAsyncWithTimeout 30_000 a
+
+let private queryPowerShellProcesses () =
+    let script =
+        "Get-CimInstance Win32_Process -Filter \"Name = 'pwsh.exe'\""
+        + " | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
+
+    let psi =
+        ProcessStartInfo(
+            "powershell.exe",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        )
+
+    [ "-NoProfile"; "-NonInteractive"; "-Command"; script ]
+    |> List.iter psi.ArgumentList.Add
+
+    use proc = Process.Start(psi)
+    let stdout = proc.StandardOutput.ReadToEnd()
+    let stderr = proc.StandardError.ReadToEnd()
+
+    if not (proc.WaitForExit(10_000)) then
+        proc.Kill(entireProcessTree = true)
+        Error "Timed out while enumerating PowerShell processes"
+    elif proc.ExitCode <> 0 then
+        Error $"Failed to enumerate PowerShell processes: {stderr.Trim()}"
+    else
+        stdout.Split([| '\r'; '\n' |], StringSplitOptions.RemoveEmptyEntries)
+        |> Array.choose (fun line ->
+            match line.Split('\t', 2) with
+            | [| pid; commandLine |] ->
+                match Int32.TryParse(pid) with
+                | true, value -> Some(value, commandLine)
+                | false, _ -> None
+            | _ -> None)
+        |> Array.toList
+        |> Ok
+
+let internal tryOwnedPowerShellPid (worktreePath: string) (pid: int, commandLine: string) =
+    let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
+    let expectedScriptPrefix = buildScript nativePath None
+    let encodedCommand = Regex(@"(?i)-EncodedCommand\s+([^\s]+)")
+    let matched = encodedCommand.Match(commandLine)
+
+    if not matched.Success then
+        None
+    else
+        try
+            let decoded =
+                matched.Groups[1].Value
+                |> Convert.FromBase64String
+                |> Text.Encoding.Unicode.GetString
+
+            if decoded.StartsWith(expectedScriptPrefix, StringComparison.OrdinalIgnoreCase) then
+                Some pid
+            else
+                None
+        with :? FormatException ->
+            None
+
+let private ownedPowerShellPids (worktreePath: string) =
+    queryPowerShellProcesses ()
+    |> Result.map (List.choose (tryOwnedPowerShellPid worktreePath))
+
+let private stopOwnedPowerShellProcesses worktreePath =
+    let stopPid pid =
+        try
+            use proc = Process.GetProcessById(pid)
+
+            if not proc.HasExited then
+                proc.Kill(entireProcessTree = true)
+
+            Ok()
+        with
+        | :? ArgumentException -> Ok()
+        | ex -> Error $"PID {pid}: {ex.Message}"
+
+    let rec waitForExit remaining =
+        async {
+            match ownedPowerShellPids worktreePath with
+            | Error message -> return Error message
+            | Ok [] -> return Ok()
+            | Ok pids when remaining = 0 ->
+                let pidList = pids |> List.map string |> String.concat ", "
+                return Error $"Fixture PowerShell processes did not exit: {pidList}"
+            | Ok _ ->
+                do! Async.Sleep 100
+                return! waitForExit (remaining - 1)
+        }
+
+    async {
+        match ownedPowerShellPids worktreePath with
+        | Error message -> return Error message
+        | Ok pids ->
+            let failures =
+                pids
+                |> List.map stopPid
+                |> List.choose (function
+                    | Ok () -> None
+                    | Error message -> Some message)
+
+            match failures with
+            | _ :: _ -> return Error(String.concat Environment.NewLine failures)
+            | [] -> return! waitForExit 50
+    }
+
+let private requestSessionClosure (agent: SessionAgent) =
+    async {
+        let! sessions = getActiveSessions agent
+
+        return!
+            sessions
+            |> Map.toList
+            |> List.map (fun (path, _) ->
+                async {
+                    try
+                        return! killSession agent (WorktreePath path)
+                    with ex ->
+                        return Error ex.Message
+                })
+            |> Async.Sequential
+            |> Async.Ignore
+    }
+
+/// Close every session tracked by an isolated test agent. WM_CLOSE is the primary path; if Windows
+/// Terminal refuses it, force-stop only pwsh processes whose decoded launch script starts in the
+/// fixture's unique worktree. WindowsTerminal.exe is a shared host and is never a valid kill target.
+let closeTrackedTestSessions (agent: SessionAgent) (worktreePath: string) =
+    async {
+        do! requestSessionClosure agent
+        let! fallback = stopOwnedPowerShellProcesses worktreePath
+        do! requestSessionClosure agent
+        let! remainingSessions = getActiveSessions agent
+        let remainingProcesses = ownedPowerShellPids worktreePath
+
+        return
+            match fallback, remainingProcesses, remainingSessions.IsEmpty with
+            | Ok (), Ok [], true -> Ok()
+            | Error message, _, _ -> Error message
+            | _, Error message, _ -> Error message
+            | _, Ok pids, false ->
+                let paths =
+                    remainingSessions
+                    |> Map.toList
+                    |> List.map fst
+                    |> String.concat ", "
+
+                let pidList = pids |> List.map string |> String.concat ", "
+                Error $"Tracked sessions remain ({paths}); PowerShell PIDs: {pidList}"
+            | _, Ok pids, true ->
+                let pidList = pids |> List.map string |> String.concat ", "
+                Error $"Fixture PowerShell processes remain: {pidList}"
+    }
+
+let cleanupTerminalTestEnvironment
+    (agent: SessionAgent option)
+    (originalCwd: string)
+    (tempRoot: string)
+    (worktreePath: string)
+    =
+    let sessionCleanup =
+        match agent with
+        | Some activeAgent ->
+            try
+                closeTrackedTestSessions activeAgent worktreePath
+                |> runAsyncWithTimeout 60_000
+            with ex ->
+                Error ex.Message
+        | None -> Ok()
+
+    Environment.CurrentDirectory <- originalCwd
+
+    let directoryCleanup =
+        try
+            if Directory.Exists(tempRoot) then
+                Directory.Delete(tempRoot, recursive = true)
+
+            Ok()
+        with ex ->
+            Error ex.Message
+
+    match sessionCleanup, directoryCleanup with
+    | Ok (), Ok () -> Ok()
+    | Error sessionError, Ok () -> Error $"Session cleanup failed: {sessionError}"
+    | Ok (), Error directoryError -> Error $"Fixture cleanup failed: {directoryError}"
+    | Error sessionError, Error directoryError ->
+        Error $"Session cleanup failed: {sessionError}{Environment.NewLine}Fixture cleanup failed: {directoryError}"
 
 /// Asserts a `Result<unit, string>` is `Ok`, prefixing `message` to the surfaced error on failure.
 /// Prefer this over `Is.EqualTo(Ok())`: the literal's error type infers as `obj`, so NUnit's
