@@ -23,26 +23,31 @@ open global.Server
 let private withCategorizationDefaults (json: string) =
     let root = JsonNode.Parse(json).AsObject()
 
-    let withEmptyCategoryPath (file: JsonNode) =
-        match file with
+    // The defaults are written into `root` in place: `JsonNode` is an interop DOM with no immutable
+    // counterpart, and its nodes carry a single parent, so rebuilding would have to `DeepClone` every
+    // retained child. The DOM is parsed above and serialized below, so this fixture is owned here and
+    // nothing observes the mutation.
+    let withEmptyCategoryPath (node: JsonNode) =
+        match node with
         | :? JsonObject as file when not (file.ContainsKey("categoryPath")) ->
             file["categoryPath"] <- JsonArray()
         | _ -> ()
 
-    match root["files"] with
-    | :? JsonArray as files -> files |> Seq.iter withEmptyCategoryPath
-    | _ -> ()
+    let fileNodes =
+        match root["files"] with
+        | :? JsonArray as files -> List.ofSeq files
+        | _ -> []
 
-    withEmptyCategoryPath root["file"]
+    root["file"] :: fileNodes |> List.iter withEmptyCategoryPath
 
-    match root["status"] with
-    | :? JsonValue as status when
-        status.GetValue<string>() = "ready"
-        && not (root.ContainsKey("categorization"))
-        ->
+    let isReadySummary =
+        match root["status"] with
+        | :? JsonValue as status -> status.GetValue<string>() = "ready"
+        | _ -> false
+
+    if isReadySummary && not (root.ContainsKey("categorization")) then
         root["categorization"] <-
             JsonNode.Parse("""{"status":"missing","reason":null}""")
-    | _ -> ()
 
     root.ToJsonString()
 
