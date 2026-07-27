@@ -66,6 +66,71 @@ type ClockTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type QueueCoalescingTests() =
+
+    let pendingAt enqueuedAt targetSessionId prompt =
+        { EnqueuedAt = enqueuedAt
+          TargetSessionId = targetSessionId
+          Prompt = prompt }
+
+    [<Test>]
+    member _.``An identical pending prompt is not queued twice``() =
+        let existing = pendingAt (clockSnapshot.AddMinutes -1.0) None (Prompt.agentPrompt "sync")
+        let duplicate = pendingAt clockSnapshot None (Prompt.agentPrompt "sync")
+
+        Assert.That(appendPending clockSnapshot duplicate [ existing ], Is.EqualTo [ existing ])
+
+    [<Test>]
+    member _.``Coalescing keeps FIFO order and still appends distinct prompts``() =
+        let first = pendingAt (clockSnapshot.AddMinutes -2.0) None (Prompt.agentPrompt "first")
+        let second = pendingAt (clockSnapshot.AddMinutes -1.0) None (Prompt.agentPrompt "second")
+        let duplicateOfFirst = pendingAt clockSnapshot None (Prompt.agentPrompt "first")
+        let third = pendingAt clockSnapshot None (Prompt.agentPrompt "third")
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                appendPending clockSnapshot duplicateOfFirst [ first; second ],
+                Is.EqualTo [ first; second ])
+            Assert.That(
+                appendPending clockSnapshot third [ first; second ],
+                Is.EqualTo [ first; second; third ]))
+
+    [<Test>]
+    member _.``Every equality field keeps a pending prompt distinct``() =
+        let pending =
+            pendingAt (clockSnapshot.AddMinutes -1.0) (Some "session-a") (Prompt.canvasFor "review.html" "text")
+
+        let variants =
+            [ { pending with TargetSessionId = Some "session-b" }
+              { pending with Prompt = { pending.Prompt with Kind = PromptKind.AgentPrompt } }
+              { pending with Prompt = { pending.Prompt with Text = "other text" } }
+              { pending with Prompt = { pending.Prompt with Filename = Some "other.html" } } ]
+            |> List.map (fun variant -> { variant with EnqueuedAt = clockSnapshot })
+
+        Assert.Multiple(fun () ->
+            for variant in variants do
+                Assert.That(appendPending clockSnapshot variant [ pending ], Is.EqualTo [ pending; variant ]))
+
+    [<Test>]
+    member _.``An expired duplicate does not suppress the new prompt``() =
+        let expired = pendingAt (clockSnapshot - TimeSpan.FromMinutes 5.0) None (Prompt.agentPrompt "sync")
+        let fresh = pendingAt clockSnapshot None (Prompt.agentPrompt "sync")
+
+        Assert.That(appendPending clockSnapshot fresh [ expired ], Is.EqualTo [ fresh ])
+
+    [<Test>]
+    member _.``The queue cap still drops the oldest entry``() =
+        let pending =
+            [ for index in 1..10 ->
+                pendingAt (clockSnapshot.AddSeconds(float index)) None (Prompt.agentPrompt $"prompt-{index}") ]
+
+        let extra = pendingAt clockSnapshot None (Prompt.agentPrompt "prompt-11")
+
+        Assert.That(appendPending clockSnapshot extra pending, Is.EqualTo(List.tail pending @ [ extra ]))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type PromptTransportTests() =
 
     [<Test>]
@@ -175,6 +240,39 @@ type PromptTransportTests() =
 
         Assert.That(result, Is.EqualTo(SendResult.Queued))
         Assert.That(drainPendingCanvas path, Is.Empty)
+
+    [<Test>]
+    member _.``Duplicate pending prompts deliver once when a session registers``() =
+        let path = uniquePath "duplicate-pending"
+        let prompt = Prompt.agentPrompt "sync"
+        let port = Tests.TestUtils.getFreeTcpPort ()
+
+        use listener = new HttpListener()
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/")
+        listener.Start()
+
+        let queueOnce () =
+            send
+                { WorktreePath = path
+                  SessionId = None
+                  Prompt = prompt }
+            |> Async.RunSynchronously
+
+        Assert.That(queueOnce (), Is.EqualTo(SendResult.Queued))
+        Assert.That(queueOnce (), Is.EqualTo(SendResult.Queued))
+
+        let firstPost = listener.GetContextAsync()
+        registerSession path $"http://127.0.0.1:{port}/" (Some $"drain-{Guid.NewGuid():N}")
+
+        let context = firstPost.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
+        context.Response.StatusCode <- 200
+        context.Response.Close()
+
+        let secondPost = listener.GetContextAsync()
+        let settled =
+            Task.WhenAny(secondPost, Task.Delay(TimeSpan.FromSeconds 1.0)).GetAwaiter().GetResult()
+
+        Assert.That(Object.ReferenceEquals(settled, secondPost), Is.False, "duplicate prompt was delivered twice")
 
     [<Test>]
     member _.``Bridge failure formatting excludes the response body``() =

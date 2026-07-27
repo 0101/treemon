@@ -102,16 +102,28 @@ let private capQueue prompts =
     let excess = List.length prompts - maxQueueSize
     if excess > 0 then prompts |> List.skip excess else prompts
 
+/// Append unless the same envelope is already waiting: equality is exact on target session and on
+/// the prompt's kind, text, and filename. Coalescing applies only to pending copies — a prompt that
+/// has already been handed to a bridge has left the queue, so an identical later message is queued
+/// again. Surviving entries keep their FIFO position, TTL, and cap.
+let internal appendPending now (queued: QueuedPrompt) (pending: QueuedPrompt list) =
+    let live = cleanExpired now pending
+
+    let isDuplicate (existing: QueuedPrompt) =
+        existing.TargetSessionId = queued.TargetSessionId && existing.Prompt = queued.Prompt
+
+    if List.exists isDuplicate live then
+        live
+    else
+        live @ [ queued ] |> capQueue
+
 let private enqueue now worktreeKey targetSessionId prompt =
     let queued =
         { EnqueuedAt = now
           TargetSessionId = targetSessionId
           Prompt = prompt }
 
-    promptQueue.AddOrUpdate(
-        worktreeKey,
-        [ queued ],
-        fun _ existing -> cleanExpired now existing @ [ queued ] |> capQueue)
+    promptQueue.AddOrUpdate(worktreeKey, [ queued ], fun _ existing -> appendPending now queued existing)
     |> ignore
 
 /// Which registering session a queued prompt may drain to.
