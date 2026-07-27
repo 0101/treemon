@@ -238,6 +238,34 @@ let private visibleFileRowsScript =
         .filter(entry => entry.offsetParent !== null)
         .map(entry => entry.querySelector('.file-path').textContent)"""
 
+let private configureLabel = "Analyze repository and configure diff groups"
+
+/// The configure affordance is identified the way a user finds it — by its accessible label — so the
+/// assertions never depend on an internal id or class.
+let private configureSelector = $"button[aria-label=\"{configureLabel}\"]"
+
+let private embeddedFrameSelector = "#diff-frame"
+
+let private embeddedHostUrl = $"{ServerFixture.canvasUrl}/e2e-diff-host.html"
+
+/// A minimal stand-in for the canvas pane. An iframe is the only thing that makes
+/// `window.parent !== window` genuinely true, and what the document posts to its parent is the whole
+/// observable contract of the configure action, so the harness embeds the real diff document and
+/// records every action-bearing message it receives.
+let private embeddedHostHtml (documentUrl: string) =
+    String.concat
+        ""
+        [ "<!doctype html><html><head><meta charset=\"utf-8\"><title>diff pane</title></head>"
+          "<body style=\"margin:0\">"
+          "<script>window.__canvasMessages=[];"
+          "window.addEventListener('message',function(event){"
+          "if(event.data&&typeof event.data.action==='string')"
+          "window.__canvasMessages.push(event.data)});"
+          "</script>"
+          "<iframe id=\"diff-frame\" style=\"width:100vw;height:100vh;border:0\" src=\""
+          documentUrl
+          "\"></iframe></body></html>" ]
+
 let private fileResultJsonWithPatch patch status identity displayPath oldDisplayPath change =
     let file = fileJson identity displayPath oldDisplayPath change
 
@@ -830,6 +858,73 @@ type DiffViewerE2ETests() =
             ()
         }
 
+    member private this.RouteEmbeddedHost() =
+        this.Page.RouteAsync(
+            "**/e2e-diff-host.html*",
+            fun route ->
+                let documentUrl =
+                    Uri(route.Request.Url).Query.Substring("?doc=".Length)
+                    |> Uri.UnescapeDataString
+
+                route.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "text/html; charset=utf-8",
+                        Body = embeddedHostHtml documentUrl
+                    )
+                )
+        )
+
+    /// Opens the diff document the way the pane does — inside an iframe — so the availability rule
+    /// is exercised against a real parent window instead of a simulated one.
+    member private this.GotoEmbedded(documentUrl: string) =
+        task {
+            let! _ =
+                this.Page.GotoAsync(
+                    $"{embeddedHostUrl}?doc={Uri.EscapeDataString documentUrl}",
+                    PageGotoOptions(WaitUntil = WaitUntilState.Load)
+                )
+
+            ()
+        }
+
+    member private this.EmbeddedFrame() =
+        this.Page.FrameLocator(embeddedFrameSelector)
+
+    /// Activates a configure affordance and waits for the host to record the resulting message, so
+    /// an assertion can never read the harness before the document has posted.
+    member private this.ActivateConfigure(action: ILocator) =
+        task {
+            let! before =
+                this.Page.EvaluateAsync<int>(
+                    "() => window.__canvasMessages.length"
+                )
+
+            do! action.ClickAsync()
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "expected => window.__canvasMessages.length === expected",
+                    before + 1
+                )
+
+            ()
+        }
+
+    /// Opens one repository's embedded diff view, activates the toolbar action, and returns the
+    /// exact request text that repository's document posted.
+    member private this.PostedConfigureRequest(documentUrl: string) =
+        task {
+            do! this.GotoEmbedded(documentUrl)
+            let action = this.EmbeddedFrame().Locator(configureSelector)
+            do! action.WaitForAsync()
+            do! this.ActivateConfigure(action)
+
+            return!
+                this.Page.EvaluateAsync<string>(
+                    "() => window.__canvasMessages[0].request"
+                )
+        }
+
     member private this.ActivateFile(identity: string) =
         task {
             let entry =
@@ -979,6 +1074,7 @@ type DiffViewerE2ETests() =
     member this.RouteTemplateAndCoreAssets() =
         task {
             do! this.RouteBody("**/diff.html", "text/html; charset=utf-8", template)
+            do! this.RouteEmbeddedHost()
             do!
                 this.RouteBody(
                     $"**/{DiffAssets.Version}/diff2html.min.css",
@@ -2676,6 +2772,299 @@ type DiffViewerE2ETests() =
                     Is.EqualTo([| "Tests|false"; "Docs|true" |])
                 )
                 Assert.That(storage, Is.EqualTo([| "0"; "0" |])))
+        }
+
+    [<Test>]
+    member this.``the embedded configure action reuses the refresh control's treatment``() =
+        task {
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.GotoEmbedded(pageUrl)
+
+            let frame = this.EmbeddedFrame()
+            do!
+                frame.Locator(
+                    ".file-entry[data-identity='id-1']"
+                ).WaitForAsync()
+
+            let action = frame.Locator(configureSelector)
+            do! action.WaitForAsync()
+
+            let! treatment =
+                action.EvaluateAsync<string array>(
+                    """(action, selector) => {
+                        const refresh = document.getElementById('refresh');
+                        const treatment = element => {
+                            const rect = element.getBoundingClientRect();
+                            const style = getComputedStyle(element);
+                            return [
+                                Math.round(rect.width) + 'x' + Math.round(rect.height),
+                                style.border,
+                                style.borderRadius,
+                                style.backgroundColor,
+                                style.color,
+                                style.opacity
+                            ].join('|');
+                        };
+                        return [
+                            treatment(action),
+                            treatment(refresh),
+                            action.getAttribute('aria-label'),
+                            action.getAttribute('title'),
+                            action.tagName + ':' + action.type,
+                            action.textContent,
+                            String(action.querySelectorAll('svg.toolbar-icon').length),
+                            String(action.closest('.toolbar') === refresh.closest('.toolbar')),
+                            String(action.nextElementSibling === refresh),
+                            String(document.querySelectorAll(selector).length)
+                        ];
+                    }""",
+                    configureSelector
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(treatment[0], Is.EqualTo(treatment[1]))
+                Assert.That(
+                    treatment[2..],
+                    Is.EqualTo(
+                        [| configureLabel
+                           configureLabel
+                           "BUTTON:button"
+                           ""
+                           "1"
+                           "true"
+                           "true"
+                           "1" |]
+                    )
+                ))
+        }
+
+    [<Test>]
+    member this.``the configure action is absent top-level and without a canvas transport``() =
+        task {
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.Goto()
+            do!
+                this.Page.Locator(
+                    ".file-entry[data-identity='id-1']"
+                ).WaitForAsync()
+
+            let! standalone =
+                this.Page.EvaluateAsync<string array>(
+                    """selector => [
+                        String(document.querySelectorAll(selector).length),
+                        String(window.parent === window),
+                        typeof window.canvasSend
+                    ]""",
+                    configureSelector
+                )
+
+            // canvas-send.js installs the helper once and bails when this flag is already set, so
+            // the embedded document below loads with a genuinely missing transport rather than a
+            // stubbed one.
+            do!
+                this.Page.AddInitScriptAsync(
+                    "window.__canvasSendInstalled = true;"
+                )
+            do! this.GotoEmbedded(pageUrl)
+            let frame = this.EmbeddedFrame()
+            do!
+                frame.Locator(
+                    ".file-entry[data-identity='id-1']"
+                ).WaitForAsync()
+
+            let! withoutTransport =
+                frame.Locator("body").EvaluateAsync<string array>(
+                    """(body, selector) => [
+                        String(document.querySelectorAll(selector).length),
+                        String(window.parent === window),
+                        typeof window.canvasSend
+                    ]""",
+                    configureSelector
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    standalone,
+                    Is.EqualTo([| "0"; "true"; "function" |])
+                )
+                Assert.That(
+                    withoutTransport,
+                    Is.EqualTo([| "0"; "false"; "undefined" |])
+                ))
+        }
+
+    [<Test>]
+    member this.``activating the configure action posts the fixed request``() =
+        task {
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do! this.GotoEmbedded(pageUrl)
+
+            let action = this.EmbeddedFrame().Locator(configureSelector)
+            do! action.WaitForAsync()
+            do! this.ActivateConfigure(action)
+
+            let! posted =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const message = window.__canvasMessages[0] || {};
+                        const request = message.request;
+                        const mentions = text => String(String(request).includes(text));
+                        return [
+                            String(window.__canvasMessages.length),
+                            String(message.action),
+                            Object.keys(message).sort().join(','),
+                            typeof request,
+                            String(String(request).trim().length > 0),
+                            mentions('.treemon.json'),
+                            mentions('"diffCategories"'),
+                            mentions('4 levels'),
+                            mentions('"Other"'),
+                            mentions('"**"')
+                        ];
+                    }"""
+                )
+
+            Assert.That(
+                posted,
+                Is.EqualTo(
+                    [| "1"
+                       "configure-diff-categories"
+                       "action,request"
+                       "string"
+                       "true"
+                       "true"
+                       "true"
+                       "true"
+                       "true"
+                       "true" |]
+                )
+            )
+        }
+
+    [<Test>]
+    member this.``two repositories post a byte-identical configure request``() =
+        task {
+            let otherPageUrl =
+                $"{ServerFixture.canvasUrl}/e2e-other-repo-worktree/diff.html"
+
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-summary?*",
+                    fun route ->
+                        let body =
+                            if
+                                route.Request.Url.Contains(
+                                    "e2e-other-repo-worktree"
+                                )
+                            then
+                                configuredSummaryJson
+                                    [| categorizedFileJson
+                                           "id-lexer"
+                                           "lib/parser/Lexer.rs"
+                                           None
+                                           "modified"
+                                           [ "Runtime" ] |]
+                            else
+                                configuredSummaryJson
+                                    [| categorizedFileJson
+                                           "id-app"
+                                           "src/Client/App.fs"
+                                           None
+                                           "modified"
+                                           [ "Production code"; "Client" ] |]
+
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                )
+
+            let! first = this.PostedConfigureRequest(pageUrl)
+            let! second = this.PostedConfigureRequest(otherPageUrl)
+
+            // Every value the browser could possibly derive from the repository it is showing: the
+            // worktree keys in the two document URLs, the changed paths, and the category names.
+            let derived =
+                [| "e2e-diff-worktree"
+                   "e2e-other-repo-worktree"
+                   "src/Client/App.fs"
+                   "lib/parser/Lexer.rs"
+                   "Production code"
+                   "Runtime"
+                   ServerFixture.canvasUrl |]
+
+            Assert.Multiple(fun () ->
+                Assert.That(first, Is.Not.Empty)
+                Assert.That(second, Is.EqualTo(first))
+
+                derived
+                |> Array.iter (fun value ->
+                    Assert.That(first, Does.Not.Contain(value))))
+        }
+
+    [<Test>]
+    member this.``the invalid warning offers the same configure action as the toolbar``() =
+        task {
+            let reason = "each category needs a name"
+            let warningText = $"Diff groups are not applied: {reason}."
+
+            do! this.RouteSummary(invalidSummaryJson reason [| firstFile |])
+            do! this.Goto()
+            do!
+                this.Page.Locator(
+                    ".file-entry[data-identity='id-1']"
+                ).WaitForAsync()
+
+            let! standaloneWarning =
+                this.Page.EvaluateAsync<string array>(
+                    """selector => [
+                        document.getElementById('category-warning').textContent,
+                        String(document.querySelectorAll(selector).length)
+                    ]""",
+                    configureSelector
+                )
+
+            do! this.GotoEmbedded(pageUrl)
+            let frame = this.EmbeddedFrame()
+            let warningAction =
+                frame.Locator($"#category-warning {configureSelector}")
+            do! warningAction.WaitForAsync()
+
+            do! this.ActivateConfigure(warningAction)
+            do!
+                this.ActivateConfigure(
+                    frame.Locator($".toolbar {configureSelector}")
+                )
+
+            let! payloads =
+                this.Page.EvaluateAsync<string array>(
+                    "() => window.__canvasMessages.map(message => JSON.stringify(message))"
+                )
+
+            let! placement =
+                frame.Locator("#category-warning").EvaluateAsync<string array>(
+                    """(warning, selector) => [
+                        warning.textContent,
+                        String(warning.querySelectorAll(selector).length),
+                        String(document.querySelectorAll(selector).length)
+                    ]""",
+                    configureSelector
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    standaloneWarning,
+                    Is.EqualTo([| warningText; "0" |])
+                )
+                Assert.That(
+                    placement,
+                    Is.EqualTo([| warningText; "1"; "2" |])
+                )
+                Assert.That(payloads.Length, Is.EqualTo(2))
+                Assert.That(payloads[0], Does.Contain("configure-diff-categories"))
+                Assert.That(payloads[1], Is.EqualTo(payloads[0])))
         }
 
     [<Test>]

@@ -716,6 +716,27 @@ var FILTER_KEY = 'treemon.diff.layers:' + location.pathname.replace(/\/diff\.htm
 var HIGHLIGHTER_URL = '/assets/diff2html/3.4.52/diff2html-ui-slim.min.js';
 var OTHER_CATEGORY = 'Other';
 var CATEGORY_WARNING = 'Diff groups are not applied';
+var CONFIGURE_ACTION = 'configure-diff-categories';
+var CONFIGURE_LABEL = 'Analyze repository and configure diff groups';
+// The whole request, fixed in the template. Nothing in it is derived from the repository, the
+// document URL, or any other browser-side value, so the generated diff.html stays byte-identical
+// across repositories and the agent — not the browser — decides which paths exist.
+var CONFIGURE_REQUEST = [
+    'Analyze this repository and configure its diff groups for the Treemon worktree diff viewer.',
+    '',
+    'Locate the root worktree that owns the shared .treemon.json — linked worktrees read the repository root\'s file — and edit that file in place. Preserve every existing field exactly as it is and modify only the "diffCategories" key.',
+    '',
+    '"diffCategories" is a non-empty ordered array of category nodes. A node has a "name" string plus exactly one of "patterns" (a non-empty array of glob strings) or "children" (a non-empty array of nodes) — never both, and never an empty array. Order is meaningful: leaves are visited depth-first and the first matching leaf wins.',
+    '',
+    'Rules:',
+    '- Nest at most 4 levels deep.',
+    '- Keep sibling names non-blank and unique.',
+    '- Do not use "Other" as a top-level name; Treemon reserves it for the trailing group of unmatched files.',
+    '- Patterns are repository-relative and match the whole path. The supported glob subset is literal text, "?" for one character other than "/", "*" for any run of characters within one path segment, and "**" for zero or more whole path segments. No other metacharacter is special, and regular expressions are not accepted.',
+    '- Do not write catch-all patterns; Treemon already collects everything unmatched under "Other".',
+    '',
+    'Cover the repository\'s production, test, documentation, and instruction areas, nesting production code into subcategories where the layout makes that meaningful. Then report the groups you wrote.'
+].join('\n');
 // The one size that decides every initial disclosure: a group holding more than this many files, or
 // a branch with more direct children than this, opens as a header instead of exposed rows.
 var CATEGORY_DISCLOSURE_LIMIT = 5;
@@ -1158,13 +1179,48 @@ function renderCategoryTree(files) {
     list.replaceChildren.apply(list, sections);
 }
 
+// The configure action only makes sense when this view is embedded in a pane that can carry the
+// message to the worktree's agent session. A standalone top-level tab has no such parent, so the
+// control is never rendered there rather than rendered dead.
+function canvasTransportAvailable() {
+    return window.parent !== window && typeof window.canvasSend === 'function';
+}
+
+// The single place the configure payload is built. Existing SystemView routing owns delivery,
+// session resume/start, and the waiting/error banners, so this only posts the fixed request.
+function sendConfigureRequest() {
+    window.canvasSend(CONFIGURE_ACTION, { request: CONFIGURE_REQUEST });
+}
+
+// Reuses the existing neutral icon-only toolbar treatment (.refresh-button), so the action reads as
+// one more ordinary control instead of an accent that competes with the diff.
+function createConfigureButton() {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'refresh-button';
+    button.setAttribute('aria-label', CONFIGURE_LABEL);
+    button.title = CONFIGURE_LABEL;
+    button.innerHTML =
+        '<svg class="toolbar-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false">' +
+        '<path d="M2.5 4.5h11M2.5 11.5h11"></path>' +
+        '<circle cx="6" cy="4.5" r="1.7" fill="var(--bg-hover)"></circle>' +
+        '<circle cx="10" cy="11.5" r="1.7" fill="var(--bg-hover)"></circle>' +
+        '</svg>';
+    button.addEventListener('click', sendConfigureRequest);
+    return button;
+}
+
 function renderCategorizationWarning(reason) {
     var text = document.createElement('span');
     text.className = 'category-warning-text';
     text.textContent = reason
         ? CATEGORY_WARNING + ': ' + reason + '.'
         : CATEGORY_WARNING + '.';
-    document.getElementById('category-warning').replaceChildren(text);
+    var warning = document.getElementById('category-warning');
+    warning.replaceChildren(text);
+    // The warning is where an author lands after a bad edit, so it carries the same affordance as
+    // the toolbar — the same factory, so neither the label nor the payload can drift.
+    if (canvasTransportAvailable()) warning.appendChild(createConfigureButton());
 }
 
 function renderCategorizedFiles(files, categorization) {
@@ -1681,6 +1737,11 @@ window.canvasSelectionMetadata = function(selectionContext) {
 document.getElementById('unified-view').addEventListener('click', function() { setView('unified'); });
 document.getElementById('split-view').addEventListener('click', function() { setView('split'); });
 document.getElementById('refresh').addEventListener('click', loadSummary);
+if (canvasTransportAvailable()) {
+    document
+        .querySelector('.toolbar')
+        .insertBefore(createConfigureButton(), document.getElementById('refresh'));
+}
 document.getElementById('filter-committed').addEventListener('change', filtersChanged);
 document.getElementById('filter-local').addEventListener('change', filtersChanged);
 document.getElementById('filter-untracked').addEventListener('change', filtersChanged);
