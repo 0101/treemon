@@ -511,11 +511,11 @@ let internal autoSyncDependencies
                 let! state = agent.PostAndAsyncReply(GetState)
                 return prStatusForPath state path
             }
-      SelectSessionId =
+      SelectTarget =
         fun path ->
             async {
                 let! state = agent.PostAndAsyncReply(GetState)
-                return AutoSync.selectSessionId activityStore (state.SessionStatuses |> Map.values) path
+                return AutoSync.selectTarget activityStore (state.SessionStatuses |> Map.values) path
             }
       Deliver =
         AutoSync.deliver

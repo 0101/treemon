@@ -5,9 +5,26 @@ open Shared
 open Server.SessionActivity
 open Server.SessionActivityStore
 
+/// Who — if anyone — is listening in a worktree. Openness is a case, not a flag on an id, because
+/// both cases can carry a session id: `NoOpenSession` may still know a retained/offline identity
+/// from a closed CLI, and that identity is only a delivery hint, never evidence that a live agent
+/// will act on a prompt. `OpenSession` means a CLI was seen inside `SessionActivity.openWindow`,
+/// including an idle one — an idle open CLI is still attached and still owns its worktree.
+type SyncTarget =
+    | OpenSession of sessionId: string
+    | NoOpenSession of retainedSessionId: string option
+
+module SyncTarget =
+    /// The id a bridge send is addressed to, which both cases can supply. Callers that need to know
+    /// whether anyone is listening must match on the case instead.
+    let sessionId =
+        function
+        | OpenSession sessionId -> Some sessionId
+        | NoOpenSession retainedSessionId -> retainedSessionId
+
 type DeliveryRequest =
     { WorktreePath: WorktreePath
-      SessionId: string option
+      Target: SyncTarget
       Prompt: string }
 
 /// `ClaimRevision`/`ReleaseRevision` are the in-process claim; the accepted-revision operations are
@@ -22,7 +39,7 @@ type TriggerDependencies =
       /// inside that worktree's own repo and a same-named branch elsewhere can never answer for it.
       /// Read again at action boundaries because `RefreshPr` runs on its own cadence.
       ReadPrStatus: string -> Async<PrStatus>
-      SelectSessionId: string -> Async<string option>
+      SelectTarget: string -> Async<SyncTarget>
       Deliver: DeliveryRequest -> Async<bool> }
 
 /// One merged-and-still-enabled branch. The local branch name is the `.treemon.json` preference
@@ -82,17 +99,26 @@ let internal isAlreadyAccepted
     | Some record -> record.BaseRevision = baseRevision && now - record.AcceptedAt < acceptedRetryAge
     | None -> false
 
-let internal selectTargetSessionId (now: DateTimeOffset) (sessions: StoredStatus list) =
+/// The open winner decides the target; retained identity is consulted only once no session is open,
+/// so an open idle CLI can never be mistaken for an offline one that merely left an id behind.
+let internal selectTargetFromSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
     let openSessions =
         sessions |> List.filter (fun session -> now - session.LastSeen < openWindow)
 
-    openSessions
-    |> pickActive _.Status StoredStatus.activityOrderKey
-    |> Option.orElseWith (fun () -> openSessions |> StoredStatus.tryMostRecentActivity)
-    |> Option.orElseWith (fun () -> sessions |> StoredStatus.tryMostRecentActivity)
-    |> Option.map (_.SessionId >> SessionId.value)
+    let openWinner =
+        openSessions
+        |> pickActive _.Status StoredStatus.activityOrderKey
+        |> Option.orElseWith (fun () -> openSessions |> StoredStatus.tryMostRecentActivity)
 
-let selectSessionId
+    match openWinner with
+    | Some winner -> OpenSession(SessionId.value winner.SessionId)
+    | None ->
+        sessions
+        |> StoredStatus.tryMostRecentActivity
+        |> Option.map (_.SessionId >> SessionId.value)
+        |> NoOpenSession
+
+let selectTarget
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (liveSessions: StoredStatus seq)
     (path: string)
@@ -106,7 +132,7 @@ let selectSessionId
     |> CodingToolStatus.includeRetainedSessions retained
     |> Seq.filter (fun stored -> WorktreePath.value stored.WorktreePath = path)
     |> Seq.toList
-    |> selectTargetSessionId DateTimeOffset.UtcNow
+    |> selectTargetFromSessions DateTimeOffset.UtcNow
 
 let internal registrationGraceMilliseconds = 3000
 
@@ -130,10 +156,11 @@ let deliver
     =
     async {
         let path = WorktreePath.value request.WorktreePath
+        let sessionId = SyncTarget.sessionId request.Target
 
         let sendRequest: SessionBridge.SendRequest =
             { WorktreePath = path
-              SessionId = request.SessionId
+              SessionId = sessionId
               Prompt = SessionBridge.Prompt.agentPrompt request.Prompt }
 
         let launchFallback () =
@@ -163,7 +190,7 @@ let deliver
         | SessionBridge.DeliveryResult.Delivered
         | SessionBridge.DeliveryResult.DeliveryFailed ->
             return true
-        | SessionBridge.DeliveryResult.NoLiveSession when Option.isSome request.SessionId ->
+        | SessionBridge.DeliveryResult.NoLiveSession when Option.isSome sessionId ->
             do! waitForRegistration ()
 
             match! tryDeliver sendRequest with
@@ -202,7 +229,7 @@ let trigger
 
                 if claimed then
                     try
-                        let! sessionId = dependencies.SelectSessionId gitData.Path
+                        let! target = dependencies.SelectTarget gitData.Path
                         let! stillEligible = isStillEligible dependencies repoRoot gitData
 
                         if not stillEligible then
@@ -212,7 +239,7 @@ let trigger
                             let! accepted =
                                 dependencies.Deliver
                                     { WorktreePath = WorktreePath gitData.Path
-                                      SessionId = sessionId
+                                      Target = target
                                       Prompt = prompt upstreamRemote baseBranch }
 
                             // Recorded only once acceptance is certain: a crash or rejection before

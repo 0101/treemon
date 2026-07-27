@@ -54,7 +54,7 @@ let private withoutAcceptedRecords: TriggerDependencies =
       RecordAcceptedRevision = fun _ _ -> ()
       ClearAcceptedRevision = ignore
       ReadPrStatus = fun _ -> async { return NoPr }
-      SelectSessionId = fun _ -> async { return None }
+      SelectTarget = fun _ -> async { return NoOpenSession None }
       Deliver = fun _ -> async { return true } }
 
 let private prInfo isMerged : PrStatus =
@@ -75,7 +75,7 @@ let private openPr = prInfo false
 /// read/record/clear functions the scheduler injects are the ones under test.
 let private withAcceptedRecords agent store deliver =
     { autoSyncDependencies agent (SessionManager.createAgent ()) None (Some store) with
-        SelectSessionId = fun _ -> async { return Some "session-a" }
+        SelectTarget = fun _ -> async { return OpenSession "session-a" }
         Deliver = deliver }
 
 let private acceptedRecord revision acceptedAt : AutoSyncStore.AcceptedSyncRecord =
@@ -158,8 +158,8 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-1.0))
 
         Assert.That(
-            selectTargetSessionId now [ newerIdle; active ],
-            Is.EqualTo(Some "active"))
+            selectTargetFromSessions now [ newerIdle; active ],
+            Is.EqualTo(OpenSession "active"))
 
     [<Test>]
     member _.``Greatest activity UpdatedAt supplies the open idle auto-sync session id``() =
@@ -180,8 +180,8 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-2.0))
 
         Assert.That(
-            selectTargetSessionId now [ older; newer ],
-            Is.EqualTo(Some "newer"))
+            selectTargetFromSessions now [ older; newer ],
+            Is.EqualTo(OpenSession "newer"))
 
     [<Test>]
     member _.``Greatest activity UpdatedAt supplies a retained id only when no session is open``() =
@@ -202,8 +202,36 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-10.0))
 
         Assert.That(
-            selectTargetSessionId now [ older; newer ],
-            Is.EqualTo(Some "newer"))
+            selectTargetFromSessions now [ older; newer ],
+            Is.EqualTo(NoOpenSession(Some "newer")))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``An open idle session is a different target from a retained-only session with the same id``() =
+        let session lastSeen =
+            storedSession "shared-id" "/repo/wt" SessionLevelStatus.Idle (now.AddMinutes(-1.0)) lastSeen
+
+        let openIdle = selectTargetFromSessions now [ session (now.AddSeconds(-30.0)) ]
+        let retainedOnly = selectTargetFromSessions now [ session (now.AddMinutes(-10.0)) ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                openIdle,
+                Is.EqualTo(OpenSession "shared-id"),
+                "an idle CLI inside the openness window is still attached")
+            Assert.That(
+                retainedOnly,
+                Is.EqualTo(NoOpenSession(Some "shared-id")),
+                "the same id from a closed CLI is retained identity, not an open session")
+            Assert.That(openIdle, Is.Not.EqualTo retainedOnly)
+            Assert.That(
+                SyncTarget.sessionId openIdle,
+                Is.EqualTo(SyncTarget.sessionId retainedOnly),
+                "the id alone cannot tell the two apart, which is why openness is its own case"))
+
+    [<Test>]
+    member _.``A worktree with no sessions has no open session and no retained identity``() =
+        Assert.That(selectTargetFromSessions now [], Is.EqualTo(NoOpenSession None))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -341,7 +369,7 @@ type AutoSyncTriggerTests() =
                             agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reply))
                     ReleaseRevision =
                         fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
-                    SelectSessionId =
+                    SelectTarget =
                         fun _ ->
                             async {
                                 // Stands in for the RefreshPr cleanup landing mid-operation.
@@ -349,7 +377,7 @@ type AutoSyncTriggerTests() =
                                     root
                                     (Set.ofList >> Set.remove "feature-a" >> Set.toList)
 
-                                return Some "session-a"
+                                return OpenSession "session-a"
                             }
                     Deliver =
                         fun _ ->
@@ -384,12 +412,12 @@ type AutoSyncTriggerTests() =
             let dependencies =
                 { withoutAcceptedRecords with
                     ReadPrStatus = fun _ -> async { return observedPr }
-                    SelectSessionId =
+                    SelectTarget =
                         fun _ ->
                             async {
                                 // The PR refresh reconciles the merge while the target is chosen.
                                 observedPr <- mergedPr
-                                return Some "session-a"
+                                return OpenSession "session-a"
                             }
                     Deliver =
                         fun _ ->
@@ -602,7 +630,7 @@ type AutoSyncSchedulerDispatchTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectSessionId = fun _ -> async { return Some "session-a" }
+                    SelectTarget = fun _ -> async { return OpenSession "session-a" }
                     Deliver =
                         fun _ ->
                             async {
@@ -663,7 +691,7 @@ type AutoSyncDeliveryTests() =
 
     let request =
         { WorktreePath = WorktreePath "/repo/wt"
-          SessionId = Some "session-a"
+          Target = OpenSession "session-a"
           Prompt = "Sync with upstream/main." }
 
     [<Test>]
@@ -720,7 +748,7 @@ type AutoSyncDeliveryTests() =
             use store = new SessionActivityStore(Path.Combine(root, "session-activity.db"))
             store.UpsertStatus newerClosed
 
-            let sessionId = selectSessionId (Some store) [ openIdle ] path
+            let target = selectTarget (Some store) [ openIdle ] path
 
             let tryDeliver (value: SessionBridge.SendRequest) =
                 async {
@@ -738,11 +766,14 @@ type AutoSyncDeliveryTests() =
                     tryBeginLaunch
                     ignore
                     launch
-                    { request with SessionId = sessionId }
+                    { request with Target = target }
                 |> Async.RunSynchronously
 
             Assert.Multiple(fun () ->
-                Assert.That(sessionId, Is.EqualTo(Some "open-idle"))
+                Assert.That(
+                    target,
+                    Is.EqualTo(OpenSession "open-idle"),
+                    "an open idle session wins over newer retained identity as an OPEN target")
                 Assert.That(accepted, Is.True))
         finally
             if Directory.Exists root then Directory.Delete(root, true)
@@ -833,7 +864,7 @@ type AutoSyncDeliveryTests() =
                         Assert.That(prompt, Is.EqualTo("Sync with upstream/main."))
                         return Ok ()
                     })
-                { request with SessionId = None }
+                { request with Target = NoOpenSession None }
             |> Async.StartAsTask
 
         graceStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
@@ -881,7 +912,7 @@ type AutoSyncDeliveryTests() =
                         launchAttempts <- launchAttempts + 1
                         return Ok ()
                     })
-                { request with SessionId = None }
+                { request with Target = NoOpenSession None }
             |> Async.RunSynchronously
 
         Assert.Multiple(fun () ->
@@ -916,7 +947,7 @@ type AutoSyncDeliveryTests() =
                         else
                             return Error "launch failed"
                     })
-                { request with SessionId = None }
+                { request with Target = NoOpenSession None }
             |> Async.RunSynchronously
 
         Assert.Multiple(fun () ->
@@ -988,7 +1019,7 @@ type AutoSyncDeliveryTests() =
                     })
                 { request with
                     WorktreePath = WorktreePath path
-                    SessionId = Some sessionId }
+                    Target = OpenSession sessionId }
             |> Async.StartAsTask
 
         let firstContext =
@@ -1361,7 +1392,7 @@ type AutoSyncVerificationTests() =
                     ReleaseRevision =
                         fun worktreePath baseRevision ->
                             agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
-                    SelectSessionId = fun _ -> async { return Some "retained-session" }
+                    SelectTarget = fun _ -> async { return NoOpenSession(Some "retained-session") }
                     Deliver =
                         deliver
                             (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })
@@ -1415,7 +1446,7 @@ type AutoSyncVerificationTests() =
                     ReleaseRevision =
                         fun worktreePath baseRevision ->
                             agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
-                    SelectSessionId = fun _ -> async { return Some "selected-working" }
+                    SelectTarget = fun _ -> async { return OpenSession "selected-working" }
                     Deliver =
                         fun request ->
                             async {
