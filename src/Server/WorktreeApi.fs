@@ -196,8 +196,8 @@ let internal assembleFromState
         gitData
         |> Option.map _.Comparison
         |> Option.defaultValue GitWorktree.Undetermined
-    let upstreamBranch = gitData |> Option.bind _.UpstreamBranch
-    let pr = PrStatus.lookupPrStatus repo.PrData upstreamBranch
+    let prBranch = gitData |> Option.bind GitWorktree.prBranchName
+    let pr = PrStatus.lookupPrStatus repo.PrData prBranch
 
     { Path = PathUtils.toWorktreePath wt.Path
       Branch = wt.Branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
@@ -625,10 +625,7 @@ let worktreeApi
     let fixtures = testFixtures |> Option.bind (fun p -> loadFixtures p |> Result.toOption)
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
-    let schedulerServices : RefreshScheduler.SchedulerServices =
-        { SessionAgent = sessionAgent
-          ActivityStore = activityStore }
-    let autoSyncDependencies = RefreshScheduler.autoSyncDependencies agent schedulerServices
+    let autoSyncDependencies = RefreshScheduler.autoSyncDependencies agent sessionAgent activityStore
 
     let validatePath path =
         async {

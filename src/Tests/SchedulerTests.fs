@@ -57,7 +57,8 @@ type RefreshGitTaskTests() =
 
             let services =
                 { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
-                  ActivityStore = None }
+                  ActivityStore = None
+                  MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json")) }
 
             do!
                 executeTask
@@ -96,7 +97,8 @@ type RefreshGitTaskTests() =
 
             let services =
                 { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
-                  ActivityStore = None }
+                  ActivityStore = None
+                  MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json")) }
 
             do!
                 executeTask
@@ -338,9 +340,10 @@ type StateAgentTests() =
             let gitData : GitData =
                 { Path = "/repo/main"
                   Branch = "main"
+                  HeadCommit = "main-sha"
                   LastCommitMessage = "initial"
                   LastCommitTime = DateTimeOffset.UtcNow
-                  UpstreamBranch = None
+                  Upstream = NoUpstream
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
@@ -407,9 +410,10 @@ type StateAgentTests() =
         let gitData : GitData =
             { Path = path
               Branch = "untracked"
+              HeadCommit = "sha-untracked"
               LastCommitMessage = "initial"
               LastCommitTime = DateTimeOffset.UtcNow
-              UpstreamBranch = None
+              Upstream = NoUpstream
               MainBehindCount = 0
               BaseRevision = None
               IsDirty = false
@@ -460,9 +464,10 @@ type StateAgentTests() =
             let gitData : GitData =
                 { Path = "/repo/feature"
                   Branch = "feature"
+                  HeadCommit = "feature-sha"
                   LastCommitMessage = "wip"
                   LastCommitTime = DateTimeOffset.UtcNow
-                  UpstreamBranch = None
+                  Upstream = NoUpstream
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
@@ -556,9 +561,10 @@ type StateAgentTests() =
             let gitData : GitData =
                 { Path = "/repo/unknown"
                   Branch = "unknown"
+                  HeadCommit = "unknown-sha"
                   LastCommitMessage = "nope"
                   LastCommitTime = DateTimeOffset.UtcNow
-                  UpstreamBranch = None
+                  Upstream = NoUpstream
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
@@ -630,9 +636,10 @@ type StateAgentTests() =
             let gitData : GitData =
                 { Path = oldPath
                   Branch = "old"
+                  HeadCommit = "old-sha"
                   LastCommitMessage = "old"
                   LastCommitTime = DateTimeOffset.UtcNow
-                  UpstreamBranch = None
+                  Upstream = NoUpstream
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
@@ -1413,6 +1420,153 @@ type ResolveIgnoredPathsTests() =
 
         let ignored = result |> Map.find (RepoId "Repo1")
         Assert.That(ignored, Is.Empty, "No patterns should produce empty ignored set")
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type MergedPrBranchScopeTests() =
+
+    [<Test>]
+    member _.``ignored uncollected worktree does not block pruning active branches``() =
+        let activePath = "/r1/main"
+        let ignoredPath = "/r1/ignored"
+
+        let gitData : GitData =
+            { Path = activePath
+              Branch = "main"
+              HeadCommit = "sha-main"
+              LastCommitMessage = "main"
+              LastCommitTime = DateTimeOffset.UtcNow
+              Upstream = Upstream "main"
+              MainBehindCount = 0
+              BaseRevision = None
+              IsDirty = false
+              Comparison = Clean
+              WorkMetrics = None }
+
+        let ignoredGitData =
+            { gitData with
+                Path = ignoredPath
+                HeadCommit = "stale-ignored-sha" }
+
+        let repo =
+            { PerRepoState.empty with
+                KnownPaths = Set.ofList [ activePath; ignoredPath ]
+                GitData = Map.ofList [ activePath, gitData; ignoredPath, ignoredGitData ] }
+
+        let scope = mergedPrBranchScope (Set.ofList [ ignoredPath ]) Set.empty repo
+
+        Assert.That(scope.GitData |> Map.containsKey ignoredPath, Is.False)
+        Assert.That(scope.KnownBranches, Is.EqualTo(Set.ofList [ "main" ]))
+        Assert.That(scope.PruneBranches, Is.EqualTo(Some(Set.ofList [ "main" ])))
+
+    // A worktree first seen while already archived never gets a steady-state RefreshGit, so it has
+    // no GitData. Its list branch must still enter the enumeration, and its path must not count
+    // against completeness — otherwise pruning stops for this repo for the process lifetime.
+    [<Test>]
+    member _.``archived worktree without git data contributes its branch without blocking pruning``() =
+        let activePath = "/r1/main"
+        let archivedPath = "/r1/archived"
+
+        let gitData : GitData =
+            { Path = activePath
+              Branch = "main"
+              HeadCommit = "sha-main"
+              LastCommitMessage = "main"
+              LastCommitTime = DateTimeOffset.UtcNow
+              Upstream = Upstream "main"
+              MainBehindCount = 0
+              BaseRevision = None
+              IsDirty = false
+              Comparison = Clean
+              WorkMetrics = None }
+
+        let repo =
+            { PerRepoState.empty with
+                WorktreeList = [ makeWorktree activePath "main"; makeWorktree archivedPath "feature/archived" ]
+                KnownPaths = Set.ofList [ activePath; archivedPath ]
+                GitData = Map.ofList [ activePath, gitData ] }
+
+        let scope = mergedPrBranchScope Set.empty (Set.ofList [ archivedPath ]) repo
+
+        Assert.That(scope.KnownBranches, Is.EqualTo(Set.ofList [ "main"; "feature/archived" ]),
+            "an archived worktree's branch must stay in scope so its merged record is not pruned")
+        Assert.That(scope.PruneBranches, Is.EqualTo(Some(Set.ofList [ "main"; "feature/archived" ])),
+            "an archived worktree that never collects git data must not block pruning forever")
+
+    [<Test>]
+    member _.``failed upstream read remains in PR scope without enabling pruning``() =
+        let path = "/r1/local-name"
+
+        let gitData: GitData =
+            { Path = path
+              Branch = "local-name"
+              HeadCommit = "provider-sha"
+              LastCommitMessage = "merged"
+              LastCommitTime = DateTimeOffset.UtcNow
+              Upstream = UpstreamReadFailed
+              MainBehindCount = 0
+              BaseRevision = None
+              IsDirty = false
+              Comparison = Clean
+              WorkMetrics = None }
+
+        let repo =
+            { PerRepoState.empty with
+                KnownPaths = Set.singleton path
+                GitData = Map.ofList [ path, gitData ] }
+
+        let scope = mergedPrBranchScope Set.empty Set.empty repo
+
+        Assert.That(scope.KnownBranches, Is.EqualTo(Set.singleton "local-name"))
+        Assert.That(scope.PruneBranches, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``card lookup uses local fallback when both upstream reads fail``() =
+        let path = "/r1/local-name"
+        let worktree = makeWorktree path "local-name"
+
+        let gitData: GitData =
+            { Path = path
+              Branch = "local-name"
+              HeadCommit = "provider-sha"
+              LastCommitMessage = "merged"
+              LastCommitTime = DateTimeOffset.UtcNow
+              Upstream = UpstreamReadFailed
+              MainBehindCount = 0
+              BaseRevision = None
+              IsDirty = false
+              Comparison = Clean
+              WorkMetrics = None }
+
+        let mergedPr =
+            HasPr
+                { Id = 42
+                  Title = "Merged"
+                  Url = "https://example.test/pull/42"
+                  IsDraft = false
+                  Comments = WithResolution(0, 0)
+                  Builds = []
+                  IsMerged = true
+                  HasConflicts = false }
+
+        let repo =
+            { PerRepoState.empty with
+                GitData = Map.ofList [ path, gitData ]
+                PrData = Map.ofList [ "local-name", mergedPr ] }
+
+        let card =
+            Server.WorktreeApi.assembleFromState
+                DateTimeOffset.UtcNow
+                Set.empty
+                Set.empty
+                Set.empty
+                Map.empty
+                Map.empty
+                repo
+                worktree
+
+        Assert.That(card.Pr, Is.EqualTo(mergedPr))
 
 
 [<TestFixture>]

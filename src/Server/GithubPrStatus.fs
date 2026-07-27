@@ -26,6 +26,7 @@ let private runGh (arguments: string) =
 
 type internal ParsedGithubPr =
     { BranchName: string
+      HeadSha: string option
       PrNumber: int
       Title: string
       IsDraft: bool
@@ -42,9 +43,11 @@ let internal parsePrList (json: string) =
                 let title = el.GetProperty("title").GetString()
                 let isDraft = el |> tryBool "draft" |> Option.defaultValue false
                 let isMerged = el |> tryProp "merged_at" |> Option.isSome
-                let branchName = el.GetProperty("head").GetProperty("ref").GetString()
+                let head = el.GetProperty("head")
+                let branchName = head.GetProperty("ref").GetString()
                 Some
                     { BranchName = branchName
+                      HeadSha = head |> tryString "sha"
                       PrNumber = number
                       Title = title
                       IsDraft = isDraft
@@ -233,7 +236,7 @@ let private fetchPrList (remote: GithubRemote) (state: string) (extraParams: str
 let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
     async {
         let! openChild = Async.StartChild(fetchPrList remote "open" "")
-        let! closedChild = Async.StartChild(fetchPrList remote "closed" "&sort=updated&direction=desc&per_page=10")
+        let! closedChild = Async.StartChild(fetchPrList remote "closed" "&sort=updated&direction=desc&per_page=30")
         let! openPrs = openChild
         let! closedPrs = closedChild
 
@@ -269,7 +272,7 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
 
                         return
                             pr.BranchName,
-                            HasPr
+                            (HasPr
                                 { Id = pr.PrNumber
                                   Title = pr.Title
                                   Url = url
@@ -277,7 +280,8 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                                   Comments = threadCounts
                                   Builds = builds
                                   IsMerged = pr.IsMerged
-                                  HasConflicts = hasConflicts }
+                                  HasConflicts = hasConflicts },
+                             pr.HeadSha)
                     })
                 |> Async.Parallel
 

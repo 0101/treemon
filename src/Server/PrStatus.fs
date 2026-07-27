@@ -82,6 +82,7 @@ let getRemoteUrl (repoRoot: string) (remoteName: string) =
 
 type internal ParsedPr =
     { BranchName: string
+      HeadSha: string option
       PrId: int
       Title: string
       IsDraft: bool
@@ -130,8 +131,14 @@ let internal parsePrList (json: string) =
                     let hasConflicts =
                         el |> tryString "mergeStatus" = Some "conflicts"
 
+                    let headSha =
+                        el
+                        |> tryProp "lastMergeSourceCommit"
+                        |> Option.bind (tryString "commitId")
+
                     Some
                         { BranchName = branchName
+                          HeadSha = headSha
                           PrId = prId
                           Title = title
                           IsDraft = isDraft
@@ -419,7 +426,7 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
 
                         return
                             pr.BranchName,
-                            HasPr
+                            (HasPr
                                 { Id = pr.PrId
                                   Title = pr.Title
                                   Url = url
@@ -427,7 +434,8 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                                   Comments = threadCounts
                                   Builds = builds
                                   IsMerged = pr.IsMerged
-                                  HasConflicts = pr.HasConflicts }
+                                  HasConflicts = pr.HasConflicts },
+                             pr.HeadSha)
                     })
                 |> Async.Parallel
 
