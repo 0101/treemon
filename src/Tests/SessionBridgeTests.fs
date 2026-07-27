@@ -128,6 +128,48 @@ type QueueCoalescingTests() =
 
         Assert.That(appendPending clockSnapshot extra pending, Is.EqualTo(List.tail pending @ [ extra ]))
 
+    [<Test>]
+    member _.``A drain survivor is not restored beside an identical concurrent enqueue``() =
+        let survivor = pendingAt (clockSnapshot.AddMinutes -1.0) (Some "session-a") (Prompt.agentPrompt "sync")
+        let concurrent = pendingAt clockSnapshot (Some "session-a") (Prompt.agentPrompt "sync")
+
+        Assert.That(mergePending clockSnapshot [ survivor ] [ concurrent ], Is.EqualTo [ survivor ])
+
+    [<Test>]
+    member _.``Merged survivors keep FIFO order ahead of distinct concurrent enqueues``() =
+        let firstSurvivor = pendingAt (clockSnapshot.AddMinutes -2.0) None (Prompt.agentPrompt "first")
+        let secondSurvivor = pendingAt (clockSnapshot.AddMinutes -1.0) None (Prompt.agentPrompt "second")
+        let duplicateOfSecond = pendingAt clockSnapshot None (Prompt.agentPrompt "second")
+        let concurrent = pendingAt clockSnapshot None (Prompt.agentPrompt "third")
+
+        Assert.That(
+            mergePending clockSnapshot [ firstSurvivor; secondSurvivor ] [ duplicateOfSecond; concurrent ],
+            Is.EqualTo [ firstSurvivor; secondSurvivor; concurrent ])
+
+    [<Test>]
+    member _.``Merging keeps a concurrent enqueue whose only expired match is dropped``() =
+        let expiredSurvivor = pendingAt (clockSnapshot - TimeSpan.FromMinutes 5.0) None (Prompt.agentPrompt "sync")
+        let concurrent = pendingAt clockSnapshot None (Prompt.agentPrompt "sync")
+        let expiredConcurrent = pendingAt (clockSnapshot - TimeSpan.FromMinutes 5.0) None (Prompt.agentPrompt "stale")
+
+        Assert.That(
+            mergePending clockSnapshot [ expiredSurvivor ] [ concurrent; expiredConcurrent ],
+            Is.EqualTo [ concurrent ])
+
+    [<Test>]
+    member _.``Merging caps the queue and drops the oldest survivors``() =
+        let survivors =
+            [ for index in 1..6 ->
+                pendingAt (clockSnapshot.AddSeconds(float index)) None (Prompt.agentPrompt $"survivor-{index}") ]
+
+        let concurrent =
+            [ for index in 1..6 ->
+                pendingAt clockSnapshot None (Prompt.agentPrompt $"concurrent-{index}") ]
+
+        Assert.That(
+            mergePending clockSnapshot survivors concurrent,
+            Is.EqualTo(List.skip 2 survivors @ concurrent))
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]

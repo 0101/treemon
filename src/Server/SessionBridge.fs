@@ -102,20 +102,25 @@ let private capQueue prompts =
     let excess = List.length prompts - maxQueueSize
     if excess > 0 then prompts |> List.skip excess else prompts
 
-/// Append unless the same envelope is already waiting: equality is exact on target session and on
-/// the prompt's kind, text, and filename. Coalescing applies only to pending copies — a prompt that
-/// has already been handed to a bridge has left the queue, so an identical later message is queued
-/// again. Surviving entries keep their FIFO position, TTL, and cap.
-let internal appendPending now (queued: QueuedPrompt) (pending: QueuedPrompt list) =
-    let live = cleanExpired now pending
-
-    let isDuplicate (existing: QueuedPrompt) =
+/// Concatenate two pending lists, keeping `earlier` entries ahead of `later` ones and skipping any
+/// entry whose envelope is already waiting: equality is exact on target session and on the prompt's
+/// kind, text, and filename. Coalescing applies only to pending copies — a prompt that has already
+/// been handed to a bridge has left the queue, so an identical later message is queued again.
+/// Surviving entries keep their FIFO position, TTL, and cap.
+let internal mergePending now (earlier: QueuedPrompt list) (later: QueuedPrompt list) =
+    let isDuplicate (queued: QueuedPrompt) (existing: QueuedPrompt) =
         existing.TargetSessionId = queued.TargetSessionId && existing.Prompt = queued.Prompt
 
-    if List.exists isDuplicate live then
-        live
-    else
-        live @ [ queued ] |> capQueue
+    (cleanExpired now earlier, cleanExpired now later)
+    ||> List.fold (fun kept queued ->
+        if List.exists (isDuplicate queued) kept then
+            kept
+        else
+            kept @ [ queued ])
+    |> capQueue
+
+let internal appendPending now (queued: QueuedPrompt) (pending: QueuedPrompt list) =
+    mergePending now pending [ queued ]
 
 let private enqueue now worktreeKey targetSessionId prompt =
     let queued =
@@ -148,12 +153,15 @@ let private deliverableTo worktreeKey (sessionId: string option) (queued: Queued
         | None -> true
         | Some targetSessionId -> sessionId = Some targetSessionId
 
+/// Put undeliverable entries back. A prompt enqueued between the drain's `TryRemove` and this
+/// requeue merges through the same coalescing as `enqueue`, so an entry identical to a survivor
+/// does not come back as a second pending copy.
 let private requeue now (worktreeKey: string) (survivors: QueuedPrompt list) =
     if not (List.isEmpty survivors) then
         promptQueue.AddOrUpdate(
             worktreeKey,
             survivors,
-            fun _ existing -> survivors @ cleanExpired now existing |> capQueue)
+            fun _ existing -> mergePending now survivors existing)
         |> ignore
 
 let private postPrompt

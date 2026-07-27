@@ -51,11 +51,13 @@ would not be that document's author.
 
 Queued messages retain the existing cap of 10 and five-minute TTL. An identical pending envelope for
 the same worktree and target session is coalesced without changing FIFO order; different payloads and
-targets remain distinct. On drain, an AgentDoc prompt goes only to its recorded owner, so ownership
-changes made while a message waits are honored. A SystemView prompt stays bound to the session
-resolution picked, if any; when nothing was reachable it drains to the next identified registration
-— the session the queue caused to launch. An anonymous (session-less) registration never drains
-either kind.
+targets remain distinct. Coalescing also covers the requeue path: a drain removes the whole queue,
+and undelivered survivors merge back ahead of anything enqueued meanwhile, dropping concurrent
+entries identical to a survivor rather than restoring a second pending copy. On drain, an AgentDoc
+prompt goes only to its recorded owner, so ownership changes made while a message waits are honored.
+A SystemView prompt stays bound to the session resolution picked, if any; when nothing was reachable
+it drains to the next identified registration — the session the queue caused to launch. An anonymous
+(session-less) registration never drains either kind.
 
 ### Persistence and Cleanup
 
