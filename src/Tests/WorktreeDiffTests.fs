@@ -862,7 +862,7 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(GitWorktree.isDirty repoDir |> TestUtils.runAsync, Is.False)
-            Assert.That(GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync, Is.True))
+            Assert.That(GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync, Is.EqualTo(GitWorktree.HasContent)))
 
         File.Delete(Path.Combine(repoDir, "untracked.txt"))
         let manyUntracked =
@@ -880,7 +880,7 @@ type WorktreeDiffIntegrationTests() =
                   "--untracked-files=all" ]
 
         Assert.That(Encoding.UTF8.GetByteCount(porcelain), Is.GreaterThan(1024))
-        Assert.That(GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync, Is.True)
+        Assert.That(GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync, Is.EqualTo(GitWorktree.HasContent))
 
         manyUntracked
         |> List.iter (fun path -> File.Delete(Path.Combine(repoDir, path)))
@@ -889,13 +889,13 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(GitWorktree.isDirty repoDir |> TestUtils.runAsync, Is.True)
-            Assert.That(GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync, Is.True))
+            Assert.That(GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync, Is.EqualTo(GitWorktree.HasContent)))
 
         gitOk repoDir [ "add"; "--"; "tracked.txt" ]
 
         Assert.Multiple(fun () ->
             Assert.That(GitWorktree.isDirty repoDir |> TestUtils.runAsync, Is.True)
-            Assert.That(GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync, Is.True))
+            Assert.That(GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync, Is.EqualTo(GitWorktree.HasContent)))
 
     [<Test>]
     member _.``Comparison_net follows committed comparison content``() =
@@ -958,8 +958,8 @@ type WorktreeDiffIntegrationTests() =
             "Untracked files must not affect the tracked-dirty sync guard"
         )
         Assert.That(
-            GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync,
-            Is.False,
+            GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync,
+            Is.EqualTo(GitWorktree.Clean),
             "The generated untracked viewer must not count as comparison content"
         )
         Assert.That(
@@ -977,8 +977,8 @@ type WorktreeDiffIntegrationTests() =
             "Untracked files must not affect the tracked-dirty sync guard"
         )
         Assert.That(
-            GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync,
-            Is.True,
+            GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync,
+            Is.EqualTo(GitWorktree.HasContent),
             "Only the exact generated viewer path may be excluded"
         )
 
@@ -1138,6 +1138,26 @@ type WorktreeDiffIntegrationTests() =
             Assert.That(gitData.IsDirty, Is.False, "Skipping the removal leaves the worktree clean"))
 
     [<Test>]
+    member _.``a worktree Git cannot read is undetermined rather than clean``() =
+        let nonRepo = Path.Combine(tempDir, "not-a-repo")
+        Directory.CreateDirectory(nonRepo) |> ignore
+
+        let gitData =
+            collectWorktreeGitData nonRepo (Some "main") "origin" "main"
+            |> TestUtils.runAsync
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                GitWorktree.localComparisonContent nonRepo |> TestUtils.runAsync,
+                Is.EqualTo(GitWorktree.Undetermined),
+                "A status command that cannot answer must not be read as an empty worktree")
+            Assert.That(
+                gitData.Comparison,
+                Is.EqualTo(GitWorktree.Undetermined),
+                "No probe answered, so nothing licenses removing the viewer")
+            Assert.That(gitData.WorkMetrics, Is.EqualTo(None)))
+
+    [<Test>]
     member _.``GitMetrics_missing_base keeps committed work out of the clean verdict``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
@@ -1221,8 +1241,8 @@ type WorktreeDiffIntegrationTests() =
             "The tracked-dirty Sync guard retains its prior semantics"
         )
         Assert.That(
-            GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync,
-            Is.False,
+            GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync,
+            Is.EqualTo(GitWorktree.Clean),
             "A tracked generated viewer update must not count as comparison content"
         )
 

@@ -17,12 +17,25 @@ type CommitInfo =
       Time: DateTimeOffset }
 
 /// What a refresh could establish about a worktree's content relative to its base.
-/// `Undetermined` is not `Clean`: the base ref could not be resolved, so committed work is invisible
-/// to this refresh. Callers that act destructively on emptiness must act only on `Clean`.
+/// `Undetermined` is not `Clean`: a Git probe failed or the base ref could not be resolved, so some
+/// content is invisible to this refresh. Callers that act destructively on emptiness must act only
+/// on `Clean`.
 type ComparisonContent =
     | HasContent
     | Clean
     | Undetermined
+
+module ComparisonContent =
+
+    /// Fold one layer's verdict into another. Content found anywhere wins, then unreadability:
+    /// a worktree is clean only when every layer was read and every layer was empty.
+    let combine first second =
+        match first, second with
+        | HasContent, _
+        | _, HasContent -> HasContent
+        | Undetermined, _
+        | _, Undetermined -> Undetermined
+        | Clean, Clean -> Clean
 
 type GitData =
     { Path: string
@@ -221,7 +234,10 @@ let isDirty (worktreePath: string) =
         return parseDirtyStatus output
     }
 
-let hasLocalDiff (worktreePath: string) =
+/// Staged, unstaged, and untracked content in the working tree, excluding Treemon's own generated
+/// viewer. A Git command that could not answer reports `Undetermined` rather than `Clean`, so a
+/// transient failure never reads as an empty worktree.
+let localComparisonContent (worktreePath: string) =
     async {
         let! result =
             ProcessRunner.runArgumentList
@@ -241,9 +257,10 @@ let hasLocalDiff (worktreePath: string) =
 
         return
             match result with
-            | Ok output -> output.ExitCode = 0 && output.Stdout.Length > 0
-            | Error(ProcessRunner.CaptureLimitExceeded ProcessRunner.StandardOutput) -> true
-            | Error _ -> false
+            | Ok output when output.ExitCode <> 0 -> Undetermined
+            | Ok output -> if output.Stdout.Length > 0 then HasContent else Clean
+            | Error(ProcessRunner.CaptureLimitExceeded ProcessRunner.StandardOutput) -> HasContent
+            | Error _ -> Undetermined
     }
 
 let getCommitCount (worktreePath: string) (baseRef: string) =
@@ -263,18 +280,16 @@ let private extractRegexInt (pattern: string) (text: string) =
     let m = System.Text.RegularExpressions.Regex.Match(text, pattern)
     if m.Success then Int32.Parse(m.Groups[1].Value: string) else 0
 
+/// Net merge-base-to-`HEAD` content plus its line counts. `None` output means the Git command failed,
+/// which is `Undetermined` — distinct from the empty output of a branch that is genuinely level.
 let parseDiffStats (output: string option) =
-    output
-    |> Option.bind (fun s ->
-        match s.Trim() with
-        | "" -> None
-        | trimmed ->
-            Some(
-                true,
-                extractRegexInt @"(\d+) insertion" trimmed,
-                extractRegexInt @"(\d+) deletion" trimmed
-            ))
-    |> Option.defaultValue (false, 0, 0)
+    match output |> Option.map _.Trim() with
+    | None -> Undetermined, 0, 0
+    | Some "" -> Clean, 0, 0
+    | Some trimmed ->
+        HasContent,
+        extractRegexInt @"(\d+) insertion" trimmed,
+        extractRegexInt @"(\d+) deletion" trimmed
 
 let getDiffStats (worktreePath: string) (baseRef: string) =
     async {
@@ -286,14 +301,15 @@ let getDiffStats (worktreePath: string) (baseRef: string) =
         return parseDiffStats output
     }
 
-let createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved =
-    if hasCommittedDiff then
+let createWorkMetrics committed commitCount linesAdded linesRemoved =
+    match committed with
+    | HasContent ->
         Some
             { CommitCount = commitCount
               LinesAdded = linesAdded
               LinesRemoved = linesRemoved }
-    else
-        None
+    | Clean
+    | Undetermined -> None
 
 let internal selectUpstreamRemote
     (configuredRemote: string option)
@@ -445,19 +461,19 @@ type private CommonGitData =
     { LastCommit: CommitInfo option
       UpstreamBranch: string option
       IsDirty: bool
-      HasLocalDiff: bool }
+      LocalContent: ComparisonContent }
 
 let private collectCommonGitData (worktreePath: string) =
     async {
         let! commitChild = Async.StartChild(getLastCommit worktreePath)
         let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
         let! dirtyChild = Async.StartChild(isDirty worktreePath)
-        let! localDiffChild = Async.StartChild(hasLocalDiff worktreePath)
+        let! localContentChild = Async.StartChild(localComparisonContent worktreePath)
 
         let! commit = commitChild
         let! upstream = upstreamChild
         let! dirty = dirtyChild
-        let! localDiff = localDiffChild
+        let! localContent = localContentChild
 
         let upstreamBranch =
             upstream
@@ -470,7 +486,7 @@ let private collectCommonGitData (worktreePath: string) =
             { LastCommit = commit
               UpstreamBranch = upstreamBranch
               IsDirty = dirty
-              HasLocalDiff = localDiff }
+              LocalContent = localContent }
     }
 
 let private collectWorktreeGitDataForBaseRef
@@ -495,7 +511,7 @@ let private collectWorktreeGitDataForBaseRef
                 Async.StartChild(async.Return None)
 
         let! commitCount = commitCountChild
-        let! hasCommittedDiff, linesAdded, linesRemoved = diffStatsChild
+        let! committedContent, linesAdded, linesRemoved = diffStatsChild
         let! mainBehind = mainBehindChild
         let! baseRevision = baseRevisionChild
 
@@ -508,8 +524,8 @@ let private collectWorktreeGitDataForBaseRef
               MainBehindCount = mainBehind
               BaseRevision = baseRevision
               IsDirty = common.IsDirty
-              Comparison = if hasCommittedDiff || common.HasLocalDiff then HasContent else Clean
-              WorkMetrics = createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved }
+              Comparison = ComparisonContent.combine committedContent common.LocalContent
+              WorkMetrics = createWorkMetrics committedContent commitCount linesAdded linesRemoved }
     }
 
 let collectWorktreeGitData
@@ -537,7 +553,7 @@ let collectWorktreeGitData
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = common.IsDirty
-                  Comparison = if common.HasLocalDiff then HasContent else Undetermined
+                  Comparison = ComparisonContent.combine Undetermined common.LocalContent
                   WorkMetrics = None }
         | Ok baseRef ->
             return!
