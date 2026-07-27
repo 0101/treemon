@@ -1216,7 +1216,7 @@ function canvasTransportAvailable() {
 }
 
 // The single place the configure payload is built. Existing SystemView routing owns delivery,
-// session resume/start, and the waiting/error banners, so this only posts the fixed request.
+// session startup, and the waiting/error banners, so this only posts the fixed request.
 function sendConfigureRequest() {
     window.canvasSend(CONFIGURE_ACTION, { request: CONFIGURE_REQUEST });
 }
