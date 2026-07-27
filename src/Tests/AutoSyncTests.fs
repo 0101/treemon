@@ -52,7 +52,7 @@ let private withoutAcceptedRecords: TriggerDependencies =
       ReleaseRevision = fun _ _ -> ()
       ReadAcceptedRevision = fun _ -> async { return None }
       RecordAcceptedRevision = fun _ _ -> async { return () }
-      ClearAcceptedRevision = ignore
+      RetireAcceptedRevision = fun _ _ -> ()
       ReadPrStatus = fun _ -> async { return NoPr }
       SelectTarget = fun _ -> async { return NoOpenSession None }
       Deliver = fun _ -> async { return true } }
@@ -80,7 +80,15 @@ let private withAcceptedRecords agent store deliver =
 
 let private acceptedRecord revision acceptedAt : AutoSyncStore.AcceptedSyncRecord =
     { BaseRevision = revision
-      AcceptedAt = acceptedAt }
+      AcceptedAt = acceptedAt
+      Generation = AutoSyncStore.nextAcceptance () }
+
+/// The claim's stage and revision as readable text, because the generation inside an `Accepted`
+/// claim is an opaque token the test cannot predict.
+let private claimStage =
+    Option.map (function
+        | Delivering revision -> $"delivering {revision}"
+        | Accepted(revision, _) -> $"accepted {revision}")
 
 /// A durable store rooted in `dir`, loaded from disk exactly as server startup loads it.
 let private loadedStore dir =
@@ -276,7 +284,7 @@ type AutoSyncTriggerTests() =
             let! _ = claim FirstAttempt
             let! retryWhileDelivering = claim RetryExpiredAccept
 
-            agent.Post(AcceptAutoSyncTrigger(path, "base-a"))
+            agent.Post(AcceptAutoSyncTrigger(path, "base-a", AutoSyncStore.nextAcceptance ()))
 
             let! repeatedAfterAccept = claim FirstAttempt
             let! retryAfterExpiry = claim RetryExpiredAccept
@@ -299,6 +307,40 @@ type AutoSyncTriggerTests() =
                     retriedTwice,
                     Is.False,
                     "the retry itself is a delivery in flight and must not be duplicated"))
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``Only the acceptance a clear names is retired``() =
+        async {
+            let agent = createAgent ()
+            let path = "/repo/wt"
+            let acceptance = AutoSyncStore.nextAcceptance ()
+            let earlierAcceptance = AutoSyncStore.nextAcceptance ()
+
+            let! _ =
+                agent.PostAndAsyncReply(fun reply ->
+                    ClaimAutoSyncTrigger(path, "base-a", FirstAttempt, reply))
+
+            agent.Post(AcceptAutoSyncTrigger(path, "base-a", acceptance))
+            // A catch-up that read the earlier acceptance's record, delayed until after this
+            // revision was accepted again.
+            agent.Post(ClearAcceptedAutoSyncTrigger(path, earlierAcceptance))
+            let! afterStaleClear = agent.PostAndAsyncReply(GetState)
+
+            agent.Post(ClearAcceptedAutoSyncTrigger(path, acceptance))
+            let! afterOwnClear = agent.PostAndAsyncReply(GetState)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    afterStaleClear.AutoSyncTriggeredRevisions |> Map.tryFind path |> claimStage,
+                    Is.EqualTo(Some "accepted base-a"),
+                    "a clear decided for an earlier acceptance must leave the claim a later one published alone")
+                Assert.That(
+                    afterOwnClear.AutoSyncTriggeredRevisions |> Map.tryFind path,
+                    Is.EqualTo(None),
+                    "the acceptance a clear does name is retired, so its revision can be prompted again"))
         }
         |> Async.RunSynchronously
 
@@ -636,6 +678,109 @@ type AutoSyncTriggerTests() =
                     deliveries,
                     Is.EqualTo(2),
                     "falling behind the same revision again is new work and must prompt again")))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A catch-up clear cannot erase an acceptance made while it ran``() =
+        TestUtils.withTempDir "treemon-auto-sync-catchup-race" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+            // Mutable because the pause is armed for exactly one store write — the catch-up's own
+            // durable clear — and disarms itself when it takes effect.
+            let mutable pauseNextWrite = false
+
+            let deliver _ =
+                async {
+                    deliveries <- deliveries + 1
+                    return true
+                }
+
+            let store = loadedStore root
+            let agent = createAgent ()
+            let durableClearReached = TaskCompletionSource()
+            let reacceptanceFinished = TaskCompletionSource()
+
+            // Catch-up retires both layers of one acceptance: it posts the claim clear first, then
+            // clears the record. Holding that store write open makes the gap between the two exact,
+            // so the re-acceptance below lands inside it instead of racing for it.
+            let pausedStore =
+                { store with
+                    Update =
+                        fun path change ->
+                            if pauseNextWrite then
+                                pauseNextWrite <- false
+                                durableClearReached.SetResult()
+                                reacceptanceFinished.Task.Wait(TimeSpan.FromSeconds 30.0) |> ignore
+
+                            store.Update path change }
+
+            let dependencies = withAcceptedRecords agent pausedStore deliver
+
+            let observe behind =
+                gitData worktree "feature-a" behind (Some "base-a") false
+                |> trigger dependencies root "origin" "main" NoPr
+                |> TestUtils.runAsync
+
+            // One accepted prompt, aged past its window so the same revision is retryable again.
+            observe 2
+            let firstAcceptance = TestUtils.runAsync (store.Get worktree) |> Option.get
+
+            AutoSyncStore.setAccepted
+                store
+                worktree
+                { firstAcceptance with
+                    AcceptedAt = DateTimeOffset.UtcNow - acceptedRetryAge - TimeSpan.FromMinutes 1.0 }
+
+            pauseNextWrite <- true
+
+            let catchUp =
+                gitData worktree "feature-a" 0 (Some "base-a") false
+                |> trigger dependencies root "origin" "main" NoPr
+                |> Async.StartAsTask
+
+            TestUtils.runAsync (Async.AwaitTask durableClearReached.Task)
+            // Inside the gap: the claim is free and the expired record licenses one retry, which
+            // delivers and publishes a record of its own.
+            observe 2
+            reacceptanceFinished.SetResult()
+            TestUtils.runAsync (Async.AwaitTask catchUp)
+
+            let recordAfterRace = TestUtils.runAsync (store.Get worktree)
+            let claimAfterRace =
+                (agent.PostAndReply(GetState)).AutoSyncTriggeredRevisions |> Map.tryFind worktree
+            let deliveriesAfterRace = deliveries
+
+            // The surviving record is the only thing that can retire the surviving claim, so ageing
+            // it out must produce the one retry an expired acceptance is owed.
+            recordAfterRace
+            |> Option.iter (fun record ->
+                AutoSyncStore.setAccepted
+                    store
+                    worktree
+                    { record with
+                        AcceptedAt = DateTimeOffset.UtcNow - acceptedRetryAge - TimeSpan.FromMinutes 1.0 })
+
+            observe 2
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    recordAfterRace |> Option.map _.BaseRevision,
+                    Is.EqualTo(Some "base-a"),
+                    "an older catch-up must not erase the record of a prompt accepted after it read")
+                Assert.That(
+                    claimAfterRace |> claimStage,
+                    Is.EqualTo(Some "accepted base-a"),
+                    "the later acceptance keeps its claim, so both layers stay in step")
+                Assert.That(
+                    deliveriesAfterRace,
+                    Is.EqualTo(2),
+                    "the retry inside the gap is one prompt, not a duplicate")
+                Assert.That(
+                    deliveries,
+                    Is.EqualTo(3),
+                    "an accepted claim left without a record could never be retried again")))
 
     [<Test>]
     member _.``A record older than the retry age allows one more prompt``() =
@@ -1551,8 +1696,8 @@ type AutoSyncEndpointTests() =
             Assert.That(Result.isOk reenableResult, Is.True)
             Assert.That(secondBody, Is.EqualTo(body))
             Assert.That(
-                finalState.AutoSyncTriggeredRevisions |> Map.tryFind normalizedPath,
-                Is.EqualTo(Some(Accepted "base-a"))))
+                finalState.AutoSyncTriggeredRevisions |> Map.tryFind normalizedPath |> claimStage,
+                Is.EqualTo(Some "accepted base-a")))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1746,7 +1891,13 @@ type AutoSyncVerificationTests() =
                             agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
                     RecordAcceptedRevision =
                         fun worktreePath baseRevision ->
-                            async { agent.Post(AcceptAutoSyncTrigger(worktreePath, baseRevision)) }
+                            async {
+                                agent.Post(
+                                    AcceptAutoSyncTrigger(
+                                        worktreePath,
+                                        baseRevision,
+                                        AutoSyncStore.nextAcceptance ()))
+                            }
                     SelectTarget = fun _ -> async { return OpenSession "selected-working" }
                     Deliver =
                         fun request ->
@@ -1798,7 +1949,7 @@ type AutoSyncVerificationTests() =
                 Assert.That(TreemonConfig.readBaseBranch root, Is.EqualTo("develop"))
                 Assert.That(custom, Is.True)
                 Assert.That(
-                    finalState.AutoSyncTriggeredRevisions |> Map.tryFind path,
-                    Is.EqualTo(Some(Accepted "base-b"))))
+                    finalState.AutoSyncTriggeredRevisions |> Map.tryFind path |> claimStage,
+                    Is.EqualTo(Some "accepted base-b")))
         finally
             if Directory.Exists root then Directory.Delete(root, true)

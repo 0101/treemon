@@ -31,10 +31,12 @@ type DeliveryRequest =
 /// deduplication layers from cancelling each other out: `Delivering` is a live operation nothing may
 /// take over, while `Accepted` has handed suppression to the durable record and may be taken over
 /// exactly when that record says its retry window has passed — without which the claim would outlive
-/// every expiry and block the retry for as long as the server runs.
+/// every expiry and block the retry for as long as the server runs. `Accepted` carries the
+/// generation of the acceptance that published it, so a clear can name the acceptance it observed
+/// and leave a later one — which owns the record on disk now — untouched.
 type ClaimedRevision =
     | Delivering of baseRevision: string
-    | Accepted of baseRevision: string
+    | Accepted of baseRevision: string * generation: AutoSyncStore.AcceptanceGeneration
 
 /// Why a claim is being asked for. Only the durable record can prove that an accepted prompt aged
 /// out, so the caller carries that proof here; the claim itself still refuses while a delivery for
@@ -45,7 +47,7 @@ type ClaimReason =
 
 /// `ClaimRevision`/`ReleaseRevision` are the in-process claim; the accepted-revision operations are
 /// the durable, restart-safe layer on top of it (`AutoSyncStore`). `RecordAcceptedRevision` and
-/// `ClearAcceptedRevision` each write both sides of an acceptance — the durable record and the
+/// `RetireAcceptedRevision` each write both sides of one acceptance — the durable record and the
 /// claim's stage — so the two layers age out and are forgotten together.
 type TriggerDependencies =
     { ClaimRevision: string -> string -> ClaimReason -> Async<bool>
@@ -54,7 +56,12 @@ type TriggerDependencies =
       /// Completes only once the record is published, because the same call then makes the claim
       /// retryable and the record is what a retry re-reads to learn the prompt already happened.
       RecordAcceptedRevision: string -> string -> Async<unit>
-      ClearAcceptedRevision: string -> unit
+      /// Forgets both layers of *one* acceptance, named by the generation of the record the caller
+      /// read. Anything published after that read is a later acceptance holding a live claim, and
+      /// this must leave it whole. Ending auto-sync for a worktree outright — disable, merged
+      /// cleanup, removal — is not this: those forget the path's record and claim unconditionally,
+      /// which is `AutoSyncStore.clear` beside `ClearAutoSyncTrigger`.
+      RetireAcceptedRevision: string -> AutoSyncStore.AcceptanceGeneration -> unit
       /// The worktree's current PR status, keyed by canonical worktree path so the lookup resolves
       /// inside that worktree's own repo and a same-named branch elsewhere can never answer for it.
       /// Read again at action boundaries because `RefreshPr` runs on its own cadence.
@@ -246,9 +253,16 @@ let trigger
         match revision eligible gitData with
         | None ->
             // Catching up ends an accepted prompt's life: falling behind the same base revision
-            // again is new work, so both suppression layers must forget it and prompt again.
+            // again is new work, so both suppression layers must forget it and prompt again. Only
+            // the acceptance this observation actually read is retired: a prompt accepted after that
+            // read holds a live claim and owns the record on disk now, and erasing that record would
+            // leave its claim suppressing the revision with nothing left to age out.
             if gitData.MainBehindCount = 0 then
-                dependencies.ClearAcceptedRevision gitData.Path
+                let! acceptedRecord = dependencies.ReadAcceptedRevision gitData.Path
+
+                acceptedRecord
+                |> Option.iter (fun record ->
+                    dependencies.RetireAcceptedRevision gitData.Path record.Generation)
         | Some baseRevision ->
             let! acceptedRecord = dependencies.ReadAcceptedRevision gitData.Path
 

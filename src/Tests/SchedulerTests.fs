@@ -173,7 +173,8 @@ type WorktreeListRefreshTests() =
 
                 let accepted revision : Server.AutoSyncStore.AcceptedSyncRecord =
                     { BaseRevision = revision
-                      AcceptedAt = DateTimeOffset.UtcNow }
+                      AcceptedAt = DateTimeOffset.UtcNow
+                      Generation = Server.AutoSyncStore.nextAcceptance () }
 
                 Server.AutoSyncStore.setAccepted store livePath (accepted "base-a")
                 Server.AutoSyncStore.setAccepted store deletedPath (accepted "base-b")
@@ -267,7 +268,8 @@ type PrRefreshAutoSyncCleanupTests() =
 
                     let accepted revision : Server.AutoSyncStore.AcceptedSyncRecord =
                         { BaseRevision = revision
-                          AcceptedAt = DateTimeOffset.UtcNow }
+                          AcceptedAt = DateTimeOffset.UtcNow
+                          Generation = Server.AutoSyncStore.nextAcceptance () }
 
                     Server.AutoSyncStore.setAccepted autoSyncStore mergedPath (accepted "base-a")
                     Server.AutoSyncStore.setAccepted autoSyncStore unmergedPath (accepted "base-a")

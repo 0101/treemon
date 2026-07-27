@@ -630,6 +630,12 @@ let worktreeApi
     let autoSyncDependencies =
         RefreshScheduler.autoSyncDependencies agent sessionAgent activityStore autoSyncStore
 
+    /// Ends auto-sync bookkeeping for a worktree outright, whichever acceptance wrote the record.
+    /// Every caller drops the in-process claim in the same breath (`ClearAutoSyncTrigger` on
+    /// disable, `RemoveWorktree` on deletion), so no acceptance is left half-forgotten.
+    let clearAcceptedRecord path =
+        autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clear store path)
+
     let validatePath path =
         async {
             let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
@@ -699,7 +705,7 @@ let worktreeApi
 
                       let clearSyncState () =
                           agent.Post(RefreshScheduler.StateMsg.ClearAutoSyncTrigger ctx.Worktree.Path)
-                          autoSyncDependencies.ClearAcceptedRevision ctx.Worktree.Path
+                          clearAcceptedRecord ctx.Worktree.Path
 
                       // Rejected rather than silently ignored: the client's optimistic toggle rolls
                       // back onto its normal error surface instead of showing an enabled state that
@@ -782,7 +788,7 @@ let worktreeApi
                           | _ -> None)
                       |> Map.ofList
               }
-          deleteWorktree = deleteWorktree agent autoSyncDependencies.ClearAcceptedRevision rootPaths
+          deleteWorktree = deleteWorktree agent clearAcceptedRecord rootPaths
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
                   async {

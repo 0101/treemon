@@ -116,13 +116,19 @@ type StateMsg =
         baseRevision: string *
         reason: AutoSync.ClaimReason *
         AsyncReplyChannel<bool>
-    /// The delivery this claim was taken for was accepted: suppression passes to the durable record,
-    /// which is the only layer that can retire it again.
-    | AcceptAutoSyncTrigger of path: string * baseRevision: string
-    /// The durable record was cleared, so the accepted claim paired with it goes too — otherwise it
-    /// would suppress the same revision for the rest of the process with no record left to age out.
-    /// Only an accepted claim: a delivery still in flight owns its revision and is never superseded.
-    | ClearAcceptedAutoSyncTrigger of path: string
+    /// The delivery this claim was taken for was accepted: suppression passes to the durable record
+    /// published under `acceptance`, which is the only layer that can retire it again.
+    | AcceptAutoSyncTrigger of
+        path: string *
+        baseRevision: string *
+        acceptance: AutoSyncStore.AcceptanceGeneration
+    /// One acceptance's durable record was cleared, so the accepted claim published under the same
+    /// generation goes too — otherwise it would suppress the same revision for the rest of the
+    /// process with no record left to age out. Scoped to that generation, never to the path alone: a
+    /// claim accepted after the clear was decided is a *later* acceptance with a record of its own,
+    /// and retiring it would recreate exactly the orphaned-claim state this message exists to
+    /// prevent. A delivery still in flight owns its revision and is never superseded either.
+    | ClearAcceptedAutoSyncTrigger of path: string * acceptance: AutoSyncStore.AcceptanceGeneration
     | ReleaseAutoSyncTrigger of path: string * baseRevision: string
     | ClearAutoSyncTrigger of path: string
     | TryBeginAutoSyncLaunch of path: string * AsyncReplyChannel<bool>
@@ -422,7 +428,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             | None, _ -> true
             // A newer base revision is new work: it supersedes whatever is held for the old one.
             | Some(AutoSync.Delivering held), _ -> held <> baseRevision
-            | Some(AutoSync.Accepted held), AutoSync.FirstAttempt -> held <> baseRevision
+            | Some(AutoSync.Accepted(held, _)), AutoSync.FirstAttempt -> held <> baseRevision
             // The durable record aged out, and nothing is in flight to duplicate.
             | Some(AutoSync.Accepted _), AutoSync.RetryExpiredAccept -> true
 
@@ -436,7 +442,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         else
             state
 
-    | AcceptAutoSyncTrigger(path, baseRevision) ->
+    | AcceptAutoSyncTrigger(path, baseRevision, acceptance) ->
         // Only the claim this delivery still holds may be marked: a newer revision claimed while it
         // was in flight owns the entry now and must not inherit the older prompt's acceptance.
         match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
@@ -444,12 +450,12 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             { state with
                 AutoSyncTriggeredRevisions =
                     state.AutoSyncTriggeredRevisions
-                    |> Map.add path (AutoSync.Accepted baseRevision) }
+                    |> Map.add path (AutoSync.Accepted(baseRevision, acceptance)) }
         | _ -> state
 
-    | ClearAcceptedAutoSyncTrigger path ->
+    | ClearAcceptedAutoSyncTrigger(path, acceptance) ->
         match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
-        | Some(AutoSync.Accepted _) ->
+        | Some(AutoSync.Accepted(_, held)) when held = acceptance ->
             { state with
                 AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
         | _ -> state
@@ -527,7 +533,9 @@ let internal autoSyncDependencies
             agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reason, reply))
       ReleaseRevision = fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
       // Without a durable store (fixture mode) nothing is ever recorded, so nothing can expire and
-      // nothing licenses a retry: the in-process claim remains the only deduplication.
+      // nothing licenses a retry: the in-process claim remains the only deduplication, and with no
+      // record to name an acceptance, catch-up has nothing to retire either — an accepted revision
+      // simply stays claimed for the life of that process.
       ReadAcceptedRevision =
         fun path ->
             match autoSyncStore with
@@ -536,6 +544,10 @@ let internal autoSyncDependencies
       RecordAcceptedRevision =
         fun path baseRevision ->
             async {
+                // The generation names this one acceptance, so the record and the claim below can
+                // only ever be retired together and only by a clear that observed this acceptance.
+                let acceptance = AutoSyncStore.nextAcceptance ()
+
                 // Both layers move together, and in this order: a claim made retryable ahead of its
                 // record would let a concurrent trigger that began from the expired record take the
                 // claim over, re-read the stale record it had already seen, and prompt twice.
@@ -546,15 +558,19 @@ let internal autoSyncDependencies
                             store
                             path
                             { BaseRevision = baseRevision
-                              AcceptedAt = DateTimeOffset.UtcNow }
+                              AcceptedAt = DateTimeOffset.UtcNow
+                              Generation = acceptance }
                 | None -> ()
 
-                agent.Post(AcceptAutoSyncTrigger(path, baseRevision))
+                agent.Post(AcceptAutoSyncTrigger(path, baseRevision, acceptance))
             }
-      ClearAcceptedRevision =
-        fun path ->
-            agent.Post(ClearAcceptedAutoSyncTrigger path)
-            autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clear store path)
+      RetireAcceptedRevision =
+        fun path acceptance ->
+            // Both operations name the acceptance, so their order no longer matters and neither can
+            // touch a prompt accepted after the read that asked for this: an acceptance in between
+            // keeps both its record and its claim, and the pair stays synchronized.
+            agent.Post(ClearAcceptedAutoSyncTrigger(path, acceptance))
+            autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clearAccepted store path acceptance)
       ReadPrStatus =
         fun path ->
             async {
