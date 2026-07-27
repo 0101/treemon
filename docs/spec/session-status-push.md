@@ -193,10 +193,11 @@ candidate set before collapsing it. The representative's own `LastSeen` still de
 contributes an open dot, while its `UpdatedAt` keeps it eligible for footer and resume ownership.
 
 The remoting contract exposes `toggleAutoSync`. When enabled and the branch falls behind, `AutoSync`
-uses the same live and retained session state to select a target identity, then sends a typed
-agent-prompt through `SessionBridge`. A matching live registration receives it directly; transient
-delivery failure queues it for retry, while no live target triggers the guarded fallback launch.
-The passive reporting extension never sends prompts.
+uses the same live and retained session state but preserves whether the selected identity is open.
+An open session receives a typed agent prompt through `SessionBridge`; transient delivery failure
+queues it for retry. With no open session, AutoSync first attempts the bounded mechanical path
+defined in `docs/spec/worktree-monitor.md` and uses retained identity or a guarded launch only when
+that path requires agent fallback. The passive reporting extension never originates prompts.
 
 The projection keeps the activity source through the `AgentActivity` union and exposes every open
 session for status/context rendering. Overview snapshot capture uses the same live session

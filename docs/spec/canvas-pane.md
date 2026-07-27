@@ -118,7 +118,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - The Elmish client accepts only messages from `http://127.0.0.1:5002`, validates the payload shape, and turns it into Elmish messages.
 - The client forwards valid payloads through Fable.Remoting with `sendCanvasMessage`.
 - The server forwards live messages by HTTP POST to the registered bridge `/inject` endpoint.
-- `SessionBridge` wraps the payload in a typed `{kind:"canvas",prompt}` envelope; the extension maps that kind to the unchanged `[canvas] {payload}` session prompt and sends it through its serialized `enqueueSend` chain.
+- `SessionBridge` wraps the payload in a typed `{kind:"canvas",prompt}` envelope; the extension maps that kind to the unchanged `[canvas] {payload}` session prompt and sends it through its serialized `enqueueSend` chain. Identical sends already queued but not started are coalesced; once `session.send` starts, the same payload may be queued again.
 - When the reporting extension later publishes that `[canvas]` prompt as session activity, the
   dashboard collapse projects it through `UserMessageFormatting`: the first-party
   `canvas-selection` action displays its human-readable `request`, other known actions get concise
@@ -129,7 +129,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 
 ### Message Queue
 
-- If no live bridge can take the message, the server queues it per worktree (cap 10, 5-min TTL) and returns `Queued`. Draining re-resolves the current target — see `docs/spec/canvas-interaction-routing.md`.
+- If no live bridge can take the message, the server queues it per worktree (cap 10, 5-min TTL) and returns `Queued`. An identical pending envelope for the same target session occupies one entry; different targets or payloads remain distinct. Draining re-resolves the current target — see `docs/spec/canvas-interaction-routing.md`.
 - While queued, the client shows a `Waiting for session…` banner instead of an immediate error.
 - The banner clears to `Idle` only when the target worktree's session actually delivers (never flipped to `Failed` by a wall-clock timer). The user may dismiss it manually, and the server may silently expire the message after its TTL.
 

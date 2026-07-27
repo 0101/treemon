@@ -4,7 +4,7 @@
 
 - At-a-glance visibility into all active worktrees across multiple repositories
 - Surface activity signals from multiple sources (git, beads, coding AI tools, Azure DevOps, GitHub) so stalled branches are obvious
-- Keep worktrees current through an agent-driven auto-sync preference rather than a mechanical Git pipeline
+- Keep enabled worktrees current through an open-session agent path and a narrow mechanical fast path when no coding session is open
 - Lightweight polling — no hooks or agents inside worktrees
 - Zero configuration — point at root directories, provider detection is automatic from git remotes
 
@@ -64,19 +64,21 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - The unpressed toggle uses the normal neutral card-action style. The pressed state reuses the green glow of the active-terminal button and persists per branch in `.treemon.json` under `autoSyncBranches`.
 - Clicking the toggle updates the card optimistically and calls `IWorktreeApi.toggleAutoSync`; an API error restores the previous state and activates the dashboard's normal error surface until the next successful data refresh. The card's `S` key binding invokes the same toggle action.
 - While persistence is pending for a worktree, the toggle is disabled and additional mouse or `S` key inputs for that path are ignored. Other worktrees remain independently toggleable, and the pending state clears on either success or failure.
-- `autoSyncBranches` is intentionally not pruned when a worktree is archived or deleted. Branch-name reuse may restore the preference; avoiding cleanup machinery is preferred for this low-impact case.
-- When enabled, fresh Git observations request a sync when the worktree is behind a newly observed base revision. The base revision, not repeated polling of the same behind count, is the deduplication identity.
+- Archiving or deleting a worktree does not prune `autoSyncBranches`; branch-name reuse may restore the preference. A reconciled merged PR is the exception: its local branch is removed automatically, its trigger state is cleared, and the API rejects attempts to re-enable it while the merged state is known.
+- When enabled, fresh Git observations start a sync only when the worktree is behind a newly observed base revision. The base revision, not repeated polling of the same behind count, is the deduplication identity.
+- An in-process revision claim prevents concurrent delivery. After an agent prompt is accepted, the canonical worktree path, base revision, and acceptance time are also persisted in a port-scoped runtime store. The same revision is suppressed across restarts for one hour; a new revision triggers immediately. Catch-up, disable, merged-branch cleanup, and worktree removal clear the durable record.
 - Scheduler trigger and fallback-launch guards use the resolved canonical worktree path, so differently-cased API input cannot create or clear alternate keys.
 - Refresh-triggered delivery runs as guarded background work so bridge HTTP, registration grace, or fallback launch latency cannot stall the sequential scheduler. The explicit toggle API awaits its immediate trigger attempt before returning.
-- The prompt targets the active open session when one is running; otherwise it targets the open
-  session with the greatest activity `UpdatedAt`. A retained/offline session identity is used only
-  when no open session exists (see `docs/spec/session-status-push.md`).
-- A live session receives the prompt immediately through `SessionBridge`; the extension serializes it through the same `enqueueSend` chain used by canvas messages, including while the session is busy.
-- `SessionBridge` POSTs a typed `{kind,prompt}` envelope. The extension passes `agent-prompt` text verbatim to `session.send`; `canvas` retains the existing `[canvas]` display/routing prefix.
+- The target model distinguishes an open session from retained/offline identity. The active open session wins; otherwise the open session with the greatest activity `UpdatedAt` wins. Retained identity is used only for agent fallback when no open session exists (see `docs/spec/session-status-push.md`).
+- With an open session, behavior remains agent-driven: `SessionBridge` sends the prompt to that session without performing Git mutations. The prompt requires a safe sync and appropriate checks, then a push only when the branch has an open pull request.
+- With no open session, Treemon first attempts a bounded Git-only sync. It refuses a dirty worktree, fetches `{upstreamRemote}/{baseBranch}` for that worktree, tries a fast-forward and then a non-editing merge, aborts conflicts, and verifies that the fetched base revision is an ancestor of `HEAD`.
+- After a successful mechanical sync, a lightweight live provider query decides the push rule: an open pull request gets a non-force push of the current branch; no open pull request finishes locally; unknown PR state falls back to an agent. The mechanical path does not run project builds or tests.
+- Dirty state, conflicts, failed aborts, command failures, unknown PR state, and failed pushes all fall back to one agent prompt containing only a closed structured reason. Raw Git output, paths, filenames, branch text, and commit messages never enter the prompt.
+- One per-worktree operation guard covers target selection, mechanical work, and delivery, so a later fetch cannot overlap an in-progress sync even if it observes a newer base revision.
+- `SessionBridge` POSTs a typed `{kind,prompt}` envelope. Identical pending envelopes for the same worktree and target session occupy one server queue entry, and the extension similarly coalesces identical sends that have not started. Once `session.send` starts, a later identical prompt is eligible again. See `docs/spec/canvas-pane.md` for the shared queue contract.
 - A selected session whose bridge is not registered gets a bounded registration grace period. If its bridge appears, delivery continues there; only a confirmed absence after the grace period opens a terminal and starts a new session with the sync prompt.
 - A failed POST to a known live bridge queues the session-targeted prompt for retry instead of launching a replacement session. A per-worktree in-flight guard prevents duplicate fallback launches.
-- The prompt asks the agent to sync with `{upstreamRemote}/{baseBranch}` when safe, preserve in-progress work, and run appropriate checks.
-- Treemon does not run a separate pull/merge/conflict-resolution/test/commit/push pipeline. Agent prompt acceptance is observable; completion of the Git synchronization is not.
+- Agent prompt acceptance is observable; completion of agent-owned synchronization is not. Mechanical completion is accepted only after the Git and conditional-push checks above succeed.
 
 ### Contextual Card Actions
 
@@ -141,6 +143,7 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 
 - Auto-detected from git remote URL alongside AzDo
 - Fetched via `gh api graphql`: open + recent closed PRs, review thread resolution counts (`CommentSummary.WithResolution`)
+- Per provider branch, an open PR wins; otherwise the most recently updated closed PR wins. A newer merged PR must not be masked by an older closed-unmerged PR for a reused branch name.
 - Review thread resolution uses GraphQL (`PullRequest.reviewThreads.nodes.isResolved`) — REST API does not expose resolution status
 - Dashboard renders `"{unresolved}/{total} threads"` badge, matching ADO format; dimmed when all resolved; action button only when unresolved threads exist
 - Merged PRs return `WithResolution(0, 0)` without a network call; PRs with zero threads show no badge
@@ -237,14 +240,15 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure live fold, SQLite (WAL) base-state/history store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
 | `src/Server/UserMessageFormatting.fs` | Server-owned system-reminder suppression and canvas prompt projection shared by ingestion, activity, and footer fields |
 | `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, and per-worktree provider config |
-| `src/Server/AutoSync.fs` | Agent auto-sync prompt, open-session-first target selection, base-revision eligibility, and live-delivery/fallback orchestration |
+| `src/Server/AutoSync.fs` | Open-session agent delivery, sessionless mechanical-sync orchestration, structured fallback reasons, and base-revision eligibility |
+| `src/Server/AutoSyncStore.fs` | Port-scoped accepted-base-revision persistence used for restart-safe prompt deduplication |
 | `src/Server/CardEventLog.fs` | Transient post-fork lifecycle events surfaced on worktree cards through `getSyncStatus` |
 | `src/Server/SessionBridge.fs` | Generic session registration, liveness, queued prompt delivery, and forwarding |
 | `src/Extension/extension.mjs`, `session-prompt.mjs` | Session bridge HTTP receiver, serialized `session.send` queue, and typed prompt-transport decoding |
-| `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching |
-| `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI, including the bounded recent-closed window |
+| `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching, and lightweight live open-PR lookup |
+| `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching, open-first per-branch selection, and lightweight live open-PR lookup |
 | `src/Server/MergedPrStore.fs` | Durable merged-PR fallback reconciliation, identity checks, and runtime-state persistence |
-| `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, upstream-read state, HEAD identity, observed base revision, dirty detection, work metrics |
+| `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, dirty detection, bounded mechanical sync, and non-force branch push |
 | `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, and upstream remote |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
@@ -273,7 +277,9 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Push model over log-parsing for coding-tool status: explicit lifecycle events beat mtime inference; one pure server fold replaces three per-provider detectors (see `docs/spec/session-status-push.md`)
 - `WorktreePath` over `RepoId * BranchName` composite: already used across the API, inherently unique, no new types needed
 - Repo-scoped branch events: prevents name collisions across repos
-- Agent-driven auto-sync over a deterministic pipeline: one persistent preference delegates synchronization and conflict handling to the coding session instead of maintaining a second Git/test/push implementation.
+- Narrow mechanical sync with agent fallback: when no session is open, Treemon may fetch and merge only a clean worktree and may non-force push only after a live open-PR result. Any ambiguity or failure delegates to an agent, and project-specific checks remain agent/CI work.
+- Action-time PR lookup over cached dashboard state: the conditional push decision uses a lightweight live provider query because cached PR data is eventual and cannot safely distinguish every closed state.
+- Restart-safe accepted-revision suppression: a one-hour durable acceptance record prevents a restart from re-prompting work already queued to an agent while still allowing eventual retry and immediate delivery for a newer base revision.
 - Nonblocking polling over awaited refresh delivery: scheduled Git observations dispatch guarded auto-sync work in the background to preserve polling cadence, while the explicit toggle path awaits delivery so its request lifecycle stays deterministic.
 - Open-session-first auto-sync target: prefer the active open winner, then the greatest-`UpdatedAt`
   open idle session; use retained/offline identity only when no open session exists. Delivery

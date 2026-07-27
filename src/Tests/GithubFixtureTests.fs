@@ -86,6 +86,44 @@ type ParsePrListFixtureTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type GithubFirstPerBranchFixtureTests() =
+
+    /// Mirrors fetchGithubPrStatuses: open PRs first, then closed PRs newest-updated first.
+    let fetchedPrs () =
+        (readFixture "pr-list-branch-reuse-open.json" |> parsePrList)
+        @ (readFixture "pr-list-branch-reuse-closed.json" |> parsePrList)
+
+    [<Test>]
+    member _.``One PR per branch is kept``() =
+        let result = fetchedPrs () |> firstPerBranch
+        let branches = result |> List.map _.BranchName
+        Assert.That(branches, Is.EquivalentTo([ "feature/reopened-work"; "feature/reused-name" ]))
+
+    [<Test>]
+    member _.``Newer merged PR wins over older closed-unmerged PR on a reused branch``() =
+        let result = fetchedPrs () |> firstPerBranch
+        let pr = result |> List.find (fun pr -> pr.BranchName = "feature/reused-name")
+        Assert.That(pr.PrNumber, Is.EqualTo(20))
+        Assert.That(pr.IsMerged, Is.True)
+
+    [<Test>]
+    member _.``Open PR wins over merged PR on the same branch``() =
+        let result = fetchedPrs () |> firstPerBranch
+        let pr = result |> List.find (fun pr -> pr.BranchName = "feature/reopened-work")
+        Assert.That(pr.PrNumber, Is.EqualTo(21))
+        Assert.That(pr.IsMerged, Is.False)
+
+    [<Test>]
+    member _.``Filtering to known branches keeps the merged winner``() =
+        let result = fetchedPrs () |> filterRelevantPrs (set [ "feature/reused-name" ])
+        Assert.That(result, Has.Exactly(1).Items)
+        Assert.That(result[0].PrNumber, Is.EqualTo(20))
+        Assert.That(result[0].IsMerged, Is.True)
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type ParseActionRunsFixtureTests() =
 
     [<Test>]

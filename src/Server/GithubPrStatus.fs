@@ -212,10 +212,13 @@ let private fetchActionRuns (remote: GithubRemote) (branch: string) =
         return enriched |> Array.toList
     }
 
+/// Expects the fetch order produced by fetchGithubPrStatuses: open PRs first,
+/// then closed PRs sorted by most recently updated. distinctBy keeps the first
+/// occurrence, so an open PR wins and otherwise the newest closed PR wins.
+/// Sorting by IsMerged here would promote an old closed-unmerged PR above a
+/// newer merged PR for a reused branch name and mask the merge.
 let internal firstPerBranch (prs: ParsedGithubPr list) =
-    prs
-    |> List.sortBy _.IsMerged
-    |> List.distinctBy _.BranchName
+    prs |> List.distinctBy _.BranchName
 
 let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedGithubPr list) =
     prs

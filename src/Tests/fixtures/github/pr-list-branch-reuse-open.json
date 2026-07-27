@@ -1,0 +1,10 @@
+[
+  {
+    "number": 21,
+    "title": "Second attempt at the shared feature",
+    "state": "open",
+    "draft": false,
+    "merged_at": null,
+    "head": { "ref": "feature/reopened-work", "sha": "sha-reopened-work-open" }
+  }
+]
