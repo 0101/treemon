@@ -192,24 +192,12 @@ type DiffEndpointRepositoryConfigurationTests() =
     /// A repository root and one linked worktree under a throwaway directory. Only the diff
     /// endpoint's own view of them matters here, so neither is a real Git worktree.
     let withRepository (name: string) (action: string -> string -> unit) =
-        let tempDir =
-            Path.Combine(
-                Path.GetTempPath(),
-                $"treemon-diff-config-{name}-{Guid.NewGuid():N}"
-            )
-
-        let repoRoot = Path.Combine(tempDir, "repo")
-        let linked = Path.Combine(tempDir, "linked")
-        Directory.CreateDirectory(repoRoot) |> ignore
-        Directory.CreateDirectory(linked) |> ignore
-
-        try
-            action repoRoot linked
-        finally
-            try
-                Directory.Delete(tempDir, recursive = true)
-            with _ ->
-                ()
+        TestUtils.withTempDir $"treemon-diff-config-{name}" (fun tempDir ->
+            let repoRoot = Path.Combine(tempDir, "repo")
+            let linked = Path.Combine(tempDir, "linked")
+            Directory.CreateDirectory(repoRoot) |> ignore
+            Directory.CreateDirectory(linked) |> ignore
+            action repoRoot linked)
 
     /// A server whose scheduler keys the repository by its root exactly as discovery does, which is
     /// what makes the configuration the endpoint reads the root's own.
