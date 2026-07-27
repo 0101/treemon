@@ -10,6 +10,7 @@
     <Compile Include="SqliteTestDatabase.fs" />
     <Compile Include="WorktreeFixtures.fs" />
     <Compile Include="GitTestHelpers.fs" />
+    <Compile Include="ProcessRunnerTests.fs" />
     <Compile Include="WorktreeDiffTests.fs" />
     <Compile Include="DiffEndpointTests.fs" />
     <Compile Include="ServerFixture.fs" />

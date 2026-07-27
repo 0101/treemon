@@ -177,7 +177,8 @@ not a settled one.
 | `src/Server/BeadsStatus.fs` | `bd list --json` invocation |
 | `src/Server/Program.fs` | Startup deploy-branch read (`git rev-parse --abbrev-ref HEAD`) |
 | `src/Server/WorktreeDiff.fs` | Byte-level argument-list caller; per-operation error mapping and capture-limit constants |
-| `src/Tests/WorktreeDiffTests.fs` | Argument-list execution, limits, timeout, and start-failure tests |
+| `src/Tests/ProcessRunnerTests.fs` | Argument-list execution, limits, timeout, start-failure, and text/exit-wrapper tests |
+| `src/Tests/WorktreeDiffTests.fs` | Diff-viewer Git consumers over the byte-oriented entry points |
 | `src/Tests/CreateWorktreeServerTests.fs` | Git worktree and post-fork argv regression tests |
 | `src/Tests/UpstreamRemoteTests.fs` | `buildRemoteUrlArgs` argument-list assertions |
 | `src/Tests/SmokeTests.fs` | Non-production live-server proof that Git collection populates dashboard data |
