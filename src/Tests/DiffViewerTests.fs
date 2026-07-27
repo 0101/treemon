@@ -2775,6 +2775,315 @@ type DiffViewerE2ETests() =
         }
 
     [<Test>]
+    member this.``a remembered selection expands its collapsed ancestors on load and after refresh``() =
+        task {
+            // Client is forced collapsed by its parent's size, so the remembered file sits two
+            // levels down behind a computed default that no explicit toggle has touched.
+            let rememberedPath = "src/Production code-Client-Views/file1.fs"
+            let rememberedIdentity = "id-Production code-Client-Views-1"
+            let rememberedKey = $"""["modified",null,"{rememberedPath}"]"""
+
+            let files =
+                Array.concat
+                    [ categoryFiles [ "Production code"; "Client"; "Views" ] 2
+                      categoryFiles [ "Production code"; "Client"; "State" ] 1
+                      categoryFiles [ "Production code"; "Server" ] 4 ]
+
+            do!
+                this.Page.AddInitScriptAsync(
+                    $"""localStorage.setItem(
+                        'treemon.diff.selection:/e2e-diff-worktree',
+                        '{rememberedKey}'
+                    );"""
+                )
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.RouteFiles()
+            do! this.Goto()
+
+            let restoredPanel () =
+                this.Page
+                    .Locator($".file-entry[data-identity='{rememberedIdentity}'].active")
+                    .Locator("xpath=..")
+                    .Locator("xpath=..")
+                    .Locator("#patch .d2h-wrapper")
+
+            do! restoredPanel().WaitForAsync()
+
+            let! restored =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! visible =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            do! this.RefreshCategories()
+            do! restoredPanel().WaitForAsync()
+
+            let! afterRefresh =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+            let! afterRefreshVisible =
+                this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+            let! panelState =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.querySelector('.file-entry.active').dataset.identity,
+                        String(document.querySelectorAll('.file-panel').length),
+                        String(document.querySelectorAll('#patch').length)
+                    ]"""
+                )
+
+            let expectedDisclosure =
+                [| "Production code|true"
+                   "Production code > Client|true"
+                   "Production code > Client > Views|true"
+                   "Production code > Client > State|true"
+                   "Production code > Server|false" |]
+
+            let expectedVisible =
+                [| "src/Production code-Client-Views/file0.fs"
+                   rememberedPath
+                   "src/Production code-Client-State/file0.fs" |]
+
+            Assert.Multiple(fun () ->
+                Assert.That(restored, Is.EqualTo(expectedDisclosure))
+                Assert.That(visible, Is.EqualTo(expectedVisible))
+                Assert.That(afterRefresh, Is.EqualTo(expectedDisclosure))
+                Assert.That(afterRefreshVisible, Is.EqualTo(expectedVisible))
+                Assert.That(
+                    panelState,
+                    Is.EqualTo([| rememberedIdentity; "1"; "1" |])
+                ))
+        }
+
+    [<Test>]
+    member this.``collapsing an ancestor clears the selection and ignores a late patch response``() =
+        task {
+            let fileStarted =
+                TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let releaseFile =
+                TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let fileHandlerFinished =
+                TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+            let files =
+                Array.concat
+                    [ categoryFiles [ "Production code"; "Client" ] 2
+                      categoryFiles [ "Production code"; "Server" ] 1
+                      categoryFiles [ "Docs" ] 1 ]
+
+            do!
+                this.Page.AddInitScriptAsync(
+                    """(() => {
+                        window.__categoryFileOutcome = null;
+                        window.__summaryRequests = 0;
+                        const originalFetch = window.fetch;
+                        window.fetch = function(input) {
+                            const url = typeof input === 'string' ? input : input.url;
+                            const request = originalFetch.apply(this, arguments);
+                            if (url.includes('diff-summary')) window.__summaryRequests += 1;
+                            if (url.includes('diff-file')) {
+                                request.then(
+                                    () => { window.__categoryFileOutcome = 'completed'; },
+                                    error => { window.__categoryFileOutcome = error.name; }
+                                );
+                            }
+                            return request;
+                        };
+                    })()"""
+                )
+            do! this.RouteSummary(configuredSummaryJson files)
+            // The patch response is held open, so the collapse happens while the request is still
+            // in flight and the response is only released afterwards.
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-file?*",
+                    fun route ->
+                        task {
+                            fileStarted.TrySetResult(true) |> ignore
+                            let! _ = releaseFile.Task
+
+                            try
+                                do!
+                                    route.FulfillAsync(
+                                        RouteFulfillOptions(
+                                            ContentType = "application/json",
+                                            Body =
+                                                fileResultJson
+                                                    "text"
+                                                    "id-Production code-Client-0"
+                                                    "src/Production code-Client/file0.fs"
+                                                    (None: string option)
+                                                    "modified"
+                                        )
+                                    )
+                            with _ ->
+                                ()
+
+                            fileHandlerFinished.TrySetResult(true) |> ignore
+                        }
+                        :> Task
+                )
+            do! this.Goto()
+            do! this.ActivateFile("id-Production code-Client-0")
+            let! _ = fileStarted.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+
+            // Collapsing the grandparent, not the leaf that holds the row.
+            do! this.ToggleCategory("Production code")
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__categoryFileOutcome === 'AbortError'"
+                )
+
+            let collapsedState () =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        String(document.querySelectorAll('.file-entry.active').length),
+                        String(document.querySelectorAll('.file-entry[aria-expanded="true"]').length),
+                        String(document.querySelectorAll('.file-panel').length),
+                        String(document.querySelectorAll('#patch').length),
+                        String(state.selected === null),
+                        String(state.currentResult === null),
+                        String(localStorage.getItem('treemon.diff.selection:/e2e-diff-worktree') === null)
+                    ]"""
+                )
+
+            let! collapsed = collapsedState ()
+
+            releaseFile.TrySetResult(true) |> ignore
+            let! _ = fileHandlerFinished.Task.WaitAsync(TimeSpan.FromSeconds(10.0))
+            // A summary round-trip gives the released response every chance to render before the
+            // second reading, so "ignored" is proven rather than merely not yet observed.
+            do! this.RefreshCategories()
+            let! _ =
+                this.Page.WaitForFunctionAsync("() => window.__summaryRequests === 2")
+            let! afterLateResponse = collapsedState ()
+
+            let! disclosure =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            let expected =
+                [| "0"; "0"; "0"; "0"; "true"; "true"; "true" |]
+
+            Assert.Multiple(fun () ->
+                Assert.That(collapsed, Is.EqualTo(expected))
+                Assert.That(afterLateResponse, Is.EqualTo(expected))
+                Assert.That(
+                    disclosure,
+                    Is.EqualTo(
+                        [| "Production code|false"
+                           "Production code > Client|true"
+                           "Production code > Server|true"
+                           "Docs|true" |]
+                    )
+                ))
+        }
+
+    [<Test>]
+    member this.``opening a file in another category keeps a single panel open``() =
+        task {
+            let files =
+                Array.append (categoryFiles [ "Docs" ] 2) (categoryFiles [ "Instructions" ] 1)
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.RouteFiles()
+            do! this.Goto()
+
+            let openPatch (identity: string) =
+                task {
+                    do! this.ActivateFile(identity)
+                    do!
+                        this.Page
+                            .Locator($".file-entry[data-identity='{identity}'].active")
+                            .Locator("xpath=..")
+                            .Locator("xpath=..")
+                            .Locator("#patch .d2h-wrapper")
+                            .WaitForAsync()
+                }
+
+            do! openPatch "id-Docs-0"
+            do! openPatch "id-Instructions-0"
+
+            let! accordion =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.querySelector('.file-entry.active').dataset.identity,
+                        String(document.querySelectorAll('.file-entry[aria-expanded="true"]').length),
+                        String(document.querySelectorAll('.file-panel').length),
+                        String(document.querySelectorAll('#patch').length),
+                        document
+                            .querySelector('.file-panel')
+                            .closest('.category-item')
+                            .querySelector('.category-name')
+                            .textContent
+                    ]"""
+                )
+            let! disclosure =
+                this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    accordion,
+                    Is.EqualTo([| "id-Instructions-0"; "1"; "1"; "1"; "Instructions" |])
+                )
+                Assert.That(
+                    disclosure,
+                    Is.EqualTo([| "Docs|true"; "Instructions|true" |])
+                ))
+        }
+
+    [<Test>]
+    member this.``arrow home and end skip file rows under collapsed categories``() =
+        task {
+            let files =
+                Array.concat
+                    [ categoryFiles [ "Docs" ] 2
+                      categoryFiles [ "Tests" ] 6
+                      categoryFiles [ "Instructions" ] 1 ]
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.RouteFiles()
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(2).WaitForAsync()
+
+            let focusedPath () =
+                this.Page.EvaluateAsync<string>(
+                    "() => document.activeElement.querySelector('.file-path').textContent"
+                )
+
+            let pressFrom (identity: string) (key: string) =
+                task {
+                    do! this.Page.Locator($".file-entry[data-identity='{identity}']").FocusAsync()
+                    do! this.Page.Keyboard.PressAsync(key)
+                    return! focusedPath ()
+                }
+
+            let press (key: string) =
+                task {
+                    do! this.Page.Keyboard.PressAsync(key)
+                    return! focusedPath ()
+                }
+
+            // The six Tests rows sit between Docs and Instructions in document order but are hidden.
+            let! down = pressFrom "id-Docs-1" "ArrowDown"
+            let! wrapDown = press "ArrowDown"
+            let! wrapUp = press "ArrowUp"
+            let! home = press "Home"
+            let! last = press "End"
+
+            do! this.ToggleCategory("Tests")
+
+            let! revealed = pressFrom "id-Docs-1" "ArrowDown"
+            let! revealedHome = press "Home"
+
+            Assert.Multiple(fun () ->
+                Assert.That(down, Is.EqualTo("src/Instructions/file0.fs"))
+                Assert.That(wrapDown, Is.EqualTo("src/Docs/file0.fs"))
+                Assert.That(wrapUp, Is.EqualTo("src/Instructions/file0.fs"))
+                Assert.That(home, Is.EqualTo("src/Docs/file0.fs"))
+                Assert.That(last, Is.EqualTo("src/Instructions/file0.fs"))
+                Assert.That(revealed, Is.EqualTo("src/Tests/file0.fs"))
+                Assert.That(revealedHome, Is.EqualTo("src/Docs/file0.fs")))
+        }
+
+    [<Test>]
     member this.``the embedded configure action reuses the refresh control's treatment``() =
         task {
             do! this.RouteSummary(readySummaryJson [| firstFile |])

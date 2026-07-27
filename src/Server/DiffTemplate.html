@@ -943,6 +943,28 @@ function fileEntries() {
     return Array.from(document.querySelectorAll('#file-list .file-entry'));
 }
 
+// The category headers a node sits under, innermost first. A flat list nests nothing, so every row
+// there has an empty chain and is trivially reachable.
+function ancestorCategoryHeaders(node) {
+    var headers = [];
+    var panel = node.closest('.category-panel');
+    while (panel) {
+        headers.push(panel.previousElementSibling);
+        panel = panel.parentElement.closest('.category-panel');
+    }
+    return headers;
+}
+
+// Category disclosure decides what a reader can reach, so navigation reads the same source of truth
+// the CSS does: a row counts as visible only while every ancestor header is expanded.
+function visibleFileEntries() {
+    return fileEntries().filter(function(entry) {
+        return ancestorCategoryHeaders(entry).every(function(header) {
+            return header.getAttribute('aria-expanded') === 'true';
+        });
+    });
+}
+
 function showFileActions(path) {
     var range = document.createRange();
     range.selectNodeContents(path);
@@ -1026,7 +1048,7 @@ function createFileItem(file, index) {
     }
 
     button.addEventListener('keydown', function(event) {
-        var buttons = fileEntries();
+        var buttons = visibleFileEntries();
         var current = buttons.indexOf(button);
         var target = null;
         if (event.key === 'ArrowDown') target = buttons[(current + 1) % buttons.length];
@@ -1148,11 +1170,6 @@ function createCategorySection(node, depth, forcedCollapsed) {
     count.setAttribute('aria-label', node.count + (node.count === 1 ? ' file' : ' files'));
 
     button.append(name, count);
-    button.addEventListener('click', function() {
-        var expanded = button.getAttribute('aria-expanded') !== 'true';
-        button.setAttribute('aria-expanded', String(expanded));
-        state.categoryToggles.set(categoryToggleKey(node.path), expanded);
-    });
 
     var panel = document.createElement('div');
     panel.className = 'category-panel';
@@ -1164,6 +1181,18 @@ function createCategorySection(node, depth, forcedCollapsed) {
         return createFileItem(entry.file, entry.index);
     });
     panel.append.apply(panel, children.concat(rows));
+
+    button.addEventListener('click', function() {
+        var expanded = button.getAttribute('aria-expanded') !== 'true';
+        button.setAttribute('aria-expanded', String(expanded));
+        state.categoryToggles.set(categoryToggleKey(node.path), expanded);
+        // Hiding the open file must not leave a selected-but-invisible patch behind, so the one
+        // collapse path runs: it aborts the in-flight request, invalidates a late response, and
+        // drops the remembered selection.
+        if (!expanded && state.selectedButton && panel.contains(state.selectedButton)) {
+            collapseFilePanel();
+        }
+    });
 
     section.append(button, panel);
     return section;
@@ -1288,7 +1317,13 @@ function restoreFileSelection(files) {
     if (!selected) return;
     var button = fileEntries()
         .find(function(candidate) { return candidate.dataset.identity === selected.identity; });
-    if (button) openFile(selected, button, button.closest('.file-item'));
+    if (!button) return;
+    // A remembered file outranks computed disclosure: every category between it and the root opens
+    // so the restored panel is on screen rather than selected inside a collapsed subtree.
+    ancestorCategoryHeaders(button).forEach(function(header) {
+        header.setAttribute('aria-expanded', 'true');
+    });
+    openFile(selected, button, button.closest('.file-item'));
 }
 
 function renderChangeSummary(files) {
