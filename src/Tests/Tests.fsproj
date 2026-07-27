@@ -78,6 +78,8 @@
     <Compile Include="CanvasBridgeTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />
+    <Compile Include="DiffViewerTestHarness.fs" />
+    <Compile Include="DiffCategoryTests.fs" />
     <Compile Include="DiffViewerTests.fs" />
     <Compile Include="BeadsPlanningTests.fs" />
     <Compile Include="ActivityClassifierTests.fs" />
