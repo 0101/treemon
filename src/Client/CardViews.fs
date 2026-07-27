@@ -343,7 +343,7 @@ let buildBadge (repoName: string) (build: BuildInfo) =
         | _ -> None
     match build.Url with
     | Some url ->
-        Interop.createElement "a" [
+        HtmlHelper.createElement "a" [
             prop.className className
             prop.text text
             prop.href url
@@ -487,9 +487,9 @@ let prActionButton (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
     ]
 
 let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
-    React.fragment [
+    React.Fragment [
         if pr.IsMerged then
-            Interop.createElement "a" [
+            HtmlHelper.createElement "a" [
                 prop.className "pr-badge merged"
                 prop.title pr.Title
                 prop.href pr.Url
@@ -497,7 +497,7 @@ let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
                 prop.text "Merged"
             ]
         else
-            Interop.createElement "a" [
+            HtmlHelper.createElement "a" [
                 prop.className (if pr.IsDraft then "pr-badge draft" else "pr-badge")
                 prop.title pr.Title
                 prop.href pr.Url
@@ -789,7 +789,7 @@ let sortLabel =
     | ByActivity -> "Recent"
 
 let providerIcon (provider: RepoProvider option) =
-    let icon viewBox (svgPath: string) =
+    let icon (viewBox: string) (svgPath: string) =
         Svg.svg [
             svg.className "provider-icon"
             svg.viewBox viewBox
@@ -807,7 +807,7 @@ let providerIcon (provider: RepoProvider option) =
             prop.href url
             prop.target "_blank"
             prop.onClick (fun e -> e.stopPropagation())
-            prop.children [ icon (0, 0, 24, 24) githubPath ]
+            prop.children [ icon "0 0 24 24" githubPath ]
         ]
     | Some(AzDoProvider url) ->
         Html.a [
@@ -815,7 +815,7 @@ let providerIcon (provider: RepoProvider option) =
             prop.href url
             prop.target "_blank"
             prop.onClick (fun e -> e.stopPropagation())
-            prop.children [ icon (0, 0, 18, 18) azdoPath ]
+            prop.children [ icon "0 0 18 18" azdoPath ]
         ]
 
 let repoSectionHeader (callbacks: CardCallbacks) (focusedElement: FocusTarget option) (repo: RepoModel) =

@@ -129,11 +129,12 @@ let useHover () =
             scheduledFrame.current <-
                 Some (Browser.Dom.window.requestAnimationFrame flush)
 
+    let cancelScheduledFrame () =
+        scheduledFrame.current
+        |> Option.iter Browser.Dom.window.cancelAnimationFrame
+
     React.useEffect(
-        (fun () ->
-            React.createDisposable (fun () ->
-                scheduledFrame.current
-                |> Option.iter Browser.Dom.window.cancelAnimationFrame)),
+        (fun () -> cancelScheduledFrame),
         [||]
     )
 

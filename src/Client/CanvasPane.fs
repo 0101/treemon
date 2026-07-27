@@ -487,7 +487,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                             if not isActive then style.display.none
                         ]
                     ])
-            React.fragment [
+            React.Fragment [
                 headerBar tabs (Some doc) (doc.Kind = AgentDoc && not isFocusedDocAlive)
                 errorBanner
                 docErrorBanner
@@ -496,7 +496,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                 yield! iframes
             ]
         | None ->
-            React.fragment [
+            React.Fragment [
                 headerBar [] None false
                 errorBanner
                 docErrorBanner
