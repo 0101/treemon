@@ -144,7 +144,7 @@ stored, so there is no target to assign.
 
 ## Updating
 
-Overwrite the file — Treemon detects content changes (via hash) and reloads the pane automatically. The pane morphs the doc in place rather than reloading it, and **tints the blocks your edit changed** so the user can spot them without hunting; the tint clears on your next edit. Surgical edits therefore highlight better than wholesale rewrites — and giving sections stable `id`s helps the diff match them precisely. If Treemon isn't monitoring the directory, the extension serves canvas files over HTTP and sends you the browser URL as a separate session message right after a supported write updates a canvas file (open it for the user or share the ctrl+clickable URL). `canvasSend` interactions work identically in both modes — no changes needed in your HTML.
+Overwrite the file — Treemon detects content changes (via hash) and updates the pane automatically. The pane morphs the doc in place rather than reloading it, and **tints the blocks your edit changed** so the user can spot them without hunting; the tint clears on your next edit. Surgical edits therefore highlight better than wholesale rewrites — and giving sections stable `id`s helps the diff match them precisely. If Treemon isn't monitoring the directory, the extension serves canvas files over HTTP and sends you the browser URL as a separate session message right after a supported write updates a canvas file (open it for the user or share the ctrl+clickable URL). `canvasSend` interactions work identically in both modes — no changes needed in your HTML.
 
 ## Multiple docs
 

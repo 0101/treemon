@@ -184,8 +184,12 @@ changed rows already use).
   next morph, which strips the class by itself — so the highlight lasts exactly until the next edit
   with no timer. The class is applied *after* `Idiomorph.morph` returns, or that same sync would
   strip it immediately.
-- **Attributes are deliberately not observed.** Our own class writes, and idiomorph removing them,
-  are attribute mutations; excluding them removes all self-interference without a filter.
+- **Attribute changes count too.** An update that only swaps an `src`, an `href`, or an input's
+  state produces no `childList` or `characterData` record, so ignoring attributes would make a real
+  edit indistinguishable from a no-op and re-apply the previous edit's tint. Idiomorph stripping our
+  own `canvas-updated` class is itself an attribute mutation, so `class` records are compared with
+  that class removed from both sides; our own writes need no filter because they run after the
+  observer is disconnected.
 - **A morph that changes nothing re-applies the previous set.** Tab switching dispatches
   `MorphActiveDoc` unconditionally (see Decisions), so without this a tab switch would clear a
   highlight no edit had superseded. A morph that *does* change something but leaves nothing to tint
@@ -194,10 +198,13 @@ changed rows already use).
   between blocks — a whole-file rewrite that only re-indents otherwise reports most of the doc as
   changed.
 - **A flood highlights nothing.** Past 60% of the doc's blocks the edit is a rewrite, and tinting
-  everything says nothing. Both sides of that ratio count blocks at *any* depth: measuring hits
-  (which land on the nearest block, however deeply nested) against only the top-level children
-  compares different populations, can exceed 1, and would suppress ordinary edits — permanently so
-  for a doc wrapped in a single container.
+  everything says nothing. The numerator is *block coverage* — each hit plus every block it contains
+  — not hit count: a freshly populated wrapper arrives as a single record because its descendants
+  were assembled while detached, so counting hits would let a whole-doc rewrite slip under the
+  threshold and tint the entire document through that one wrapper. Both sides of the ratio count
+  blocks at *any* depth: measuring hits (which land on the nearest block, however deeply nested)
+  against only the top-level children compares different populations, can exceed 1, and would
+  suppress ordinary edits — permanently so for a doc wrapped in a single container.
 - **Only the newest signal's response is applied.** Signals can overlap (a tab re-select racing a
   poll delta), and two fetches have no completion order, so a generation counter drops superseded
   responses rather than morphing the doc back to older content.

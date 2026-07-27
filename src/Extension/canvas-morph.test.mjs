@@ -14,6 +14,7 @@ const {
   promoteToBlock,
   dropNested,
   countBlocks,
+  blockCoverage,
   isFlood,
   selectTargets,
   applyHighlight,
@@ -41,6 +42,8 @@ function element(tagName, ...children) {
     add: (name) => node.classes.add(name),
     remove: (name) => node.classes.delete(name),
   };
+  node.getAttribute = (name) =>
+    name === "class" ? Array.from(node.classes).join(" ") : null;
   children.forEach((child) => {
     child.parentElement = node;
     node.children.push(child);
@@ -57,6 +60,12 @@ function commentIn(parent, value) {
 }
 
 const textChange = (target, oldValue) => ({ type: "characterData", target, oldValue });
+const attributeChange = (target, attributeName, oldValue) => ({
+  type: "attributes",
+  target,
+  attributeName,
+  oldValue,
+});
 const added = (...nodes) => ({ type: "childList", addedNodes: nodes });
 const removed = (...nodes) => ({ type: "childList", addedNodes: [], removedNodes: nodes });
 
@@ -164,6 +173,12 @@ test("countBlocks counts blocks at every depth, not just the root's children", (
   assert.equal(countBlocks(root), 5, "h1 + ul + 3 li");
 });
 
+test("a hit's coverage includes every block it contains", () => {
+  const wrapper = element("DIV", element("P"), element("UL", element("LI")));
+
+  assert.equal(blockCoverage(wrapper), 4, "the div itself + p + ul + li");
+});
+
 test("the flood guard trips only past the threshold", () => {
   assert.equal(isFlood(3, 4), true);
   assert.equal(isFlood(1, 4), false);
@@ -198,6 +213,51 @@ test("a whole-file rewrite highlights nothing rather than everything", () => {
   const targets = selectTargets(blocks.map((block) => added(block)), root, []);
 
   assert.deepEqual(targets, [], "4 of 4 blocks changed — highlighting all of them says nothing");
+});
+
+test("replacing a wrapper that holds most of the doc highlights nothing", () => {
+  // Regression: a fully populated wrapper arrives as ONE childList record — its descendants were
+  // assembled while detached — so counting hits scored a whole-doc rewrite as a single hit, slipped
+  // under the flood threshold, and tinted the entire document through that one wrapper.
+  const wrapper = element("DIV", ...[0, 1, 2, 3, 4, 5].map(() => element("P")));
+  const root = element("BODY", element("H1"), wrapper);
+
+  assert.deepEqual(selectTargets([added(wrapper)], root, []), []);
+});
+
+test("swapping only an image source highlights its block", () => {
+  // Regression: attributes were unobserved, so an update touching only an src/href/input state
+  // produced no records at all — indistinguishable from a no-op, which re-applied the *previous*
+  // edit's tint while leaving the real change unmarked.
+  const image = element("IMG");
+  const figure = element("FIGURE", image);
+  const root = docAround(figure);
+  const stale = element("P");
+
+  const targets = selectTargets([attributeChange(image, "src", "before.png")], root, [stale]);
+
+  assert.deepEqual(targets, [figure]);
+});
+
+test("idiomorph stripping our own highlight class is not a change", () => {
+  // The previous morph's tint is removed by idiomorph's attribute sync *inside* the observed
+  // window. Counting that as an edit would clear a highlight no edit has superseded.
+  const paragraph = element("P");
+  paragraph.classes.add("note");
+  const root = docAround(paragraph);
+  const record = attributeChange(paragraph, "class", `note ${HIGHLIGHT_CLASS}`);
+
+  assert.equal(mutatedContent([record]), false);
+  assert.deepEqual(selectTargets([record], root, [paragraph]), [paragraph]);
+});
+
+test("a class the file genuinely changed still counts", () => {
+  const paragraph = element("P");
+  paragraph.classes.add("warning");
+  const root = docAround(paragraph);
+  const record = attributeChange(paragraph, "class", `note ${HIGHLIGHT_CLASS}`);
+
+  assert.deepEqual(selectTargets([record], root, []), [paragraph]);
 });
 
 test("a morph that changes nothing keeps the previous highlight", () => {

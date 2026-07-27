@@ -16,8 +16,11 @@
  * something but leaves nothing to tint (a pure deletion) clears instead, so the tint never points
  * at content the latest edit did not touch.
  *
- * Attribute mutations are deliberately NOT observed: our own class writes, and idiomorph removing
- * them, are attribute mutations — excluding them removes all self-interference without a filter.
+ * Attribute mutations count as well: an update that only swaps an `src`, an `href`, or an input's
+ * state produces no other kind of record, so ignoring them would make a real edit look like a no-op
+ * and re-apply the previous edit's tint. Idiomorph stripping our own `canvas-updated` class is
+ * itself an attribute mutation, so `class` records are compared with that class removed from both
+ * sides; our own writes need no filter because they run after the observer is disconnected.
  */
 (function () {
   'use strict';
@@ -70,6 +73,27 @@
       !isWhitespaceOnlyChange(record.oldValue, record.target && record.target.nodeValue);
   }
 
+  /** Class names with our own tag removed and the rest ordered, so neither idiomorph stripping the
+   *  highlight nor a reshuffled attribute reads as an edit. */
+  function classSignature(value) {
+    return (value == null ? '' : String(value)).split(/\s+/)
+      .filter(function (name) { return name && name !== HIGHLIGHT_CLASS; })
+      .sort()
+      .join(' ');
+  }
+
+  function isVisibleAttributeChange(record) {
+    return record.attributeName !== 'class' ||
+      classSignature(record.oldValue) !== classSignature(record.target.getAttribute('class'));
+  }
+
+  /** Whether a record that names a single target reports something the reader can see. */
+  function isVisibleChange(record) {
+    if (record.type === 'characterData') return isVisibleTextChange(record);
+    if (record.type === 'attributes') return isVisibleAttributeChange(record);
+    return false;
+  }
+
   /**
    * Whether the morph changed the document at all — including changes with nothing left to
    * highlight, such as a pure deletion. Distinguishing this from "produced no targets" is what
@@ -77,12 +101,11 @@
    */
   function mutatedContent(records) {
     return records.some(function (record) {
-      if (record.type === 'characterData') return isVisibleTextChange(record);
       if (record.type === 'childList') {
         return nodesOf(record.addedNodes).concat(nodesOf(record.removedNodes))
           .some(function (node) { return !isIgnorable(node); });
       }
-      return false;
+      return isVisibleChange(record);
     });
   }
 
@@ -94,11 +117,7 @@
           .map(elementFor)
           .filter(Boolean);
       }
-      if (record.type === 'characterData' && isVisibleTextChange(record)) {
-        var element = elementFor(record.target);
-        return element ? [element] : [];
-      }
-      return [];
+      return isVisibleChange(record) ? [elementFor(record.target)].filter(Boolean) : [];
     });
   }
 
@@ -134,8 +153,18 @@
     }, 0);
   }
 
-  function isFlood(hitCount, blockCount) {
-    return blockCount > 0 && hitCount / blockCount > FLOOD_RATIO;
+  function isFlood(coveredBlocks, blockCount) {
+    return blockCount > 0 && coveredBlocks / blockCount > FLOOD_RATIO;
+  }
+
+  /**
+   * How many of the doc's blocks one hit accounts for: itself, plus every block it contains. A
+   * freshly populated wrapper arrives as a *single* record — its descendants were assembled while
+   * detached — so counting hits instead would let a whole-doc rewrite slip under the flood
+   * threshold and tint the entire document through that one wrapper.
+   */
+  function blockCoverage(element) {
+    return (BLOCK_TAGS.has(element.tagName) ? 1 : 0) + countBlocks(element);
   }
 
   /**
@@ -149,7 +178,8 @@
         .map(function (element) { return promoteToBlock(element, root); }),
       root
     );
-    if (isFlood(hits.length, countBlocks(root))) return [];
+    var covered = hits.reduce(function (total, hit) { return total + blockCoverage(hit); }, 0);
+    if (isFlood(covered, countBlocks(root))) return [];
     if (hits.length > 0) return hits;
     if (mutatedContent(records)) return [];
     return (previous || []).filter(function (element) { return element.isConnected; });
@@ -167,7 +197,9 @@
       childList: true,
       subtree: true,
       characterData: true,
-      characterDataOldValue: true
+      characterDataOldValue: true,
+      attributes: true,
+      attributeOldValue: true
     });
 
     Idiomorph.morph(root, html, { morphStyle: 'innerHTML' });
@@ -227,11 +259,13 @@
       HIGHLIGHT_CLASS: HIGHLIGHT_CLASS,
       FLOOD_RATIO: FLOOD_RATIO,
       isWhitespaceOnlyChange: isWhitespaceOnlyChange,
+      isVisibleAttributeChange: isVisibleAttributeChange,
       mutatedContent: mutatedContent,
       changedElementsFrom: changedElementsFrom,
       promoteToBlock: promoteToBlock,
       dropNested: dropNested,
       countBlocks: countBlocks,
+      blockCoverage: blockCoverage,
       isFlood: isFlood,
       selectTargets: selectTargets,
       applyHighlight: applyHighlight
