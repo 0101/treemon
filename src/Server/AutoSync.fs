@@ -55,6 +55,7 @@ type SyncFailure =
     | MergeConflict
     | MergeAbortFailed
     | GitCommandFailed
+    | BranchChanged
     | OpenPrCheckFailed
     | PushFailed
 
@@ -126,6 +127,7 @@ let internal failureDescription =
     | MergeConflict -> "the merge conflicted and was aborted"
     | MergeAbortFailed -> "the merge conflicted and could not be aborted, so a merge may still be in progress"
     | GitCommandFailed -> "a Git command did not complete"
+    | BranchChanged -> "the worktree is not on the branch this sync was started for"
     | OpenPrCheckFailed -> "the pull request state could not be determined"
     | PushFailed -> "the push was rejected"
 
@@ -145,28 +147,44 @@ let internal syncOutcomeResult =
 let internal pushOutcomeResult =
     function
     | GitWorktree.BranchPushOutcome.Pushed -> Ok()
+    | GitWorktree.BranchPushOutcome.BranchChanged -> Error BranchChanged
     | GitWorktree.BranchPushOutcome.PushFailed -> Error PushFailed
 
 /// Treemon's whole token-free path as one operation: the Git sync, the live push decision, and the
-/// push that decision may require. Only a run that finished all of it may skip agent delivery, so
-/// every step leaves through the same closed reason. The three effects are parameters so the
-/// sequence can be exercised without a repository or a provider.
+/// push that decision may require, all bound to the branch the observation was made on. Only a run
+/// that finished all of it may skip agent delivery, so every step leaves through the same closed
+/// reason. The effects are parameters so the sequence can be exercised without a repository or a
+/// provider.
 let mechanicalSync
+    (checkedOutBranch: string -> Async<string option>)
     (syncWithBase: string -> string -> string -> Async<GitWorktree.BranchSyncOutcome>)
     (queryOpenPrState: string -> string -> string -> Async<PrOpenState.OpenPrState>)
-    (pushBranch: string -> Async<GitWorktree.BranchPushOutcome>)
+    (pushBranch: string -> string -> Async<GitWorktree.BranchPushOutcome>)
     (request: MechanicalSyncRequest)
     =
+    // Asked again at each boundary instead of trusting the observation that started the run: a
+    // checkout decides which branch a merge lands on and which branch's work a push would publish,
+    // and the pull request that authorizes the push is looked up for the observed branch alone.
+    let stillOnObservedBranch () =
+        async {
+            let! current = checkedOutBranch request.WorktreePath
+            return if current = Some request.Branch then Ok() else Error BranchChanged
+        }
+
     asyncResult {
+        do! stillOnObservedBranch ()
         let! outcome = syncWithBase request.WorktreePath request.UpstreamRemote request.BaseBranch
         do! syncOutcomeResult outcome
+        // A merge that landed somewhere else is not this operation's work, so the provider is never
+        // even asked about a branch the worktree has left.
+        do! stillOnObservedBranch ()
 
         // Asked now, at the moment the push would happen, and of the provider rather than the
         // dashboard's cached map: the branch this run just moved is the only thing that may move
         // remotely, and only while a pull request is actually open to receive it.
         match! queryOpenPrState request.RepoRoot request.UpstreamRemote request.Branch with
         | PrOpenState.OpenPr ->
-            let! pushOutcome = pushBranch request.WorktreePath
+            let! pushOutcome = pushBranch request.WorktreePath request.Branch
             return! pushOutcomeResult pushOutcome
         | PrOpenState.NoOpenPr -> return ()
         | PrOpenState.UnknownPrState -> return! Error OpenPrCheckFailed

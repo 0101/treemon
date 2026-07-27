@@ -167,7 +167,7 @@ let private publishedFeature (tempDir: string) =
     gitOk repoDir [ "push"; "--set-upstream"; "origin"; "feature" ]
     repoDir, originDir
 
-let private push (repoDir: string) = pushCurrentBranch repoDir |> runAsync
+let private push (repoDir: string) (branch: string) = pushSyncedBranch repoDir branch |> runAsync
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -181,7 +181,7 @@ type BranchPushTests() =
             let mainBefore = remoteRef repoDir originDir "refs/heads/main"
             commitFile repoDir "feature-work.txt" "feature work"
 
-            let outcome = push repoDir
+            let outcome = push repoDir "feature"
 
             Assert.That(outcome, Is.EqualTo(BranchPushOutcome.Pushed))
             Assert.That(remoteRef repoDir originDir "refs/heads/feature", Is.EqualTo(Some(headOf repoDir)))
@@ -199,7 +199,7 @@ type BranchPushTests() =
             let localHead = headOf repoDir
             let remoteHead = headOf otherDir
 
-            let outcome = push repoDir
+            let outcome = push repoDir "feature"
 
             Assert.That(outcome, Is.EqualTo(BranchPushOutcome.PushFailed))
             // A forced push would have replaced the diverged remote commit with the local one; the
@@ -214,23 +214,23 @@ type BranchPushTests() =
             gitOk repoDir [ "switch"; "-c"; "unpublished"; "--no-track" ]
             commitFile repoDir "unpublished-work.txt" "unpublished work"
 
-            let outcome = push repoDir
+            let outcome = push repoDir "unpublished"
 
             Assert.That(outcome, Is.EqualTo(BranchPushOutcome.PushFailed))
             // No upstream means no guessed default: the branch must not appear on the remote at all.
             Assert.That(remoteRef repoDir originDir "refs/heads/unpublished", Is.EqualTo(None)))
 
     [<Test>]
-    member _.``a detached head fails instead of pushing whatever is checked out``() =
+    member _.``a detached head is not the named branch and publishes nothing``() =
         withTempDir "treemon-branch-push-detached" (fun tempDir ->
             let repoDir, originDir = publishedFeature tempDir
             let publishedHead = headOf repoDir
             commitFile repoDir "feature-work.txt" "feature work"
             gitOk repoDir [ "checkout"; "--detach"; "HEAD" ]
 
-            let outcome = push repoDir
+            let outcome = push repoDir "feature"
 
-            Assert.That(outcome, Is.EqualTo(BranchPushOutcome.PushFailed))
+            Assert.That(outcome, Is.EqualTo(BranchPushOutcome.BranchChanged))
             Assert.That(remoteRef repoDir originDir "refs/heads/feature", Is.EqualTo(Some publishedHead)))
 
     [<Test>]
@@ -243,14 +243,15 @@ type BranchPushTests() =
             // before it, which is the shape an authentication or transport failure also takes.
             gitOk repoDir [ "config"; "branch.feature.remote"; "missing-remote" ]
 
-            let outcome = push repoDir
+            let outcome = push repoDir "feature"
 
             Assert.That(outcome, Is.EqualTo(BranchPushOutcome.PushFailed))
             Assert.That(remoteRef repoDir originDir "refs/heads/feature", Is.EqualTo(Some publishedHead)))
 
 /// The sessionless path as one composed operation over a real repository: Treemon's own Git sync,
-/// the live push decision, and the push that decision may require. Only the provider answer is
-/// supplied by the test - there is no provider to ask here - so every Git step is the real one.
+/// the live push decision, and the push that decision may require. The provider answer is supplied by
+/// the test - there is no provider to ask here - and a Git step is stubbed only where a race has to
+/// land inside it; every other Git step, including each branch reading, is the real one.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -266,13 +267,14 @@ type MechanicalSyncCompositionTests() =
 
     let refusedDirty: Result<unit, AutoSync.SyncFailure> = Error AutoSync.DirtyWorktree
 
-    let syncedWith openPrState pushBranch repoDir =
-        AutoSync.mechanicalSync
-            syncWithBase
-            (fun _ _ _ -> async { return openPrState })
-            pushBranch
-            (request repoDir)
+    let branchChanged: Result<unit, AutoSync.SyncFailure> = Error AutoSync.BranchChanged
+
+    let syncedThrough queryOpenPrState pushBranch repoDir =
+        AutoSync.mechanicalSync checkedOutBranch syncWithBase queryOpenPrState pushBranch (request repoDir)
         |> runAsync
+
+    let syncedWith openPrState =
+        syncedThrough (fun _ _ _ -> async { return openPrState })
 
     [<Test>]
     member _.``divergent history is merged and left unpushed when no pull request is open``() =
@@ -287,7 +289,7 @@ type MechanicalSyncCompositionTests() =
                 repoDir
                 |> syncedWith
                     PrOpenState.NoOpenPr
-                    (fun _ ->
+                    (fun _ _ ->
                         async {
                             pushes <- pushes + 1
                             return BranchPushOutcome.Pushed
@@ -309,7 +311,7 @@ type MechanicalSyncCompositionTests() =
             advanceBase baseDir "base-work.txt" "base work"
             let originDir = Path.Combine(tempDir, "origin.git")
 
-            let outcome = repoDir |> syncedWith PrOpenState.OpenPr pushCurrentBranch
+            let outcome = repoDir |> syncedWith PrOpenState.OpenPr pushSyncedBranch
 
             Assert.Multiple(fun () ->
                 Assert.That(Result.isOk outcome, Is.True)
@@ -328,17 +330,115 @@ type MechanicalSyncCompositionTests() =
             let mutable queries = 0
 
             let outcome =
-                AutoSync.mechanicalSync
-                    syncWithBase
+                repoDir
+                |> syncedThrough
                     (fun _ _ _ ->
                         async {
                             queries <- queries + 1
                             return PrOpenState.OpenPr
                         })
-                    (fun _ -> failwith "a sync that merged nothing must not push")
-                    (request repoDir)
-                |> runAsync
+                    (fun _ _ -> failwith "a sync that merged nothing must not push")
 
             Assert.Multiple(fun () ->
                 Assert.That(outcome, Is.EqualTo(refusedDirty))
                 Assert.That(queries, Is.Zero, "a sync that moved nothing has nothing to publish")))
+
+    [<Test>]
+    member _.``a worktree checked out elsewhere since the observation is never merged``() =
+        withTempDir "treemon-mechanical-checkout-before-sync" (fun tempDir ->
+            let repoDir, baseDir = scratchRepos tempDir
+            advanceBase baseDir "base-work.txt" "base work"
+            // The observation named `feature`; by the time the operation acts, the tree is on
+            // something else and merging the base into it would be work nobody asked for.
+            gitOk repoDir [ "switch"; "-c"; "other" ]
+            let headBefore = headOf repoDir
+            let knownBaseBefore = gitText repoDir [ "rev-parse"; "origin/main" ]
+            // Mutable because the provider query is the impure boundary whose absence is under test.
+            let mutable queries = 0
+
+            let outcome =
+                repoDir
+                |> syncedThrough
+                    (fun _ _ _ ->
+                        async {
+                            queries <- queries + 1
+                            return PrOpenState.OpenPr
+                        })
+                    (fun _ _ -> failwith "a sync that merged nothing must not push")
+
+            Assert.Multiple(fun () ->
+                Assert.That(outcome, Is.EqualTo(branchChanged))
+                Assert.That(headOf repoDir, Is.EqualTo(headBefore))
+                Assert.That(
+                    gitText repoDir [ "rev-parse"; "origin/main" ],
+                    Is.EqualTo(knownBaseBefore),
+                    "a branch nobody observed is not fetched for, let alone merged")
+                Assert.That(queries, Is.Zero)))
+
+    [<Test>]
+    member _.``a checkout during the merge stops the run before the provider is asked``() =
+        withTempDir "treemon-mechanical-checkout-during-sync" (fun tempDir ->
+            let repoDir, _ = scratchRepos tempDir
+            // Mutable because the provider query is the impure boundary whose absence is under test.
+            let mutable queries = 0
+
+            let outcome =
+                AutoSync.mechanicalSync
+                    checkedOutBranch
+                    // A checkout landing while Treemon's own merge runs: the merge reports success,
+                    // but the tree it finished on is no longer the one that was observed.
+                    (fun _ _ _ ->
+                        async {
+                            gitOk repoDir [ "switch"; "-c"; "other" ]
+                            return BranchSyncOutcome.Merged
+                        })
+                    (fun _ _ _ ->
+                        async {
+                            queries <- queries + 1
+                            return PrOpenState.NoOpenPr
+                        })
+                    (fun _ _ -> failwith "a run that left its branch must not push")
+                    (request repoDir)
+                |> runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(outcome, Is.EqualTo(branchChanged))
+                Assert.That(queries, Is.Zero, "a branch the worktree has left is never looked up")))
+
+    [<Test>]
+    member _.``a checkout while the pull request is looked up publishes neither branch``() =
+        withTempDir "treemon-mechanical-checkout-before-push" (fun tempDir ->
+            let repoDir, baseDir = scratchRepos tempDir
+            let originDir = Path.Combine(tempDir, "origin.git")
+            gitOk repoDir [ "push"; "--set-upstream"; "origin"; "feature" ]
+            // A second published branch holding unpushed work: exactly what a push bound to `HEAD`
+            // rather than to the observed branch would have advanced on the remote.
+            gitOk repoDir [ "switch"; "-c"; "other" ]
+            gitOk repoDir [ "push"; "--set-upstream"; "origin"; "other" ]
+            commitFile repoDir "other-work.txt" "other work"
+            gitOk repoDir [ "switch"; "feature" ]
+            advanceBase baseDir "base-work.txt" "base work"
+            let featurePublished = remoteRef repoDir originDir "refs/heads/feature"
+            let otherPublished = remoteRef repoDir originDir "refs/heads/other"
+
+            let outcome =
+                repoDir
+                |> syncedThrough
+                    (fun _ _ _ ->
+                        async {
+                            // The checkout lands while the provider is answering for `feature`.
+                            gitOk repoDir [ "switch"; "other" ]
+                            return PrOpenState.OpenPr
+                        })
+                    pushSyncedBranch
+
+            Assert.Multiple(fun () ->
+                Assert.That(outcome, Is.EqualTo(branchChanged))
+                Assert.That(
+                    remoteRef repoDir originDir "refs/heads/other",
+                    Is.EqualTo(otherPublished),
+                    "one branch's open pull request must never authorize publishing another")
+                Assert.That(
+                    remoteRef repoDir originDir "refs/heads/feature",
+                    Is.EqualTo(featurePublished),
+                    "the merged head belongs to a run that stayed on its branch")))

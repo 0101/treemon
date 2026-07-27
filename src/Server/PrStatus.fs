@@ -502,7 +502,7 @@ let queryOpenPrState (remote: AzDoRemote) (branch: string) =
     }
 
 /// Git's own record of where a branch is published: the remote it tracks, which is also the remote
-/// `GitWorktree.pushCurrentBranch` sends the branch to.
+/// `GitWorktree.pushSyncedBranch` sends the branch to.
 let internal branchRemoteArgs (repoRoot: string) (branch: string) =
     [ "-C"; repoRoot; "config"; "--get"; $"branch.{branch}.remote" ]
 

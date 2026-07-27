@@ -603,9 +603,10 @@ let internal autoSyncDependencies
       CompleteOperation = CompleteAutoSyncOperation >> agent.Post
       MechanicalSync =
         AutoSync.mechanicalSync
+            GitWorktree.checkedOutBranch
             GitWorktree.syncWithBase
             PrStatus.queryOpenPrStateByRepoRoot
-            GitWorktree.pushCurrentBranch
+            GitWorktree.pushSyncedBranch
       Deliver =
         AutoSync.deliver
             SessionBridge.tryDeliver

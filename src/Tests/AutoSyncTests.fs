@@ -1079,9 +1079,9 @@ type AutoSyncMechanicalTests() =
         TestUtils.withTempDir "treemon-auto-sync-fallback" (fun root ->
             let observation = enabledObservation root
 
-            // The real composition, so each prompt is reached the way production reaches it: a Git
-            // outcome, then the provider's answer, then the push.
-            let promptFor syncOutcome openPrState pushOutcome =
+            // The real composition, so each prompt is reached the way production reaches it: the
+            // branch the worktree is on, a Git outcome, then the provider's answer, then the push.
+            let promptWith checkedOutBranch syncOutcome openPrState pushOutcome =
                 // Mutable because delivery is the impure boundary the prompt is read from.
                 let mutable delivered = []
 
@@ -1090,9 +1090,10 @@ type AutoSyncMechanicalTests() =
                         SelectTarget = fun _ -> async { return NoOpenSession None }
                         MechanicalSync =
                             mechanicalSync
+                                (fun _ -> async { return checkedOutBranch })
                                 (fun _ _ _ -> async { return syncOutcome })
                                 (fun _ _ _ -> async { return openPrState })
-                                (fun _ -> async { return pushOutcome })
+                                (fun _ _ -> async { return pushOutcome })
                         Deliver =
                             fun request ->
                                 async {
@@ -1102,6 +1103,8 @@ type AutoSyncMechanicalTests() =
 
                 trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
                 delivered |> List.exactlyOne
+
+            let promptFor = promptWith (Some observation.Branch)
 
             let dirty =
                 promptFor
@@ -1127,7 +1130,14 @@ type AutoSyncMechanicalTests() =
                     PrOpenState.OpenPr
                     GitWorktree.BranchPushOutcome.PushFailed
 
-            let prompts = [ dirty; conflicted; unknownPr; pushFailed ]
+            let branchChanged =
+                promptWith
+                    (Some "some-other-branch")
+                    GitWorktree.BranchSyncOutcome.FastForwarded
+                    PrOpenState.NoOpenPr
+                    GitWorktree.BranchPushOutcome.Pushed
+
+            let prompts = [ dirty; conflicted; unknownPr; pushFailed; branchChanged ]
 
             let leakedRepositoryText =
                 prompts
@@ -1140,9 +1150,10 @@ type AutoSyncMechanicalTests() =
                 Assert.That(conflicted, Is.EqualTo(fallbackPrompt "origin" "main" MergeConflict))
                 Assert.That(unknownPr, Is.EqualTo(fallbackPrompt "origin" "main" OpenPrCheckFailed))
                 Assert.That(pushFailed, Is.EqualTo(fallbackPrompt "origin" "main" PushFailed))
+                Assert.That(branchChanged, Is.EqualTo(fallbackPrompt "origin" "main" BranchChanged))
                 Assert.That(
                     prompts |> List.distinct,
-                    Has.Exactly(4).Items,
+                    Has.Exactly(5).Items,
                     "an agent must be able to tell the stopping points apart")
                 Assert.That(
                     leakedRepositoryText,

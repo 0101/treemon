@@ -375,6 +375,22 @@ let private runBranchGit (worktreePath: string) (arguments: string list) =
 let private singleLineStdout (output: ProcessRunner.ArgumentListOutput) =
     Text.Encoding.UTF8.GetString(output.Stdout).Trim()
 
+/// The branch a worktree currently has checked out, or `None` when there is no branch to act on: a
+/// detached `HEAD` answers the literal `HEAD`, and a command that failed answers nothing. Both mean
+/// the same thing to a caller holding an earlier observation — this is not the branch you saw — so
+/// neither a merge nor a push may proceed on the strength of it.
+let checkedOutBranch (worktreePath: string) =
+    async {
+        match! runBranchGit worktreePath [ "rev-parse"; "--abbrev-ref"; "HEAD" ] with
+        | Ok output when output.ExitCode = 0 ->
+            return
+                match singleLineStdout output with
+                | ""
+                | "HEAD" -> None
+                | branch -> Some branch
+        | _ -> return None
+    }
+
 let private runBranchSyncGit (worktreePath: string) (arguments: string list) =
     runBranchGit worktreePath arguments
     |> AsyncResult.mapError (fun _ -> BranchSyncOutcome.CommandFailed)
@@ -495,14 +511,17 @@ let syncWithBase (worktreePath: string) (upstreamRemote: string) (baseBranch: st
         return outcome
     }
 
-/// What Treemon's own push of a just-synced branch did. Two cases on purpose: a refusal (a detached
-/// HEAD, no configured upstream) and a failure (authentication, a diverged remote, a broken command)
-/// mean the same thing to the caller — Treemon could not finish the sync mechanically, so an agent
-/// takes over — and neither may carry Git text into a prompt (see `docs/spec/worktree-monitor.md`,
-/// Branch Sync).
+/// What Treemon's own push of a just-synced branch did. A refusal (no configured upstream) and a
+/// failure (authentication, a diverged remote, a broken command) mean the same thing to the caller —
+/// Treemon could not finish the sync mechanically, so an agent takes over. A worktree that is not on
+/// the branch the push was authorized for is its own case, because the tree, not the push, is what
+/// changed. Neither may carry Git text into a prompt (see `docs/spec/worktree-monitor.md`, Branch
+/// Sync).
 [<RequireQualifiedAccess>]
 type BranchPushOutcome =
     | Pushed
+    /// The worktree is not on the branch this push was authorized for, a detached `HEAD` included.
+    | BranchChanged
     | PushFailed
 
 let private runBranchPushGit worktreePath arguments =
@@ -522,16 +541,15 @@ let private branchPushValue worktreePath arguments =
             return value
     }
 
-/// The branch this worktree has checked out. A detached HEAD answers the literal `HEAD`, which names
-/// no branch to push, so it fails like any other unusable state.
-let private checkedOutBranch worktreePath =
-    asyncResult {
-        let! branch = branchPushValue worktreePath [ "rev-parse"; "--abbrev-ref"; "HEAD" ]
-
-        if branch = "HEAD" then
-            return! Error BranchPushOutcome.PushFailed
-        else
-            return branch
+/// The tree must still be on the branch this push was authorized for. The open pull request that
+/// licensed the push was looked up for that one branch, so a checkout since then — or a `HEAD` that
+/// names no branch at all — would publish work nothing asked about; asking git itself here, rather
+/// than trusting an earlier reading, leaves no window between the check and the push.
+let private ensureCheckedOut worktreePath branch =
+    async {
+        match! checkedOutBranch worktreePath with
+        | Some current when current = branch -> return Ok()
+        | _ -> return Error BranchPushOutcome.BranchChanged
     }
 
 /// Where the branch has to go, taken from the two config keys git itself writes for a tracking
@@ -552,16 +570,18 @@ let private configuredUpstreamTarget worktreePath branch =
         return remote, remoteRef
     }
 
-/// Advances an open pull request with the branch a mechanical sync just updated. Both halves of the
-/// refspec are spelled out, so neither `push.default`, nor `HEAD`, nor a remote-side default picks
-/// what moves. There is deliberately no `--force` and no `--force-with-lease`: a remote that has
-/// moved on is exactly the case Treemon must not resolve by itself, so the push fails with both sides
-/// untouched and the caller hands the worktree to an agent.
-let pushCurrentBranch (worktreePath: string) =
+/// Advances an open pull request with the branch a mechanical sync just updated. The branch is named
+/// by the caller rather than read from `HEAD`, so the tree it publishes is the one whose pull request
+/// authorized the push and a worktree that moved on stops here. Both halves of the refspec are
+/// spelled out, so neither `push.default`, nor `HEAD`, nor a remote-side default picks what moves.
+/// There is deliberately no `--force` and no `--force-with-lease`: a remote that has moved on is
+/// exactly the case Treemon must not resolve by itself, so the push fails with both sides untouched
+/// and the caller hands the worktree to an agent.
+let pushSyncedBranch (worktreePath: string) (branch: string) =
     async {
         let! result =
             asyncResult {
-                let! branch = checkedOutBranch worktreePath
+                do! ensureCheckedOut worktreePath branch
                 let! remote, remoteRef = configuredUpstreamTarget worktreePath branch
 
                 let! output =
