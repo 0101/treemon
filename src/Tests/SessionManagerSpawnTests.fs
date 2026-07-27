@@ -1,10 +1,10 @@
 module Tests.SessionManagerSpawnTests
 
-open System
-open System.IO
 open NUnit.Framework
 open Shared
 open Server.SessionManager
+open Tests.GitTestHelpers
+open Tests.TerminalSessionFixture
 open Tests.TestUtils
 
 [<TestFixture>]
@@ -13,47 +13,24 @@ open Tests.TestUtils
 [<NonParallelizable>]
 type SessionManagerSpawnTests() =
 
-    let originalCwd = Environment.CurrentDirectory
-    // NUnit owns fixture lifecycle, so these values must span SetUp, each test, and TearDown.
-    let mutable agent: SessionAgent option = None
-    let mutable tempRoot = ""
-
-    let testPath () =
-        WorktreePath(Path.Combine(tempRoot, "repo"))
+    // NUnit owns fixture lifecycle, so the environment must span SetUp, each test, and TearDown.
+    let mutable environment: TerminalTestEnvironment option = None
 
     [<SetUp>]
     member _.Setup() =
-        tempRoot <- Path.Combine(Path.GetTempPath(), $"treemon-session-spawn-{Guid.NewGuid():N}")
-        Directory.CreateDirectory(WorktreePath.value (testPath ())) |> ignore
-        Environment.CurrentDirectory <- tempRoot
-
-        try
-            agent <- Some(createAgent ())
-        with _ ->
-            Environment.CurrentDirectory <- originalCwd
-
-            try
-                Directory.Delete(tempRoot, recursive = true)
-            with cleanupEx ->
-                TestContext.Error.WriteLine($"SetUp cleanup failed: {cleanupEx.Message}")
-
-            reraise ()
+        environment <- Some(create "treemon-session-spawn" initRepoOnMain)
 
     [<TearDown>]
     member _.Cleanup() =
-        let result =
-            cleanupTerminalTestEnvironment
-                agent
-                originalCwd
-                tempRoot
-                (WorktreePath.value (testPath ()))
-        agent <- None
+        let result = environment |> Option.map cleanup |> Option.defaultValue (Ok())
+        environment <- None
         assertOk result "Terminal fixture cleanup failed"
 
     [<Test>]
     member _.``spawnTerminal returns Ok and HWND is resolved``() =
-        let a = agent.Value
-        let testPath = testPath ()
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
         let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
 
         let result = runAsync (spawnTerminal a testPath)
@@ -67,8 +44,9 @@ type SessionManagerSpawnTests() =
 
     [<Test>]
     member _.``killSession closes the window``() =
-        let a = agent.Value
-        let testPath = testPath ()
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
         let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
 
         let result = runAsync (spawnTerminal a testPath)
@@ -88,8 +66,9 @@ type SessionManagerSpawnTests() =
 
     [<Test>]
     member _.``re-spawn works after killSession``() =
-        let a = agent.Value
-        let testPath = testPath ()
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
         let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
 
         let result1 = runAsync (spawnTerminal a testPath)

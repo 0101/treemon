@@ -1,7 +1,5 @@
 module Tests.ActionLaunchSpawnTests
 
-open System
-open System.IO
 open System.Threading
 open NUnit.Framework
 open Shared
@@ -9,6 +7,7 @@ open Server.SessionManager
 open Server.CodingToolStatus
 open Server.CodingToolCli
 open Tests.GitTestHelpers
+open Tests.TerminalSessionFixture
 open Tests.TestUtils
 
 [<TestFixture>]
@@ -17,47 +16,24 @@ open Tests.TestUtils
 [<NonParallelizable>]
 type ActionLaunchSpawnTests() =
 
-    let originalCwd = Environment.CurrentDirectory
-    // NUnit owns fixture lifecycle, so these values must span SetUp, each test, and TearDown.
-    let mutable agent: SessionAgent option = None
-    let mutable tempRoot = ""
-
-    let testPath () =
-        WorktreePath(Path.Combine(tempRoot, "repo"))
+    // NUnit owns fixture lifecycle, so the environment must span SetUp, each test, and TearDown.
+    let mutable environment: TerminalTestEnvironment option = None
 
     [<SetUp>]
     member _.Setup() =
-        tempRoot <- Path.Combine(Path.GetTempPath(), $"treemon-action-spawn-{Guid.NewGuid():N}")
-        initRepoOnMain (WorktreePath.value (testPath ()))
-        Environment.CurrentDirectory <- tempRoot
-
-        try
-            agent <- Some(createAgent ())
-        with _ ->
-            Environment.CurrentDirectory <- originalCwd
-
-            try
-                Directory.Delete(tempRoot, recursive = true)
-            with cleanupEx ->
-                TestContext.Error.WriteLine($"SetUp cleanup failed: {cleanupEx.Message}")
-
-            reraise ()
+        environment <- Some(create "treemon-action-spawn" initRepoOnMain)
 
     [<TearDown>]
     member _.Cleanup() =
-        let result =
-            cleanupTerminalTestEnvironment
-                agent
-                originalCwd
-                tempRoot
-                (WorktreePath.value (testPath ()))
-        agent <- None
+        let result = environment |> Option.map cleanup |> Option.defaultValue (Ok())
+        environment <- None
         assertOk result "Terminal fixture cleanup failed"
 
     [<Test>]
     member _.``launchAction with no existing session spawns new window and tracks HWND``() =
-        let a = agent.Value
-        let testPath = testPath ()
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
         let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
         let prompt = actionPrompt (Some CodingToolProvider.CopilotCli) (FixPr "https://dev.azure.com/org/proj/_git/repo/pullrequest/42")
         let command = (build (Some CodingToolProvider.CopilotCli) (Interactive prompt)).AsShellString
@@ -76,8 +52,9 @@ type ActionLaunchSpawnTests() =
 
     [<Test>]
     member _.``launchAction with existing tracked session opens new tab without new window``() =
-        let a = agent.Value
-        let testPath = testPath ()
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
         let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
 
         let spawnResult = runAsync (spawnTerminal a testPath)
@@ -111,8 +88,9 @@ type ActionLaunchSpawnTests() =
 
     [<Test>]
     member _.``launchAction spawns session that stays open (interactive mode)``() =
-        let a = agent.Value
-        let testPath = testPath ()
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
         let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
         let prompt = "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
         let command = (build (Some CodingToolProvider.CopilotCli) (Interactive prompt)).AsShellString
@@ -131,8 +109,9 @@ type ActionLaunchSpawnTests() =
 
     [<Test>]
     member _.``launchAction with special characters in prompt succeeds``() =
-        let a = agent.Value
-        let testPath = testPath ()
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
         let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
         let prompt = actionPrompt (Some CodingToolProvider.CopilotCli) (FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs&s=abc")
         let command = (build (Some CodingToolProvider.CopilotCli) (Interactive prompt)).AsShellString
