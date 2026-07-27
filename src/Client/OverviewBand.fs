@@ -400,7 +400,7 @@ let view
             | _, Some (window, response) ->
                 OverviewChart.tasksChart window response.Anchor response.Snapshots
 
-        React.fragment
+        React.Fragment
             [ match agents with
               | [] -> Html.none
               | _ ->
