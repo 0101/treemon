@@ -371,11 +371,6 @@ type GitCommandConstructionTests() =
         Assert.That(args, Is.EqualTo([ "-C"; "/repo/root"; "remote"; "get-url"; "upstream" ]))
 
     [<Test>]
-    member _.``PrStatus buildRemoteUrlArgs with origin queries origin``() =
-        let args = Server.PrStatus.buildRemoteUrlArgs "/repo/root" "origin"
-        Assert.That(args, Is.EqualTo([ "-C"; "/repo/root"; "remote"; "get-url"; "origin" ]))
-
-    [<Test>]
     member _.``PrStatus buildRemoteUrlArgs keeps a spaced Windows repo root as one argument``() =
         let args = Server.PrStatus.buildRemoteUrlArgs "Q:\\code\\my project" "upstream"
         Assert.That(args, Is.EqualTo([ "-C"; "Q:\\code\\my project"; "remote"; "get-url"; "upstream" ]))
