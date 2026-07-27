@@ -1225,6 +1225,115 @@ type AutoSyncEndpointTests() =
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
+    member _.``A merge reconciled while enabling leaves no preference and no success``() =
+        let normalizedPath = PathUtils.normalizePath worktree
+        let repoId = PathUtils.toRepoId root
+        let observation =
+            trackedGitData normalizedPath "feature-a" "provider/feature-a" 2 (Some "base-a") false
+        let mergedPrMap = Map.ofList [ "provider/feature-a", mergedPr ]
+
+        let stateAgent = createAgent ()
+
+        stateAgent.Post(
+            UpdateWorktreeList(
+                repoId,
+                [ { GitWorktree.WorktreeInfo.Path = normalizedPath
+                    Head = "head"
+                    Branch = Some "feature-a" } ]))
+
+        stateAgent.Post(UpdateGit(repoId, normalizedPath, observation))
+        stateAgent.Post(UpdatePr(repoId, Map.ofList [ "provider/feature-a", openPr ]))
+
+        let store = loadedStore root
+
+        // NUnit fixture-free mutables: the racing refresh is an impure boundary, and its cleanup
+        // targets are the evidence that nothing but the endpoint itself could undo the write.
+        let armed = ref false
+        let refreshCleanupTargets = ref []
+
+        // The interleaving under test, made exact instead of timing-dependent: the toggle takes its
+        // snapshot (an open PR), and only then does `RefreshPr` publish the reconciled merged map
+        // and run its own cleanup — which finds the preference still disabled and therefore removes
+        // nothing. Interposing on the state agent guarantees that order, because the toggle cannot
+        // proceed until this reply is handed back.
+        let racingAgent =
+            MailboxProcessor<StateMsg>.Start(fun inbox ->
+                let rec loop () =
+                    async {
+                        let! msg = inbox.Receive()
+
+                        match msg with
+                        | GetState reply ->
+                            let! snapshot = stateAgent.PostAndAsyncReply(GetState)
+
+                            if armed.Value then
+                                armed.Value <- false
+                                stateAgent.Post(UpdatePr(repoId, mergedPrMap))
+
+                                refreshCleanupTargets.Value <-
+                                    AutoSync.mergedAutoSyncTargets
+                                        mergedPrMap
+                                        (TreemonConfig.readAutoSyncBranchSet (Some root))
+                                        (Map.ofList [ normalizedPath, observation ])
+
+                                for target in refreshCleanupTargets.Value do
+                                    TreemonConfig.modifyAutoSyncBranches root (fun existing ->
+                                        existing |> Set.ofList |> Set.remove target.Branch |> Set.toList)
+
+                                    stateAgent.Post(ClearAutoSyncTrigger target.Path)
+                                    AutoSyncStore.clear store target.Path
+
+                                // Drain the publication so the toggle's next read cannot precede it.
+                                let! _ = stateAgent.PostAndAsyncReply(GetState)
+                                ()
+
+                            reply.Reply snapshot
+                        | other -> stateAgent.Post other
+
+                        return! loop ()
+                    }
+
+                loop ())
+
+        let api =
+            WorktreeApi.worktreeApi
+                racingAgent
+                (CardEventLog.createAgent ())
+                (SessionManager.createAgent ())
+                None
+                None
+                (Some store)
+                [ root ]
+                None
+                "1.0"
+                None
+
+        armed.Value <- true
+
+        let enableResult =
+            api.toggleAutoSync (WorktreePath normalizedPath) true |> Async.RunSynchronously
+
+        // Read back through the same agent so the endpoint's own posts are ordered ahead of it.
+        let state = racingAgent.PostAndReply(GetState)
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                refreshCleanupTargets.Value,
+                Is.Empty,
+                "the racing refresh read the preference before the write, so only the enable itself can undo it")
+            Assert.That(
+                Result.isError enableResult,
+                Is.True,
+                "an enable that loses the race to a merge must not answer Ok")
+            Assert.That(
+                TreemonConfig.readAutoSyncBranchSet (Some root),
+                Is.Empty,
+                "the just-written preference must be rolled back rather than waiting for another PR refresh")
+            Assert.That(state.AutoSyncTriggeredRevisions, Is.Empty)
+            Assert.That(TestUtils.runAsync (store.Get normalizedPath), Is.EqualTo None))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
     member _.``Differently-cased disable lets the same base revision trigger again``() =
         let normalizedPath = PathUtils.normalizePath worktree
         let differentlyCasedPath = normalizedPath.ToUpperInvariant()
