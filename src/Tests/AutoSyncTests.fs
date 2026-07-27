@@ -1487,10 +1487,11 @@ type AutoSyncEndpointTests() =
 
         let store = loadedStore root
 
-        // NUnit fixture-free mutables: the racing refresh is an impure boundary, and its cleanup
-        // targets are the evidence that nothing but the endpoint itself could undo the write.
-        let armed = ref false
-        let refreshCleanupTargets = ref []
+        // Mutable because the mailbox loop is an impure boundary: it must fire the racing refresh
+        // exactly once and hand its cleanup targets back to the assertions, which is the evidence
+        // that nothing but the endpoint itself could undo the write.
+        let mutable armed = false
+        let mutable refreshCleanupTargets = []
 
         // The interleaving under test, made exact instead of timing-dependent: the toggle takes its
         // snapshot (an open PR), and only then does `RefreshPr` publish the reconciled merged map
@@ -1507,17 +1508,17 @@ type AutoSyncEndpointTests() =
                         | GetState reply ->
                             let! snapshot = stateAgent.PostAndAsyncReply(GetState)
 
-                            if armed.Value then
-                                armed.Value <- false
+                            if armed then
+                                armed <- false
                                 stateAgent.Post(UpdatePr(repoId, mergedPrMap))
 
-                                refreshCleanupTargets.Value <-
+                                refreshCleanupTargets <-
                                     AutoSync.mergedAutoSyncTargets
                                         mergedPrMap
                                         (TreemonConfig.readAutoSyncBranchSet (Some root))
                                         (Map.ofList [ normalizedPath, observation ])
 
-                                for target in refreshCleanupTargets.Value do
+                                for target in refreshCleanupTargets do
                                     TreemonConfig.modifyAutoSyncBranches root (fun existing ->
                                         existing |> Set.ofList |> Set.remove target.Branch |> Set.toList)
 
@@ -1549,7 +1550,7 @@ type AutoSyncEndpointTests() =
                 "1.0"
                 None
 
-        armed.Value <- true
+        armed <- true
 
         let enableResult =
             api.toggleAutoSync (WorktreePath normalizedPath) true |> Async.RunSynchronously
@@ -1559,7 +1560,7 @@ type AutoSyncEndpointTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(
-                refreshCleanupTargets.Value,
+                refreshCleanupTargets,
                 Is.Empty,
                 "the racing refresh read the preference before the write, so only the enable itself can undo it")
             Assert.That(
