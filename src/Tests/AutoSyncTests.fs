@@ -1059,11 +1059,12 @@ type AutoSyncMechanicalTests() =
             trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
 
             let expectedRequest =
-                { WorktreePath = observation.Path
-                  RepoRoot = root
-                  UpstreamRemote = "origin"
-                  BaseBranch = "main"
-                  Branch = "feature-a" }
+                { Sync =
+                    { WorktreePath = observation.Path
+                      UpstreamRemote = "origin"
+                      BaseBranch = "main"
+                      Branch = "feature-a" }
+                  RepoRoot = root }
 
             Assert.Multiple(fun () ->
                 Assert.That(requests, Is.EqualTo([ expectedRequest ]))
@@ -1091,7 +1092,7 @@ type AutoSyncMechanicalTests() =
                         MechanicalSync =
                             mechanicalSync
                                 (fun _ -> async { return checkedOutBranch })
-                                (fun _ _ _ -> async { return syncOutcome })
+                                (fun _ -> async { return syncOutcome })
                                 (fun _ _ _ -> async { return openPrState })
                                 (fun _ _ -> async { return pushOutcome })
                         Deliver =

@@ -60,7 +60,15 @@ let private mergeInProgress (repoDir: string) =
 
     exitCode = 0
 
-let private sync (repoDir: string) = syncWithBase repoDir "origin" "main" |> runAsync
+/// The sync request a scratch repo's `feature` worktree is normally asked for: its own tree, the
+/// shared `origin`, and the base and observed branches that go with them.
+let private syncRequest (repoDir: string) (upstreamRemote: string) : BranchSyncRequest =
+    { WorktreePath = repoDir
+      UpstreamRemote = upstreamRemote
+      BaseBranch = "main"
+      Branch = "feature" }
+
+let private sync (repoDir: string) = syncWithBase (syncRequest repoDir "origin") |> runAsync
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -153,11 +161,34 @@ type BranchSyncTests() =
             advanceBase baseDir "base-work.txt" "base work"
             let headBefore = headOf repoDir
 
-            let outcome = syncWithBase repoDir "missing-remote" "main" |> runAsync
+            let outcome = syncWithBase (syncRequest repoDir "missing-remote") |> runAsync
 
             Assert.That(outcome, Is.EqualTo(BranchSyncOutcome.CommandFailed))
             Assert.That(headOf repoDir, Is.EqualTo(headBefore))
             Assert.That(mergeInProgress repoDir, Is.False))
+
+    [<Test>]
+    member _.``a sync whose branch is no longer checked out merges into nothing else``() =
+        withTempDir "treemon-branch-sync-branch-changed" (fun tempDir ->
+            let repoDir, baseDir = scratchRepos tempDir
+            advanceBase baseDir "base-work.txt" "base work"
+            // The request still names `feature`, so this stands in for a checkout that landed after
+            // the observation: the probe and the fetch run, and the merge must not.
+            gitOk repoDir [ "switch"; "-c"; "other" ]
+            let otherHeadBefore = headOf repoDir
+            let featureHeadBefore = gitText repoDir [ "rev-parse"; "feature" ]
+
+            let outcome = sync repoDir
+
+            Assert.Multiple(fun () ->
+                Assert.That(outcome, Is.EqualTo(BranchSyncOutcome.BranchChanged))
+                Assert.That(headOf repoDir, Is.EqualTo(otherHeadBefore))
+                Assert.That(gitText repoDir [ "rev-parse"; "feature" ], Is.EqualTo(featureHeadBefore))
+                Assert.That(
+                    File.Exists(Path.Combine(repoDir, "base-work.txt")),
+                    Is.False,
+                    "the base must not reach the tree of a branch nobody observed")
+                Assert.That(mergeInProgress repoDir, Is.False)))
 
 /// A `feature` branch already published to the shared `origin`: a configured upstream and a remote
 /// ref to advance, which is the state a worktree with an open pull request is in.
@@ -259,11 +290,8 @@ type BranchPushTests() =
 type MechanicalSyncCompositionTests() =
 
     let request repoDir : AutoSync.MechanicalSyncRequest =
-        { WorktreePath = repoDir
-          RepoRoot = repoDir
-          UpstreamRemote = "origin"
-          BaseBranch = "main"
-          Branch = "feature" }
+        { Sync = syncRequest repoDir "origin"
+          RepoRoot = repoDir }
 
     let refusedDirty: Result<unit, AutoSync.SyncFailure> = Error AutoSync.DirtyWorktree
 
@@ -376,26 +404,43 @@ type MechanicalSyncCompositionTests() =
                 Assert.That(queries, Is.Zero)))
 
     [<Test>]
-    member _.``a checkout during the merge stops the run before the provider is asked``() =
+    member _.``a checkout landing inside the sync never merges the branch it moved to``() =
         withTempDir "treemon-mechanical-checkout-during-sync" (fun tempDir ->
-            let repoDir, _ = scratchRepos tempDir
-            // Mutable because the provider query is the impure boundary whose absence is under test.
+            let repoDir, baseDir = scratchRepos tempDir
+            advanceBase baseDir "base-work.txt" "base work"
+            // A second branch holding its own work: the branch a merge bound to `HEAD` rather than
+            // to the observed branch would have moved, and it diverges from the base, so a wrong
+            // merge would leave a commit and a file behind rather than fail.
+            gitOk repoDir [ "switch"; "-c"; "other" ]
+            commitFile repoDir "other-work.txt" "other work"
+            gitOk repoDir [ "switch"; "feature" ]
+            let otherHeadBefore = gitText repoDir [ "rev-parse"; "other" ]
+            let featureHeadBefore = gitText repoDir [ "rev-parse"; "feature" ]
+            // Mutable because the checkout is the impure boundary this race is built from: it lands
+            // exactly once, after the operation's own observation and while the real sync is
+            // probing and fetching, which is the window a pre-sync check alone leaves open.
+            let mutable observations = 0
             let mutable queries = 0
+
+            let observeThenCheckout path =
+                async {
+                    let! branch = checkedOutBranch path
+                    observations <- observations + 1
+
+                    if observations = 1 then
+                        gitOk repoDir [ "switch"; "other" ]
+
+                    return branch
+                }
 
             let outcome =
                 AutoSync.mechanicalSync
-                    checkedOutBranch
-                    // A checkout landing while Treemon's own merge runs: the merge reports success,
-                    // but the tree it finished on is no longer the one that was observed.
-                    (fun _ _ _ ->
-                        async {
-                            gitOk repoDir [ "switch"; "-c"; "other" ]
-                            return BranchSyncOutcome.Merged
-                        })
+                    observeThenCheckout
+                    syncWithBase
                     (fun _ _ _ ->
                         async {
                             queries <- queries + 1
-                            return PrOpenState.NoOpenPr
+                            return PrOpenState.OpenPr
                         })
                     (fun _ _ -> failwith "a run that left its branch must not push")
                     (request repoDir)
@@ -403,6 +448,16 @@ type MechanicalSyncCompositionTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(outcome, Is.EqualTo(branchChanged))
+                Assert.That(
+                    gitText repoDir [ "rev-parse"; "other" ],
+                    Is.EqualTo(otherHeadBefore),
+                    "the branch the worktree moved to was never observed, so nothing may merge into it")
+                Assert.That(
+                    File.Exists(Path.Combine(repoDir, "base-work.txt")),
+                    Is.False,
+                    "a refused merge leaves the tree it would have written exactly as it was")
+                Assert.That(gitText repoDir [ "rev-parse"; "feature" ], Is.EqualTo(featureHeadBefore))
+                Assert.That(mergeInProgress repoDir, Is.False)
                 Assert.That(queries, Is.Zero, "a branch the worktree has left is never looked up")))
 
     [<Test>]

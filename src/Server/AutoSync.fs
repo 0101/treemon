@@ -59,16 +59,12 @@ type SyncFailure =
     | OpenPrCheckFailed
     | PushFailed
 
-/// One mechanical attempt's inputs. A record rather than a parameter list because every field is a
-/// string and two of them name branches, so a swapped pair would silently fetch or push the wrong
-/// ref. `RepoRoot` is where the shared branch configuration the provider query reads lives;
-/// `WorktreePath` is the tree that actually moves.
+/// One mechanical attempt's inputs: the Git sync's own request plus the repo root where the shared
+/// branch configuration the provider query reads lives. The tree that actually moves is
+/// `Sync.WorktreePath`, never `RepoRoot`.
 type MechanicalSyncRequest =
-    { WorktreePath: string
-      RepoRoot: string
-      UpstreamRemote: string
-      BaseBranch: string
-      Branch: string }
+    { Sync: GitWorktree.BranchSyncRequest
+      RepoRoot: string }
 
 /// `ClaimRevision`/`ReleaseRevision` are the in-process claim; the accepted-revision operations are
 /// the durable, restart-safe layer on top of it (`AutoSyncStore`). `RecordAcceptedRevision` and
@@ -142,6 +138,7 @@ let internal syncOutcomeResult =
     | GitWorktree.BranchSyncOutcome.RefusedDirty -> Error DirtyWorktree
     | GitWorktree.BranchSyncOutcome.Conflicted -> Error MergeConflict
     | GitWorktree.BranchSyncOutcome.AbortFailed -> Error MergeAbortFailed
+    | GitWorktree.BranchSyncOutcome.BranchChanged -> Error BranchChanged
     | GitWorktree.BranchSyncOutcome.CommandFailed -> Error GitCommandFailed
 
 let internal pushOutcomeResult =
@@ -157,23 +154,25 @@ let internal pushOutcomeResult =
 /// provider.
 let mechanicalSync
     (checkedOutBranch: string -> Async<string option>)
-    (syncWithBase: string -> string -> string -> Async<GitWorktree.BranchSyncOutcome>)
+    (syncWithBase: GitWorktree.BranchSyncRequest -> Async<GitWorktree.BranchSyncOutcome>)
     (queryOpenPrState: string -> string -> string -> Async<PrOpenState.OpenPrState>)
     (pushBranch: string -> string -> Async<GitWorktree.BranchPushOutcome>)
     (request: MechanicalSyncRequest)
     =
     // Asked again at each boundary instead of trusting the observation that started the run: a
     // checkout decides which branch a merge lands on and which branch's work a push would publish,
-    // and the pull request that authorizes the push is looked up for the observed branch alone.
+    // and the pull request that authorizes the push is looked up for the observed branch alone. The
+    // sync and the push each re-read the branch at their own mutation, so what this adds is refusing
+    // to spend a fetch or a provider query on a worktree that has already moved on.
     let stillOnObservedBranch () =
         async {
-            let! current = checkedOutBranch request.WorktreePath
-            return if current = Some request.Branch then Ok() else Error BranchChanged
+            let! current = checkedOutBranch request.Sync.WorktreePath
+            return if current = Some request.Sync.Branch then Ok() else Error BranchChanged
         }
 
     asyncResult {
         do! stillOnObservedBranch ()
-        let! outcome = syncWithBase request.WorktreePath request.UpstreamRemote request.BaseBranch
+        let! outcome = syncWithBase request.Sync
         do! syncOutcomeResult outcome
         // A merge that landed somewhere else is not this operation's work, so the provider is never
         // even asked about a branch the worktree has left.
@@ -182,9 +181,9 @@ let mechanicalSync
         // Asked now, at the moment the push would happen, and of the provider rather than the
         // dashboard's cached map: the branch this run just moved is the only thing that may move
         // remotely, and only while a pull request is actually open to receive it.
-        match! queryOpenPrState request.RepoRoot request.UpstreamRemote request.Branch with
+        match! queryOpenPrState request.RepoRoot request.Sync.UpstreamRemote request.Sync.Branch with
         | PrOpenState.OpenPr ->
-            let! pushOutcome = pushBranch request.WorktreePath request.Branch
+            let! pushOutcome = pushBranch request.Sync.WorktreePath request.Sync.Branch
             return! pushOutcomeResult pushOutcome
         | PrOpenState.NoOpenPr -> return ()
         | PrOpenState.UnknownPrState -> return! Error OpenPrCheckFailed
@@ -379,11 +378,12 @@ let private attemptSync
             return! deliverPrompt dependencies gitData target (prompt upstreamRemote baseBranch)
         | NoOpenSession _ ->
             let request =
-                { WorktreePath = gitData.Path
-                  RepoRoot = repoRoot
-                  UpstreamRemote = upstreamRemote
-                  BaseBranch = baseBranch
-                  Branch = gitData.Branch }
+                { Sync =
+                    { WorktreePath = gitData.Path
+                      UpstreamRemote = upstreamRemote
+                      BaseBranch = baseBranch
+                      Branch = gitData.Branch }
+                  RepoRoot = repoRoot }
 
             match! dependencies.MechanicalSync request with
             | Ok() ->

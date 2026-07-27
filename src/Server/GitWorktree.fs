@@ -345,7 +345,20 @@ type BranchSyncOutcome =
     | Conflicted
     /// The conflicted merge could not be aborted, so a merge may still be in progress.
     | AbortFailed
+    /// The worktree is no longer on the branch this sync was started for, a detached `HEAD`
+    /// included, so nothing was merged.
+    | BranchChanged
     | CommandFailed
+
+/// One sync's inputs. A record rather than a parameter list because every field is a string and two
+/// of them name branches, so a swapped pair would silently fetch the wrong ref or merge into a
+/// branch nobody observed. `Branch` is the branch the caller observed the worktree on: the merge
+/// runs only while the worktree still has that branch checked out.
+type BranchSyncRequest =
+    { WorktreePath: string
+      UpstreamRemote: string
+      BaseBranch: string
+      Branch: string }
 
 /// A sync fetches over the network from background work that no HTTP response is waiting on, so it
 /// gets its own timeout instead of the interactive response deadline `runArgumentList` applies. The
@@ -389,6 +402,17 @@ let checkedOutBranch (worktreePath: string) =
                 | "HEAD" -> None
                 | branch -> Some branch
         | _ -> return None
+    }
+
+/// The tree must still be on the branch an earlier observation named. Asked of git as late as the
+/// CLI allows, immediately before the command that acts, because a checkout decides which branch a
+/// merge lands on and which branch's work a push publishes. Each caller supplies the outcome its own
+/// vocabulary uses for a worktree that moved on.
+let private ensureOnBranch branchChanged worktreePath branch =
+    async {
+        match! checkedOutBranch worktreePath with
+        | Some current when current = branch -> return Ok()
+        | _ -> return Error branchChanged
     }
 
 let private runBranchSyncGit (worktreePath: string) (arguments: string list) =
@@ -440,23 +464,33 @@ let private failedMergeOutcome worktreePath =
         | Error outcome -> return outcome
     }
 
-let private mergeFetchedBase worktreePath revision =
+/// One merge attempt, bound to the branch the sync was started for. `git merge` acts on whatever
+/// `HEAD` names at the moment it runs, so the branch is re-read from the tree here — after the
+/// cleanliness probe and the fetch, and immediately before the mutation — rather than trusted from
+/// the observation that started the run; from the command itself onwards git's own worktree locks
+/// take over. Both merge attempts pass through this, since a refused fast-forward leaves a whole
+/// process runtime before the merge that follows it.
+let private mergeOnBranch (request: BranchSyncRequest) arguments =
     asyncResult {
-        let! fastForwardExit =
-            branchSyncExitCode worktreePath [ "merge"; "--ff-only"; "--quiet"; revision ]
+        do! ensureOnBranch BranchSyncOutcome.BranchChanged request.WorktreePath request.Branch
+        return! branchSyncExitCode request.WorktreePath ("merge" :: arguments)
+    }
+
+let private mergeFetchedBase request revision =
+    asyncResult {
+        let! fastForwardExit = mergeOnBranch request [ "--ff-only"; "--quiet"; revision ]
 
         if fastForwardExit = 0 then
             return BranchSyncOutcome.FastForwarded
         else
             // A refused fast-forward leaves the worktree untouched, so a real merge can still follow
             // it. `--no-edit` keeps git from opening an editor in a background server process.
-            let! mergeExit =
-                branchSyncExitCode worktreePath [ "merge"; "--no-edit"; "--quiet"; revision ]
+            let! mergeExit = mergeOnBranch request [ "--no-edit"; "--quiet"; revision ]
 
             if mergeExit = 0 then
                 return BranchSyncOutcome.Merged
             else
-                let! failure = failedMergeOutcome worktreePath
+                let! failure = failedMergeOutcome request.WorktreePath
                 return! Error failure
     }
 
@@ -465,8 +499,10 @@ let private mergeFetchedBase worktreePath revision =
 /// the repo root's (`fetchUpstream` also fast-forwards the base worktree, an unrelated side effect),
 /// prefers a fast-forward over a merge commit, aborts a conflict it created, and confirms the fetched
 /// revision actually reached `HEAD` instead of trusting an exit code.
-let syncWithBase (worktreePath: string) (upstreamRemote: string) (baseBranch: string) =
+let syncWithBase (request: BranchSyncRequest) =
     async {
+        let worktreePath = request.WorktreePath
+
         let! result =
             asyncResult {
                 let! localContent = localComparisonContent worktreePath
@@ -482,7 +518,7 @@ let syncWithBase (worktreePath: string) (upstreamRemote: string) (baseBranch: st
                 let! fetchExit =
                     branchSyncExitCode
                         worktreePath
-                        [ "fetch"; "--quiet"; upstreamRemote; "--"; baseBranch ]
+                        [ "fetch"; "--quiet"; request.UpstreamRemote; "--"; request.BaseBranch ]
 
                 if fetchExit <> 0 then
                     return! Error BranchSyncOutcome.CommandFailed
@@ -493,7 +529,7 @@ let syncWithBase (worktreePath: string) (upstreamRemote: string) (baseBranch: st
                 if alreadyCurrent then
                     return BranchSyncOutcome.AlreadyCurrent
                 else
-                    let! outcome = mergeFetchedBase worktreePath baseRevision
+                    let! outcome = mergeFetchedBase request baseRevision
                     let! verified = headContains worktreePath baseRevision
 
                     if verified then
@@ -541,17 +577,6 @@ let private branchPushValue worktreePath arguments =
             return value
     }
 
-/// The tree must still be on the branch this push was authorized for. The open pull request that
-/// licensed the push was looked up for that one branch, so a checkout since then — or a `HEAD` that
-/// names no branch at all — would publish work nothing asked about; asking git itself here, rather
-/// than trusting an earlier reading, leaves no window between the check and the push.
-let private ensureCheckedOut worktreePath branch =
-    async {
-        match! checkedOutBranch worktreePath with
-        | Some current when current = branch -> return Ok()
-        | _ -> return Error BranchPushOutcome.BranchChanged
-    }
-
 /// Where the branch has to go, taken from the two config keys git itself writes for a tracking
 /// branch. Reading `remote` and `merge` separately avoids splitting a combined `origin/feature` at a
 /// slash, which guesses wrong for any branch name that contains one; an unconfigured upstream is just
@@ -572,16 +597,17 @@ let private configuredUpstreamTarget worktreePath branch =
 
 /// Advances an open pull request with the branch a mechanical sync just updated. The branch is named
 /// by the caller rather than read from `HEAD`, so the tree it publishes is the one whose pull request
-/// authorized the push and a worktree that moved on stops here. Both halves of the refspec are
-/// spelled out, so neither `push.default`, nor `HEAD`, nor a remote-side default picks what moves.
-/// There is deliberately no `--force` and no `--force-with-lease`: a remote that has moved on is
-/// exactly the case Treemon must not resolve by itself, so the push fails with both sides untouched
-/// and the caller hands the worktree to an agent.
+/// authorized the push; the tree is re-read once more here because that pull request was looked up
+/// for that one branch, so a worktree that moved on since stops before publishing anything. Both
+/// halves of the refspec are spelled out, so neither `push.default`, nor `HEAD`, nor a remote-side
+/// default picks what moves. There is deliberately no `--force` and no `--force-with-lease`: a remote
+/// that has moved on is exactly the case Treemon must not resolve by itself, so the push fails with
+/// both sides untouched and the caller hands the worktree to an agent.
 let pushSyncedBranch (worktreePath: string) (branch: string) =
     async {
         let! result =
             asyncResult {
-                do! ensureCheckedOut worktreePath branch
+                do! ensureOnBranch BranchPushOutcome.BranchChanged worktreePath branch
                 let! remote, remoteRef = configuredUpstreamTarget worktreePath branch
 
                 let! output =
