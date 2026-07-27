@@ -226,9 +226,76 @@ button { font: inherit; }
 .change-summary-modified .change-summary-count { color: var(--modified); }
 .change-summary-removed .change-summary-count { color: var(--deleted); }
 
+.category-warning {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    margin: .5rem .75rem .25rem;
+    padding: .5rem .75rem;
+    border-left: 2px solid var(--border-bright);
+    color: var(--text-secondary);
+    font-size: var(--fs-base);
+    line-height: 1.45;
+}
+
+.category-warning:empty { display: none; }
+
 .file-list {
     min-height: 0;
     padding: 0 0 .8rem;
+}
+
+.category-entry {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: .3rem .5rem;
+    align-items: center;
+    padding: .45rem .75rem .45rem calc(var(--category-depth, 1) * .75rem);
+    border: 0;
+    border-radius: 0;
+    text-align: left;
+    color: var(--text-primary);
+    background: transparent;
+    cursor: pointer;
+}
+
+.category-entry::before {
+    content: "›";
+    color: var(--text-muted);
+    font-size: var(--fs-lg);
+    line-height: 1;
+    transition: transform .12s ease;
+}
+
+.category-entry[aria-expanded="true"]::before { transform: rotate(90deg); }
+
+.category-entry:hover { background: var(--bg-elevated); }
+
+.category-entry:focus-visible {
+    outline: 2px solid var(--accent-bright);
+    outline-offset: 2px;
+}
+
+.category-name {
+    overflow: hidden;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.category-count {
+    color: var(--text-muted);
+    font-family: var(--font-code);
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
+}
+
+.category-entry[aria-expanded="false"] + .category-panel { display: none; }
+
+.category-panel .file-entry {
+    padding-left: calc((var(--category-depth, 0) + 1) * .75rem);
 }
 
 .file-item {
@@ -630,6 +697,7 @@ button { font: inherit; }
                 </label>
             </div>
             <div id="change-summary" class="change-summary" aria-live="polite"></div>
+            <div id="category-warning" class="category-warning" role="status"></div>
             <div id="file-list" class="file-list"></div>
             <div id="summary-state" aria-live="polite">
                 <div class="state-card" data-state="loading-summary">
@@ -646,6 +714,8 @@ var VIEW_KEY = 'treemon.diff.view';
 var SELECTION_KEY = 'treemon.diff.selection:' + location.pathname.replace(/\/diff\.html$/, '');
 var FILTER_KEY = 'treemon.diff.layers:' + location.pathname.replace(/\/diff\.html$/, '');
 var HIGHLIGHTER_URL = '/assets/diff2html/3.4.52/diff2html-ui-slim.min.js';
+var OTHER_CATEGORY = 'Other';
+var CATEGORY_WARNING = 'Diff groups are not applied';
 var VIEWER_ID = crypto.randomUUID();
 var state = {
     summary: null,
@@ -825,6 +895,7 @@ function clearNavigator() {
     state.selectedButton = null;
     state.panel = null;
     document.getElementById('file-list').replaceChildren();
+    document.getElementById('category-warning').replaceChildren();
     document.getElementById('summary-state').replaceChildren();
     document.getElementById('change-summary').replaceChildren();
     document.getElementById('change-summary').removeAttribute('aria-label');
@@ -840,6 +911,10 @@ function changePresentation(change) {
     }[change] || { symbol: '?', label: 'Changed file' };
 }
 
+function fileEntries() {
+    return Array.from(document.querySelectorAll('#file-list .file-entry'));
+}
+
 function showFileActions(path) {
     var range = document.createRange();
     range.selectNodeContents(path);
@@ -851,111 +926,210 @@ function showFileActions(path) {
 
 function renderFileList(files) {
     var list = document.getElementById('file-list');
-    list.replaceChildren();
-    files.forEach(function(file, index) {
-        var item = document.createElement('section');
-        item.className = 'file-item';
-        item.dataset.identity = file.identity;
+    list.replaceChildren.apply(list, files.map(createFileItem));
+}
 
-        var heading = document.createElement('h2');
-        heading.className = 'file-heading';
+function createFileItem(file, index) {
+    var item = document.createElement('section');
+    item.className = 'file-item';
+    item.dataset.identity = file.identity;
 
-        var button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'file-entry';
-        button.dataset.identity = file.identity;
-        button.id = 'file-header-' + index;
-        button.setAttribute('aria-expanded', 'false');
-        button.setAttribute('aria-controls', 'file-panel-' + index);
-        button.title = file.oldDisplayPath
-            ? file.oldDisplayPath + ' → ' + file.displayPath
-            : file.displayPath;
+    var heading = document.createElement('h2');
+    heading.className = 'file-heading';
 
-        var presentation = changePresentation(file.change);
-        var badge = document.createElement('span');
-        badge.className = 'change-badge ' + file.change;
-        badge.textContent = presentation.symbol;
-        badge.setAttribute('aria-label', presentation.label);
-        badge.title = presentation.label;
-        button.appendChild(badge);
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'file-entry';
+    button.dataset.identity = file.identity;
+    button.id = 'file-header-' + index;
+    button.setAttribute('aria-expanded', 'false');
+    button.setAttribute('aria-controls', 'file-panel-' + index);
+    button.title = file.oldDisplayPath
+        ? file.oldDisplayPath + ' → ' + file.displayPath
+        : file.displayPath;
 
-        var path = document.createElement('span');
-        path.className = 'file-path';
-        path.textContent = file.displayPath;
-        button.appendChild(path);
+    var presentation = changePresentation(file.change);
+    var badge = document.createElement('span');
+    badge.className = 'change-badge ' + file.change;
+    badge.textContent = presentation.symbol;
+    badge.setAttribute('aria-label', presentation.label);
+    badge.title = presentation.label;
+    button.appendChild(badge);
 
-        var stats = null;
-        if (
-            Number.isInteger(file.linesAdded) &&
-            Number.isInteger(file.linesRemoved) &&
-            (file.linesAdded > 0 || file.linesRemoved > 0)
-        ) {
-            stats = document.createElement('span');
-            stats.className = 'file-stats';
-            var statLabels = [];
+    var path = document.createElement('span');
+    path.className = 'file-path';
+    path.textContent = file.displayPath;
+    button.appendChild(path);
 
-            if (file.linesAdded > 0) {
-                var added = document.createElement('span');
-                added.className = 'file-lines-added';
-                added.textContent = '+' + file.linesAdded;
-                statLabels.push(file.linesAdded + ' lines added');
-                stats.appendChild(added);
-            }
+    var stats = null;
+    if (
+        Number.isInteger(file.linesAdded) &&
+        Number.isInteger(file.linesRemoved) &&
+        (file.linesAdded > 0 || file.linesRemoved > 0)
+    ) {
+        stats = document.createElement('span');
+        stats.className = 'file-stats';
+        var statLabels = [];
 
-            if (file.linesRemoved > 0) {
-                var removed = document.createElement('span');
-                removed.className = 'file-lines-removed';
-                removed.textContent = '−' + file.linesRemoved;
-                statLabels.push(file.linesRemoved + ' lines removed');
-                stats.appendChild(removed);
-            }
-
-            stats.setAttribute('aria-label', statLabels.join(', '));
+        if (file.linesAdded > 0) {
+            var added = document.createElement('span');
+            added.className = 'file-lines-added';
+            added.textContent = '+' + file.linesAdded;
+            statLabels.push(file.linesAdded + ' lines added');
+            stats.appendChild(added);
         }
 
-        if (file.oldDisplayPath) {
-            var oldPath = document.createElement('span');
-            oldPath.className = 'old-path';
-            oldPath.textContent = 'from ' + file.oldDisplayPath;
-            button.appendChild(oldPath);
+        if (file.linesRemoved > 0) {
+            var removed = document.createElement('span');
+            removed.className = 'file-lines-removed';
+            removed.textContent = '−' + file.linesRemoved;
+            statLabels.push(file.linesRemoved + ' lines removed');
+            stats.appendChild(removed);
         }
 
-        button.addEventListener('keydown', function(event) {
-            var buttons = Array.from(list.querySelectorAll('.file-entry'));
-            var current = buttons.indexOf(button);
-            var target = null;
-            if (event.key === 'ArrowDown') target = buttons[(current + 1) % buttons.length];
-            else if (event.key === 'ArrowUp') target = buttons[(current - 1 + buttons.length) % buttons.length];
-            else if (event.key === 'Home') target = buttons[0];
-            else if (event.key === 'End') target = buttons[buttons.length - 1];
-            if (target) {
-                event.preventDefault();
-                target.focus();
-            }
-        });
+        stats.setAttribute('aria-label', statLabels.join(', '));
+    }
 
-        var actionsButton = document.createElement('button');
-        actionsButton.type = 'button';
-        actionsButton.className = 'file-actions-button';
-        actionsButton.setAttribute('aria-label', 'Actions for ' + file.displayPath);
-        actionsButton.title = 'Actions for ' + file.displayPath;
-        actionsButton.innerHTML =
-            '<svg class="toolbar-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false">' +
-            '<circle cx="3" cy="8" r="1"></circle>' +
-            '<circle cx="8" cy="8" r="1"></circle>' +
-            '<circle cx="13" cy="8" r="1"></circle>' +
-            '</svg>';
-        actionsButton.addEventListener('click', function(event) {
-            event.stopPropagation();
-            showFileActions(path);
-        });
-        heading.addEventListener('click', function() { selectFile(file, button, item); });
+    if (file.oldDisplayPath) {
+        var oldPath = document.createElement('span');
+        oldPath.className = 'old-path';
+        oldPath.textContent = 'from ' + file.oldDisplayPath;
+        button.appendChild(oldPath);
+    }
 
-        heading.append(button, actionsButton);
-        if (stats) heading.appendChild(stats);
-        item.appendChild(heading);
-        list.appendChild(item);
+    button.addEventListener('keydown', function(event) {
+        var buttons = fileEntries();
+        var current = buttons.indexOf(button);
+        var target = null;
+        if (event.key === 'ArrowDown') target = buttons[(current + 1) % buttons.length];
+        else if (event.key === 'ArrowUp') target = buttons[(current - 1 + buttons.length) % buttons.length];
+        else if (event.key === 'Home') target = buttons[0];
+        else if (event.key === 'End') target = buttons[buttons.length - 1];
+        if (target) {
+            event.preventDefault();
+            target.focus();
+        }
     });
+
+    var actionsButton = document.createElement('button');
+    actionsButton.type = 'button';
+    actionsButton.className = 'file-actions-button';
+    actionsButton.setAttribute('aria-label', 'Actions for ' + file.displayPath);
+    actionsButton.title = 'Actions for ' + file.displayPath;
+    actionsButton.innerHTML =
+        '<svg class="toolbar-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" focusable="false">' +
+        '<circle cx="3" cy="8" r="1"></circle>' +
+        '<circle cx="8" cy="8" r="1"></circle>' +
+        '<circle cx="13" cy="8" r="1"></circle>' +
+        '</svg>';
+    actionsButton.addEventListener('click', function(event) {
+        event.stopPropagation();
+        showFileActions(path);
+    });
+    heading.addEventListener('click', function() { selectFile(file, button, item); });
+
+    heading.append(button, actionsButton);
+    if (stats) heading.appendChild(stats);
+    item.appendChild(heading);
+    return item;
+}
+
+// Rebuilds the tree of categories that actually contain changed files from the server-ordered
+// category paths, so a configured category without changes never renders. Unmatched files collect
+// in the synthetic trailing Other group.
+function categoryRoots(files) {
+    var root = { children: new Map(), files: [] };
+
+    files.forEach(function(file, index) {
+        var path = Array.isArray(file.categoryPath) ? file.categoryPath : [];
+        var category = path.reduce(function(parent, name) {
+            var child = parent.children.get(name);
+            if (!child) {
+                child = { name: name, children: new Map(), files: [], count: 0 };
+                parent.children.set(name, child);
+            }
+            child.count += 1;
+            return child;
+        }, root);
+        category.files.push({ file: file, index: index });
+    });
+
+    var configured = Array.from(root.children.values());
+    if (!root.files.length) return configured;
+    return configured.concat([
+        {
+            name: OTHER_CATEGORY,
+            children: new Map(),
+            files: root.files,
+            count: root.files.length
+        }
+    ]);
+}
+
+function createCategorySection(node, depth) {
+    var section = document.createElement('section');
+    section.className = 'category-item';
+    section.style.setProperty('--category-depth', String(depth));
+
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'category-entry';
+    button.setAttribute('aria-expanded', 'true');
+    button.title = node.name;
+
+    var name = document.createElement('span');
+    name.className = 'category-name';
+    name.textContent = node.name;
+
+    var count = document.createElement('span');
+    count.className = 'category-count';
+    count.textContent = String(node.count);
+    count.setAttribute('aria-label', node.count + (node.count === 1 ? ' file' : ' files'));
+
+    button.append(name, count);
+    button.addEventListener('click', function() {
+        button.setAttribute(
+            'aria-expanded',
+            String(button.getAttribute('aria-expanded') !== 'true')
+        );
+    });
+
+    var panel = document.createElement('div');
+    panel.className = 'category-panel';
+    var children = Array.from(node.children.values(), function(child) {
+        return createCategorySection(child, depth + 1);
+    });
+    var rows = node.files.map(function(entry) {
+        return createFileItem(entry.file, entry.index);
+    });
+    panel.append.apply(panel, children.concat(rows));
+
+    section.append(button, panel);
+    return section;
+}
+
+function renderCategoryTree(files) {
+    var list = document.getElementById('file-list');
+    var sections = categoryRoots(files).map(function(node) {
+        return createCategorySection(node, 1);
+    });
+    list.replaceChildren.apply(list, sections);
+}
+
+function renderCategorizationWarning(reason) {
+    var text = document.createElement('span');
+    text.className = 'category-warning-text';
+    text.textContent = reason
+        ? CATEGORY_WARNING + ': ' + reason + '.'
+        : CATEGORY_WARNING + '.';
+    document.getElementById('category-warning').replaceChildren(text);
+}
+
+function renderCategorizedFiles(files, categorization) {
+    var status = categorization && categorization.status;
+    if (status === 'invalid') renderCategorizationWarning(categorization.reason);
+    if (status === 'configured') renderCategoryTree(files);
+    else renderFileList(files);
 }
 
 function mountFilePanel(button, item) {
@@ -1014,7 +1188,7 @@ function restoreFileSelection(files) {
     var stored = readStorage(SELECTION_KEY);
     var selected = files.find(function(file) { return fileSelectionKey(file) === stored; });
     if (!selected) return;
-    var button = Array.from(document.querySelectorAll('.file-entry'))
+    var button = fileEntries()
         .find(function(candidate) { return candidate.dataset.identity === selected.identity; });
     if (button) openFile(selected, button, button.closest('.file-item'));
 }
@@ -1394,7 +1568,7 @@ function renderReadySummary(summary) {
     state.summary = summary;
     document.getElementById('base-label').textContent = comparisonLabel(summary.baseRef);
     renderChangeSummary(files);
-    renderFileList(files);
+    renderCategorizedFiles(files, summary.categorization);
     restoreFileSelection(files);
 }
 

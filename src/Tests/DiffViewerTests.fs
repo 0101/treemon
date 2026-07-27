@@ -102,13 +102,17 @@ let private exactLinePatch =
           " trailing context"
           "" ]
 
-let private fileJson identity displayPath oldDisplayPath change =
+let private categorizedFileJson identity displayPath oldDisplayPath change categoryPath =
     {| identity = identity
        displayPath = displayPath
        oldDisplayPath = oldDisplayPath
        linesAdded = (None: int option)
        linesRemoved = (None: int option)
-       change = change |}
+       change = change
+       categoryPath = (categoryPath: string list) |}
+
+let private fileJson identity displayPath oldDisplayPath change =
+    categorizedFileJson identity displayPath oldDisplayPath change []
 
 let private fileJsonWithStats
     identity
@@ -123,7 +127,8 @@ let private fileJsonWithStats
        oldDisplayPath = oldDisplayPath
        linesAdded = Some linesAdded
        linesRemoved = Some linesRemoved
-       change = change |}
+       change = change
+       categoryPath = List.empty<string> |}
 
 let private firstFile =
     fileJson "id-1" "src/a.txt" None "modified"
@@ -155,17 +160,41 @@ let private readyLayerCounts committed local untracked =
         {| status = "ready"
            fileCount = untracked |} |}
 
-let private readySummaryJsonWithCounts committed local untracked files =
+let private categorizationJson status reason =
+    {| status = status
+       reason = (reason: string option) |}
+
+let private summaryJsonWithCategorization categorization committed local untracked files =
     JsonSerializer.Serialize(
         {| status = "ready"
            baseRef = "origin/main"
            fileCount = Array.length files
            files = files
+           categorization = categorization
            layerCounts = readyLayerCounts committed local untracked |}
     )
 
+let private readySummaryJsonWithCounts committed local untracked files =
+    summaryJsonWithCategorization
+        (categorizationJson "missing" None)
+        committed
+        local
+        untracked
+        files
+
 let private readySummaryJson files =
     readySummaryJsonWithCounts 2 3 1 files
+
+let private configuredSummaryJson files =
+    summaryJsonWithCategorization (categorizationJson "configured" None) 2 3 1 files
+
+let private invalidSummaryJson reason files =
+    summaryJsonWithCategorization
+        (categorizationJson "invalid" (Some reason))
+        2
+        3
+        1
+        files
 
 let private fileResultJsonWithPatch patch status identity displayPath oldDisplayPath change =
     let file = fileJson identity displayPath oldDisplayPath change
@@ -1801,6 +1830,312 @@ type DiffViewerE2ETests() =
                 Assert.That(staleLoading, Is.Zero)
                 Assert.That(staleSummaryState, Is.Zero)
                 Assert.That(staleHeading, Is.Zero))
+        }
+
+    [<Test>]
+    member this.``configured summaries nest categories with subtree counts and text-only names``() =
+        task {
+            let files =
+                [| categorizedFileJson
+                       "id-client-app"
+                       "src/Client/App.fs"
+                       None
+                       "modified"
+                       [ "Production code"; "Client" ]
+                   categorizedFileJson
+                       "id-client-view"
+                       "src/Client/View.fs"
+                       None
+                       "modified"
+                       [ "Production code"; "Client" ]
+                   categorizedFileJson
+                       "id-server-api"
+                       "src/Server/Api.fs"
+                       None
+                       "modified"
+                       [ "Production code"; "Server" ]
+                   categorizedFileJson
+                       "id-tests"
+                       "src/Tests/ApiTests.fs"
+                       None
+                       "added"
+                       [ "Tests" ]
+                   categorizedFileJson
+                       "id-docs"
+                       "docs/spec/api.md"
+                       None
+                       "modified"
+                       [ "<b>Docs</b>" ]
+                   fileJson "id-other" "notes.txt" None "untracked" |]
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(4).WaitForAsync()
+
+            let! outline =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const lines = [];
+                        const walk = (section, depth) => {
+                            const button = section.querySelector(':scope > .category-entry');
+                            const panel = section.querySelector(':scope > .category-panel');
+                            const count = button.querySelector('.category-count');
+                            lines.push([
+                                depth,
+                                button.querySelector('.category-name').textContent,
+                                count.textContent,
+                                count.getAttribute('aria-label'),
+                                button.getAttribute('aria-expanded')
+                            ].join('|'));
+                            [...panel.children].forEach(child => {
+                                if (child.classList.contains('category-item')) walk(child, depth + 1);
+                                else lines.push(
+                                    [depth, 'file', child.querySelector('.file-path').textContent].join('|')
+                                );
+                            });
+                        };
+                        document.querySelectorAll('#file-list > .category-item')
+                            .forEach(section => walk(section, 1));
+                        return lines;
+                    }"""
+                )
+
+            let! presentation =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const padding = element => parseFloat(getComputedStyle(element).paddingLeft);
+                        const branch = document.querySelector('#file-list > .category-item > .category-entry');
+                        const nested = document.querySelector(
+                            '#file-list > .category-item > .category-panel > .category-item > .category-entry'
+                        );
+                        const row = document.querySelector('.category-panel .file-entry');
+                        return [
+                            String(document.querySelectorAll('#file-list b').length),
+                            String(document.querySelectorAll('.file-item').length),
+                            document.querySelector(
+                                '#file-list > .category-item:last-child .category-name'
+                            ).textContent,
+                            getComputedStyle(document.getElementById('category-warning')).display,
+                            String(padding(nested) > padding(branch)),
+                            String(padding(row) > padding(nested)),
+                            getComputedStyle(document.querySelector('.category-name')).fontSize,
+                            getComputedStyle(document.querySelector('.category-count')).fontSize
+                        ];
+                    }"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    outline,
+                    Is.EqualTo(
+                        [| "1|Production code|3|3 files|true"
+                           "2|Client|2|2 files|true"
+                           "2|file|src/Client/App.fs"
+                           "2|file|src/Client/View.fs"
+                           "2|Server|1|1 file|true"
+                           "2|file|src/Server/Api.fs"
+                           "1|Tests|1|1 file|true"
+                           "1|file|src/Tests/ApiTests.fs"
+                           "1|<b>Docs</b>|1|1 file|true"
+                           "1|file|docs/spec/api.md"
+                           "1|Other|1|1 file|true"
+                           "1|file|notes.txt" |]
+                    )
+                )
+                Assert.That(
+                    presentation,
+                    Is.EqualTo(
+                        [| "0"
+                           "6"
+                           "Other"
+                           "none"
+                           "true"
+                           "true"
+                           "13px"
+                           "11px" |]
+                    )
+                ))
+        }
+
+    [<Test>]
+    member this.``configured summaries render only changed categories and omit an empty other group``() =
+        task {
+            let files =
+                [| categorizedFileJson
+                       "id-tests-a"
+                       "src/Tests/ApiTests.fs"
+                       None
+                       "modified"
+                       [ "Tests" ]
+                   categorizedFileJson
+                       "id-tests-b"
+                       "src/Tests/ViewTests.fs"
+                       None
+                       "added"
+                       [ "Tests" ] |]
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").WaitForAsync()
+
+            let! rendered =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        String(document.querySelectorAll('#file-list > .category-item').length),
+                        String(document.querySelectorAll('.category-item').length),
+                        document.querySelector('.category-name').textContent,
+                        document.querySelector('.category-count').textContent,
+                        String([...document.querySelectorAll('.category-name')]
+                            .some(name => name.textContent === 'Other')),
+                        String(document.querySelectorAll('.file-item').length)
+                    ]"""
+                )
+
+            Assert.That(
+                rendered,
+                Is.EqualTo([| "1"; "1"; "Tests"; "2"; "false"; "2" |])
+            )
+        }
+
+    [<Test>]
+    member this.``missing categorization renders the flat file list``() =
+        task {
+            do! this.RouteSummary(readySummaryJson [| firstFile; secondFile |])
+            do! this.Goto()
+            do!
+                this.Page.Locator(
+                    ".file-entry[data-identity='id-2']"
+                ).WaitForAsync()
+
+            let! rendered =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        String(document.querySelectorAll('#file-list > .file-item').length),
+                        String(document.querySelectorAll('.category-item').length),
+                        String(document.querySelectorAll('.category-entry').length),
+                        [...document.querySelectorAll('#file-list > .file-item .file-path')]
+                            .map(path => path.textContent)
+                            .join(','),
+                        getComputedStyle(document.getElementById('category-warning')).display,
+                        document.getElementById('category-warning').textContent
+                    ]"""
+                )
+
+            Assert.That(
+                rendered,
+                Is.EqualTo(
+                    [| "2"
+                       "0"
+                       "0"
+                       "src/a.txt,src/new-name.txt"
+                       "none"
+                       "" |]
+                )
+            )
+        }
+
+    [<Test>]
+    member this.``invalid categorization warns above the unchanged flat list``() =
+        task {
+            let summaries =
+                [| invalidSummaryJson
+                       "each category needs a name"
+                       [| firstFile; secondFile |]
+                   configuredSummaryJson
+                       [| categorizedFileJson
+                              "id-configured"
+                              "src/Server/Api.fs"
+                              None
+                              "modified"
+                              [ "Production code" ] |] |]
+            // The route callback owns the sequence of summaries served to Refresh.
+            let mutable summaryIndex = 0
+
+            do! this.RouteHighlighter()
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-summary?*",
+                    fun route ->
+                        let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
+                        summaryIndex <- summaryIndex + 1
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                )
+            do! this.RouteFiles()
+            do! this.Goto()
+            do!
+                this.Page.Locator(
+                    ".file-entry[data-identity='id-2']"
+                ).WaitForAsync()
+
+            let! warned =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const warning = document.getElementById('category-warning');
+                        const list = document.getElementById('file-list');
+                        const totals = document.getElementById('change-summary');
+                        return [
+                            warning.textContent,
+                            warning.getAttribute('role'),
+                            String(warning.querySelectorAll('.category-warning-text').length),
+                            String(getComputedStyle(warning).display !== 'none'),
+                            String(Boolean(
+                                warning.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING
+                            )),
+                            String(Boolean(
+                                warning.compareDocumentPosition(totals) & Node.DOCUMENT_POSITION_PRECEDING
+                            )),
+                            String(warning.getBoundingClientRect().bottom
+                                <= list.getBoundingClientRect().top + 1),
+                            totals.textContent,
+                            String(document.querySelectorAll('#file-list > .file-item').length),
+                            String(document.querySelectorAll('.category-item').length)
+                        ];
+                    }"""
+                )
+
+            do! this.ActivateFile("id-1")
+            do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
+            let! selectable = this.Page.Locator("#patch").CountAsync()
+
+            do! this.Page.Locator("#refresh").ClickAsync()
+            do! this.Page.Locator(".category-entry").WaitForAsync()
+
+            let! afterRefresh =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [
+                        document.getElementById('category-warning').textContent,
+                        String(document.querySelectorAll('#category-warning > *').length),
+                        document.querySelector('.category-name').textContent,
+                        String(document.querySelectorAll('#file-list > .file-item').length)
+                    ]"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    warned,
+                    Is.EqualTo(
+                        [| "Diff groups are not applied: each category needs a name."
+                           "status"
+                           "1"
+                           "true"
+                           "true"
+                           "true"
+                           "true"
+                           "Modified 2"
+                           "2"
+                           "0" |]
+                    )
+                )
+                Assert.That(selectable, Is.EqualTo(1))
+                Assert.That(
+                    afterRefresh,
+                    Is.EqualTo([| ""; "0"; "Production code"; "0" |])
+                ))
         }
 
     [<Test>]
