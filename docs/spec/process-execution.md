@@ -36,8 +36,15 @@ Interactive UI launches (terminal, editor) are a different concern and are **not
   on a non-zero exit. A text wrapper additionally fails when the stdout it would return was
   truncated, because its callers parse that string; the exit-code wrappers never do, because they
   discard the output.
-- Background refresh commands use the 60 s default, request-serving diff commands share a monotonic
-  10 s response deadline, and the post-fork hook uses its explicit 5-minute cap.
+- Timeout follows the call site, not a refresh/request rule. Most commands — the status collectors'
+  `runGit`/`runGitResult`, `gh`, `az`, `bd`, and `git worktree add` — use the 60 s default; the diff
+  endpoint's sequential commands share one monotonic 10 s response deadline; the post-fork hook uses
+  its explicit 5-minute cap. Two short Git probes go through `runArgumentList`, which creates a
+  fresh 10 s deadline per call: `GitWorktree.localComparisonContent` and `GitWorktree.probeRef`.
+  Both are reached from the refresh timer — `localComparisonContent` as one of the five
+  `Async.StartChild` children of `collectCommonGitData` (whose four siblings run on the 60 s
+  default), `probeRef` via `resolveBaseRef` in `collectWorktreeGitData` — and `probeRef` is also
+  reached from the fork request in `forkWorktree`.
 
 ## Technical Approach
 
@@ -47,7 +54,7 @@ Interactive UI launches (terminal, editor) are a different concern and are **not
 
 | Entry point | Timeout source | Use for |
 |---|---|---|
-| `runArgumentList` | The 10 s interactive response deadline (`argumentListResponseDeadlineMs`) | Work serving a user request |
+| `runArgumentList` | A fresh 10 s response deadline per call (`argumentListResponseDeadlineMs`) | A single short probe that must not stall its caller — today the two Git probes above, on both the refresh and fork paths |
 | `runArgumentListWithTimeout` | Explicit `timeoutMs` | Background refresh, long hooks |
 | `runArgumentListWithinResponseDeadline` | A `ResponseDeadline` shared across several sequential calls | Multi-command request handling (the diff endpoint) |
 
@@ -139,9 +146,17 @@ lists remove the parser boundary entirely: quoting is unnecessary, and validatio
 - **No string-arguments compatibility API.** Keeping one would let new callers bypass the structural
   guarantee; its absence makes the compiler reject that implementation shape.
 - **Preserve each call site's existing timeout instead of unifying on the 10 s response deadline.**
-  Status collection runs off the refresh timer, not a user request; moving it onto the interactive
-  deadline would make refresh flakier under load. Timeout policy is a separate question from argv
-  safety and is not bundled into this change.
+  Timeout policy is a separate question from argv safety and is not bundled into this change, so
+  every call site kept the timeout it already had. The result is deliberately uneven rather than
+  tidy: `localComparisonContent` (the call dates from commit `01667ff1`) and `probeRef` were already
+  on `runArgumentList`'s 10 s deadline before this branch, so part of refresh-timer status
+  collection runs on the interactive deadline while the rest of it runs on the 60 s default.
+- **Open question: should the refresh-path 10 s probes move to the 60 s default?** A 10 s cap on a
+  refresh-timer collector can make refresh flakier under load, which is why the bulk of status
+  collection sits on the 60 s default; `localComparisonContent` and `probeRef` do not follow that
+  reasoning. Aligning them is a behavioural change to `GitWorktree`, not a documentation fix, so it
+  is intentionally unmade here. Decide it from evidence about refresh timeouts on large repos rather
+  than from symmetry.
 - **Text-capturing wrappers live in `ProcessRunner`, not in a shared helper module.** Decoding a
   captured stream is part of running a process; putting it beside the capture code keeps one owner.
 - **Byte caps stay explicit.** The right cap depends on the operation — `localComparisonContent`
