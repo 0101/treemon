@@ -513,6 +513,54 @@ type DiffProvisioningTests() =
                 Does.Not.Contain(IdiomorphScript.idiomorphJs)
             ))
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffViewerVisibilityTests() =
+
+    let doc filename kind : CanvasDoc =
+        { Filename = filename
+          ContentHash = "hash"
+          LastModified = DateTimeOffset.UnixEpoch
+          OwnerSessionId = None
+          Kind = kind }
+
+    let inventory = [ doc "diff.html" SystemView; doc "beads.html" SystemView; doc "notes.html" AgentDoc ]
+
+    let filenames comparison =
+        DiffProvisioner.visibleDocs comparison inventory |> List.map _.Filename
+
+    [<Test>]
+    member _.``a confirmed clean worktree offers no diff view``() =
+        Assert.That(filenames GitWorktree.Clean, Is.EqualTo([ "beads.html"; "notes.html" ]))
+
+    [<Test>]
+    member _.``a worktree with content keeps every document``() =
+        Assert.That(filenames GitWorktree.HasContent, Is.EqualTo([ "diff.html"; "beads.html"; "notes.html" ]))
+
+    [<Test>]
+    member _.``an unevaluated comparison keeps the view that reports the failure``() =
+        Assert.That(
+            filenames GitWorktree.Undetermined,
+            Is.EqualTo([ "diff.html"; "beads.html"; "notes.html" ]),
+            "Only a confirmed clean worktree may hide the diff view")
+
+    [<Test>]
+    member _.``the reserved viewer path is hidden whoever wrote it``() =
+        // CanvasDocKinds.classify recognises diff.html by filename alone, so the scanner cannot
+        // report an authored document there as an AgentDoc. Hiding is keyed on the reserved path.
+        let authored = [ doc "diff.html" AgentDoc ]
+
+        Assert.That(
+            DiffProvisioner.visibleDocs GitWorktree.Clean authored,
+            Is.Empty,
+            "A clean worktree offers nothing at the reserved diff path")
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffAssetsTests() =
+
     [<Test>]
     member _.``template pins only self-hosted diff2html assets``() =
         let template = File.ReadAllText(templatePath)

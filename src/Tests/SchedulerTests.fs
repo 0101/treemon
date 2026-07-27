@@ -84,6 +84,57 @@ type RefreshGitTaskTests() =
         }
         |> Async.RunSynchronously
 
+    [<Test>]
+    member _.``Clean worktree keeps its viewer on disk but offers no diff document``() =
+        async {
+            let repoDir = Path.Combine(tempDir, "repo")
+            initRepoOnMain repoDir
+
+            let agent = createAgent ()
+            let worktree = { Path = repoDir; Head = "abc123"; Branch = Some "main" }
+            agent.Post(UpdateWorktreeList(testRepoId, [ worktree ]))
+            agent.Post(UpdateBaseBranch(testRepoId, "main"))
+
+            let services =
+                { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
+                  ActivityStore = None
+                  MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json")) }
+
+            do!
+                executeTask
+                    agent
+                    services
+                    (Map.ofList [ testRepoId, repoDir ])
+                    (RefreshGit(testRepoId, repoDir))
+
+            let! state = agent.PostAndAsyncReply(GetState)
+            let repo = state.Repos |> Map.find testRepoId
+
+            let status =
+                Server.WorktreeApi.assembleFromState
+                    DateTimeOffset.UtcNow
+                    Set.empty
+                    Set.empty
+                    Set.empty
+                    Map.empty
+                    Map.empty
+                    repo
+                    worktree
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    File.Exists(Path.Combine(repoDir, ".agents", "canvas", "diff.html")),
+                    Is.True,
+                    "A refresh must not delete files to hide a page")
+                Assert.That(
+                    repo.CanvasData |> Map.find repoDir |> List.map _.Filename,
+                    Is.EqualTo([ "diff.html" ]),
+                    "The scan reports what is on disk")
+                Assert.That(status.CanvasDocs, Is.Empty, "A clean worktree offers no diff document")
+                Assert.That(status.HasDiff, Is.False))
+        }
+        |> Async.RunSynchronously
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -296,7 +347,7 @@ type StateAgentTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
-                  HasDiff = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/main", gitData))
@@ -366,7 +417,7 @@ type StateAgentTests() =
               MainBehindCount = 0
               BaseRevision = None
               IsDirty = false
-              HasDiff = true
+              Comparison = HasContent
               WorkMetrics = None }
 
         let repo =
@@ -420,7 +471,7 @@ type StateAgentTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
-                  HasDiff = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/feature", gitData))
@@ -517,7 +568,7 @@ type StateAgentTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
-                  HasDiff = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/unknown", gitData))
@@ -592,7 +643,7 @@ type StateAgentTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
-                  HasDiff = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, oldPath, gitData))
@@ -1390,7 +1441,7 @@ type MergedPrBranchScopeTests() =
               MainBehindCount = 0
               BaseRevision = None
               IsDirty = false
-              HasDiff = false
+              Comparison = Clean
               WorkMetrics = None }
 
         let ignoredGitData =
@@ -1427,7 +1478,7 @@ type MergedPrBranchScopeTests() =
               MainBehindCount = 0
               BaseRevision = None
               IsDirty = false
-              HasDiff = false
+              Comparison = Clean
               WorkMetrics = None }
 
         let repo =
@@ -1457,7 +1508,7 @@ type MergedPrBranchScopeTests() =
               MainBehindCount = 0
               BaseRevision = None
               IsDirty = false
-              HasDiff = false
+              Comparison = Clean
               WorkMetrics = None }
 
         let repo =
@@ -1485,7 +1536,7 @@ type MergedPrBranchScopeTests() =
               MainBehindCount = 0
               BaseRevision = None
               IsDirty = false
-              HasDiff = false
+              Comparison = Clean
               WorkMetrics = None }
 
         let mergedPr =

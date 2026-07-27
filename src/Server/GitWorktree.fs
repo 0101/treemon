@@ -16,6 +16,27 @@ type CommitInfo =
       Message: string
       Time: DateTimeOffset }
 
+/// What a refresh could establish about a worktree's content relative to its base.
+/// `Undetermined` is not `Clean`: a Git probe failed or the base ref could not be resolved, so some
+/// content is invisible to this refresh. Callers that act destructively on emptiness must act only
+/// on `Clean`.
+type ComparisonContent =
+    | HasContent
+    | Clean
+    | Undetermined
+
+module ComparisonContent =
+
+    /// Fold one layer's verdict into another. Content found anywhere wins, then unreadability:
+    /// a worktree is clean only when every layer was read and every layer was empty.
+    let combine first second =
+        match first, second with
+        | HasContent, _
+        | _, HasContent -> HasContent
+        | Undetermined, _
+        | _, Undetermined -> Undetermined
+        | Clean, Clean -> Clean
+
 /// Outcome of resolving a worktree's upstream tracking branch (`git rev-parse --abbrev-ref @{u}`).
 /// `Upstream` carries the remote-stripped branch name — the store/PR-map key. Distinguishes git's
 /// deterministic "no upstream configured" from a transient read failure (timeout, `index.lock`, IO
@@ -40,7 +61,7 @@ type GitData =
       MainBehindCount: int
       BaseRevision: string option
       IsDirty: bool
-      HasDiff: bool
+      Comparison: ComparisonContent
       WorkMetrics: Shared.WorkMetrics option }
 
 let prBranchName (gitData: GitData) =
@@ -271,8 +292,11 @@ let parseDirtyStatus (output: string option) =
     output
     |> Option.exists (String.IsNullOrWhiteSpace >> not)
 
+/// Repo-relative path of the viewer Treemon generates into every worktree.
+let generatedDiffViewerPath = ".agents/canvas/diff.html"
+
 let private generatedDiffViewerExclusionPathspec =
-    ":(top,exclude).agents/canvas/diff.html"
+    $":(top,exclude){generatedDiffViewerPath}"
 
 let isDirty (worktreePath: string) =
     async {
@@ -280,7 +304,10 @@ let isDirty (worktreePath: string) =
         return parseDirtyStatus output
     }
 
-let hasLocalDiff (worktreePath: string) =
+/// Staged, unstaged, and untracked content in the working tree, excluding Treemon's own generated
+/// viewer. A Git command that could not answer reports `Undetermined` rather than `Clean`, so a
+/// transient failure never reads as an empty worktree.
+let localComparisonContent (worktreePath: string) =
     async {
         let! result =
             ProcessRunner.runArgumentList
@@ -300,9 +327,10 @@ let hasLocalDiff (worktreePath: string) =
 
         return
             match result with
-            | Ok output -> output.ExitCode = 0 && output.Stdout.Length > 0
-            | Error(ProcessRunner.CaptureLimitExceeded ProcessRunner.StandardOutput) -> true
-            | Error _ -> false
+            | Ok output when output.ExitCode <> 0 -> Undetermined
+            | Ok output -> if output.Stdout.Length > 0 then HasContent else Clean
+            | Error(ProcessRunner.CaptureLimitExceeded ProcessRunner.StandardOutput) -> HasContent
+            | Error _ -> Undetermined
     }
 
 let getCommitCount (worktreePath: string) (baseRef: string) =
@@ -322,18 +350,16 @@ let private extractRegexInt (pattern: string) (text: string) =
     let m = System.Text.RegularExpressions.Regex.Match(text, pattern)
     if m.Success then Int32.Parse(m.Groups[1].Value: string) else 0
 
+/// Net merge-base-to-`HEAD` content plus its line counts. `None` output means the Git command failed,
+/// which is `Undetermined` — distinct from the empty output of a branch that is genuinely level.
 let parseDiffStats (output: string option) =
-    output
-    |> Option.bind (fun s ->
-        match s.Trim() with
-        | "" -> None
-        | trimmed ->
-            Some(
-                true,
-                extractRegexInt @"(\d+) insertion" trimmed,
-                extractRegexInt @"(\d+) deletion" trimmed
-            ))
-    |> Option.defaultValue (false, 0, 0)
+    match output |> Option.map _.Trim() with
+    | None -> Undetermined, 0, 0
+    | Some "" -> Clean, 0, 0
+    | Some trimmed ->
+        HasContent,
+        extractRegexInt @"(\d+) insertion" trimmed,
+        extractRegexInt @"(\d+) deletion" trimmed
 
 let getDiffStats (worktreePath: string) (baseRef: string) =
     async {
@@ -345,14 +371,15 @@ let getDiffStats (worktreePath: string) (baseRef: string) =
         return parseDiffStats output
     }
 
-let createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved =
-    if hasCommittedDiff then
+let createWorkMetrics committed commitCount linesAdded linesRemoved =
+    match committed with
+    | HasContent ->
         Some
             { CommitCount = commitCount
               LinesAdded = linesAdded
               LinesRemoved = linesRemoved }
-    else
-        None
+    | Clean
+    | Undetermined -> None
 
 let internal selectUpstreamRemote
     (configuredRemote: string option)
@@ -462,10 +489,27 @@ let validateBranchName (branchName: string) =
     else
         Error $"Invalid branch name: '{branchName}'"
 
-let private gitRefExists (repoRoot: string) (gitRef: string) =
+/// Whether a ref exists. `git rev-parse --verify --quiet` exits 1 exactly when the ref is absent, so
+/// that alone is a confirmed answer; every other outcome (timeout, failed start, unexpected exit) is
+/// a failed probe and must not be read as absence — callers fall back to a different base only for a
+/// ref proven missing. Mirrors `WorktreeDiff.runRefExists`.
+let internal probeRef (repoRoot: string) (gitRef: string) =
     async {
-        let! output = runGit repoRoot $"rev-parse --verify --quiet \"{gitRef}\""
-        return output |> Option.exists (fun s -> s.Trim().Length > 0)
+        let! result =
+            ProcessRunner.runArgumentList
+                1024
+                1024
+                "Git"
+                "git"
+                [ "-C"; repoRoot; "rev-parse"; "--verify"; "--quiet"; gitRef ]
+                None
+
+        return
+            match result with
+            | Ok output when output.ExitCode = 0 -> Ok true
+            | Ok output when output.ExitCode = 1 -> Ok false
+            | Ok output -> Error $"git rev-parse '{gitRef}' exited {output.ExitCode}"
+            | Error _ -> Error $"git rev-parse '{gitRef}' could not be run"
     }
 
 let internal selectBaseRef
@@ -484,17 +528,19 @@ let internal selectBaseRef
 /// Resolves the base branch to a concrete git ref to fork from. Prefers the
 /// remote-tracking ref (e.g. `upstream/main`) so a new worktree forks from the
 /// upstream tip rather than a possibly-stale local branch, falling back to the
-/// local branch when no remote-tracking ref exists. Does not require any worktree
-/// to currently have the base checked out.
+/// local branch only when the remote-tracking ref is proven absent. A failed probe
+/// short-circuits to an error rather than falling back, so an unreadable preferred
+/// base is never silently replaced by a stale local one. Does not require any
+/// worktree to currently have the base checked out.
 let resolveBaseRef (repoRoot: string) (upstreamRemote: string) (baseBranch: string) =
-    async {
+    asyncResult {
         let remoteRef = mainRef upstreamRemote baseBranch
-        let! remoteExists = gitRefExists repoRoot $"refs/remotes/{remoteRef}"
+        let! remoteExists = probeRef repoRoot $"refs/remotes/{remoteRef}"
         let! localExists =
-            if remoteExists then async.Return false
-            else gitRefExists repoRoot $"refs/heads/{baseBranch}"
+            if remoteExists then AsyncResult.ok false
+            else probeRef repoRoot $"refs/heads/{baseBranch}"
 
-        return
+        return!
             selectBaseRef upstreamRemote baseBranch remoteExists localExists
             |> Result.requireSome
                 $"Base branch '{baseBranch}' not found as '{remoteRef}' or as a local branch"
@@ -505,7 +551,7 @@ type private CommonGitData =
       HeadCommit: string
       Upstream: UpstreamResult
       IsDirty: bool
-      HasLocalDiff: bool }
+      LocalContent: ComparisonContent }
 
 let private collectCommonGitData (worktreePath: string) (branch: string option) =
     async {
@@ -513,20 +559,20 @@ let private collectCommonGitData (worktreePath: string) (branch: string option) 
         let! headChild = Async.StartChild(getHeadCommit worktreePath)
         let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath branch)
         let! dirtyChild = Async.StartChild(isDirty worktreePath)
-        let! localDiffChild = Async.StartChild(hasLocalDiff worktreePath)
+        let! localContentChild = Async.StartChild(localComparisonContent worktreePath)
 
         let! commit = commitChild
         let! headCommit = headChild
         let! upstream = upstreamChild
         let! dirty = dirtyChild
-        let! localDiff = localDiffChild
+        let! localContent = localContentChild
 
         return
             { LastCommit = commit
               HeadCommit = headCommit
               Upstream = upstream
               IsDirty = dirty
-              HasLocalDiff = localDiff }
+              LocalContent = localContent }
     }
 
 let private collectWorktreeGitDataForBaseRef
@@ -551,7 +597,7 @@ let private collectWorktreeGitDataForBaseRef
                 Async.StartChild(async.Return None)
 
         let! commitCount = commitCountChild
-        let! hasCommittedDiff, linesAdded, linesRemoved = diffStatsChild
+        let! committedContent, linesAdded, linesRemoved = diffStatsChild
         let! mainBehind = mainBehindChild
         let! baseRevision = baseRevisionChild
 
@@ -565,8 +611,8 @@ let private collectWorktreeGitDataForBaseRef
               MainBehindCount = mainBehind
               BaseRevision = baseRevision
               IsDirty = common.IsDirty
-              HasDiff = hasCommittedDiff || common.HasLocalDiff
-              WorkMetrics = createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved }
+              Comparison = ComparisonContent.combine committedContent common.LocalContent
+              WorkMetrics = createWorkMetrics committedContent commitCount linesAdded linesRemoved }
     }
 
 let collectWorktreeGitData
@@ -595,7 +641,7 @@ let collectWorktreeGitData
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = common.IsDirty
-                  HasDiff = common.HasLocalDiff
+                  Comparison = ComparisonContent.combine Undetermined common.LocalContent
                   WorkMetrics = None }
         | Ok baseRef ->
             return!

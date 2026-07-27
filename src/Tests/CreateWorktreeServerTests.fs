@@ -148,6 +148,28 @@ type ResolveBaseRefTests() =
         let result = resolveBaseRef repoDir "origin" "does-not-exist" |> Async.RunSynchronously
         Assert.That(Result.isError result, Is.True, $"Expected Error but got: {result}")
 
+    [<Test>]
+    member _.``an absent ref is distinguishable from a probe that could not answer``() =
+        // The fallback to a local base is only safe for a ref proven absent. If a failed probe were
+        // also reported as absence, an unreadable remote ref would silently resolve to a possibly
+        // stale local branch, and a clean comparison against it would wrongly read as clean.
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        let notARepo = Path.Combine(tempDir, "not-a-repo")
+        Directory.CreateDirectory(notARepo) |> ignore
+
+        let present = probeRef repoDir "refs/heads/main" |> Async.RunSynchronously
+        let absent = probeRef repoDir "refs/remotes/origin/main" |> Async.RunSynchronously
+        let unanswerable = probeRef notARepo "refs/heads/main" |> Async.RunSynchronously
+
+        Assert.Multiple(fun () ->
+            Assert.That((present = Ok true), Is.True, $"Expected Ok true but got: {present}")
+            Assert.That(
+                (absent = Ok false),
+                Is.True,
+                $"git exits 1 for a ref it can confirm is absent, but got: {absent}")
+            Assert.That(Result.isError unanswerable, Is.True, "A probe that could not run is not absence"))
+
 
 // ─── forkWorktree / runPostFork: end-to-end against real git repos ───
 
