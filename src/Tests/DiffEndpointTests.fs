@@ -125,7 +125,10 @@ let private worktreeUrl
 
     $"{baseUrl}/{encoded}/{endpoint}"
 
-let private agentKnowingWithConfiguration
+/// The scheduler keys a repository by `PathUtils.toRepoId` of its root, and the diff endpoint reads
+/// the categorization from that key, so a test that cares about the repository root supplies it.
+let private agentKnowingRepository
+    (repoId: RepoId)
     (worktreePaths: string list)
     upstreamRemote
     baseBranch
@@ -142,7 +145,6 @@ let private agentKnowingWithConfiguration
 
             info)
 
-    let repoId = RepoId "diff-endpoint-tests"
     agent.Post(
         RefreshScheduler.repositoryDiscoveryUpdate
             repoId
@@ -157,10 +159,22 @@ let private agentKnowingWithConfiguration
 
     agent
 
+let private agentKnowingWithConfiguration
+    (worktreePaths: string list)
+    upstreamRemote
+    baseBranch
+    =
+    agentKnowingRepository
+        (RepoId "diff-endpoint-tests")
+        worktreePaths
+        upstreamRemote
+        baseBranch
+
 let private agentKnowing worktreePaths =
     agentKnowingWithConfiguration worktreePaths "origin" "main"
 
-let private withDiffServerConfiguration
+let private withDiffServerRepository
+    (repoId: RepoId)
     responseDeadlineMs
     (worktreePaths: string list)
     upstreamRemote
@@ -171,7 +185,8 @@ let private withDiffServerConfiguration
     =
     let port = TestUtils.getFreeTcpPort ()
     let agent =
-        agentKnowingWithConfiguration
+        agentKnowingRepository
+            repoId
             worktreePaths
             upstreamRemote
             baseBranch
@@ -199,6 +214,25 @@ let private withDiffServerConfiguration
         host.StopAsync(CancellationToken.None)
             .GetAwaiter()
             .GetResult()
+
+let private withDiffServerConfiguration
+    responseDeadlineMs
+    (worktreePaths: string list)
+    upstreamRemote
+    baseBranch
+    (service: WorktreeDiffApi.Service)
+    (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
+    (action: MailboxProcessor<RefreshScheduler.StateMsg> -> HttpClient -> string -> unit)
+    =
+    withDiffServerRepository
+        (RepoId "diff-endpoint-tests")
+        responseDeadlineMs
+        worktreePaths
+        upstreamRemote
+        baseBranch
+        service
+        newIdentity
+        action
 
 let private withDiffServerDeadline
     responseDeadlineMs
@@ -381,9 +415,9 @@ let private diffContext worktreePath : WorktreeDiff.DiffComparisonContext =
       UpstreamRemote = "origin"
       BaseBranch = "main" }
 
-/// Sends one request through a diff handler in-process. The canvas server does not resolve a
-/// repository's categorization yet, so the configuration a summary is classified against is
-/// reachable only through the handler contract.
+/// Sends one request through a diff handler in-process, so a summary can be classified against a
+/// configuration value directly. The canvas server resolves that value from the repository root per
+/// request; `DiffEndpointRepositoryConfigurationTests` covers that resolution over real HTTP.
 let private handlerResponse
     (viewer: Guid)
     (query: string)
@@ -820,6 +854,216 @@ type DiffEndpointCategorizationTests() =
             )
             |> WorktreeDiffApi.serializeFileResult
         )
+
+/// The canvas server resolves a diff request's owning repository root from the scheduler and reads
+/// `.treemon.json` there on every summary request. These tests drive real HTTP against a real
+/// configuration file with a fake diff service, so what they prove is that resolution and re-read —
+/// not Git behavior.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type DiffEndpointRepositoryConfigurationTests() =
+
+    // Git order, deliberately unrelated to configuration order.
+    let changed =
+        [ entry "docs/plan.md" None WorktreeDiff.Modified
+          entry "README.md" None WorktreeDiff.Modified
+          entry "src/Server/Api.fs" None WorktreeDiff.Modified ]
+
+    let service =
+        fakeService
+            (Ok(summary changed))
+            (fun requested -> Ok(WorktreeDiff.Text requested.Path))
+
+    let rootConfiguration =
+        """{ "baseBranch": "main",
+             "diffCategories": [
+               { "name": "Server", "patterns": ["src/Server/**"] },
+               { "name": "Docs", "patterns": ["docs/**"] }
+             ] }"""
+
+    let grouped =
+        [ "src/Server/Api.fs", [ "Server" ]
+          "docs/plan.md", [ "Docs" ]
+          "README.md", ([]: string list) ]
+
+    let ungrouped =
+        changed |> List.map (fun file -> file.Path, ([]: string list))
+
+    /// A repository root and one linked worktree under a throwaway directory. Only the diff
+    /// endpoint's own view of them matters here, so neither is a real Git worktree.
+    let withRepository (name: string) (action: string -> string -> unit) =
+        let tempDir =
+            Path.Combine(
+                Path.GetTempPath(),
+                $"treemon-diff-config-{name}-{Guid.NewGuid():N}"
+            )
+
+        let repoRoot = Path.Combine(tempDir, "repo")
+        let linked = Path.Combine(tempDir, "linked")
+        Directory.CreateDirectory(repoRoot) |> ignore
+        Directory.CreateDirectory(linked) |> ignore
+
+        try
+            action repoRoot linked
+        finally
+            try
+                Directory.Delete(tempDir, recursive = true)
+            with _ ->
+                ()
+
+    /// A server whose scheduler keys the repository by its root exactly as discovery does, which is
+    /// what makes the configuration the endpoint reads the root's own.
+    let withServer repoRoot worktreePaths service newIdentity action =
+        withDiffServerRepository
+            (PathUtils.toRepoId repoRoot)
+            ProcessRunner.argumentListResponseDeadlineMs
+            worktreePaths
+            "origin"
+            "main"
+            service
+            newIdentity
+            (fun _ client baseUrl -> action client baseUrl)
+
+    let summaryBody (client: HttpClient) baseUrl worktreePath =
+        use response = get client (worktreeUrl baseUrl worktreePath "diff-summary")
+        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+        getResponseBody response
+
+    [<Test>]
+    member _.``a linked worktree is classified by the root repository configuration``() =
+        withRepository "linked" (fun repoRoot linked ->
+            File.WriteAllText(Path.Combine(repoRoot, ".treemon.json"), rootConfiguration)
+
+            // A worktree-local file must never win: reading it would put every file under one
+            // category, so its absence from the responses is what proves the root was used.
+            File.WriteAllText(
+                Path.Combine(linked, ".treemon.json"),
+                """{ "diffCategories": [ { "name": "Worktree local", "patterns": ["**"] } ] }"""
+            )
+
+            withServer
+                repoRoot
+                [ repoRoot; linked ]
+                service
+                _.Path
+                (fun client baseUrl ->
+                    let linkedBody = summaryBody client baseUrl linked
+                    let rootBody = summaryBody client baseUrl repoRoot
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(summaryCategoryPaths linkedBody, Is.EqualTo(grouped))
+
+                        Assert.That(
+                            summaryCategorization linkedBody,
+                            Is.EqualTo(("configured", Option<string>.None))
+                        )
+
+                        Assert.That(summaryCategoryPaths rootBody, Is.EqualTo(grouped))
+
+                        Assert.That(
+                            summaryCategorization rootBody,
+                            Is.EqualTo(("configured", Option<string>.None))
+                        ))))
+
+    [<Test>]
+    member _.``an edited configuration reaches the next summary without a scheduler cycle``() =
+        withRepository "reread" (fun repoRoot _ ->
+            let configPath = Path.Combine(repoRoot, ".treemon.json")
+
+            withServer
+                repoRoot
+                [ repoRoot ]
+                service
+                _.Path
+                (fun client baseUrl ->
+                    // One server, one scheduler snapshot, no refresh in between: every difference
+                    // below comes from re-reading the file on the request itself.
+                    let beforeConfiguration = summaryBody client baseUrl repoRoot
+
+                    File.WriteAllText(configPath, rootConfiguration)
+                    let afterWrite = summaryBody client baseUrl repoRoot
+
+                    File.WriteAllText(
+                        configPath,
+                        """{ "diffCategories": [ { "name": "Server" } ] }"""
+                    )
+
+                    let afterInvalidEdit = summaryBody client baseUrl repoRoot
+
+                    File.Delete(configPath)
+                    let afterDelete = summaryBody client baseUrl repoRoot
+
+                    let invalidStatus, invalidReason =
+                        summaryCategorization afterInvalidEdit
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(
+                            summaryCategorization beforeConfiguration,
+                            Is.EqualTo(("missing", Option<string>.None))
+                        )
+
+                        Assert.That(
+                            summaryCategoryPaths beforeConfiguration,
+                            Is.EqualTo(ungrouped)
+                        )
+
+                        Assert.That(
+                            summaryCategorization afterWrite,
+                            Is.EqualTo(("configured", Option<string>.None))
+                        )
+
+                        Assert.That(summaryCategoryPaths afterWrite, Is.EqualTo(grouped))
+                        Assert.That(invalidStatus, Is.EqualTo("invalid"))
+
+                        Assert.That(
+                            invalidReason |> Option.defaultValue "",
+                            Does.Contain("not both")
+                        )
+
+                        Assert.That(
+                            summaryCategoryPaths afterInvalidEdit,
+                            Is.EqualTo(ungrouped)
+                        )
+
+                        Assert.That(
+                            summaryCategorization afterDelete,
+                            Is.EqualTo(("missing", Option<string>.None))
+                        )
+
+                        Assert.That(summaryCategoryPaths afterDelete, Is.EqualTo(ungrouped)))))
+
+    [<Test>]
+    member _.``an unknown worktree still 404s instead of resolving a configuration``() =
+        withRepository "unknown" (fun repoRoot _ ->
+            File.WriteAllText(Path.Combine(repoRoot, ".treemon.json"), rootConfiguration)
+
+            let neverCallService: WorktreeDiffApi.Service =
+                { GetSummary = fun _ _ _ -> failwith "Unknown worktree reached diff summary"
+                  GetLayerCounts =
+                    fun _ _ -> failwith "Unknown worktree reached diff layer counts"
+                  GetFile = fun _ _ _ _ _ -> failwith "Unknown worktree reached diff file" }
+
+            withServer
+                repoRoot
+                [ repoRoot ]
+                neverCallService
+                (fun _ -> failwith "Unknown worktree issued an identity")
+                (fun client baseUrl ->
+                    use response =
+                        get
+                            client
+                            (worktreeUrl
+                                baseUrl
+                                (Path.Combine(repoRoot, "..", "unknown"))
+                                "diff-summary")
+
+                    let body = getResponseBody response
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
+                        Assert.That(body, Is.EqualTo("Unknown worktree")))))
 
 [<TestFixture>]
 [<Category("Unit")>]

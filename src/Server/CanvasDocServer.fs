@@ -44,25 +44,32 @@ let private isSafeSessionIdChar (c: char) =
 let internal isValidSessionId (sessionId: string) =
     not (System.String.IsNullOrWhiteSpace sessionId) && sessionId |> Seq.forall isSafeSessionIdChar
 
+/// Resolves a diff request's worktree against one scheduler snapshot, yielding both the comparison
+/// context Git needs and the `RepoId` that owns the worktree. `RepoId`'s value is the normalized
+/// repository root (`PathUtils.toRepoId`), so keeping the key is what lets a linked worktree read the
+/// root repository's shared `.treemon.json` instead of a worktree-local one.
 let internal tryFindDiffComparisonContext
     (state: RefreshScheduler.DashboardState)
     (selectedWorktreePath: string)
-    =
+    : (RepoId * WorktreeDiff.DiffComparisonContext) option =
     let normalizedPath = PathUtils.normalizePath selectedWorktreePath
 
     state.Repos
-    |> Map.values
-    |> Seq.tryPick (fun repo ->
+    |> Map.tryPick (fun repoId repo ->
         if repo.KnownPaths |> Set.contains normalizedPath then
-            Some
+            Some(
+                repoId,
                 ({ WorktreePath = normalizedPath
                    UpstreamRemote = repo.UpstreamRemote
                    BaseBranch = repo.BaseBranch }
                  : WorktreeDiff.DiffComparisonContext)
+            )
         else
             None)
 
-let private getDiffComparisonContext
+/// The repository root and comparison context behind one diff request, resolved from a single
+/// scheduler snapshot so both always describe the same repository.
+let private resolveDiffTarget
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     path
     =
@@ -73,8 +80,8 @@ let private getDiffComparisonContext
 
 let private isKnownWorktree agent path =
     async {
-        let! context = getDiffComparisonContext agent path
-        return context |> Option.isSome
+        let! target = resolveDiffTarget agent path
+        return target |> Option.isSome
     }
 
 /// injectUrl is stored and later used as an HTTP POST target by SessionBridge (send /
@@ -444,17 +451,27 @@ let private handleCanvasRequest
         let diffDeadline =
             ProcessRunner.createResponseDeadline diffResponseDeadlineMs
 
-        let! comparisonContext =
-            getDiffComparisonContext agent worktreePath
+        let! diffTarget =
+            resolveDiffTarget agent worktreePath
             |> Async.StartAsTask
 
-        let isKnown = comparisonContext |> Option.isSome
+        let comparisonContext = diffTarget |> Option.map snd
+        let isKnown = diffTarget |> Option.isSome
 
         if filename = "diff-summary" then
+            // Read and validate the repository's categorization on *every* summary request rather
+            // than caching it in scheduler state: Refresh must show an edited or agent-written
+            // `.treemon.json` immediately instead of at the next scheduler cycle. The read is keyed
+            // by the owning repository root, so a linked worktree gets the shared configuration.
+            let categorization =
+                diffTarget
+                |> Option.map (fst >> RepoId.value >> DiffCategories.read)
+                |> Option.defaultValue DiffCategories.Missing
+
             do!
                 diffHandlers.Summary
                     diffDeadline
-                    DiffCategories.Missing
+                    categorization
                     comparisonContext
                     ctx
         elif filename = "diff-file" then

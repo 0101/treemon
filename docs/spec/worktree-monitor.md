@@ -221,6 +221,16 @@ Each repo can configure which branch is considered the "base" for ahead/behind c
 - **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh. The dashboard and generated diff viewer therefore expose the same base branch, including for linked worktrees without their own `.treemon.json`.
 - **Config example**: `{ "baseBranch": "dev" }` in `.treemon.json` at repo root
 
+### Diff Categories
+
+The diff viewer's optional per-repository grouping of changed files:
+
+- **Resolution**: `.treemon.json` `"diffCategories"` array → absent means the flat file list
+- **Affects**: only the generated diff viewer's grouping and its categorization warning; comparison semantics, layers, and file identities are unchanged
+- **Not stored** in scheduler state: the canvas server resolves the request's owning repository root and reads and validates the field on every diff-summary request, so an edited or agent-written configuration shows up on the next Refresh instead of at the next scheduler cycle. Linked worktrees therefore read the repo-root value, like `baseBranch` and `upstreamRemote`.
+- **Schema, matching, and validation**: see `docs/spec/diff-file-categories.md`
+- **Config example**: `{ "diffCategories": [ { "name": "Server", "patterns": ["src/Server/**"] } ] }` in `.treemon.json` at repo root
+
 ### CommentSummary
 
 - `WithResolution of unresolved * total` — thread resolution tracking (both AzDo and GitHub)
@@ -254,7 +264,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI, including the bounded recent-closed window |
 | `src/Server/MergedPrStore.fs` | Durable merged-PR fallback reconciliation, identity checks, and runtime-state persistence |
 | `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, upstream-read state, HEAD identity, observed base revision, dirty detection, work metrics |
-| `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, and upstream remote |
+| `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, upstream remote, and the raw `diffCategories` read |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
 | `src/Server/SessionManager.fs` | MailboxProcessor session agent, spawn/focus/kill, persistence |
@@ -294,7 +304,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
 - Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups
 - Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start (the `treemon.ps1` shims trigger it when prod is running). Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The server is the single writer of `config.json` (with an internal write lock); the online-only CLI never writes config files, which removes the cross-process clobber hazard.
-- `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the repo-local `.treemon.json` (`autoSyncBranches`, `baseBranch`, `upstreamRemote`) are deliberately separate stores in separate modules, named so the machine-vs-repo scope is obvious and the two never collide.
+- `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the repo-local `.treemon.json` (`autoSyncBranches`, `baseBranch`, `upstreamRemote`, `diffCategories`) are deliberately separate stores in separate modules, named so the machine-vs-repo scope is obvious and the two never collide.
 - Create-worktree prompt auto-launch is **fire-and-forget, server-side, and reuses `launchAction`**: repo root, provider, and the new path are all in scope on the server, so it orchestrates the launch there rather than via a client follow-up. A failed spawn is logged, not surfaced (the worktree already exists), and it launches even after a post-fork warning. Provider is read **directly** from the new worktree's `.treemon.json` (it isn't in scheduler state yet, so `resolveProvider` would return `None` there), and the worktree path is single-quote-escaped in `SessionManager.buildScript` so a path containing `'` can't break the launch script.
 - The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The prompt (and skill) are single-quote-escaped at the CLI sink, so an odd skill value is a no-op for the tool, not an injection concern, making validation pure complication.
 
