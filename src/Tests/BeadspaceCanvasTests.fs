@@ -5,6 +5,8 @@ open System.IO
 open NUnit.Framework
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
+open Shared
+open Server
 
 /// Mock beads data — covers all statuses, types, priorities, labels, and dependencies
 /// to exercise every rendering path in the issues table and detail panel.
@@ -43,9 +45,12 @@ type BeadspaceCanvasTests() =
             do! this.Page.RouteAsync("**/beads.html", fun route ->
                 task {
                     let! html = File.ReadAllTextAsync(beadsHtmlPath)
+                    let injected =
+                        html
+                        |> CanvasExport.injectAtHead (CanvasDocServer.buildInjection SystemView "beads.html")
                     do! route.FulfillAsync(RouteFulfillOptions(
                         ContentType = "text/html",
-                        Body = html))
+                        Body = injected))
                 } :> System.Threading.Tasks.Task)
 
             // Intercept beads-data request — serve mock JSON
@@ -360,4 +365,30 @@ type BeadspaceCanvasTests() =
             do! detailPanel.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = detailPanel.CountAsync()
             Assert.That(count, Is.EqualTo(1), "Clicking the row body should still expand the detail panel")
+        }
+
+    [<Test>]
+    member this.``Selection metadata identifies the exact beads task``() =
+        task {
+            let allChip = this.Page.Locator(".filter-chip", PageLocatorOptions(HasText = "All"))
+            do! allChip.ClickAsync()
+            let firstRow = this.Page.Locator(".issue-table-row").First
+            let! expectedTaskId = firstRow.GetAttributeAsync("data-issue-id")
+            let! sourceContext =
+                firstRow.Locator(".col-title").EvaluateAsync<string>(
+                    """element => {
+                        const range = document.createRange();
+                        range.selectNodeContents(element);
+                        return JSON.stringify(window.canvasSelectionMetadata({ range: range }));
+                    }""")
+            Assert.That(
+                sourceContext,
+                Is.EqualTo($"""{{"kind":"beads","taskId":"{expectedTaskId}"}}"""))
+        }
+
+    [<Test>]
+    member this.``standalone beads selection action stays visible and reports unavailable transport``() =
+        task {
+            let title = this.Page.Locator(".issue-table-row .col-title").First
+            do! CanvasTestHelpers.assertStandaloneSelectionUnavailable this.Page title
         }

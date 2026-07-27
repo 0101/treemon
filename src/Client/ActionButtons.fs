@@ -41,3 +41,21 @@ let createPrIcon =
         ]
     ]
 
+let diffIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 16, 16)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "1.5")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.custom ("aria-hidden", "true")
+        svg.custom ("focusable", "false")
+        svg.children [
+            Svg.path [ svg.d "M3 2.5v8a2 2 0 0 0 2 2h2" ]
+            Svg.circle [ svg.cx 3; svg.cy 2.5; svg.r 1.5 ]
+            Svg.circle [ svg.cx 3; svg.cy 12.5; svg.r 1.5 ]
+            Svg.path [ svg.d "M10 4.5h3M11.5 3v3M10 11.5h3" ]
+        ]
+    ]

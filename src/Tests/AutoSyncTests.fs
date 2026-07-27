@@ -29,12 +29,14 @@ let private storedSession sessionId worktreePath status updatedAt lastSeen =
 let private gitData path branch behind revision dirty : GitWorktree.GitData =
     { Path = path
       Branch = branch
+      HeadCommit = ""
       LastCommitMessage = ""
       LastCommitTime = DateTimeOffset.MinValue
-      UpstreamBranch = None
+      Upstream = GitWorktree.NoUpstream
       MainBehindCount = behind
       BaseRevision = revision
       IsDirty = dirty
+      HasDiff = false
       WorkMetrics = None }
 
 [<TestFixture>]

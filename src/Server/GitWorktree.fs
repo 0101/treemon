@@ -6,7 +6,6 @@ open System.Runtime.InteropServices
 open FsToolkit.ErrorHandling
 open Shared
 
-
 type WorktreeInfo =
     { Path: string
       Head: string
@@ -17,16 +16,42 @@ type CommitInfo =
       Message: string
       Time: DateTimeOffset }
 
+/// Outcome of resolving a worktree's upstream tracking branch (`git rev-parse --abbrev-ref @{u}`).
+/// `Upstream` carries the remote-stripped branch name — the store/PR-map key. Distinguishes git's
+/// deterministic "no upstream configured" from a transient read failure (timeout, `index.lock`, IO
+/// error) so downstream prune logic never mistakes a failed read for "this branch has no upstream"
+/// and wrongly forgets a merged PR.
+type UpstreamResult =
+    | Upstream of string
+    | NoUpstream
+    | UpstreamReadFailed
+
 type GitData =
     { Path: string
       Branch: string
+      /// The worktree tip commit hash from `git rev-parse HEAD` — deliberately not `getLastCommit`,
+      /// which skips merge commits. Used as the identity stamp for a merged-PR record so a reused
+      /// branch name cannot resurrect a prior incarnation's badge. Empty when no commit could be read.
+      HeadCommit: string
       LastCommitMessage: string
       LastCommitTime: DateTimeOffset
-      UpstreamBranch: string option
+      /// Resolved upstream tracking state, as returned by `getUpstreamBranch`.
+      Upstream: UpstreamResult
       MainBehindCount: int
       BaseRevision: string option
       IsDirty: bool
+      HasDiff: bool
       WorkMetrics: Shared.WorkMetrics option }
+
+let prBranchName (gitData: GitData) =
+    match gitData.Upstream with
+    | Upstream branch -> Some branch
+    | UpstreamReadFailed ->
+        Some gitData.Branch
+        |> Option.filter (fun branch ->
+            not (String.IsNullOrWhiteSpace branch)
+            && branch <> WorktreeStatus.DetachedBranchName)
+    | NoUpstream -> None
 
 /// Result of a successful worktree creation: the path of the new worktree (so
 /// callers can act on the exact location — e.g. launch a session there) alongside
@@ -116,6 +141,12 @@ let getLastCommit (worktreePath: string) =
             return parseCommitOutput worktreePath fallback
     }
 
+let private getHeadCommit (worktreePath: string) =
+    async {
+        let! output = runGit worktreePath "rev-parse HEAD"
+        return output |> Option.map _.Trim() |> Option.defaultValue ""
+    }
+
 let private tryFastForwardMain (repoRoot: string) (baseBranch: string) (mainRef: string) =
     async {
         let! currentBranch = runGit repoRoot "rev-parse --abbrev-ref HEAD"
@@ -138,9 +169,9 @@ let fetchUpstream (repoRoot: string) (upstreamRemote: string) (baseBranch: strin
         do! tryFastForwardMain repoRoot baseBranch (mainRef upstreamRemote baseBranch)
     }
 
-let getMainBehindCount (worktreePath: string) (mainRef: string) =
+let getMainBehindCount (worktreePath: string) (baseRef: string) =
     async {
-        let! output = runGit worktreePath $"rev-list --count HEAD..{mainRef}"
+        let! output = runGit worktreePath $"rev-list --count HEAD..{baseRef}"
 
         return
             output
@@ -161,30 +192,122 @@ let getBaseRevision (worktreePath: string) (mainRef: string) =
             |> Option.filter (String.IsNullOrWhiteSpace >> not)
     }
 
-let getUpstreamBranch (worktreePath: string) =
-    async {
-        let! output = runGit worktreePath "rev-parse --abbrev-ref @{u}"
+/// git reports a genuine, stable "no upstream" deterministically via one of these fatals: the branch
+/// never configured a tracking ref ("no upstream configured"), HEAD is detached ("does not point to
+/// a branch"), or the branch is unborn / has no commits ("no such branch: '<name>'"). These are the
+/// only error states safe to treat as "this worktree contributes no branch" — each is stable and
+/// carries no merged-PR record to lose, so pruning may proceed. EVERY other stderr — a timeout, an
+/// `index.lock`, an IO error, or `ambiguous argument '@{u}': unknown revision` (an upstream that WAS
+/// configured but is now unresolvable, e.g. a merged-then-deleted remote branch after `fetch
+/// --prune`) — is a read failure whose branch is *unknown*, not absent, so we must not mistake it for
+/// "no upstream" and prune a still-valid record. See `classifyUpstream`. NOTE: these match English
+/// git output; the target (Git for Windows) ships without gettext localization, so they are stable.
+let private noUpstreamMarkers =
+    [ "no upstream configured"
+      "does not point to a branch"
+      "no such branch" ]
 
-        return
-            output
-            |> Option.bind (fun s ->
-                let trimmed = s.Trim()
-                if String.IsNullOrEmpty(trimmed) then None else Some trimmed)
+/// Pure classification of a `git rev-parse --abbrev-ref @{u}` result into the three cases the
+/// merged-PR prune logic distinguishes (see worktree-monitor.md, Merged-PR Persistence):
+///  - `Upstream name` — configured and read cleanly;
+///  - `NoUpstream` — git deterministically reports no upstream (branch tracks nothing, detached, or
+///    unborn) — a stable state carrying no record to lose, so it is safe to prune against;
+///  - `UpstreamReadFailed` — anything else: a transient failure (timeout/lock/IO), an unrecognized
+///    error, a configured-but-unresolvable upstream, or an anomalous empty success. The upstream is
+///    *unknown*, not proven absent, so the branch must be excluded from the prune enumeration.
+/// Defaulting the unrecognized case to `UpstreamReadFailed` is deliberate: only the explicit markers
+/// are safe to prune against; everything else errs toward never forgetting a merged PR.
+let internal classifyUpstream (result: Result<string, string>) : UpstreamResult =
+    match result with
+    | Ok output ->
+        let trimmed = output.Trim()
+        if String.IsNullOrEmpty trimmed then UpstreamReadFailed else Upstream trimmed
+    | Error message ->
+        let lowered = message.ToLowerInvariant()
+
+        if noUpstreamMarkers |> List.exists (fun marker -> lowered.Contains(marker)) then
+            NoUpstream
+        else
+            UpstreamReadFailed
+
+let internal parseConfiguredUpstream (branch: string) (output: string) =
+    output.Split([| '\n' |], StringSplitOptions.RemoveEmptyEntries)
+    |> Array.tryPick (fun line ->
+        match line.TrimEnd('\r').Split([| '\t' |], 2) with
+        | [| localBranch; upstream |] when localBranch = branch && not (String.IsNullOrWhiteSpace upstream) ->
+            Some upstream
+        | _ -> None)
+
+let private stripRemote (upstream: string) =
+    match upstream.IndexOf('/') with
+    | -1 -> upstream
+    | i -> upstream[(i + 1)..]
+
+let getUpstreamBranch (worktreePath: string) (branch: string option) : Async<UpstreamResult> =
+    async {
+        let! result = runGitResult worktreePath "rev-parse --abbrev-ref @{u}"
+
+        match classifyUpstream result, branch with
+        | Upstream upstream, _ -> return Upstream(stripRemote upstream)
+        | NoUpstream, _ -> return NoUpstream
+        | UpstreamReadFailed, None -> return UpstreamReadFailed
+        | UpstreamReadFailed, Some localBranch ->
+            let! configured =
+                runGitResult
+                    worktreePath
+                    "for-each-ref \"--format=%(refname:short)%09%(upstream:short)\" refs/heads"
+
+            return
+                match configured with
+                | Ok output ->
+                    output
+                    |> parseConfiguredUpstream localBranch
+                    |> Option.map (stripRemote >> Upstream)
+                    |> Option.defaultValue UpstreamReadFailed
+                | Error _ -> UpstreamReadFailed
     }
+
+let parseDirtyStatus (output: string option) =
+    output
+    |> Option.exists (String.IsNullOrWhiteSpace >> not)
+
+let private generatedDiffViewerExclusionPathspec =
+    ":(top,exclude).agents/canvas/diff.html"
 
 let isDirty (worktreePath: string) =
     async {
         let! output = runGit worktreePath "status --porcelain -uno"
-
-        return
-            output
-            |> Option.map (fun s -> s.Trim().Length > 0)
-            |> Option.defaultValue false
+        return parseDirtyStatus output
     }
 
-let getCommitCount (worktreePath: string) (mainRef: string) =
+let hasLocalDiff (worktreePath: string) =
     async {
-        let! output = runGit worktreePath $"rev-list --count --no-merges {mainRef}..HEAD"
+        let! result =
+            ProcessRunner.runArgumentList
+                1024
+                1024
+                "Git"
+                "git"
+                [ "-C"
+                  worktreePath
+                  "status"
+                  "--porcelain"
+                  "--untracked-files=all"
+                  "--"
+                  "."
+                  generatedDiffViewerExclusionPathspec ]
+                None
+
+        return
+            match result with
+            | Ok output -> output.ExitCode = 0 && output.Stdout.Length > 0
+            | Error(ProcessRunner.CaptureLimitExceeded ProcessRunner.StandardOutput) -> true
+            | Error _ -> false
+    }
+
+let getCommitCount (worktreePath: string) (baseRef: string) =
+    async {
+        let! output = runGit worktreePath $"rev-list --count --no-merges {baseRef}..HEAD"
 
         return
             output
@@ -206,62 +329,48 @@ let parseDiffStats (output: string option) =
         | "" -> None
         | trimmed ->
             Some(
+                true,
                 extractRegexInt @"(\d+) insertion" trimmed,
                 extractRegexInt @"(\d+) deletion" trimmed
             ))
-    |> Option.defaultValue (0, 0)
+    |> Option.defaultValue (false, 0, 0)
 
-let getDiffStats (worktreePath: string) (mainRef: string) =
+let getDiffStats (worktreePath: string) (baseRef: string) =
     async {
-        let! output = runGit worktreePath $"diff --shortstat {mainRef}...HEAD"
+        let! output =
+            runGit
+                worktreePath
+                $"diff --no-ext-diff --no-textconv --shortstat {baseRef}...HEAD -- . \"{generatedDiffViewerExclusionPathspec}\""
+
         return parseDiffStats output
     }
 
-let collectWorktreeGitData (worktreePath: string) (branch: string option) (mainRef: string) =
-    async {
-        let! commitChild = Async.StartChild(getLastCommit worktreePath)
-        let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath)
-        let! dirtyChild = Async.StartChild(isDirty worktreePath)
-        let! commitCountChild = Async.StartChild(getCommitCount worktreePath mainRef)
-        let! diffStatsChild = Async.StartChild(getDiffStats worktreePath mainRef)
-        let! mainBehindChild = Async.StartChild(getMainBehindCount worktreePath mainRef)
-        let! baseRevisionChild = Async.StartChild(getBaseRevision worktreePath mainRef)
+let createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved =
+    if hasCommittedDiff then
+        Some
+            { CommitCount = commitCount
+              LinesAdded = linesAdded
+              LinesRemoved = linesRemoved }
+    else
+        None
 
-        let! commit = commitChild
-        let! upstream = upstreamChild
-        let! mainBehind = mainBehindChild
-        let! baseRevision = baseRevisionChild
-        let! dirty = dirtyChild
-        let! commitCount = commitCountChild
-        let! (linesAdded, linesRemoved) = diffStatsChild
+let internal selectUpstreamRemote
+    (configuredRemote: string option)
+    (remoteOutput: string option)
+    =
+    match configuredRemote with
+    | Some remote -> remote
+    | None ->
+        let hasUpstream =
+            remoteOutput
+            |> Option.exists (fun output ->
+                output.Split(
+                    [| '\n'; '\r' |],
+                    StringSplitOptions.RemoveEmptyEntries
+                )
+                |> Array.exists (fun remote -> remote.Trim() = "upstream"))
 
-        let upstreamBranch =
-            upstream
-            |> Option.map (fun u ->
-                match u.IndexOf('/') with
-                | -1 -> u
-                | i -> u[(i + 1)..])
-
-        let workMetrics : Shared.WorkMetrics option =
-            match commitCount with
-            | 0 -> None
-            | _ ->
-                Some
-                    { CommitCount = commitCount
-                      LinesAdded = linesAdded
-                      LinesRemoved = linesRemoved }
-
-        return
-            { Path = worktreePath
-              Branch = branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
-              LastCommitMessage = commit |> Option.map _.Message |> Option.defaultValue ""
-              LastCommitTime = commit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
-              UpstreamBranch = upstreamBranch
-              MainBehindCount = mainBehind
-              BaseRevision = baseRevision
-              IsDirty = dirty
-              WorkMetrics = workMetrics }
-    }
+        if hasUpstream then "upstream" else "origin"
 
 let resolveUpstreamRemote (repoRoot: string) =
     async {
@@ -269,14 +378,7 @@ let resolveUpstreamRemote (repoRoot: string) =
         | Some remote -> return remote
         | None ->
             let! output = runGit repoRoot "remote"
-
-            let hasUpstream =
-                output
-                |> Option.exists (fun s ->
-                    s.Split([| '\n'; '\r' |], StringSplitOptions.RemoveEmptyEntries)
-                    |> Array.exists (fun r -> r.Trim() = "upstream"))
-
-            return if hasUpstream then "upstream" else "origin"
+            return selectUpstreamRemote None output
     }
 
 let private isWorktreePrunable (repoRoot: string) (worktreePath: string) =
@@ -366,6 +468,19 @@ let private gitRefExists (repoRoot: string) (gitRef: string) =
         return output |> Option.exists (fun s -> s.Trim().Length > 0)
     }
 
+let internal selectBaseRef
+    (upstreamRemote: string)
+    (baseBranch: string)
+    (remoteExists: bool)
+    (localExists: bool)
+    =
+    if remoteExists then
+        Some(mainRef upstreamRemote baseBranch)
+    elif localExists then
+        Some baseBranch
+    else
+        None
+
 /// Resolves the base branch to a concrete git ref to fork from. Prefers the
 /// remote-tracking ref (e.g. `upstream/main`) so a new worktree forks from the
 /// upstream tip rather than a possibly-stale local branch, falling back to the
@@ -375,15 +490,121 @@ let resolveBaseRef (repoRoot: string) (upstreamRemote: string) (baseBranch: stri
     async {
         let remoteRef = mainRef upstreamRemote baseBranch
         let! remoteExists = gitRefExists repoRoot $"refs/remotes/{remoteRef}"
+        let! localExists =
+            if remoteExists then async.Return false
+            else gitRefExists repoRoot $"refs/heads/{baseBranch}"
 
-        if remoteExists then
-            return Ok remoteRef
-        else
-            let! localExists = gitRefExists repoRoot $"refs/heads/{baseBranch}"
+        return
+            selectBaseRef upstreamRemote baseBranch remoteExists localExists
+            |> Result.requireSome
+                $"Base branch '{baseBranch}' not found as '{remoteRef}' or as a local branch"
+    }
+
+type private CommonGitData =
+    { LastCommit: CommitInfo option
+      HeadCommit: string
+      Upstream: UpstreamResult
+      IsDirty: bool
+      HasLocalDiff: bool }
+
+let private collectCommonGitData (worktreePath: string) (branch: string option) =
+    async {
+        let! commitChild = Async.StartChild(getLastCommit worktreePath)
+        let! headChild = Async.StartChild(getHeadCommit worktreePath)
+        let! upstreamChild = Async.StartChild(getUpstreamBranch worktreePath branch)
+        let! dirtyChild = Async.StartChild(isDirty worktreePath)
+        let! localDiffChild = Async.StartChild(hasLocalDiff worktreePath)
+
+        let! commit = commitChild
+        let! headCommit = headChild
+        let! upstream = upstreamChild
+        let! dirty = dirtyChild
+        let! localDiff = localDiffChild
+
+        return
+            { LastCommit = commit
+              HeadCommit = headCommit
+              Upstream = upstream
+              IsDirty = dirty
+              HasLocalDiff = localDiff }
+    }
+
+let private collectWorktreeGitDataForBaseRef
+    (worktreePath: string)
+    (branch: string option)
+    (remoteRef: string)
+    (baseRef: string)
+    (common: CommonGitData)
+    =
+    async {
+        let! commitCountChild = Async.StartChild(getCommitCount worktreePath baseRef)
+        let! diffStatsChild = Async.StartChild(getDiffStats worktreePath baseRef)
+        let! mainBehindChild =
+            if baseRef = remoteRef then
+                Async.StartChild(getMainBehindCount worktreePath baseRef)
+            else
+                Async.StartChild(async.Return 0)
+        let! baseRevisionChild =
+            if baseRef = remoteRef then
+                Async.StartChild(getBaseRevision worktreePath baseRef)
+            else
+                Async.StartChild(async.Return None)
+
+        let! commitCount = commitCountChild
+        let! hasCommittedDiff, linesAdded, linesRemoved = diffStatsChild
+        let! mainBehind = mainBehindChild
+        let! baseRevision = baseRevisionChild
+
+        return
+            { Path = worktreePath
+              Branch = branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
+              HeadCommit = common.HeadCommit
+              LastCommitMessage = common.LastCommit |> Option.map _.Message |> Option.defaultValue ""
+              LastCommitTime = common.LastCommit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
+              Upstream = common.Upstream
+              MainBehindCount = mainBehind
+              BaseRevision = baseRevision
+              IsDirty = common.IsDirty
+              HasDiff = hasCommittedDiff || common.HasLocalDiff
+              WorkMetrics = createWorkMetrics hasCommittedDiff commitCount linesAdded linesRemoved }
+    }
+
+let collectWorktreeGitData
+    (worktreePath: string)
+    (branch: string option)
+    (upstreamRemote: string)
+    (baseBranch: string)
+    =
+    async {
+        let remoteRef = mainRef upstreamRemote baseBranch
+        let! baseRefChild = Async.StartChild(resolveBaseRef worktreePath upstreamRemote baseBranch)
+        let! common = collectCommonGitData worktreePath branch
+        let! baseRef = baseRefChild
+
+        match baseRef with
+        | Error error ->
+            Log.log "GitMetrics" error
 
             return
-                if localExists then Ok baseBranch
-                else Error $"Base branch '{baseBranch}' not found as '{remoteRef}' or as a local branch"
+                { Path = worktreePath
+                  Branch = branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
+                  HeadCommit = common.HeadCommit
+                  LastCommitMessage = common.LastCommit |> Option.map _.Message |> Option.defaultValue ""
+                  LastCommitTime = common.LastCommit |> Option.map _.Time |> Option.defaultValue DateTimeOffset.MinValue
+                  Upstream = common.Upstream
+                  MainBehindCount = 0
+                  BaseRevision = None
+                  IsDirty = common.IsDirty
+                  HasDiff = common.HasLocalDiff
+                  WorkMetrics = None }
+        | Ok baseRef ->
+            return!
+                collectWorktreeGitDataForBaseRef
+                    worktreePath
+                    branch
+                    remoteRef
+                    baseRef
+                    common
     }
 
 /// Best-effort fetch of the base branch from upstream so the remote-tracking ref

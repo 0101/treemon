@@ -18,6 +18,10 @@ let ts (s: string) : DateTimeOffset = DateTimeOffset.Parse(s, CultureInfo.Invari
 /// Build a push-model `Message` (domain record) from body text and an ISO-8601 timestamp string.
 let msg (text: string) (t: string) : Message = { Text = text; At = ts t }
 
+/// Build a unique temporary path without creating it.
+let uniquePath prefix =
+    Path.Combine(Path.GetTempPath(), $"treemon-{prefix}-{Guid.NewGuid():N}")
+
 let resolveCmdShim (fileName: string) =
     if Path.GetExtension(fileName) = "" then
         let cmdPath = $"{fileName}.cmd"
@@ -109,6 +113,13 @@ let private findPidsOnPortLinux (port: int) =
         | _ -> None)
     |> Array.distinct
     |> Array.toList
+
+let withTempDir (prefix: string) (action: string -> 'a) =
+    let tempDir = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid()}")
+    Directory.CreateDirectory(tempDir) |> ignore
+    try action tempDir
+    finally
+        try Directory.Delete(tempDir, recursive = true) with _ -> ()
 
 /// Run `action` with the process CWD swapped to a throwaway temp directory, then
 /// restore and delete it. Tests that persist relative to the current directory

@@ -3,6 +3,29 @@ module Tests.HttpSecurityTests
 open NUnit.Framework
 open Server.HttpSecurity
 
+// The loopback host predicate is shared by Origin/Referer checks, canvas injection URL validation,
+// and the canvas server's Host-header guard.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type IsLoopbackHostTests() =
+
+    [<TestCase("localhost")>]
+    [<TestCase("LOCALHOST")>]
+    [<TestCase("127.0.0.1")>]
+    [<TestCase("127.0.0.42")>]
+    [<TestCase("::1")>]
+    [<TestCase("[::1]")>]
+    member _.``localhost and loopback IP literals are accepted``(host: string) =
+        Assert.That(isLoopbackHost host, Is.True)
+
+    [<TestCase("attacker.example")>]
+    [<TestCase("127.0.0.1.attacker.example")>]
+    [<TestCase("10.0.0.5")>]
+    [<TestCase("0.0.0.0")>]
+    member _.``hostnames and non-loopback IPs are rejected``(host: string) =
+        Assert.That(isLoopbackHost host, Is.False)
+
 // Unit coverage for the CSRF guard's pure decision core (Server.HttpSecurity, internal via
 // InternalsVisibleTo). The guard rejects a state-changing request only when it carries a
 // non-loopback Origin/Referer; a missing header pair is allowed so the non-browser Cli (sends

@@ -32,6 +32,7 @@ const SYSTEM_VIEW_FILENAMES = new Set(
 
 const TRANSPORT_SHIM = `<script>
 if (window.parent === window) {
+  window.__canvasTopLevelTransportAvailable = true;
   window.addEventListener('message', function(e) {
     if (e.source === window && e.data && typeof e.data.action === 'string') {
       fetch('http://127.0.0.1:__PORT__/_message', {
@@ -241,7 +242,11 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
     const res = await fetch(TREEMON_REGISTER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ worktreePath, injectUrl, sessionId }),
+      body: JSON.stringify({
+        worktreePath,
+        injectUrl,
+        sessionId,
+      }),
       signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
@@ -286,8 +291,11 @@ async function declareOwnership(worktreePath, filename, sessionId) {
     }
     const outcome = await res.json().catch(() => ({}));
     const attributed = outcome?.attributed === true;
+    // `monitored` distinguishes the two non-attributed cases: an unmonitored worktree (nothing
+    // recorded) from a SystemView, which has no author to record.
+    const monitored = outcome?.monitored === true;
     log(`declared ownership: ${filename} → ${sessionId} (attributed=${attributed})`);
-    return { ok: true, attributed };
+    return { ok: true, attributed, monitored };
   } catch (err) {
     log(`could not declare ownership for ${filename}: ${err.message}`);
     return { ok: false, error: err.message };
@@ -359,13 +367,13 @@ async function handleCanvasWrite(session, state, filename) {
 const worktreePath = process.cwd();
 const extensionState = { browserMode: false, port: 0, sessionId: null, worktreePath };
 
-// Explicit ownership tool the agent can call on demand — for a doc produced by a script or
-// another tool (no supported write event fired to auto-declare), or one whose messages are reaching
-// the wrong session. It stamps THIS session's id, so the agent only supplies the filename.
+// Explicit routing tool the agent can call on demand. AgentDocs assign author ownership;
+// SystemViews are not claimable - their interactions resolve to a live session. It stamps THIS session's id,
+// so the agent only supplies the filename.
 const takeOwnershipTool = {
   name: "canvas_take_ownership",
   description:
-    "Declare THIS session as the owner of a canvas doc under .agents/canvas/, so replies from that doc route back to this session. Use it when a canvas doc was produced by a script or unsupported tool, or when a doc's messages are reaching the wrong session. Pass the doc's filename, e.g. \"review.html\".",
+    "Route an authored canvas doc's replies to THIS session by claiming its author ownership. Pass the filename under .agents/canvas/, e.g. \"review.html\". SystemViews such as diff.html and beads.html are not claimable: they always reach the worktree's most recently active session.",
   parameters: {
     type: "object",
     properties: {
@@ -392,9 +400,14 @@ const takeOwnershipTool = {
       throw new Error(`Ownership declaration failed: ${result.error}`);
     }
     if (!result.attributed) {
+      if (result.monitored) {
+        throw new Error(
+          `"${name}" is a generated SystemView, so it has no author to claim. Its interactions always reach the worktree's most recently active session.`,
+        );
+      }
       throw new Error(`Treemon is not monitoring this worktree, so ownership was not recorded for ${name}.`);
     }
-    return `This session now owns "${name}" — replies from that canvas doc will route here.`;
+    return `Replies from "${name}" now route to this session.`;
   },
 };
 

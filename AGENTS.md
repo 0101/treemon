@@ -2,6 +2,12 @@
 
 Git worktree monitoring dashboard — at-a-glance visibility into all active worktrees across multiple repos.
 
+## Production Safety
+
+- During development, tests, benchmarks, reviews, or verification, never run `.\treemon.ps1 deploy`, `start`, `stop`, or `restart`; bind or replace production port 5000; or otherwise interfere with the running production instance.
+- A production action is allowed only after the user gives explicit consent immediately before that action in the current conversation. A spec, bead description, prior-session approval, or generic instruction to verify does not count as consent.
+- Use test harnesses, fixtures, demo/dev modes, or any available non-production ports instead. If production smoke verification is genuinely required, ask for consent at that point and leave it pending when consent is not given.
+
 ## Setup
 
 ```
@@ -38,7 +44,7 @@ This project uses strict functional F# style. These rules are non-negotiable.
 - **Immutable collections** — use F# `list`, `Map`, `Set` instead of `Dictionary<>`, `ResizeArray`, `List<T>` (mutable .NET types)
 - **String interpolation** — `$"text {x}"` instead of `sprintf "text %s" x`
 - **Modern indexing** — `collection[0]` not `collection.[0]` (dot-bracket obsolete since F# 6)
-- **Nested record copy-and-update** — collapse hand-nested updates with F# 7+ dotted syntax: `{ x with A.B = v }`, and multi-field `{ x with A.B = v1; A.C = v2 }`, instead of `{ x with A = { x.A with B = v } }`. Only applies when the inner record copies the *same* field of the *same* source (`x.A`); it does **not** apply inside a full record literal such as `{ A = { x.A with B = v }; C = ... }` (no outer `with`). Fable 4.28 supports this syntax.
+- **Nested record copy-and-update** — collapse hand-nested updates with F# 7+ dotted syntax: `{ x with A.B = v }`, and multi-field `{ x with A.B = v1; A.C = v2 }`, instead of `{ x with A = { x.A with B = v } }`. Only applies when the inner record copies the *same* field of the *same* source (`x.A`); it does **not** apply inside a full record literal such as `{ A = { x.A with B = v }; C = ... }` (no outer `with`). Fable 5.0 supports this syntax.
 - **CSS over inline styles** — use `prop.className` with CSS classes, not `style.*` in Feliz views (inline styles bypass the theme)
 - **`Path.Combine()`** for paths, **`Environment.NewLine`** for line endings
 

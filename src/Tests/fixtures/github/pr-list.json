@@ -5,7 +5,7 @@
     "state": "open",
     "draft": false,
     "merged_at": null,
-    "head": { "ref": "test/add-editorconfig" }
+    "head": { "ref": "test/add-editorconfig", "sha": "sha-editorconfig" }
   },
   {
     "number": 1,
@@ -13,6 +13,6 @@
     "state": "open",
     "draft": false,
     "merged_at": null,
-    "head": { "ref": "test/add-health-endpoint" }
+    "head": { "ref": "test/add-health-endpoint", "sha": "sha-health-endpoint" }
   }
 ]

@@ -490,12 +490,14 @@ type SchedulerUpstreamTests() =
             let gitData : GitData =
                 { Path = "/repo/main"
                   Branch = "main"
+                  HeadCommit = "main-sha"
                   LastCommitMessage = "init"
                   LastCommitTime = DateTimeOffset.UtcNow
-                  UpstreamBranch = None
+                  Upstream = NoUpstream
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
+                  HasDiff = false
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/main", gitData))

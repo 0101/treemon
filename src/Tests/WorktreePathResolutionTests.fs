@@ -42,6 +42,13 @@ let private createApi agent roots =
         "1.0"
         None
 
+let private deleteWorktree agent worktreeRoots wtPath =
+    WorktreeApi.deleteWorktreeWith
+        (fun _ _ _ -> async { return Ok () })
+        (fun _ -> async { return () })
+        agent
+        (RefreshScheduler.buildRootPaths worktreeRoots)
+        wtPath
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -80,10 +87,8 @@ type DeleteWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = createApi agent [ tempDirA; tempDirB ]
-
             let targetPath = worktreePath tempDirA "feature-x"
-            let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
+            let! _result = deleteWorktree agent [ tempDirA; tempDirB ] (PathUtils.toWorktreePath targetPath)
 
             let! state = getAgentState agent
 
@@ -131,10 +136,8 @@ type DeleteWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = createApi agent [ tempDirA; tempDirB ]
-
             let targetPath = worktreePath tempDirB "main"
-            let! _result = api.deleteWorktree (PathUtils.toWorktreePath targetPath)
+            let! _result = deleteWorktree agent [ tempDirA; tempDirB ] (PathUtils.toWorktreePath targetPath)
 
             let! state = getAgentState agent
 
@@ -172,10 +175,8 @@ type DeleteWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA ]
 
-            let api = createApi agent [ tempDirA ]
-
-            let! result =
-                api.deleteWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "missing"))
+            let unknownPath = worktreePath tempDirA "missing"
+            let! result = deleteWorktree agent [ tempDirA ] (PathUtils.toWorktreePath unknownPath)
 
             match result with
             | Error msg ->

@@ -1,11 +1,15 @@
 module Tests.CanvasPaneTests
 
 open System
+open System.IO
+open System.Threading.Tasks
 open NUnit.Framework
 open Newtonsoft.Json
+open Newtonsoft.Json.Linq
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
 open Tests.CanvasTestHelpers
+open Shared
 
 /// Branch name of the fixture worktree that has a CanvasDoc defined in
 /// src/Tests/fixtures/worktrees.json.  Tests target this known branch
@@ -335,6 +339,186 @@ type CanvasPaneTests() =
                 Assert.Inconclusive(
                     "sendCanvasMessage API call not observed within 5s. " +
                     "This may happen if no canvas bridge is registered (extension not running).")
+        }
+
+    [<Test>]
+    member this.``pane-hosted Beadspace selection emits each action once with task source context``() =
+        task {
+            let beadsHtmlPath =
+                Path.GetFullPath(
+                    Path.Combine(
+                        __SOURCE_DIRECTORY__,
+                        "..",
+                        "Server",
+                        "BeadspaceTemplate.html"))
+
+            let beadsJson =
+                """[{"id":"pane-task-1","title":"Verify pane routing","description":"Exercise Beadspace selection routing","status":"in_progress","priority":1,"issue_type":"task","labels":[],"created_at":"2026-07-24T10:00:00Z","updated_at":"2026-07-24T11:00:00Z","dependency_count":0,"dependent_count":0}]"""
+
+            do!
+                this.Page.RouteAsync(
+                    "**/beads.html",
+                    fun route ->
+                        task {
+                            let! html = File.ReadAllTextAsync(beadsHtmlPath)
+                            let injected =
+                                html
+                                |> Server.CanvasExport.injectAtHead (
+                                    Server.CanvasDocServer.buildInjection
+                                        CanvasDocKind.SystemView
+                                        "beads.html")
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "text/html",
+                                        Body = injected))
+                        }
+                        :> Task)
+
+            do!
+                this.Page.RouteAsync(
+                    "**/beads-data",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = beadsJson)))
+
+            let forwardedRequests =
+                Array.init 3 (fun _ ->
+                    TaskCompletionSource<string>(
+                        TaskCreationOptions.RunContinuationsAsynchronously))
+
+            // Playwright invokes this impure route callback for each pane-to-server delivery.
+            let mutable forwardedCount = 0
+            let successBody =
+                JsonConvert.SerializeObject(
+                    CanvasMessageResult.Ok,
+                    Fable.Remoting.Json.FableJsonConverter())
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/sendCanvasMessage",
+                    fun route ->
+                        task {
+                            let index = forwardedCount
+                            forwardedCount <- forwardedCount + 1
+
+                            if index < forwardedRequests.Length then
+                                route.Request.PostData
+                                |> Option.ofObj
+                                |> Option.defaultValue ""
+                                |> forwardedRequests[index].TrySetResult
+                                |> ignore
+
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = successBody))
+                        }
+                        :> Task)
+
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! ensureCanvasPaneOpen this.Page
+
+            let beadsFrame =
+                this.Page.FrameLocator(".canvas-pane .canvas-iframe-active")
+            let title = beadsFrame.Locator(".issue-table-row .col-title").First
+            do! title.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let selectTitle () =
+                task {
+                    let! _ =
+                        title.EvaluateAsync(
+                            """element => {
+                                const range = document.createRange();
+                                range.selectNodeContents(element);
+                                const selection = window.getSelection();
+                                selection.removeAllRanges();
+                                selection.addRange(range);
+                                document.dispatchEvent(new Event('selectionchange'));
+                            }""")
+
+                    do!
+                        beadsFrame.Locator(
+                            "canvas-selection-context button[data-intent='explain']"
+                        ).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+                }
+
+            let explain =
+                beadsFrame.Locator(
+                    "canvas-selection-context button[data-intent='explain']")
+            let remove =
+                beadsFrame.Locator(
+                    "canvas-selection-context button[data-intent='remove']")
+            let comment =
+                beadsFrame.Locator("canvas-selection-context button[data-comment]")
+
+            do! selectTitle ()
+            do! explain.ClickAsync()
+            let! first =
+                forwardedRequests[0].Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            do! selectTitle ()
+            do! remove.ClickAsync()
+            let! second =
+                forwardedRequests[1].Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            do! selectTitle ()
+            do! comment.ClickAsync()
+            do!
+                beadsFrame.Locator("canvas-selection-context input")
+                    .FillAsync("Keep the task context")
+            do!
+                beadsFrame.Locator("canvas-selection-context input")
+                    .PressAsync("Enter")
+            let! third =
+                forwardedRequests[2].Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let requests =
+                [| first; second; third |]
+                |> Array.map (fun raw ->
+                    JsonConvert.DeserializeObject<CanvasMessageRequest array>(
+                        raw,
+                        converter)
+                    |> Array.exactlyOne)
+
+            let payloads =
+                requests
+                |> Array.map (fun request ->
+                    request, JObject.Parse(request.Payload))
+
+            TestContext.Out.WriteLine(
+                $"Pane-forwarded Beadspace requests:{Environment.NewLine}{System.Text.Json.JsonSerializer.Serialize([| first; second; third |])}")
+
+            Assert.Multiple(fun () ->
+                Assert.That(forwardedCount, Is.EqualTo(3))
+                Assert.That(
+                    requests |> Array.map _.Filename,
+                    Is.EqualTo([| "beads.html"; "beads.html"; "beads.html" |]))
+                Assert.That(
+                    payloads |> Array.map (fun (_, payload) -> payload["intent"].Value<string>()),
+                    Is.EqualTo([| "explain"; "remove"; "comment" |]))
+                Assert.That(
+                    payloads |> Array.map (fun (_, payload) -> payload["doc"].Value<string>()),
+                    Is.EqualTo([| "beads.html"; "beads.html"; "beads.html" |]))
+                Assert.That(
+                    payloads
+                    |> Array.map (fun (_, payload) ->
+                        let sourceContext = payload["sourceContext"] :?> JObject
+                        let kind = sourceContext["kind"].Value<string>()
+                        let taskId = sourceContext["taskId"].Value<string>()
+                        kind, taskId),
+                    Is.EqualTo(
+                        [| "beads", "pane-task-1"
+                           "beads", "pane-task-1"
+                           "beads", "pane-task-1" |])))
         }
 
     [<Test>]
@@ -712,22 +896,18 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
-    member this.``Overview omits liveness dot for SystemView doc but keeps it for AgentDoc``() =
+    member this.``Overview omits SystemView docs and keeps AgentDoc liveness``() =
         task {
-            // Focus a worktree with no canvas docs to trigger the overview, which lists every
-            // worktree's docs (including the multirepo SystemView + AgentDocs).
+            // Focus a worktree with no canvas docs to trigger the overview.
             do! focusCanvasCard this.Page "feature-recent"
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             do! (this.Page.Locator(".canvas-overview")).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // The beads (SystemView) overview entry must have no liveness dot.
             let beadsDoc = this.Page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "beads"))
-            do! beadsDoc.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            let! beadsDots = beadsDoc.Locator(".canvas-liveness-dot").CountAsync()
-            Assert.That(beadsDots, Is.EqualTo(0), "SystemView (beads) overview entry should not render a liveness dot")
+            let! beadsCount = beadsDoc.CountAsync()
+            Assert.That(beadsCount, Is.EqualTo(0), "SystemView docs must not appear in the Canvas Docs overview")
 
-            // An AgentDoc overview entry (dashboard) must keep its liveness dot.
             let dashboardDoc = this.Page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "dashboard"))
             let! dashDots = dashboardDoc.Locator(".canvas-liveness-dot").CountAsync()
             Assert.That(dashDots, Is.EqualTo(1), "AgentDoc (dashboard) overview entry should still render a liveness dot")
@@ -745,7 +925,7 @@ type CanvasPaneTests() =
     // network-mock pattern) so exactly one AgentDoc is unviewed, serialising the map with the same
     // FableJsonConverter the client deserialises with so the wire format matches.
     [<Test>]
-    member this.``Overview marks only unviewed AgentDocs unread, never viewed or SystemView docs``() =
+    member this.``Overview marks only unviewed AgentDocs unread and omits SystemViews``() =
         task {
             // Build the last-viewed map for feature-multidoc (scopedKey "Q:/code/TestProject/feature-multidoc";
             // AgentDocs overview.html=multi-hash-001, details.html=multi-hash-002, metrics.html=multi-hash-003):
@@ -787,11 +967,9 @@ type CanvasPaneTests() =
             Assert.That(overviewClass, Does.Not.Contain("canvas-overview-doc-unviewed"),
                 "Viewed AgentDoc (overview) must NOT carry canvas-overview-doc-unviewed")
 
-            // beads.html — SystemView, excluded from awareness at the source -> must never carry the class.
             let beadsDoc = page.Locator(".canvas-pane .canvas-overview-doc", PageLocatorOptions(HasText = "beads"))
-            let! beadsClass = beadsDoc.First.GetAttributeAsync("class")
-            Assert.That(beadsClass, Does.Not.Contain("canvas-overview-doc-unviewed"),
-                "SystemView (beads) doc must never carry canvas-overview-doc-unviewed")
+            let! beadsCount = beadsDoc.CountAsync()
+            Assert.That(beadsCount, Is.EqualTo(0), "SystemView docs must not appear in the Canvas Docs overview")
 
             do! page.CloseAsync()
         }
@@ -841,6 +1019,85 @@ type CanvasPaneTests() =
             do! countBadge.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! countText = countBadge.TextContentAsync()
             Assert.That(countText.Trim(), Is.EqualTo("2"), "SystemView badge should show the worktree's total beads issue count (Open+InProgress+Blocked+Closed)")
+        }
+
+    [<Test>]
+    member this.``Diff SystemView entry reuses the accessible inline diff SVG while beads keeps its count``() =
+        task {
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let diffDoc: CanvasDoc =
+                { Filename = "diff.html"
+                  ContentHash = "diff-tab"
+                  LastModified = DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero)
+                  OwnerSessionId = None
+                  Kind = CanvasDocKind.SystemView }
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getWorktrees",
+                    Func<IRoute, Task>(fun route ->
+                        task {
+                            let! upstream = route.FetchAsync()
+                            let! json = upstream.TextAsync()
+                            let response =
+                                JsonConvert.DeserializeObject<DashboardResponse>(json, converter)
+                            let transformed =
+                                { response with
+                                    Repos =
+                                        response.Repos
+                                        |> List.map (fun repo ->
+                                            { repo with
+                                                Worktrees =
+                                                    repo.Worktrees
+                                                    |> List.map (fun wt ->
+                                                        if wt.Branch = FixtureSystemViewBranch then
+                                                            { wt with CanvasDocs = wt.CanvasDocs @ [ diffDoc ] }
+                                                        else
+                                                            wt) }) }
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = JsonConvert.SerializeObject(transformed, converter)
+                                    )
+                                )
+                        } :> Task)
+                )
+
+            let! _ = this.Page.ReloadAsync()
+            do! focusCanvasCard this.Page FixtureSystemViewBranch
+            do! ensureCanvasPaneOpen this.Page
+
+            let diffTab =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-system-tab",
+                    PageLocatorOptions(Has = this.Page.Locator("svg")))
+            do! diffTab.WaitForAsync()
+            let! semantics =
+                diffTab.EvaluateAsync<string array>(
+                    """button => [
+                        button.getAttribute('title'),
+                        String(button.querySelectorAll('.canvas-system-tab-glyph > svg').length),
+                        button.querySelector('svg')?.getAttribute('aria-hidden') || '',
+                        button.querySelector('.canvas-system-tab-glyph')?.textContent.trim() || '',
+                        String(button.querySelectorAll('.canvas-system-tab-count').length)
+                    ]"""
+                )
+            let! beadsCount =
+                this.Page.Locator(".canvas-system-tab-count").TextContentAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    semantics,
+                    Is.EqualTo(
+                        [| "Worktree diff — double-click to open in a browser tab"
+                           "1"
+                           "true"
+                           ""
+                           "0" |]
+                    )
+                )
+                Assert.That(beadsCount.Trim(), Is.EqualTo("2")))
         }
 
     [<Test>]

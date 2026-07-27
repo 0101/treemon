@@ -76,7 +76,7 @@ let private helperCap (injection: string) =
 [<Category("Fast")>]
 type BuildInjectionTests() =
 
-    // ── SystemView: stripped injection (no morph, no bridge) ──────────────────
+    // ── SystemView: generic interactions without authored-doc machinery ───────
 
     [<Test>]
     member _.``SystemView injection omits the idiomorph runtime and morph controller``() =
@@ -170,8 +170,8 @@ type BuildInjectionTests() =
 
     // ── Item 2: injected window.canvasSend(action, payload) helper ────────────
     // canvasSend wraps the flat postMessage contract and enforces the SAME size cap the client
-    // applies (CanvasPane.fs drops when JSON.stringify(me.data).length > MaxPayloadBytes). It is
-    // injected for AgentDocs only — a SystemView is server-generated and posts nothing.
+    // applies (CanvasPane.fs drops when JSON.stringify(me.data).length > MaxPayloadBytes). Both doc
+    // kinds need it because the generic selected-text runtime posts through this helper.
 
     [<Test>]
     member _.``AgentDoc injection includes the canvasSend helper``() =
@@ -180,16 +180,23 @@ type BuildInjectionTests() =
                     "Agent docs get the first-class window.canvasSend(action,payload) helper")
 
     [<Test>]
-    member _.``SystemView injection omits the canvasSend helper``() =
+    member _.``SystemView injection includes the canvasSend helper``() =
         let injection = buildInjection SystemView "beads.html"
-        Assert.That(injection, Does.Not.Contain(canvasSendMarker),
-                    "A system view is server-generated and posts nothing, so canvasSend is omitted")
+        Assert.That(injection, Does.Contain(canvasSendMarker),
+                    "SystemViews need canvasSend for generic selected-text interactions")
+
+    [<Test>]
+    member _.``canvasSend requires an explicit transport in a top-level window``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.Multiple(fun () ->
+            Assert.That(injection, Does.Contain("window.parent === window"))
+            Assert.That(injection, Does.Contain("__canvasTopLevelTransportAvailable")))
 
     // ── Injected window.canvasExpand(button, sectionId) helper ────────────────
     // canvasExpand swaps the clicked button for a themed spinner and posts the flat
     // {action:'expand-section', section, doc} request to the owning session, so the agent rewrites
-    // the doc in place. It calls canvasSend, so like canvasSend it is AgentDoc-only — a SystemView
-    // has no owner session to receive the request and posts nothing.
+    // the doc in place. It remains AgentDoc-only because a generated SystemView has no authored
+    // document to expand in response to a session request.
 
     [<Test>]
     member _.``AgentDoc injection includes the canvasExpand helper and its spinner``() =
@@ -239,10 +246,11 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(selectionProcessingMarker))
 
     [<Test>]
-    member _.``SystemView injection omits selected-text contextual actions``() =
+    member _.``SystemView injection includes selected-text contextual actions and processing highlight``() =
         let injection = buildInjection SystemView "beads.html"
-        Assert.That(injection, Does.Not.Contain(selectionContextMarker))
-        Assert.That(injection, Does.Not.Contain(selectionActionMarker))
+        Assert.That(injection, Does.Contain(selectionContextMarker))
+        Assert.That(injection, Does.Contain(selectionActionMarker))
+        Assert.That(injection, Does.Contain(selectionProcessingMarker))
 
     [<Test>]
     member _.``server embeds the canonical extension selection runtime without drift``() =
@@ -268,6 +276,7 @@ type BuildInjectionTests() =
         Assert.That(extension, Does.Contain("canvas-selection-context.js"))
         Assert.That(extension, Does.Contain("canvas-doc-kinds.json"))
         Assert.That(extension, Does.Contain("SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())"))
+        Assert.That(extension, Does.Contain("window.__canvasTopLevelTransportAvailable = true"))
         Assert.That(extension, Does.Contain("injectScripts(content, port, canvasRoute.filename)"))
         Assert.That(extension, Does.Contain("\"Content-Security-Policy\": \"frame-ancestors 'none'\""))
 
@@ -343,7 +352,8 @@ type BuildInjectionTests() =
     // ── Item 3: injected JS error overlay (window.onerror + unhandledrejection) ──
     // The overlay (AgentDoc only) forwards doc-side JS failures to the pane as the flat
     // {action:'canvas-doc-error', wt, doc, message, source, line, col} message the client surfaces in a
-    // dismissible banner. A SystemView runs no author JS, so it never gets the overlay.
+    // dismissible banner. SystemViews keep their own runtime error handling and never get this
+    // authored-document reporting overlay.
 
     [<Test>]
     member _.``AgentDoc injection includes the JS error overlay``() =
@@ -359,7 +369,7 @@ type BuildInjectionTests() =
     member _.``SystemView injection omits the JS error overlay``() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(errorOverlayMarker),
-                    "A system view runs no author JS, so the error overlay is omitted")
+                    "SystemViews must not receive the authored-document error overlay")
 
     [<Test>]
     member _.``the error overlay wraps its postMessage in try/catch so the error path can't loop``() =
@@ -439,6 +449,99 @@ type LoopbackInjectUrlTests() =
     member _.``rejects non-loopback or malformed inject URLs``(url: string) =
         Assert.That(isLoopbackInjectUrl url, Is.False, $"{url} must be rejected")
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffComparisonContextTests() =
+
+    [<Test>]
+    member _.``known root and linked paths resolve their scheduler-owned repo comparison``() =
+        let repoRoot =
+            Path.Combine(Path.GetTempPath(), "treemon-context", "repo")
+            |> PathUtils.normalizePath
+
+        let linked =
+            Path.Combine(Path.GetTempPath(), "treemon-context", "linked")
+            |> PathUtils.normalizePath
+
+        let repo =
+            { RefreshScheduler.PerRepoState.empty with
+                KnownPaths = Set.ofList [ repoRoot; linked ]
+                UpstreamRemote = "upstream"
+                BaseBranch = "dev" }
+
+        let state =
+            { RefreshScheduler.DashboardState.empty with
+                Repos =
+                    Map.ofList
+                        [ RepoId "context-repo",
+                          repo ] }
+
+        [ repoRoot; linked ]
+        |> List.iter (fun path ->
+            let context =
+                tryFindDiffComparisonContext state path
+
+            Assert.That(
+                context,
+                Is.EqualTo(
+                    Some
+                        ({ WorktreePath = path
+                           UpstreamRemote = "upstream"
+                           BaseBranch = "dev" }
+                         : WorktreeDiff.DiffComparisonContext)
+                )
+            ))
+
+        Assert.That(
+            tryFindDiffComparisonContext
+                state
+                (Path.Combine(Path.GetTempPath(), "treemon-context", "unknown")),
+            Is.EqualTo(None)
+        )
+
+    [<Test>]
+    member _.``comparison lookup cannot observe defaults once discovery makes a linked path known``() =
+        async {
+            let linked =
+                Path.Combine(Path.GetTempPath(), "treemon-context", "atomic-linked")
+                |> PathUtils.normalizePath
+
+            let agent = RefreshScheduler.createAgent ()
+
+            Assert.That(
+                tryFindDiffComparisonContext RefreshScheduler.DashboardState.empty linked,
+                Is.EqualTo(None)
+            )
+
+            let info: GitWorktree.WorktreeInfo =
+                { Path = linked
+                  Head = "abc123"
+                  Branch = Some "feature" }
+
+            agent.Post(
+                RefreshScheduler.repositoryDiscoveryUpdate
+                    (RepoId "atomic-context-repo")
+                    (Some [ info ])
+                    "upstream"
+                    "develop"
+            )
+
+            let! state = agent.PostAndAsyncReply(RefreshScheduler.GetState)
+
+            Assert.That(
+                tryFindDiffComparisonContext state linked,
+                Is.EqualTo(
+                    Some
+                        ({ WorktreePath = linked
+                           UpstreamRemote = "upstream"
+                           BaseBranch = "develop" }
+                         : WorktreeDiff.DiffComparisonContext)
+                )
+            )
+        }
+        |> Async.RunSynchronously
+
 // ── /api/canvas/attribute ownership declaration ───────────────────────────────
 // attributeOwnership is the HTTP-free core of canvasAttributeHandler (the same seam extraction
 // isLoopbackInjectUrl uses for canvasRegisterHandler). It records ownership only for a known
@@ -451,11 +554,6 @@ type LoopbackInjectUrlTests() =
 [<Category("Fast")>]
 [<NonParallelizable>]
 type AttributeOwnershipTests() =
-
-    // Unique per test so the process-global ownership agent never leaks state between tests.
-    let uniquePath prefix =
-        let id = System.Guid.NewGuid().ToString("N")[..7]
-        $"/test/{prefix}/{id}"
 
     let uniqueSid prefix =
         let id = System.Guid.NewGuid().ToString("N")[..7]
@@ -487,6 +585,23 @@ type AttributeOwnershipTests() =
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
             Assert.That(owner, Is.EqualTo(Some sessionId),
                         "getOwner must return the sessionId the authoring session declared"))
+
+    [<Test>]
+    member _.``a SystemView declaration records nothing because its routing is resolved``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-system"
+            let agent = agentKnowing worktree
+            let sessionId = uniqueSid "claimer"
+
+            Assert.That(
+                runAsync (attributeOwnership agent worktree "diff.html" sessionId),
+                Is.EqualTo(NotAttributable),
+                "A SystemView has no author, so a claim is reported as not attributable rather than silently stored")
+
+            Assert.That(
+                runAsync (CanvasDocOwnership.getOwner worktree "diff.html"),
+                Is.EqualTo(None: string option),
+                "Nothing reads a stored SystemView target, so nothing may be written"))
 
     [<Test>]
     member _.``an unknown worktree is rejected and records no ownership``() =

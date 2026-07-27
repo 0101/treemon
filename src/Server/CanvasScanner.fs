@@ -25,11 +25,15 @@ let scan (worktreePath: string) =
                 |> Array.sort
                 |> Array.map (fun filePath ->
                     let filename = Path.GetFileName(filePath)
+                    let kind = CanvasDocKinds.classify filename
                     { Filename = filename
                       ContentHash = hashFile filePath
                       LastModified = DateTimeOffset(File.GetLastWriteTimeUtc(filePath), TimeSpan.Zero)
-                      OwnerSessionId = owners |> Map.tryFind filename
-                      Kind = CanvasDocKinds.classify filename })
+                      OwnerSessionId =
+                        match kind with
+                        | AgentDoc -> owners |> Map.tryFind filename
+                        | SystemView -> None
+                      Kind = kind })
                 |> Array.toList
         else
             return []

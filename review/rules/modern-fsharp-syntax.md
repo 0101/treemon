@@ -19,7 +19,7 @@ F# 8 and 9 introduced cleaner syntax that reduces noise and improves readability
 - Use `list[i..j]` slice syntax instead of verbose `List.skip`/`List.take` combinations where the intent is slicing a contiguous range.
 - Use `{| |}` anonymous records when a one-off record shape is needed and no named type exists, instead of defining a single-use record type.
 - Use `nameof` instead of hardcoded string literals for member/type names in error messages and attributes.
-- Use F# 7+ nested copy-and-update syntax `{ x with A.B = value }` (a dot-path to a nested field) instead of hand-nesting `{ x with A = { x.A with B = value } }`. Multiple nested fields collapse into one expression: `{ x with A.B = v1; A.C = v2 }`, even at different depths (`{ x with A.B.C = v1; A.D = v2 }`). This applies **only** when the inner value is a copy-and-update of the *same* field on the *same* source record (`x.A`); it does **not** apply when the enclosing record is a full literal (`{ A = { x.A with ... }; C = ... }`) rather than an `x with` update. Fable 4.28 compiles this syntax correctly.
+- Use F# 7+ nested copy-and-update syntax `{ x with A.B = value }` (a dot-path to a nested field) instead of hand-nesting `{ x with A = { x.A with B = value } }`. Multiple nested fields collapse into one expression: `{ x with A.B = v1; A.C = v2 }`, even at different depths (`{ x with A.B.C = v1; A.D = v2 }`). This applies **only** when the inner value is a copy-and-update of the *same* field on the *same* source record (`x.A`); it does **not** apply when the enclosing record is a full literal (`{ A = { x.A with ... }; C = ... }`) rather than an `x with` update. Fable 5.0 compiles this syntax correctly.
 
 ## Wrong
 ```fsharp

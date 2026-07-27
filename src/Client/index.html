@@ -185,7 +185,7 @@
            from Overview.Scale — the accepted, documented exception to CSS-only, decision (g)). No
            box/title bar or hairlines (the toggle button is the header); the category columns wrap to
            the next line when the pane is too narrow (overview-drilldown). */
-        .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
+        .overview-band { --overview-band-inset: 16px; background: #1e1e2e; padding: 15px var(--overview-band-inset); margin-bottom: 16px; }
         /* History cycle button toolbar (spec: docs/spec/overview-activity-history.md). Pinned top-right,
            styled like the band's controls; aria-pressed=true tints it while a window is open. */
         .overview-toolbar { display: flex; justify-content: flex-end; margin-bottom: 4px; }
@@ -198,9 +198,14 @@
         /* A 1px zero-net-flow sentinel closes an open agent drill-down when the Agents band reaches
            its sticky point. The visual transition itself is one DOM tree driven by dashboard scroll. */
         .overview-agents-stick-sentinel { height: 1px; margin-bottom: -1px; }
+        /* The pinned chrome must mask the scrolling cards across the FULL dashboard width, so the band
+           bleeds out over the dashboard padding and re-adds it as its own padding — the columns stay
+           aligned with the normal-flow sections while background, clip, and divider reach both edges. */
         .overview-agents-band {
             position: sticky; top: 0; z-index: 20;
             padding-bottom: 0; margin-bottom: 0;
+            margin-inline: calc(-1 * var(--dashboard-padding));
+            padding-inline: calc(var(--dashboard-padding) + var(--overview-band-inset));
             border-bottom: 1px solid transparent;
             animation: overview-agents-shell-morph linear both;
             animation-timeline: --overview-dashboard-scroll;
@@ -208,7 +213,7 @@
         }
         .overview-agents-band::after {
             content: ''; position: absolute; left: 0; right: 0;
-            top: calc(var(--dashboard-padding) + var(--pane-header-height) - 1px);
+            top: calc(var(--pane-header-height) - 1px);
             border-bottom: 1px solid #313244; opacity: 0;
             animation: overview-agents-line-enter linear both;
             animation-timeline: --overview-dashboard-scroll;
@@ -226,7 +231,8 @@
             animation-range: 0 var(--overview-agents-morph-range);
         }
         .overview-toolbar-agents {
-            position: absolute; top: 15px; right: 16px; z-index: 1; margin-bottom: 0;
+            position: absolute; top: 15px; z-index: 1; margin-bottom: 0;
+            right: calc(var(--dashboard-padding) + var(--overview-band-inset));
             animation: overview-agents-meta-exit linear both;
             animation-timeline: --overview-dashboard-scroll;
             animation-range: 0 24px;
@@ -249,9 +255,9 @@
             to {
                 transform: translateY(calc(-1 * var(--dashboard-padding)));
                 clip-path: inset(
-                    var(--dashboard-padding)
                     0
-                    calc(100% - var(--dashboard-padding) - var(--pane-header-height))
+                    0
+                    calc(100% - var(--pane-header-height))
                     0);
                 background-color: #181825;
             }
@@ -911,8 +917,10 @@
         .canvas-system-tab:hover { background: #353050; border-color: #cba6f7; }
         .canvas-system-tab.active { background: #322a4a; border-color: #cba6f7; color: #cba6f7; }
         .canvas-system-tab-glyph {
+            display: inline-grid; place-items: center;
             font-size: 0.7em; font-weight: 700; letter-spacing: 0.06em; opacity: 0.85;
         }
+        .canvas-system-tab-glyph .btn-icon { width: 14px; height: 14px; }
         .canvas-system-tab-count {
             background: #cba6f7; color: #1e1e2e; border-radius: 8px;
             padding: 0 6px; min-width: 16px; text-align: center;

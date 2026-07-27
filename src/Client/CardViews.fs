@@ -7,6 +7,7 @@ open Feliz
 open Components
 open ActionButtons
 open CanvasAwareness
+open CanvasState
 
 let ctClassName =
     function
@@ -155,6 +156,7 @@ type CardCallbacks =
       ToggleAutoSync: WorktreeStatus -> unit
       LaunchAction: WorktreePath -> ActionKind -> unit
       OpenCanvasDoc: string -> string -> unit
+      OpenDiff: string -> unit
       DispatchArchive: ArchiveViews.Msg -> unit }
 
 let mainBehindIndicator (baseBranch: string) (count: int) =
@@ -172,8 +174,8 @@ let mainBehindIndicator (baseBranch: string) (count: int) =
 /// Post-fork setup is routine when it works, so a successful or still-running run is noise on the
 /// card — only its failures (including timeouts) are worth surfacing.
 let isVisibleCardEvent (evt: CardEvent) =
-    evt.Source = EventSource.PostFork
-    && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
+    evt.Source <> EventSource.PostFork
+    || (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
 
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
@@ -197,6 +199,25 @@ let autoSyncIcon () =
         ]
     ]
 
+let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: string) =
+    let ready = hasSystemView WorktreeDiffFilename wt
+
+    if wt.IsArchived || not ready || not wt.HasDiff then
+        Html.none
+    else
+        Html.button [
+            prop.className "action-btn diff-action-btn"
+            prop.custom ("aria-label", "Open worktree diff")
+            prop.onKeyDown (fun e ->
+                if e.key = "Enter" || e.key = " " then
+                    e.stopPropagation())
+            prop.onClick (fun e ->
+                e.stopPropagation()
+                callbacks.OpenDiff scopedKey)
+            prop.title "Open worktree diff"
+            prop.children [ diffIcon ]
+        ]
+
 let autoSyncButton (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
     let isPending = pendingPaths.Contains wt.Path
     Html.button [
@@ -210,7 +231,13 @@ let autoSyncButton (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) 
         prop.children [ autoSyncIcon () ]
     ]
 
-let mainBehindRow (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
+let mainBehindRow
+    (pendingPaths: Set<WorktreePath>)
+    (callbacks: CardCallbacks)
+    (baseBranch: string)
+    (wt: WorktreeStatus)
+    (scopedKey: string)
+    =
     Html.div [
         prop.className "main-behind-row"
         prop.children [
@@ -221,6 +248,7 @@ let mainBehindRow (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (
                     prop.text "uncommitted changes"
                 ]
             autoSyncButton pendingPaths callbacks baseBranch wt
+            diffButton callbacks wt scopedKey
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -315,7 +343,7 @@ let buildBadge (repoName: string) (build: BuildInfo) =
         | _ -> None
     match build.Url with
     | Some url ->
-        Interop.createElement "a" [
+        HtmlHelper.createElement "a" [
             prop.className className
             prop.text text
             prop.href url
@@ -459,9 +487,9 @@ let prActionButton (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
     ]
 
 let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
-    React.fragment [
+    React.Fragment [
         if pr.IsMerged then
-            Interop.createElement "a" [
+            HtmlHelper.createElement "a" [
                 prop.className "pr-badge merged"
                 prop.title pr.Title
                 prop.href pr.Url
@@ -469,7 +497,7 @@ let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
                 prop.text "Merged"
             ]
         else
-            Interop.createElement "a" [
+            HtmlHelper.createElement "a" [
                 prop.className (if pr.IsDraft then "pr-badge draft" else "pr-badge")
                 prop.title pr.Title
                 prop.href pr.Url
@@ -650,6 +678,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator baseBranch wt.MainBehindCount
+                    diffButton callbacks wt scopedKey
                     autoSyncButton props.AutoSyncPending callbacks baseBranch wt
                     prSection callbacks props.ActionCooldowns wt repoName
                 ]
@@ -704,7 +733,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             ]
                         ]
 
-                    mainBehindRow props.AutoSyncPending callbacks baseBranch wt
+                    mainBehindRow props.AutoSyncPending callbacks baseBranch wt scopedKey
 
                     prRow callbacks props.ActionCooldowns wt repoName
                 ]
@@ -760,7 +789,7 @@ let sortLabel =
     | ByActivity -> "Recent"
 
 let providerIcon (provider: RepoProvider option) =
-    let icon viewBox (svgPath: string) =
+    let icon (viewBox: string) (svgPath: string) =
         Svg.svg [
             svg.className "provider-icon"
             svg.viewBox viewBox
@@ -778,7 +807,7 @@ let providerIcon (provider: RepoProvider option) =
             prop.href url
             prop.target "_blank"
             prop.onClick (fun e -> e.stopPropagation())
-            prop.children [ icon (0, 0, 24, 24) githubPath ]
+            prop.children [ icon "0 0 24 24" githubPath ]
         ]
     | Some(AzDoProvider url) ->
         Html.a [
@@ -786,7 +815,7 @@ let providerIcon (provider: RepoProvider option) =
             prop.href url
             prop.target "_blank"
             prop.onClick (fun e -> e.stopPropagation())
-            prop.children [ icon (0, 0, 18, 18) azdoPath ]
+            prop.children [ icon "0 0 18 18" azdoPath ]
         ]
 
 let repoSectionHeader (callbacks: CardCallbacks) (focusedElement: FocusTarget option) (repo: RepoModel) =

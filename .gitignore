@@ -14,6 +14,7 @@ package-lock.json
 dist/
 src/Client/output/
 *.fs.js
+*.fable-temp.csproj
 
 # IDE
 .vs/

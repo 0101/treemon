@@ -44,6 +44,7 @@
               }
             },
             "MainBehindCount": 25,
+            "HasDiff": true,
             "AutoSyncEnabled": true,
             "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 },
             "CanvasDocs": [{ "Filename": "e2e-test.html", "ContentHash": "fixture-abc123", "LastModified": "2026-01-15T10:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" }]
@@ -77,6 +78,7 @@
               }
             },
             "MainBehindCount": 5,
+            "HasDiff": true,
             "AutoSyncEnabled": false,
             "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 },
             "CanvasDocs": []
@@ -91,6 +93,7 @@
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "HasDiff": false,
             "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
@@ -106,6 +109,7 @@
             "MainBehindCount": 42,
             "AutoSyncEnabled": false,
             "IsDirty": true,
+            "HasDiff": true,
             "CanvasDocs": []
           },
           {
@@ -136,6 +140,7 @@
               }
             },
             "MainBehindCount": 0,
+            "HasDiff": false,
             "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
@@ -175,6 +180,7 @@
               }
             },
             "MainBehindCount": 2,
+            "HasDiff": true,
             "AutoSyncEnabled": false,
             "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 },
             "CanvasDocs": []
@@ -189,6 +195,7 @@
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "HasDiff": false,
             "AutoSyncEnabled": false,
             "CanvasDocs": [
               { "Filename": "overview.html", "ContentHash": "multi-hash-001", "LastModified": "2026-02-16T22:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
@@ -206,6 +213,7 @@
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 10,
+            "HasDiff": false,
             "AutoSyncEnabled": false,
             "CanvasDocs": []
           }
@@ -249,6 +257,7 @@
               }
             },
             "MainBehindCount": 0,
+            "HasDiff": false,
             "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
@@ -283,6 +292,7 @@
               }
             },
             "MainBehindCount": 0,
+            "HasDiff": false,
             "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
@@ -296,6 +306,7 @@
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 3,
+            "HasDiff": false,
             "AutoSyncEnabled": false,
             "CanvasDocs": [
               { "Filename": "beads.html", "ContentHash": "treemon-beads-000", "LastModified": "2026-02-22T13:45:00+00:00", "OwnerSessionId": null, "Kind": "SystemView" },

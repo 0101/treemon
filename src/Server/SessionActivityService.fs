@@ -295,7 +295,11 @@ let private historyState
 /// store (its dbPath keyed to the server's port/data dir so a side-by-side validation instance
 /// never collides) and the scheduler agent it feeds. Call Start once before serving; Dispose on
 /// shutdown. The store is borrowed from Program; Dispose stops only this service.
-type SessionActivityService(store: SessionActivityStore, scheduler: MailboxProcessor<RefreshScheduler.StateMsg>) =
+type SessionActivityService internal
+    (
+        store: SessionActivityStore,
+        scheduler: MailboxProcessor<RefreshScheduler.StateMsg>
+    ) =
 
     let dispositionGate = obj ()
     // Service disposal is a lifetime boundary: mark it once so no work can be queued behind Stop.

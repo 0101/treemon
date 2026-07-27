@@ -31,6 +31,12 @@ type ParsePrListFixtureTests() =
         Assert.That(branches, Does.Contain("test/add-health-endpoint"))
 
     [<Test>]
+    member _.``Extracts immutable head SHA``() =
+        let prs = readFixture "pr-list-with-closed.json" |> parsePrList
+        let merged = prs |> List.find (fun pr -> pr.PrNumber = 3)
+        Assert.That(merged.HeadSha, Is.EqualTo(Some "sha-merged-branch"))
+
+    [<Test>]
     member _.``Extracts PR number``() =
         let prs = readFixture "pr-list.json" |> parsePrList
         let numbers = prs |> List.map _.PrNumber

@@ -21,9 +21,10 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 
 ### Treemon Detection
 
-At startup the extension POSTs to `/api/canvas/register`. Treemon's response now reports
-whether the worktree is actually monitored: `{ registered: bool, monitored: bool }`, always
-with HTTP 200. The extension enters **browser fallback mode** when registration is
+At startup the extension POSTs `worktreePath`, `injectUrl`, and `sessionId` to
+`/api/canvas/register`. Treemon's response reports whether the worktree is actually monitored:
+`{ registered: bool, monitored: bool }`, always with HTTP 200. The extension enters
+**browser fallback mode** when registration is
 unreachable/fails **or** `monitored === false`. For backward compatibility with older Treemon
 servers that return a non-JSON body, a successful (200) response with no `monitored` field is
 treated as monitored (Treemon mode). In Treemon mode, behavior is unchanged — the existing

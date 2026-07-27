@@ -5,7 +5,7 @@
     "state": "closed",
     "draft": false,
     "merged_at": "2026-02-20T10:00:00Z",
-    "head": { "ref": "feature/merged-branch" }
+    "head": { "ref": "feature/merged-branch", "sha": "sha-merged-branch" }
   },
   {
     "number": 4,
@@ -13,6 +13,6 @@
     "state": "open",
     "draft": true,
     "merged_at": null,
-    "head": { "ref": "feature/draft-work" }
+    "head": { "ref": "feature/draft-work", "sha": "sha-draft-work" }
   }
 ]
