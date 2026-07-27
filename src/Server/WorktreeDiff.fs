@@ -127,8 +127,6 @@ let private mapDiffProcessFailure
     match failure with
     | ProcessRunner.StartFailed _ -> GitStartFailed operation
     | ProcessRunner.TimedOut -> GitTimedOut operation
-    | ProcessRunner.CaptureLimitExceeded stream ->
-        GitCaptureLimitExceeded(operation, stream)
 
 let private runDiffGit
     (deadline: ProcessRunner.ResponseDeadline)
@@ -154,6 +152,10 @@ let private runDiffGit
         return
             match result with
             | Error failure -> Error(mapDiffProcessFailure operation failure)
+            // A truncated patch is unusable here — the caller parses these bytes — so the diff
+            // viewer keeps its typed capture-limit error even though the process exited.
+            | Ok output when not output.Truncated.IsEmpty ->
+                Error(GitCaptureLimitExceeded(operation, List.head output.Truncated))
             | Ok output when output.ExitCode <> 0 ->
                 Log.log
                     "WorktreeDiff"

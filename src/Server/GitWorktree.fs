@@ -347,7 +347,6 @@ let localComparisonContent (worktreePath: string) =
             match result with
             | Ok output when output.ExitCode <> 0 -> Undetermined
             | Ok output -> if output.Stdout.Length > 0 then HasContent else Clean
-            | Error(ProcessRunner.CaptureLimitExceeded ProcessRunner.StandardOutput) -> HasContent
             | Error _ -> Undetermined
     }
 
@@ -720,8 +719,10 @@ let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
 /// blocking the auto-launch indefinitely.
 let private postForkTimeoutMs = 5 * 60 * 1000
 
-/// The hook runs project setup (`npm install`, `bd init`), whose stdout is unbounded build chatter;
-/// stderr only carries the failure message surfaced on the card.
+/// The hook is an arbitrary user-authored setup script (`npm install`, `bd init`), so both streams
+/// carry whatever its children write; the caps bound memory only. Truncating them cannot fail the
+/// hook — its outcome is its exit code — but stderr is what a failure message is built from, so it
+/// stays large enough to carry one.
 let private postForkStdoutLimitBytes = 16 * 1024 * 1024
 let private postForkStderrLimitBytes = 64 * 1024
 
@@ -742,7 +743,9 @@ let postForkScriptPath (repoRoot: string) : string option =
 /// name, capped at `timeoutMs` (a run that exceeds it is killed and returns a
 /// timeout Error). Returns Ok when the script succeeds or is absent, and Error
 /// with the process failure when it exits non-zero — the worktree already
-/// exists, so a failure is never fatal, only surfaced on the card.
+/// exists, so a failure is never fatal, only surfaced on the card. The hook's
+/// output is never read, only its exit code, so a verbose run that outgrows the
+/// capture caps is still a success.
 let runPostForkWithTimeout (timeoutMs: int) (repoRoot: string) (worktreePath: string) (baseRef: string) (branchName: string) : Async<Result<unit, string>> =
     async {
         match postForkScriptPath repoRoot with
@@ -754,8 +757,8 @@ let runPostForkWithTimeout (timeoutMs: int) (repoRoot: string) (worktreePath: st
                 else
                     "bash", [ scriptPath; worktreePath; repoRoot; baseRef; branchName ]
 
-            let! result =
-                ProcessRunner.runArgumentListTextResultWithTimeout
+            return!
+                ProcessRunner.runArgumentListExitResultWithTimeout
                     timeoutMs
                     postForkStdoutLimitBytes
                     postForkStderrLimitBytes
@@ -763,8 +766,6 @@ let runPostForkWithTimeout (timeoutMs: int) (repoRoot: string) (worktreePath: st
                     fileName
                     arguments
                     (Some worktreePath)
-
-            return result |> Result.map ignore
     }
 
 /// Runs the post-fork hook with the production 5-minute cap (see
@@ -794,14 +795,13 @@ let forkWorktree (repoRoot: string) (baseBranch: string) (branchName: string) : 
         let fileName, arguments, worktreePath = resolveWorktreeCommand repoRoot baseRef name
 
         do!
-            ProcessRunner.runArgumentListTextResult
+            ProcessRunner.runArgumentListExitResult
                 gitStdoutLimitBytes
                 gitStderrLimitBytes
                 "CreateWorktree"
                 fileName
                 arguments
                 None
-            |> AsyncResult.ignore
 
         let legacyScriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
         let legacyScriptExists = File.Exists(Path.Combine(repoRoot, legacyScriptName))

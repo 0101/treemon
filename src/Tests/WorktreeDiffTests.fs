@@ -119,6 +119,17 @@ let private sleepCommand (seconds: int) =
     else
         "sh", [ "-c"; $"sleep {seconds}" ]
 
+/// An OS-appropriate command that writes `stderrBytes` bytes to stderr, `ok` to stdout, and exits 0
+/// — a chatty-but-successful child, which is what a real `post-fork` hook looks like.
+let private noisyStderrCommand (stderrBytes: int) =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+        "powershell",
+        [ "-NoProfile"
+          "-Command"
+          $"[Console]::Error.Write('x' * {stderrBytes}); Write-Output 'ok'" ]
+    else
+        "sh", [ "-c"; $"printf '%%{stderrBytes}s' '' >&2; echo ok" ]
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -179,17 +190,21 @@ type ProcessRunnerArgumentListTests() =
                 None
             |> TestUtils.runAsync
 
-        let expected =
-            Error(
-                ProcessRunner.CaptureLimitExceeded
-                    ProcessRunner.StandardOutput
-            )
+        match result with
+        | Error error -> Assert.Fail($"Expected a completed run, got {error}")
+        | Ok output ->
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    output.Truncated,
+                    Is.EqualTo([ ProcessRunner.StandardOutput ]),
+                    "the stdout capture limit must be reported")
 
-        Assert.That(
-            (result = expected),
-            Is.True,
-            $"Expected stdout capture limit, got {result}"
-        )
+                Assert.That(output.Stdout.Length, Is.EqualTo(16), "no bytes past the cap are kept")
+
+                Assert.That(
+                    output.ExitCode,
+                    Is.EqualTo(0),
+                    "the exit code survives a truncated capture"))
 
     [<Test>]
     member _.``stderr capture reports its byte limit``() =
@@ -203,17 +218,16 @@ type ProcessRunnerArgumentListTests() =
                 None
             |> TestUtils.runAsync
 
-        let expected =
-            Error(
-                ProcessRunner.CaptureLimitExceeded
-                    ProcessRunner.StandardError
-            )
+        match result with
+        | Error error -> Assert.Fail($"Expected a completed run, got {error}")
+        | Ok output ->
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    output.Truncated,
+                    Is.EqualTo([ ProcessRunner.StandardError ]),
+                    "the stderr capture limit must be reported")
 
-        Assert.That(
-            (result = expected),
-            Is.True,
-            $"Expected stderr capture limit, got {result}"
-        )
+                Assert.That(output.ExitCode, Is.Not.EqualTo(0), "the failing exit code survives"))
 
     [<Test>]
     member _.``timeout returns a typed error and terminates the process tree``() =
@@ -403,11 +417,13 @@ type ProcessRunnerArgumentListTests() =
         )
 
     [<Test>]
-    member _.``text capture maps a stdout capture limit to its own message``() =
+    member _.``text capture fails closed when the parsed stdout was truncated``() =
         writeText tempDir "large.txt" (String('x', 4096))
         gitOk tempDir [ "add"; "--"; "large.txt" ]
         gitOk tempDir [ "commit"; "-m"; "large output" ]
 
+        // `git show` exits 0 here: the text wrappers still fail, because their callers parse the
+        // string they get back and a prefix would silently read as the whole output.
         let result =
             ProcessRunner.runArgumentListTextResult
                 16
@@ -428,25 +444,65 @@ type ProcessRunnerArgumentListTests() =
         )
 
     [<Test>]
-    member _.``text capture maps a stderr capture limit to its own message``() =
+    member _.``text capture keeps complete stdout when only stderr was truncated``() =
+        let fileName, arguments = noisyStderrCommand 4096
+
         let result =
             ProcessRunner.runArgumentListTextResult
                 1024
-                1
+                16
                 "Test"
-                "git"
-                [ "not-a-real-git-command" ]
+                fileName
+                arguments
                 None
             |> TestUtils.runAsync
 
-        let expected: Result<string, string> =
-            Error "Standard error exceeded its capture limit"
+        let expected: Result<string, string> = Ok "ok"
 
         Assert.That(
             (result = expected),
             Is.True,
-            $"Expected the mapped stderr limit message, got {result}"
+            $"Truncated stderr must not fail a command whose stdout is complete, got {result}"
         )
+
+    [<Test>]
+    member _.``exit-code capture succeeds on exit 0 despite a truncated capture``() =
+        let fileName, arguments = noisyStderrCommand 4096
+
+        let result =
+            ProcessRunner.runArgumentListExitResult
+                16
+                16
+                "Test"
+                fileName
+                arguments
+                None
+            |> TestUtils.runAsync
+
+        let expected: Result<unit, string> = Ok()
+
+        Assert.That(
+            (result = expected),
+            Is.True,
+            $"A chatty but successful child must stay a success, got {result}"
+        )
+
+    [<Test>]
+    member _.``exit-code capture reports stderr for a non-zero exit``() =
+        let result =
+            ProcessRunner.runArgumentListExitResult
+                1024
+                1024
+                "Test"
+                "git"
+                [ "-C"; tempDir; "cat-file"; "-p"; "definitely-not-an-object" ]
+                None
+            |> TestUtils.runAsync
+
+        match result with
+        | Ok() -> Assert.Fail("Expected a non-zero exit to fail")
+        | Error error ->
+            Assert.That(error, Does.StartWith("fatal:"), $"Expected Git stderr, got '{error}'")
 
 [<TestFixture>]
 [<Category("Unit")>]

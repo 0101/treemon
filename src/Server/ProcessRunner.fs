@@ -21,15 +21,20 @@ type CaptureStream =
     | StandardOutput
     | StandardError
 
+/// A run that produced no exit code at all. Reaching a capture limit is deliberately not here: the
+/// child still ran and exited, so that outcome is a successful capture carrying `Truncated`.
 type ArgumentListFailure =
     | StartFailed of string
     | TimedOut
-    | CaptureLimitExceeded of CaptureStream
 
 type ArgumentListOutput =
     { ExitCode: int
       Stdout: byte[]
-      Stderr: byte[] }
+      Stderr: byte[]
+      /// Streams whose capture hit its byte limit, stdout first. Truncation is a property of the
+      /// captured bytes, not a verdict on the run: it makes parsed stdout unusable, but is
+      /// irrelevant to a caller that only reads the exit code.
+      Truncated: CaptureStream list }
 
 type private BoundedCapture =
     { Bytes: byte[]
@@ -166,6 +171,19 @@ let private observeCapturesWithin
                 return ()
     }
 
+let private describeTruncation streams =
+    match streams with
+    | [] -> ""
+    | _ ->
+        let names =
+            streams
+            |> List.map (function
+                | StandardOutput -> "stdout"
+                | StandardError -> "stderr")
+            |> String.concat "+"
+
+        $", truncated: {names}"
+
 /// Runs a process without shell argument parsing. Output capture is bounded and
 /// timeout cancellation terminates the complete process tree.
 let private runArgumentListCore
@@ -218,20 +236,22 @@ let private runArgumentListCore
                     let! stdout = stdoutTask |> Async.AwaitTask
                     let! stderr = stderrTask |> Async.AwaitTask
 
+                    let truncated =
+                        [ if stdout.LimitExceeded then StandardOutput
+                          if stderr.LimitExceeded then StandardError ]
+
                     Log.log
                         context
-                        $"{fileName} ({arguments.Length} args) -> exit {proc.ExitCode}, stdout bytes: {stdout.Bytes.Length}, stderr bytes: {stderr.Bytes.Length}"
+                        $"{fileName} ({arguments.Length} args) -> exit {proc.ExitCode}, stdout bytes: {stdout.Bytes.Length}, stderr bytes: {stderr.Bytes.Length}{describeTruncation truncated}"
 
+                    // The child exited, so the exit code is the answer. A caller that parses the
+                    // captured bytes decides for itself whether truncation invalidates that answer.
                     return
-                        if stdout.LimitExceeded then
-                            Error(CaptureLimitExceeded StandardOutput)
-                        elif stderr.LimitExceeded then
-                            Error(CaptureLimitExceeded StandardError)
-                        else
-                            Ok
-                                { ExitCode = proc.ExitCode
-                                  Stdout = stdout.Bytes
-                                  Stderr = stderr.Bytes }
+                        Ok
+                            { ExitCode = proc.ExitCode
+                              Stdout = stdout.Bytes
+                              Stderr = stderr.Bytes
+                              Truncated = truncated }
                 with :? OperationCanceledException ->
                     killProcessTree proc
 
@@ -343,8 +363,11 @@ let private describeFailure (timeoutMs: int) failure =
     match failure with
     | StartFailed message -> $"Failed to start process: {message}"
     | TimedOut -> $"Timed out after {timeoutMs}ms"
-    | CaptureLimitExceeded StandardOutput -> "Standard output exceeded its capture limit"
-    | CaptureLimitExceeded StandardError -> "Standard error exceeded its capture limit"
+
+/// Text callers parse the stdout they receive, so a truncated capture is not a shorter answer —
+/// it is a wrong one, and must fail rather than pass as a complete string.
+let private stdoutTruncatedMessage =
+    "Standard output exceeded its capture limit"
 
 /// Like `runArgumentListTextResult` but with an explicit timeout, for long-running setup hooks
 /// (e.g. `npm install`) that would otherwise be killed by the short default.
@@ -370,6 +393,8 @@ let runArgumentListTextResultWithTimeout
 
         return
             match result with
+            | Ok output when List.contains StandardOutput output.Truncated ->
+                Error stdoutTruncatedMessage
             | Ok output when output.ExitCode = 0 -> Ok(decodeCapture output.Stdout)
             | Ok output -> Error(decodeCapture output.Stderr)
             | Error failure -> Error(describeFailure timeoutMs failure)
@@ -417,3 +442,51 @@ let runArgumentListText
             | Ok stdout -> Some stdout
             | Error _ -> None
     }
+
+/// Like `runArgumentListExitResult` but with an explicit timeout, for the post-fork setup hook.
+let runArgumentListExitResultWithTimeout
+    (timeoutMs: int)
+    (stdoutLimitBytes: int)
+    (stderrLimitBytes: int)
+    (context: string)
+    (fileName: string)
+    (arguments: string list)
+    (workingDirectory: string option)
+    : Async<Result<unit, string>> =
+    async {
+        let! result =
+            runArgumentListWithTimeout
+                timeoutMs
+                stdoutLimitBytes
+                stderrLimitBytes
+                context
+                fileName
+                arguments
+                workingDirectory
+
+        return
+            match result with
+            | Ok output when output.ExitCode = 0 -> Ok()
+            | Ok output -> Error(decodeCapture output.Stderr)
+            | Error failure -> Error(describeFailure timeoutMs failure)
+    }
+
+/// For callers that run a command for its effect and discard its output: success is the child's
+/// exit code alone, so a chatty-but-successful run stays a success no matter how much output the
+/// capture had to drop. `Error` carries the child's stderr or a described runner failure.
+let runArgumentListExitResult
+    (stdoutLimitBytes: int)
+    (stderrLimitBytes: int)
+    (context: string)
+    (fileName: string)
+    (arguments: string list)
+    (workingDirectory: string option)
+    =
+    runArgumentListExitResultWithTimeout
+        defaultTimeoutMs
+        stdoutLimitBytes
+        stderrLimitBytes
+        context
+        fileName
+        arguments
+        workingDirectory

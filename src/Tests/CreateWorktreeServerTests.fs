@@ -409,6 +409,24 @@ type CreateWorktreeIntegrationTests() =
             Assert.That(Result.isError result, Is.True, $"Expected Error but got: {result}")
 
     [<Test>]
+    member _.``runPostFork succeeds when the script outgrows its capture limit but exits 0``() =
+        // The hook's output is never read, only its exit code — a setup script that logs more than
+        // the capture caps hold (native build tooling, npm) must not be reported as a failed step.
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+
+        if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+            File.WriteAllText(Path.Combine(repoDir, "post-fork.ps1"), "[Console]::Error.Write('x' * 200000)")
+        else
+            File.WriteAllText(Path.Combine(repoDir, "post-fork.sh"), "#!/usr/bin/env bash\nprintf '%200000s' '' >&2\n")
+
+        match forkWorktree repoDir "main" "postfork-chatty" |> Async.RunSynchronously with
+        | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
+        | Ok fork ->
+            let result = runPostFork repoDir fork.WorktreePath fork.BaseRef "postfork-chatty" |> Async.RunSynchronously
+            Assert.That(Result.isOk result, Is.True, $"Expected Ok for a verbose successful hook but got: {result}")
+
+    [<Test>]
     member _.``runPostForkWithTimeout kills a hung post-fork script and reports a timeout``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir

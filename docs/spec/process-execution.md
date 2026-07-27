@@ -24,11 +24,16 @@ Interactive UI launches (terminal, editor) are a different concern and are **not
 
 - Each list element reaches the child as exactly one argument. Spaces, quotes, newlines, and Git
   syntax such as `HEAD..origin/main` are preserved as data rather than re-parsed as a command line.
-- Stdout and stderr are captured as bytes up to caller-supplied limits. Exceeding either limit
-  returns `CaptureLimitExceeded` for that stream after the pipe has been fully drained.
+- Stdout and stderr are captured as bytes up to caller-supplied limits. A stream that exceeds its
+  limit is drained fully and reported as truncated on the output, not as a failed run: the child
+  exited, so its exit code is preserved and each caller decides whether the missing bytes matter.
 - Timeout cancellation kills the complete process tree and returns `TimedOut`.
-- Byte-oriented callers receive exit code plus raw stdout/stderr. Text-oriented callers receive
-  UTF-8-decoded, trailing-whitespace-trimmed stdout on exit 0; non-zero exits return trimmed stderr.
+- Byte-oriented callers receive exit code, raw stdout/stderr, and which streams were truncated.
+  The `Result`-returning text and exit-code wrappers receive UTF-8-decoded, trailing-whitespace-trimmed
+  stdout on exit 0 and trimmed stderr (or a described runner failure) on a non-zero exit; the
+  `option`-returning `runArgumentListText` collapses any non-zero exit or runner failure to `None`.
+  A text wrapper additionally fails when the stdout it would return was truncated, because its
+  callers parse that string; the exit-code wrappers never do, because they discard the output.
 - Background refresh commands use the 60 s default, request-serving diff commands share a monotonic
   10 s response deadline, and the post-fork hook uses its explicit 5-minute cap.
 
@@ -48,37 +53,48 @@ All take `arguments: string list`, explicit `stdoutLimitBytes` / `stderrLimitByt
 `Async<Result<ArgumentListOutput, ArgumentListFailure>>`:
 
 ```fsharp
-type ArgumentListOutput = { ExitCode: int; Stdout: byte[]; Stderr: byte[] }
+type ArgumentListOutput =
+    { ExitCode: int
+      Stdout: byte[]
+      Stderr: byte[]
+      Truncated: CaptureStream list }   // stdout first when both capture limits were hit
 
 type ArgumentListFailure =
     | StartFailed of string
     | TimedOut
-    | CaptureLimitExceeded of CaptureStream
 ```
 
-Capture is drained recursively even after a limit is reached, so a child process cannot block on a
-full pipe. Timeout cancellation kills the whole process tree.
+`ArgumentListFailure` holds only the outcomes with no exit code at all. Capture is drained
+recursively even after a limit is reached, so a child process cannot block on a full pipe. Timeout
+cancellation kills the whole process tree.
 
 ### Text-capturing convenience
 
 `ArgumentListOutput` carries `byte[]`, which is what the diff viewer needs (it parses NUL-delimited
 machine output). The status collectors — `GitWorktree`, `PrStatus`, `GithubPrStatus`, `BeadsStatus` —
-all want decoded text. Three wrappers provide that shared behavior:
+all want decoded text, and the post-fork hook and `git worktree add` want neither. Five wrappers
+provide that shared behavior:
 
 | Entry point | Timeout | Return |
 |---|---|---|
 | `runArgumentListText` | 60 s default | `Async<string option>` |
 | `runArgumentListTextResult` | 60 s default | `Async<Result<string, string>>` |
 | `runArgumentListTextResultWithTimeout` | Explicit `timeoutMs` | `Async<Result<string, string>>` |
+| `runArgumentListExitResult` | 60 s default | `Async<Result<unit, string>>` |
+| `runArgumentListExitResultWithTimeout` | Explicit `timeoutMs` | `Async<Result<unit, string>>` |
 
-All three take explicit stdout/stderr byte limits and delegate to
+All five take explicit stdout/stderr byte limits and delegate to
 `runArgumentListWithTimeout`. They decode with `Encoding.UTF8.GetString` (replacement fallback for
 invalid sequences) and apply `TrimEnd`, matching the status collectors' text contract. The diff
 viewer retains its strict UTF-8 decoder because malformed machine output is a domain error there.
 
-The `Result` wrappers flatten `ArgumentListFailure` into one distinct message per case; the
-`TimedOut` message names the configured timeout, which is what a failed post-fork hook surfaces to
-the user.
+The text wrappers return stdout, so a truncated stdout capture is an `Error` — a prefix would read
+as a complete answer to the parser consuming it. The `Exit` wrappers return `unit`: they exist for
+callers that run a command for its effect (the post-fork hook, `git worktree add`), where the exit
+code is the only signal and output volume must never override it.
+
+The `Result` wrappers turn a runner failure into one distinct message per case; the `TimedOut`
+message names the configured timeout, which is what a failed post-fork hook surfaces to the user.
 
 Callers that need bytes keep using the byte-returning entry points directly.
 
@@ -109,6 +125,13 @@ lists remove the parser boundary entirely: quoting is unnecessary, and validatio
 
 ## Decisions
 
+- **Truncation is a property of a completed run, not a failure.** A capture limit bounds memory; it
+  says nothing about whether the command worked. Reporting it as `Error` made exit 0 unrepresentable
+  for every caller, so a verbose-but-successful post-fork hook or `git worktree add` was surfaced as
+  a failed step on the worktree card. `ArgumentListOutput.Truncated` moves the judgement to the
+  caller: the text wrappers still fail on truncated stdout (they hand a parser a string), the diff
+  viewer still maps truncation to its typed `GitCaptureLimitExceeded`, and the exit-code wrappers
+  ignore it.
 - **No string-arguments compatibility API.** Keeping one would let new callers bypass the structural
   guarantee; its absence makes the compiler reject that implementation shape.
 - **Preserve each call site's existing timeout instead of unifying on the 10 s response deadline.**
@@ -143,7 +166,7 @@ not a settled one.
 
 | File | Role |
 |---|---|
-| `src/Server/ProcessRunner.fs` | The only process-execution API: argument-list entry points, bounded capture, process-tree kill, response deadlines, text-capturing wrapper |
+| `src/Server/ProcessRunner.fs` | The only process-execution API: argument-list entry points, bounded capture, process-tree kill, response deadlines, text and exit-code wrappers |
 | `src/Server/GitWorktree.fs` | `runGit`/`runGitResult` wrappers; worktree creation and the post-fork hook |
 | `src/Server/PrStatus.fs` | `runAz` wrapper, `buildRemoteUrlArgs`, Azure DevOps PR/build queries |
 | `src/Server/GithubPrStatus.fs` | `runGh` wrapper, GitHub REST and GraphQL queries |
