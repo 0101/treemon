@@ -379,6 +379,21 @@ type DiffCategoriesMatchingTests() =
         assertDoesNotMatch "src/Client/**" [ "src/Server/App.fs"; "Client/App.fs" ]
 
     [<Test>]
+    member _.``a run of stars matches exactly what a single star matches``() =
+        assertMatches "src/***.fs" [ "src/App.fs"; "src/.fs" ]
+        assertDoesNotMatch "src/***.fs" [ "src/Client/App.fs"; "src/App.fsx" ]
+        assertMatches "a***b" [ "ab"; "axb"; "axyzb" ]
+        assertDoesNotMatch "a***b" [ "a/b"; "axbc" ]
+        assertMatches "src/**/**/File.fs" [ "src/File.fs"; "src/A/File.fs"; "src/A/B/File.fs" ]
+        assertDoesNotMatch "src/**/**/File.fs" [ "File.fs"; "src/File.fsx" ]
+        assertMatches "src/**/*.fs" [ "src/App.fs"; "src/A/B/App.fs" ]
+
+    [<Test>]
+    member _.``a pattern without a double star matches only paths of its own depth``() =
+        assertMatches "src/*/File.fs" [ "src/A/File.fs" ]
+        assertDoesNotMatch "src/*/File.fs" [ "src/File.fs"; "src/A/B/File.fs" ]
+
+    [<Test>]
     member _.``patterns match the whole path, never a substring``() =
         assertMatches "src/App.fs" [ "src/App.fs" ]
         assertDoesNotMatch "src" [ "src/App.fs" ]

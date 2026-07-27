@@ -155,11 +155,19 @@ let read (repoRoot: string) : Configuration =
     | TreemonConfig.Unreadable -> Invalid unreadableReason
     | TreemonConfig.Present element -> validate element
 
-/// One segment of a compiled pattern. `**` stands for whole segments; any other segment is matched
-/// character by character, so `*` and `?` can never cross a `/`.
+/// One segment of a compiled pattern. `**` stands for whole segments; a wildcard-free segment is one
+/// ordinal comparison; any other segment is matched character by character, so `*` and `?` can never
+/// cross a `/`.
 type private GlobSegment =
     | AnySegments
+    | Literal of string
     | SegmentPattern of char[]
+
+/// A compiled pattern: its segments plus, for a pattern carrying no `**`, the exact number of path
+/// segments it can match, so a path of any other depth is rejected before a character is examined.
+type private CompiledGlob =
+    { Segments: GlobSegment[]
+      FixedLength: int option }
 
 /// A leaf lifted out of the tree with its patterns already compiled, its display path from the root,
 /// and its position in depth-first configuration order — the order that decides both which
@@ -167,7 +175,7 @@ type private GlobSegment =
 type private CompiledLeaf =
     { Order: int
       CategoryPath: string list
-      Globs: GlobSegment[] list }
+      Globs: CompiledGlob list }
 
 /// The pattern positions reachable from `position` without consuming an item, because a star is
 /// allowed to stand for nothing at all.
@@ -204,19 +212,44 @@ let private matchesSegment (pattern: char[]) (segment: string) =
         pattern
         (segment.ToCharArray())
 
-let private matchesGlob (glob: GlobSegment[]) (segments: string[]) =
+let private matchesGlob (glob: CompiledGlob) (segments: string[]) =
     let matchesOneSegment globSegment segment =
         match globSegment with
         | AnySegments -> true
+        | Literal literal -> String.Equals(literal, segment, StringComparison.Ordinal)
         | SegmentPattern pattern -> matchesSegment pattern segment
 
-    matchesWildcard (fun globSegment -> globSegment = AnySegments) matchesOneSegment glob segments
+    // Without `**` every glob segment consumes exactly one path segment, so the automaton has nothing
+    // to search: either the depths agree and each segment matches, or the path cannot match at all.
+    match glob.FixedLength with
+    | Some length when length <> segments.Length -> false
+    | Some _ -> Array.forall2 matchesOneSegment glob.Segments segments
+    | None -> matchesWildcard (fun globSegment -> globSegment = AnySegments) matchesOneSegment glob.Segments segments
+
+/// Drops every star that directly follows a star, in either alphabet. A run of stars means exactly
+/// what a single star means, and collapsing it at compile time is what keeps `reachableThroughStars`
+/// down to two positions, so matching stays linear in pattern length however a repository writes it.
+let private collapseStarRuns isStar (items: 'a[]) =
+    items
+    |> Array.indexed
+    |> Array.filter (fun (index, item) -> index = 0 || not (isStar item && isStar items[index - 1]))
+    |> Array.map snd
 
 /// Splits a pattern into segments once per configuration read, so classifying a file never re-parses
 /// it. Everything outside `**`, `*`, and `?` is literal text, including regular-expression syntax.
 let private compileGlob (pattern: string) =
-    pattern.Split('/')
-    |> Array.map (fun segment -> if segment = "**" then AnySegments else SegmentPattern(segment.ToCharArray()))
+    let compileSegment (segment: string) =
+        if segment = "**" then AnySegments
+        elif segment.IndexOfAny([| '*'; '?' |]) < 0 then Literal segment
+        else SegmentPattern(segment.ToCharArray() |> collapseStarRuns (fun character -> character = '*'))
+
+    let segments =
+        pattern.Split('/')
+        |> Array.map compileSegment
+        |> collapseStarRuns (fun segment -> segment = AnySegments)
+
+    { Segments = segments
+      FixedLength = if segments |> Array.contains AnySegments then None else Some segments.Length }
 
 let rec private compileNode ancestors node =
     match node with
