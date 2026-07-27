@@ -489,10 +489,27 @@ let validateBranchName (branchName: string) =
     else
         Error $"Invalid branch name: '{branchName}'"
 
-let private gitRefExists (repoRoot: string) (gitRef: string) =
+/// Whether a ref exists. `git rev-parse --verify --quiet` exits 1 exactly when the ref is absent, so
+/// that alone is a confirmed answer; every other outcome (timeout, failed start, unexpected exit) is
+/// a failed probe and must not be read as absence — callers fall back to a different base only for a
+/// ref proven missing. Mirrors `WorktreeDiff.runRefExists`.
+let internal probeRef (repoRoot: string) (gitRef: string) =
     async {
-        let! output = runGit repoRoot $"rev-parse --verify --quiet \"{gitRef}\""
-        return output |> Option.exists (fun s -> s.Trim().Length > 0)
+        let! result =
+            ProcessRunner.runArgumentList
+                1024
+                1024
+                "Git"
+                "git"
+                [ "-C"; repoRoot; "rev-parse"; "--verify"; "--quiet"; gitRef ]
+                None
+
+        return
+            match result with
+            | Ok output when output.ExitCode = 0 -> Ok true
+            | Ok output when output.ExitCode = 1 -> Ok false
+            | Ok output -> Error $"git rev-parse '{gitRef}' exited {output.ExitCode}"
+            | Error _ -> Error $"git rev-parse '{gitRef}' could not be run"
     }
 
 let internal selectBaseRef
@@ -511,17 +528,19 @@ let internal selectBaseRef
 /// Resolves the base branch to a concrete git ref to fork from. Prefers the
 /// remote-tracking ref (e.g. `upstream/main`) so a new worktree forks from the
 /// upstream tip rather than a possibly-stale local branch, falling back to the
-/// local branch when no remote-tracking ref exists. Does not require any worktree
-/// to currently have the base checked out.
+/// local branch only when the remote-tracking ref is proven absent. A failed probe
+/// short-circuits to an error rather than falling back, so an unreadable preferred
+/// base is never silently replaced by a stale local one. Does not require any
+/// worktree to currently have the base checked out.
 let resolveBaseRef (repoRoot: string) (upstreamRemote: string) (baseBranch: string) =
-    async {
+    asyncResult {
         let remoteRef = mainRef upstreamRemote baseBranch
-        let! remoteExists = gitRefExists repoRoot $"refs/remotes/{remoteRef}"
+        let! remoteExists = probeRef repoRoot $"refs/remotes/{remoteRef}"
         let! localExists =
-            if remoteExists then async.Return false
-            else gitRefExists repoRoot $"refs/heads/{baseBranch}"
+            if remoteExists then AsyncResult.ok false
+            else probeRef repoRoot $"refs/heads/{baseBranch}"
 
-        return
+        return!
             selectBaseRef upstreamRemote baseBranch remoteExists localExists
             |> Result.requireSome
                 $"Base branch '{baseBranch}' not found as '{remoteRef}' or as a local branch"

@@ -46,11 +46,14 @@ let provisionViewer (worktreePath: string) =
 /// rather than by deleting the file: the inventory is what every canvas surface derives from, and a
 /// background refresh must not mutate a user's repository to hide a page. A comparison that could
 /// not be evaluated keeps the viewer, so the page that reports the failure stays reachable.
+/// `.agents/canvas/diff.html` is a reserved path — `CanvasDocKinds.classify` recognises it by
+/// filename alone — so this hides whatever occupies it, including a document a user authored there.
+/// Provisioning still never overwrites such a document; its content survives on disk.
 let visibleDocs (comparison: GitWorktree.ComparisonContent) (docs: CanvasDoc list) =
     match comparison with
     | GitWorktree.Clean ->
         docs
         |> List.filter (fun doc ->
-            not (doc.Kind = SystemView && doc.Filename.Equals(filename, System.StringComparison.OrdinalIgnoreCase)))
+            not (doc.Filename.Equals(filename, System.StringComparison.OrdinalIgnoreCase)))
     | GitWorktree.HasContent
     | GitWorktree.Undetermined -> docs

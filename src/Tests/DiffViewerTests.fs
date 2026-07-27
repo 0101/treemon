@@ -546,13 +546,15 @@ type DiffViewerVisibilityTests() =
             "Only a confirmed clean worktree may hide the diff view")
 
     [<Test>]
-    member _.``a document authored at the viewer path is not hidden by a clean worktree``() =
+    member _.``the reserved viewer path is hidden whoever wrote it``() =
+        // CanvasDocKinds.classify recognises diff.html by filename alone, so the scanner cannot
+        // report an authored document there as an AgentDoc. Hiding is keyed on the reserved path.
         let authored = [ doc "diff.html" AgentDoc ]
 
         Assert.That(
-            DiffProvisioner.visibleDocs GitWorktree.Clean authored |> List.map _.Filename,
-            Is.EqualTo([ "diff.html" ]),
-            "Only the generated SystemView is gated on comparison content")
+            DiffProvisioner.visibleDocs GitWorktree.Clean authored,
+            Is.Empty,
+            "A clean worktree offers nothing at the reserved diff path")
 
 [<TestFixture>]
 [<Category("Unit")>]
