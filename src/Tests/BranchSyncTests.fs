@@ -2,6 +2,7 @@ module Tests.BranchSyncTests
 
 open System.IO
 open NUnit.Framework
+open Server
 open Server.GitWorktree
 open Tests.GitTestHelpers
 open Tests.TestUtils
@@ -246,3 +247,98 @@ type BranchPushTests() =
 
             Assert.That(outcome, Is.EqualTo(BranchPushOutcome.PushFailed))
             Assert.That(remoteRef repoDir originDir "refs/heads/feature", Is.EqualTo(Some publishedHead)))
+
+/// The sessionless path as one composed operation over a real repository: Treemon's own Git sync,
+/// the live push decision, and the push that decision may require. Only the provider answer is
+/// supplied by the test - there is no provider to ask here - so every Git step is the real one.
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<Category("AutoSyncVerification")>]
+type MechanicalSyncCompositionTests() =
+
+    let request repoDir : AutoSync.MechanicalSyncRequest =
+        { WorktreePath = repoDir
+          RepoRoot = repoDir
+          UpstreamRemote = "origin"
+          BaseBranch = "main"
+          Branch = "feature" }
+
+    let refusedDirty: Result<unit, AutoSync.SyncFailure> = Error AutoSync.DirtyWorktree
+
+    let syncedWith openPrState pushBranch repoDir =
+        AutoSync.mechanicalSync
+            syncWithBase
+            (fun _ _ _ -> async { return openPrState })
+            pushBranch
+            (request repoDir)
+        |> runAsync
+
+    [<Test>]
+    member _.``divergent history is merged and left unpushed when no pull request is open``() =
+        withTempDir "treemon-mechanical-merge" (fun tempDir ->
+            let repoDir, baseDir = scratchRepos tempDir
+            commitFile repoDir "feature-work.txt" "feature work"
+            advanceBase baseDir "base-work.txt" "base work"
+            // Mutable because the push is the impure boundary whose absence is under test.
+            let mutable pushes = 0
+
+            let outcome =
+                repoDir
+                |> syncedWith
+                    PrOpenState.NoOpenPr
+                    (fun _ ->
+                        async {
+                            pushes <- pushes + 1
+                            return BranchPushOutcome.Pushed
+                        })
+
+            Assert.Multiple(fun () ->
+                Assert.That(Result.isOk outcome, Is.True)
+                Assert.That(getMainBehindCount repoDir "origin/main" |> runAsync, Is.EqualTo(0))
+                Assert.That(mergeCommitCount repoDir, Is.EqualTo("1"))
+                Assert.That(File.Exists(Path.Combine(repoDir, "feature-work.txt")), Is.True)
+                Assert.That(pushes, Is.Zero, "a branch with no open pull request finishes locally")))
+
+    [<Test>]
+    member _.``an open pull request receives the branch the sync just merged``() =
+        withTempDir "treemon-mechanical-push" (fun tempDir ->
+            let repoDir, baseDir = scratchRepos tempDir
+            gitOk repoDir [ "push"; "--set-upstream"; "origin"; "feature" ]
+            commitFile repoDir "feature-work.txt" "feature work"
+            advanceBase baseDir "base-work.txt" "base work"
+            let originDir = Path.Combine(tempDir, "origin.git")
+
+            let outcome = repoDir |> syncedWith PrOpenState.OpenPr pushCurrentBranch
+
+            Assert.Multiple(fun () ->
+                Assert.That(Result.isOk outcome, Is.True)
+                Assert.That(
+                    remoteRef repoDir originDir "refs/heads/feature",
+                    Is.EqualTo(Some(headOf repoDir)),
+                    "an open pull request must end the sync holding the merged head")))
+
+    [<Test>]
+    member _.``a refused sync asks no provider and pushes nothing``() =
+        withTempDir "treemon-mechanical-refused" (fun tempDir ->
+            let repoDir, baseDir = scratchRepos tempDir
+            advanceBase baseDir "base-work.txt" "base work"
+            File.WriteAllText(Path.Combine(repoDir, "shared.txt"), "uncommitted local work")
+            // Mutable because the provider query is the impure boundary whose absence is under test.
+            let mutable queries = 0
+
+            let outcome =
+                AutoSync.mechanicalSync
+                    syncWithBase
+                    (fun _ _ _ ->
+                        async {
+                            queries <- queries + 1
+                            return PrOpenState.OpenPr
+                        })
+                    (fun _ -> failwith "a sync that merged nothing must not push")
+                    (request repoDir)
+                |> runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(outcome, Is.EqualTo(refusedDirty))
+                Assert.That(queries, Is.Zero, "a sync that moved nothing has nothing to publish")))

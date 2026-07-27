@@ -46,7 +46,8 @@ let private trackedGitData path branch upstream behind revision dirty =
         Upstream = GitWorktree.Upstream upstream }
 
 /// Trigger dependencies with no durable layer: nothing is ever recorded, so only the in-process
-/// claim deduplicates. Tests override the fields whose behavior they assert on.
+/// claim deduplicates. A session is open, so a test that does not say otherwise exercises the agent
+/// path. Tests override the fields whose behavior they assert on.
 let private withoutAcceptedRecords: TriggerDependencies =
     { ClaimRevision = fun _ _ _ -> async { return true }
       ReleaseRevision = fun _ _ -> ()
@@ -54,7 +55,10 @@ let private withoutAcceptedRecords: TriggerDependencies =
       RecordAcceptedRevision = fun _ _ -> async { return () }
       RetireAcceptedRevision = fun _ _ -> ()
       ReadPrStatus = fun _ -> async { return NoPr }
-      SelectTarget = fun _ -> async { return NoOpenSession None }
+      SelectTarget = fun _ -> async { return OpenSession "session-a" }
+      TryBeginOperation = fun _ -> async { return true }
+      CompleteOperation = ignore
+      MechanicalSync = fun _ -> async { return Ok() }
       Deliver = fun _ -> async { return true } }
 
 let private prInfo isMerged : PrStatus =
@@ -72,10 +76,15 @@ let private mergedPr = prInfo true
 let private openPr = prInfo false
 
 /// The production wiring against a real durable store, with only the delivery outcome faked, so the
-/// read/record/clear functions the scheduler injects are the ones under test.
+/// read/record/clear functions the scheduler injects are the ones under test. The per-worktree
+/// operation guard is neutralized on purpose: these fixtures model two observations overlapping
+/// inside the claim and durable-record layers, which the guard serializes in production, and
+/// `AutoSyncMechanicalTests` covers the guard itself.
 let private withAcceptedRecords agent store deliver =
     { autoSyncDependencies agent (SessionManager.createAgent ()) None (Some store) with
         SelectTarget = fun _ -> async { return OpenSession "session-a" }
+        TryBeginOperation = fun _ -> async { return true }
+        CompleteOperation = ignore
         Deliver = deliver }
 
 let private acceptedRecord revision acceptedAt : AutoSyncStore.AcceptedSyncRecord =
@@ -940,6 +949,345 @@ type AutoSyncTriggerTests() =
                     deliveries,
                     Is.EqualTo(1),
                     "an expired record licenses one retry, not one per trigger that read it")))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<Category("AutoSyncVerification")>]
+type AutoSyncMechanicalTests() =
+
+    let now = DateTimeOffset.UtcNow
+
+    /// A behind, clean, auto-sync-enabled worktree: the observation every mechanical test starts
+    /// from, with the preference living in the repo root rather than in the worktree itself.
+    let enabledObservation root =
+        TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+        gitData (Path.Combine(root, "feature-a")) "feature-a" 2 (Some "base-a") false
+
+    let claimedThrough (agent: MailboxProcessor<StateMsg>) dependencies =
+        { dependencies with
+            ClaimRevision =
+                fun path baseRevision reason ->
+                    agent.PostAndAsyncReply(fun reply ->
+                        ClaimAutoSyncTrigger(path, baseRevision, reason, reply))
+            ReleaseRevision = fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
+            RecordAcceptedRevision =
+                fun path baseRevision ->
+                    async {
+                        agent.Post(
+                            AcceptAutoSyncTrigger(path, baseRevision, AutoSyncStore.nextAcceptance ()))
+                    } }
+
+    let claimFor (agent: MailboxProcessor<StateMsg>) path =
+        (agent.PostAndReply(GetState)).AutoSyncTriggeredRevisions |> Map.tryFind path
+
+    [<Test>]
+    member _.``An open idle session keeps the sync on the agent path``() =
+        TestUtils.withTempDir "treemon-auto-sync-idle-open" (fun root ->
+            let observation = enabledObservation root
+            // Mutable because delivery and the mechanical sync are the impure boundaries under test.
+            let mutable deliveries = []
+            let mutable mechanicalRuns = 0
+
+            let idleButOpen =
+                storedSession "idle-session" observation.Path SessionLevelStatus.Idle now now
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    SelectTarget = fun _ -> async { return selectTargetFromSessions now [ idleButOpen ] }
+                    MechanicalSync =
+                        fun _ ->
+                            async {
+                                mechanicalRuns <- mechanicalRuns + 1
+                                return Ok()
+                            }
+                    Deliver =
+                        fun request ->
+                            async {
+                                deliveries <- request :: deliveries
+                                return true
+                            } }
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    mechanicalRuns,
+                    Is.Zero,
+                    "an idle CLI is still attached to its worktree, so Treemon must not mutate it")
+                Assert.That(deliveries |> List.map _.Target, Is.EqualTo([ OpenSession "idle-session" ]))
+                Assert.That(deliveries |> List.map _.Prompt, Is.EqualTo([ prompt "origin" "main" ]))))
+
+    [<Test>]
+    member _.``No open session completes the sync mechanically without prompting anyone``() =
+        TestUtils.withTempDir "treemon-auto-sync-mechanical" (fun root ->
+            let observation = enabledObservation root
+            let agent = createAgent ()
+            // Mutable because the mechanical sync, the bridge, and the launch are the impure
+            // boundaries whose requests and invocation counts are under test.
+            let mutable requests = []
+            let mutable bridgeSends = 0
+            let mutable launches = 0
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    SelectTarget = fun _ -> async { return NoOpenSession None }
+                    MechanicalSync =
+                        fun request ->
+                            async {
+                                requests <- request :: requests
+                                return Ok()
+                            }
+                    // The real delivery, so "no agent" means neither a bridge send nor a launch.
+                    Deliver =
+                        deliver
+                            (fun _ ->
+                                async {
+                                    bridgeSends <- bridgeSends + 1
+                                    return SessionBridge.DeliveryResult.NoLiveSession
+                                })
+                            (fun () -> async { return () })
+                            (fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply)))
+                            (CompleteAutoSyncLaunch >> agent.Post)
+                            (fun _ _ ->
+                                async {
+                                    launches <- launches + 1
+                                    return Ok()
+                                }) }
+                |> claimedThrough agent
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            let expectedRequest =
+                { WorktreePath = observation.Path
+                  RepoRoot = root
+                  UpstreamRemote = "origin"
+                  BaseBranch = "main"
+                  Branch = "feature-a" }
+
+            Assert.Multiple(fun () ->
+                Assert.That(requests, Is.EqualTo([ expectedRequest ]))
+                Assert.That(bridgeSends, Is.Zero, "a completed mechanical sync costs no agent delivery")
+                Assert.That(launches, Is.Zero, "a completed mechanical sync launches no session")
+                Assert.That(
+                    claimFor agent observation.Path |> claimStage,
+                    Is.EqualTo(Some "accepted base-a"),
+                    "a finished mechanical sync is an acceptance, so the same revision is not re-synced")))
+
+    [<Test>]
+    member _.``Each stopping point hands the agent its own reason and no repository text``() =
+        TestUtils.withTempDir "treemon-auto-sync-fallback" (fun root ->
+            let observation = enabledObservation root
+
+            // The real composition, so each prompt is reached the way production reaches it: a Git
+            // outcome, then the provider's answer, then the push.
+            let promptFor syncOutcome openPrState pushOutcome =
+                // Mutable because delivery is the impure boundary the prompt is read from.
+                let mutable delivered = []
+
+                let dependencies =
+                    { withoutAcceptedRecords with
+                        SelectTarget = fun _ -> async { return NoOpenSession None }
+                        MechanicalSync =
+                            mechanicalSync
+                                (fun _ _ _ -> async { return syncOutcome })
+                                (fun _ _ _ -> async { return openPrState })
+                                (fun _ -> async { return pushOutcome })
+                        Deliver =
+                            fun request ->
+                                async {
+                                    delivered <- request.Prompt :: delivered
+                                    return true
+                                } }
+
+                trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+                delivered |> List.exactlyOne
+
+            let dirty =
+                promptFor
+                    GitWorktree.BranchSyncOutcome.RefusedDirty
+                    PrOpenState.NoOpenPr
+                    GitWorktree.BranchPushOutcome.Pushed
+
+            let conflicted =
+                promptFor
+                    GitWorktree.BranchSyncOutcome.Conflicted
+                    PrOpenState.NoOpenPr
+                    GitWorktree.BranchPushOutcome.Pushed
+
+            let unknownPr =
+                promptFor
+                    GitWorktree.BranchSyncOutcome.FastForwarded
+                    PrOpenState.UnknownPrState
+                    GitWorktree.BranchPushOutcome.Pushed
+
+            let pushFailed =
+                promptFor
+                    GitWorktree.BranchSyncOutcome.Merged
+                    PrOpenState.OpenPr
+                    GitWorktree.BranchPushOutcome.PushFailed
+
+            let prompts = [ dirty; conflicted; unknownPr; pushFailed ]
+
+            let leakedRepositoryText =
+                prompts
+                |> List.filter (fun text ->
+                    text.Contains(observation.Path, StringComparison.Ordinal)
+                    || text.Contains(observation.Branch, StringComparison.Ordinal))
+
+            Assert.Multiple(fun () ->
+                Assert.That(dirty, Is.EqualTo(fallbackPrompt "origin" "main" DirtyWorktree))
+                Assert.That(conflicted, Is.EqualTo(fallbackPrompt "origin" "main" MergeConflict))
+                Assert.That(unknownPr, Is.EqualTo(fallbackPrompt "origin" "main" OpenPrCheckFailed))
+                Assert.That(pushFailed, Is.EqualTo(fallbackPrompt "origin" "main" PushFailed))
+                Assert.That(
+                    prompts |> List.distinct,
+                    Has.Exactly(4).Items,
+                    "an agent must be able to tell the stopping points apart")
+                Assert.That(
+                    leakedRepositoryText,
+                    Is.Empty,
+                    "a prompt carries the structured reason only — never a path, branch, or Git output")))
+
+    [<Test>]
+    member _.``Both prompts state both sides of the push policy``() =
+        let openPrHalf = "If this branch has an open pull request, push the synced branch after the checks pass"
+        let noPrHalf = "otherwise, do not push"
+
+        Assert.Multiple(fun () ->
+            Assert.That(prompt "origin" "main", Does.Contain(openPrHalf).And.Contains(noPrHalf))
+            Assert.That(
+                fallbackPrompt "origin" "main" MergeConflict,
+                Does.Contain(openPrHalf).And.Contains(noPrHalf)))
+
+    [<Test>]
+    member _.``A merge reconciled before the mutation stops the sync and releases the claim``() =
+        TestUtils.withTempDir "treemon-auto-sync-merged-mechanical" (fun root ->
+            let observation = enabledObservation root
+            let agent = createAgent ()
+            // Mutable because the observed PR state, the mechanical sync, and delivery are the
+            // impure boundaries this race is expressed through.
+            let mutable observedPr = NoPr
+            let mutable mechanicalRuns = 0
+            let mutable deliveries = 0
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    ReadPrStatus = fun _ -> async { return observedPr }
+                    SelectTarget =
+                        fun _ ->
+                            async {
+                                // The PR refresh reconciles the merge while the target is chosen.
+                                observedPr <- mergedPr
+                                return NoOpenSession None
+                            }
+                    MechanicalSync =
+                        fun _ ->
+                            async {
+                                mechanicalRuns <- mechanicalRuns + 1
+                                return Ok()
+                            }
+                    Deliver =
+                        fun _ ->
+                            async {
+                                deliveries <- deliveries + 1
+                                return true
+                            } }
+                |> claimedThrough agent
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(mechanicalRuns, Is.Zero, "nothing may be merged into a branch already merged")
+                Assert.That(deliveries, Is.Zero)
+                Assert.That(claimFor agent observation.Path, Is.EqualTo None, "the claim must be released")))
+
+    [<Test>]
+    member _.``A branch disabled during the sync is never handed to an agent``() =
+        TestUtils.withTempDir "treemon-auto-sync-disabled-fallback" (fun root ->
+            let observation = enabledObservation root
+            let agent = createAgent ()
+            // Mutable because delivery is the impure boundary whose invocation count is under test.
+            let mutable deliveries = 0
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    SelectTarget = fun _ -> async { return NoOpenSession None }
+                    MechanicalSync =
+                        fun _ ->
+                            async {
+                                // Stands in for a disable — or a merged-branch cleanup — landing
+                                // while Treemon's own sync was running.
+                                TreemonConfig.modifyAutoSyncBranches
+                                    root
+                                    (Set.ofList >> Set.remove "feature-a" >> Set.toList)
+
+                                return Error GitCommandFailed
+                            }
+                    Deliver =
+                        fun _ ->
+                            async {
+                                deliveries <- deliveries + 1
+                                return true
+                            } }
+                |> claimedThrough agent
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    deliveries,
+                    Is.Zero,
+                    "the gate must be re-passed after the mechanical attempt, not only before it")
+                Assert.That(claimFor agent observation.Path, Is.EqualTo None, "the claim must be released")))
+
+    [<Test>]
+    member _.``The operation guard keeps a later observation out of a running sync``() =
+        TestUtils.withTempDir "treemon-auto-sync-operation-guard" (fun root ->
+            let observation = enabledObservation root
+            let agent = createAgent ()
+            let syncStarted = TaskCompletionSource()
+            let releaseSync = TaskCompletionSource()
+            // Mutable because the mechanical sync is the impure boundary whose overlap is under test.
+            let mutable mechanicalRuns = 0
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    TryBeginOperation =
+                        fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncOperation(path, reply))
+                    CompleteOperation = CompleteAutoSyncOperation >> agent.Post
+                    SelectTarget = fun _ -> async { return NoOpenSession None }
+                    MechanicalSync =
+                        fun _ ->
+                            async {
+                                mechanicalRuns <- mechanicalRuns + 1
+                                syncStarted.TrySetResult() |> ignore
+                                do! Async.AwaitTask releaseSync.Task
+                                return Ok()
+                            } }
+
+            let running =
+                trigger dependencies root "origin" "main" NoPr observation |> Async.StartAsTask
+
+            TestUtils.runAsync (Async.AwaitTask syncStarted.Task)
+
+            // A later fetch that saw the base advance again: the revision claim would let it through
+            // precisely because it supersedes the older revision, so only the guard can stop it.
+            let laterObservation = { observation with BaseRevision = Some "base-b" }
+
+            trigger dependencies root "origin" "main" NoPr laterObservation |> TestUtils.runAsync
+            let runsDuringSync = mechanicalRuns
+
+            releaseSync.SetResult()
+            TestUtils.runAsync (Async.AwaitTask running)
+            trigger dependencies root "origin" "main" NoPr laterObservation |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(runsDuringSync, Is.EqualTo(1), "a second observation must not start a second merge")
+                Assert.That(
+                    mechanicalRuns,
+                    Is.EqualTo(2),
+                    "the guard is released with the operation, so the next observation runs")))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1820,7 +2168,7 @@ type AutoSyncVerificationTests() =
         let path = Path.Combine(root, "feature-a")
         Directory.CreateDirectory(path) |> ignore
         let agent = createAgent ()
-        let expectedPrompt = prompt "upstream" "develop"
+        let expectedPrompt = fallbackPrompt "upstream" "develop" DirtyWorktree
         // Mutable because the launch callback is the impure boundary whose invocation count is under test.
         let mutable launches = []
 
@@ -1837,6 +2185,9 @@ type AutoSyncVerificationTests() =
                         fun worktreePath baseRevision ->
                             agent.Post(ReleaseAutoSyncTrigger(worktreePath, baseRevision))
                     SelectTarget = fun _ -> async { return NoOpenSession(Some "retained-session") }
+                    // The observation is dirty, so Treemon's own sync refuses it and the worktree
+                    // reaches the agent path the way production would send it there.
+                    MechanicalSync = fun _ -> async { return Error DirtyWorktree }
                     Deliver =
                         deliver
                             (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })

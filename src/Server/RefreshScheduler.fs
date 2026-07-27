@@ -63,7 +63,10 @@ type DashboardState =
       // In-memory only: a restart rebuilds it from the reloaded sessions (re-stamping at reload time).
       CodingToolSinceByWorktree: Map<string, DateTimeOffset>
       AutoSyncTriggeredRevisions: Map<string, AutoSync.ClaimedRevision>
-      AutoSyncLaunchesInFlight: Set<string> }
+      AutoSyncLaunchesInFlight: Set<string>
+      /// Worktrees with an auto-sync operation running: target selection, Treemon's own Git sync, and
+      /// delivery. Separate from the launch guard, which one of those operations may take inside it.
+      AutoSyncOperationsInFlight: Set<string> }
 
 module DashboardState =
     let empty =
@@ -78,7 +81,8 @@ module DashboardState =
           SessionStatuses = Map.empty
           CodingToolSinceByWorktree = Map.empty
           AutoSyncTriggeredRevisions = Map.empty
-          AutoSyncLaunchesInFlight = Set.empty }
+          AutoSyncLaunchesInFlight = Set.empty
+          AutoSyncOperationsInFlight = Set.empty }
 
 type RepositoryDiscovery =
     { Worktrees: GitWorktree.WorktreeInfo list option
@@ -133,6 +137,9 @@ type StateMsg =
     | ClearAutoSyncTrigger of path: string
     | TryBeginAutoSyncLaunch of path: string * AsyncReplyChannel<bool>
     | CompleteAutoSyncLaunch of path: string
+    /// The per-worktree operation guard `AutoSync.trigger` holds for a whole sync attempt.
+    | TryBeginAutoSyncOperation of path: string * AsyncReplyChannel<bool>
+    | CompleteAutoSyncOperation of path: string
 
 let private maxEvents = 50
 
@@ -247,15 +254,20 @@ let private updateWorktreeList
         removedPaths
         |> Set.fold (fun revisions path -> Map.remove path revisions) state.AutoSyncTriggeredRevisions
 
-    let prunedLaunches =
-        removedPaths
-        |> Set.fold (fun launches path -> Set.remove path launches) state.AutoSyncLaunchesInFlight
-
     updateRepo repoId updated
         { state with
             CodingToolSinceByWorktree = prunedSince
             AutoSyncTriggeredRevisions = prunedAutoSync
-            AutoSyncLaunchesInFlight = prunedLaunches }
+            AutoSyncLaunchesInFlight = Set.difference state.AutoSyncLaunchesInFlight removedPaths
+            AutoSyncOperationsInFlight = Set.difference state.AutoSyncOperationsInFlight removedPaths }
+
+/// Both auto-sync guards are the same thing at different scopes — one path may hold it, everyone
+/// else is told no — so they share the claim/answer/record step and differ only in which set they
+/// live in.
+let private tryBeginGuard path (reply: AsyncReplyChannel<bool>) (inFlight: Set<string>) =
+    let claimed = not (Set.contains path inFlight)
+    reply.Reply claimed
+    if claimed then Set.add path inFlight else inFlight
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -333,7 +345,8 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             { state with
                 CodingToolSinceByWorktree = prunedSince
                 AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path
-                AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path }
+                AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path
+                AutoSyncOperationsInFlight = state.AutoSyncOperationsInFlight |> Set.remove path }
 
     | GetState replyChannel ->
         replyChannel.Reply(state)
@@ -472,18 +485,20 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
 
     | TryBeginAutoSyncLaunch(path, reply) ->
-        let claimed = not (Set.contains path state.AutoSyncLaunchesInFlight)
-        reply.Reply claimed
-
-        if claimed then
-            { state with
-                AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.add path }
-        else
-            state
+        { state with
+            AutoSyncLaunchesInFlight = tryBeginGuard path reply state.AutoSyncLaunchesInFlight }
 
     | CompleteAutoSyncLaunch path ->
         { state with
             AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path }
+
+    | TryBeginAutoSyncOperation(path, reply) ->
+        { state with
+            AutoSyncOperationsInFlight = tryBeginGuard path reply state.AutoSyncOperationsInFlight }
+
+    | CompleteAutoSyncOperation path ->
+        { state with
+            AutoSyncOperationsInFlight = state.AutoSyncOperationsInFlight |> Set.remove path }
 
 let createAgent () =
     MailboxProcessor<StateMsg>.Start(fun inbox ->
@@ -583,6 +598,14 @@ let internal autoSyncDependencies
                 let! state = agent.PostAndAsyncReply(GetState)
                 return AutoSync.selectTarget activityStore (state.SessionStatuses |> Map.values) path
             }
+      TryBeginOperation =
+        fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncOperation(path, reply))
+      CompleteOperation = CompleteAutoSyncOperation >> agent.Post
+      MechanicalSync =
+        AutoSync.mechanicalSync
+            GitWorktree.syncWithBase
+            PrStatus.queryOpenPrStateByRepoRoot
+            GitWorktree.pushCurrentBranch
       Deliver =
         AutoSync.deliver
             SessionBridge.tryDeliver

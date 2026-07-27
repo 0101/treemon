@@ -1,6 +1,7 @@
 module Server.AutoSync
 
 open System
+open FsToolkit.ErrorHandling
 open Shared
 open Server.SessionActivity
 open Server.SessionActivityStore
@@ -45,6 +46,29 @@ type ClaimReason =
     | FirstAttempt
     | RetryExpiredAccept
 
+/// Why Treemon's own sync of a worktree could not finish. A closed vocabulary because it is the only
+/// thing a fallback prompt may name: Git stdout, stderr, conflicted filenames, refs, paths, and
+/// commit messages are untrusted repository text and never enter a prompt (see
+/// `docs/spec/worktree-monitor.md`, Branch Sync).
+type SyncFailure =
+    | DirtyWorktree
+    | MergeConflict
+    | MergeAbortFailed
+    | GitCommandFailed
+    | OpenPrCheckFailed
+    | PushFailed
+
+/// One mechanical attempt's inputs. A record rather than a parameter list because every field is a
+/// string and two of them name branches, so a swapped pair would silently fetch or push the wrong
+/// ref. `RepoRoot` is where the shared branch configuration the provider query reads lives;
+/// `WorktreePath` is the tree that actually moves.
+type MechanicalSyncRequest =
+    { WorktreePath: string
+      RepoRoot: string
+      UpstreamRemote: string
+      BaseBranch: string
+      Branch: string }
+
 /// `ClaimRevision`/`ReleaseRevision` are the in-process claim; the accepted-revision operations are
 /// the durable, restart-safe layer on top of it (`AutoSyncStore`). `RecordAcceptedRevision` and
 /// `RetireAcceptedRevision` each write both sides of one acceptance — the durable record and the
@@ -67,6 +91,14 @@ type TriggerDependencies =
       /// Read again at action boundaries because `RefreshPr` runs on its own cadence.
       ReadPrStatus: string -> Async<PrStatus>
       SelectTarget: string -> Async<SyncTarget>
+      /// The per-worktree operation guard, held across target selection, mechanical work, and
+      /// delivery. It serializes *work*, which the revision claim deliberately does not: a claim for
+      /// a newer base revision supersedes an older one, and without this guard that supersession
+      /// would start a second fetch and merge over one still running.
+      TryBeginOperation: string -> Async<bool>
+      CompleteOperation: string -> unit
+      /// Treemon's own sync, run only when no session is open to do it.
+      MechanicalSync: MechanicalSyncRequest -> Async<Result<unit, SyncFailure>>
       Deliver: DeliveryRequest -> Async<bool> }
 
 /// One merged-and-still-enabled branch. The local branch name is the `.treemon.json` preference
@@ -75,8 +107,70 @@ type MergedAutoSyncTarget =
     { Branch: string
       Path: string }
 
+/// Both halves of the push rule live in the prompt itself rather than being selected from cached PR
+/// state: the dashboard's PR map is eventually consistent and cannot tell a closed pull request from
+/// an open one, while the agent can read the live state at the moment it would push. Provider-neutral
+/// and free of any repository text.
+let private pushPolicy =
+    "If this branch has an open pull request, push the synced branch after the checks pass; otherwise, do not push."
+
 let prompt upstreamRemote baseBranch =
-    $"Sync this worktree with {upstreamRemote}/{baseBranch} when safe. Preserve any in-progress work, resolve conflicts carefully, and run the appropriate checks before considering the sync complete."
+    $"Sync this worktree with {upstreamRemote}/{baseBranch} when safe. Preserve any in-progress work, resolve conflicts carefully, and run the appropriate checks before considering the sync complete. {pushPolicy}"
+
+/// All the agent is told about a mechanical attempt that stopped: what state the worktree may be in,
+/// in Treemon's own words. The agent inspects the repository itself for anything more, which is why
+/// no Git output has to be quoted here.
+let internal failureDescription =
+    function
+    | DirtyWorktree -> "the worktree has uncommitted local changes"
+    | MergeConflict -> "the merge conflicted and was aborted"
+    | MergeAbortFailed -> "the merge conflicted and could not be aborted, so a merge may still be in progress"
+    | GitCommandFailed -> "a Git command did not complete"
+    | OpenPrCheckFailed -> "the pull request state could not be determined"
+    | PushFailed -> "the push was rejected"
+
+let fallbackPrompt upstreamRemote baseBranch failure =
+    $"{prompt upstreamRemote baseBranch} Treemon already attempted this sync itself and stopped because {failureDescription failure}."
+
+let internal syncOutcomeResult =
+    function
+    | GitWorktree.BranchSyncOutcome.FastForwarded
+    | GitWorktree.BranchSyncOutcome.Merged
+    | GitWorktree.BranchSyncOutcome.AlreadyCurrent -> Ok()
+    | GitWorktree.BranchSyncOutcome.RefusedDirty -> Error DirtyWorktree
+    | GitWorktree.BranchSyncOutcome.Conflicted -> Error MergeConflict
+    | GitWorktree.BranchSyncOutcome.AbortFailed -> Error MergeAbortFailed
+    | GitWorktree.BranchSyncOutcome.CommandFailed -> Error GitCommandFailed
+
+let internal pushOutcomeResult =
+    function
+    | GitWorktree.BranchPushOutcome.Pushed -> Ok()
+    | GitWorktree.BranchPushOutcome.PushFailed -> Error PushFailed
+
+/// Treemon's whole token-free path as one operation: the Git sync, the live push decision, and the
+/// push that decision may require. Only a run that finished all of it may skip agent delivery, so
+/// every step leaves through the same closed reason. The three effects are parameters so the
+/// sequence can be exercised without a repository or a provider.
+let mechanicalSync
+    (syncWithBase: string -> string -> string -> Async<GitWorktree.BranchSyncOutcome>)
+    (queryOpenPrState: string -> string -> string -> Async<PrOpenState.OpenPrState>)
+    (pushBranch: string -> Async<GitWorktree.BranchPushOutcome>)
+    (request: MechanicalSyncRequest)
+    =
+    asyncResult {
+        let! outcome = syncWithBase request.WorktreePath request.UpstreamRemote request.BaseBranch
+        do! syncOutcomeResult outcome
+
+        // Asked now, at the moment the push would happen, and of the provider rather than the
+        // dashboard's cached map: the branch this run just moved is the only thing that may move
+        // remotely, and only while a pull request is actually open to receive it.
+        match! queryOpenPrState request.RepoRoot request.UpstreamRemote request.Branch with
+        | PrOpenState.OpenPr ->
+            let! pushOutcome = pushBranch request.WorktreePath
+            return! pushOutcomeResult pushOutcome
+        | PrOpenState.NoOpenPr -> return ()
+        | PrOpenState.UnknownPrState -> return! Error OpenPrCheckFailed
+    }
 
 /// Merged is terminal: nothing remains to be synced into a branch whose PR is already merged, so a
 /// leftover `.treemon.json` entry must not keep it syncing.
@@ -238,7 +332,61 @@ let deliver
             return! launchFallback ()
     }
 
-let trigger
+let private deliverPrompt
+    (dependencies: TriggerDependencies)
+    (gitData: GitWorktree.GitData)
+    (target: SyncTarget)
+    promptText
+    =
+    dependencies.Deliver
+        { WorktreePath = WorktreePath gitData.Path
+          Target = target
+          Prompt = promptText }
+
+/// Where the two paths part, once an operation owns its claim and has passed the eligibility gate.
+/// An open session — even an idle one — is attached to its worktree and owns it, so Treemon only
+/// asks it to sync. With no session open Treemon syncs the worktree itself and spends an agent only
+/// on what it could not finish.
+let private attemptSync
+    (dependencies: TriggerDependencies)
+    (repoRoot: string)
+    upstreamRemote
+    baseBranch
+    (gitData: GitWorktree.GitData)
+    (target: SyncTarget)
+    =
+    async {
+        match target with
+        | OpenSession _ ->
+            return! deliverPrompt dependencies gitData target (prompt upstreamRemote baseBranch)
+        | NoOpenSession _ ->
+            let request =
+                { WorktreePath = gitData.Path
+                  RepoRoot = repoRoot
+                  UpstreamRemote = upstreamRemote
+                  BaseBranch = baseBranch
+                  Branch = gitData.Branch }
+
+            match! dependencies.MechanicalSync request with
+            | Ok() ->
+                Log.log "AutoSync" $"Mechanical sync completed for {gitData.Branch}"
+                return true
+            | Error failure ->
+                // The gate is re-passed here because a fetch, a merge, and a provider query have run
+                // since it was last read: a branch disabled or reconciled merged meanwhile must not
+                // be handed to an agent either.
+                let! stillEligible = isStillEligible dependencies repoRoot gitData
+
+                if not stillEligible then
+                    Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: no longer eligible"
+                    return false
+                else
+                    return!
+                        fallbackPrompt upstreamRemote baseBranch failure
+                        |> deliverPrompt dependencies gitData target
+    }
+
+let private runOperation
     (dependencies: TriggerDependencies)
     (repoRoot: string)
     (upstreamRemote: string)
@@ -291,21 +439,44 @@ let trigger
                             drop "already accepted by a concurrent trigger"
                         else
                             let! accepted =
-                                dependencies.Deliver
-                                    { WorktreePath = WorktreePath gitData.Path
-                                      Target = target
-                                      Prompt = prompt upstreamRemote baseBranch }
+                                attemptSync dependencies repoRoot upstreamRemote baseBranch gitData target
 
-                            // Recorded only once acceptance is certain: a crash or rejection before
-                            // this point must leave no record, so the prompt can be retried.
+                            // Recorded only once the sync is certain to have happened: a crash, a
+                            // rejected prompt, or a mechanical run that stopped must leave no record,
+                            // so the revision can be retried. A completed mechanical run is an
+                            // acceptance in its own right — the work it was claimed for is done.
                             if accepted then
                                 do! dependencies.RecordAcceptedRevision gitData.Path baseRevision
-                                Log.log "AutoSync" $"Prompt accepted for {gitData.Branch} at base revision {baseRevision}"
+                                Log.log "AutoSync" $"Sync accepted for {gitData.Branch} at base revision {baseRevision}"
                             else
                                 dependencies.ReleaseRevision gitData.Path baseRevision
                     with ex ->
                         Log.log "AutoSync" $"Trigger failed for {gitData.Branch}: {ex.Message}"
                         dependencies.ReleaseRevision gitData.Path baseRevision
+    }
+
+/// One operation per worktree at a time. The revision claim cannot provide this: it exists to let a
+/// newer base revision supersede an older one, which is exactly the case that would otherwise start
+/// a second fetch and merge while the first is still running. A refused start changes nothing, so
+/// the next refresh simply observes the worktree again.
+let trigger
+    (dependencies: TriggerDependencies)
+    (repoRoot: string)
+    (upstreamRemote: string)
+    (baseBranch: string)
+    (prStatus: PrStatus)
+    (gitData: GitWorktree.GitData)
+    =
+    async {
+        let! started = dependencies.TryBeginOperation gitData.Path
+
+        if not started then
+            Log.log "AutoSync" $"Skipped sync for {gitData.Branch}: an operation is already running"
+        else
+            try
+                do! runOperation dependencies repoRoot upstreamRemote baseBranch prStatus gitData
+            finally
+                dependencies.CompleteOperation gitData.Path
     }
 
 let internal startGuarded onError workflow =
