@@ -44,21 +44,34 @@ type GithubHeadOwnerResolutionTests() =
     let upstream = { Owner = "upstreamowner"; Repo = "treemon" }
 
     /// Stands in for the two git reads: the remote the branch is configured to track, then that
-    /// remote's URL, keyed by the remote name the resolver asked for.
-    let resolve (branchRemote: Result<string, OpenPrState>) (remoteUrls: Map<string, Result<string, OpenPrState>>) =
+    /// remote's URL, keyed by the remote name the resolver asked for. Fetch and push URLs answer
+    /// from separate maps, so a resolver reading the wrong one fails rather than quietly returning
+    /// an owner the push would never reach.
+    let resolveWith
+        (branchRemote: Result<string, OpenPrState>)
+        (fetchUrls: Map<string, Result<string, OpenPrState>>)
+        (pushUrls: Map<string, Result<string, OpenPrState>>)
+        =
         let read (arguments: string list) =
             async {
                 if arguments |> List.exists _.StartsWith("branch.") then
                     return branchRemote
                 else
+                    let urls =
+                        if arguments |> List.contains "--push" then pushUrls else fetchUrls
+
                     return
-                        remoteUrls
+                        urls
                         |> Map.tryFind (List.last arguments)
                         |> Option.defaultValue (Error UnknownPrState)
             }
 
         Server.PrStatus.resolveHeadOwnerWith read repoRoot branch
         |> Async.RunSynchronously
+
+    /// The common remote: one URL serves both fetch and push.
+    let resolve (branchRemote: Result<string, OpenPrState>) (remoteUrls: Map<string, Result<string, OpenPrState>>) =
+        resolveWith branchRemote remoteUrls remoteUrls
 
     /// Asserted by shape rather than against a `Result` literal: the literal's other type argument
     /// infers as `obj`, which NUnit's structural compare never matches (see `TestUtils.assertOk`).
@@ -77,6 +90,33 @@ type GithubHeadOwnerResolutionTests() =
         Assert.That(
             Server.PrStatus.branchRemoteArgs repoRoot branch,
             Is.EqualTo([ "-C"; repoRoot; "config"; "--get"; "branch.feature/sync.remote" ]))
+
+    [<Test>]
+    member _.``The remote is read for the URL a push would use``() =
+        Assert.That(
+            Server.PrStatus.remotePushUrlArgs repoRoot "origin",
+            Is.EqualTo([ "-C"; repoRoot; "remote"; "get-url"; "--push"; "origin" ]))
+
+    [<Test>]
+    member _.``A remote pushing to a fork resolves the fork owner, not its fetch URL's owner``() =
+        resolveWith
+            (Ok "origin")
+            (Map [ "origin", Ok "https://github.com/upstreamowner/treemon.git" ])
+            (Map [ "origin", Ok "https://github.com/forkowner/treemon.git" ])
+        |> expectOwner "forkowner"
+
+    [<Test>]
+    member _.``A remote with no readable push destination leaves the state unknown``() =
+        resolveWith (Ok "origin") (Map [ "origin", Ok "https://github.com/upstreamowner/treemon.git" ]) Map.empty
+        |> expectUnknown
+
+    [<Test>]
+    member _.``A remote pushing somewhere that is not GitHub leaves the state unknown``() =
+        resolveWith
+            (Ok "origin")
+            (Map [ "origin", Ok "https://github.com/upstreamowner/treemon.git" ])
+            (Map [ "origin", Ok "https://dev.azure.com/org/project/_git/treemon" ])
+        |> expectUnknown
 
     [<Test>]
     member _.``A fork-owned head branch is queried under the fork, not the upstream repository``() =

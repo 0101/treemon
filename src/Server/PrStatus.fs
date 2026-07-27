@@ -506,6 +506,13 @@ let queryOpenPrState (remote: AzDoRemote) (branch: string) =
 let internal branchRemoteArgs (repoRoot: string) (branch: string) =
     [ "-C"; repoRoot; "config"; "--get"; $"branch.{branch}.remote" ]
 
+/// Where a push to that remote actually lands. A remote may point `remote.<name>.pushurl` at a fork
+/// while `remote.<name>.url` still reads the upstream repository, and `git push` follows the push URL,
+/// so `--push` - which falls back to the fetch URL when no push URL is set - is the only reading that
+/// matches the destination the branch is published to.
+let internal remotePushUrlArgs (repoRoot: string) (remoteName: string) =
+    [ "-C"; repoRoot; "remote"; "get-url"; "--push"; remoteName ]
+
 /// One git setting the open-PR lookup needs. Read through an argument list rather than `getRemoteUrl`'s
 /// command string, because both the branch and the remote name it yields are repository-controlled
 /// text that may legally hold characters a command string would re-parse, and because this shares the
@@ -518,9 +525,11 @@ let private readGitValue (arguments: string list) =
 /// the repository the pull request targets - filtering under the target's owner answers an empty
 /// list, which is a confirmed absence, so a fork-origin pull request would silently lose its push.
 /// The owner therefore comes from git's own record of where this branch lives, resolved the same way
-/// the push resolves its destination. A branch git records no remote for cannot be located - and
-/// could not be pushed either - so it stays unknown rather than being guessed onto the upstream
-/// owner. Injectable so the fork case can be exercised without a repository.
+/// the push resolves its destination: the branch's remote, then that remote's *effective push* URL,
+/// which a fork workflow may set away from the fetch URL. A branch git records no remote for, or a
+/// remote with no GitHub push destination, cannot be located - and could not be pushed either - so it
+/// stays unknown rather than being guessed onto the upstream owner. Injectable so the fork case can
+/// be exercised without a repository.
 let internal resolveHeadOwnerWith
     (readValue: string list -> Async<Result<string, OpenPrState>>)
     (repoRoot: string)
@@ -528,13 +537,13 @@ let internal resolveHeadOwnerWith
     =
     asyncResult {
         let! remoteName = readValue (branchRemoteArgs repoRoot branch)
-        let! remoteUrl = readValue [ "-C"; repoRoot; "remote"; "get-url"; remoteName ]
+        let! pushUrl = readValue (remotePushUrlArgs repoRoot remoteName)
 
         return!
-            match GithubPrStatus.parseGithubUrl remoteUrl with
+            match GithubPrStatus.parseGithubUrl pushUrl with
             | Some remote -> Ok remote.Owner
             | None ->
-                Log.log "PR" "Open PR lookup could not read a GitHub owner from the branch's own remote"
+                Log.log "PR" "Open PR lookup could not read a GitHub owner from the branch remote's push URL"
                 Error UnknownPrState
     }
 
