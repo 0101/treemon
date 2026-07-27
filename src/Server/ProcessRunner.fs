@@ -3,6 +3,7 @@ module Server.ProcessRunner
 open System
 open System.Diagnostics
 open System.IO
+open System.Text
 open System.Threading
 
 let private defaultTimeoutMs = 60_000
@@ -412,3 +413,87 @@ let runArgumentList
         fileName
         arguments
         workingDirectory
+
+/// Status collectors want text, not bytes: invalid sequences become replacement
+/// characters rather than an error, which the strict diff decoder deliberately does not do.
+let private decodeCapture (bytes: byte[]) =
+    Encoding.UTF8.GetString(bytes).TrimEnd()
+
+let private describeFailure (timeoutMs: int) failure =
+    match failure with
+    | StartFailed message -> $"Failed to start process: {message}"
+    | TimedOut -> $"Timed out after {timeoutMs}ms"
+    | CaptureLimitExceeded StandardOutput -> "Standard output exceeded its capture limit"
+    | CaptureLimitExceeded StandardError -> "Standard error exceeded its capture limit"
+
+/// Like `runArgumentListTextResult` but with an explicit timeout, for long-running setup hooks
+/// (e.g. `npm install`) that would otherwise be killed by the short default.
+let runArgumentListTextResultWithTimeout
+    (timeoutMs: int)
+    (stdoutLimitBytes: int)
+    (stderrLimitBytes: int)
+    (context: string)
+    (fileName: string)
+    (arguments: string list)
+    (workingDirectory: string option)
+    : Async<Result<string, string>> =
+    async {
+        let! result =
+            runArgumentListWithTimeout
+                timeoutMs
+                stdoutLimitBytes
+                stderrLimitBytes
+                context
+                fileName
+                arguments
+                workingDirectory
+
+        return
+            match result with
+            | Ok output when output.ExitCode = 0 -> Ok(decodeCapture output.Stdout)
+            | Ok output -> Error(decodeCapture output.Stderr)
+            | Error failure -> Error(describeFailure timeoutMs failure)
+    }
+
+/// Decoded stdout on exit 0; decoded stderr or a described runner failure otherwise.
+let runArgumentListTextResult
+    (stdoutLimitBytes: int)
+    (stderrLimitBytes: int)
+    (context: string)
+    (fileName: string)
+    (arguments: string list)
+    (workingDirectory: string option)
+    =
+    runArgumentListTextResultWithTimeout
+        defaultTimeoutMs
+        stdoutLimitBytes
+        stderrLimitBytes
+        context
+        fileName
+        arguments
+        workingDirectory
+
+/// Decoded stdout on exit 0; `None` for a non-zero exit or a runner failure.
+let runArgumentListText
+    (stdoutLimitBytes: int)
+    (stderrLimitBytes: int)
+    (context: string)
+    (fileName: string)
+    (arguments: string list)
+    (workingDirectory: string option)
+    =
+    async {
+        let! result =
+            runArgumentListTextResult
+                stdoutLimitBytes
+                stderrLimitBytes
+                context
+                fileName
+                arguments
+                workingDirectory
+
+        return
+            match result with
+            | Ok stdout -> Some stdout
+            | Error _ -> None
+    }

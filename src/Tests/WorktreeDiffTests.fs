@@ -113,6 +113,12 @@ let private initializeDiffRepo repoDir =
     gitOk repoDir [ "commit"; "-m"; "base files" ]
     gitOk repoDir [ "checkout"; "-b"; "feature" ]
 
+let private sleepCommand (seconds: int) =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+        "powershell", [ "-NoProfile"; "-Command"; $"Start-Sleep -Seconds {seconds}" ]
+    else
+        "sh", [ "-c"; $"sleep {seconds}" ]
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -282,6 +288,165 @@ type ProcessRunnerArgumentListTests() =
         match result with
         | Error(ProcessRunner.StartFailed _) -> ()
         | _ -> Assert.Fail($"Expected start failure, got {result}")
+
+    [<Test>]
+    member _.``text capture decodes UTF-8 stdout and trims trailing whitespace``() =
+        writeText tempDir "utf8.txt" "žluťoučký kůň\n\n"
+        gitOk tempDir [ "add"; "--"; "utf8.txt" ]
+        gitOk tempDir [ "commit"; "-m"; "utf8 content" ]
+
+        let result =
+            ProcessRunner.runArgumentListTextResult
+                1024
+                1024
+                "Test"
+                "git"
+                [ "-C"; tempDir; "show"; "HEAD:utf8.txt" ]
+                None
+            |> TestUtils.runAsync
+
+        let expected: Result<string, string> = Ok "žluťoučký kůň"
+
+        Assert.That(
+            (result = expected),
+            Is.True,
+            $"Expected decoded and trimmed stdout, got {result}"
+        )
+
+    [<Test>]
+    member _.``text capture yields stdout on success and None on a non-zero exit``() =
+        let succeeded =
+            ProcessRunner.runArgumentListText
+                1024
+                1024
+                "Test"
+                "git"
+                [ "-C"; tempDir; "rev-parse"; "--is-inside-work-tree" ]
+                None
+            |> TestUtils.runAsync
+
+        let failed =
+            ProcessRunner.runArgumentListText
+                1024
+                1024
+                "Test"
+                "git"
+                [ "-C"; tempDir; "rev-parse"; "--verify"; "refs/heads/missing" ]
+                None
+            |> TestUtils.runAsync
+
+        let expectedFailure: string option = None
+
+        Assert.Multiple(fun () ->
+            Assert.That(succeeded, Is.EqualTo(Some "true"))
+            Assert.That(failed, Is.EqualTo(expectedFailure)))
+
+    [<Test>]
+    member _.``text capture returns decoded stderr for a non-zero exit``() =
+        let result =
+            ProcessRunner.runArgumentListTextResult
+                1024
+                1024
+                "Test"
+                "git"
+                [ "-C"; tempDir; "cat-file"; "-p"; "definitely-not-an-object" ]
+                None
+            |> TestUtils.runAsync
+
+        match result with
+        | Ok stdout -> Assert.Fail($"Expected a non-zero exit, got stdout '{stdout}'")
+        | Error error ->
+            Assert.That(error, Does.StartWith("fatal:"), $"Expected Git stderr, got '{error}'")
+
+    [<Test>]
+    member _.``text capture maps a missing executable to a start failure message``() =
+        let result =
+            ProcessRunner.runArgumentListTextResult
+                1024
+                1024
+                "Test"
+                $"missing-executable-{Guid.NewGuid():N}"
+                []
+                None
+            |> TestUtils.runAsync
+
+        match result with
+        | Ok stdout -> Assert.Fail($"Expected a start failure, got stdout '{stdout}'")
+        | Error error ->
+            Assert.That(
+                error,
+                Does.StartWith("Failed to start process:"),
+                $"Expected a start failure message, got '{error}'"
+            )
+
+    [<Test>]
+    member _.``text capture maps a timeout to a message naming the configured timeout``() =
+        let fileName, arguments = sleepCommand 30
+
+        let result =
+            ProcessRunner.runArgumentListTextResultWithTimeout
+                2_000
+                1024
+                1024
+                "Test"
+                fileName
+                arguments
+                None
+            |> TestUtils.runAsync
+
+        let expected: Result<string, string> = Error "Timed out after 2000ms"
+
+        Assert.That(
+            (result = expected),
+            Is.True,
+            $"Expected the mapped timeout message, got {result}"
+        )
+
+    [<Test>]
+    member _.``text capture maps a stdout capture limit to its own message``() =
+        writeText tempDir "large.txt" (String('x', 4096))
+        gitOk tempDir [ "add"; "--"; "large.txt" ]
+        gitOk tempDir [ "commit"; "-m"; "large output" ]
+
+        let result =
+            ProcessRunner.runArgumentListTextResult
+                16
+                1024
+                "Test"
+                "git"
+                [ "-C"; tempDir; "show"; "HEAD:large.txt" ]
+                None
+            |> TestUtils.runAsync
+
+        let expected: Result<string, string> =
+            Error "Standard output exceeded its capture limit"
+
+        Assert.That(
+            (result = expected),
+            Is.True,
+            $"Expected the mapped stdout limit message, got {result}"
+        )
+
+    [<Test>]
+    member _.``text capture maps a stderr capture limit to its own message``() =
+        let result =
+            ProcessRunner.runArgumentListTextResult
+                1024
+                1
+                "Test"
+                "git"
+                [ "not-a-real-git-command" ]
+                None
+            |> TestUtils.runAsync
+
+        let expected: Result<string, string> =
+            Error "Standard error exceeded its capture limit"
+
+        Assert.That(
+            (result = expected),
+            Is.True,
+            $"Expected the mapped stderr limit message, got {result}"
+        )
 
 [<TestFixture>]
 [<Category("Unit")>]
