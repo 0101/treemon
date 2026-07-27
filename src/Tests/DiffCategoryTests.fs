@@ -332,23 +332,9 @@ type DiffCategoryE2ETests() =
                               None
                               "modified"
                               [ "Production code" ] |] |]
-            // The route callback owns the sequence of summaries served to Refresh.
-            let mutable summaryIndex = 0
 
             do! this.RouteHighlighter()
-            do!
-                this.Page.RouteAsync(
-                    "**/diff-summary?*",
-                    fun route ->
-                        let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
-                        summaryIndex <- summaryIndex + 1
-                        route.FulfillAsync(
-                            RouteFulfillOptions(
-                                ContentType = "application/json",
-                                Body = body
-                            )
-                        )
-                )
+            do! this.RouteSummaries(summaries)
             do! this.RouteFiles()
             do! this.Goto()
             do!
@@ -624,22 +610,7 @@ type DiffCategoryE2ETests() =
                    configuredSummaryJson (
                        Array.append (categoryFiles [ "Tests" ] 1) (categoryFiles [] 5)
                    ) |]
-            // The route callback owns the sequence of summaries served to Refresh.
-            let mutable summaryIndex = 0
-
-            do!
-                this.Page.RouteAsync(
-                    "**/diff-summary?*",
-                    fun route ->
-                        let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
-                        summaryIndex <- summaryIndex + 1
-                        route.FulfillAsync(
-                            RouteFulfillOptions(
-                                ContentType = "application/json",
-                                Body = body
-                            )
-                        )
-                )
+            do! this.RouteSummaries(summaries)
             do! this.Goto()
             do! this.Page.Locator(".category-entry").Nth(1).WaitForAsync()
 
@@ -750,21 +721,8 @@ type DiffCategoryE2ETests() =
             // Load, Refresh, layer-filter change, Refresh: Docs disappears from the third summary
             // and returns in the fourth.
             let summaries = [| full; full; withoutDocs; full |]
-            let mutable summaryIndex = 0
 
-            do!
-                this.Page.RouteAsync(
-                    "**/diff-summary?*",
-                    fun route ->
-                        let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
-                        summaryIndex <- summaryIndex + 1
-                        route.FulfillAsync(
-                            RouteFulfillOptions(
-                                ContentType = "application/json",
-                                Body = body
-                            )
-                        )
-                )
+            do! this.RouteSummaries(summaries)
             do! this.Goto()
             do! this.Page.Locator(".category-entry").Nth(4).WaitForAsync()
 

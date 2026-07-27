@@ -237,6 +237,27 @@ type DiffViewerHarness() =
     member this.RouteSummary(body) =
         this.RouteBody("**/diff-summary?*", "application/json", body)
 
+    /// Serves `summaries` one per summary request, in order, so a test can script what Load, each
+    /// Refresh and a reload see. The last entry keeps answering once the list is exhausted.
+    member this.RouteSummaries(summaries: string array) =
+        // Playwright calls the route handler once per request and gives it nowhere to carry a
+        // position, so the cursor into the scripted sequence has to survive between invocations.
+        let mutable summaryIndex = 0
+
+        this.Page.RouteAsync(
+            "**/diff-summary?*",
+            fun (route: IRoute) ->
+                let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
+                summaryIndex <- summaryIndex + 1
+
+                route.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = body
+                    )
+                )
+        )
+
     member this.RouteFiles() =
         this.Page.RouteAsync(
             "**/diff-file?*",

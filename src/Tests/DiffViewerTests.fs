@@ -2135,30 +2135,19 @@ type DiffViewerE2ETests() =
                     secondFile.oldDisplayPath
                     secondFile.change
 
+            // Load, Refresh, layer-filter change and reload each serve fresh identities for the
+            // same two files.
             let summaries =
                 [| readySummaryJson [| firstFile; secondFile |]
                    readySummaryJson [| refreshedFirstFile; refreshedSecondFile |]
                    readySummaryJson [| refreshedFirstFile; filteredSecondFile |]
                    readySummaryJson [| refreshedFirstFile; reloadedSecondFile |] |]
-            // The route callback owns the sequence of refreshed identity snapshots.
-            let mutable summaryIndex = 0
+
             let fileRequests =
                 System.Collections.Concurrent.ConcurrentQueue<string>()
 
             do! this.RouteHighlighter()
-            do!
-                this.Page.RouteAsync(
-                    "**/diff-summary?*",
-                    fun route ->
-                        let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
-                        summaryIndex <- summaryIndex + 1
-                        route.FulfillAsync(
-                            RouteFulfillOptions(
-                                ContentType = "application/json",
-                                Body = body
-                            )
-                        )
-                )
+            do! this.RouteSummaries(summaries)
             do!
                 this.Page.RouteAsync(
                     "**/diff-file?*",
