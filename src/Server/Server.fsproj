@@ -23,6 +23,7 @@
     <Compile Include="SessionManager.fs" />
     <Compile Include="GlobalConfig.fs" />
     <Compile Include="TreemonConfig.fs" />
+    <Compile Include="DiffCategories.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="WorktreeDiff.fs" />
     <Compile Include="WorktreeDiffApi.fs" />
