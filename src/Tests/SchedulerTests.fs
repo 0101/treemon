@@ -99,7 +99,8 @@ type RefreshGitTaskTests() =
             let services =
                 { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
                   ActivityStore = None
-                  MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json")) }
+                  MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json"))
+                  AutoSyncStore = Server.AutoSyncStore.create (Path.Combine(tempDir, "auto-sync.json")) }
 
             do!
                 executeTask
@@ -212,7 +213,7 @@ type PrRefreshAutoSyncCleanupTests() =
           MainBehindCount = 3
           BaseRevision = Some "base-a"
           IsDirty = false
-          HasDiff = false
+          Comparison = Clean
           WorkMetrics = None }
 
     [<Test>]

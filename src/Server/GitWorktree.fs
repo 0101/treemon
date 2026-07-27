@@ -445,7 +445,7 @@ let private mergeFetchedBase worktreePath revision =
     }
 
 /// Treemon's own bounded sync of a worktree onto its base branch, for when no coding session is open
-/// to do it. It refuses a worktree holding local work, fetches that worktree's own base rather than
+/// to do it. It merges only a worktree proven clean, fetches that worktree's own base rather than
 /// the repo root's (`fetchUpstream` also fast-forwards the base worktree, an unrelated side effect),
 /// prefers a fast-forward over a merge commit, aborts a conflict it created, and confirms the fetched
 /// revision actually reached `HEAD` instead of trusting an exit code.
@@ -453,10 +453,15 @@ let syncWithBase (worktreePath: string) (upstreamRemote: string) (baseBranch: st
     async {
         let! result =
             asyncResult {
-                let! dirty = hasLocalDiff worktreePath
+                let! localContent = localComparisonContent worktreePath
 
-                if dirty then
-                    return! Error BranchSyncOutcome.RefusedDirty
+                // An unreadable working tree is not an empty one, so a probe that could not answer
+                // fails to the agent path rather than merging over work it cannot see.
+                do!
+                    match localContent with
+                    | Clean -> Ok()
+                    | HasContent -> Error BranchSyncOutcome.RefusedDirty
+                    | Undetermined -> Error BranchSyncOutcome.CommandFailed
 
                 let! fetchExit =
                     branchSyncExitCode
