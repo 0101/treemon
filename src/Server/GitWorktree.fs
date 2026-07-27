@@ -702,7 +702,10 @@ let private worktreeDir (repoRoot: string) (branchName: string) =
 /// forked branch has no remote of its own yet, so it correctly starts with no upstream.
 let resolveWorktreeCommand (repoRoot: string) (baseRef: string) (branchName: string) =
     let worktreePath = worktreeDir repoRoot branchName
-    let arguments = $"-C \"{repoRoot}\" worktree add -b \"{branchName}\" --no-track \"{worktreePath}\" \"{baseRef}\""
+
+    let arguments =
+        [ "-C"; repoRoot; "worktree"; "add"; "-b"; branchName; "--no-track"; worktreePath; baseRef ]
+
     "git", arguments, worktreePath
 
 let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
@@ -716,6 +719,11 @@ let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
 /// past this cap is treated as a failure (surfaced on the card) rather than
 /// blocking the auto-launch indefinitely.
 let private postForkTimeoutMs = 5 * 60 * 1000
+
+/// The hook runs project setup (`npm install`, `bd init`), whose stdout is unbounded build chatter;
+/// stderr only carries the failure message surfaced on the card.
+let private postForkStdoutLimitBytes = 16 * 1024 * 1024
+let private postForkStderrLimitBytes = 64 * 1024
 
 /// Card label for the post-fork setup hook. Single source of truth for the
 /// OS-specific script name so file resolution always tracks the hook.
@@ -742,11 +750,20 @@ let runPostForkWithTimeout (timeoutMs: int) (repoRoot: string) (worktreePath: st
         | Some scriptPath ->
             let fileName, arguments =
                 if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
-                    "pwsh", $"-NoProfile -File \"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
+                    "pwsh", [ "-NoProfile"; "-File"; scriptPath; worktreePath; repoRoot; baseRef; branchName ]
                 else
-                    "bash", $"\"{scriptPath}\" \"{worktreePath}\" \"{repoRoot}\" \"{baseRef}\" \"{branchName}\""
+                    "bash", [ scriptPath; worktreePath; repoRoot; baseRef; branchName ]
 
-            let! result = ProcessRunner.runResultWithTimeout timeoutMs "PostFork" fileName arguments (Some worktreePath)
+            let! result =
+                ProcessRunner.runArgumentListTextResultWithTimeout
+                    timeoutMs
+                    postForkStdoutLimitBytes
+                    postForkStderrLimitBytes
+                    "PostFork"
+                    fileName
+                    arguments
+                    (Some worktreePath)
+
             return result |> Result.map ignore
     }
 
@@ -777,7 +794,13 @@ let forkWorktree (repoRoot: string) (baseBranch: string) (branchName: string) : 
         let fileName, arguments, worktreePath = resolveWorktreeCommand repoRoot baseRef name
 
         do!
-            ProcessRunner.runResult "CreateWorktree" fileName arguments None
+            ProcessRunner.runArgumentListTextResult
+                gitStdoutLimitBytes
+                gitStderrLimitBytes
+                "CreateWorktree"
+                fileName
+                arguments
+                None
             |> AsyncResult.ignore
 
         let legacyScriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
