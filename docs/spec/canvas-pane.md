@@ -152,7 +152,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds
   receive the shared base style, link interceptor, Escape focus-reclaim bridge, `canvasSend`, and
   selected-text actions. An `AgentDoc` additionally receives the author heartbeat, `canvasExpand`,
-  JS error reporting, idiomorph, and the morph controller.
+  JS error reporting, idiomorph, and the morph controller with its changed-content highlight style.
 - `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
 - If no `<head>` close tag exists, the injected content is prepended.
 - Running the docs on `:5002` isolates doc JavaScript from the app API on `:5000`.
@@ -172,6 +172,45 @@ Three layers of state preservation:
 **Level 3 — Canvas-wide iframe morph (general case):**
 - On `contentHash` change, the open doc morphs in place (via injected idiomorph) instead of reloading the iframe, so scroll position, focused elements, and in-progress inputs stay intact. The client sends a `content-updated` postMessage on hash change and keeps the iframe `src` stable rather than reloading it.
 - Applies to `AgentDoc` docs only — a `SystemView` is served without the morph runtime and is never sent a morph signal, because it self-refreshes from its own data endpoint (see Canvas Doc Kinds).
+
+**Changed-content highlight.** Preserving scroll makes an update easy to miss, so the morph marks
+what it changed. `src/Extension/canvas-morph.js` wraps `Idiomorph.morph` in a `MutationObserver`;
+because idiomorph writes a node only when its value actually differs, the resulting records *are*
+the diff. Each is promoted to its nearest block, deduplicated, and given the `canvas-updated` class
+(yellow `#f9e2af` at `.22`, the same colour worktree-card canvas notifications and the diff viewer's
+changed rows already use).
+
+- **No expiry.** Idiomorph reconciles every matched element's attributes against the file on the
+  next morph, which strips the class by itself — so the highlight lasts exactly until the next edit
+  with no timer. The class is applied *after* `Idiomorph.morph` returns, or that same sync would
+  strip it immediately.
+- **Attribute changes count too.** An update that only swaps an `src`, an `href`, or an input's
+  state produces no `childList` or `characterData` record, so ignoring attributes would make a real
+  edit indistinguishable from a no-op and re-apply the previous edit's tint. Idiomorph stripping our
+  own `canvas-updated` class is itself an attribute mutation, so `class` records are compared with
+  that class removed from both sides; our own writes need no filter because they run after the
+  observer is disconnected.
+- **A morph that changes nothing re-applies the previous set.** Tab switching dispatches
+  `MorphActiveDoc` unconditionally (see Decisions), so without this a tab switch would clear a
+  highlight no edit had superseded. A morph that *does* change something but leaves nothing to tint
+  — a pure deletion — clears instead, so the tint never marks content the latest edit did not touch.
+- **Whitespace-only and comment changes are ignored**, both as edited text and as nodes *inserted*
+  between blocks — a whole-file rewrite that only re-indents otherwise reports most of the doc as
+  changed.
+- **A flood highlights nothing.** Past 60% of the doc's blocks the edit is a rewrite, and tinting
+  everything says nothing. The numerator is *block coverage* — each hit plus every block it contains
+  — not hit count: a freshly populated wrapper arrives as a single record because its descendants
+  were assembled while detached, so counting hits would let a whole-doc rewrite slip under the
+  threshold and tint the entire document through that one wrapper. Both sides of the ratio count
+  blocks at *any* depth: measuring hits (which land on the nearest block, however deeply nested)
+  against only the top-level children compares different populations, can exceed 1, and would
+  suppress ordinary edits — permanently so for a doc wrapped in a single container.
+- **Only the newest signal's response is applied.** Signals can overlap (a tab re-select racing a
+  poll delta), and two fetches have no completion order, so a generation counter drops superseded
+  responses rather than morphing the doc back to older content.
+- **Fresh loads are not covered.** The highlight is computed during a morph, so a doc opened fresh
+  (first open, worktree switch, past the 3-iframe LRU cap, or after a restart) shows none even if it
+  changed. Accepted limitation; closing it would mean snapshotting each doc's last-seen body.
 
 **Level 4 — Tab switch persistence:**
 - When switching between canvas doc tabs in the same worktree, keep the previous iframe mounted but hidden (`display: none`) instead of unmounting it.
@@ -216,6 +255,9 @@ Three layers of state preservation:
 | `src/Server/BeadspaceTemplate.html` | Beadspace dashboard HTML — single source of truth (embedded into the Server assembly) |
 | `src/Server/Program.fs` | Canvas register endpoint, bridge status endpoint, doc server, HTML injection, heartbeat route |
 | `src/Server/PathUtils.fs` | Canvas path normalization and validation |
+| `src/Server/IdiomorphScript.fs` | Vendored idiomorph runtime (library only — the controller lives in `CanvasMorphScript.fs`) |
+| `src/Server/CanvasMorphScript.fs` | Morph controller injection: the embedded `canvas-morph.js` source plus the `canvas-updated` highlight style |
+| `src/Extension/canvas-morph.js` | Morph controller — reacts to `content-updated`, morphs the body via idiomorph, and marks the blocks the morph changed |
 | `src/Extension/extension.mjs`, `session-prompt.mjs` | Session bridge registration, `/inject` server, typed prompt-transport decoding, heartbeat, and reconnect backoff |
 | `src/Extension/skill/SKILL.md` | Authoring contract for agent-created canvas docs |
 
@@ -228,7 +270,7 @@ Three layers of state preservation:
 - **`CanvasSendState` DU** — send state is `Idle`, `Waiting of scopedKey`, or `Failed of message`, avoiding illegal combinations of optional fields. `Waiting` carries **only** the target worktree's `scopedKey` (`WorktreePath.value`, the same key space as `agentChangedDocs`); the earlier `queuedAt` timestamp and the wall-clock failure timer were removed (Finding C-02) because a queued message lives in the server-side queue and is delivered when its *target* session registers, so `Waiting` is cleared on delivery (`clearWaitingOnDelivery`) and is never reported as a failure on a timer. `CanvasSendResult` likewise dropped its `now` argument, removing two `Date.now()` reads from the send command and keeping `update` wall-clock-free.
 - **Kind-split routing** — an AgentDoc persists its author `sessionId` and only AgentDocs expose it for liveness UI; a SystemView stores nothing and resolves its target per interaction from live session activity.
 - **Two canvas doc kinds** — `CanvasDoc.Kind` (`AgentDoc | SystemView`, classified by filename in `CanvasScanner`) gates authored-document machinery. A `SystemView` opts out of author liveness, Start-session, morph, content-hash awareness, and archiving, but participates in generic selected-text interactions through resolved routing. It gets a distinct far-left `.canvas-system-tab` affordance instead of a normal doc tab.
-- **Tab switch lazy morph** — when switching to a previously hidden iframe, unconditionally dispatch `MorphActiveDoc` so the morph controller fetches fresh content. If the content hasn't changed, idiomorph diffs to zero changes (no-op). This avoids tracking per-iframe content hashes while keeping hidden iframes up to date.
+- **Tab switch lazy morph** — when switching to a previously hidden iframe, unconditionally dispatch `MorphActiveDoc` so the morph controller fetches fresh content. If the content hasn't changed, idiomorph diffs to zero changes (no-op). This avoids tracking per-iframe content hashes while keeping hidden iframes up to date. Because the same no-op morph still resyncs attributes from the file, the changed-content highlight re-applies its previous target set when a morph produced no mutations — otherwise switching tabs would clear it.
 - **`Model`+`Msg` lifted into `AppTypes.fs`** — the Elmish `Model` and `Msg` types, plus the shared plumbing the canvas update arms need (`worktreeApi`, `findWorktree`, `saveCollapsedReposCmd`), live in `src/Client/AppTypes.fs` (compiled after `CanvasState.fs`, before `CanvasUpdate.fs`/`App.fs`). This is a pure type/value relocation that creates a compile-order seam: the canvas update arms are extracted into `CanvasUpdate.fs` (compiled between `AppTypes.fs` and `App.fs`) without a cyclic reference, while `update` remains a single function in `App.fs` (no sub-`Msg`/`Cmd.map` split). Consumers that previously reached these via `open App` (three test files) add `open AppTypes`; nothing references them by `App.`-qualified name (the activity helper once at `App.computeActivityLevel` now lives in `ActivityState.fs`).
 - **Canvas `update` arms extracted into `CanvasUpdate.fs`** — the canvas `update`-arm bodies (`ToggleCanvasPane`, `SetCanvasPosition`, `SelectCanvasDoc`, `OpenCanvasDoc`, `ArchiveCanvasDoc`, `ArchiveCanvasDocResult`, `ShareCanvasDoc`, `ShareCanvasDocResult`, `ClipboardWriteResult`, `DismissShareNotice`, `NavigateCanvasDoc`, `CanvasMessageReceived`, `CanvasSendResult`, `DismissCanvasMessageError`, `LaunchCanvasSession`, `MorphActiveDoc`, `MorphComplete`), the shared canvas helpers (`activeVisibleDoc`, `isKnownCanvasDoc`, `markVisibleDocCmd`), and the `messageListener` subscription glue move to `src/Client/CanvasUpdate.fs` (compiled after `AppTypes.fs`, before `App.fs`). Each canvas arm in `App.fs` is now a one-line delegation (`| ToggleCanvasPane -> CanvasUpdate.toggleCanvasPane model`). This is **body extraction**, not a `Cmd.map` sub-component split: `update` stays a single function over the flat `Msg`, and each helper takes the whole `Model` and returns `Model * Cmd<Msg>` (data-last `model` parameter). `FocusOverviewCard` stays inline in `App.fs` — it is an overview-card focus arm, not a doc/morph/archive arm, and is outside the moved set. The `isKnownCanvasDoc` consumer in the tests adds `open CanvasUpdate`. Realized line counts: `App.fs` 2015 → 1861 (canvas update logic, ~150 lines, removed); it does **not** reach `main` size (1635) because the canvas **view** code (`canvasEventEntry`, `canvasEventLog`, `focusedWorktreeCanvasDoc`, and the pane-view dispatch wiring) and the canvas params threaded through `worktreeCard`/`renderCard`/`repoSection` remain — a separate view extraction, since completed. The stale "~430 lines / main size" estimate in the original task conflated this deferred view extraction with the update-arm extraction; only the update arms are in scope here. The structural gate (each canvas arm is a one-line delegation; bodies live in `CanvasUpdate.fs`) is what proves the extraction.
 - **Canvas model slice as a nested record** — the canvas Model-field group is extracted as a nested record `Canvas: CanvasState.CanvasState` on `App.Model` (mirroring the existing `CreateModal`/`ConfirmModal` nesting precedent). The four pure helpers (`touchVisitedDoc`, `canvasDocKind`, `activeVisibleDoc`, `markVisibleDocCmd`) plus the `MaxLiveIframes` literal live in `src/Client/CanvasState.fs` (compiled before `App.fs`); they take pure slices (`repos`/`focused`/`activeCanvasDoc`) rather than the whole `Model`, and `markVisibleDocCmd` is parameterized over the message constructor so the module needs no concrete `Msg` type. Thin `App.fs` wrappers keep `update` call sites unchanged. This is field-path nesting only — **not** the larger `Cmd.map` sub-component split (no sub-`Msg`/sub-`update`; `update` stays one function), which is out of scope.

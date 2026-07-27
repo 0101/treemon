@@ -372,7 +372,8 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
         + CanvasSelectionScript.script
         + errorOverlayScript filename
         + IdiomorphScript.idiomorphJs
-        + IdiomorphScript.morphController
+        + CanvasMorphScript.style
+        + CanvasMorphScript.script
 
 let private handleCanvasRequest
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)

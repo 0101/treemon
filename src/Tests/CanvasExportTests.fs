@@ -71,7 +71,7 @@ type StaticExportInjectionTests() =
         let html = buildStaticHtml sampleDoc
         Assert.That(html, Does.Not.Contain(Server.IdiomorphScript.idiomorphJs),
                     "a standalone doc never morphs, so the idiomorph runtime is omitted")
-        Assert.That(html, Does.Not.Contain(Server.IdiomorphScript.morphController),
+        Assert.That(html, Does.Not.Contain(Server.CanvasMorphScript.script),
                     "a standalone doc never morphs, so the morph controller is omitted")
 
     [<Test>]

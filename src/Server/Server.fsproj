@@ -61,6 +61,7 @@
     <Compile Include="OverviewSnapshotCapture.fs" />
     <Compile Include="IdiomorphScript.fs" />
     <Compile Include="CanvasSendScript.fs" />
+    <Compile Include="CanvasMorphScript.fs" />
     <Compile Include="CanvasSelectionScript.fs" />
     <Compile Include="HttpSecurity.fs" />
     <Compile Include="CanvasDocServer.fs" />
@@ -93,6 +94,9 @@
     </EmbeddedResource>
     <EmbeddedResource Include="..\Extension\canvas-send.js">
       <LogicalName>CanvasSend.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-morph.js">
+      <LogicalName>CanvasMorph.js</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="..\Extension\canvas-doc-kinds.json">
       <LogicalName>CanvasDocKinds.json</LogicalName>
