@@ -300,16 +300,22 @@ let private headBranch (pr: JsonElement) =
 /// review threads, workflow runs, or mergeability - because the push decision needs presence and
 /// nothing else. The `owner:branch` head filter makes GitHub do the filtering, so a response holding
 /// any other branch means the filter did not apply and the state stays unknown.
-let internal openPrQueryArgs (remote: GithubRemote) (branch: string) =
+///
+/// `headOwner` is the account whose repository *holds* the branch, which in a fork workflow is the
+/// fork and not `remote`, the repository the pull request targets. Filtering under the target's
+/// owner would answer an empty list for every fork-origin pull request, and an empty list is a
+/// confirmed absence - so the owner is resolved from git's own record of the branch
+/// (`PrStatus.resolveHeadOwner`) rather than assumed here.
+let internal openPrQueryArgs (remote: GithubRemote) (headOwner: string) (branch: string) =
     [ "api"
-      $"/repos/{remote.Owner}/{remote.Repo}/pulls?state=open&head={Uri.EscapeDataString(remote.Owner)}:{Uri.EscapeDataString(branch)}&per_page=1" ]
+      $"/repos/{remote.Owner}/{remote.Repo}/pulls?state=open&head={Uri.EscapeDataString(headOwner)}:{Uri.EscapeDataString(branch)}&per_page=1" ]
 
 let internal parseOpenPrState (branch: string) (json: string) =
     classifyResponse "GH" headBranch branch json
 
-let queryOpenPrState (remote: GithubRemote) (branch: string) =
+let queryOpenPrState (remote: GithubRemote) (headOwner: string) (branch: string) =
     async {
-        match! runQuery "GH" "gh" (openPrQueryArgs remote branch) with
+        match! runQuery "GH" "gh" (openPrQueryArgs remote headOwner branch) with
         | Ok response -> return parseOpenPrState branch response
         | Error state -> return state
     }

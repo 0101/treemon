@@ -260,27 +260,39 @@ type GithubOpenPrQueryTests() =
 
     let remote = { Owner = "testowner"; Repo = "testrepo" }
     let branch = "feature/sync"
-    let queryPath () = openPrQueryArgs remote branch |> List.last
+    let queryPath headOwner = openPrQueryArgs remote headOwner branch |> List.last
 
     [<Test>]
     member _.``Query asks GitHub for open pull requests headed by the branch``() =
-        let path = queryPath ()
+        let path = queryPath "testowner"
         Assert.That(path, Does.Contain("/repos/testowner/testrepo/pulls?"))
         Assert.That(path, Does.Contain("state=open"))
         Assert.That(path, Does.Contain("head=testowner:feature%2Fsync"))
 
     [<Test>]
+    member _.``Query asks the target repository for a head branch owned by a fork``() =
+        let path = queryPath "forkowner"
+        Assert.That(path, Does.Contain("/repos/testowner/testrepo/pulls?"))
+        Assert.That(path, Does.Contain("head=forkowner:feature%2Fsync"))
+        Assert.That(path, Does.Not.Contain("head=testowner:"))
+
+    [<Test>]
     member _.``Query asks for no comments, builds, or mergeability``() =
-        let args = openPrQueryArgs remote branch
+        let args = openPrQueryArgs remote "testowner" branch
         let command = String.concat " " args
         Assert.That(command, Does.Not.Contain("graphql"))
         Assert.That(command, Does.Not.Contain("actions"))
         Assert.That(command, Does.Not.Match(@"/pulls/\d"))
-        Assert.That(queryPath (), Does.Contain("per_page=1"))
+        Assert.That(queryPath "testowner", Does.Contain("per_page=1"))
 
     [<Test>]
     member _.``An open pull request on the branch is reported as open``() =
         let state = readFixture "open-pr-for-branch.json" |> parseOpenPrState branch
+        Assert.That(state, Is.EqualTo(OpenPr))
+
+    [<Test>]
+    member _.``An open pull request headed by a fork of the repository is reported as open``() =
+        let state = readFixture "fork-open-pr-for-branch.json" |> parseOpenPrState branch
         Assert.That(state, Is.EqualTo(OpenPr))
 
     [<Test>]
