@@ -175,7 +175,7 @@ type ProcessRunnerArgumentListTests() =
         | Error error -> Assert.Fail($"Expected process output, got {error}")
 
     [<Test>]
-    member _.``stdout capture reports its byte limit instead of returning a prefix``() =
+    member _.``stdout capture returns its bounded prefix with truncation metadata``() =
         writeText tempDir "large.txt" (String('x', 4096))
         gitOk tempDir [ "add"; "--"; "large.txt" ]
         gitOk tempDir [ "commit"; "-m"; "large output" ]

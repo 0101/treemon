@@ -29,11 +29,13 @@ Interactive UI launches (terminal, editor) are a different concern and are **not
   exited, so its exit code is preserved and each caller decides whether the missing bytes matter.
 - Timeout cancellation kills the complete process tree and returns `TimedOut`.
 - Byte-oriented callers receive exit code, raw stdout/stderr, and which streams were truncated.
-  The `Result`-returning text and exit-code wrappers receive UTF-8-decoded, trailing-whitespace-trimmed
-  stdout on exit 0 and trimmed stderr (or a described runner failure) on a non-zero exit; the
+  The `Result`-returning text wrappers receive UTF-8-decoded, trailing-whitespace-trimmed stdout on
+  exit 0 and trimmed stderr (or a described runner failure) on a non-zero exit; the
   `option`-returning `runArgumentListText` collapses any non-zero exit or runner failure to `None`.
-  A text wrapper additionally fails when the stdout it would return was truncated, because its
-  callers parse that string; the exit-code wrappers never do, because they discard the output.
+  The exit-code wrappers return `unit` on exit 0 and trimmed stderr (or a described runner failure)
+  on a non-zero exit. A text wrapper additionally fails when the stdout it would return was
+  truncated, because its callers parse that string; the exit-code wrappers never do, because they
+  discard the output.
 - Background refresh commands use the 60 s default, request-serving diff commands share a monotonic
   10 s response deadline, and the post-fork hook uses its explicit 5-minute cap.
 
@@ -84,9 +86,11 @@ provide that shared behavior:
 | `runArgumentListExitResultWithTimeout` | Explicit `timeoutMs` | `Async<Result<unit, string>>` |
 
 All five take explicit stdout/stderr byte limits and delegate to
-`runArgumentListWithTimeout`. They decode with `Encoding.UTF8.GetString` (replacement fallback for
-invalid sequences) and apply `TrimEnd`, matching the status collectors' text contract. The diff
-viewer retains its strict UTF-8 decoder because malformed machine output is a domain error there.
+`runArgumentListWithTimeout`. The text wrappers decode stdout or stderr with
+`Encoding.UTF8.GetString` (replacement fallback for invalid sequences) and apply `TrimEnd`,
+matching the status collectors' text contract. The exit-code wrappers decode and trim stderr only
+for a non-zero exit. The diff viewer retains its strict UTF-8 decoder because malformed machine
+output is a domain error there.
 
 The text wrappers return stdout, so a truncated stdout capture is an `Error` — a prefix would read
 as a complete answer to the parser consuming it. The `Exit` wrappers return `unit`: they exist for
