@@ -5,6 +5,7 @@
     "state": "closed",
     "draft": false,
     "merged_at": "2026-02-20T10:00:00Z",
+    "auto_merge": { "merge_method": "squash", "enabled_by": { "login": "octocat" } },
     "head": { "ref": "feature/merged-branch", "sha": "sha-merged-branch" }
   },
   {
@@ -13,6 +14,7 @@
     "state": "open",
     "draft": true,
     "merged_at": null,
+    "auto_merge": null,
     "head": { "ref": "feature/draft-work", "sha": "sha-draft-work" }
   }
 ]

@@ -32,7 +32,8 @@ type internal ParsedGithubPr =
       PrNumber: int
       Title: string
       IsDraft: bool
-      IsMerged: bool }
+      IsMerged: bool
+      AutoMergeEnabled: bool }
 
 let internal parsePrList (json: string) =
     try
@@ -53,7 +54,8 @@ let internal parsePrList (json: string) =
                       PrNumber = number
                       Title = title
                       IsDraft = isDraft
-                      IsMerged = isMerged })
+                      IsMerged = isMerged
+                      AutoMergeEnabled = not isMerged && (el |> tryProp "auto_merge" |> Option.isSome) })
     with ex ->
         Log.log "GH" $"Failed to parse GitHub PR list JSON: {ex.Message}"
         []
@@ -284,6 +286,7 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                                   Comments = threadCounts
                                   Builds = builds
                                   IsMerged = pr.IsMerged
+                                  AutoMergeEnabled = pr.AutoMergeEnabled
                                   HasConflicts = hasConflicts },
                              pr.HeadSha)
                     })

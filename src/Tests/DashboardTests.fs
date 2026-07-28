@@ -423,6 +423,22 @@ type DashboardTests() =
         }
 
     [<Test>]
+    member this.``Auto-merge icon renders only on the PR badge that has auto-merge set``() =
+        task {
+            let autoMergeIcons = this.Page.Locator(".wt-card .pr-badge .pr-icon.auto-merge")
+            do! autoMergeIcons.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! count = autoMergeIcons.CountAsync()
+            Assert.That(count, Is.EqualTo(1), "Fixture has exactly one PR with auto-merge enabled")
+
+            let badge = this.Page.Locator(".wt-card .pr-badge:has(.pr-icon.auto-merge)")
+            let! badgeText = badge.First.TextContentAsync()
+            Assert.That(badgeText, Does.Contain("PR #102"))
+
+            let! tooltip = autoMergeIcons.First.Locator("title").TextContentAsync()
+            Assert.That(tooltip, Does.Contain("Auto-merge"))
+        }
+
+    [<Test>]
     member this.``Beads counts are plain numbers with correct CSS classes``() =
         task {
             let beadsCounts = this.Page.Locator(".wt-card .beads-counts").First

@@ -13,6 +13,7 @@
     "state": "open",
     "draft": false,
     "merged_at": null,
+    "auto_merge": { "merge_method": "squash", "enabled_by": { "login": "octocat" } },
     "head": { "ref": "test/add-health-endpoint", "sha": "sha-health-endpoint" }
   }
 ]

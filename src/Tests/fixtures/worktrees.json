@@ -40,6 +40,7 @@
                   }
                 ],
                 "IsMerged": false,
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },
@@ -74,6 +75,7 @@
                   }
                 ],
                 "IsMerged": false,
+                "AutoMergeEnabled": true,
                 "HasConflicts": false
               }
             },
@@ -136,6 +138,7 @@
                   }
                 ],
                 "IsMerged": true,
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },
@@ -176,6 +179,7 @@
                   }
                 ],
                 "IsMerged": false,
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },
@@ -253,6 +257,7 @@
                   }
                 ],
                 "IsMerged": false,
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },
@@ -288,6 +293,7 @@
                   }
                 ],
                 "IsMerged": false,
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },

@@ -168,6 +168,9 @@ and PrInfo =
       Comments: CommentSummary
       Builds: BuildInfo list
       IsMerged: bool
+      /// GitHub auto-merge or AzDo auto-complete is set: the provider merges the PR on its own
+      /// once the remaining checks and policies pass. Always `false` for merged PRs.
+      AutoMergeEnabled: bool
       HasConflicts: bool }
 
 type WorkMetrics =
