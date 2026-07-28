@@ -46,8 +46,10 @@ let private withCategorizationDefaults (json: string) =
         | _ -> false
 
     if isReadySummary && not (root.ContainsKey("categorization")) then
+        let revision = DiffCategories.revision DiffCategories.Missing
+
         root["categorization"] <-
-            JsonNode.Parse("""{"status":"missing","reason":null}""")
+            JsonNode.Parse($"""{{"status":"missing","reason":null,"revision":"{revision}"}}""")
 
     root.ToJsonString()
 

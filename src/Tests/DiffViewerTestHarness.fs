@@ -70,7 +70,19 @@ let readyLayerCounts committed local untracked =
 
 let categorizationJson status reason =
     {| status = status
-       reason = (reason: string option) |}
+       reason = (reason: string option)
+       revision = $"rev-{status}" |}
+
+/// A categorization carrying an explicit revision, for tests that script a configuration changing
+/// while the page is open.
+let categorizationJsonAt status reason revision =
+    {| status = status
+       reason = (reason: string option)
+       revision = (revision: string) |}
+
+/// The serialized body the `diff-categorization` poll answers with.
+let categorizationBody status reason revision =
+    JsonSerializer.Serialize(categorizationJsonAt status reason revision)
 
 let summaryJsonWithCategorization categorization committed local untracked files =
     JsonSerializer.Serialize(
@@ -236,6 +248,28 @@ type DiffViewerHarness() =
 
     member this.RouteSummary(body) =
         this.RouteBody("**/diff-summary?*", "application/json", body)
+
+    /// Answers the categorization poll the configure action watches. `revisions` is served one per
+    /// request, in order, with the last entry answering once the list is exhausted, so a test can
+    /// script "unchanged, unchanged, then rewritten".
+    member this.RouteCategorizations(revisions: string array) =
+        // Same reason as RouteSummaries: Playwright hands the handler no place to carry a cursor.
+        let mutable index = 0
+
+        this.Page.RouteAsync(
+            "**/diff-categorization",
+            fun (route: IRoute) ->
+                let body = revisions[min index (revisions.Length - 1)]
+                index <- index + 1
+
+                route.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "application/json",
+                        Body = body
+                    )
+                )
+                |> ignore
+        )
 
     /// Serves `summaries` one per summary request, in order, so a test can script what Load, each
     /// Refresh and a reload see. The last entry keeps answering once the list is exhausted.

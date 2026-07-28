@@ -244,7 +244,7 @@ type DiffSerializationTests() =
                    { BaseRef = "origin/main"
                      FileCount = 1
                      Files = [ file ] },
-               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed","categoryPath":[]}],"categorization":{"status":"missing","reason":null},"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed","categoryPath":[]}],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.Clean "main",
                """{"status":"clean","baseRef":"main","fileCount":0,"files":[],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.FilteredEmpty,
@@ -285,28 +285,42 @@ type DiffSerializationTests() =
                                 { Name = "Server"
                                   Patterns = [ "src/Server/**" ] } ] } ]
 
+        // Status and reason stay stated as literals rather than derived from `categorization`, which
+        // would just reimplement the serializer under test. The revision is whatever the
+        // configuration hashes to, so it is stated through the same function the server uses; what
+        // the contract fixes is that every state carries one.
+        let expectedCategorization status reason revision =
+            let reasonJson =
+                match reason with
+                | Some text -> $"\"{text}\""
+                | None -> "null"
+
+            $"""{{"status":"{status}","reason":{reasonJson},"revision":"{revision}"}}"""
+
         let cases =
-            [ (DiffCategories.Missing,
-               ready [],
-               """{"status":"missing","reason":null}""",
-               "[]")
+            [ (DiffCategories.Missing, ready [], "missing", None, "[]")
               (configured,
                ready [ "Production code"; "Server" ],
-               """{"status":"configured","reason":null}""",
+               "configured",
+               None,
                """["Production code","Server"]""")
               (DiffCategories.Invalid "each category needs a name",
                ready [],
-               """{"status":"invalid","reason":"each category needs a name"}""",
+               "invalid",
+               Some "each category needs a name",
                "[]") ]
 
         cases
-        |> List.iter (fun (categorization, result, expectedCategorization, expectedPath) ->
+        |> List.iter (fun (categorization, result, status, reason, expectedPath) ->
+            let categorizationJson =
+                expectedCategorization status reason (DiffCategories.revision categorization)
+
             result
             |> WorktreeDiffApi.serializeSummaryResult
                 serializedLayerCounts
                 categorization
             |> assertJson (
-                $"""{{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed","categoryPath":{expectedPath}}}],"categorization":{expectedCategorization}}}"""
+                $"""{{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed","categoryPath":{expectedPath}}}],"categorization":{categorizationJson}}}"""
                 |> withLayerCounts
                     (ExpectedLayerCount.Available 2)
                     (ExpectedLayerCount.Available 3)

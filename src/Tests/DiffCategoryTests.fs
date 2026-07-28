@@ -1134,6 +1134,122 @@ type DiffCategoryE2ETests() =
         }
 
     [<Test>]
+    member this.``activating the configure action shows a spinner and blocks a second request``() =
+        task {
+            do! this.RouteSummary(readySummaryJson [| firstFile |])
+            do!
+                this.RouteCategorizations(
+                    [| categorizationBody "missing" None "rev-missing" |]
+                )
+            do! this.GotoEmbedded(pageUrl)
+
+            let action = this.EmbeddedFrame().Locator(configureSelector)
+            do! action.WaitForAsync()
+
+            let! before =
+                action.EvaluateAsync<string array>(
+                    """action => [
+                        String(action.disabled),
+                        String(action.getAttribute('aria-busy')),
+                        String(getComputedStyle(action.querySelector('.toolbar-icon')).display)
+                    ]"""
+                )
+
+            do! this.ActivateConfigure(action)
+
+            let! during =
+                action.EvaluateAsync<string array>(
+                    """action => [
+                        String(action.disabled),
+                        String(action.getAttribute('aria-busy')),
+                        String(getComputedStyle(action.querySelector('.toolbar-icon')).display),
+                        String(getComputedStyle(action, '::after').animationName),
+                        String(action.title)
+                    ]"""
+                )
+
+            // A disabled control ignores a click, so a second attempt must not reach the transport.
+            do! action.DispatchEventAsync("click")
+            do! this.Page.WaitForTimeoutAsync(200f)
+
+            let! sent =
+                this.Page.EvaluateAsync<int>(
+                    "() => window.__canvasMessages.length"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    before,
+                    Is.EqualTo([| "false"; "null"; "block" |]),
+                    "the control must start enabled with its icon showing"
+                )
+                Assert.That(
+                    during,
+                    Is.EqualTo(
+                        [| "true"
+                           "true"
+                           "none"
+                           "spin"
+                           "Configuring diff groups — waiting for the agent…" |]
+                    ),
+                    "an outstanding request must disable the control and replace its icon with the spinner"
+                )
+                Assert.That(sent, Is.EqualTo(1), "a second activation must not post another request"))
+        }
+
+    [<Test>]
+    member this.``a rewritten configuration ends the wait and reloads the grouping``() =
+        task {
+            do!
+                this.RouteSummaries(
+                    [| summaryJsonWithCategorization
+                           (categorizationJsonAt "missing" None "rev-1")
+                           2
+                           3
+                           1
+                           [| firstFile |]
+                       summaryJsonWithCategorization
+                           (categorizationJsonAt "configured" None "rev-2")
+                           2
+                           3
+                           1
+                           (categoryFiles [ "Client" ] 1) |]
+                )
+
+            // Unchanged on the first poll, rewritten on the next: the viewer must wait for the
+            // change rather than refreshing on the first answer it gets.
+            do!
+                this.RouteCategorizations(
+                    [| categorizationBody "missing" None "rev-1"
+                       categorizationBody "configured" None "rev-2" |]
+                )
+
+            do! this.GotoEmbedded(pageUrl)
+            let frame = this.EmbeddedFrame()
+            let action = frame.Locator(configureSelector)
+            do! action.WaitForAsync()
+            do! this.ActivateConfigure(action)
+
+            // The grouping the agent produced appears without the user pressing Refresh.
+            do! frame.Locator(".category-entry").First.WaitForAsync()
+
+            let! settled =
+                action.EvaluateAsync<string array>(
+                    """action => [
+                        String(action.disabled),
+                        String(action.getAttribute('aria-busy')),
+                        String(document.querySelectorAll('.category-entry').length > 0)
+                    ]"""
+                )
+
+            Assert.That(
+                settled,
+                Is.EqualTo([| "false"; "false"; "true" |]),
+                "an observed rewrite must clear the waiting state and render the new grouping"
+            )
+        }
+
+    [<Test>]
     member this.``the embedded configure action reuses the refresh control's treatment``() =
         task {
             do! this.RouteSummary(readySummaryJson [| firstFile |])
@@ -1392,15 +1508,6 @@ type DiffCategoryE2ETests() =
             do! warningAction.WaitForAsync()
 
             do! this.ActivateConfigure(warningAction)
-            do!
-                this.ActivateConfigure(
-                    frame.Locator($".toolbar {configureSelector}")
-                )
-
-            let! payloads =
-                this.Page.EvaluateAsync<string array>(
-                    "() => window.__canvasMessages.map(message => JSON.stringify(message))"
-                )
 
             let! placement =
                 frame.Locator("#category-warning").EvaluateAsync<string array>(
@@ -1412,6 +1519,25 @@ type DiffCategoryE2ETests() =
                     configureSelector
                 )
 
+            // Captured before navigating: reloading the host clears its record of posted messages.
+            let! warningPayload =
+                this.Page.EvaluateAsync<string>(
+                    "() => JSON.stringify(window.__canvasMessages[0])"
+                )
+
+            // Activating one control starts the shared wait and disables both, so the toolbar's copy
+            // is compared from a fresh page instance rather than by clicking it in this one.
+            do! this.GotoEmbedded(pageUrl)
+            let toolbarAction =
+                this.EmbeddedFrame().Locator($".toolbar {configureSelector}")
+            do! toolbarAction.WaitForAsync()
+            do! this.ActivateConfigure(toolbarAction)
+
+            let! toolbarPayload =
+                this.Page.EvaluateAsync<string>(
+                    "() => JSON.stringify(window.__canvasMessages[0])"
+                )
+
             Assert.Multiple(fun () ->
                 Assert.That(
                     standaloneWarning,
@@ -1421,7 +1547,6 @@ type DiffCategoryE2ETests() =
                     placement,
                     Is.EqualTo([| warningText; "1"; "2" |])
                 )
-                Assert.That(payloads.Length, Is.EqualTo(2))
-                Assert.That(payloads[0], Does.Contain("configure-diff-categories"))
-                Assert.That(payloads[1], Is.EqualTo(payloads[0])))
+                Assert.That(warningPayload, Does.Contain("configure-diff-categories"))
+                Assert.That(toolbarPayload, Is.EqualTo(warningPayload)))
         }

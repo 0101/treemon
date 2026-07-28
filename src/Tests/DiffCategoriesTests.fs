@@ -357,6 +357,61 @@ type DiffCategoriesValidationTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type DiffCategoriesRevisionTests() =
+
+    let clientLeaf = leafNode "Client" [ "src/Client/**" ]
+
+    [<Test>]
+    member _.``each configuration state has its own revision``() =
+        let revisions =
+            [ Missing; Invalid "some reason"; Configured [ clientLeaf ] ]
+            |> List.map DiffCategories.revision
+
+        Assert.That(revisions |> List.distinct |> List.length, Is.EqualTo(3))
+
+    [<Test>]
+    member _.``the same configuration always has the same revision``() =
+        Assert.That(
+            DiffCategories.revision (Configured [ clientLeaf ]),
+            Is.EqualTo(DiffCategories.revision (Configured [ leafNode "Client" [ "src/Client/**" ] ]))
+        )
+
+    [<Test>]
+    member _.``a rewrite that stays Configured changes the revision``() =
+        // The case a status alone cannot report: reconfiguring an already-configured repository.
+        let before = DiffCategories.revision (Configured [ clientLeaf ])
+
+        let renamed = DiffCategories.revision (Configured [ leafNode "Client code" [ "src/Client/**" ] ])
+        let repatterned = DiffCategories.revision (Configured [ leafNode "Client" [ "src/Client/*" ] ])
+        let reordered =
+            DiffCategories.revision (Configured [ leafNode "Docs" [ "docs/**" ]; clientLeaf ])
+        let nested =
+            DiffCategories.revision (Configured [ Branch { Name = "Production code"; Children = [ clientLeaf ] } ])
+
+        Assert.Multiple(fun () ->
+            Assert.That(renamed, Is.Not.EqualTo(before), "a renamed category is a change")
+            Assert.That(repatterned, Is.Not.EqualTo(before), "an edited pattern is a change")
+            Assert.That(reordered, Is.Not.EqualTo(before), "precedence order is a change")
+            Assert.That(nested, Is.Not.EqualTo(before), "nesting is a change"))
+
+    [<Test>]
+    member _.``reformatting the configuration file is not a change``() =
+        let compact = readFrom """{"diffCategories":[{"name":"Client","patterns":["src/Client/**"]}]}"""
+
+        let spaced =
+            readFrom
+                """{
+                     "diffCategories": [
+                       { "name": "Client", "patterns": [ "src/Client/**" ] }
+                     ]
+                   }"""
+
+        Assert.That(DiffCategories.revision compact, Is.EqualTo(DiffCategories.revision spaced))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type DiffCategoriesMatchingTests() =
 
     [<Test>]

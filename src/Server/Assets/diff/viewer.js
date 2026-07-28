@@ -28,6 +28,12 @@ var CONFIGURE_REQUEST = [
 // The one size that decides every initial disclosure: a group holding more than this many files, or
 // a branch with more direct children than this, opens as a header instead of exposed rows.
 var CATEGORY_DISCLOSURE_LIMIT = 5;
+// How the viewer waits for the agent to write `diffCategories`. Analyzing a repository is a
+// multi-minute job, so the window is generous; the poll only reads and validates `.treemon.json`,
+// never a diff, so the cadence costs the server almost nothing.
+var CONFIGURE_POLL_MS = 2500;
+var CONFIGURE_TIMEOUT_MS = 600000;
+var CONFIGURE_PENDING_LABEL = 'Configuring diff groups — waiting for the agent…';
 var VIEWER_ID = crypto.randomUUID();
 var state = {
     summary: null,
@@ -44,7 +50,12 @@ var state = {
     // Explicit expand/collapse choices for this page instance only, keyed by a JSON-serialized
     // category path so a name containing a delimiter cannot collide with a different path. Never
     // written to browser storage: a reload deliberately returns to the computed defaults.
-    categoryToggles: new Map()
+    categoryToggles: new Map(),
+    // Set while an agent has been asked to write `diffCategories` and the viewer is watching for the
+    // result. Held in state rather than on the button because the warning's copy of the control is
+    // recreated on every render and must come back still pending.
+    configurePending: false,
+    configurePoll: null
 };
 var highlighterPromise = null;
 
@@ -506,7 +517,74 @@ function canvasTransportAvailable() {
 // The single place the configure payload is built. Existing SystemView routing owns delivery,
 // session startup, and the waiting/error banners, so this only posts the fixed request.
 function sendConfigureRequest() {
-    window.canvasSend(CONFIGURE_ACTION, { request: CONFIGURE_REQUEST });
+    if (state.configurePending) return;
+    // canvasSend reports only whether the message left the page. A dropped message never reaches an
+    // agent, so entering the waiting state then would strand the control until it timed out.
+    if (window.canvasSend(CONFIGURE_ACTION, { request: CONFIGURE_REQUEST }) === false) return;
+    beginConfigureWait();
+}
+
+function configuredRevision() {
+    var categorization = state.summary && state.summary.categorization;
+    return categorization ? categorization.revision : null;
+}
+
+// Applies the waiting state to every configure control currently in the document. Both the toolbar
+// and the warning render one, and a render can replace either, so the state is reapplied rather than
+// remembered per element. The accessible name stays fixed — the control is still the same action;
+// only its state changes — and `aria-busy` is what reports that.
+function applyConfigurePending() {
+    var buttons = document.querySelectorAll('.configure-button');
+    for (var i = 0; i < buttons.length; i += 1) {
+        var button = buttons[i];
+        button.disabled = state.configurePending;
+        button.setAttribute('aria-busy', String(state.configurePending));
+        button.title = state.configurePending ? CONFIGURE_PENDING_LABEL : CONFIGURE_LABEL;
+    }
+}
+
+function endConfigureWait() {
+    if (state.configurePoll) clearInterval(state.configurePoll);
+    state.configurePoll = null;
+    state.configurePending = false;
+    applyConfigurePending();
+}
+
+// Watches the repository's categorization rather than the agent: an agent can finish its turn
+// without writing anything, and what the viewer must react to is the configuration actually
+// changing. The revision covers a rewrite that leaves the status `configured`.
+function beginConfigureWait() {
+    // Null when no ready summary has been rendered — a clean or failed comparison still shows the
+    // action. The first poll then establishes the baseline instead of counting as a change.
+    var baseline = configuredRevision();
+    var deadline = Date.now() + CONFIGURE_TIMEOUT_MS;
+    var polling = false;
+    state.configurePending = true;
+    applyConfigurePending();
+
+    state.configurePoll = setInterval(async function() {
+        if (Date.now() > deadline) {
+            endConfigureWait();
+            return;
+        }
+
+        // A slow poll must not stack requests behind itself.
+        if (polling) return;
+        polling = true;
+
+        try {
+            var current = await fetchJson('diff-categorization', { cache: 'no-store' });
+            if (!state.configurePending) return;
+            if (baseline === null) baseline = current.revision;
+            if (current.revision === baseline) return;
+            endConfigureWait();
+            loadSummary();
+        } catch (_) {
+            // A failed poll is not a failed configuration — the next tick retries until the deadline.
+        } finally {
+            polling = false;
+        }
+    }, CONFIGURE_POLL_MS);
 }
 
 // Reuses the existing neutral icon-only toolbar treatment (.refresh-button), so the action reads as
@@ -514,7 +592,7 @@ function sendConfigureRequest() {
 function createConfigureButton() {
     var button = document.createElement('button');
     button.type = 'button';
-    button.className = 'refresh-button';
+    button.className = 'refresh-button configure-button';
     button.setAttribute('aria-label', CONFIGURE_LABEL);
     button.title = CONFIGURE_LABEL;
     button.innerHTML =
@@ -537,7 +615,11 @@ function renderCategorizationWarning(reason) {
     warning.replaceChildren(text);
     // The warning is where an author lands after a bad edit, so it carries the same affordance as
     // the toolbar — the same factory, so neither the label nor the payload can drift.
-    if (canvasTransportAvailable()) warning.appendChild(createConfigureButton());
+    if (canvasTransportAvailable()) {
+        warning.appendChild(createConfigureButton());
+        // This copy is new, so it starts unaware of a wait that is already running.
+        applyConfigurePending();
+    }
 }
 
 function renderCategorizedFiles(files, categorization) {

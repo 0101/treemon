@@ -49,6 +49,11 @@ type internal Handlers =
         ProcessRunner.ResponseDeadline
             -> WorktreeDiff.DiffComparisonContext option
             -> HttpContext
+            -> System.Threading.Tasks.Task<unit>
+      Categorization:
+        ProcessRunner.ResponseDeadline
+            -> DiffCategories.Configuration option
+            -> HttpContext
             -> System.Threading.Tasks.Task<unit> }
 
 [<Literal>]
@@ -474,13 +479,25 @@ let private diffFileJson (file: DiffFileSummary) =
        categoryPath = file.CategoryPath |}
 
 /// The categorization state of the repository, without a single repository-authored pattern: the
-/// browser receives only the status and, for an invalid configuration, the fixed validation reason.
+/// browser receives only the status, for an invalid configuration the fixed validation reason, and a
+/// revision that changes whenever the configuration does — including a rewrite that stays
+/// `configured`, which a status alone cannot distinguish.
 let private categorizationJson (categorization: DiffCategories.Configuration) =
+    let revision = DiffCategories.revision categorization
+
     match categorization with
-    | DiffCategories.Missing -> {| status = "missing"; reason = None |}
-    | DiffCategories.Configured _ -> {| status = "configured"; reason = None |}
+    | DiffCategories.Missing ->
+        {| status = "missing"
+           reason = None
+           revision = revision |}
+    | DiffCategories.Configured _ ->
+        {| status = "configured"
+           reason = None
+           revision = revision |}
     | DiffCategories.Invalid reason ->
-        {| status = "invalid"; reason = Some reason |}
+        {| status = "invalid"
+           reason = Some reason
+           revision = revision |}
 
 let private diffReplacementName =
     function
@@ -1019,13 +1036,33 @@ let private handleFile
                 do! writeError deadline ctx 400 "Invalid diff-file query"
     }
 
+/// The categorization on its own, so a viewer waiting for an agent to write `diffCategories` can
+/// watch for the change without paying for a diff: this reads and validates `.treemon.json` and runs
+/// no Git command.
+let private handleCategorization
+    deadline
+    (categorization: DiffCategories.Configuration option)
+    (ctx: HttpContext)
+    =
+    task {
+        match categorization with
+        | None -> do! writeError deadline ctx 404 "Unknown worktree"
+        | Some configuration ->
+            do!
+                configuration
+                |> categorizationJson
+                |> JsonSerializer.Serialize
+                |> writeJson deadline ctx
+    }
+
 let internal createHandlersWithStore
     (store: DiffIdentityStore)
     (service: Service)
     newIdentity
     =
     { Summary = handleSummary service store newIdentity
-      File = handleFile service store }
+      File = handleFile service store
+      Categorization = handleCategorization }
 
 let internal createHandlers
     (service: Service)

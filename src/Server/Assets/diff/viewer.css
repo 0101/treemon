@@ -134,6 +134,29 @@ button { font: inherit; }
     outline-offset: 2px;
 }
 
+/* Waiting for the agent to write the categories: the icon is replaced in place by a spinner sized
+   to the same 28px control, so the toolbar does not reflow while the request is outstanding. */
+.configure-button[aria-busy="true"] {
+    cursor: default;
+    opacity: 1;
+}
+
+.configure-button[aria-busy="true"] .toolbar-icon { display: none; }
+
+.configure-button[aria-busy="true"]::after {
+    content: "";
+    width: 14px;
+    height: 14px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .configure-button[aria-busy="true"]::after { animation-duration: 2.4s; }
+}
+
 .workspace {
     display: grid;
     grid-template-rows: minmax(0, 1fr);

@@ -472,6 +472,13 @@ let private handleCanvasRequest
                      : WorktreeDiffApi.DiffSummaryTarget))
 
             do! diffHandlers.Summary diffDeadline summaryTarget ctx
+        elif filename = "diff-categorization" then
+            // The same per-request read as the summary, without the diff: this is what a viewer
+            // polls while it waits for an agent to write `diffCategories`.
+            let categorization =
+                diffTarget |> Option.map (fst >> RepoId.value >> DiffCategories.read)
+
+            do! diffHandlers.Categorization diffDeadline categorization ctx
         elif filename = "diff-file" then
             do! diffHandlers.File diffDeadline comparisonContext ctx
         elif filename = "beads-data" then

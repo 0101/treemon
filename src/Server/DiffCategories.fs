@@ -167,6 +167,36 @@ let read (repoRoot: string) : Configuration =
     | TreemonConfig.Unreadable -> Invalid unreadableReason
     | TreemonConfig.Present element -> validate element
 
+/// A short fingerprint of what a configuration currently *means*, so a poller can tell that a
+/// repository was reconfigured. It is derived from the validated outline rather than the file's
+/// bytes, so reformatting `.treemon.json` is correctly not a change, while a rewrite that keeps the
+/// `Configured` status but alters names, nesting, order, or patterns is.
+let revision (configuration: Configuration) =
+    let rec outline node =
+        match node with
+        | Leaf leaf ->
+            let patterns = String.concat "|" leaf.Patterns
+            $"L:{leaf.Name}({patterns})"
+        | Branch branch ->
+            let children = branch.Children |> List.map outline |> String.concat ","
+            $"B:{branch.Name}[{children}]"
+
+    let content =
+        match configuration with
+        | Missing -> "missing"
+        | Invalid reason -> $"invalid:{reason}"
+        | Configured roots ->
+            let roots = roots |> List.map outline |> String.concat ","
+            $"configured:{roots}"
+
+    use sha = System.Security.Cryptography.SHA256.Create()
+
+    content
+    |> Text.Encoding.UTF8.GetBytes
+    |> sha.ComputeHash
+    |> Array.take 8
+    |> Convert.ToHexString
+
 /// One segment of a compiled pattern. `**` stands for whole segments; a wildcard-free segment is one
 /// ordinal comparison; any other segment is matched character by character, so `*` and `?` can never
 /// cross a `/`.

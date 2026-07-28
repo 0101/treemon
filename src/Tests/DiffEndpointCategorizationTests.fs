@@ -321,6 +321,78 @@ type DiffEndpointRepositoryConfigurationTests() =
                         Assert.That(summaryCategoryPaths afterDelete, Is.EqualTo(ungrouped)))))
 
     [<Test>]
+    member _.``the categorization route answers the current configuration without running Git``() =
+        withRepository "poll" (fun repoRoot _ ->
+            let configPath = Path.Combine(repoRoot, ".treemon.json")
+
+            // Any Git work here would be a bug: the poll exists so a waiting viewer costs a file
+            // read, not a diff.
+            let neverCallService: WorktreeDiffApi.Service =
+                { GetSummary = fun _ _ _ -> failwith "the categorization route ran a diff"
+                  GetLayerCounts =
+                    fun _ _ -> failwith "the categorization route counted layers"
+                  GetFile = fun _ _ _ _ -> failwith "the categorization route read a file" }
+
+            withServer
+                repoRoot
+                [ repoRoot ]
+                neverCallService
+                _.Path
+                (fun client baseUrl ->
+                    let categorizationBody () =
+                        use response =
+                            get client (worktreeUrl baseUrl repoRoot "diff-categorization")
+
+                        Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                        getResponseBody response
+
+                    let read (body: string) =
+                        use doc = JsonDocument.Parse(body)
+                        let root = doc.RootElement
+
+                        root.GetProperty("status").GetString(),
+                        root.GetProperty("revision").GetString()
+
+                    let missingStatus, missingRevision = read (categorizationBody ())
+
+                    File.WriteAllText(configPath, rootConfiguration)
+                    let configuredStatus, configuredRevision = read (categorizationBody ())
+
+                    // Reformatting alone must not read as a change, or a waiting viewer would
+                    // refresh on an edit that altered nothing.
+                    File.WriteAllText(configPath, rootConfiguration.Replace("\n", "\n  "))
+                    let _, reformattedRevision = read (categorizationBody ())
+
+                    File.WriteAllText(
+                        configPath,
+                        """{ "diffCategories": [ { "name": "Everything", "patterns": ["src/**"] } ] }"""
+                    )
+
+                    let _, rewrittenRevision = read (categorizationBody ())
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(missingStatus, Is.EqualTo("missing"))
+                        Assert.That(configuredStatus, Is.EqualTo("configured"))
+
+                        Assert.That(
+                            configuredRevision,
+                            Is.Not.EqualTo(missingRevision),
+                            "writing a configuration must change the revision"
+                        )
+
+                        Assert.That(
+                            reformattedRevision,
+                            Is.EqualTo(configuredRevision),
+                            "reformatting the file must not read as a change"
+                        )
+
+                        Assert.That(
+                            rewrittenRevision,
+                            Is.Not.EqualTo(configuredRevision),
+                            "a rewrite that stays configured must still change the revision"
+                        ))))
+
+    [<Test>]
     member _.``an unknown worktree still 404s instead of resolving a configuration``() =
         withRepository "unknown" (fun repoRoot _ ->
             File.WriteAllText(Path.Combine(repoRoot, ".treemon.json"), rootConfiguration)
