@@ -52,11 +52,8 @@ its own worktree. This file is the entry point; detailed designs live in their o
 
 ## Done
 
-- **`ProcessRunner` consolidation on the argument-list API** — the string-argument entry points
-  (`run`/`runResult`/`runResultWithTimeout`) are deleted, so every data-collecting subprocess
-  (`git`, `gh`, `az`, `bd`, the post-fork hook) builds `argv` element by element and argv safety no
-  longer depends on callers remembering to quote interpolated values. Interactive UI launches
-  (terminal, editor) are deliberately still out of scope. See `docs/spec/process-execution.md`.
+- **`ProcessRunner` consolidation on the argument-list API** — the string-argument entry points are
+  deleted; see `docs/spec/process-execution.md`.
 - **`GlobalConfig` store extraction** — lifted the machine-level `~/.treemon/config.json`
   read/modify/write (single-writer lock, atomic temp-file replace, missing-vs-empty
   `worktreeRoots` semantics, plus the canvas / collapsed-repos / last-viewed-hashes / editor

@@ -117,22 +117,13 @@ let summarize (issues: PlanningIssue list) : BeadsSummary =
       Blocked = count "blocked"
       Closed = count "closed" }
 
-/// The issue list is bounded by the number of beads issues rather than a known constant;
-/// stderr only ever carries a `bd` message.
-let private bdStdoutLimitBytes = 16 * 1024 * 1024
-let private bdStderrLimitBytes = 64 * 1024
-
 let getBeadsIssueList (dbPath: string) =
     async {
         if File.Exists(dbPath) then
             let! output =
-                ProcessRunner.runArgumentListText
-                    bdStdoutLimitBytes
-                    bdStderrLimitBytes
-                    "Beads"
-                    "bd"
+                ProcessRunner.text
+                    { ProcessRunner.Spawn.create "bd" with Context = "Beads" }
                     [ "list"; "--json"; "--db"; dbPath ]
-                    None
 
             return output |> Option.defaultValue "[]"
         else

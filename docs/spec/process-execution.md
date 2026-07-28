@@ -28,18 +28,15 @@ Interactive UI launches (terminal, editor) are a different concern and are **not
   limit is drained fully and reported as truncated on the output, not as a failed run: the child
   exited, so its exit code is preserved and each caller decides whether the missing bytes matter.
 - Timeout cancellation kills the complete process tree and returns `TimedOut`.
-- Byte-oriented callers receive exit code, raw stdout/stderr, and which streams were truncated.
-  The `Result`-returning text wrappers receive UTF-8-decoded, trailing-whitespace-trimmed stdout on
-  exit 0 and trimmed stderr (or a described runner failure) on a non-zero exit; the
-  `option`-returning `runArgumentListText` collapses any non-zero exit or runner failure to `None`.
-  The exit-code wrappers return `unit` on exit 0 and trimmed stderr (or a described runner failure)
-  on a non-zero exit. A text wrapper additionally fails when the stdout it would return was
-  truncated, because its callers parse that string; the exit-code wrappers never do, because they
-  discard the output.
+- Byte-oriented callers receive exit code, raw stdout/stderr, and which streams were truncated. The
+  `text`/`textResult` functions return UTF-8-decoded, trailing-whitespace-trimmed stdout on exit 0
+  and trimmed stderr (or a described runner failure) otherwise, and additionally fail when the
+  stdout they would return was truncated, because their callers parse that string. `exitResult`
+  returns `unit` on exit 0 and ignores truncation entirely, because it discards the output.
 - Timeout follows the call site, not a refresh/request rule. Most commands — the status collectors'
   `runGit`/`runGitResult`, `gh`, `az`, `bd`, and `git worktree add` — use the 60 s default; the diff
   endpoint's sequential commands share one monotonic 10 s response deadline; the post-fork hook uses
-  its explicit 5-minute cap. Two short Git probes go through `runArgumentList`, which creates a
+  its explicit 5-minute cap. Two short Git probes use `InteractiveDeadline`, which creates a
   fresh 10 s deadline per call: `GitWorktree.localComparisonContent` and `GitWorktree.probeRef`.
   Both are reached from the refresh timer — `localComparisonContent` as one of the five
   `Async.StartChild` children of `collectCommonGitData` (whose four siblings run on the 60 s
@@ -50,121 +47,92 @@ Interactive UI launches (terminal, editor) are a different concern and are **not
 
 ### The API
 
-`ProcessRunner` exposes one family, all backed by `runArgumentListCore`:
-
-| Entry point | Timeout source | Use for |
-|---|---|---|
-| `runArgumentList` | A fresh 10 s response deadline per call (`argumentListResponseDeadlineMs`) | A single short probe that must not stall its caller — today the two Git probes above, on both the refresh and fork paths |
-| `runArgumentListWithTimeout` | Explicit `timeoutMs` | Background refresh, long hooks |
-| `runArgumentListWithinResponseDeadline` | A `ResponseDeadline` shared across several sequential calls | Multi-command request handling (the diff endpoint) |
-
-All take `arguments: string list`, explicit `stdoutLimitBytes` / `stderrLimitBytes`, and return
-`Async<Result<ArgumentListOutput, ArgumentListFailure>>`:
+Everything about a run except its arguments lives in a `Spawn` record — `FileName`, `Context`,
+`Limits`, `Deadline`, `WorkingDirectory`. A module builds one per command with
+`Spawn.create fileName` and overrides individual fields at the call sites that differ, so a call
+site names only what is unusual about it:
 
 ```fsharp
-type ArgumentListOutput =
-    { ExitCode: int
-      Stdout: byte[]
-      Stderr: byte[]
-      Truncated: CaptureStream list }   // stdout first when both capture limits were hit
+let private git = { Spawn.create "git" with Context = "Git" }
 
-type ArgumentListFailure =
-    | StartFailed of string
-    | TimedOut
+ProcessRunner.text git ("-C" :: workingDir :: arguments)
+
+ProcessRunner.capture
+    { git with Limits = CaptureLimits.tiny; Deadline = InteractiveDeadline }
+    [ "-C"; worktreePath; "status"; "--porcelain" ]
 ```
 
-`ArgumentListFailure` holds only the outcomes with no exit code at all. Capture is drained
-recursively even after a limit is reached, so a child process cannot block on a full pipe. Timeout
-cancellation kills the whole process tree.
+Four functions in `src/Server/ProcessRunner.fs` take a `Spawn` and a `string list`, and differ only
+in what they return: `capture` (exit code plus raw stdout/stderr bytes and which streams were
+truncated), `text` (`string option`), `textResult` (`Result<string, string>`), and `exitResult`
+(`Result<unit, string>`). Every result shape works with every deadline, because the timeout is a
+field rather than a separate entry point.
 
-### Text-capturing convenience
+`Deadline` is a DU: `DefaultTimeout` (60 s), `Timeout of ms`, `InteractiveDeadline` (a fresh 10 s
+response deadline per call), and `SharedDeadline` (a `ResponseDeadline` established before the call
+and spent across several sequential runs). Only `SharedDeadline` can be exhausted on arrival, which
+yields `TimedOut` without spawning anything.
 
-`ArgumentListOutput` carries `byte[]`, which is what the diff viewer needs (it parses NUL-delimited
-machine output). The status collectors — `GitWorktree`, `PrStatus`, `GithubPrStatus`, `BeadsStatus` —
-all want decoded text, and the post-fork hook and `git worktree add` want neither. Five wrappers
-provide that shared behavior:
+`CaptureLimits` names the three byte-cap policies in use: `data` (16 MiB stdout / 64 KiB stderr) for
+status collectors, JSON output, and diff summaries; `small` (64 KiB / 64 KiB) for short single-value
+reads; and `tiny` (1 KiB / 1 KiB) for probes that only ask whether there was any output. A call site
+that needs a different cap overrides one field — the diff viewer's file route uses
+`{ CaptureLimits.data with StdoutBytes = maxWorktreeDiffBytes }`.
 
-| Entry point | Timeout | Return |
-|---|---|---|
-| `runArgumentListText` | 60 s default | `Async<string option>` |
-| `runArgumentListTextResult` | 60 s default | `Async<Result<string, string>>` |
-| `runArgumentListTextResultWithTimeout` | Explicit `timeoutMs` | `Async<Result<string, string>>` |
-| `runArgumentListExitResult` | 60 s default | `Async<Result<unit, string>>` |
-| `runArgumentListExitResultWithTimeout` | Explicit `timeoutMs` | `Async<Result<unit, string>>` |
-
-All five take explicit stdout/stderr byte limits and delegate to
-`runArgumentListWithTimeout`. The text wrappers decode stdout or stderr with
-`Encoding.UTF8.GetString` (replacement fallback for invalid sequences) and apply `TrimEnd`,
-matching the status collectors' text contract. The exit-code wrappers decode and trim stderr only
-for a non-zero exit. The diff viewer retains its strict UTF-8 decoder because malformed machine
-output is a domain error there.
-
-The text wrappers return stdout, so a truncated stdout capture is an `Error` — a prefix would read
-as a complete answer to the parser consuming it. The `Exit` wrappers return `unit`: they exist for
-callers that run a command for its effect (the post-fork hook, `git worktree add`), where the exit
-code is the only signal and output volume must never override it.
-
-The `Result` wrappers turn a runner failure into one distinct message per case; the `TimedOut`
-message names the configured timeout, which is what a failed post-fork hook surfaces to the user.
-
-Callers that need bytes keep using the byte-returning entry points directly.
+Byte-returning results expose `ArgumentListOutput` (exit code, raw streams, `Truncated`) or
+`ArgumentListFailure` — the two outcomes with no exit code at all, `StartFailed` and `TimedOut`.
+The text and exit wrappers layer decoding and `Result` mapping over the same core. The diff viewer
+uses `capture` directly because it parses NUL-delimited machine output, and keeps its own strict
+UTF-8 decoder because malformed output is a domain error there.
 
 ### Constructing arguments
 
-Each argument is one list element. Three patterns need care, because the string form hid them:
-
 - **A glued token stays one element.** `HEAD..{baseRef}`, `{baseRef}...HEAD`, and
   `--format=%H%n%s%n%aI` are single arguments built by concatenation — they are not two arguments
-  because they contain a separator.
+  because they contain a separator. The same holds for a GraphQL document, a REST URL with a query
+  string, and an `az --route-parameters k=v` item.
 - **An optional argument splices a list, never a string.** A value that is absent must contribute
-  *zero* elements and, when present, may contribute *several*:
-  ```fsharp
-  let topArguments = top |> Option.map (fun n -> [ "--top"; string n ]) |> Option.defaultValue []
-  ```
-  Interpolating `$" --top {n}"` into a larger string is the shape this replaces; it is the one
-  conversion that changes argument *count*, so it cannot be done by mechanical de-quoting.
-- **Quotes in the old string were for the parser, not the value.** `\"{worktreePath}\"` becomes the
-  bare element `worktreePath`. Leaving the quotes in would pass them through as literal characters.
-
-### Why argument lists are mandatory
-
-A string-arguments API makes correctness depend on every caller quoting every interpolated value
-and validating characters that can alter parsing. Those obligations are not type-checked, and Git
-accepts some ref characters (including `"`) that make hand-built command lines unsafe. Argument
-lists remove the parser boundary entirely: quoting is unnecessary, and validation such as
-`validateBranchName` remains a product-input policy rather than a process-safety control.
+  *zero* elements and, when present, may contribute *several* — `--top n` is
+  `Option.map (fun n -> [ "--top"; string n ]) >> Option.defaultValue []`. This is the only shape
+  that changes argument *count*, so it cannot be handled by de-quoting alone.
+- **Never quote a value.** There is no parser to quote for; a wrapping `"` reaches the child as a
+  literal character.
 
 ## Decisions
 
 - **Truncation is a property of a completed run, not a failure.** A capture limit bounds memory; it
-  says nothing about whether the command worked. Reporting it as `Error` made exit 0 unrepresentable
-  for every caller, so a verbose-but-successful post-fork hook or `git worktree add` was surfaced as
-  a failed step on the worktree card. `ArgumentListOutput.Truncated` moves the judgement to the
-  caller: the text wrappers still fail on truncated stdout (they hand a parser a string), the diff
-  viewer still maps truncation to its typed `GitCaptureLimitExceeded`, and the exit-code wrappers
-  ignore it.
+  says nothing about whether the command worked, and reporting it as `Error` makes exit 0
+  unrepresentable — a verbose-but-successful post-fork hook surfaces as a failed step on the
+  worktree card. `ArgumentListOutput.Truncated` moves the judgement to the caller: `text`/
+  `textResult` still fail on truncated stdout, the diff viewer maps truncation to its typed
+  `GitCaptureLimitExceeded`, and `exitResult` ignores it.
 - **No string-arguments compatibility API.** Keeping one would let new callers bypass the structural
-  guarantee; its absence makes the compiler reject that implementation shape.
-- **Preserve each call site's existing timeout instead of unifying on the 10 s response deadline.**
-  Timeout policy is a separate question from argv safety and is not bundled into this change, so
-  every call site kept the timeout it already had. The result is deliberately uneven rather than
-  tidy: `localComparisonContent` (the call dates from commit `01667ff1`) and `probeRef` were already
-  on `runArgumentList`'s 10 s deadline before this branch, so part of refresh-timer status
-  collection runs on the interactive deadline while the rest of it runs on the 60 s default.
+  guarantee. Correctness would otherwise depend on every caller quoting every interpolated value and
+  validating characters that can alter parsing — obligations that are not type-checked, and Git
+  accepts ref characters (including `"`) that make hand-built command lines unsafe. With argument
+  lists, `validateBranchName` stays a product-input policy rather than a process-safety control.
+- **Timeout policy is per call site, not unified.** It is a separate question from argv safety, so
+  every call site keeps the timeout it has. The result is deliberately uneven: part of refresh-timer
+  status collection runs on the interactive 10 s deadline while the rest runs on the 60 s default.
 - **Open question: should the refresh-path 10 s probes move to the 60 s default?** A 10 s cap on a
   refresh-timer collector can make refresh flakier under load, which is why the bulk of status
   collection sits on the 60 s default; `localComparisonContent` and `probeRef` do not follow that
-  reasoning. Aligning them is a behavioural change to `GitWorktree`, not a documentation fix, so it
-  is intentionally unmade here. Decide it from evidence about refresh timeouts on large repos rather
-  than from symmetry.
-- **Text-capturing wrappers live in `ProcessRunner`, not in a shared helper module.** Decoding a
-  captured stream is part of running a process; putting it beside the capture code keeps one owner.
-- **Byte caps stay explicit.** The right cap depends on the operation — `localComparisonContent`
-  needs 1 KiB because it only asks "was there output", while JSON/status collectors and diff
-  summaries allow up to 16 MiB. A universal default would be wrong in both directions.
+  reasoning. Aligning them is a behavioural change to `GitWorktree`, not a documentation fix.
+  Decide it from evidence about refresh timeouts on large repos rather than from symmetry.
+- **Byte caps are named policies, not per-caller constants.** The right cap depends on the
+  operation — a probe asking "was there output" needs 1 KiB, a JSON collector up to 16 MiB — so a
+  single universal default would be wrong in both directions. Naming the three policies in
+  `CaptureLimits` keeps that intent explicit at each call site while removing the twelve
+  near-duplicate constants the per-caller form had accumulated. A genuinely different cap is a
+  one-field override.
+- **Run configuration is a record, not positional parameters or a class.** The previous form passed
+  seven positional arguments of which one typically varied, with two adjacent `int`s and two
+  adjacent `string`s that could be swapped without a compile error. A record makes each value
+  named at the site that sets it; copy-and-update comes free, which a class with optional
+  parameters would need a hand-written `With` member to imitate.
 - **`buildRemoteUrlArgs` returns `string list`.** It exists to be unit-tested independently of
   process spawning; returning the argument list keeps that property while making the assertions
-  exact (element equality) instead of substring matches against a concatenated command line.
+  exact element equality instead of substring matches against a concatenated command line.
 
 ## Out of Scope
 
@@ -185,7 +153,7 @@ not a settled one.
 
 | File | Role |
 |---|---|
-| `src/Server/ProcessRunner.fs` | The only process-execution API: argument-list entry points, bounded capture, process-tree kill, response deadlines, text and exit-code wrappers |
+| `src/Server/ProcessRunner.fs` | The only process-execution API: `Spawn`/`Deadline`/`CaptureLimits`, the four run functions, bounded capture, process-tree kill, response deadlines |
 | `src/Server/GitWorktree.fs` | `runGit`/`runGitResult` wrappers; worktree creation and the post-fork hook |
 | `src/Server/PrStatus.fs` | `runAz` wrapper, `buildRemoteUrlArgs`, Azure DevOps PR/build queries |
 | `src/Server/GithubPrStatus.fs` | `runGh` wrapper, GitHub REST and GraphQL queries |

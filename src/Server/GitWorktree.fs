@@ -81,28 +81,14 @@ type CreateWorktreeResult =
     { WorktreePath: string
       Warnings: CreateWorktreeWarnings }
 
-/// Status collection reads porcelain listings and diff summaries, which are bounded by repo size
-/// rather than by a known constant; stderr only ever carries a git message.
-let private gitStdoutLimitBytes = 16 * 1024 * 1024
-let private gitStderrLimitBytes = 64 * 1024
+let private git =
+    { ProcessRunner.Spawn.create "git" with Context = "Git" }
 
 let private runGit (workingDir: string) (arguments: string list) =
-    ProcessRunner.runArgumentListText
-        gitStdoutLimitBytes
-        gitStderrLimitBytes
-        "Git"
-        "git"
-        ("-C" :: workingDir :: arguments)
-        None
+    ProcessRunner.text git ("-C" :: workingDir :: arguments)
 
 let private runGitResult (workingDir: string) (arguments: string list) =
-    ProcessRunner.runArgumentListTextResult
-        gitStdoutLimitBytes
-        gitStderrLimitBytes
-        "Git"
-        "git"
-        ("-C" :: workingDir :: arguments)
-        None
+    ProcessRunner.textResult git ("-C" :: workingDir :: arguments)
 
 let parseWorktreeList (porcelainOutput: string) =
     porcelainOutput.Split(
@@ -328,11 +314,10 @@ let isDirty (worktreePath: string) =
 let localComparisonContent (worktreePath: string) =
     async {
         let! result =
-            ProcessRunner.runArgumentList
-                1024
-                1024
-                "Git"
-                "git"
+            ProcessRunner.capture
+                { git with
+                    Limits = ProcessRunner.CaptureLimits.tiny
+                    Deadline = ProcessRunner.InteractiveDeadline }
                 [ "-C"
                   worktreePath
                   "status"
@@ -341,7 +326,6 @@ let localComparisonContent (worktreePath: string) =
                   "--"
                   "."
                   generatedDiffViewerExclusionPathspec ]
-                None
 
         return
             match result with
@@ -520,13 +504,11 @@ let validateBranchName (branchName: string) =
 let internal probeRef (repoRoot: string) (gitRef: string) =
     async {
         let! result =
-            ProcessRunner.runArgumentList
-                1024
-                1024
-                "Git"
-                "git"
+            ProcessRunner.capture
+                { git with
+                    Limits = ProcessRunner.CaptureLimits.tiny
+                    Deadline = ProcessRunner.InteractiveDeadline }
                 [ "-C"; repoRoot; "rev-parse"; "--verify"; "--quiet"; gitRef ]
-                None
 
         return
             match result with
@@ -719,13 +701,6 @@ let private legacyForkScriptWarning (scriptName: string) (exists: bool) =
 /// blocking the auto-launch indefinitely.
 let private postForkTimeoutMs = 5 * 60 * 1000
 
-/// The hook is an arbitrary user-authored setup script (`npm install`, `bd init`), so both streams
-/// carry whatever its children write; the caps bound memory only. Truncating them cannot fail the
-/// hook — its outcome is its exit code — but stderr is what a failure message is built from, so it
-/// stays large enough to carry one.
-let private postForkStdoutLimitBytes = 16 * 1024 * 1024
-let private postForkStderrLimitBytes = 64 * 1024
-
 /// Card label for the post-fork setup hook. Single source of truth for the
 /// OS-specific script name so file resolution always tracks the hook.
 let postForkScriptName =
@@ -758,14 +733,12 @@ let runPostForkWithTimeout (timeoutMs: int) (repoRoot: string) (worktreePath: st
                     "bash", [ scriptPath; worktreePath; repoRoot; baseRef; branchName ]
 
             return!
-                ProcessRunner.runArgumentListExitResultWithTimeout
-                    timeoutMs
-                    postForkStdoutLimitBytes
-                    postForkStderrLimitBytes
-                    "PostFork"
-                    fileName
+                ProcessRunner.exitResult
+                    { ProcessRunner.Spawn.create fileName with
+                        Context = "PostFork"
+                        Deadline = ProcessRunner.Timeout timeoutMs
+                        WorkingDirectory = Some worktreePath }
                     arguments
-                    (Some worktreePath)
     }
 
 /// Runs the post-fork hook with the production 5-minute cap (see
@@ -795,13 +768,9 @@ let forkWorktree (repoRoot: string) (baseBranch: string) (branchName: string) : 
         let fileName, arguments, worktreePath = resolveWorktreeCommand repoRoot baseRef name
 
         do!
-            ProcessRunner.runArgumentListExitResult
-                gitStdoutLimitBytes
-                gitStderrLimitBytes
-                "CreateWorktree"
-                fileName
+            ProcessRunner.exitResult
+                { ProcessRunner.Spawn.create fileName with Context = "CreateWorktree" }
                 arguments
-                None
 
         let legacyScriptName = if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then "fork.ps1" else "fork.sh"
         let legacyScriptExists = File.Exists(Path.Combine(repoRoot, legacyScriptName))

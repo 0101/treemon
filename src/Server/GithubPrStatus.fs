@@ -21,13 +21,10 @@ let parseGithubUrl (url: string) =
         else
             None)
 
-/// GitHub JSON payloads are bounded by PR, workflow-run, and review-thread counts rather than a
-/// known constant; stderr only ever carries a CLI message.
-let private stdoutLimitBytes = 16 * 1024 * 1024
-let private stderrLimitBytes = 64 * 1024
+let private gh =
+    { ProcessRunner.Spawn.create "gh" with Context = "GH" }
 
-let private runGh (arguments: string list) =
-    ProcessRunner.runArgumentListText stdoutLimitBytes stderrLimitBytes "GH" "gh" arguments None
+let private runGh (arguments: string list) = ProcessRunner.text gh arguments
 
 type internal ParsedGithubPr =
     { BranchName: string

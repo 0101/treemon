@@ -21,6 +21,13 @@ let private noisyStderrCommand (stderrBytes: int) =
     else
         "sh", [ "-c"; $"printf '%%{stderrBytes}s' '' >&2; echo ok" ]
 
+/// Every case here pins the caps it exercises, so the shared spawn starts from the smallest preset
+/// and each test overrides only the limit under test.
+let private testSpawn fileName =
+    { ProcessRunner.Spawn.create fileName with
+        Context = "Test"
+        Limits = ProcessRunner.CaptureLimits.tiny }
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -50,13 +57,9 @@ type ProcessRunnerArgumentListTests() =
     [<Test>]
     member _.``argument-list execution preserves a working path containing spaces``() =
         let result =
-            ProcessRunner.runArgumentList
-                1024
-                1024
-                "Test"
-                "git"
+            ProcessRunner.capture
+                (testSpawn "git")
                 [ "-C"; tempDir; "rev-parse"; "--is-inside-work-tree" ]
-                None
             |> TestUtils.runAsync
 
         match result with
@@ -72,13 +75,9 @@ type ProcessRunnerArgumentListTests() =
         gitOk tempDir [ "commit"; "-m"; "large output" ]
 
         let result =
-            ProcessRunner.runArgumentList
-                16
-                1024
-                "Test"
-                "git"
+            ProcessRunner.capture
+                { testSpawn "git" with Limits.StdoutBytes = 16 }
                 [ "-C"; tempDir; "show"; "HEAD:large.txt" ]
-                None
             |> TestUtils.runAsync
 
         match result with
@@ -100,13 +99,9 @@ type ProcessRunnerArgumentListTests() =
     [<Test>]
     member _.``stderr capture reports its byte limit``() =
         let result =
-            ProcessRunner.runArgumentList
-                1024
-                1
-                "Test"
-                "git"
+            ProcessRunner.capture
+                { testSpawn "git" with Limits.StderrBytes = 1 }
                 [ "not-a-real-git-command" ]
-                None
             |> TestUtils.runAsync
 
         match result with
@@ -137,14 +132,9 @@ type ProcessRunnerArgumentListTests() =
                 "sh", [ "-c"; $"sleep 30 & echo $! > '{escapedPidPath}'; wait" ]
 
         let result =
-            ProcessRunner.runArgumentListWithTimeout
-                2_000
-                1024
-                1024
-                "Test"
-                fileName
+            ProcessRunner.capture
+                { testSpawn fileName with Deadline = ProcessRunner.Timeout 2_000 }
                 arguments
-                None
             |> TestUtils.runAsync
 
         Assert.That(
@@ -181,13 +171,9 @@ type ProcessRunnerArgumentListTests() =
     [<Test>]
     member _.``missing executable returns a typed start failure``() =
         let result =
-            ProcessRunner.runArgumentList
-                1024
-                1024
-                "Test"
-                $"missing-executable-{Guid.NewGuid():N}"
+            ProcessRunner.capture
+                (testSpawn $"missing-executable-{Guid.NewGuid():N}")
                 []
-                None
             |> TestUtils.runAsync
 
         match result with
@@ -201,13 +187,9 @@ type ProcessRunnerArgumentListTests() =
         gitOk tempDir [ "commit"; "-m"; "utf8 content" ]
 
         let result =
-            ProcessRunner.runArgumentListTextResult
-                1024
-                1024
-                "Test"
-                "git"
+            ProcessRunner.textResult
+                (testSpawn "git")
                 [ "-C"; tempDir; "show"; "HEAD:utf8.txt" ]
-                None
             |> TestUtils.runAsync
 
         let expected: Result<string, string> = Ok "žluťoučký kůň"
@@ -221,23 +203,15 @@ type ProcessRunnerArgumentListTests() =
     [<Test>]
     member _.``text capture yields stdout on success and None on a non-zero exit``() =
         let succeeded =
-            ProcessRunner.runArgumentListText
-                1024
-                1024
-                "Test"
-                "git"
+            ProcessRunner.text
+                (testSpawn "git")
                 [ "-C"; tempDir; "rev-parse"; "--is-inside-work-tree" ]
-                None
             |> TestUtils.runAsync
 
         let failed =
-            ProcessRunner.runArgumentListText
-                1024
-                1024
-                "Test"
-                "git"
+            ProcessRunner.text
+                (testSpawn "git")
                 [ "-C"; tempDir; "rev-parse"; "--verify"; "refs/heads/missing" ]
-                None
             |> TestUtils.runAsync
 
         let expectedFailure: string option = None
@@ -249,13 +223,9 @@ type ProcessRunnerArgumentListTests() =
     [<Test>]
     member _.``text capture returns decoded stderr for a non-zero exit``() =
         let result =
-            ProcessRunner.runArgumentListTextResult
-                1024
-                1024
-                "Test"
-                "git"
+            ProcessRunner.textResult
+                (testSpawn "git")
                 [ "-C"; tempDir; "cat-file"; "-p"; "definitely-not-an-object" ]
-                None
             |> TestUtils.runAsync
 
         match result with
@@ -266,13 +236,9 @@ type ProcessRunnerArgumentListTests() =
     [<Test>]
     member _.``text capture maps a missing executable to a start failure message``() =
         let result =
-            ProcessRunner.runArgumentListTextResult
-                1024
-                1024
-                "Test"
-                $"missing-executable-{Guid.NewGuid():N}"
+            ProcessRunner.textResult
+                (testSpawn $"missing-executable-{Guid.NewGuid():N}")
                 []
-                None
             |> TestUtils.runAsync
 
         match result with
@@ -295,14 +261,9 @@ type ProcessRunnerArgumentListTests() =
                 "sh", [ "-c"; "sleep 30" ]
 
         let result =
-            ProcessRunner.runArgumentListTextResultWithTimeout
-                300
-                1024
-                1024
-                "Test"
-                fileName
+            ProcessRunner.textResult
+                { testSpawn fileName with Deadline = ProcessRunner.Timeout 300 }
                 arguments
-                None
             |> TestUtils.runAsync
 
         let expected: Result<string, string> = Error "Timed out after 300ms"
@@ -322,13 +283,9 @@ type ProcessRunnerArgumentListTests() =
         // `git show` exits 0 here: the text wrappers still fail, because their callers parse the
         // string they get back and a prefix would silently read as the whole output.
         let result =
-            ProcessRunner.runArgumentListTextResult
-                16
-                1024
-                "Test"
-                "git"
+            ProcessRunner.textResult
+                { testSpawn "git" with Limits.StdoutBytes = 16 }
                 [ "-C"; tempDir; "show"; "HEAD:large.txt" ]
-                None
             |> TestUtils.runAsync
 
         let expected: Result<string, string> =
@@ -345,13 +302,9 @@ type ProcessRunnerArgumentListTests() =
         let fileName, arguments = noisyStderrCommand 4096
 
         let result =
-            ProcessRunner.runArgumentListTextResult
-                1024
-                16
-                "Test"
-                fileName
+            ProcessRunner.textResult
+                { testSpawn fileName with Limits.StderrBytes = 16 }
                 arguments
-                None
             |> TestUtils.runAsync
 
         let expected: Result<string, string> = Ok "ok"
@@ -367,13 +320,11 @@ type ProcessRunnerArgumentListTests() =
         let fileName, arguments = noisyStderrCommand 4096
 
         let result =
-            ProcessRunner.runArgumentListExitResult
-                16
-                16
-                "Test"
-                fileName
+            ProcessRunner.exitResult
+                { testSpawn fileName with
+                    Limits.StdoutBytes = 16
+                    Limits.StderrBytes = 16 }
                 arguments
-                None
             |> TestUtils.runAsync
 
         let expected: Result<unit, string> = Ok()
@@ -387,13 +338,9 @@ type ProcessRunnerArgumentListTests() =
     [<Test>]
     member _.``exit-code capture reports stderr for a non-zero exit``() =
         let result =
-            ProcessRunner.runArgumentListExitResult
-                1024
-                1024
-                "Test"
-                "git"
+            ProcessRunner.exitResult
+                (testSpawn "git")
                 [ "-C"; tempDir; "cat-file"; "-p"; "definitely-not-an-object" ]
-                None
             |> TestUtils.runAsync
 
         match result with

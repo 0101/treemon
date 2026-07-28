@@ -11,7 +11,7 @@ let internal argumentListResponseDeadlineMs = 10_000
 let private maxArgumentListShutdownMs = 250
 let private maxArgumentListResponseReserveMs = 500
 
-type internal ResponseDeadline =
+type ResponseDeadline =
     private
         { ExpiresAt: int64
           ResponseReserveMs: int
@@ -39,6 +39,52 @@ type ArgumentListOutput =
 type private BoundedCapture =
     { Bytes: byte[]
       LimitExceeded: bool }
+
+/// How many bytes of each stream a run may keep. The right cap depends on the operation, so this
+/// is always chosen explicitly — the presets below name the three policies actually in use.
+type CaptureLimits =
+    { StdoutBytes: int
+      StderrBytes: int }
+
+module CaptureLimits =
+    /// Status collectors, JSON output, and diff summaries: large stdout, small stderr.
+    let data =
+        { StdoutBytes = 16 * 1024 * 1024
+          StderrBytes = 64 * 1024 }
+
+    /// Short single-value reads such as a branch name or a resolved ref.
+    let small =
+        { StdoutBytes = 64 * 1024
+          StderrBytes = 64 * 1024 }
+
+    /// Probes that only ask "was there any output at all".
+    let tiny = { StdoutBytes = 1024; StderrBytes = 1024 }
+
+/// Where a run's time budget comes from. `SharedDeadline` is the only case that spends a budget
+/// established before the call, so several sequential runs can share one response deadline.
+type Deadline =
+    | DefaultTimeout
+    | Timeout of ms: int
+    | InteractiveDeadline
+    | SharedDeadline of ResponseDeadline
+
+/// Everything about a run except its arguments. Build one per command per module and override
+/// individual fields at the call sites that differ.
+type Spawn =
+    { FileName: string
+      Context: string
+      Limits: CaptureLimits
+      Deadline: Deadline
+      WorkingDirectory: string option }
+
+module Spawn =
+    /// A data-collecting run of `fileName` on the 60 s default, logged under the executable's name.
+    let create fileName =
+        { FileName = fileName
+          Context = fileName
+          Limits = CaptureLimits.data
+          Deadline = DefaultTimeout
+          WorkingDirectory = None }
 
 let private responseReserveMs responseDeadlineMs =
     min
@@ -288,34 +334,11 @@ let private runArgumentListCore
             return Error(StartFailed ex.Message)
     }
 
-let runArgumentListWithTimeout
-    (timeoutMs: int)
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    =
-    runArgumentListCore
-        timeoutMs
-        5_000
-        stdoutLimitBytes
-        stderrLimitBytes
-        context
-        fileName
-        arguments
-        workingDirectory
+let private defaultShutdownTimeoutMs = 5_000
 
-let internal runArgumentListWithinResponseDeadline
-    (deadline: ResponseDeadline)
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    =
+/// A response deadline yields the time left after reserving room to send the response and to reap
+/// a killed child. `None` means the budget is already spent.
+let private responseDeadlineBudget deadline =
     let processTimeoutMs =
         max
             0
@@ -324,35 +347,37 @@ let internal runArgumentListWithinResponseDeadline
              - deadline.ShutdownReserveMs)
 
     if processTimeoutMs = 0 then
-        async.Return(Error TimedOut)
+        None
     else
-        runArgumentListCore
-            processTimeoutMs
-            deadline.ShutdownReserveMs
-            stdoutLimitBytes
-            stderrLimitBytes
-            context
-            fileName
-            arguments
-            workingDirectory
+        Some(processTimeoutMs, deadline.ShutdownReserveMs)
 
-/// Argument-list process execution within the production 10-second response deadline.
-let runArgumentList
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    =
-    runArgumentListWithinResponseDeadline
-        (createResponseDeadline argumentListResponseDeadlineMs)
-        stdoutLimitBytes
-        stderrLimitBytes
-        context
-        fileName
-        arguments
-        workingDirectory
+let private resolveDeadline deadline =
+    match deadline with
+    | DefaultTimeout -> Some(defaultTimeoutMs, defaultShutdownTimeoutMs)
+    | Timeout ms -> Some(ms, defaultShutdownTimeoutMs)
+    | InteractiveDeadline ->
+        responseDeadlineBudget (createResponseDeadline argumentListResponseDeadlineMs)
+    | SharedDeadline deadline -> responseDeadlineBudget deadline
+
+/// The run plus the budget it was given, so failure messages can name the timeout that applied.
+let private runWithBudget (spawn: Spawn) (arguments: string list) =
+    match resolveDeadline spawn.Deadline with
+    | None -> 0, async.Return(Error TimedOut)
+    | Some(timeoutMs, shutdownTimeoutMs) ->
+        timeoutMs,
+        runArgumentListCore
+            timeoutMs
+            shutdownTimeoutMs
+            spawn.Limits.StdoutBytes
+            spawn.Limits.StderrBytes
+            spawn.Context
+            spawn.FileName
+            arguments
+            spawn.WorkingDirectory
+
+/// Exit code with raw stdout/stderr bytes, for callers that parse machine output themselves.
+let capture (spawn: Spawn) (arguments: string list) =
+    runWithBudget spawn arguments |> snd
 
 /// Status collectors want text, not bytes: invalid sequences become replacement
 /// characters rather than an error, which the strict diff decoder deliberately does not do.
@@ -369,27 +394,11 @@ let private describeFailure (timeoutMs: int) failure =
 let private stdoutTruncatedMessage =
     "Standard output exceeded its capture limit"
 
-/// Like `runArgumentListTextResult` but with an explicit timeout, for long-running setup hooks
-/// (e.g. `npm install`) that would otherwise be killed by the short default.
-let runArgumentListTextResultWithTimeout
-    (timeoutMs: int)
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    : Async<Result<string, string>> =
+/// Decoded stdout on exit 0; decoded stderr or a described runner failure otherwise.
+let textResult (spawn: Spawn) (arguments: string list) : Async<Result<string, string>> =
     async {
-        let! result =
-            runArgumentListWithTimeout
-                timeoutMs
-                stdoutLimitBytes
-                stderrLimitBytes
-                context
-                fileName
-                arguments
-                workingDirectory
+        let timeoutMs, run = runWithBudget spawn arguments
+        let! result = run
 
         return
             match result with
@@ -400,42 +409,10 @@ let runArgumentListTextResultWithTimeout
             | Error failure -> Error(describeFailure timeoutMs failure)
     }
 
-/// Decoded stdout on exit 0; decoded stderr or a described runner failure otherwise.
-let runArgumentListTextResult
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    =
-    runArgumentListTextResultWithTimeout
-        defaultTimeoutMs
-        stdoutLimitBytes
-        stderrLimitBytes
-        context
-        fileName
-        arguments
-        workingDirectory
-
 /// Decoded stdout on exit 0; `None` for a non-zero exit or a runner failure.
-let runArgumentListText
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    =
+let text (spawn: Spawn) (arguments: string list) =
     async {
-        let! result =
-            runArgumentListTextResult
-                stdoutLimitBytes
-                stderrLimitBytes
-                context
-                fileName
-                arguments
-                workingDirectory
+        let! result = textResult spawn arguments
 
         return
             match result with
@@ -443,26 +420,13 @@ let runArgumentListText
             | Error _ -> None
     }
 
-/// Like `runArgumentListExitResult` but with an explicit timeout, for the post-fork setup hook.
-let runArgumentListExitResultWithTimeout
-    (timeoutMs: int)
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    : Async<Result<unit, string>> =
+/// For callers that run a command for its effect and discard its output: success is the child's
+/// exit code alone, so a chatty-but-successful run stays a success no matter how much output the
+/// capture had to drop. `Error` carries the child's stderr or a described runner failure.
+let exitResult (spawn: Spawn) (arguments: string list) : Async<Result<unit, string>> =
     async {
-        let! result =
-            runArgumentListWithTimeout
-                timeoutMs
-                stdoutLimitBytes
-                stderrLimitBytes
-                context
-                fileName
-                arguments
-                workingDirectory
+        let timeoutMs, run = runWithBudget spawn arguments
+        let! result = run
 
         return
             match result with
@@ -470,23 +434,3 @@ let runArgumentListExitResultWithTimeout
             | Ok output -> Error(decodeCapture output.Stderr)
             | Error failure -> Error(describeFailure timeoutMs failure)
     }
-
-/// For callers that run a command for its effect and discard its output: success is the child's
-/// exit code alone, so a chatty-but-successful run stays a success no matter how much output the
-/// capture had to drop. `Error` carries the child's stderr or a described runner failure.
-let runArgumentListExitResult
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    =
-    runArgumentListExitResultWithTimeout
-        defaultTimeoutMs
-        stdoutLimitBytes
-        stderrLimitBytes
-        context
-        fileName
-        arguments
-        workingDirectory

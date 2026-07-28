@@ -66,21 +66,12 @@ let private azPythonExe =
             let python = Path.Combine(Path.GetDirectoryName(cmd), "..", "python.exe") |> Path.GetFullPath
             if File.Exists(python) then Some python else None)
 
-/// Azure DevOps JSON payloads are bounded by PR and build counts rather than a known constant;
-/// stderr only ever carries a CLI message.
-let private stdoutLimitBytes = 16 * 1024 * 1024
-let private stderrLimitBytes = 64 * 1024
-
 let private runAz (arguments: string list) =
     match azPythonExe.Value with
     | Some python ->
-        ProcessRunner.runArgumentListText
-            stdoutLimitBytes
-            stderrLimitBytes
-            "PR"
-            python
+        ProcessRunner.text
+            { ProcessRunner.Spawn.create python with Context = "PR" }
             ("-IBm" :: "azure.cli" :: arguments)
-            None
     | None ->
         Log.log "PR" "Could not locate Azure CLI python.exe via PATH"
         async { return None }
@@ -89,13 +80,9 @@ let buildRemoteUrlArgs (repoRoot: string) (remoteName: string) =
     [ "-C"; repoRoot; "remote"; "get-url"; remoteName ]
 
 let getRemoteUrl (repoRoot: string) (remoteName: string) =
-    ProcessRunner.runArgumentListText
-        stdoutLimitBytes
-        stderrLimitBytes
-        "PR"
-        "git"
+    ProcessRunner.text
+        { ProcessRunner.Spawn.create "git" with Context = "PR" }
         (buildRemoteUrlArgs repoRoot remoteName)
-        None
 
 type internal ParsedPr =
     { BranchName: string
