@@ -3,6 +3,9 @@ var SELECTION_KEY = 'treemon.diff.selection:' + location.pathname.replace(/\/dif
 var FILTER_KEY = 'treemon.diff.layers:' + location.pathname.replace(/\/diff\.html$/, '');
 var HIGHLIGHTER_URL = '/assets/diff2html/3.4.52/diff2html-ui-slim.min.js';
 var OTHER_CATEGORY = 'Other';
+// Joins the names of a flattened single-child chain into one label, matching how `tm categories`
+// writes a root-to-leaf path.
+var CATEGORY_CHAIN_SEPARATOR = ' > ';
 var CATEGORY_WARNING = 'Diff groups are not applied';
 var CONFIGURE_ACTION = 'configure-diff-categories';
 var CONFIGURE_LABEL = 'Analyze repository and configure diff groups';
@@ -424,11 +427,34 @@ function categoryRoots(files) {
     ]);
 }
 
+// A run of categories that each hold exactly one child and no files of their own tells the reader
+// nothing at each step: every level costs a row, an indent, and a click to reveal a single row. Such
+// a run becomes one row carrying the joined names and the deepest category's contents, count, and
+// path — that node is the one the row discloses, so the remembered toggle stays with those files
+// even when a new sibling later breaks the run apart. Flattening runs before disclosure and
+// rendering, so the disclosure rules, the indentation depth, and keyboard reachability all see the
+// shape the reader sees.
+function flattenCategoryChain(node) {
+    var names = [node.name];
+    var tip = node;
+    while (tip.children.size === 1 && !tip.files.length) {
+        tip = tip.children.values().next().value;
+        names.push(tip.name);
+    }
+    return {
+        names: names,
+        path: tip.path,
+        children: Array.from(tip.children.values(), flattenCategoryChain),
+        files: tip.files,
+        count: tip.count
+    };
+}
+
 // The intrinsic default of one category, independent of its ancestors: a leaf (including the
 // synthetic Other group) opens while its files fit the limit, and a branch closes only when it has
 // more direct children than the limit, so a wide branch shows a summary instead of a wall of headers.
 function categoryOpensByDefault(node) {
-    if (node.children.size) return node.children.size <= CATEGORY_DISCLOSURE_LIMIT;
+    if (node.children.length) return node.children.length <= CATEGORY_DISCLOSURE_LIMIT;
     return node.files.length <= CATEGORY_DISCLOSURE_LIMIT;
 }
 
@@ -455,27 +481,32 @@ function createCategorySection(node, depth, forcedCollapsed) {
     section.className = 'category-item';
     section.style.setProperty('--category-depth', String(depth));
 
+    var label = node.names.join(CATEGORY_CHAIN_SEPARATOR);
+    var countLabel = node.count + (node.count === 1 ? ' file' : ' files');
+
     var button = document.createElement('button');
     button.type = 'button';
     button.className = 'category-entry';
     button.setAttribute('aria-expanded', String(categoryExpanded(node, forcedCollapsed)));
-    button.title = node.name;
+    button.title = label;
+    // A joined chain reads as one breadcrumb on screen, but its separators are punctuation, so the
+    // accessible name spells the names out and carries the count the row shows beside them.
+    button.setAttribute('aria-label', node.names.concat([countLabel]).join(', '));
 
     var name = document.createElement('span');
     name.className = 'category-name';
-    name.textContent = node.name;
+    name.textContent = label;
 
     var count = document.createElement('span');
     count.className = 'category-count';
     count.textContent = String(node.count);
-    count.setAttribute('aria-label', node.count + (node.count === 1 ? ' file' : ' files'));
 
     button.append(name, count);
 
     var panel = document.createElement('div');
     panel.className = 'category-panel';
     var forcesChildren = forcesChildrenCollapsed(node);
-    var children = Array.from(node.children.values(), function(child) {
+    var children = node.children.map(function(child) {
         return createCategorySection(child, depth + 1, forcesChildren);
     });
     var rows = node.files.map(function(entry) {
@@ -503,9 +534,11 @@ function renderCategoryTree(files) {
     var list = document.getElementById('file-list');
     // Top-level categories are evaluated individually; nothing forces them collapsed on behalf of
     // the diff as a whole.
-    var sections = categoryRoots(files).map(function(node) {
-        return createCategorySection(node, 1, false);
-    });
+    var sections = categoryRoots(files)
+        .map(flattenCategoryChain)
+        .map(function(node) {
+            return createCategorySection(node, 1, false);
+        });
     list.replaceChildren.apply(list, sections);
 }
 

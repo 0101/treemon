@@ -9,6 +9,22 @@ open Microsoft.Playwright
 open NUnit.Framework
 open Tests.DiffViewerTestHarness
 
+/// Every rendered category row as `indent depth|label|count|aria-expanded|direct file rows`, which
+/// is exactly what flattening a single-child chain changes: which rows exist, how each is labelled,
+/// how deep it is indented, and where the file rows hang.
+let private categoryRowScript =
+    """() => [...document.querySelectorAll('.category-item')].map(section => {
+        const button = section.querySelector(':scope > .category-entry');
+        const panel = section.querySelector(':scope > .category-panel');
+        return [
+            section.style.getPropertyValue('--category-depth'),
+            button.querySelector('.category-name').textContent,
+            button.querySelector('.category-count').textContent,
+            button.getAttribute('aria-expanded'),
+            String(panel.querySelectorAll(':scope > .file-item').length)
+        ].join('|');
+    })"""
+
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Canvas")>]
@@ -163,12 +179,11 @@ type DiffCategoryE2ETests() =
                         const walk = (section, depth) => {
                             const button = section.querySelector(':scope > .category-entry');
                             const panel = section.querySelector(':scope > .category-panel');
-                            const count = button.querySelector('.category-count');
                             lines.push([
                                 depth,
                                 button.querySelector('.category-name').textContent,
-                                count.textContent,
-                                count.getAttribute('aria-label'),
+                                button.querySelector('.category-count').textContent,
+                                button.getAttribute('aria-label'),
                                 button.getAttribute('aria-expanded')
                             ].join('|'));
                             [...panel.children].forEach(child => {
@@ -212,17 +227,17 @@ type DiffCategoryE2ETests() =
                 Assert.That(
                     outline,
                     Is.EqualTo(
-                        [| "1|Production code|3|3 files|true"
-                           "2|Client|2|2 files|true"
+                        [| "1|Production code|3|Production code, 3 files|true"
+                           "2|Client|2|Client, 2 files|true"
                            "2|file|src/Client/App.fs"
                            "2|file|src/Client/View.fs"
-                           "2|Server|1|1 file|true"
+                           "2|Server|1|Server, 1 file|true"
                            "2|file|src/Server/Api.fs"
-                           "1|Tests|1|1 file|true"
+                           "1|Tests|1|Tests, 1 file|true"
                            "1|file|src/Tests/ApiTests.fs"
-                           "1|<b>Docs</b>|1|1 file|true"
+                           "1|<b>Docs</b>|1|<b>Docs</b>, 1 file|true"
                            "1|file|docs/spec/api.md"
-                           "1|Other|1|1 file|true"
+                           "1|Other|1|Other, 1 file|true"
                            "1|file|notes.txt" |]
                     )
                 )
@@ -640,6 +655,114 @@ type DiffCategoryE2ETests() =
         }
 
     [<Test>]
+    member this.``single-child chains render as one joined row at every depth``() =
+        task {
+            let files =
+                Array.concat
+                    // A chain from a root, a chain starting below a branching parent, a branch with
+                    // two children, and a category holding both a child and files of its own.
+                    [ categoryFiles [ "Production code"; "Server"; "F#" ] 3
+                      categoryFiles [ "Docs"; "Specs"; "Draft" ] 1
+                      categoryFiles [ "Docs"; "Guides" ] 1
+                      categoryFiles [ "Scripts" ] 1
+                      categoryFiles [ "Scripts"; "CI" ] 1 ]
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(5).WaitForAsync()
+
+            let! rows = this.Page.EvaluateAsync<string array>(categoryRowScript)
+
+            let! labels =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const header = label => [...document.querySelectorAll('.category-entry')]
+                            .find(entry => entry.querySelector('.category-name').textContent === label);
+                        const chain = header('Production code > Server > F#');
+                        const plain = header('Docs');
+                        return [
+                            chain.title,
+                            chain.getAttribute('aria-label'),
+                            plain.title,
+                            plain.getAttribute('aria-label')
+                        ];
+                    }"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    rows,
+                    Is.EqualTo(
+                        [| "1|Production code > Server > F#|3|true|3"
+                           "1|Docs|2|true|0"
+                           "2|Specs > Draft|1|true|1"
+                           "2|Guides|1|true|1"
+                           "1|Scripts|2|true|1"
+                           "2|CI|1|true|1" |]
+                    )
+                )
+                Assert.That(
+                    labels,
+                    Is.EqualTo(
+                        [| "Production code > Server > F#"
+                           "Production code, Server, F#, 3 files"
+                           "Docs"
+                           "Docs, 2 files" |]
+                    )
+                ))
+        }
+
+    [<Test>]
+    member this.``a collapsed chain keeps its choice when a new sibling breaks it``() =
+        task {
+            let chainFiles = categoryFiles [ "Production code"; "Server"; "F#" ] 3
+
+            let summaries =
+                [| configuredSummaryJson chainFiles
+                   configuredSummaryJson (
+                       Array.append
+                           chainFiles
+                           (categoryFiles [ "Production code"; "Client" ] 1)
+                   ) |]
+
+            do! this.RouteSummaries(summaries)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").WaitForAsync()
+
+            do! this.ToggleCategory("Production code > Server > F#")
+
+            let! collapsed = this.Page.EvaluateAsync<string array>(categoryRowScript)
+            let! hidden = this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            // The refreshed summary gives Production code a second child, so the chain breaks into
+            // its own row plus a shorter joined row. The remembered choice belongs to the files it
+            // was made on, so it follows that shorter row rather than closing the new parent.
+            do! this.RefreshCategories()
+
+            let! afterBreak = this.Page.EvaluateAsync<string array>(categoryRowScript)
+            let! visible = this.Page.EvaluateAsync<string array>(visibleFileRowsScript)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    collapsed,
+                    Is.EqualTo([| "1|Production code > Server > F#|3|false|3" |])
+                )
+                Assert.That(hidden, Is.Empty)
+                Assert.That(
+                    afterBreak,
+                    Is.EqualTo(
+                        [| "1|Production code|4|true|0"
+                           "2|Server > F#|3|false|3"
+                           "2|Client|1|true|1" |]
+                    )
+                )
+                Assert.That(
+                    visible,
+                    Is.EqualTo([| "src/Production code-Client/file0.fs" |])
+                ))
+        }
+
+    [<Test>]
     member this.``explicit toggles are keyed by path so delimiters in names cannot collide``() =
         task {
             let files =
@@ -658,12 +781,14 @@ type DiffCategoryE2ETests() =
 
             do! this.RouteSummary(configuredSummaryJson files)
             do! this.Goto()
-            do! this.Page.Locator(".category-entry").Nth(3).WaitForAsync()
+            do! this.Page.Locator(".category-entry").Nth(1).WaitForAsync()
 
             let! before =
                 this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
 
-            do! this.ToggleCategory("C")
+            // Both chains flatten into one row each, so the two rows are keyed by the paths
+            // ["A/B", "C"] and ["A", "B/C"] — which a delimiter-joined key would confuse.
+            do! this.ToggleCategory("A/B > C")
 
             let! afterToggle =
                 this.Page.EvaluateAsync<string array>(categoryDisclosureScript)
@@ -678,21 +803,11 @@ type DiffCategoryE2ETests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     before,
-                    Is.EqualTo(
-                        [| "A/B|true"
-                           "A/B > C|true"
-                           "A|true"
-                           "A > B/C|true" |]
-                    )
+                    Is.EqualTo([| "A/B > C|true"; "A > B/C|true" |])
                 )
                 Assert.That(
                     afterToggle,
-                    Is.EqualTo(
-                        [| "A/B|true"
-                           "A/B > C|false"
-                           "A|true"
-                           "A > B/C|true" |]
-                    )
+                    Is.EqualTo([| "A/B > C|false"; "A > B/C|true" |])
                 )
                 Assert.That(visible, Is.EqualTo([| "src/slash-child.fs" |]))
                 Assert.That(afterRefresh, Is.EqualTo(afterToggle)))
