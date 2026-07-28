@@ -1,6 +1,7 @@
 module Tests.BranchSyncTests
 
 open System.IO
+open System.Runtime.InteropServices
 open NUnit.Framework
 open Server
 open Server.GitBranchSync
@@ -104,6 +105,34 @@ type BranchSyncTests() =
             Assert.That(mergeCommitCount repoDir, Is.EqualTo("1"))
             Assert.That(File.Exists(Path.Combine(repoDir, "feature-work.txt")), Is.True)
             Assert.That(File.Exists(Path.Combine(repoDir, "base-work.txt")), Is.True))
+
+    [<Test>]
+    member _.``repository hooks never run during a mechanical sync``() =
+        withTempDir "treemon-branch-sync-hooks" (fun tempDir ->
+            let repoDir, baseDir = scratchRepos tempDir
+            commitFile repoDir "feature-work.txt" "feature work"
+            advanceBase baseDir "base-work.txt" "base work"
+
+            // Hooks are project-controlled scripts, and this operation runs unattended: a merge would
+            // otherwise execute whatever the repository ships as post-merge.
+            let evidence = Path.Combine(repoDir, "hook-evidence.txt")
+            let hookPath = Path.Combine(repoDir, ".git", "hooks", "post-merge")
+            Directory.CreateDirectory(Path.GetDirectoryName(hookPath)) |> ignore
+            File.WriteAllText(hookPath, $"#!/bin/sh\ntouch \"{evidence}\"\n")
+
+            if not (RuntimeInformation.IsOSPlatform OSPlatform.Windows) then
+                File.SetUnixFileMode(
+                    hookPath,
+                    UnixFileMode.UserRead ||| UnixFileMode.UserWrite ||| UnixFileMode.UserExecute)
+
+            let outcome = sync repoDir
+
+            Assert.Multiple(fun () ->
+                Assert.That(outcome, Is.EqualTo(BranchSyncOutcome.Merged))
+                Assert.That(
+                    File.Exists evidence,
+                    Is.False,
+                    "an unattended sync must not execute repository hook scripts")))
 
     [<Test>]
     member _.``a conflicting merge is aborted and the pre-merge tree and index are restored``() =

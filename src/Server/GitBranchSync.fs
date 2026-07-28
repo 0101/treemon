@@ -43,10 +43,20 @@ let private branchSyncGit =
         Limits = ProcessRunner.CaptureLimits.small
         Deadline = ProcessRunner.Timeout branchSyncTimeoutMs }
 
+/// Repository hooks are project-controlled scripts, and this path runs unattended with nobody
+/// watching the worktree — `pre-merge-commit`, `post-merge`, and `pre-push` would all fire. Git
+/// treats a missing hooks directory as "no hooks at all", so every mechanical command points at a
+/// directory Treemon never creates. This is what keeps the documented guarantee that the mechanical
+/// path runs no project work; `--no-verify` would not, since it leaves `post-merge` running.
+let private noHooksPath =
+    IO.Path.Combine(IO.Path.GetTempPath(), "treemon-mechanical-sync-no-hooks")
+
 /// Every sync and push command goes through an argument list, so a remote or branch name can never
 /// be parsed as part of a command string.
 let private runBranchGit (worktreePath: string) (arguments: string list) =
-    ProcessRunner.capture branchSyncGit ("-C" :: worktreePath :: arguments)
+    ProcessRunner.capture
+        branchSyncGit
+        ("-c" :: $"core.hooksPath={noHooksPath}" :: "-C" :: worktreePath :: arguments)
 
 let private singleLineStdout (output: ProcessRunner.ArgumentListOutput) =
     Text.Encoding.UTF8.GetString(output.Stdout).Trim()
@@ -157,6 +167,16 @@ let private mergeFetchedBase request revision =
 /// Treemon's own bounded sync of a worktree onto its base branch, for when no coding session is open
 /// to do it. It merges only a worktree proven clean, fetches that worktree's own base rather than
 /// the repo root's (`fetchUpstream` also fast-forwards the base worktree, an unrelated side effect),
+/// An unreadable working tree is not an empty one, so a probe that could not answer fails to the
+/// agent path rather than merging over work it cannot see.
+let private ensureClean worktreePath =
+    async {
+        match! GitWorktree.localComparisonContent worktreePath with
+        | GitWorktree.Clean -> return Ok()
+        | GitWorktree.HasContent -> return Error BranchSyncOutcome.RefusedDirty
+        | GitWorktree.Undetermined -> return Error BranchSyncOutcome.CommandFailed
+    }
+
 /// prefers a fast-forward over a merge commit, aborts a conflict it created, and confirms the fetched
 /// revision actually reached `HEAD` instead of trusting an exit code.
 let syncWithBase (request: BranchSyncRequest) =
@@ -165,15 +185,7 @@ let syncWithBase (request: BranchSyncRequest) =
 
         let! result =
             asyncResult {
-                let! localContent = GitWorktree.localComparisonContent worktreePath
-
-                // An unreadable working tree is not an empty one, so a probe that could not answer
-                // fails to the agent path rather than merging over work it cannot see.
-                do!
-                    match localContent with
-                    | GitWorktree.Clean -> Ok()
-                    | GitWorktree.HasContent -> Error BranchSyncOutcome.RefusedDirty
-                    | GitWorktree.Undetermined -> Error BranchSyncOutcome.CommandFailed
+                do! ensureClean worktreePath
 
                 let! fetchExit =
                     branchSyncExitCode
@@ -189,6 +201,11 @@ let syncWithBase (request: BranchSyncRequest) =
                 if alreadyCurrent then
                     return BranchSyncOutcome.AlreadyCurrent
                 else
+                    // The fetch above reaches the network and may have run for minutes, so the tree
+                    // proven clean before it is not evidence about the tree being merged into now.
+                    // Asked again as late as possible, for the same reason the branch is re-read.
+                    do! ensureClean worktreePath
+
                     let! outcome = mergeFetchedBase request baseRevision
                     let! verified = headContains worktreePath baseRevision
 

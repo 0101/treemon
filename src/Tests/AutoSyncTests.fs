@@ -469,6 +469,10 @@ type AutoSyncTriggerTests() =
                 isAlreadyAccepted now "base-b" (Some inWindow),
                 Is.False,
                 "a different base revision is new work and must trigger immediately")
+            Assert.That(
+                isAlreadyAccepted now "base-a" (Some(acceptedRecord "base-a" (now + TimeSpan.FromDays 1.0))),
+                Is.False,
+                "a record stamped in the future would otherwise suppress the revision until that time")
             Assert.That(isAlreadyAccepted now "base-a" None, Is.False))
 
     [<Test>]

@@ -157,14 +157,18 @@ let revision eligible (gitData: GitWorktree.GitData) =
 let acceptedRetryAge = TimeSpan.FromHours 1.0
 
 /// A durable record suppresses only the revision it was written for, and only inside the retry
-/// window — a different base revision is the legitimate case where the base advanced again.
+/// window — a different base revision is the legitimate case where the base advanced again. A record
+/// stamped in the future is not inside any window: a clock rollback or a hand-edited runtime file
+/// would otherwise suppress the revision until that future time, so it re-prompts instead.
 let internal isAlreadyAccepted
     (now: DateTimeOffset)
     baseRevision
     (record: AutoSyncStore.AcceptedSyncRecord option)
     =
     match record with
-    | Some record -> record.BaseRevision = baseRevision && now - record.AcceptedAt < acceptedRetryAge
+    | Some record ->
+        let age = now - record.AcceptedAt
+        record.BaseRevision = baseRevision && age >= TimeSpan.Zero && age < acceptedRetryAge
     | None -> false
 
 /// The open winner decides the target; retained identity is consulted only once no session is open,
