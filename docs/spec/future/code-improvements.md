@@ -34,13 +34,12 @@ its own worktree. This file is the entry point; detailed designs live in their o
 | # | Improvement | Detail / spec | Status |
 |---|---|---|---|
 | 1 | **Strong-typed paths** — an `AbsolutePath` type to kill path-comparison bugs at construction time | `docs/spec/future/strong-typed-paths.md` | Deferred (cost/benefit) |
-| 2 | **Port management** — centralize/derive the dev/prod/canvas/vite port assignments | `docs/spec/future/port-management.md` | Idea |
+| 2 | **Port management** — mostly resolved; the centralized `Ports` module is deliberately not worth building. What remains is converting `DemoModeTests` off its two hardcoded ports so `TestUtils.killOrphansOnPort` can be deleted. | `docs/spec/future/port-management.md` | Mostly done |
 | 3 | **Canvas roadmap items** — follow-on canvas-pane enhancements | `docs/spec/future/canvas-roadmap.md` | Idea |
 | 4 | **Process: guard against spec drift** — a lightweight check (or review rule) that flags `Key Files` references to moved/renamed modules so docs can't silently rot after refactors | — | Idea |
-| 5 | **Survey other large modules** — *investigated.* The two largest production modules are `WorktreeApi.fs` (870 L) and `RefreshScheduler.fs` (741 L); both mix concerns. Concrete splits broken out as #8 below (and #7, the `GlobalConfig` extract, now *Done*). (Strict-FP smells are already clean: no stray `let mutable`/loops/`null` in production; `Dictionary` only at cache/registry boundaries.) | — | Done (survey) |
+| 5 | **Survey other large modules** — *investigated.* `RefreshScheduler.fs` and `WorktreeApi.fs` both mix concerns; the concrete split is broken out as #8 below (and #7, the `GlobalConfig` extract, now *Done*). `WorktreeDiff.fs` is tracked separately as #13. (Strict-FP smells are already clean: no stray `let mutable`/loops/`null` in production; `Dictionary` only at cache/registry boundaries.) | — | Done (survey) |
 | 6 | **Remoting CSRF / Origin hardening** — pipeline-level Origin/Referer check so a cross-origin browser page can't drive the unauthenticated loopback Fable.Remoting API (covers the dangerous pre-existing process-launching endpoints, not just watched-roots) | `docs/spec/remoting-csrf-hardening.md` | **Done** — shipped on `quicklaunch` (`HttpSecurity.csrfGuard`) |
 | 8 | **Split `RefreshScheduler.fs`** — the `DashboardState`/`StateMsg`/`processMessage` state slice now lives in `SchedulerState.fs`; the embedded `CanvasWatchers` filesystem-watcher module (~110 L) still sits inside the scheduling loop and can follow the same seam. | — | Partly done (state slice extracted) |
-| 9 | **Consolidate `ProcessRunner` on the argument-list API** — the codebase has three ways to start a process: raw `ProcessStartInfo`, the original string-argument API, and the argument-list API. The two `ProcessRunner` paths differ in *how* they are safe: the string path interpolates arguments and depends on callers applying validators, while the argument-list path is safe by construction and also gives bounded byte capture, process-tree kill, and a shared response deadline. A missing validator on a string call site produces no compile error, so the safer path should become the only one. Migrate the remaining string callers, then delete `run`/`runResult`/`runResultWithTimeout`. | — | Idea |
 | 10 | **Share the `WorktreeDiffTests` git fixture** — the suite creates a real repository per test in `[<SetUp>]` (`initRepoOnMain`), making it the single largest contributor to Fast-suite runtime. Build the repository once in `[<OneTimeSetUp>]` and give each test its own branch or clone. | — | Idea |
 | 11 | **Fast-suite runtime exceeds its documented budget** — AGENTS.md advertises `<60s` for `Category=Fast`; the suite has been several times that for a while, dominated by browser-driven fixtures (`DashboardTests`, `CreateWorktreeServerTests`, `ArchiveTests`) plus #10. Either bring the suite back under budget or correct the figure, because a stale number stops it acting as a gate. | — | Idea |
 | 12 | **Pin a SystemView to a chosen session** — SystemView interactions resolve per interaction to the worktree's most recently active live session, so with two agents alternating the target follows whoever spoke last. A user-visible pin would make it sticky. Deliberately out of scope when the resolution rule was adopted: storage would exist solely to hold rare, uncontended overrides. | `docs/spec/canvas-interaction-routing.md` | Idea |
@@ -53,6 +52,8 @@ its own worktree. This file is the entry point; detailed designs live in their o
 
 ## Done
 
+- **`ProcessRunner` consolidation on the argument-list API** — the string-argument entry points are
+  deleted; see `docs/spec/process-execution.md`.
 - **`GlobalConfig` store extraction** — lifted the machine-level `~/.treemon/config.json`
   read/modify/write (single-writer lock, atomic temp-file replace, missing-vs-empty
   `worktreeRoots` semantics, plus the canvas / collapsed-repos / last-viewed-hashes / editor

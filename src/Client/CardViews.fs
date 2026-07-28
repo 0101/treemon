@@ -463,7 +463,7 @@ let archiveButton (callbacks: CardCallbacks) scopedKey (wt: WorktreeStatus) =
 
 let conflictIcon () =
     Svg.svg [
-        svg.className "conflict-icon"
+        svg.className "pr-icon conflict"
         svg.viewBox (0, 0, 1920, 1920)
         svg.custom ("role", "img")
         svg.children [
@@ -471,6 +471,19 @@ let conflictIcon () =
             Svg.path [
                 svg.d "m1359.36 1279.51-79.85 79.85L960 1039.85l-319.398 319.51-79.85-79.85L880.152 960 560.753 640.602l79.85-79.85L960 880.152l319.51-319.398 79.85 79.85L1039.85 960l319.51 319.51ZM960 0C430.645 0 0 430.645 0 960s430.645 960 960 960 960-430.645 960-960S1489.355 0 960 0Z"
                 svg.custom ("fillRule", "evenodd")
+            ]
+        ]
+    ]
+
+let autoMergeIcon () =
+    Svg.svg [
+        svg.className "pr-icon auto-merge"
+        svg.viewBox (0, 0, 16, 16)
+        svg.custom ("role", "img")
+        svg.children [
+            Svg.title "Auto-merge is set — the PR merges itself once all checks pass"
+            Svg.path [
+                svg.d "M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm0-1.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13Zm3.78-9.72a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L4.22 8.28a.75.75 0 1 1 1.06-1.06L7 8.94l3.72-3.72a.75.75 0 0 1 1.06 0Z"
             ]
         ]
     ]
@@ -504,6 +517,7 @@ let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
                 prop.target "_blank"
                 prop.children [
                     Html.text $"PR #{pr.Id}"
+                    if pr.AutoMergeEnabled then autoMergeIcon ()
                     if pr.HasConflicts then conflictIcon ()
                 ]
             ]

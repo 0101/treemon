@@ -23,6 +23,7 @@ let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
           Builds = []
           IsOpen = false
           IsMerged = true
+          AutoMergeEnabled = false
           HasConflicts = false }
 
 /// Reconciles live provider data with durable merged records. Provider head SHAs are immutable PR

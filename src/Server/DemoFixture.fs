@@ -75,6 +75,7 @@ let private prRetryBuilding: PrInfo =
             Failure = None } ]
       IsOpen = true
       IsMerged = false
+      AutoMergeEnabled = false
       HasConflicts = false }
 
 let private prRetryFailed =
@@ -116,6 +117,7 @@ let private prAuth: PrInfo =
             Failure = None } ]
       IsOpen = true
       IsMerged = false
+      AutoMergeEnabled = false
       HasConflicts = false }
 
 let private prStreaming: PrInfo =
@@ -135,6 +137,7 @@ let private prStreaming: PrInfo =
             Failure = None } ]
       IsOpen = true
       IsMerged = false
+      AutoMergeEnabled = true
       HasConflicts = false }
 
 let private prCsvMerged: PrInfo =
@@ -150,6 +153,7 @@ let private prCsvMerged: PrInfo =
             Failure = None } ]
       IsOpen = false
       IsMerged = true
+      AutoMergeEnabled = false
       HasConflicts = false }
 
 // --- Worktrees (base definitions) ---

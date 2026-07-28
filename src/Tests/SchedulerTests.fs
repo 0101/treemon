@@ -1552,6 +1552,7 @@ type MergedPrBranchScopeTests() =
                   Builds = []
                   IsOpen = false
                   IsMerged = true
+                  AutoMergeEnabled = false
                   HasConflicts = false }
 
         let repo =

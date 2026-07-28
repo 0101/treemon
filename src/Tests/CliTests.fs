@@ -39,17 +39,17 @@ type ResolvePortTests() =
 [<Category("Fast")>]
 type FormatPrTests() =
 
-    let makePrInfo id title isDraft isMerged hasConflicts =
-        HasPr
-            { Id = id
-              Title = title
-              Url = $"https://example.com/pr/{id}"
-              IsDraft = isDraft
-              Comments = WithResolution(0, 0)
-              Builds = []
-              IsOpen = not isMerged
-              IsMerged = isMerged
-              HasConflicts = hasConflicts }
+    let basePr =
+        { Id = 1
+          Title = "A pull request"
+          Url = "https://example.com/pr/1"
+          IsDraft = false
+          Comments = WithResolution(0, 0)
+          Builds = []
+          IsOpen = true
+          IsMerged = false
+          AutoMergeEnabled = false
+          HasConflicts = false }
 
     [<Test>]
     member _.``NoPr formats as No PR``() =
@@ -57,32 +57,49 @@ type FormatPrTests() =
 
     [<Test>]
     member _.``HasPr with no flags shows PR number and title``() =
-        let result = formatPr (makePrInfo 42 "Add feature X" false false false)
+        let result = formatPr (HasPr { basePr with Id = 42; Title = "Add feature X" })
         Assert.That(result, Is.EqualTo("PR #42: Add feature X"))
 
     [<Test>]
     member _.``HasPr draft shows draft flag``() =
-        let result = formatPr (makePrInfo 7 "WIP changes" true false false)
+        let result = formatPr (HasPr { basePr with Id = 7; Title = "WIP changes"; IsDraft = true })
         Assert.That(result, Is.EqualTo("PR #7 [draft]: WIP changes"))
 
     [<Test>]
     member _.``HasPr merged shows merged flag``() =
-        let result = formatPr (makePrInfo 10 "Done" false true false)
+        let result = formatPr (HasPr { basePr with Id = 10; Title = "Done"; IsMerged = true })
         Assert.That(result, Is.EqualTo("PR #10 [merged]: Done"))
 
     [<Test>]
+    member _.``HasPr with auto-merge shows auto-merge flag``() =
+        let result = formatPr (HasPr { basePr with Id = 8; Title = "Queued"; AutoMergeEnabled = true })
+        Assert.That(result, Is.EqualTo("PR #8 [auto-merge]: Queued"))
+
+    [<Test>]
     member _.``HasPr with conflicts shows conflicts flag``() =
-        let result = formatPr (makePrInfo 5 "Conflicting" false false true)
+        let result = formatPr (HasPr { basePr with Id = 5; Title = "Conflicting"; HasConflicts = true })
         Assert.That(result, Is.EqualTo("PR #5 [conflicts]: Conflicting"))
 
     [<Test>]
     member _.``HasPr with all flags shows all flags``() =
-        let result = formatPr (makePrInfo 99 "Everything" true true true)
-        Assert.That(result, Is.EqualTo("PR #99 [draft, merged, conflicts]: Everything"))
+        let result =
+            formatPr (
+                HasPr
+                    { basePr with
+                        Id = 99
+                        Title = "Everything"
+                        IsDraft = true
+                        IsMerged = true
+                        AutoMergeEnabled = true
+                        HasConflicts = true })
+
+        Assert.That(result, Is.EqualTo("PR #99 [draft, merged, auto-merge, conflicts]: Everything"))
 
     [<Test>]
     member _.``HasPr draft and conflicts shows both flags``() =
-        let result = formatPr (makePrInfo 3 "Draft conflict" true false true)
+        let result =
+            formatPr (HasPr { basePr with Id = 3; Title = "Draft conflict"; IsDraft = true; HasConflicts = true })
+
         Assert.That(result, Is.EqualTo("PR #3 [draft, conflicts]: Draft conflict"))
 
 [<TestFixture>]

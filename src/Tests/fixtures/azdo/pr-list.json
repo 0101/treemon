@@ -6,6 +6,7 @@
     "sourceRefName": "refs/heads/feature/auth",
     "status": "active",
     "mergeStatus": "conflicts",
+    "autoCompleteSetBy": null,
     "lastMergeSourceCommit": { "commitId": "sha-feature-auth" },
     "repository": { "id": "abc12345-def6-7890-abcd-ef1234567890" }
   },
@@ -16,6 +17,7 @@
     "sourceRefName": "refs/heads/fix/login-style",
     "status": "active",
     "mergeStatus": "succeeded",
+    "autoCompleteSetBy": { "displayName": "Test User", "id": "user-guid" },
     "lastMergeSourceCommit": { "commitId": "sha-fix-login-style" },
     "repository": { "id": "abc12345-def6-7890-abcd-ef1234567890" }
   },
@@ -26,6 +28,7 @@
     "sourceRefName": "refs/heads/refactor/data-layer",
     "status": "completed",
     "closedDate": "2026-02-20T14:30:00Z",
+    "autoCompleteSetBy": { "displayName": "Test User", "id": "user-guid" },
     "lastMergeSourceCommit": { "commitId": "sha-refactor-data-layer" },
     "repository": { "id": "abc12345-def6-7890-abcd-ef1234567890" }
   }

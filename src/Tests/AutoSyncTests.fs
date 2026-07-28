@@ -70,6 +70,7 @@ let private prInfo isMerged : PrStatus =
           Builds = []
           IsOpen = not isMerged
           IsMerged = isMerged
+          AutoMergeEnabled = false
           HasConflicts = false }
 
 let private mergedPr = prInfo true

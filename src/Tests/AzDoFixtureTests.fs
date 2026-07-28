@@ -96,6 +96,24 @@ type ParsePrListFixtureTests() =
         Assert.That(completed.HasConflicts, Is.False)
 
     [<Test>]
+    member _.``PR with autoCompleteSetBy has AutoMergeEnabled true``() =
+        let _, prs = readFixture "pr-list.json" |> parsePrList
+        let autoCompleting = prs |> List.find (fun pr -> pr.PrId = 102)
+        Assert.That(autoCompleting.AutoMergeEnabled, Is.True)
+
+    [<Test>]
+    member _.``PR with null autoCompleteSetBy has AutoMergeEnabled false``() =
+        let _, prs = readFixture "pr-list.json" |> parsePrList
+        let plain = prs |> List.find (fun pr -> pr.PrId = 101)
+        Assert.That(plain.AutoMergeEnabled, Is.False)
+
+    [<Test>]
+    member _.``Completed PR keeps AutoMergeEnabled false despite autoCompleteSetBy``() =
+        let _, prs = readFixture "pr-list.json" |> parsePrList
+        let completed = prs |> List.find (fun pr -> pr.PrId = 100)
+        Assert.That(completed.AutoMergeEnabled, Is.False)
+
+    [<Test>]
     member _.``Empty array returns empty list and no GUID``() =
         let guid, prs = parsePrList "[]"
         Assert.That(prs, Is.Empty)

@@ -12,6 +12,7 @@ let private mkPr branch prId isMerged closedDate =
       IsDraft = false
       IsOpen = not isMerged
       IsMerged = isMerged
+      AutoMergeEnabled = false
       HasConflicts = false
       ClosedDate = closedDate }
 

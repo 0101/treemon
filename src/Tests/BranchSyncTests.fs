@@ -331,6 +331,7 @@ type MechanicalSyncCompositionTests() =
               Builds = []
               IsOpen = true
               IsMerged = false
+              AutoMergeEnabled = false
               HasConflicts = false }
 
     let refusedDirty: Result<unit, AutoSync.SyncFailure> = Error AutoSync.DirtyWorktree

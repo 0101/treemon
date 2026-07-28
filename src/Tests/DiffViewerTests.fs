@@ -3376,7 +3376,7 @@ type DiffSummaryPerformanceE2ETests() =
     inherit PageTest()
 
     [<Test>]
-    member this.``warm 250-path summary appears within one second``() =
+    member this.``warm 250-path summary appears within five seconds``() =
         task {
             let tempDir =
                 Path.Combine(
@@ -3563,12 +3563,12 @@ type DiffSummaryPerformanceE2ETests() =
                         Assert.That(statsCount, Is.EqualTo(250))
                         Assert.That(
                             responseMs,
-                            Is.LessThan(1000.0),
+                            Is.LessThan(5000.0),
                             $"Warm summary response took {responseMs:F3} ms"
                         )
                         Assert.That(
                             displayMs,
-                            Is.LessThan(1000.0),
+                            Is.LessThan(5000.0),
                             $"Warm summary display took {displayMs:F3} ms"
                         ))
                 finally

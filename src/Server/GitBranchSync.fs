@@ -31,24 +31,22 @@ type BranchSyncRequest =
       Branch: string }
 
 /// A sync fetches over the network from background work that no HTTP response is waiting on, so it
-/// gets its own timeout instead of the interactive response deadline `runArgumentList` applies.
+/// gets its own timeout instead of the interactive response deadline the shared spawns apply.
 let private branchSyncTimeoutMs = 120_000
 
-/// Nothing in the sync reads Git's output; the bound only stops a pathological repository from
-/// streaming megabytes through the server process.
-let private branchSyncCaptureLimitBytes = 64 * 1024
+/// Nothing in the sync reads Git's output beyond a single ref line, so `CaptureLimits.small` is
+/// ample; the bound only stops a pathological repository from streaming megabytes through the
+/// server process.
+let private branchSyncGit =
+    { ProcessRunner.Spawn.create "git" with
+        Context = "Git"
+        Limits = ProcessRunner.CaptureLimits.small
+        Deadline = ProcessRunner.Timeout branchSyncTimeoutMs }
 
 /// Every sync and push command goes through an argument list, so a remote or branch name can never
 /// be parsed as part of a command string.
 let private runBranchGit (worktreePath: string) (arguments: string list) =
-    ProcessRunner.runArgumentListWithTimeout
-        branchSyncTimeoutMs
-        branchSyncCaptureLimitBytes
-        branchSyncCaptureLimitBytes
-        "Git"
-        "git"
-        ("-C" :: worktreePath :: arguments)
-        None
+    ProcessRunner.capture branchSyncGit ("-C" :: worktreePath :: arguments)
 
 let private singleLineStdout (output: ProcessRunner.ArgumentListOutput) =
     Text.Encoding.UTF8.GetString(output.Stdout).Trim()

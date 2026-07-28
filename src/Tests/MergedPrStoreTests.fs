@@ -205,6 +205,7 @@ let private openLivePr id : PrStatus =
           Builds = [ { Name = "ci"; Status = Building; Url = None; Failure = None } ]
           IsOpen = true
           IsMerged = false
+          AutoMergeEnabled = true
           HasConflicts = true }
 
 // A live MERGED PR carrying volatile fields, to prove reconcile persists only Id/Title/Url.
@@ -218,6 +219,7 @@ let private mergedLivePr id title url : PrStatus =
           Builds = [ { Name = "ci"; Status = Succeeded; Url = Some "https://example.test/ci"; Failure = None } ]
           IsOpen = false
           IsMerged = true
+          AutoMergeEnabled = true
           HasConflicts = true }
 
 // The exact inert reconstruction the spec mandates for a persisted record overlaid as fallback.
@@ -231,6 +233,7 @@ let private reconstructed (r: MergedPrRecord) : PrStatus =
           Builds = []
           IsOpen = false
           IsMerged = true
+          AutoMergeEnabled = false
           HasConflicts = false }
 
 // Pure reconcileMergedPrs: no I/O, so these run parallel with no CWD/agent setup.
@@ -563,6 +566,7 @@ type MergedPrStoreEndToEndTests() =
               Builds = [ { Name = "ci"; Status = Succeeded; Url = Some "https://example.test/ci"; Failure = None } ]
               IsOpen = false
               IsMerged = true
+              AutoMergeEnabled = true
               HasConflicts = true }
 
     let record42 = mk 42 "Add X" "https://example.test/pull/42"

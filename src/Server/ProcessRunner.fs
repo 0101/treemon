@@ -3,6 +3,7 @@ module Server.ProcessRunner
 open System
 open System.Diagnostics
 open System.IO
+open System.Text
 open System.Threading
 
 let private defaultTimeoutMs = 60_000
@@ -10,7 +11,7 @@ let internal argumentListResponseDeadlineMs = 10_000
 let private maxArgumentListShutdownMs = 250
 let private maxArgumentListResponseReserveMs = 500
 
-type internal ResponseDeadline =
+type ResponseDeadline =
     private
         { ExpiresAt: int64
           ResponseReserveMs: int
@@ -20,19 +21,70 @@ type CaptureStream =
     | StandardOutput
     | StandardError
 
+/// A run that produced no exit code at all. Reaching a capture limit is deliberately not here: the
+/// child still ran and exited, so that outcome is a successful capture carrying `Truncated`.
 type ArgumentListFailure =
     | StartFailed of string
     | TimedOut
-    | CaptureLimitExceeded of CaptureStream
 
 type ArgumentListOutput =
     { ExitCode: int
       Stdout: byte[]
-      Stderr: byte[] }
+      Stderr: byte[]
+      /// Streams whose capture hit its byte limit, stdout first. Truncation is a property of the
+      /// captured bytes, not a verdict on the run: it makes parsed stdout unusable, but is
+      /// irrelevant to a caller that only reads the exit code.
+      Truncated: CaptureStream list }
 
 type private BoundedCapture =
     { Bytes: byte[]
       LimitExceeded: bool }
+
+/// How many bytes of each stream a run may keep. The right cap depends on the operation, so this
+/// is always chosen explicitly — the presets below name the three policies actually in use.
+type CaptureLimits =
+    { StdoutBytes: int
+      StderrBytes: int }
+
+module CaptureLimits =
+    /// Status collectors, JSON output, and diff summaries: large stdout, small stderr.
+    let data =
+        { StdoutBytes = 16 * 1024 * 1024
+          StderrBytes = 64 * 1024 }
+
+    /// Short single-value reads such as a branch name or a resolved ref.
+    let small =
+        { StdoutBytes = 64 * 1024
+          StderrBytes = 64 * 1024 }
+
+    /// Probes that only ask "was there any output at all".
+    let tiny = { StdoutBytes = 1024; StderrBytes = 1024 }
+
+/// Where a run's time budget comes from. `SharedDeadline` is the only case that spends a budget
+/// established before the call, so several sequential runs can share one response deadline.
+type Deadline =
+    | DefaultTimeout
+    | Timeout of ms: int
+    | InteractiveDeadline
+    | SharedDeadline of ResponseDeadline
+
+/// Everything about a run except its arguments. Build one per command per module and override
+/// individual fields at the call sites that differ.
+type Spawn =
+    { FileName: string
+      Context: string
+      Limits: CaptureLimits
+      Deadline: Deadline
+      WorkingDirectory: string option }
+
+module Spawn =
+    /// A data-collecting run of `fileName` on the 60 s default, logged under the executable's name.
+    let create fileName =
+        { FileName = fileName
+          Context = fileName
+          Limits = CaptureLimits.data
+          Deadline = DefaultTimeout
+          WorkingDirectory = None }
 
 let private responseReserveMs responseDeadlineMs =
     min
@@ -74,86 +126,6 @@ let internal responseDeadlineOperationRemainingMs deadline =
 
 let internal responseDeadlineCanContinue deadline =
     responseDeadlineOperationRemainingMs deadline > 0
-
-let private truncate (s: string) =
-    if s.Length > 200 then s[..199] + "..." else s
-
-let private startAndCapture (timeoutMs: int) (context: string) (fileName: string) (arguments: string) (workingDirectory: string option) =
-    async {
-        let cmdString = $"{fileName} {arguments}"
-
-        try
-            let psi =
-                ProcessStartInfo(
-                    fileName,
-                    arguments,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                )
-
-            workingDirectory |> Option.iter (fun dir -> psi.WorkingDirectory <- dir)
-
-            use proc = Process.Start(psi)
-            use cts = new CancellationTokenSource(timeoutMs)
-            let ct = cts.Token
-
-            let! waitResult =
-                async {
-                    try
-                        let stdoutTask = proc.StandardOutput.ReadToEndAsync(ct)
-                        let stderrTask = proc.StandardError.ReadToEndAsync(ct)
-                        do! proc.WaitForExitAsync(ct) |> Async.AwaitTask
-                        let! stdout = stdoutTask |> Async.AwaitTask
-                        let! stderr = stderrTask |> Async.AwaitTask
-                        return Ok(proc.ExitCode, stdout.TrimEnd(), stderr.TrimEnd())
-                    with :? System.OperationCanceledException ->
-                        try proc.Kill(entireProcessTree = true) with _ -> ()
-                        return Error $"Timed out after {timeoutMs}ms"
-                }
-
-            match waitResult with
-            | Ok(exitCode, stdout, stderr) ->
-                Log.log context $"{cmdString} -> exit {exitCode}, stdout: {truncate stdout}, stderr: {truncate stderr}"
-                return Ok(exitCode, stdout, stderr)
-            | Error msg ->
-                Log.log context $"{cmdString} -> {msg}"
-                return Error msg
-        with :? System.ComponentModel.Win32Exception as ex ->
-            Log.log context $"{cmdString} -> failed to start: {ex.Message}"
-            return Error ex.Message
-    }
-
-let run (context: string) (fileName: string) (arguments: string) =
-    async {
-        let! result = startAndCapture defaultTimeoutMs context fileName arguments None
-
-        return
-            match result with
-            | Ok(0, stdout, _) -> Some stdout
-            | _ -> None
-    }
-
-let private toResult result =
-    match result with
-    | Ok(0, stdout, _) -> Ok stdout
-    | Ok(_, _, stderr) -> Error stderr
-    | Error msg -> Error msg
-
-let runResult (context: string) (fileName: string) (arguments: string) (workingDirectory: string option) =
-    async {
-        let! result = startAndCapture defaultTimeoutMs context fileName arguments workingDirectory
-        return toResult result
-    }
-
-/// Like `runResult` but with an explicit timeout, for long-running setup hooks
-/// (e.g. `npm install`) that would otherwise be killed by the short default.
-let runResultWithTimeout (timeoutMs: int) (context: string) (fileName: string) (arguments: string) (workingDirectory: string option) =
-    async {
-        let! result = startAndCapture timeoutMs context fileName arguments workingDirectory
-        return toResult result
-    }
 
 let rec private drainBoundedCapture
     (stream: Stream)
@@ -245,6 +217,19 @@ let private observeCapturesWithin
                 return ()
     }
 
+let private describeTruncation streams =
+    match streams with
+    | [] -> ""
+    | _ ->
+        let names =
+            streams
+            |> List.map (function
+                | StandardOutput -> "stdout"
+                | StandardError -> "stderr")
+            |> String.concat "+"
+
+        $", truncated: {names}"
+
 /// Runs a process without shell argument parsing. Output capture is bounded and
 /// timeout cancellation terminates the complete process tree.
 let private runArgumentListCore
@@ -297,20 +282,22 @@ let private runArgumentListCore
                     let! stdout = stdoutTask |> Async.AwaitTask
                     let! stderr = stderrTask |> Async.AwaitTask
 
+                    let truncated =
+                        [ if stdout.LimitExceeded then StandardOutput
+                          if stderr.LimitExceeded then StandardError ]
+
                     Log.log
                         context
-                        $"{fileName} ({arguments.Length} args) -> exit {proc.ExitCode}, stdout bytes: {stdout.Bytes.Length}, stderr bytes: {stderr.Bytes.Length}"
+                        $"{fileName} ({arguments.Length} args) -> exit {proc.ExitCode}, stdout bytes: {stdout.Bytes.Length}, stderr bytes: {stderr.Bytes.Length}{describeTruncation truncated}"
 
+                    // The child exited, so the exit code is the answer. A caller that parses the
+                    // captured bytes decides for itself whether truncation invalidates that answer.
                     return
-                        if stdout.LimitExceeded then
-                            Error(CaptureLimitExceeded StandardOutput)
-                        elif stderr.LimitExceeded then
-                            Error(CaptureLimitExceeded StandardError)
-                        else
-                            Ok
-                                { ExitCode = proc.ExitCode
-                                  Stdout = stdout.Bytes
-                                  Stderr = stderr.Bytes }
+                        Ok
+                            { ExitCode = proc.ExitCode
+                              Stdout = stdout.Bytes
+                              Stderr = stderr.Bytes
+                              Truncated = truncated }
                 with :? OperationCanceledException ->
                     killProcessTree proc
 
@@ -347,34 +334,11 @@ let private runArgumentListCore
             return Error(StartFailed ex.Message)
     }
 
-let runArgumentListWithTimeout
-    (timeoutMs: int)
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    =
-    runArgumentListCore
-        timeoutMs
-        5_000
-        stdoutLimitBytes
-        stderrLimitBytes
-        context
-        fileName
-        arguments
-        workingDirectory
+let private defaultShutdownTimeoutMs = 5_000
 
-let internal runArgumentListWithinResponseDeadline
-    (deadline: ResponseDeadline)
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    =
+/// A response deadline yields the time left after reserving room to send the response and to reap
+/// a killed child. `None` means the budget is already spent.
+let private responseDeadlineBudget deadline =
     let processTimeoutMs =
         max
             0
@@ -383,32 +347,92 @@ let internal runArgumentListWithinResponseDeadline
              - deadline.ShutdownReserveMs)
 
     if processTimeoutMs = 0 then
-        async.Return(Error TimedOut)
+        None
     else
-        runArgumentListCore
-            processTimeoutMs
-            deadline.ShutdownReserveMs
-            stdoutLimitBytes
-            stderrLimitBytes
-            context
-            fileName
-            arguments
-            workingDirectory
+        Some(processTimeoutMs, deadline.ShutdownReserveMs)
 
-/// Argument-list process execution within the production 10-second response deadline.
-let runArgumentList
-    (stdoutLimitBytes: int)
-    (stderrLimitBytes: int)
-    (context: string)
-    (fileName: string)
-    (arguments: string list)
-    (workingDirectory: string option)
-    =
-    runArgumentListWithinResponseDeadline
-        (createResponseDeadline argumentListResponseDeadlineMs)
-        stdoutLimitBytes
-        stderrLimitBytes
-        context
-        fileName
-        arguments
-        workingDirectory
+let private resolveDeadline deadline =
+    match deadline with
+    | DefaultTimeout -> Some(defaultTimeoutMs, defaultShutdownTimeoutMs)
+    | Timeout ms -> Some(ms, defaultShutdownTimeoutMs)
+    | InteractiveDeadline ->
+        responseDeadlineBudget (createResponseDeadline argumentListResponseDeadlineMs)
+    | SharedDeadline deadline -> responseDeadlineBudget deadline
+
+/// The run plus the budget it was given, so failure messages can name the timeout that applied.
+let private runWithBudget (spawn: Spawn) (arguments: string list) =
+    match resolveDeadline spawn.Deadline with
+    | None -> 0, async.Return(Error TimedOut)
+    | Some(timeoutMs, shutdownTimeoutMs) ->
+        timeoutMs,
+        runArgumentListCore
+            timeoutMs
+            shutdownTimeoutMs
+            spawn.Limits.StdoutBytes
+            spawn.Limits.StderrBytes
+            spawn.Context
+            spawn.FileName
+            arguments
+            spawn.WorkingDirectory
+
+/// Exit code with raw stdout/stderr bytes, for callers that parse machine output themselves.
+let capture (spawn: Spawn) (arguments: string list) =
+    runWithBudget spawn arguments |> snd
+
+/// Status collectors want text, not bytes: invalid sequences become replacement
+/// characters rather than an error, which the strict diff decoder deliberately does not do.
+let private decodeCapture (bytes: byte[]) =
+    Encoding.UTF8.GetString(bytes).TrimEnd()
+
+let private describeFailure (timeoutMs: int) failure =
+    match failure with
+    | StartFailed message -> $"Failed to start process: {message}"
+    | TimedOut -> $"Timed out after {timeoutMs}ms"
+
+/// Text callers parse the stdout they receive, so a truncated capture is not a shorter answer —
+/// it is a wrong one, and must fail rather than pass as a complete string.
+let private stdoutTruncatedMessage =
+    "Standard output exceeded its capture limit"
+
+/// Decoded stdout on exit 0; decoded stderr or a described runner failure otherwise.
+let textResult (spawn: Spawn) (arguments: string list) : Async<Result<string, string>> =
+    async {
+        let timeoutMs, run = runWithBudget spawn arguments
+        let! result = run
+
+        return
+            match result with
+            // A failing command's stderr is the diagnostic, and stdout is never returned on this
+            // path, so a truncated stdout capture must not mask it.
+            | Ok output when output.ExitCode <> 0 -> Error(decodeCapture output.Stderr)
+            | Ok output when List.contains StandardOutput output.Truncated ->
+                Error stdoutTruncatedMessage
+            | Ok output -> Ok(decodeCapture output.Stdout)
+            | Error failure -> Error(describeFailure timeoutMs failure)
+    }
+
+/// Decoded stdout on exit 0; `None` for a non-zero exit or a runner failure.
+let text (spawn: Spawn) (arguments: string list) =
+    async {
+        let! result = textResult spawn arguments
+
+        return
+            match result with
+            | Ok stdout -> Some stdout
+            | Error _ -> None
+    }
+
+/// For callers that run a command for its effect and discard its output: success is the child's
+/// exit code alone, so a chatty-but-successful run stays a success no matter how much output the
+/// capture had to drop. `Error` carries the child's stderr or a described runner failure.
+let exitResult (spawn: Spawn) (arguments: string list) : Async<Result<unit, string>> =
+    async {
+        let timeoutMs, run = runWithBudget spawn arguments
+        let! result = run
+
+        return
+            match result with
+            | Ok output when output.ExitCode = 0 -> Ok()
+            | Ok output -> Error(decodeCapture output.Stderr)
+            | Error failure -> Error(describeFailure timeoutMs failure)
+    }

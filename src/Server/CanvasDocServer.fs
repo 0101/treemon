@@ -4,6 +4,7 @@ open Giraffe
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Hosting
 open System.IO
 open System.Text.Json
 open global.Microsoft.AspNetCore.Hosting
@@ -375,6 +376,55 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
         + CanvasMorphScript.style
         + CanvasMorphScript.script
 
+/// Serve a canvas doc from disk with the live injection spliced in, or the matching 400/404 for a
+/// path that escapes the worktree or names a file that isn't there.
+let private serveCanvasDoc (ctx: HttpContext) (worktreePath: string) (filename: string) : System.Threading.Tasks.Task = task {
+    match Server.PathUtils.validateCanvasPath worktreePath filename with
+    | Error reason ->
+        ctx.Response.StatusCode <- 400
+        do! ctx.Response.WriteAsync(reason)
+        Log.log "Canvas" $"Doc request 400: path traversal — {filename}"
+    | Ok resolvedPath when not (File.Exists resolvedPath) ->
+        ctx.Response.StatusCode <- 404
+        do! ctx.Response.WriteAsync("File not found")
+        Log.log "Canvas" $"Doc request 404: file not found — {resolvedPath}"
+    | Ok resolvedPath ->
+        let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
+        let html = System.Text.Encoding.UTF8.GetString(rawBytes)
+        let injection = buildInjection (CanvasDocKinds.classify filename) filename
+        // Same </head> placement the static export uses (CanvasExport.injectAtHead) — one
+        // implementation so live-served and published docs can never drift.
+        let injected = CanvasExport.injectAtHead injection html
+        ctx.Response.ContentType <- "text/html; charset=utf-8"
+        ctx.Response.Headers["Cache-Control"] <- "no-cache"
+        // Restrict who may frame a canvas doc to local treemon UI origins. The dashboard frames
+        // docs cross-origin (loopback, with dev/prod ports that vary), so a port-wildcard
+        // loopback allowlist permits the pane while blocking any public page from framing a doc
+        // and harvesting its iframe→parent postMessages (canvasSend input, doc-error text). CSP
+        // frame-ancestors is the modern successor to X-Frame-Options, which is deliberately NOT
+        // set: its only cross-origin option is DENY/SAMEORIGIN, which would also block the
+        // legitimate cross-origin pane.
+        ctx.Response.Headers["Content-Security-Policy"] <- "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"
+        do! ctx.Response.WriteAsync(injected)
+        Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
+}
+
+/// Serve the beads issue list backing a worktree's beads dashboard doc.
+let private serveBeadsData (ctx: HttpContext) (worktreePath: string) : System.Threading.Tasks.Task = task {
+    let dbPath = Path.Combine(worktreePath, ".beads", "beads.db")
+    let! json = BeadsStatus.getBeadsIssueList dbPath |> Async.StartAsTask
+    ctx.Response.ContentType <- "application/json"
+    ctx.Response.Headers["Cache-Control"] <- "no-cache"
+    do! ctx.Response.WriteAsync(json)
+    Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/beads-data"
+}
+
+let private refuseUnknownWorktree (ctx: HttpContext) (worktreePath: string) : System.Threading.Tasks.Task = task {
+    ctx.Response.StatusCode <- 404
+    do! ctx.Response.WriteAsync("Unknown worktree")
+    Log.log "Canvas" $"Doc request 404: unknown worktree — {worktreePath}"
+}
+
 let private handleCanvasRequest
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (diffHandlers: WorktreeDiffApi.Handlers)
@@ -405,54 +455,18 @@ let private handleCanvasRequest
         elif filename = "diff-file" then
             do! diffHandlers.File diffDeadline comparisonContext ctx
         elif filename = "beads-data" then
-            if not isKnown then
-                ctx.Response.StatusCode <- 404
-                do! ctx.Response.WriteAsync("Unknown worktree")
-                Log.log "Canvas" $"Doc request 404: unknown worktree — {worktreePath}"
+            if isKnown then
+                do! serveBeadsData ctx worktreePath
             else
-                let dbPath = Path.Combine(worktreePath, ".beads", "beads.db")
-                let! json = BeadsStatus.getBeadsIssueList dbPath |> Async.StartAsTask
-                ctx.Response.ContentType <- "application/json"
-                ctx.Response.Headers["Cache-Control"] <- "no-cache"
-                do! ctx.Response.WriteAsync(json)
-                Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/beads-data"
+                do! refuseUnknownWorktree ctx worktreePath
         elif not (filename.EndsWith(".html")) then
             ctx.Response.StatusCode <- 400
             do! ctx.Response.WriteAsync("Only .html files are served")
             Log.log "Canvas" $"Doc request 400: non-html file — {filename}"
         elif not isKnown then
-            ctx.Response.StatusCode <- 404
-            do! ctx.Response.WriteAsync("Unknown worktree")
-            Log.log "Canvas" $"Doc request 404: unknown worktree — {worktreePath}"
+            do! refuseUnknownWorktree ctx worktreePath
         else
-            match Server.PathUtils.validateCanvasPath worktreePath filename with
-            | Error reason ->
-                ctx.Response.StatusCode <- 400
-                do! ctx.Response.WriteAsync(reason)
-                Log.log "Canvas" $"Doc request 400: path traversal — {filename}"
-            | Ok resolvedPath when not (File.Exists resolvedPath) ->
-                ctx.Response.StatusCode <- 404
-                do! ctx.Response.WriteAsync("File not found")
-                Log.log "Canvas" $"Doc request 404: file not found — {resolvedPath}"
-            | Ok resolvedPath ->
-                let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
-                let html = System.Text.Encoding.UTF8.GetString(rawBytes)
-                let injection = buildInjection (CanvasDocKinds.classify filename) filename
-                // Same </head> placement the static export uses (CanvasExport.injectAtHead) — one
-                // implementation so live-served and published docs can never drift.
-                let injected = CanvasExport.injectAtHead injection html
-                ctx.Response.ContentType <- "text/html; charset=utf-8"
-                ctx.Response.Headers["Cache-Control"] <- "no-cache"
-                // Restrict who may frame a canvas doc to local treemon UI origins. The dashboard frames
-                // docs cross-origin (loopback, with dev/prod ports that vary), so a port-wildcard
-                // loopback allowlist permits the pane while blocking any public page from framing a doc
-                // and harvesting its iframe→parent postMessages (canvasSend input, doc-error text). CSP
-                // frame-ancestors is the modern successor to X-Frame-Options, which is deliberately NOT
-                // set: its only cross-origin option is DENY/SAMEORIGIN, which would also block the
-                // legitimate cross-origin pane.
-                ctx.Response.Headers["Content-Security-Policy"] <- "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"
-                do! ctx.Response.WriteAsync(injected)
-                Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
+            do! serveCanvasDoc ctx worktreePath filename
 }
 
 let private handleDiffAsset (ctx: HttpContext) : System.Threading.Tasks.Task = task {
@@ -486,32 +500,29 @@ let internal createHostWithDiffDeadline
     let diffHandlers =
         WorktreeDiffApi.createHandlers service newIdentity
 
-    Microsoft.AspNetCore.Hosting.WebHostBuilder()
-        .UseKestrel(_.Listen(System.Net.IPAddress.Loopback, canvasPort))
-        .ConfigureServices(fun services ->
-            services.AddRouting() |> ignore)
-        .Configure(fun (app: IApplicationBuilder) ->
-            app.Use(fun ctx next -> requireLoopbackHost ctx next) |> ignore
-            app.UseRouting() |> ignore
-            app.UseEndpoints(fun endpoints ->
-                endpoints.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
-                endpoints.MapGet(
-                    "/assets/diff2html/{version}/{filename}",
-                    RequestDelegate(handleDiffAsset)
-                )
-                |> ignore
-                endpoints.MapGet(
-                    "/{**path}",
-                    RequestDelegate(
-                        handleCanvasRequest
-                            agent
-                            diffHandlers
-                            diffResponseDeadlineMs
-                    )
-                )
-                |> ignore)
-            |> ignore)
-        .Build()
+    // Empty builder rather than WebApplication.CreateBuilder: the canvas doc server wants no
+    // appsettings/environment configuration and no console logging providers, so nothing it hosts
+    // can write to the dashboard's stdout.
+    let builder = WebApplication.CreateEmptyBuilder(WebApplicationOptions())
+    builder.WebHost.UseKestrel(_.Listen(System.Net.IPAddress.Loopback, canvasPort)) |> ignore
+    builder.Services.AddRouting() |> ignore
+
+    let app = builder.Build()
+    app.Use(fun ctx next -> requireLoopbackHost ctx next) |> ignore
+    app.UseRouting() |> ignore
+    app.MapPost("/bridge/heartbeat", RequestDelegate(handleHeartbeat agent)) |> ignore
+    app.MapGet("/assets/diff2html/{version}/{filename}", RequestDelegate(handleDiffAsset)) |> ignore
+    app.MapGet(
+        "/{**path}",
+        RequestDelegate(
+            handleCanvasRequest
+                agent
+                diffHandlers
+                diffResponseDeadlineMs
+        )
+    )
+    |> ignore
+    app
 
 let internal createHost
     (agent: MailboxProcessor<SchedulerState.StateMsg>)

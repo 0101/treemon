@@ -119,6 +119,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Pins for vulnerable transitive dependencies we never call directly: Saturn drags in
+         JwtBearer 6.0.3 with the Microsoft.IdentityModel 6.10.0 chain (NU1902), and
+         Microsoft.Data.Sqlite drags in SQLitePCLRaw 2.1.11 with a vulnerable SQLite native
+         build (NU1903). -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Shared\Shared.fsproj" />
   </ItemGroup>
 

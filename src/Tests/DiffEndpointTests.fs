@@ -1052,16 +1052,14 @@ type DiffEndpointHttpTests() =
         let responseDeadlineMs = 3_000
 
         let runDelayedGit deadline seconds =
-            ProcessRunner.runArgumentListWithinResponseDeadline
-                deadline
-                1024
-                1024
-                "DiffEndpointDeadlineTest"
-                "git"
+            ProcessRunner.capture
+                { ProcessRunner.Spawn.create "git" with
+                    Context = "DiffEndpointDeadlineTest"
+                    Limits = ProcessRunner.CaptureLimits.tiny
+                    Deadline = ProcessRunner.SharedDeadline deadline }
                 [ "-c"
                   $"alias.pause=!sleep {seconds}"
                   "pause" ]
-                None
 
         let service: WorktreeDiffApi.Service =
             { GetSummary =
