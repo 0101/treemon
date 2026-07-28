@@ -272,6 +272,22 @@ type DiffFileResult =
     | TimedOut of file: DiffFileSummary
     | GitError of file: DiffFileSummary
 
+/// One declared category leaf and the number of a repository's tracked files that classify into it.
+/// A leaf whose patterns match nothing is still reported, with a zero count: a configuration that is
+/// valid but matches nothing is exactly the silent failure a coverage report exists to expose.
+type DiffCategoryCoverage =
+    { CategoryPath: string list
+      FileCount: int }
+
+/// What a repository's declared `diffCategories` actually do to its tracked files: the configuration
+/// state and, when it is configured, every declared leaf in configuration order together with the
+/// number of files no leaf matched (the viewer's trailing **Other** group).
+[<RequireQualifiedAccess>]
+type DiffCategoryReport =
+    | Missing
+    | Invalid of reason: string
+    | Configured of leaves: DiffCategoryCoverage list * unmatchedCount: int
+
 /// Single source of truth for the canvas-session launch prompt, shared by the client
 /// (LaunchCanvasSession) and the server (sendCanvasMessage) so the two cannot drift.
 module CanvasPrompt =

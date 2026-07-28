@@ -3,6 +3,7 @@ module Tests.DiffCategoriesTests
 open System
 open System.IO
 open NUnit.Framework
+open Shared
 open Server
 open Server.DiffCategories
 open Tests.TestUtils
@@ -586,3 +587,152 @@ type DiffCategoriesClassificationTests() =
             classifyNames (Invalid "categories sharing a parent need distinct names") paths,
             Is.EqualTo([ "src/Server/B.fs -> "; "docs/a.md -> "; "src/Client/A.fs -> " ]))
 
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffCategoriesCoverageTests() =
+
+    /// A configuration whose last leaf matches nothing a test ever supplies, which is the silent
+    /// failure the coverage report exists to expose.
+    let configuration =
+        Configured
+            [ Branch
+                  { Name = "Production code"
+                    Children = [ leafNode "Client" [ "src/Client/**" ]; leafNode "Server" [ "src/Server/**" ] ] }
+              leafNode "Docs" [ "docs/**" ]
+              leafNode "Instructions" [ "AGENTS.md" ] ]
+
+    let trackedPaths =
+        [ "src/Client/App.fs"; "src/Server/Api.fs"; "src/Server/Diff.fs"; "docs/spec/a.md"; "notes.txt"; "build.ps1" ]
+
+    /// Renders a report as one line per declared leaf (`Parent > Child = count`) plus the unmatched
+    /// count, so tests assert on the whole report rather than on one field at a time.
+    let outlineOfCoverage report =
+        match report with
+        | DiffCategoryReport.Configured(leaves, unmatched) ->
+            (leaves
+             |> List.map (fun leaf -> $"""{String.Join(" > ", leaf.CategoryPath)} = {leaf.FileCount}"""))
+            @ [ $"unmatched = {unmatched}" ]
+        | other -> failwith $"expected Configured but got {other}"
+
+    [<Test>]
+    member _.``every declared leaf is reported in configuration order with its file count``() =
+        Assert.That(
+            DiffCategories.coverage configuration trackedPaths |> outlineOfCoverage,
+            Is.EqualTo(
+                [ "Production code > Client = 1"
+                  "Production code > Server = 2"
+                  "Docs = 1"
+                  "Instructions = 0"
+                  "unmatched = 2" ]),
+            "a leaf that matched nothing is reported with a zero count rather than omitted")
+
+    [<Test>]
+    member _.``a configuration whose patterns match nothing reports every leaf as zero``() =
+        let report =
+            DiffCategories.coverage (Configured [ leafNode "Client" [ "Src/Client/**" ] ]) trackedPaths
+
+        Assert.That(
+            report |> outlineOfCoverage,
+            Is.EqualTo([ "Client = 0"; $"unmatched = {trackedPaths.Length}" ]),
+            "matching is case-sensitive, so the whole repository falls into Other")
+
+    [<Test>]
+    member _.``counts follow the same first-match-wins precedence as classification``() =
+        let overlapping =
+            Configured [ leafNode "Tests" [ "**/*Tests.fs" ]; leafNode "Server" [ "src/Server/**" ] ]
+
+        Assert.That(
+            DiffCategories.coverage overlapping [ "src/Server/DiffTests.fs" ] |> outlineOfCoverage,
+            Is.EqualTo([ "Tests = 1"; "Server = 0"; "unmatched = 0" ]))
+
+    [<Test>]
+    member _.``a repository with no tracked files reports every leaf as zero``() =
+        Assert.That(
+            DiffCategories.coverage configuration [] |> outlineOfCoverage,
+            Is.EqualTo(
+                [ "Production code > Client = 0"
+                  "Production code > Server = 0"
+                  "Docs = 0"
+                  "Instructions = 0"
+                  "unmatched = 0" ]))
+
+    [<Test>]
+    member _.``a Missing configuration reports Missing``() =
+        Assert.That(DiffCategories.coverage Missing trackedPaths, Is.EqualTo(DiffCategoryReport.Missing))
+
+    [<Test>]
+    member _.``an Invalid configuration reports its reason``() =
+        let reason = "categories sharing a parent need distinct names"
+
+        Assert.That(
+            DiffCategories.coverage (Invalid reason) trackedPaths,
+            Is.EqualTo(DiffCategoryReport.Invalid reason))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffCategoryReportTests() =
+
+    /// A repository whose `files` are committed and whose configuration (if any) is written
+    /// afterwards, so `.treemon.json` itself stays untracked and out of the counts.
+    let withCommittedRepo (files: string list) (config: string option) (action: string -> 'a) : 'a =
+        withTempDir "treemon-diff-category-report" (fun dir ->
+            let repoDir = Path.Combine(dir, "repo")
+            GitTestHelpers.initRepo repoDir
+
+            files
+            |> List.iter (fun relativePath ->
+                let fullPath = Path.Combine(repoDir, relativePath.Replace('/', Path.DirectorySeparatorChar))
+                Directory.CreateDirectory(Path.GetDirectoryName fullPath) |> ignore
+                File.WriteAllText(fullPath, "content"))
+
+            GitTestHelpers.gitAssert repoDir "add -A"
+            GitTestHelpers.gitAssert repoDir "commit -m tracked"
+            config |> Option.iter (fun json -> File.WriteAllText(Path.Combine(repoDir, configFileName), json))
+            action repoDir)
+
+    [<Test>]
+    member _.``a configured repository is reported against its tracked files``() =
+        let json =
+            categoriesJson
+                [ leafJson "Client" [ "src/Client/**" ]
+                  leafJson "Docs" [ "docs/**" ]
+                  leafJson "Instructions" [ "AGENTS.md" ] ]
+
+        withCommittedRepo [ "src/Client/App.fs"; "src/Client/View.fs"; "docs/spec.md"; "notes.txt" ] (Some json) (fun repoDir ->
+            File.WriteAllText(Path.Combine(repoDir, "scratch.tmp"), "untracked")
+
+            let expected : Result<DiffCategoryReport, string> =
+                Ok(
+                    DiffCategoryReport.Configured(
+                        [ { CategoryPath = [ "Client" ]; FileCount = 2 }
+                          { CategoryPath = [ "Docs" ]; FileCount = 1 }
+                          { CategoryPath = [ "Instructions" ]; FileCount = 0 } ],
+                        1
+                    )
+                )
+
+            Assert.That(
+                WorktreeApi.diffCategoryReport repoDir |> runAsync,
+                Is.EqualTo(expected),
+                "only tracked files are counted, so the untracked scratch file and .treemon.json are absent"))
+
+    [<Test>]
+    member _.``a repository without diffCategories reports Missing``() =
+        withCommittedRepo [ "src/Client/App.fs" ] None (fun repoDir ->
+            let expected : Result<DiffCategoryReport, string> = Ok DiffCategoryReport.Missing
+
+            Assert.That(WorktreeApi.diffCategoryReport repoDir |> runAsync, Is.EqualTo(expected)))
+
+    [<Test>]
+    member _.``an invalid configuration is reported with its reason instead of counts``() =
+        let json = categoriesJson [ leafJson "Other" [ "**" ] ]
+
+        withCommittedRepo [ "src/Client/App.fs" ] (Some json) (fun repoDir ->
+            match WorktreeApi.diffCategoryReport repoDir |> runAsync with
+            | Ok(DiffCategoryReport.Invalid reason) -> Assert.That(reason, Does.Contain("reserved"))
+            | other -> Assert.Fail($"expected an Invalid report but got {other}"))

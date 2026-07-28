@@ -5,6 +5,7 @@ module Server.DiffCategories
 open System
 open System.Text.Json
 open FsToolkit.ErrorHandling
+open Shared
 
 /// A validated category: a `Leaf` selects files with patterns, a `Branch` nests further categories.
 /// Record payloads rather than tuple cases, so compiled patterns can be added to a leaf without
@@ -293,18 +294,26 @@ let private compileGlob (pattern: string) =
     { Segments = segments
       FixedLength = if segments |> Array.contains AnySegments then None else Some segments.Length }
 
-let rec private compileNode ancestors node =
+/// Every leaf paired with its display path from the root, in depth-first configuration order — the
+/// order that decides both which overlapping leaf wins and how matched files are grouped.
+let rec private leavesOf ancestors node =
     match node with
-    | Leaf leaf -> [ ancestors @ [ leaf.Name ], leaf.Patterns |> List.map compileGlob ]
-    | Branch branch -> branch.Children |> List.collect (compileNode (ancestors @ [ branch.Name ]))
+    | Leaf leaf -> [ ancestors @ [ leaf.Name ], leaf ]
+    | Branch branch -> branch.Children |> List.collect (leavesOf (ancestors @ [ branch.Name ]))
 
 let private compileLeaves nodes =
     nodes
-    |> List.collect (compileNode [])
-    |> List.mapi (fun order (categoryPath, globs) ->
+    |> List.collect (leavesOf [])
+    |> List.mapi (fun order (categoryPath, leaf) ->
         { Order = order
           CategoryPath = categoryPath
-          Globs = globs })
+          Globs = leaf.Patterns |> List.map compileGlob })
+
+/// The outline a configuration declares: every leaf's root-to-leaf category path, in that same
+/// order. Classification can only report the leaves something matched, so a leaf whose patterns
+/// match nothing is visible through this alone.
+let leafPaths nodes =
+    nodes |> List.collect (leavesOf []) |> List.map fst
 
 /// Patterns are repository-relative and always matched against the whole path, so a Windows-style
 /// separator is normalized away before the path is split into segments.
@@ -344,3 +353,32 @@ let classifyAndOrder (configuration: Configuration) (pathsOf: 'a -> string * str
         // Sorting a list is stable, which is what keeps files in their original order inside a group.
         |> List.sortBy fst
         |> List.map snd
+
+/// What a configuration does to the paths it is given: every declared leaf with the number of files
+/// classified into it — zero counts included, since a leaf that matches nothing is the failure this
+/// report exists to expose — plus the count of files no leaf matched. Counting through
+/// `classifyAndOrder` keeps one matcher behind both the viewer's grouping and this report.
+let coverage (configuration: Configuration) (paths: string list) =
+    match configuration with
+    | Missing -> DiffCategoryReport.Missing
+    | Invalid reason -> DiffCategoryReport.Invalid reason
+    | Configured nodes ->
+        let countByPath =
+            paths
+            |> classifyAndOrder configuration (fun path -> path, None)
+            |> List.countBy snd
+            |> Map.ofList
+
+        let countOf categoryPath =
+            countByPath |> Map.tryFind categoryPath |> Option.defaultValue 0
+
+        let leaves =
+            leafPaths nodes
+            |> List.map (fun categoryPath ->
+                ({ CategoryPath = categoryPath
+                   FileCount = countOf categoryPath }
+                 : DiffCategoryCoverage))
+
+        // Sibling names are unique, so distinct leaves have distinct paths and an unmatched file's
+        // empty path can collide with none of them.
+        DiffCategoryReport.Configured(leaves, countOf [])

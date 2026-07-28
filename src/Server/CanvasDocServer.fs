@@ -45,27 +45,19 @@ let internal isValidSessionId (sessionId: string) =
     not (System.String.IsNullOrWhiteSpace sessionId) && sessionId |> Seq.forall isSafeSessionIdChar
 
 /// Resolves a diff request's worktree against one scheduler snapshot, yielding both the comparison
-/// context Git needs and the `RepoId` that owns the worktree. `RepoId`'s value is the normalized
-/// repository root (`PathUtils.toRepoId`), so keeping the key is what lets a linked worktree read the
-/// root repository's shared `.treemon.json` instead of a worktree-local one.
+/// context Git needs and the `RepoId` that owns the worktree, so a linked worktree reads the root
+/// repository's shared `.treemon.json` instead of a worktree-local one.
 let internal tryFindDiffComparisonContext
     (state: RefreshScheduler.DashboardState)
     (selectedWorktreePath: string)
     : (RepoId * WorktreeDiff.DiffComparisonContext) option =
-    let normalizedPath = PathUtils.normalizePath selectedWorktreePath
-
-    state.Repos
-    |> Map.tryPick (fun repoId repo ->
-        if repo.KnownPaths |> Set.contains normalizedPath then
-            Some(
-                repoId,
-                ({ WorktreePath = normalizedPath
-                   UpstreamRemote = repo.UpstreamRemote
-                   BaseBranch = repo.BaseBranch }
-                 : WorktreeDiff.DiffComparisonContext)
-            )
-        else
-            None)
+    RefreshScheduler.tryFindOwningRepo state selectedWorktreePath
+    |> Option.map (fun (repoId, repo) ->
+        repoId,
+        ({ WorktreePath = PathUtils.normalizePath selectedWorktreePath
+           UpstreamRemote = repo.UpstreamRemote
+           BaseBranch = repo.BaseBranch }
+         : WorktreeDiff.DiffComparisonContext))
 
 /// The repository root and comparison context behind one diff request, resolved from a single
 /// scheduler snapshot so both always describe the same repository.
