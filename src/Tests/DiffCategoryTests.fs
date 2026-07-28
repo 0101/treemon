@@ -1394,7 +1394,9 @@ type DiffCategoryE2ETests() =
                             mentions('"diffCategories"'),
                             mentions('4 levels'),
                             mentions('"Other"'),
-                            mentions('"**"')
+                            mentions('"**"'),
+                            mentions('displayed to the reader, top to bottom'),
+                            mentions('tm categories')
                         ];
                     }"""
                 )
@@ -1406,6 +1408,8 @@ type DiffCategoryE2ETests() =
                        "configure-diff-categories"
                        "action,request"
                        "string"
+                       "true"
+                       "true"
                        "true"
                        "true"
                        "true"

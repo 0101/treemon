@@ -14,7 +14,7 @@ var CONFIGURE_REQUEST = [
     '',
     'Locate the root worktree that owns the shared .treemon.json — linked worktrees read the repository root\'s file — and edit that file in place. Preserve every existing field exactly as it is and modify only the "diffCategories" key.',
     '',
-    '"diffCategories" is a non-empty ordered array of category nodes. A node has a "name" string plus exactly one of "patterns" (a non-empty array of glob strings) or "children" (a non-empty array of nodes) — never both, and never an empty array. Order is meaningful: leaves are visited depth-first and the first matching leaf wins.',
+    '"diffCategories" is a non-empty ordered array of category nodes. A node has a "name" string plus exactly one of "patterns" (a non-empty array of glob strings) or "children" (a non-empty array of nodes) — never both, and never an empty array. Order is meaningful in two ways: leaves are visited depth-first and the first matching leaf wins, and the array order is also the order the groups are displayed to the reader, top to bottom, at every level.',
     '',
     'Rules:',
     '- Nest at most 4 levels deep.',
@@ -23,7 +23,9 @@ var CONFIGURE_REQUEST = [
     '- Patterns are repository-relative and match the whole path. The supported glob subset is literal text, "?" for one character other than "/", "*" for any run of characters within one path segment, and "**" for zero or more whole path segments. No other metacharacter is special, and regular expressions are not accepted.',
     '- Do not write catch-all patterns; Treemon already collects everything unmatched under "Other".',
     '',
-    'Cover the repository\'s production, test, documentation, and instruction areas, nesting production code into subcategories where the layout makes that meaningful. Then report the groups you wrote.'
+    'Cover the repository\'s production, test, documentation, and instruction areas, nesting production code into subcategories where the layout makes that meaningful, and order every level so that someone reviewing a change reads what matters most about it first and the incidental parts of it last.',
+    '',
+    'Then verify the result instead of trusting it: run `tm categories` inside the repository. It fails when the configuration is missing or invalid, and otherwise prints every declared group in order with the number of tracked files it matches, followed by how many files no group matched. Let that command tell you what a pattern really covers rather than working the matching out by hand. A group matching nothing is a mistake to fix; a large unmatched count means the patterns are missing part of the repository, so widen them or add a real group — never a catch-all. Re-run the check after each edit, and report the final per-group counts together with the unmatched count.'
 ].join('\n');
 // The one size that decides every initial disclosure: a group holding more than this many files, or
 // a branch with more direct children than this, opens as a header instead of exposed rows.
