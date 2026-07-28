@@ -279,6 +279,38 @@ type BranchPushTests() =
             Assert.That(outcome, Is.EqualTo(BranchPushOutcome.PushFailed))
             Assert.That(remoteRef repoDir originDir "refs/heads/feature", Is.EqualTo(Some publishedHead)))
 
+    [<Test>]
+    member _.``an option-like configured remote never reaches the push command``() =
+        withTempDir "treemon-branch-push-option-remote" (fun tempDir ->
+            let repoDir, originDir = publishedFeature tempDir
+            let publishedHead = headOf repoDir
+            commitFile repoDir "feature-work.txt" "feature work"
+            // The remote is the one push argument that has to precede `--`, so a configured value
+            // git would read as an option instead of a destination — `--receive-pack` names the
+            // program a local push runs — is refused by Treemon rather than left to whatever git's
+            // own parsing makes of the rest of the command.
+            gitOk repoDir [ "config"; "branch.feature.remote"; "--receive-pack=echo" ]
+
+            let outcome = push repoDir "feature"
+
+            Assert.That(outcome, Is.EqualTo(BranchPushOutcome.PushFailed))
+            Assert.That(remoteRef repoDir originDir "refs/heads/feature", Is.EqualTo(Some publishedHead)))
+
+    [<Test>]
+    member _.``a remote name containing a dash still publishes the branch``() =
+        withTempDir "treemon-branch-push-dashed-remote" (fun tempDir ->
+            let repoDir, originDir = publishedFeature tempDir
+            // Only a leading dash makes a value option-like: a dash anywhere else is an ordinary
+            // remote name and must keep pushing.
+            gitOk repoDir [ "remote"; "add"; "my-origin"; originDir ]
+            gitOk repoDir [ "push"; "--set-upstream"; "my-origin"; "feature" ]
+            commitFile repoDir "feature-work.txt" "feature work"
+
+            let outcome = push repoDir "feature"
+
+            Assert.That(outcome, Is.EqualTo(BranchPushOutcome.Pushed))
+            Assert.That(remoteRef repoDir originDir "refs/heads/feature", Is.EqualTo(Some(headOf repoDir))))
+
 /// The sessionless path as one composed operation over a real repository: Treemon's own Git sync,
 /// the live push decision, and the push that decision may require. The provider answer is supplied by
 /// the test - there is no provider to ask here - and a Git step is stubbed only where a race has to

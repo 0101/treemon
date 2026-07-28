@@ -580,10 +580,17 @@ let private branchPushValue worktreePath arguments =
 /// Where the branch has to go, taken from the two config keys git itself writes for a tracking
 /// branch. Reading `remote` and `merge` separately avoids splitting a combined `origin/feature` at a
 /// slash, which guesses wrong for any branch name that contains one; an unconfigured upstream is just
-/// a missing key, and returning its failure is what stops a push to a guessed default.
+/// a missing key, and returning its failure is what stops a push to a guessed default. The remote is
+/// the one part of the push `--` cannot cover, since it has to precede it, so a value git would read
+/// as an option rather than as a destination is refused here instead of reaching the command line.
+/// Nothing usable is lost: no remote name or URL a push can reach begins with a dash.
 let private configuredUpstreamTarget worktreePath branch =
     asyncResult {
         let! remote = branchPushValue worktreePath [ "config"; "--get"; $"branch.{branch}.remote" ]
+
+        if remote.StartsWith("-", StringComparison.Ordinal) then
+            return! Error BranchPushOutcome.PushFailed
+
         let! mergeRef = branchPushValue worktreePath [ "config"; "--get"; $"branch.{branch}.merge" ]
 
         let remoteRef =
