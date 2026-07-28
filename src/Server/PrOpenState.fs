@@ -58,19 +58,15 @@ let internal runQuery (context: string) (fileName: string) (arguments: string li
 /// more than the branch, the whole filtered head projected into one comparable value that `branch`
 /// then names. Entries naming any other source mean the filter did not apply, so the answer stays
 /// unknown rather than being read as an absence.
-/// Only the shape of a payload is logged, never the payload itself.
-let internal classifyResponse
-    (context: string)
-    (sourceBranchOf: JsonElement -> string option)
-    (branch: string)
-    (json: string)
-    =
+/// Every case that cannot be classified answers with the diagnostic its caller logs, so the decision
+/// itself stays a pure data transform. Diagnostics describe only the shape of a payload, never the
+/// payload itself.
+let private classify (sourceBranchOf: JsonElement -> string option) (branch: string) (json: string) =
     try
         use doc = JsonDocument.Parse(json)
 
         if doc.RootElement.ValueKind <> JsonValueKind.Array then
-            Log.log context "Open PR lookup returned a non-array payload"
-            UnknownPrState
+            Error "Open PR lookup returned a non-array payload"
         else
             let branches =
                 doc.RootElement.EnumerateArray()
@@ -78,11 +74,22 @@ let internal classifyResponse
                 |> Seq.toList
 
             match branches with
-            | [] -> NoOpenPr
-            | _ when branches |> List.forall ((=) (Some branch)) -> OpenPr
-            | _ ->
-                Log.log context "Open PR lookup returned entries outside the requested branch"
-                UnknownPrState
+            | [] -> Ok NoOpenPr
+            | _ when branches |> List.forall ((=) (Some branch)) -> Ok OpenPr
+            | _ -> Error "Open PR lookup returned entries outside the requested branch"
     with ex ->
-        Log.log context $"Open PR lookup returned an unreadable payload ({ex.GetType().Name})"
+        Error $"Open PR lookup returned an unreadable payload ({ex.GetType().Name})"
+
+/// The logging edge around `classify`: an unclassifiable response is reported once under `context`
+/// and collapses to `UnknownPrState`, which hands the worktree to an agent.
+let internal classifyResponse
+    (context: string)
+    (sourceBranchOf: JsonElement -> string option)
+    (branch: string)
+    (json: string)
+    =
+    match classify sourceBranchOf branch json with
+    | Ok state -> state
+    | Error diagnostic ->
+        Log.log context diagnostic
         UnknownPrState
