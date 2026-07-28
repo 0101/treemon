@@ -402,10 +402,12 @@ let textResult (spawn: Spawn) (arguments: string list) : Async<Result<string, st
 
         return
             match result with
+            // A failing command's stderr is the diagnostic, and stdout is never returned on this
+            // path, so a truncated stdout capture must not mask it.
+            | Ok output when output.ExitCode <> 0 -> Error(decodeCapture output.Stderr)
             | Ok output when List.contains StandardOutput output.Truncated ->
                 Error stdoutTruncatedMessage
-            | Ok output when output.ExitCode = 0 -> Ok(decodeCapture output.Stdout)
-            | Ok output -> Error(decodeCapture output.Stderr)
+            | Ok output -> Ok(decodeCapture output.Stdout)
             | Error failure -> Error(describeFailure timeoutMs failure)
     }
 

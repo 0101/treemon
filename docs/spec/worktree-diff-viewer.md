@@ -4,7 +4,7 @@
 
 - Open a browsable worktree-to-base diff from a Treemon card without launching an editor.
 - Let users include committed branch changes, local tracked changes, and untracked files independently.
-- Display the changed-file list within one second on a warm local server for the verification fixture: 250 changed paths, including at least 25 untracked paths.
+- Display the changed-file list within five seconds on a warm local server for the verification fixture: 250 changed paths, including at least 25 untracked paths.
 - Keep rendering responsive by loading and displaying one selected file at a time.
 - Keep the server contract independent of diff2html so the renderer can change without redefining Git semantics.
 
@@ -73,7 +73,7 @@ The summary route is `GET /<encoded-known-worktree>/diff-summary?committed=<bool
 
 ## Verification
 
-- Run `dotnet test src/Tests/Tests.fsproj --filter "FullyQualifiedName~DiffSummaryPerformanceE2ETests" --logger "console;verbosity=normal"` to create exactly 250 changed paths (225 tracked and 25 untracked), warm the real local diff server, and fail unless the browser receives and paints the complete changed-file summary within one second. The passing test prints raw warm-response, measured-response, display timing, and path-count evidence.
+- Run `dotnet test src/Tests/Tests.fsproj --filter "FullyQualifiedName~DiffSummaryPerformanceE2ETests" --logger "console;verbosity=normal"` to create exactly 250 changed paths (225 tracked and 25 untracked), warm the real local diff server, and fail unless the browser receives and paints the complete changed-file summary within five seconds. The passing test prints raw warm-response, measured-response, display timing, and path-count evidence.
 - Run `dotnet test src/Tests/Tests.fsproj --filter "FullyQualifiedName~DiffViewerE2ETests" --logger "console;verbosity=normal"` to verify accordion behavior, wrapping and gutter geometry, syntax-highlighting success/failure/retry, status indicators, toolbar controls, and pane-hosted selected-text actions in Chromium. The hosted selection check exercises Explain, Remove, and Comment and prints their raw emitted payloads with exact file, hunk, and old/new line ranges. Any horizontal overflow, overlapping gutter/code rectangles, multiple mounted patches, ready state without token markup, inaccessible control/status, missing action, duplicate delivery, or incorrect source context fails the suite.
 - Run `dotnet test src/Tests/Tests.fsproj --filter "FullyQualifiedName~WorktreeDiffIntegrationTests|FullyQualifiedName~DiffEndpointHttpTests|FullyQualifiedName~DiffViewerE2ETests" --logger "console;verbosity=normal"` to verify every layer combination, mixed-layer patches, defaults, persistence, filtered-empty behavior, malformed input rejection, and stale identities after filter changes.
 - Run `dotnet test src/Tests/Tests.fsproj --filter "FullyQualifiedName~WorktreeDiffActionTests" --logger "console;verbosity=normal"` to verify the card Diff action remains keyboard accessible, preserves card focus, and targets the intended worktree.

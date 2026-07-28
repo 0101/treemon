@@ -21,6 +21,17 @@ let private noisyStderrCommand (stderrBytes: int) =
     else
         "sh", [ "-c"; $"printf '%%{stderrBytes}s' '' >&2; echo ok" ]
 
+/// An OS-appropriate command that writes `stdoutBytes` bytes to stdout, a short message to stderr,
+/// and exits non-zero — a failing child that also overruns its stdout cap.
+let private failingNoisyStdoutCommand (stdoutBytes: int) =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+        "powershell",
+        [ "-NoProfile"
+          "-Command"
+          $"Write-Output ('x' * {stdoutBytes}); [Console]::Error.Write('boom'); exit 1" ]
+    else
+        "sh", [ "-c"; $"printf '%%{stdoutBytes}s' ''; echo boom >&2; exit 1" ]
+
 /// Every case here pins the caps it exercises, so the shared spawn starts from the smallest preset
 /// and each test overrides only the limit under test.
 let private testSpawn fileName =
@@ -295,6 +306,26 @@ type ProcessRunnerArgumentListTests() =
             (result = expected),
             Is.True,
             $"Expected the mapped stdout limit message, got {result}"
+        )
+
+    [<Test>]
+    member _.``text capture reports stderr when a failing command also truncated stdout``() =
+        // Both conditions at once: the command fails *and* overruns its stdout cap. stdout is never
+        // returned on the failure path, so the capture limit must not mask the actual diagnostic.
+        let fileName, arguments = failingNoisyStdoutCommand 4096
+
+        let result =
+            ProcessRunner.textResult
+                { testSpawn fileName with Limits.StdoutBytes = 16 }
+                arguments
+            |> TestUtils.runAsync
+
+        let expected: Result<string, string> = Error "boom"
+
+        Assert.That(
+            (result = expected),
+            Is.True,
+            $"Expected the child's stderr rather than the capture-limit message, got {result}"
         )
 
     [<Test>]
