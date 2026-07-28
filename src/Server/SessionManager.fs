@@ -39,7 +39,7 @@ let private resolveNewHwnd (beforeWindows: Set<nativeint>) (timeoutMs: int) =
 
     poll ()
 
-let private encodeCommand (command: string) =
+let internal encodeCommand (command: string) =
     let bytes = System.Text.Encoding.Unicode.GetBytes(command)
     Convert.ToBase64String(bytes)
 
