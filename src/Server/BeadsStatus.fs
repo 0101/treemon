@@ -120,7 +120,11 @@ let summarize (issues: PlanningIssue list) : BeadsSummary =
 let getBeadsIssueList (dbPath: string) =
     async {
         if File.Exists(dbPath) then
-            let! output = ProcessRunner.run "Beads" "bd" $"list --json --db \"{dbPath}\""
+            let! output =
+                ProcessRunner.text
+                    { ProcessRunner.Spawn.create "bd" with Context = "Beads" }
+                    [ "list"; "--json"; "--db"; dbPath ]
+
             return output |> Option.defaultValue "[]"
         else
             return "[]"

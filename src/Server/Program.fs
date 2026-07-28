@@ -9,7 +9,11 @@ open Shared
 open Server
 
 let readDeployBranch () =
-    ProcessRunner.run "Startup" "git" "rev-parse --abbrev-ref HEAD"
+    ProcessRunner.text
+        { ProcessRunner.Spawn.create "git" with
+            Context = "Startup"
+            Limits = ProcessRunner.CaptureLimits.small }
+        [ "rev-parse"; "--abbrev-ref"; "HEAD" ]
     |> Async.RunSynchronously
     |> Option.bind (fun branch ->
         match branch with

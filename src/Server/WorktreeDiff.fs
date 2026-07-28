@@ -113,9 +113,9 @@ let allWorktreeDiffLayers =
       LocalChanges = true
       Untracked = true }
 
-let private diffStderrLimitBytes = 64 * 1024
-let private summaryCaptureLimitBytes = 16 * 1024 * 1024
-let private smallGitCaptureLimitBytes = 64 * 1024
+let private diffGit =
+    { ProcessRunner.Spawn.create "git" with Context = "WorktreeDiff" }
+
 let private strictUtf8 = UTF8Encoding(false, true)
 let private generatedDiffViewerPath =
     String.concat "/" [ ".agents"; "canvas"; "diff.html" ]
@@ -127,13 +127,11 @@ let private mapDiffProcessFailure
     match failure with
     | ProcessRunner.StartFailed _ -> GitStartFailed operation
     | ProcessRunner.TimedOut -> GitTimedOut operation
-    | ProcessRunner.CaptureLimitExceeded stream ->
-        GitCaptureLimitExceeded(operation, stream)
 
 let private runDiffGit
     (deadline: ProcessRunner.ResponseDeadline)
     (operation: WorktreeDiffOperation)
-    (stdoutLimitBytes: int)
+    (limits: ProcessRunner.CaptureLimits)
     (repoRoot: string)
     (arguments: string list)
     =
@@ -142,18 +140,19 @@ let private runDiffGit
             [ "-C"; repoRoot; "-c"; "core.quotepath=false" ] @ arguments
 
         let! result =
-            ProcessRunner.runArgumentListWithinResponseDeadline
-                deadline
-                stdoutLimitBytes
-                diffStderrLimitBytes
-                "WorktreeDiff"
-                "git"
+            ProcessRunner.capture
+                { diffGit with
+                    Limits = limits
+                    Deadline = ProcessRunner.SharedDeadline deadline }
                 gitArguments
-                None
 
         return
             match result with
             | Error failure -> Error(mapDiffProcessFailure operation failure)
+            // A truncated patch is unusable here — the caller parses these bytes — so the diff
+            // viewer keeps its typed capture-limit error even though the process exited.
+            | Ok output when not output.Truncated.IsEmpty ->
+                Error(GitCaptureLimitExceeded(operation, List.head output.Truncated))
             | Ok output when output.ExitCode <> 0 ->
                 Log.log
                     "WorktreeDiff"
@@ -192,19 +191,16 @@ let private runRefExists
     =
     async {
         let! result =
-            ProcessRunner.runArgumentListWithinResponseDeadline
-                deadline
-                smallGitCaptureLimitBytes
-                diffStderrLimitBytes
-                "WorktreeDiff"
-                "git"
+            ProcessRunner.capture
+                { diffGit with
+                    Limits = ProcessRunner.CaptureLimits.small
+                    Deadline = ProcessRunner.SharedDeadline deadline }
                 [ "-C"
                   repoRoot
                   "rev-parse"
                   "--verify"
                   "--quiet"
                   gitRef ]
-                None
 
         return
             match result with
@@ -570,7 +566,7 @@ let private resolveComparison
                 runDiffGit
                     deadline
                     ResolveMergeBase
-                    smallGitCaptureLimitBytes
+                    ProcessRunner.CaptureLimits.small
                     context.WorktreePath
                     [ "merge-base"; "HEAD"; baseRef ]
 
@@ -988,7 +984,7 @@ let internal getWorktreeDiffSummaryWithinDeadline
                         runDiffGit
                             deadline
                             EnumerateTracked
-                            summaryCaptureLimitBytes
+                            ProcessRunner.CaptureLimits.data
                             context.WorktreePath
                             (trackedEnumerationArguments
                                 [ "--raw"; "--numstat" ]
@@ -1008,7 +1004,7 @@ let internal getWorktreeDiffSummaryWithinDeadline
                         runDiffGit
                             deadline
                             EnumerateUntracked
-                            summaryCaptureLimitBytes
+                            ProcessRunner.CaptureLimits.data
                             context.WorktreePath
                             untrackedEnumerationArguments
 
@@ -1081,7 +1077,7 @@ let private countLayer deadline context layers =
                         runDiffGit
                             deadline
                             EnumerateTracked
-                            summaryCaptureLimitBytes
+                            ProcessRunner.CaptureLimits.data
                             context.WorktreePath
                             (trackedEnumerationArguments [ "--name-status" ] comparison)
 
@@ -1099,7 +1095,7 @@ let private countLayer deadline context layers =
                         runDiffGit
                             deadline
                             EnumerateUntracked
-                            summaryCaptureLimitBytes
+                            ProcessRunner.CaptureLimits.data
                             context.WorktreePath
                             untrackedEnumerationArguments
 
@@ -1237,7 +1233,8 @@ let private getTrackedDiffFile
                 runDiffGit
                     deadline
                     LoadFile
-                    maxWorktreeDiffBytes
+                    { ProcessRunner.CaptureLimits.data with
+                        StdoutBytes = maxWorktreeDiffBytes }
                     repoRoot
                     ([ "diff"
                        "--no-ext-diff"
