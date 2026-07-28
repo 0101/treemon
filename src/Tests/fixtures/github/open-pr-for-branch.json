@@ -5,7 +5,15 @@
     "state": "open",
     "draft": false,
     "merged_at": null,
-    "head": { "ref": "feature/sync", "sha": "sha-feature-sync" },
+    "head": {
+      "ref": "feature/sync",
+      "sha": "sha-feature-sync",
+      "label": "testowner:feature/sync",
+      "repo": {
+        "full_name": "testowner/testrepo",
+        "owner": { "login": "testowner" }
+      }
+    },
     "base": { "ref": "main" }
   }
 ]

@@ -54,8 +54,10 @@ let internal runQuery (context: string) (fileName: string) (arguments: string li
     }
 
 /// Classifies the response to a query that already asked the provider for one branch.
-/// `sourceBranchOf` reads that provider's own source-branch field. Entries naming any other branch
-/// mean the filter did not apply, so the answer stays unknown rather than being read as an absence.
+/// `sourceBranchOf` reads that provider's own source-branch field - or, where the provider filters on
+/// more than the branch, the whole filtered head projected into one comparable value that `branch`
+/// then names. Entries naming any other source mean the filter did not apply, so the answer stays
+/// unknown rather than being read as an absence.
 /// Only the shape of a payload is logged, never the payload itself.
 let internal classifyResponse
     (context: string)

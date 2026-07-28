@@ -292,14 +292,28 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
             return Map entries
     }
 
-/// Reads the branch a pull request is merging *from*; GitHub's own name for it.
-let private headBranch (pr: JsonElement) =
-    pr |> tryProp "head" |> Option.bind (tryStringValue "ref")
+/// Reads the `owner:branch` head a pull request is merging *from* - the same pair the query's head
+/// filter names, so both halves of that filter are verified rather than only the branch. The owner is
+/// folded to lower case because GitHub logins are case-insensitive; the branch is left exact because
+/// git refs are not. A pull request whose head repository is gone (a deleted fork) reads as `None`,
+/// which the classifier treats as unknown rather than as a match.
+let private headLabel (pr: JsonElement) =
+    let head = pr |> tryProp "head"
+
+    let owner =
+        head
+        |> Option.bind (tryProp "repo")
+        |> Option.bind (tryProp "owner")
+        |> Option.bind (tryStringValue "login")
+
+    (owner, head |> Option.bind (tryStringValue "ref"))
+    ||> Option.map2 (fun owner headRef -> $"{owner.ToLowerInvariant()}:{headRef}")
 
 /// Asks GitHub only whether this branch currently heads an open pull request - one page, and no
 /// review threads, workflow runs, or mergeability - because the push decision needs presence and
 /// nothing else. The `owner:branch` head filter makes GitHub do the filtering, so a response holding
-/// any other branch means the filter did not apply and the state stays unknown.
+/// any other head - a different owner as much as a different branch - means the filter did not apply
+/// and the state stays unknown.
 ///
 /// `headOwner` is the account whose repository *holds* the branch, which in a fork workflow is the
 /// fork and not `remote`, the repository the pull request targets. Filtering under the target's
@@ -310,12 +324,12 @@ let internal openPrQueryArgs (remote: GithubRemote) (headOwner: string) (branch:
     [ "api"
       $"/repos/{remote.Owner}/{remote.Repo}/pulls?state=open&head={Uri.EscapeDataString(headOwner)}:{Uri.EscapeDataString(branch)}&per_page=1" ]
 
-let internal parseOpenPrState (branch: string) (json: string) =
-    classifyResponse "GH" headBranch branch json
+let internal parseOpenPrState (headOwner: string) (branch: string) (json: string) =
+    classifyResponse "GH" headLabel $"{headOwner.ToLowerInvariant()}:{branch}" json
 
 let queryOpenPrState (remote: GithubRemote) (headOwner: string) (branch: string) =
     async {
         match! runQuery "GH" "gh" (openPrQueryArgs remote headOwner branch) with
-        | Ok response -> return parseOpenPrState branch response
+        | Ok response -> return parseOpenPrState headOwner branch response
         | Error state -> return state
     }

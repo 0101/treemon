@@ -287,36 +287,62 @@ type GithubOpenPrQueryTests() =
 
     [<Test>]
     member _.``An open pull request on the branch is reported as open``() =
-        let state = readFixture "open-pr-for-branch.json" |> parseOpenPrState branch
+        let state = readFixture "open-pr-for-branch.json" |> parseOpenPrState "testowner" branch
         Assert.That(state, Is.EqualTo(OpenPr))
 
     [<Test>]
     member _.``An open pull request headed by a fork of the repository is reported as open``() =
-        let state = readFixture "fork-open-pr-for-branch.json" |> parseOpenPrState branch
+        let state = readFixture "fork-open-pr-for-branch.json" |> parseOpenPrState "forkowner" branch
         Assert.That(state, Is.EqualTo(OpenPr))
 
     [<Test>]
+    member _.``A pull request headed by another owner's branch of the same name leaves the state unknown``() =
+        let state = readFixture "fork-open-pr-for-branch.json" |> parseOpenPrState "testowner" branch
+        Assert.That(state, Is.EqualTo(UnknownPrState))
+
+    [<Test>]
+    member _.``The head owner is matched without regard to case``() =
+        let state = readFixture "fork-open-pr-for-branch.json" |> parseOpenPrState "ForkOwner" branch
+        Assert.That(state, Is.EqualTo(OpenPr))
+
+    [<Test>]
+    member _.``A head branch differing only in case leaves the state unknown``() =
+        let state =
+            """[{"number":7,"head":{"ref":"Feature/Sync","repo":{"owner":{"login":"testowner"}}}}]"""
+            |> parseOpenPrState "testowner" branch
+
+        Assert.That(state, Is.EqualTo(UnknownPrState))
+
+    [<Test>]
+    member _.``A pull request without a head repository owner leaves the state unknown``() =
+        let state =
+            """[{"number":7,"head":{"ref":"feature/sync","repo":null}}]"""
+            |> parseOpenPrState "testowner" branch
+
+        Assert.That(state, Is.EqualTo(UnknownPrState))
+
+    [<Test>]
     member _.``An empty response is a confirmed absence``() =
-        let state = parseOpenPrState branch "[]"
+        let state = parseOpenPrState "testowner" branch "[]"
         Assert.That(state, Is.EqualTo(NoOpenPr))
 
     [<Test>]
     member _.``An unparseable response leaves the state unknown``() =
-        let state = parseOpenPrState branch "not json"
+        let state = parseOpenPrState "testowner" branch "not json"
         Assert.That(state, Is.EqualTo(UnknownPrState))
 
     [<Test>]
     member _.``An error object instead of a pull request list leaves the state unknown``() =
-        let state = parseOpenPrState branch """{"message":"Not Found"}"""
+        let state = parseOpenPrState "testowner" branch """{"message":"Not Found"}"""
         Assert.That(state, Is.EqualTo(UnknownPrState))
 
     [<Test>]
     member _.``A response naming other branches leaves the state unknown``() =
-        let state = readFixture "pr-list.json" |> parseOpenPrState branch
+        let state = readFixture "pr-list.json" |> parseOpenPrState "testowner" branch
         Assert.That(state, Is.EqualTo(UnknownPrState))
 
     [<Test>]
     member _.``A pull request without a head branch leaves the state unknown``() =
-        let state = parseOpenPrState branch """[{"number":7}]"""
+        let state = parseOpenPrState "testowner" branch """[{"number":7}]"""
         Assert.That(state, Is.EqualTo(UnknownPrState))
 
