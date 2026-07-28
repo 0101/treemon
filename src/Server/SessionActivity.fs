@@ -305,7 +305,7 @@ let idleDebounceWindow = TimeSpan.FromSeconds 10.0
 /// WaitingForUser agent normally resumes via `user_prompt`→Working rather than `turn_ended`→Idle, so
 /// a spurious ≤`graceWindow` red hold on a waiting card is only a rare edge, not the common path.
 /// `idleSince` is the frozen "entered Idle" stamp (`CodingToolSinceByWorktree`), which the scheduler
-/// (`RefreshScheduler.stampIdleSince`) resets on every new Working turn — so each turn restarts the
+/// (`SchedulerState.stampIdleSince`) resets on every new Working turn — so each turn restarts the
 /// window. With no stamp there is no reference instant, so the real Idle status falls through. The
 /// classified activity (Reviewing/Investigating/…) is unaffected: it is derived from the retained
 /// skill, so a held-Working worktree keeps its group.

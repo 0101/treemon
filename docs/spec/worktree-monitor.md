@@ -238,7 +238,8 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 |------|---------|
 | `src/Shared/Types.fs` | Domain types: `DashboardResponse`, `CodingToolStatus`, `CodingToolProvider`, `CommentSummary` |
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
-| `src/Server/RefreshScheduler.fs` | MailboxProcessor state agent, repo-keyed task scheduling, merged-PR reconciliation |
+| `src/Server/SchedulerState.fs` | Dashboard state model, `StateMsg` protocol, and the MailboxProcessor state agent |
+| `src/Server/RefreshScheduler.fs` | Repo-keyed task scheduling, task execution, merged-PR reconciliation |
 | `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure live fold, SQLite (WAL) base-state/history store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
 | `src/Server/UserMessageFormatting.fs` | Server-owned system-reminder suppression and canvas prompt projection shared by ingestion, activity, and footer fields |
 | `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, and per-worktree provider config |
@@ -250,7 +251,8 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/PrStatus.fs` | Provider routing, AzDo PR/thread/build fetching, and lightweight live open-PR lookup |
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching, open-first per-branch selection, and lightweight live open-PR lookup |
 | `src/Server/MergedPrStore.fs` | Durable merged-PR fallback reconciliation, identity checks, and runtime-state persistence |
-| `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, dirty detection, bounded mechanical sync, and non-force branch push |
+| `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, and dirty detection |
+| `src/Server/GitBranchSync.fs` | Bounded mechanical sync of a worktree onto its base and non-force branch push |
 | `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, and upstream remote |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |

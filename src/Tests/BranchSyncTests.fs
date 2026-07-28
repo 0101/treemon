@@ -3,6 +3,7 @@ module Tests.BranchSyncTests
 open System.IO
 open NUnit.Framework
 open Server
+open Server.GitBranchSync
 open Server.GitWorktree
 open Tests.GitTestHelpers
 open Tests.TestUtils

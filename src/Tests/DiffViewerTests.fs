@@ -268,7 +268,7 @@ let private createSummaryPerformanceRepo repoDir =
     DiffProvisioner.provisionViewer repoDir |> ignore
 
 let private performanceAgentKnowing worktreePath =
-    let agent = RefreshScheduler.createAgent ()
+    let agent = SchedulerState.createAgent ()
 
     let info: GitWorktree.WorktreeInfo =
         { Path = PathUtils.normalizePath worktreePath
@@ -276,13 +276,13 @@ let private performanceAgentKnowing worktreePath =
           Branch = Some "performance" }
 
     agent.Post(
-        RefreshScheduler.UpdateWorktreeList(
+        SchedulerState.UpdateWorktreeList(
             RepoId "diff-summary-performance",
             [ info ]
         )
     )
 
-    agent.PostAndAsyncReply(RefreshScheduler.GetState)
+    agent.PostAndAsyncReply(SchedulerState.GetState)
     |> TestUtils.runAsync
     |> ignore
 

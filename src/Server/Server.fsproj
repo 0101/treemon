@@ -24,6 +24,7 @@
     <Compile Include="GlobalConfig.fs" />
     <Compile Include="TreemonConfig.fs" />
     <Compile Include="GitWorktree.fs" />
+    <Compile Include="GitBranchSync.fs" />
     <Compile Include="WorktreeDiff.fs" />
     <Compile Include="WorktreeDiffApi.fs" />
     <Compile Include="JsonHelpers.fs" />
@@ -56,6 +57,7 @@
     <Compile Include="CanvasScanner.fs" />
     <Compile Include="CanvasExport.fs" />
     <Compile Include="CanvasShare.fs" />
+    <Compile Include="SchedulerState.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="CardEventLog.fs" />
     <Compile Include="DemoFixture.fs" />

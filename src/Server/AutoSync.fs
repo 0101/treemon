@@ -63,7 +63,7 @@ type SyncFailure =
 /// branch configuration the provider query reads lives. The tree that actually moves is
 /// `Sync.WorktreePath`, never `RepoRoot`.
 type MechanicalSyncRequest =
-    { Sync: GitWorktree.BranchSyncRequest
+    { Sync: GitBranchSync.BranchSyncRequest
       RepoRoot: string }
 
 /// `ClaimRevision`/`ReleaseRevision` are the in-process claim; the accepted-revision operations are
@@ -132,20 +132,20 @@ let fallbackPrompt upstreamRemote baseBranch failure =
 
 let internal syncOutcomeResult =
     function
-    | GitWorktree.BranchSyncOutcome.FastForwarded
-    | GitWorktree.BranchSyncOutcome.Merged
-    | GitWorktree.BranchSyncOutcome.AlreadyCurrent -> Ok()
-    | GitWorktree.BranchSyncOutcome.RefusedDirty -> Error DirtyWorktree
-    | GitWorktree.BranchSyncOutcome.Conflicted -> Error MergeConflict
-    | GitWorktree.BranchSyncOutcome.AbortFailed -> Error MergeAbortFailed
-    | GitWorktree.BranchSyncOutcome.BranchChanged -> Error BranchChanged
-    | GitWorktree.BranchSyncOutcome.CommandFailed -> Error GitCommandFailed
+    | GitBranchSync.BranchSyncOutcome.FastForwarded
+    | GitBranchSync.BranchSyncOutcome.Merged
+    | GitBranchSync.BranchSyncOutcome.AlreadyCurrent -> Ok()
+    | GitBranchSync.BranchSyncOutcome.RefusedDirty -> Error DirtyWorktree
+    | GitBranchSync.BranchSyncOutcome.Conflicted -> Error MergeConflict
+    | GitBranchSync.BranchSyncOutcome.AbortFailed -> Error MergeAbortFailed
+    | GitBranchSync.BranchSyncOutcome.BranchChanged -> Error BranchChanged
+    | GitBranchSync.BranchSyncOutcome.CommandFailed -> Error GitCommandFailed
 
 let internal pushOutcomeResult =
     function
-    | GitWorktree.BranchPushOutcome.Pushed -> Ok()
-    | GitWorktree.BranchPushOutcome.BranchChanged -> Error BranchChanged
-    | GitWorktree.BranchPushOutcome.PushFailed -> Error PushFailed
+    | GitBranchSync.BranchPushOutcome.Pushed -> Ok()
+    | GitBranchSync.BranchPushOutcome.BranchChanged -> Error BranchChanged
+    | GitBranchSync.BranchPushOutcome.PushFailed -> Error PushFailed
 
 /// Treemon's whole token-free path as one operation: the Git sync, the live push decision, and the
 /// push that decision may require, all bound to the branch the observation was made on. Only a run
@@ -154,9 +154,9 @@ let internal pushOutcomeResult =
 /// provider.
 let mechanicalSync
     (checkedOutBranch: string -> Async<string option>)
-    (syncWithBase: GitWorktree.BranchSyncRequest -> Async<GitWorktree.BranchSyncOutcome>)
+    (syncWithBase: GitBranchSync.BranchSyncRequest -> Async<GitBranchSync.BranchSyncOutcome>)
     (queryOpenPrState: string -> string -> string -> Async<PrOpenState.OpenPrState>)
-    (pushBranch: string -> string -> Async<GitWorktree.BranchPushOutcome>)
+    (pushBranch: string -> string -> Async<GitBranchSync.BranchPushOutcome>)
     (request: MechanicalSyncRequest)
     =
     // Asked again at each boundary instead of trusting the observation that started the run: a

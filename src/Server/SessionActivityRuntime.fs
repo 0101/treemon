@@ -13,7 +13,7 @@ type internal Runtime =
 
 let internal createComponents
     (dbPath: string)
-    (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
     =
     let store = new SessionActivityStore.SessionActivityStore(dbPath)
 
@@ -26,7 +26,7 @@ let internal createComponents
 
 let internal create
     (dbPath: string)
-    (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     =
     let snapshotStore = OverviewSnapshotStore.OverviewSnapshotStore(dbPath)

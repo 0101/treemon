@@ -217,7 +217,7 @@ activity is **derived** from the skill via the pure Shared classifier (no separa
 
 Adding record fields breaks every construction site (no default record values in F#) — each
 type-growth task must update all sites (`DemoFixture.fs` ×8, `WorktreeApi.fs` mapping,
-`RefreshScheduler.fs`, client/server `IWorktreeApi` impls, test fixtures) in the same change to keep
+`SchedulerState.fs`, client/server `IWorktreeApi` impls, test fixtures) in the same change to keep
 the solution compiling (no compat shims, per house rules).
 
 ### Client aggregation + band

@@ -5,6 +5,7 @@ open System.IO
 open NUnit.Framework
 open Server.TreemonConfig
 open Server.RefreshScheduler
+open Server.SchedulerState
 open Server.GitWorktree
 open Shared
 

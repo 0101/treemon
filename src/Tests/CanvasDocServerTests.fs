@@ -492,13 +492,13 @@ type DiffComparisonContextTests() =
             |> PathUtils.normalizePath
 
         let repo =
-            { RefreshScheduler.PerRepoState.empty with
+            { SchedulerState.PerRepoState.empty with
                 KnownPaths = Set.ofList [ repoRoot; linked ]
                 UpstreamRemote = "upstream"
                 BaseBranch = "dev" }
 
         let state =
-            { RefreshScheduler.DashboardState.empty with
+            { SchedulerState.DashboardState.empty with
                 Repos =
                     Map.ofList
                         [ RepoId "context-repo",
@@ -534,10 +534,10 @@ type DiffComparisonContextTests() =
                 Path.Combine(Path.GetTempPath(), "treemon-context", "atomic-linked")
                 |> PathUtils.normalizePath
 
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
 
             Assert.That(
-                tryFindDiffComparisonContext RefreshScheduler.DashboardState.empty linked,
+                tryFindDiffComparisonContext SchedulerState.DashboardState.empty linked,
                 Is.EqualTo(None)
             )
 
@@ -554,7 +554,7 @@ type DiffComparisonContextTests() =
                     "develop"
             )
 
-            let! state = agent.PostAndAsyncReply(RefreshScheduler.GetState)
+            let! state = agent.PostAndAsyncReply(SchedulerState.GetState)
 
             Assert.That(
                 tryFindDiffComparisonContext state linked,
@@ -590,12 +590,12 @@ type AttributeOwnershipTests() =
     // verbatim and isKnownWorktree compares the normalized request path, so the path is stored
     // normalized just like the real populate path does.
     let agentKnowing (worktreePath: string) =
-        let agent = RefreshScheduler.createAgent ()
+        let agent = SchedulerState.createAgent ()
 
         let info: GitWorktree.WorktreeInfo =
             { Path = PathUtils.normalizePath worktreePath; Head = ""; Branch = Some "test" }
 
-        agent.Post(RefreshScheduler.UpdateWorktreeList(RepoId "attr-test-repo", [ info ]))
+        agent.Post(SchedulerState.UpdateWorktreeList(RepoId "attr-test-repo", [ info ]))
         agent
 
     [<Test>]

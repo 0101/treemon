@@ -98,7 +98,7 @@ let parseArgs (args: string array) =
               TestFixtures = testFixtures
               Demo = false }
 
-let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: FixtureData) =
+let private populateAgentFromFixtures (agent: MailboxProcessor<SchedulerState.StateMsg>) (fixtures: FixtureData) =
     fixtures.Worktrees.Repos
     |> List.iter (fun repo ->
         let worktreeInfos =
@@ -108,7 +108,7 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
                   Head = ""
                   Branch = Some wt.Branch }: GitWorktree.WorktreeInfo)
 
-        agent.Post(RefreshScheduler.UpdateWorktreeList(repo.RepoId, worktreeInfos))
+        agent.Post(SchedulerState.UpdateWorktreeList(repo.RepoId, worktreeInfos))
         Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees for repo '{RepoId.value repo.RepoId}'")
 
 let private buildDemoApi (startTime: System.DateTimeOffset) : IWorktreeApi =
@@ -316,7 +316,7 @@ let main args =
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
             buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None, []
         else
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()

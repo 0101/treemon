@@ -3,6 +3,7 @@ module Tests.IdleDetectionTests
 open System
 open NUnit.Framework
 open Server.RefreshScheduler
+open Server.SchedulerState
 open Shared
 
 let private now = DateTimeOffset(2026, 3, 27, 12, 0, 0, TimeSpan.Zero)

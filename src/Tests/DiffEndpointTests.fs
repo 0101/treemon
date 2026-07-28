@@ -97,8 +97,8 @@ let private agentKnowingWithConfiguration
     (worktreePaths: string list)
     upstreamRemote
     baseBranch
-    : MailboxProcessor<RefreshScheduler.StateMsg> =
-    let agent = RefreshScheduler.createAgent ()
+    : MailboxProcessor<SchedulerState.StateMsg> =
+    let agent = SchedulerState.createAgent ()
 
     let worktrees =
         worktreePaths
@@ -119,7 +119,7 @@ let private agentKnowingWithConfiguration
             baseBranch
     )
 
-    agent.PostAndAsyncReply(RefreshScheduler.GetState)
+    agent.PostAndAsyncReply(SchedulerState.GetState)
     |> TestUtils.runAsync
     |> ignore
 
@@ -135,7 +135,7 @@ let private withDiffServerConfiguration
     baseBranch
     (service: WorktreeDiffApi.Service)
     (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
-    (action: MailboxProcessor<RefreshScheduler.StateMsg> -> HttpClient -> string -> unit)
+    (action: MailboxProcessor<SchedulerState.StateMsg> -> HttpClient -> string -> unit)
     =
     let port = TestUtils.getFreeTcpPort ()
     let agent =
@@ -2348,7 +2348,7 @@ type DiffIdentityLifecycleHttpTests() =
                 let identity =
                     issueIdentity client summaryUrl
 
-                let deleteAgent = RefreshScheduler.createAgent ()
+                let deleteAgent = SchedulerState.createAgent ()
                 let repoId = PathUtils.toRepoId repoRoot
 
                 let worktreeInfo: GitWorktree.WorktreeInfo =
@@ -2357,7 +2357,7 @@ type DiffIdentityLifecycleHttpTests() =
                       Branch = Some "feature" }
 
                 deleteAgent.Post(
-                    RefreshScheduler.UpdateWorktreeList(
+                    SchedulerState.UpdateWorktreeList(
                         repoId,
                         [ worktreeInfo ]
                     )
@@ -2430,7 +2430,7 @@ type DiffIdentityLifecycleHttpTests() =
                     issueIdentity client removedSummaryUrl
 
                 let reconcileAgent =
-                    RefreshScheduler.createAgent ()
+                    SchedulerState.createAgent ()
 
                 let retainedInfo: GitWorktree.WorktreeInfo =
                     { Path =
@@ -2440,13 +2440,13 @@ type DiffIdentityLifecycleHttpTests() =
                       Branch = Some "retained" }
 
                 let retainedRepo =
-                    { RefreshScheduler.PerRepoState.empty with
+                    { SchedulerState.PerRepoState.empty with
                         WorktreeList = [ retainedInfo ]
                         KnownPaths = Set.singleton retainedInfo.Path
                         IsReady = true }
 
                 let pendingRepo =
-                    { RefreshScheduler.PerRepoState.empty with
+                    { SchedulerState.PerRepoState.empty with
                         IsReady = false }
 
                 let pendingRepoId = RepoId "pending"

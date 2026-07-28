@@ -148,7 +148,7 @@ let private overviewWorktreeFields
     (archivedBranches: Set<string>)
     (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
     (codingToolSince: Map<string, DateTimeOffset>)
-    (repo: RefreshScheduler.PerRepoState)
+    (repo: SchedulerState.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
     let beads = repo.BeadsData |> Map.tryFind wt.Path |> Option.defaultValue BeadsSummary.zero
@@ -186,7 +186,7 @@ let internal assembleFromState
     (autoSyncBranches: Set<string>)
     (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
     (codingToolSince: Map<string, DateTimeOffset>)
-    (repo: RefreshScheduler.PerRepoState)
+    (repo: SchedulerState.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
     let fields =
@@ -239,7 +239,7 @@ type WorktreeContext =
 
 let private tryResolveWorktreeContext
     (rootPaths: Map<RepoId, string>)
-    (state: RefreshScheduler.DashboardState)
+    (state: SchedulerState.DashboardState)
     (path: string)
     =
     state.Repos
@@ -256,7 +256,7 @@ let private tryResolveWorktreeContext
                   RepoRoot = root
                   Branch = wt.Branch })))
 
-let private allKnownPaths (state: RefreshScheduler.DashboardState) =
+let private allKnownPaths (state: SchedulerState.DashboardState) =
     state.Repos
     |> Map.values
     |> Seq.collect _.KnownPaths
@@ -291,7 +291,7 @@ let loadOverviewAssemblyInputs
 let internal isOverviewCaptureReady
     (rootPaths: Map<RepoId, string>)
     (inputs: OverviewAssemblyInputs option)
-    (state: RefreshScheduler.DashboardState)
+    (state: SchedulerState.DashboardState)
     =
     let repoReady inputs repoId =
         match state.Repos |> Map.tryFind repoId with
@@ -340,11 +340,11 @@ let private assembleReposCore
     (archivedBranchesByRepo: Map<RepoId, Set<string>>)
     (autoSyncBranchesByRepo: Map<RepoId, Set<string>>)
     (rootPaths: Map<RepoId, string>)
-    (state: RefreshScheduler.DashboardState)
+    (state: SchedulerState.DashboardState)
     (assembleStatus:
         Set<string> ->
             Set<string> ->
-            RefreshScheduler.PerRepoState ->
+            SchedulerState.PerRepoState ->
             GitWorktree.WorktreeInfo ->
             WorktreeStatus)
     : RepoWorktrees list =
@@ -380,7 +380,7 @@ let assembleRepos
     (inputs: RepoAssemblyInputs)
     (rootPaths: Map<RepoId, string>)
     (activeSessionPaths: Set<string>)
-    (state: RefreshScheduler.DashboardState)
+    (state: SchedulerState.DashboardState)
     : RepoWorktrees list =
     let pushByWorktree =
         state.SessionStatuses
@@ -410,7 +410,7 @@ let internal assembleOverviewFromState
     (archivedBranches: Set<string>)
     (pushByWorktree: Map<string, CodingToolStatus.CodingToolResult>)
     (codingToolSince: Map<string, DateTimeOffset>)
-    (repo: RefreshScheduler.PerRepoState)
+    (repo: SchedulerState.PerRepoState)
     (wt: GitWorktree.WorktreeInfo)
     =
     let fields =
@@ -447,7 +447,7 @@ let internal assembleOverviewFromState
 let assembleOverviewRepos
     (inputs: OverviewAssemblyInputs)
     (rootPaths: Map<RepoId, string>)
-    (state: RefreshScheduler.DashboardState)
+    (state: SchedulerState.DashboardState)
     : RepoWorktrees list =
     let pushByWorktree =
         CodingToolStatus.collapseByWorktree inputs.Now (state.SessionStatuses |> Map.values)
@@ -468,7 +468,7 @@ let assembleOverviewRepos
                 wt)
 
 let getWorktrees
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (rootPaths: Map<RepoId, string>)
@@ -476,7 +476,7 @@ let getWorktrees
     (deployBranch: string option)
     : Async<DashboardResponse> =
     async {
-        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+        let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
         let! activeSessions = SessionManager.getActiveSessions sessionAgent
 
         let activeSessionPaths = activeSessions |> Map.keys |> Set.ofSeq
@@ -547,13 +547,13 @@ let private openTerminal
 let internal deleteWorktreeWith
     (removeGitWorktree: string -> string -> string option -> Async<Result<unit, string>>)
     (removeWorktreeState: string -> Async<unit>)
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (wtPath: WorktreePath)
     =
     let path = WorktreePath.value wtPath
     asyncResult {
-        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+        let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
         match tryResolveWorktreeContext rootPaths state path with
         | None -> return! Error $"No worktree found at path '{path}'"
@@ -561,7 +561,7 @@ let internal deleteWorktreeWith
             return! Error "Cannot delete the main worktree"
         | Some ctx ->
             do! removeGitWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
-            agent.Post(RefreshScheduler.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
+            agent.Post(SchedulerState.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
             do! removeWorktreeState ctx.Worktree.Path
     }
 
@@ -581,14 +581,14 @@ let private deleteWorktree agent (clearAcceptedSync: string -> unit) rootPaths w
         wtPath
 
 let private updateArchivedBranches
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (setOp: string -> Set<string> -> Set<string>)
     (wtPath: WorktreePath)
     =
     let path = WorktreePath.value wtPath
     async {
-        let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+        let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
         match tryResolveWorktreeContext rootPaths state path with
         | None ->
@@ -608,12 +608,12 @@ let private updateArchivedBranches
                 |> setOp branch
                 |> Set.intersect liveBranches
                 |> Set.toList)
-            agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh ctx.RepoId)
+            agent.Post(SchedulerState.StateMsg.ExpediteRefresh ctx.RepoId)
             return Ok ()
     }
 
 let worktreeApi
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
     (sessionAgent: SessionManager.SessionAgent)
     (activityStore: SessionActivityStore.SessionActivityStore option)
@@ -638,7 +638,7 @@ let worktreeApi
 
     let validatePath path =
         async {
-            let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+            let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
             let knownPaths = allKnownPaths state
             return knownPaths |> Set.exists (fun p -> pathEquals p path)
         }
@@ -684,7 +684,7 @@ let worktreeApi
           toggleAutoSync = fun wtPath enabled ->
               let path = WorktreePath.value wtPath
               async {
-                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                  let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
                   match tryResolveWorktreeContext rootPaths state path with
                   | None -> return Error $"No worktree found at path '{path}'"
@@ -704,7 +704,7 @@ let worktreeApi
                               |> Set.toList)
 
                       let clearSyncState () =
-                          agent.Post(RefreshScheduler.StateMsg.ClearAutoSyncTrigger ctx.Worktree.Path)
+                          agent.Post(SchedulerState.StateMsg.ClearAutoSyncTrigger ctx.Worktree.Path)
                           clearAcceptedRecord ctx.Worktree.Path
 
                       // Rejected rather than silently ignored: the client's optimistic toggle rolls
@@ -757,7 +757,7 @@ let worktreeApi
               }
           getSyncStatus = fun () ->
               async {
-                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                  let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
                   let eventKeyToPath =
                       state.Repos
@@ -808,7 +808,7 @@ let worktreeApi
           getBranches = fun repoIdStr ->
               async {
                   let repoId = PathUtils.toRepoId repoIdStr
-                  let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                  let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
                   return
                       state.Repos
@@ -830,7 +830,7 @@ let worktreeApi
 
                   let branchName = BranchName.value req.BranchName
                   let! fork = GitWorktree.forkWorktree root (BranchName.value req.BaseBranch) branchName
-                  agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                  agent.Post(SchedulerState.StateMsg.ExpediteRefresh repoId)
 
                   // Fire-and-forget: when a prompt was supplied, spawn a tracked coding-agent
                   // window in the new worktree seeded with the config-driven skill invocation.
@@ -892,7 +892,7 @@ let worktreeApi
                                           Log.log "API" $"post-fork setup failed for {branchName}: {msg}"
                                           StepStatus.Failed msg
                                   cardLog.Post(CardEventLog.PostForkEnded(eventKey, status))
-                                  agent.Post(RefreshScheduler.StateMsg.ExpediteRefresh repoId)
+                                  agent.Post(SchedulerState.StateMsg.ExpediteRefresh repoId)
                               with ex ->
                                   Log.log "API" $"post-fork background task faulted for {branchName}: {ex.Message}"
                                   cardLog.Post(CardEventLog.PostForkEnded(eventKey, StepStatus.Failed ex.Message))
@@ -913,7 +913,7 @@ let worktreeApi
                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
                       return! SessionManager.launchAction sessionAgent req.Path command.AsShellString
                   })
-          reportActivity = fun level -> async { agent.Post(RefreshScheduler.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
+          reportActivity = fun level -> async { agent.Post(SchedulerState.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
           saveCanvasPaneOpen = fun isOpen -> async { writeCanvasPaneOpen isOpen }
           saveOverviewPanelOpen = fun isOpen -> async { writeOverviewPanelOpen isOpen }
@@ -940,7 +940,7 @@ let worktreeApi
               withValidatedPathValue request.WorktreePath "sendCanvasMessage" CanvasMessageResult.Error (fun () ->
                   async {
                       let path = WorktreePath.value request.WorktreePath
-                      let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+                      let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
                       let! outcome =
                           CanvasBridge.sendMessage (state.SessionStatuses |> Map.values) request

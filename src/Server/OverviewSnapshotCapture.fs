@@ -10,15 +10,15 @@ type internal CaptureClock =
       WaitUntil: DateTimeOffset -> CancellationToken -> Async<unit> }
 
 type internal CaptureDependencies =
-    { CaptureState: unit -> Async<RefreshScheduler.DashboardState>
+    { CaptureState: unit -> Async<SchedulerState.DashboardState>
       LoadAssemblyInputs: DateTimeOffset -> WorktreeApi.OverviewAssemblyInputs
       IsReady:
         WorktreeApi.OverviewAssemblyInputs option ->
-            RefreshScheduler.DashboardState ->
+            SchedulerState.DashboardState ->
             bool
       AssembleRepos:
         WorktreeApi.OverviewAssemblyInputs ->
-            RefreshScheduler.DashboardState ->
+            SchedulerState.DashboardState ->
             RepoWorktrees list
       Aggregate: RepoWorktrees list -> OverviewData.Overview
       Insert: OverviewData.OverviewSnapshot -> bool }
@@ -144,14 +144,14 @@ type internal SnapshotCapture
         }
 
 let internal create
-    (scheduler: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
     (snapshotStore: OverviewSnapshotStore.OverviewSnapshotStore)
     =
     let dependencies =
         { CaptureState =
             fun () ->
-                scheduler.PostAndAsyncReply RefreshScheduler.GetState
+                scheduler.PostAndAsyncReply SchedulerState.GetState
           LoadAssemblyInputs =
             fun boundary ->
                 WorktreeApi.loadOverviewAssemblyInputs boundary rootPaths

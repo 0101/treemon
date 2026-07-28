@@ -9,6 +9,7 @@ open Shared
 open Server
 open Server.AutoSync
 open Server.RefreshScheduler
+open Server.SchedulerState
 open Server.SessionActivity
 open Server.SessionActivityStore
 
@@ -1109,34 +1110,34 @@ type AutoSyncMechanicalTests() =
 
             let dirty =
                 promptFor
-                    GitWorktree.BranchSyncOutcome.RefusedDirty
+                    GitBranchSync.BranchSyncOutcome.RefusedDirty
                     PrOpenState.NoOpenPr
-                    GitWorktree.BranchPushOutcome.Pushed
+                    GitBranchSync.BranchPushOutcome.Pushed
 
             let conflicted =
                 promptFor
-                    GitWorktree.BranchSyncOutcome.Conflicted
+                    GitBranchSync.BranchSyncOutcome.Conflicted
                     PrOpenState.NoOpenPr
-                    GitWorktree.BranchPushOutcome.Pushed
+                    GitBranchSync.BranchPushOutcome.Pushed
 
             let unknownPr =
                 promptFor
-                    GitWorktree.BranchSyncOutcome.FastForwarded
+                    GitBranchSync.BranchSyncOutcome.FastForwarded
                     PrOpenState.UnknownPrState
-                    GitWorktree.BranchPushOutcome.Pushed
+                    GitBranchSync.BranchPushOutcome.Pushed
 
             let pushFailed =
                 promptFor
-                    GitWorktree.BranchSyncOutcome.Merged
+                    GitBranchSync.BranchSyncOutcome.Merged
                     PrOpenState.OpenPr
-                    GitWorktree.BranchPushOutcome.PushFailed
+                    GitBranchSync.BranchPushOutcome.PushFailed
 
             let branchChanged =
                 promptWith
                     (Some "some-other-branch")
-                    GitWorktree.BranchSyncOutcome.FastForwarded
+                    GitBranchSync.BranchSyncOutcome.FastForwarded
                     PrOpenState.NoOpenPr
-                    GitWorktree.BranchPushOutcome.Pushed
+                    GitBranchSync.BranchPushOutcome.Pushed
 
             let prompts = [ dirty; conflicted; unknownPr; pushFailed; branchChanged ]
 

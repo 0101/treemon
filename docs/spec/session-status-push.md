@@ -238,7 +238,7 @@ projection but persists the complete count-only aggregate independently; see
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
 | `src/Server/SessionActivityStore.fs` | Session persistence, additive migration, idempotent event append, representative queries, and retention. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
-| `src/Server/RefreshScheduler.fs` | Live session state and `CodingToolSince` transitions. |
+| `src/Server/SchedulerState.fs` | Live session state and `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |
 | `src/Server/SessionBridge.fs` | Session registration, targeted prompt delivery, retry queue, and bridge liveness. |
 | `src/Server/AutoSync.fs` | Delivery-aware session selection and guarded sync-prompt fallback launch. |
