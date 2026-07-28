@@ -460,7 +460,7 @@ let main args =
                 try
                     host.StopAsync().GetAwaiter().GetResult()
                 finally
-                    host.Dispose())
+                    host.DisposeAsync().GetAwaiter().GetResult())
     finally
         activityRuntime
         |> Option.iter (fun runtime ->
