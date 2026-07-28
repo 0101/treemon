@@ -57,14 +57,14 @@
         .ctrl-btn:hover { background: #45475a; border-color: #585b70; }
         .ctrl-btn.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
 
-        .card-grid {
+        .card-grid, .archive-section {
             display: grid;
             gap: 12px;
             grid-template-columns: 1fr;
         }
-        @container dashboard (min-width: 768px)  { .card-grid { grid-template-columns: repeat(2, 1fr); } }
-        @container dashboard (min-width: 1200px) { .card-grid { grid-template-columns: repeat(3, 1fr); } }
-        @container dashboard (min-width: 1800px) { .card-grid { grid-template-columns: repeat(4, 1fr); } }
+        @container dashboard (min-width: 768px)  { .card-grid, .archive-section { grid-template-columns: repeat(2, 1fr); } }
+        @container dashboard (min-width: 1200px) { .card-grid, .archive-section { grid-template-columns: repeat(3, 1fr); } }
+        @container dashboard (min-width: 1800px) { .card-grid, .archive-section { grid-template-columns: repeat(4, 1fr); } }
 
         .wt-card {
             background: #2a2a3c;
@@ -545,7 +545,6 @@
         .diff-stats { font-size: 0.75em; align-self: center; margin-left: 4px; white-space: nowrap; }
         .diff-added { color: #a6e3a1; }
         .diff-removed { color: #f38ba8; }
-        .work-metrics { display: flex; align-items: center; gap: 4px; }
 
         .wt-card.skeleton { pointer-events: none; }
         .skeleton-dot { width: 10px; height: 10px; border-radius: 50%; background: #313244; flex-shrink: 0; }
@@ -588,7 +587,6 @@
         .archive-btn:hover { color: #89b4fa; border-color: #89b4fa; }
 
         .archive-section {
-            display: flex; flex-wrap: wrap; gap: 8px;
             margin-top: 10px; padding: 8px 0;
             opacity: 0.5;
         }
@@ -598,14 +596,16 @@
             display: flex; align-items: center; gap: 6px;
             background: #232334; border-radius: 6px;
             padding: 4px 10px; font-size: 0.82em;
-            max-width: 300px;
+            min-width: 0; overflow: hidden;
         }
+        .archive-card .header-info { gap: 6px; }
         .archive-card .branch-name {
             font-weight: 500; font-size: 0.9em;
+            flex: 0 0 auto; min-width: 0; max-width: 100%;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-            max-width: 150px; color: #9399b2;
+            color: #a6adc8;
         }
-        .archive-card .commit-time { color: #585b70; white-space: nowrap; }
+        .archive-card .commit-time { color: #7f849c; white-space: nowrap; flex-shrink: 0; }
 
         .unarchive-btn {
             flex-shrink: 0;

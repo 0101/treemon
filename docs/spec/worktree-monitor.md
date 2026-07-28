@@ -57,6 +57,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Event log (up to the last 2 events), diff/auto-sync/terminal/delete actions
 - Green left border on cards with active terminal sessions
 - Contextual action buttons: fix PR comments, fix failed builds, and create PRs
+- Archived worktrees render below the card grid as one-line cards on the same responsive grid columns, so they align with the full cards above. Each shows the branch name (never dropped), then the commit grid and diff stats only while they fit the remaining width, the compact commit age (`123d`, no "ago" suffix), and the unarchive button.
 
 ### Branch Sync
 
