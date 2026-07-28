@@ -3,6 +3,7 @@ module Tests.TerminalSessionFixtureTests
 open System
 open System.Diagnostics
 open System.IO
+open FsToolkit.ErrorHandling
 open NUnit.Framework
 open Server.SessionManager
 open Tests.TerminalSessionFixture
@@ -31,9 +32,22 @@ let private startShell path =
     Process.Start(psi)
 
 let private stopIfRunning (proc: Process) =
-    if not proc.HasExited then
+    if proc.HasExited then
+        Ok()
+    else
         proc.Kill(entireProcessTree = true)
-        proc.WaitForExit(5_000) |> ignore
+
+        if proc.WaitForExit(5_000) then
+            Ok()
+        else
+            Error $"Fixture PowerShell PID {proc.Id} survived cleanup"
+
+let private deleteDirectory path =
+    try
+        Directory.Delete(path, recursive = true)
+        Ok()
+    with ex ->
+        Error $"Failed to delete {path}: {ex.Message}"
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -111,6 +125,12 @@ type TerminalSessionProcessCleanupTests() =
                 Assert.That(owned.WaitForExit(5_000), Is.True)
                 Assert.That(other.HasExited, Is.False))
         finally
-            stopIfRunning owned
-            stopIfRunning other
-            Directory.Delete(fixtureRoot, recursive = true)
+            let cleanupResult =
+                [ stopIfRunning owned
+                  stopIfRunning other
+                  deleteDirectory fixtureRoot ]
+                |> List.sequenceResultA
+                |> Result.map ignore
+                |> Result.mapError (String.concat Environment.NewLine)
+
+            assertOk cleanupResult "Fixture process cleanup failed"

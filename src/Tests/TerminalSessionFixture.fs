@@ -285,10 +285,28 @@ let create prefix prepareWorktree =
 
         reraise ()
 
+/// Flushes the agent mailbox while the fixture CWD is still in place. A request whose reply timed out
+/// leaves its message queued, and `SessionManager` persists `data/sessions.json` relative to the
+/// process CWD, so a late `Kill` would otherwise write into the restored directory. The mailbox is
+/// FIFO: the first reply proves every earlier message and its persist finished, and the second sees
+/// an already-validated map, so it cannot trigger a further write.
+let private drainAgent environment =
+    async {
+        do! getActiveSessions environment.Agent |> Async.Ignore
+        do! getActiveSessions environment.Agent |> Async.Ignore
+    }
+
 let cleanup environment =
     let sessionCleanup =
         try
             Async.RunSynchronously(closeTrackedSessions environment, timeout = 60_000)
+        with ex ->
+            Error ex.Message
+
+    let agentDrain =
+        try
+            Async.RunSynchronously(drainAgent environment, timeout = 30_000)
+            Ok()
         with ex ->
             Error ex.Message
 
@@ -301,9 +319,9 @@ let cleanup environment =
         with ex ->
             Error ex.Message
 
-    match sessionCleanup, directoryCleanup with
-    | Ok (), Ok () -> Ok()
-    | Error sessionError, Ok () -> Error $"Session cleanup failed: {sessionError}"
-    | Ok (), Error directoryError -> Error $"Fixture cleanup failed: {directoryError}"
-    | Error sessionError, Error directoryError ->
-        Error $"Session cleanup failed: {sessionError}{Environment.NewLine}Fixture cleanup failed: {directoryError}"
+    [ sessionCleanup |> Result.mapError (fun error -> $"Session cleanup failed: {error}")
+      agentDrain |> Result.mapError (fun error -> $"Agent drain failed: {error}")
+      directoryCleanup |> Result.mapError (fun error -> $"Fixture cleanup failed: {error}") ]
+    |> List.sequenceResultA
+    |> Result.map ignore
+    |> Result.mapError (String.concat Environment.NewLine)
