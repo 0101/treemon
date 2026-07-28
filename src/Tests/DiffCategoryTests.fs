@@ -297,6 +297,128 @@ type DiffCategoryE2ETests() =
         }
 
     [<Test>]
+    member this.``category headers carry their subtree's line stats``() =
+        task {
+            let files =
+                [| categorizedFileJsonWithStats
+                       "id-client-app"
+                       "src/Client/App.fs"
+                       "modified"
+                       [ "Production code"; "Client" ]
+                       (Some 10)
+                       (Some 3)
+                   categorizedFileJsonWithStats
+                       "id-client-view"
+                       "src/Client/View.fs"
+                       "added"
+                       [ "Production code"; "Client" ]
+                       (Some 5)
+                       (Some 0)
+                   // No stats at all, so the group it sits in must sum its siblings and nothing else.
+                   categorizedFileJsonWithStats
+                       "id-client-logo"
+                       "src/Client/logo.png"
+                       "modified"
+                       [ "Production code"; "Client" ]
+                       None
+                       None
+                   categorizedFileJsonWithStats
+                       "id-server-api"
+                       "src/Server/Api.fs"
+                       "deleted"
+                       [ "Production code"; "Server" ]
+                       (Some 0)
+                       (Some 7)
+                   categorizedFileJsonWithStats
+                       "id-docs"
+                       "docs/spec/api.md"
+                       "modified"
+                       [ "Docs"; "Specs" ]
+                       (Some 4)
+                       (Some 0)
+                   categorizedFileJsonWithStats
+                       "id-assets"
+                       "assets/icon.ico"
+                       "added"
+                       [ "Assets" ]
+                       None
+                       None
+                   categorizedFileJsonWithStats
+                       "id-other"
+                       "notes.txt"
+                       "untracked"
+                       []
+                       (Some 3)
+                       (Some 2) |]
+
+            do! this.RouteSummary(configuredSummaryJson files)
+            do! this.Goto()
+            do! this.Page.Locator(".category-entry").Nth(5).WaitForAsync()
+
+            let! headers =
+                this.Page.EvaluateAsync<string array>(
+                    """() => [...document.querySelectorAll('.category-entry')].map(entry => {
+                        const stats = entry.querySelector('.category-stats');
+                        return [
+                            entry.querySelector('.category-name').textContent,
+                            entry.querySelector('.category-count').textContent,
+                            stats ? stats.textContent : 'no stats',
+                            stats
+                                ? [...stats.children].map(part => part.className).join(' ')
+                                : 'no stats',
+                            entry.getAttribute('aria-label')
+                        ].join('|');
+                    })"""
+                )
+
+            // The header's numbers must look like a file row's: same face, same colours, and placed
+            // after the count at the end of the row.
+            let! presentation =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const header = document.querySelector('.category-entry .category-stats');
+                        const row = document.querySelector('.file-heading .file-stats');
+                        const same = (left, right, property) => String(
+                            getComputedStyle(left)[property] === getComputedStyle(right)[property]
+                        );
+                        return [
+                            same(header, row, 'fontFamily'),
+                            same(header, row, 'fontSize'),
+                            same(
+                                header.querySelector('.file-lines-added'),
+                                row.querySelector('.file-lines-added'),
+                                'color'
+                            ),
+                            same(
+                                header.querySelector('.file-lines-removed'),
+                                row.querySelector('.file-lines-removed'),
+                                'color'
+                            ),
+                            String(header.previousElementSibling.className === 'category-count'),
+                            String(header.nextElementSibling === null)
+                        ];
+                    }"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    headers,
+                    Is.EqualTo(
+                        [| "Production code|4|+15−10|file-lines-added file-lines-removed|Production code, 4 files, 15 lines added, 10 lines removed"
+                           "Client|3|+15−3|file-lines-added file-lines-removed|Client, 3 files, 15 lines added, 3 lines removed"
+                           "Server|1|−7|file-lines-removed|Server, 1 file, 7 lines removed"
+                           "Docs > Specs|1|+4|file-lines-added|Docs, Specs, 1 file, 4 lines added"
+                           "Assets|1|no stats|no stats|Assets, 1 file"
+                           "Other|1|+3−2|file-lines-added file-lines-removed|Other, 1 file, 3 lines added, 2 lines removed" |]
+                    )
+                )
+                Assert.That(
+                    presentation,
+                    Is.EqualTo([| "true"; "true"; "true"; "true"; "true"; "true" |])
+                ))
+        }
+
+    [<Test>]
     member this.``missing categorization renders the flat file list``() =
         task {
             do! this.RouteSummary(readySummaryJson [| firstFile; secondFile |])

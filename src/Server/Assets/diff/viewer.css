@@ -262,7 +262,7 @@ button { font: inherit; }
     display: grid;
     width: 100%;
     min-width: 0;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
     gap: .3rem .5rem;
     align-items: center;
     padding: .45rem .75rem .45rem calc(var(--category-depth, 1) * .75rem);
@@ -303,6 +303,18 @@ button { font: inherit; }
     font-family: var(--font-code);
     font-size: var(--fs-sm);
     font-variant-numeric: tabular-nums;
+}
+
+/* The subtree sum sits where a file row's own stats sit, in the same face and colours, so scanning
+   collapsed groups and open rows reads as one scale. */
+.category-stats {
+    display: inline-flex;
+    gap: .4rem;
+    font-family: var(--font-code);
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    white-space: nowrap;
 }
 
 .category-entry[aria-expanded="false"] + .category-panel { display: none; }

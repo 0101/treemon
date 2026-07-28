@@ -283,6 +283,43 @@ function renderFileList(files) {
     list.replaceChildren.apply(list, files.map(createFileItem));
 }
 
+// Line stats a change actually carries. A binary entry or a pure rename reports none, so one rule
+// decides both whether a file row shows numbers and what a category header's subtree sum counts.
+function fileLineStats(file) {
+    if (!Number.isInteger(file.linesAdded) || !Number.isInteger(file.linesRemoved)) return null;
+    return { added: file.linesAdded, removed: file.linesRemoved };
+}
+
+// The +X/−Y pair, built the same way for a file row and for a category header's subtree sum so the
+// two levels read as one scale. A zero side is omitted and nothing at all is rendered when neither
+// side has lines to report; the colour classes name the number, not the level that shows it.
+function createLineStats(className, stats) {
+    if (!stats || (stats.added <= 0 && stats.removed <= 0)) return null;
+
+    var element = document.createElement('span');
+    element.className = className;
+    var labels = [];
+
+    if (stats.added > 0) {
+        var added = document.createElement('span');
+        added.className = 'file-lines-added';
+        added.textContent = '+' + stats.added;
+        labels.push(stats.added + ' lines added');
+        element.appendChild(added);
+    }
+
+    if (stats.removed > 0) {
+        var removed = document.createElement('span');
+        removed.className = 'file-lines-removed';
+        removed.textContent = '−' + stats.removed;
+        labels.push(stats.removed + ' lines removed');
+        element.appendChild(removed);
+    }
+
+    element.setAttribute('aria-label', labels.join(', '));
+    return element;
+}
+
 function createFileItem(file, index) {
     var item = document.createElement('section');
     item.className = 'file-item';
@@ -315,34 +352,7 @@ function createFileItem(file, index) {
     path.textContent = file.displayPath;
     button.appendChild(path);
 
-    var stats = null;
-    if (
-        Number.isInteger(file.linesAdded) &&
-        Number.isInteger(file.linesRemoved) &&
-        (file.linesAdded > 0 || file.linesRemoved > 0)
-    ) {
-        stats = document.createElement('span');
-        stats.className = 'file-stats';
-        var statLabels = [];
-
-        if (file.linesAdded > 0) {
-            var added = document.createElement('span');
-            added.className = 'file-lines-added';
-            added.textContent = '+' + file.linesAdded;
-            statLabels.push(file.linesAdded + ' lines added');
-            stats.appendChild(added);
-        }
-
-        if (file.linesRemoved > 0) {
-            var removed = document.createElement('span');
-            removed.className = 'file-lines-removed';
-            removed.textContent = '−' + file.linesRemoved;
-            statLabels.push(file.linesRemoved + ' lines removed');
-            stats.appendChild(removed);
-        }
-
-        stats.setAttribute('aria-label', statLabels.join(', '));
-    }
+    var stats = createLineStats('file-stats', fileLineStats(file));
 
     if (file.oldDisplayPath) {
         var oldPath = document.createElement('span');
@@ -388,14 +398,26 @@ function createFileItem(file, index) {
     return item;
 }
 
+// Adds one file's line stats to a running subtree total. A change that reports none — a binary
+// entry, a pure rename — contributes zero rather than breaking the sum.
+function accumulateLineStats(totals, stats) {
+    if (stats) {
+        if (stats.added > 0) totals.added += stats.added;
+        if (stats.removed > 0) totals.removed += stats.removed;
+    }
+    return totals;
+}
+
 // Rebuilds the tree of categories that actually contain changed files from the server-ordered
-// category paths, so a configured category without changes never renders. Unmatched files collect
-// in the synthetic trailing Other group.
+// category paths, so a configured category without changes never renders. Every category on a
+// file's path counts it and adds its lines, so a branch header reports its whole subtree rather
+// than its direct files. Unmatched files collect in the synthetic trailing Other group.
 function categoryRoots(files) {
     var root = { children: new Map(), files: [], path: [] };
 
     files.forEach(function(file, index) {
         var path = Array.isArray(file.categoryPath) ? file.categoryPath : [];
+        var stats = fileLineStats(file);
         var category = path.reduce(function(parent, name) {
             var child = parent.children.get(name);
             if (!child) {
@@ -404,11 +426,13 @@ function categoryRoots(files) {
                     path: parent.path.concat([name]),
                     children: new Map(),
                     files: [],
-                    count: 0
+                    count: 0,
+                    lines: { added: 0, removed: 0 }
                 };
                 parent.children.set(name, child);
             }
             child.count += 1;
+            accumulateLineStats(child.lines, stats);
             return child;
         }, root);
         category.files.push({ file: file, index: index });
@@ -422,7 +446,10 @@ function categoryRoots(files) {
             path: [OTHER_CATEGORY],
             children: new Map(),
             files: root.files,
-            count: root.files.length
+            count: root.files.length,
+            lines: root.files.reduce(function(totals, entry) {
+                return accumulateLineStats(totals, fileLineStats(entry.file));
+            }, { added: 0, removed: 0 })
         }
     ]);
 }
@@ -446,7 +473,8 @@ function flattenCategoryChain(node) {
         path: tip.path,
         children: Array.from(tip.children.values(), flattenCategoryChain),
         files: tip.files,
-        count: tip.count
+        count: tip.count,
+        lines: tip.lines
     };
 }
 
@@ -483,6 +511,7 @@ function createCategorySection(node, depth, forcedCollapsed) {
 
     var label = node.names.join(CATEGORY_CHAIN_SEPARATOR);
     var countLabel = node.count + (node.count === 1 ? ' file' : ' files');
+    var stats = createLineStats('category-stats', node.lines);
 
     var button = document.createElement('button');
     button.type = 'button';
@@ -490,8 +519,14 @@ function createCategorySection(node, depth, forcedCollapsed) {
     button.setAttribute('aria-expanded', String(categoryExpanded(node, forcedCollapsed)));
     button.title = label;
     // A joined chain reads as one breadcrumb on screen, but its separators are punctuation, so the
-    // accessible name spells the names out and carries the count the row shows beside them.
-    button.setAttribute('aria-label', node.names.concat([countLabel]).join(', '));
+    // accessible name spells the names out and carries the size the row shows beside them: how many
+    // files the group holds and how many lines they change.
+    button.setAttribute(
+        'aria-label',
+        node.names
+            .concat([countLabel], stats ? [stats.getAttribute('aria-label')] : [])
+            .join(', ')
+    );
 
     var name = document.createElement('span');
     name.className = 'category-name';
@@ -502,6 +537,7 @@ function createCategorySection(node, depth, forcedCollapsed) {
     count.textContent = String(node.count);
 
     button.append(name, count);
+    if (stats) button.appendChild(stats);
 
     var panel = document.createElement('div');
     panel.className = 'category-panel';

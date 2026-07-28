@@ -116,6 +116,18 @@ let invalidSummaryJson reason files =
         1
         files
 
+/// A categorized file that reports line stats, so a category header has real numbers to aggregate.
+/// Passing `None` for either side is how a change without stats — a binary entry, a pure rename —
+/// reaches the viewer.
+let categorizedFileJsonWithStats identity displayPath change categoryPath linesAdded linesRemoved =
+    {| identity = identity
+       displayPath = displayPath
+       oldDisplayPath = (None: string option)
+       linesAdded = (linesAdded: int option)
+       linesRemoved = (linesRemoved: int option)
+       change = change
+       categoryPath = (categoryPath: string list) |}
+
 /// Builds `count` changed files that all classify into `path`; an empty path leaves them unmatched
 /// so they collect in the synthetic trailing Other group.
 let categoryFiles (path: string list) (count: int) =

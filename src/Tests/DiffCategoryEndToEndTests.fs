@@ -456,6 +456,32 @@ type DiffCategoryDocumentE2ETests() =
             return lines;
         }"""
 
+    /// Every header's line stats against the sum of the file rows in its subtree, so the
+    /// aggregation is proven over Git's real numbers rather than over a routed payload.
+    let subtreeStatsScript =
+        """() => {
+            const totals = element => {
+                const value = selector => {
+                    const node = element && element.querySelector(selector);
+                    return node ? parseInt(node.textContent.replace(/[^0-9]/g, ''), 10) : 0;
+                };
+                return [value('.file-lines-added'), value('.file-lines-removed')];
+            };
+            return [...document.querySelectorAll('.category-item')].map(section => {
+                const button = section.querySelector(':scope > .category-entry');
+                const panel = section.querySelector(':scope > .category-panel');
+                const header = totals(button.querySelector('.category-stats'));
+                const rows = [...panel.querySelectorAll('.file-heading .file-stats')]
+                    .map(totals)
+                    .reduce((sum, file) => [sum[0] + file[0], sum[1] + file[1]], [0, 0]);
+                return [
+                    button.querySelector('.category-name').textContent,
+                    header.join('/'),
+                    String(header[0] === rows[0] && header[1] === rows[1])
+                ].join('|');
+            });
+        }"""
+
     [<Test>]
     member this.``the served diff document renders the repository's real category hierarchy``() =
         task {
@@ -504,27 +530,54 @@ type DiffCategoryDocumentE2ETests() =
                     let! outline = this.Page.EvaluateAsync<string array>(outlineScript)
                     report "6. browser-rendered category outline" outline
 
-                    Assert.That(
-                        outline,
-                        Is.EqualTo(
-                            [| "1|Production code|5|5|true"
-                               "2|Client|3|3|true"
-                               "3|file|src/Client/App.fs"
-                               "3|file|src/Client/Moved.fs"
-                               "3|file|src/Client/View.fs"
-                               "2|Server|1|1|true"
-                               "3|file|src/Server/Api.fs"
-                               "2|Shared|1|1|true"
-                               "3|file|src/Shared/Types.fs"
-                               "1|Tests|1|1|true"
-                               "2|file|src/Tests/ApiTests.fs"
-                               "1|Docs|1|1|true"
-                               "2|file|docs/plan.md"
-                               "1|Other|2|2|true"
-                               "2|file|README.md"
-                               "2|file|scripts/tool.ps1" |]
+                    let! subtreeStats =
+                        this.Page.EvaluateAsync<string array>(subtreeStatsScript)
+
+                    report "7. header line stats against their subtree" subtreeStats
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(
+                            outline,
+                            Is.EqualTo(
+                                [| "1|Production code|5|5|true"
+                                   "2|Client|3|3|true"
+                                   "3|file|src/Client/App.fs"
+                                   "3|file|src/Client/Moved.fs"
+                                   "3|file|src/Client/View.fs"
+                                   "2|Server|1|1|true"
+                                   "3|file|src/Server/Api.fs"
+                                   "2|Shared|1|1|true"
+                                   "3|file|src/Shared/Types.fs"
+                                   "1|Tests|1|1|true"
+                                   "2|file|src/Tests/ApiTests.fs"
+                                   "1|Docs|1|1|true"
+                                   "2|file|docs/plan.md"
+                                   "1|Other|2|2|true"
+                                   "2|file|README.md"
+                                   "2|file|scripts/tool.ps1" |]
+                            )
                         )
-                    )
+                        // Each header reports its whole subtree, so a branch equals the sum of the
+                        // rows beneath it, over the numbers Git itself produced.
+                        Assert.That(
+                            subtreeStats
+                            |> Array.map (fun line ->
+                                let parts = line.Split('|')
+                                $"{parts[0]}|{parts[2]}"),
+                            Is.EqualTo(
+                                [| "Production code|true"
+                                   "Client|true"
+                                   "Server|true"
+                                   "Shared|true"
+                                   "Tests|true"
+                                   "Docs|true"
+                                   "Other|true" |]
+                            )
+                        )
+                        Assert.That(
+                            subtreeStats[0].Split('|')[1],
+                            Does.Match(@"^[1-9]\d*/[1-9]\d*$")
+                        ))
                 finally
                     host.StopAsync(CancellationToken.None).GetAwaiter().GetResult()
             finally
