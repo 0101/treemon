@@ -47,6 +47,7 @@ type FormatPrTests() =
               IsDraft = isDraft
               Comments = WithResolution(0, 0)
               Builds = []
+              IsOpen = not isMerged
               IsMerged = isMerged
               HasConflicts = hasConflicts }
 

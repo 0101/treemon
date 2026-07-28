@@ -3,10 +3,8 @@ module Server.PrStatus
 open System
 open System.IO
 open System.Text.Json
-open FsToolkit.ErrorHandling
 open Shared
 open Server.JsonHelpers
-open Server.PrOpenState
 
 type AzDoRemote =
     { Org: string
@@ -88,6 +86,7 @@ type internal ParsedPr =
       PrId: int
       Title: string
       IsDraft: bool
+      IsOpen: bool
       IsMerged: bool
       HasConflicts: bool
       ClosedDate: DateTimeOffset option }
@@ -123,6 +122,7 @@ let internal parsePrList (json: string) =
 
                     let status = el.GetProperty("status").GetString()
                     let isMerged = status = "completed"
+                    let isOpen = status = "active"
 
                     let closedDate =
                         el
@@ -146,6 +146,7 @@ let internal parsePrList (json: string) =
                           PrId = prId
                           Title = title
                           IsDraft = isDraft
+                          IsOpen = isOpen
                           IsMerged = isMerged
                           HasConflicts = hasConflicts
                           ClosedDate = closedDate }
@@ -437,6 +438,7 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                                   IsDraft = pr.IsDraft
                                   Comments = threadCounts
                                   Builds = builds
+                                  IsOpen = pr.IsOpen
                                   IsMerged = pr.IsMerged
                                   HasConflicts = pr.HasConflicts },
                              pr.HeadSha)
@@ -457,116 +459,6 @@ let fetchPrStatusesByRepoRoot (repoRoot: string) (upstreamRemote: string) (known
         | Some(AzureDevOps remote) -> return! fetchPrStatuses remote knownBranches
         | Some(GitHub remote) -> return! GithubPrStatus.fetchGithubPrStatuses remote knownBranches
         | None -> return Map.empty
-    }
-
-/// Asks Azure DevOps only whether this branch currently sources an active pull request - no threads,
-/// builds, or completed pull requests - because the push decision needs presence and nothing else.
-/// `--source-branch` makes the service do the filtering, so a response holding any other branch means
-/// the filter did not apply and the state stays unknown.
-let internal openPrQueryArgs (remote: AzDoRemote) (branch: string) =
-    [ "repos"
-      "pr"
-      "list"
-      "--org"
-      $"https://dev.azure.com/{remote.Org}"
-      "--project"
-      remote.Project
-      "--repository"
-      remote.Repo
-      "--status"
-      "active"
-      "--source-branch"
-      $"refs/heads/{branch}"
-      "--top"
-      "1"
-      "-o"
-      "json" ]
-
-/// Reads the branch a pull request is merging *from*, as the short name Treemon knows it by.
-let private sourceBranch (pr: JsonElement) =
-    pr |> tryStringValue "sourceRefName" |> Option.map branchFromRef
-
-let internal parseOpenPrState (branch: string) (json: string) =
-    classifyResponse "PR" sourceBranch branch json
-
-let queryOpenPrState (remote: AzDoRemote) (branch: string) =
-    async {
-        match azPythonExe.Value with
-        | None ->
-            Log.log "PR" "Open PR lookup could not locate Azure CLI python.exe via PATH"
-            return UnknownPrState
-        | Some python ->
-            match! runQuery "PR" python ("-IBm" :: "azure.cli" :: openPrQueryArgs remote branch) with
-            | Ok response -> return parseOpenPrState branch response
-            | Error state -> return state
-    }
-
-/// Git's own record of where a branch is published: the remote it tracks, which is also the remote
-/// `GitBranchSync.pushSyncedBranch` sends the branch to.
-let internal branchRemoteArgs (repoRoot: string) (branch: string) =
-    [ "-C"; repoRoot; "config"; "--get"; $"branch.{branch}.remote" ]
-
-/// Where a push to that remote actually lands. A remote may point `remote.<name>.pushurl` at a fork
-/// while `remote.<name>.url` still reads the upstream repository, and `git push` follows the push URL,
-/// so `--push` - which falls back to the fetch URL when no push URL is set - is the only reading that
-/// matches the destination the branch is published to.
-let internal remotePushUrlArgs (repoRoot: string) (remoteName: string) =
-    [ "-C"; repoRoot; "remote"; "get-url"; "--push"; remoteName ]
-
-/// One git setting the open-PR lookup needs. Read through an argument list rather than `getRemoteUrl`'s
-/// command string, because both the branch and the remote name it yields are repository-controlled
-/// text that may legally hold characters a command string would re-parse, and because this shares the
-/// bounded runner the rest of the lookup uses. A missing key exits non-zero, so it fails here.
-let private readGitValue (arguments: string list) =
-    runQuery "PR" "git" arguments |> AsyncResult.map _.Trim()
-
-/// The account whose repository holds the branch a pull request is merging *from*. GitHub filters
-/// open pull requests by `owner:branch`, and in a fork workflow that owner is the fork rather than
-/// the repository the pull request targets - filtering under the target's owner answers an empty
-/// list, which is a confirmed absence, so a fork-origin pull request would silently lose its push.
-/// The owner therefore comes from git's own record of where this branch lives, resolved the same way
-/// the push resolves its destination: the branch's remote, then that remote's *effective push* URL,
-/// which a fork workflow may set away from the fetch URL. A branch git records no remote for, or a
-/// remote with no GitHub push destination, cannot be located - and could not be pushed either - so it
-/// stays unknown rather than being guessed onto the upstream owner. Injectable so the fork case can
-/// be exercised without a repository.
-let internal resolveHeadOwnerWith
-    (readValue: string list -> Async<Result<string, OpenPrState>>)
-    (repoRoot: string)
-    (branch: string)
-    =
-    asyncResult {
-        let! remoteName = readValue (branchRemoteArgs repoRoot branch)
-        let! pushUrl = readValue (remotePushUrlArgs repoRoot remoteName)
-
-        return!
-            match GithubPrStatus.parseGithubUrl pushUrl with
-            | Some remote -> Ok remote.Owner
-            | None ->
-                Log.log "PR" "Open PR lookup could not read a GitHub owner from the branch remote's push URL"
-                Error UnknownPrState
-    }
-
-let internal resolveHeadOwner repoRoot branch =
-    resolveHeadOwnerWith readGitValue repoRoot branch
-
-/// The live push decision for a mechanically synced branch. It reuses provider detection and the
-/// configured upstream remote but never the dashboard's cached PR map: that map is eventually
-/// consistent, and on GitHub a closed-unmerged pull request there is indistinguishable from an open
-/// one. An unsupported remote is unknown, not an absence.
-let queryOpenPrStateByRepoRoot (repoRoot: string) (upstreamRemote: string) (branch: string) =
-    async {
-        let! remoteUrl = getRemoteUrl repoRoot upstreamRemote
-
-        match remoteUrl |> Option.bind detectProvider with
-        | Some(AzureDevOps remote) -> return! queryOpenPrState remote branch
-        | Some(GitHub remote) ->
-            match! resolveHeadOwner repoRoot branch with
-            | Ok headOwner -> return! GithubPrStatus.queryOpenPrState remote headOwner branch
-            | Error state -> return state
-        | None ->
-            Log.log "PR" "Open PR lookup found no supported provider on the upstream remote"
-            return UnknownPrState
     }
 
 let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =

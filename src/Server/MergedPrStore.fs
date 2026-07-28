@@ -21,6 +21,7 @@ let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
           IsDraft = false
           Comments = WithResolution(0, 0)
           Builds = []
+          IsOpen = false
           IsMerged = true
           HasConflicts = false }
 

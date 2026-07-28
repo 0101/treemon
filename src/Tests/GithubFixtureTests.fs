@@ -3,7 +3,6 @@ module Tests.GithubFixtureTests
 open System.IO
 open NUnit.Framework
 open Server.GithubPrStatus
-open Server.PrOpenState
 open Shared
 
 let private fixtureDir =
@@ -251,98 +250,3 @@ type ParsePrMergeabilityTests() =
     member _.``JSON without mergeable field returns false``() =
         let result = parsePrMergeability """{"number": 1, "title": "test"}"""
         Assert.That(result, Is.False)
-
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type GithubOpenPrQueryTests() =
-
-    let remote = { Owner = "testowner"; Repo = "testrepo" }
-    let branch = "feature/sync"
-    let queryPath headOwner = openPrQueryArgs remote headOwner branch |> List.last
-
-    [<Test>]
-    member _.``Query asks GitHub for open pull requests headed by the branch``() =
-        let path = queryPath "testowner"
-        Assert.That(path, Does.Contain("/repos/testowner/testrepo/pulls?"))
-        Assert.That(path, Does.Contain("state=open"))
-        Assert.That(path, Does.Contain("head=testowner:feature%2Fsync"))
-
-    [<Test>]
-    member _.``Query asks the target repository for a head branch owned by a fork``() =
-        let path = queryPath "forkowner"
-        Assert.That(path, Does.Contain("/repos/testowner/testrepo/pulls?"))
-        Assert.That(path, Does.Contain("head=forkowner:feature%2Fsync"))
-        Assert.That(path, Does.Not.Contain("head=testowner:"))
-
-    [<Test>]
-    member _.``Query asks for no comments, builds, or mergeability``() =
-        let args = openPrQueryArgs remote "testowner" branch
-        let command = String.concat " " args
-        Assert.That(command, Does.Not.Contain("graphql"))
-        Assert.That(command, Does.Not.Contain("actions"))
-        Assert.That(command, Does.Not.Match(@"/pulls/\d"))
-        Assert.That(queryPath "testowner", Does.Contain("per_page=1"))
-
-    [<Test>]
-    member _.``An open pull request on the branch is reported as open``() =
-        let state = readFixture "open-pr-for-branch.json" |> parseOpenPrState "testowner" branch
-        Assert.That(state, Is.EqualTo(OpenPr))
-
-    [<Test>]
-    member _.``An open pull request headed by a fork of the repository is reported as open``() =
-        let state = readFixture "fork-open-pr-for-branch.json" |> parseOpenPrState "forkowner" branch
-        Assert.That(state, Is.EqualTo(OpenPr))
-
-    [<Test>]
-    member _.``A pull request headed by another owner's branch of the same name leaves the state unknown``() =
-        let state = readFixture "fork-open-pr-for-branch.json" |> parseOpenPrState "testowner" branch
-        Assert.That(state, Is.EqualTo(UnknownPrState))
-
-    [<Test>]
-    member _.``The head owner is matched without regard to case``() =
-        let state = readFixture "fork-open-pr-for-branch.json" |> parseOpenPrState "ForkOwner" branch
-        Assert.That(state, Is.EqualTo(OpenPr))
-
-    [<Test>]
-    member _.``A head branch differing only in case leaves the state unknown``() =
-        let state =
-            """[{"number":7,"head":{"ref":"Feature/Sync","repo":{"owner":{"login":"testowner"}}}}]"""
-            |> parseOpenPrState "testowner" branch
-
-        Assert.That(state, Is.EqualTo(UnknownPrState))
-
-    [<Test>]
-    member _.``A pull request without a head repository owner leaves the state unknown``() =
-        let state =
-            """[{"number":7,"head":{"ref":"feature/sync","repo":null}}]"""
-            |> parseOpenPrState "testowner" branch
-
-        Assert.That(state, Is.EqualTo(UnknownPrState))
-
-    [<Test>]
-    member _.``An empty response is a confirmed absence``() =
-        let state = parseOpenPrState "testowner" branch "[]"
-        Assert.That(state, Is.EqualTo(NoOpenPr))
-
-    [<Test>]
-    member _.``An unparseable response leaves the state unknown``() =
-        let state = parseOpenPrState "testowner" branch "not json"
-        Assert.That(state, Is.EqualTo(UnknownPrState))
-
-    [<Test>]
-    member _.``An error object instead of a pull request list leaves the state unknown``() =
-        let state = parseOpenPrState "testowner" branch """{"message":"Not Found"}"""
-        Assert.That(state, Is.EqualTo(UnknownPrState))
-
-    [<Test>]
-    member _.``A response naming other branches leaves the state unknown``() =
-        let state = readFixture "pr-list.json" |> parseOpenPrState "testowner" branch
-        Assert.That(state, Is.EqualTo(UnknownPrState))
-
-    [<Test>]
-    member _.``A pull request without a head branch leaves the state unknown``() =
-        let state = parseOpenPrState "testowner" branch """[{"number":7}]"""
-        Assert.That(state, Is.EqualTo(UnknownPrState))
-

@@ -630,9 +630,8 @@ let worktreeApi
     let autoSyncDependencies =
         RefreshScheduler.autoSyncDependencies agent sessionAgent activityStore autoSyncStore
 
-    /// Ends auto-sync bookkeeping for a worktree outright, whichever acceptance wrote the record.
-    /// Every caller drops the in-process claim in the same breath (`ClearAutoSyncTrigger` on
-    /// disable, `RemoveWorktree` on deletion), so no acceptance is left half-forgotten.
+    /// Ends auto-sync bookkeeping for a worktree: disabling the preference or deleting the worktree
+    /// leaves nothing for the accepted-revision record to suppress.
     let clearAcceptedRecord path =
         autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clear store path)
 
@@ -696,64 +695,32 @@ let worktreeApi
                           repo |> Option.bind (fun repo -> repo.GitData |> Map.tryFind ctx.Worktree.Path)
                       let prStatus = RefreshScheduler.prStatusForPath state ctx.Worktree.Path
 
-                      let writePreference enable =
+                      try
                           TreemonConfig.modifyAutoSyncBranches ctx.RepoRoot (fun existing ->
                               existing
                               |> Set.ofList
-                              |> (if enable then Set.add branch else Set.remove branch)
+                              |> (if enabled then Set.add branch else Set.remove branch)
                               |> Set.toList)
 
-                      let clearSyncState () =
-                          agent.Post(SchedulerState.StateMsg.ClearAutoSyncTrigger ctx.Worktree.Path)
-                          clearAcceptedRecord ctx.Worktree.Path
+                          if not enabled then
+                              clearAcceptedRecord ctx.Worktree.Path
+                          else
+                              match repo, worktreeGit with
+                              | Some repo, Some gitData ->
+                                  do!
+                                      AutoSync.trigger
+                                          autoSyncDependencies
+                                          ctx.RepoRoot
+                                          repo.UpstreamRemote
+                                          repo.BaseBranch
+                                          prStatus
+                                          gitData
+                              | _ -> ()
 
-                      // Rejected rather than silently ignored: the client's optimistic toggle rolls
-                      // back onto its normal error surface instead of showing an enabled state that
-                      // the next PR refresh would immediately remove again.
-                      let rejectMerged reason =
-                          Log.log "API" $"toggleAutoSync: {reason} merged branch '{branch}'"
-                          Error $"'{branch}' is merged, so auto-sync can no longer be enabled for it"
-
-                      if enabled && AutoSync.isMergedPr prStatus then
-                          return rejectMerged "rejected"
-                      else
-                          try
-                              writePreference enabled
-
-                              if not enabled then
-                                  clearSyncState ()
-                                  return Ok ()
-                              else
-                                  // The merged check above ran against the snapshot this call opened
-                                  // with, but `RefreshPr` publishes on its own cadence and computes
-                                  // its own cleanup from the preference as it was *before* this
-                                  // write — so a merge reconciled in between would leave the branch
-                                  // enabled with nothing to remove it. Re-reading here, after the
-                                  // preference exists and before anything acts on it, closes that
-                                  // window: this call owns the rollback of the value it just wrote.
-                                  let! currentPrStatus = autoSyncDependencies.ReadPrStatus ctx.Worktree.Path
-
-                                  if AutoSync.isMergedPr currentPrStatus then
-                                      writePreference false
-                                      clearSyncState ()
-                                      return rejectMerged "rolled back"
-                                  else
-                                      match repo, worktreeGit with
-                                      | Some repo, Some gitData ->
-                                          do!
-                                              AutoSync.trigger
-                                                  autoSyncDependencies
-                                                  ctx.RepoRoot
-                                                  repo.UpstreamRemote
-                                                  repo.BaseBranch
-                                                  currentPrStatus
-                                                  gitData
-                                      | _ -> ()
-
-                                      return Ok ()
-                          with ex ->
-                              Log.log "API" $"toggleAutoSync failed for '{path}': {ex.Message}"
-                              return Error $"Failed to persist auto-sync preference: {ex.Message}"
+                          return Ok ()
+                      with ex ->
+                          Log.log "API" $"toggleAutoSync failed for '{path}': {ex.Message}"
+                          return Error $"Failed to persist auto-sync preference: {ex.Message}"
               }
           getSyncStatus = fun () ->
               async {

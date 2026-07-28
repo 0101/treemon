@@ -5,7 +5,6 @@ open System.Text.Json
 open System.Text.RegularExpressions
 open Shared
 open Server.JsonHelpers
-open Server.PrOpenState
 
 type GithubRemote = { Owner: string; Repo: string }
 
@@ -31,6 +30,7 @@ type internal ParsedGithubPr =
       PrNumber: int
       Title: string
       IsDraft: bool
+      IsOpen: bool
       IsMerged: bool }
 
 let internal parsePrList (json: string) =
@@ -44,6 +44,7 @@ let internal parsePrList (json: string) =
                 let title = el.GetProperty("title").GetString()
                 let isDraft = el |> tryBool "draft" |> Option.defaultValue false
                 let isMerged = el |> tryProp "merged_at" |> Option.isSome
+                let isOpen = el |> tryString "state" = Some "open"
                 let head = el.GetProperty("head")
                 let branchName = head.GetProperty("ref").GetString()
                 Some
@@ -52,6 +53,7 @@ let internal parsePrList (json: string) =
                       PrNumber = number
                       Title = title
                       IsDraft = isDraft
+                      IsOpen = isOpen
                       IsMerged = isMerged })
     with ex ->
         Log.log "GH" $"Failed to parse GitHub PR list JSON: {ex.Message}"
@@ -213,11 +215,10 @@ let private fetchActionRuns (remote: GithubRemote) (branch: string) =
         return enriched |> Array.toList
     }
 
-/// Expects the fetch order produced by fetchGithubPrStatuses: open PRs first,
-/// then closed PRs sorted by most recently updated. distinctBy keeps the first
-/// occurrence, so an open PR wins and otherwise the newest closed PR wins.
-/// Sorting by IsMerged here would promote an old closed-unmerged PR above a
-/// newer merged PR for a reused branch name and mask the merge.
+/// Expects the fetch order produced by `fetchGithubPrStatuses`: open PRs first, then closed PRs
+/// sorted by most recently updated. `distinctBy` keeps the first occurrence, so an open PR wins and
+/// otherwise the newest closed PR does — sorting by `IsMerged` instead would promote an old
+/// closed-unmerged PR above a newer merged one for a reused branch name and mask the merge.
 let internal firstPerBranch (prs: ParsedGithubPr list) =
     prs |> List.distinctBy _.BranchName
 
@@ -283,6 +284,7 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                                   IsDraft = pr.IsDraft
                                   Comments = threadCounts
                                   Builds = builds
+                                  IsOpen = pr.IsOpen
                                   IsMerged = pr.IsMerged
                                   HasConflicts = hasConflicts },
                              pr.HeadSha)
@@ -290,46 +292,4 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                 |> Async.Parallel
 
             return Map entries
-    }
-
-/// Reads the `owner:branch` head a pull request is merging *from* - the same pair the query's head
-/// filter names, so both halves of that filter are verified rather than only the branch. The owner is
-/// folded to lower case because GitHub logins are case-insensitive; the branch is left exact because
-/// git refs are not. A pull request whose head repository is gone (a deleted fork) reads as `None`,
-/// which the classifier treats as unknown rather than as a match.
-let private headLabel (pr: JsonElement) =
-    let head = pr |> tryProp "head"
-
-    let owner =
-        head
-        |> Option.bind (tryProp "repo")
-        |> Option.bind (tryProp "owner")
-        |> Option.bind (tryStringValue "login")
-
-    (owner, head |> Option.bind (tryStringValue "ref"))
-    ||> Option.map2 (fun owner headRef -> $"{owner.ToLowerInvariant()}:{headRef}")
-
-/// Asks GitHub only whether this branch currently heads an open pull request - one page, and no
-/// review threads, workflow runs, or mergeability - because the push decision needs presence and
-/// nothing else. The `owner:branch` head filter makes GitHub do the filtering, so a response holding
-/// any other head - a different owner as much as a different branch - means the filter did not apply
-/// and the state stays unknown.
-///
-/// `headOwner` is the account whose repository *holds* the branch, which in a fork workflow is the
-/// fork and not `remote`, the repository the pull request targets. Filtering under the target's
-/// owner would answer an empty list for every fork-origin pull request, and an empty list is a
-/// confirmed absence - so the owner is resolved from git's own record of the branch
-/// (`PrStatus.resolveHeadOwner`) rather than assumed here.
-let internal openPrQueryArgs (remote: GithubRemote) (headOwner: string) (branch: string) =
-    [ "api"
-      $"/repos/{remote.Owner}/{remote.Repo}/pulls?state=open&head={Uri.EscapeDataString(headOwner)}:{Uri.EscapeDataString(branch)}&per_page=1" ]
-
-let internal parseOpenPrState (headOwner: string) (branch: string) (json: string) =
-    classifyResponse "GH" headLabel $"{headOwner.ToLowerInvariant()}:{branch}" json
-
-let queryOpenPrState (remote: GithubRemote) (headOwner: string) (branch: string) =
-    async {
-        match! runQuery "GH" "gh" (openPrQueryArgs remote headOwner branch) with
-        | Ok response -> return parseOpenPrState headOwner branch response
-        | Error state -> return state
     }

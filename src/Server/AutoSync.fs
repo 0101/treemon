@@ -28,24 +28,6 @@ type DeliveryRequest =
       Target: SyncTarget
       Prompt: string }
 
-/// The in-process claim one worktree's revision is held under. The stage is what keeps the two
-/// deduplication layers from cancelling each other out: `Delivering` is a live operation nothing may
-/// take over, while `Accepted` has handed suppression to the durable record and may be taken over
-/// exactly when that record says its retry window has passed — without which the claim would outlive
-/// every expiry and block the retry for as long as the server runs. `Accepted` carries the
-/// generation of the acceptance that published it, so a clear can name the acceptance it observed
-/// and leave a later one — which owns the record on disk now — untouched.
-type ClaimedRevision =
-    | Delivering of baseRevision: string
-    | Accepted of baseRevision: string * generation: AutoSyncStore.AcceptanceGeneration
-
-/// Why a claim is being asked for. Only the durable record can prove that an accepted prompt aged
-/// out, so the caller carries that proof here; the claim itself still refuses while a delivery for
-/// the same revision is in flight.
-type ClaimReason =
-    | FirstAttempt
-    | RetryExpiredAccept
-
 /// Why Treemon's own sync of a worktree could not finish. A closed vocabulary because it is the only
 /// thing a fallback prompt may name: Git stdout, stderr, conflicted filenames, refs, paths, and
 /// commit messages are untrusted repository text and never enter a prompt (see
@@ -56,58 +38,39 @@ type SyncFailure =
     | MergeAbortFailed
     | GitCommandFailed
     | BranchChanged
-    | OpenPrCheckFailed
     | PushFailed
 
-/// One mechanical attempt's inputs: the Git sync's own request plus the repo root where the shared
-/// branch configuration the provider query reads lives. The tree that actually moves is
-/// `Sync.WorktreePath`, never `RepoRoot`.
+/// One mechanical attempt's inputs: the Git sync's own request plus the reconciled PR status that
+/// decides whether the synced branch is also pushed.
 type MechanicalSyncRequest =
     { Sync: GitBranchSync.BranchSyncRequest
-      RepoRoot: string }
+      PrStatus: PrStatus }
 
-/// `ClaimRevision`/`ReleaseRevision` are the in-process claim; the accepted-revision operations are
-/// the durable, restart-safe layer on top of it (`AutoSyncStore`). `RecordAcceptedRevision` and
-/// `RetireAcceptedRevision` each write both sides of one acceptance — the durable record and the
-/// claim's stage — so the two layers age out and are forgotten together.
+/// The durable accepted-revision record is the only deduplication layer. `trigger` holds
+/// `TryBeginOperation` across a whole attempt, so nothing else runs for the worktree while one is in
+/// flight, and the record answers whether this exact revision was already prompted.
 type TriggerDependencies =
-    { ClaimRevision: string -> string -> ClaimReason -> Async<bool>
-      ReleaseRevision: string -> string -> unit
-      ReadAcceptedRevision: string -> Async<AutoSyncStore.AcceptedSyncRecord option>
-      /// Completes only once the record is published, because the same call then makes the claim
-      /// retryable and the record is what a retry re-reads to learn the prompt already happened.
+    { ReadAcceptedRevision: string -> Async<AutoSyncStore.AcceptedSyncRecord option>
+      /// Completes only once the record is readable, so the operation guard is never released ahead
+      /// of the record the next observation re-reads.
       RecordAcceptedRevision: string -> string -> Async<unit>
-      /// Forgets both layers of *one* acceptance, named by the generation of the record the caller
-      /// read. Anything published after that read is a later acceptance holding a live claim, and
-      /// this must leave it whole. Ending auto-sync for a worktree outright — disable, merged
-      /// cleanup, removal — is not this: those forget the path's record and claim unconditionally,
-      /// which is `AutoSyncStore.clear` beside `ClearAutoSyncTrigger`.
-      RetireAcceptedRevision: string -> AutoSyncStore.AcceptanceGeneration -> unit
+      ClearAcceptedRevision: string -> unit
       /// The worktree's current PR status, keyed by canonical worktree path so the lookup resolves
       /// inside that worktree's own repo and a same-named branch elsewhere can never answer for it.
       /// Read again at action boundaries because `RefreshPr` runs on its own cadence.
       ReadPrStatus: string -> Async<PrStatus>
       SelectTarget: string -> Async<SyncTarget>
-      /// The per-worktree operation guard, held across target selection, mechanical work, and
-      /// delivery. It serializes *work*, which the revision claim deliberately does not: a claim for
-      /// a newer base revision supersedes an older one, and without this guard that supersession
-      /// would start a second fetch and merge over one still running.
+      /// One operation per worktree, held across target selection, mechanical work, and delivery, so
+      /// a later observation cannot start a second fetch and merge over one still running.
       TryBeginOperation: string -> Async<bool>
       CompleteOperation: string -> unit
       /// Treemon's own sync, run only when no session is open to do it.
       MechanicalSync: MechanicalSyncRequest -> Async<Result<unit, SyncFailure>>
       Deliver: DeliveryRequest -> Async<bool> }
 
-/// One merged-and-still-enabled branch. The local branch name is the `.treemon.json` preference
-/// key; the canonical worktree path is the trigger and durable-record key.
-type MergedAutoSyncTarget =
-    { Branch: string
-      Path: string }
-
-/// Both halves of the push rule live in the prompt itself rather than being selected from cached PR
-/// state: the dashboard's PR map is eventually consistent and cannot tell a closed pull request from
-/// an open one, while the agent can read the live state at the moment it would push. Provider-neutral
-/// and free of any repository text.
+/// The push rule lives in the prompt itself rather than being decided for the agent: the agent can
+/// read the live pull-request state at the moment it would push. Provider-neutral and free of any
+/// repository text.
 let private pushPolicy =
     "If this branch has an open pull request, push the synced branch after the checks pass; otherwise, do not push."
 
@@ -124,7 +87,6 @@ let internal failureDescription =
     | MergeAbortFailed -> "the merge conflicted and could not be aborted, so a merge may still be in progress"
     | GitCommandFailed -> "a Git command did not complete"
     | BranchChanged -> "the worktree is not on the branch this sync was started for"
-    | OpenPrCheckFailed -> "the pull request state could not be determined"
     | PushFailed -> "the push was rejected"
 
 let fallbackPrompt upstreamRemote baseBranch failure =
@@ -147,46 +109,30 @@ let internal pushOutcomeResult =
     | GitBranchSync.BranchPushOutcome.BranchChanged -> Error BranchChanged
     | GitBranchSync.BranchPushOutcome.PushFailed -> Error PushFailed
 
-/// Treemon's whole token-free path as one operation: the Git sync, the live push decision, and the
-/// push that decision may require, all bound to the branch the observation was made on. Only a run
-/// that finished all of it may skip agent delivery, so every step leaves through the same closed
-/// reason. The effects are parameters so the sequence can be exercised without a repository or a
-/// provider.
+/// Only an open pull request may receive a mechanically synced branch. A merged or closed-unmerged
+/// one has nothing to advance, so the sync finishes locally.
+let isOpenPr (prStatus: PrStatus) =
+    match prStatus with
+    | HasPr pr -> pr.IsOpen
+    | NoPr -> false
+
+/// Treemon's whole token-free path as one operation: the Git sync, then the push an open pull
+/// request calls for. Only a run that finished all of it may skip agent delivery, so every step
+/// leaves through the same closed reason. The effects are parameters so the sequence can be
+/// exercised without a repository. Both mutations re-read the checked-out branch themselves, so a
+/// worktree that moves on mid-run refuses instead of acting on a branch nobody observed.
 let mechanicalSync
-    (checkedOutBranch: string -> Async<string option>)
     (syncWithBase: GitBranchSync.BranchSyncRequest -> Async<GitBranchSync.BranchSyncOutcome>)
-    (queryOpenPrState: string -> string -> string -> Async<PrOpenState.OpenPrState>)
     (pushBranch: string -> string -> Async<GitBranchSync.BranchPushOutcome>)
     (request: MechanicalSyncRequest)
     =
-    // Asked again at each boundary instead of trusting the observation that started the run: a
-    // checkout decides which branch a merge lands on and which branch's work a push would publish,
-    // and the pull request that authorizes the push is looked up for the observed branch alone. The
-    // sync and the push each re-read the branch at their own mutation, so what this adds is refusing
-    // to spend a fetch or a provider query on a worktree that has already moved on.
-    let stillOnObservedBranch () =
-        async {
-            let! current = checkedOutBranch request.Sync.WorktreePath
-            return if current = Some request.Sync.Branch then Ok() else Error BranchChanged
-        }
-
     asyncResult {
-        do! stillOnObservedBranch ()
         let! outcome = syncWithBase request.Sync
         do! syncOutcomeResult outcome
-        // A merge that landed somewhere else is not this operation's work, so the provider is never
-        // even asked about a branch the worktree has left.
-        do! stillOnObservedBranch ()
 
-        // Asked now, at the moment the push would happen, and of the provider rather than the
-        // dashboard's cached map: the branch this run just moved is the only thing that may move
-        // remotely, and only while a pull request is actually open to receive it.
-        match! queryOpenPrState request.RepoRoot request.Sync.UpstreamRemote request.Sync.Branch with
-        | PrOpenState.OpenPr ->
+        if isOpenPr request.PrStatus then
             let! pushOutcome = pushBranch request.Sync.WorktreePath request.Sync.Branch
             return! pushOutcomeResult pushOutcome
-        | PrOpenState.NoOpenPr -> return ()
-        | PrOpenState.UnknownPrState -> return! Error OpenPrCheckFailed
     }
 
 /// Merged is terminal: nothing remains to be synced into a branch whose PR is already merged, so a
@@ -201,22 +147,6 @@ let isEligible enabled prStatus = enabled && not (isMergedPr prStatus)
 
 let internal readEnabledPreference repoRoot branch =
     TreemonConfig.readAutoSyncBranchSet (Some repoRoot) |> Set.contains branch
-
-/// Branches whose reconciled PR is merged while auto-sync is still enabled for them. PRs are matched
-/// by provider branch and preferences are keyed by local branch, both read from one repo's own Git
-/// data, so a merged branch can never disable a same-named branch in another repo.
-let mergedAutoSyncTargets
-    (effectivePrMap: Map<string, PrStatus>)
-    (enabledBranches: Set<string>)
-    (gitData: Map<string, GitWorktree.GitData>)
-    =
-    gitData
-    |> Map.values
-    |> Seq.filter (fun data ->
-        Set.contains data.Branch enabledBranches
-        && isMergedPr (PrStatus.lookupPrStatus effectivePrMap (GitWorktree.prBranchName data)))
-    |> Seq.map (fun data -> { Branch = data.Branch; Path = data.Path })
-    |> Seq.toList
 
 let revision eligible (gitData: GitWorktree.GitData) =
     if eligible && gitData.MainBehindCount > 0 then gitData.BaseRevision else None
@@ -236,14 +166,6 @@ let internal isAlreadyAccepted
     match record with
     | Some record -> record.BaseRevision = baseRevision && now - record.AcceptedAt < acceptedRetryAge
     | None -> false
-
-/// Where the durable expiry meets the in-process claim. A record for this exact revision can only be
-/// an expired one by the time this is asked — a live one already suppressed the trigger — and it is
-/// the only proof that licenses taking over the claim an accepted prompt still holds.
-let internal claimReason baseRevision (record: AutoSyncStore.AcceptedSyncRecord option) =
-    match record with
-    | Some record when record.BaseRevision = baseRevision -> RetryExpiredAccept
-    | _ -> FirstAttempt
 
 /// The open winner decides the target; retained identity is consulted only once no session is open,
 /// so an open idle CLI can never be mistaken for an offline one that merely left an id behind.
@@ -282,14 +204,20 @@ let selectTarget
 
 let internal registrationGraceMilliseconds = 3000
 
-/// The gate an operation must re-pass immediately before it acts. `RefreshPr` runs on its own
-/// cadence, so it can remove the preference — or learn the PR merged — after the Git observation
-/// that started this operation. Cancelling here is safe because nothing has been delivered yet;
-/// nothing may cancel once a prompt has been accepted or a Git command is already running.
-let isStillEligible (dependencies: TriggerDependencies) (repoRoot: string) (gitData: GitWorktree.GitData) =
+/// The gate an operation must re-pass immediately before it acts, answering with the PR status it
+/// read. `RefreshPr` runs on its own cadence, so it can remove the preference — or learn the PR
+/// merged — after the Git observation that started this operation, and the same reading decides
+/// whether a mechanically synced branch is pushed. Cancelling here is safe because nothing has been
+/// delivered yet; nothing may cancel once a prompt has been accepted or a Git command is running.
+let eligiblePrStatus (dependencies: TriggerDependencies) (repoRoot: string) (gitData: GitWorktree.GitData) =
     async {
         let! prStatus = dependencies.ReadPrStatus gitData.Path
-        return isEligible (readEnabledPreference repoRoot gitData.Branch) prStatus
+
+        return
+            if isEligible (readEnabledPreference repoRoot gitData.Branch) prStatus then
+                Some prStatus
+            else
+                None
     }
 
 let deliver
@@ -360,7 +288,7 @@ let private deliverPrompt
           Target = target
           Prompt = promptText }
 
-/// Where the two paths part, once an operation owns its claim and has passed the eligibility gate.
+/// Where the two paths part, once an operation holds the guard and has passed the eligibility gate.
 /// An open session — even an idle one — is attached to its worktree and owns it, so Treemon only
 /// asks it to sync. With no session open Treemon syncs the worktree itself and spends an agent only
 /// on what it could not finish.
@@ -369,6 +297,7 @@ let private attemptSync
     (repoRoot: string)
     upstreamRemote
     baseBranch
+    (prStatus: PrStatus)
     (gitData: GitWorktree.GitData)
     (target: SyncTarget)
     =
@@ -383,22 +312,21 @@ let private attemptSync
                       UpstreamRemote = upstreamRemote
                       BaseBranch = baseBranch
                       Branch = gitData.Branch }
-                  RepoRoot = repoRoot }
+                  PrStatus = prStatus }
 
             match! dependencies.MechanicalSync request with
             | Ok() ->
                 Log.log "AutoSync" $"Mechanical sync completed for {gitData.Branch}"
                 return true
             | Error failure ->
-                // The gate is re-passed here because a fetch, a merge, and a provider query have run
-                // since it was last read: a branch disabled or reconciled merged meanwhile must not
-                // be handed to an agent either.
-                let! stillEligible = isStillEligible dependencies repoRoot gitData
-
-                if not stillEligible then
+                // The gate is re-passed here because a fetch and a merge have run since it was last
+                // read: a branch disabled or reconciled merged meanwhile must not be handed to an
+                // agent either.
+                match! eligiblePrStatus dependencies repoRoot gitData with
+                | None ->
                     Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: no longer eligible"
                     return false
-                else
+                | Some _ ->
                     return!
                         fallbackPrompt upstreamRemote baseBranch failure
                         |> deliverPrompt dependencies gitData target
@@ -419,64 +347,43 @@ let private runOperation
         match revision eligible gitData with
         | None ->
             // Catching up ends an accepted prompt's life: falling behind the same base revision
-            // again is new work, so both suppression layers must forget it and prompt again. Only
-            // the acceptance this observation actually read is retired: a prompt accepted after that
-            // read holds a live claim and owns the record on disk now, and erasing that record would
-            // leave its claim suppressing the revision with nothing left to age out.
+            // again is new work, so the record must forget it and prompt again.
             if gitData.MainBehindCount = 0 then
-                let! acceptedRecord = dependencies.ReadAcceptedRevision gitData.Path
-
-                acceptedRecord
-                |> Option.iter (fun record ->
-                    dependencies.RetireAcceptedRevision gitData.Path record.Generation)
+                dependencies.ClearAcceptedRevision gitData.Path
         | Some baseRevision ->
             let! acceptedRecord = dependencies.ReadAcceptedRevision gitData.Path
 
             if not (isAlreadyAccepted DateTimeOffset.UtcNow baseRevision acceptedRecord) then
-                let! claimed =
-                    dependencies.ClaimRevision gitData.Path baseRevision (claimReason baseRevision acceptedRecord)
+                try
+                    let! target = dependencies.SelectTarget gitData.Path
 
-                if claimed then
-                    let drop reason =
-                        Log.log "AutoSync" $"Dropped sync for {gitData.Branch}: {reason}"
-                        dependencies.ReleaseRevision gitData.Path baseRevision
+                    match! eligiblePrStatus dependencies repoRoot gitData with
+                    | None -> Log.log "AutoSync" $"Dropped sync for {gitData.Branch}: no longer eligible"
+                    | Some currentPrStatus ->
+                        let! accepted =
+                            attemptSync
+                                dependencies
+                                repoRoot
+                                upstreamRemote
+                                baseBranch
+                                currentPrStatus
+                                gitData
+                                target
 
-                    try
-                        let! target = dependencies.SelectTarget gitData.Path
-                        let! stillEligible = isStillEligible dependencies repoRoot gitData
-                        // The durable record is re-read at the same boundary as eligibility because
-                        // the claim taken above may have been an accepted one: a concurrent trigger
-                        // that started from the same expired record could have delivered and
-                        // recorded meanwhile, and its fresh record is the proof that this delivery
-                        // would be a repeat.
-                        let! currentRecord = dependencies.ReadAcceptedRevision gitData.Path
-
-                        if not stillEligible then
-                            drop "no longer eligible"
-                        elif isAlreadyAccepted DateTimeOffset.UtcNow baseRevision currentRecord then
-                            drop "already accepted by a concurrent trigger"
-                        else
-                            let! accepted =
-                                attemptSync dependencies repoRoot upstreamRemote baseBranch gitData target
-
-                            // Recorded only once the sync is certain to have happened: a crash, a
-                            // rejected prompt, or a mechanical run that stopped must leave no record,
-                            // so the revision can be retried. A completed mechanical run is an
-                            // acceptance in its own right — the work it was claimed for is done.
-                            if accepted then
-                                do! dependencies.RecordAcceptedRevision gitData.Path baseRevision
-                                Log.log "AutoSync" $"Sync accepted for {gitData.Branch} at base revision {baseRevision}"
-                            else
-                                dependencies.ReleaseRevision gitData.Path baseRevision
-                    with ex ->
-                        Log.log "AutoSync" $"Trigger failed for {gitData.Branch}: {ex.Message}"
-                        dependencies.ReleaseRevision gitData.Path baseRevision
+                        // Recorded only once the sync is certain to have happened: a crash, a
+                        // rejected prompt, or a mechanical run that stopped must leave no record,
+                        // so the revision can be retried. A completed mechanical run is an
+                        // acceptance in its own right — the work it was started for is done.
+                        if accepted then
+                            do! dependencies.RecordAcceptedRevision gitData.Path baseRevision
+                            Log.log "AutoSync" $"Sync accepted for {gitData.Branch} at base revision {baseRevision}"
+                with ex ->
+                    Log.log "AutoSync" $"Trigger failed for {gitData.Branch}: {ex.Message}"
     }
 
-/// One operation per worktree at a time. The revision claim cannot provide this: it exists to let a
-/// newer base revision supersede an older one, which is exactly the case that would otherwise start
-/// a second fetch and merge while the first is still running. A refused start changes nothing, so
-/// the next refresh simply observes the worktree again.
+/// One operation per worktree at a time, covering target selection, mechanical work, and delivery,
+/// so a later observation cannot start a second fetch and merge over one still running. A refused
+/// start changes nothing, so the next refresh simply observes the worktree again.
 let trigger
     (dependencies: TriggerDependencies)
     (repoRoot: string)

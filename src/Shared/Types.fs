@@ -167,6 +167,9 @@ and PrInfo =
       IsDraft: bool
       Comments: CommentSummary
       Builds: BuildInfo list
+      /// A pull request is open, merged, or closed unmerged. `IsMerged` alone cannot tell the last
+      /// two apart, which is what the auto-sync push decision needs.
+      IsOpen: bool
       IsMerged: bool
       HasConflicts: bool }
 

@@ -40,49 +40,25 @@ let internal autoSyncDependencies
             CodingToolCli.build provider (CodingToolCli.Interactive text)
         SessionManager.launchAction sessionAgent worktreePath command.AsShellString
 
-    { ClaimRevision =
-        fun path baseRevision reason ->
-            agent.PostAndAsyncReply(fun reply -> ClaimAutoSyncTrigger(path, baseRevision, reason, reply))
-      ReleaseRevision = fun path baseRevision -> agent.Post(ReleaseAutoSyncTrigger(path, baseRevision))
-      // Without a durable store (fixture mode) nothing is ever recorded, so nothing can expire and
-      // nothing licenses a retry: the in-process claim remains the only deduplication, and with no
-      // record to name an acceptance, catch-up has nothing to retire either — an accepted revision
-      // simply stays claimed for the life of that process.
-      ReadAcceptedRevision =
+    // Fixture mode runs without a durable store: nothing is recorded, so every observation of a
+    // behind worktree is a first one and the operation guard remains the only serialization.
+    { ReadAcceptedRevision =
         fun path ->
             match autoSyncStore with
             | Some store -> store.Get path
-            | None -> async { return None }
+            | None -> async.Return None
       RecordAcceptedRevision =
         fun path baseRevision ->
-            async {
-                // The generation names this one acceptance, so the record and the claim below can
-                // only ever be retired together and only by a clear that observed this acceptance.
-                let acceptance = AutoSyncStore.nextAcceptance ()
-
-                // Both layers move together, and in this order: a claim made retryable ahead of its
-                // record would let a concurrent trigger that began from the expired record take the
-                // claim over, re-read the stale record it had already seen, and prompt twice.
-                match autoSyncStore with
-                | Some store ->
-                    do!
-                        AutoSyncStore.publishAccepted
-                            store
-                            path
-                            { BaseRevision = baseRevision
-                              AcceptedAt = DateTimeOffset.UtcNow
-                              Generation = acceptance }
-                | None -> ()
-
-                agent.Post(AcceptAutoSyncTrigger(path, baseRevision, acceptance))
-            }
-      RetireAcceptedRevision =
-        fun path acceptance ->
-            // Both operations name the acceptance, so their order no longer matters and neither can
-            // touch a prompt accepted after the read that asked for this: an acceptance in between
-            // keeps both its record and its claim, and the pair stays synchronized.
-            agent.Post(ClearAcceptedAutoSyncTrigger(path, acceptance))
-            autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clearAccepted store path acceptance)
+            match autoSyncStore with
+            | Some store ->
+                AutoSyncStore.publishAccepted
+                    store
+                    path
+                    { BaseRevision = baseRevision
+                      AcceptedAt = DateTimeOffset.UtcNow }
+            | None -> async.Return()
+      ClearAcceptedRevision =
+        fun path -> autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clear store path)
       ReadPrStatus =
         fun path ->
             async {
@@ -98,12 +74,7 @@ let internal autoSyncDependencies
       TryBeginOperation =
         fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncOperation(path, reply))
       CompleteOperation = CompleteAutoSyncOperation >> agent.Post
-      MechanicalSync =
-        AutoSync.mechanicalSync
-            GitBranchSync.checkedOutBranch
-            GitBranchSync.syncWithBase
-            PrStatus.queryOpenPrStateByRepoRoot
-            GitBranchSync.pushSyncedBranch
+      MechanicalSync = AutoSync.mechanicalSync GitBranchSync.syncWithBase GitBranchSync.pushSyncedBranch
       Deliver =
         AutoSync.deliver
             SessionBridge.tryDeliver
@@ -298,13 +269,6 @@ let repositoryDiscoveryUpdate
           BaseBranch = baseBranch }
     )
 
-/// Known paths a fresh listing no longer contains. A failed listing (`None`) reports nothing gone:
-/// the previous list is retained, so those worktrees are not known to have disappeared.
-let internal disappearedPaths (known: Set<string>) (discovered: GitWorktree.WorktreeInfo list option) =
-    discovered
-    |> Option.map (fun worktrees -> Set.difference known (worktrees |> List.map _.Path |> Set.ofList))
-    |> Option.defaultValue Set.empty
-
 let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
     |> Map.tryFind task
@@ -324,17 +288,12 @@ let internal executeTask
             let! worktrees = GitWorktree.listWorktrees root
             let! upstreamRemote = GitWorktree.resolveUpstreamRemote root
             let baseBranch = TreemonConfig.readBaseBranch root
-            // Read before the discovery update, while the previously known paths are still visible.
             let! state = agent.PostAndAsyncReply(GetState)
             agent.Post(repositoryDiscoveryUpdate repoId worktrees upstreamRemote baseBranch)
-            let repo = state.Repos |> Map.tryFind repoId
 
-            // The state fold prunes its own per-worktree maps, but the durable accepted-sync records
-            // live outside DashboardState, so a disappeared worktree drops its record here.
-            disappearedPaths (repo |> Option.map _.KnownPaths |> Option.defaultValue Set.empty) worktrees
-            |> Set.iter (AutoSyncStore.clear services.AutoSyncStore)
+            let alreadyDetected =
+                state.Repos |> Map.tryFind repoId |> Option.bind _.Provider |> Option.isSome
 
-            let alreadyDetected = repo |> Option.bind _.Provider |> Option.isSome
             if not alreadyDetected then
                 let! remoteUrl = PrStatus.getRemoteUrl root upstreamRemote
                 let provider = remoteUrl |> Option.bind PrStatus.detectProvider |> Option.map PrStatus.toRepoProvider |> Option.defaultValue UnknownProvider
@@ -456,28 +415,6 @@ let internal executeTask
                 MergedPrStore.setForRepo services.MergedPrStore repoId newPersisted
 
             agent.Post(UpdatePr(repoId, effectiveMap))
-
-            // Merged is terminal, and this is the only place holding the reconciled map, so the
-            // preference is retired here — one config write per repo, then the per-worktree trigger
-            // and durable accepted state that would otherwise keep prompting a merged branch.
-            let mergedTargets =
-                AutoSync.mergedAutoSyncTargets
-                    effectiveMap
-                    (TreemonConfig.readAutoSyncBranchSet (Some root))
-                    branchScope.GitData
-
-            if not (List.isEmpty mergedTargets) then
-                let mergedBranches = mergedTargets |> List.map _.Branch |> Set.ofList
-
-                TreemonConfig.modifyAutoSyncBranches root (fun existing ->
-                    Set.difference (Set.ofList existing) mergedBranches |> Set.toList)
-
-                for target in mergedTargets do
-                    agent.Post(ClearAutoSyncTrigger target.Path)
-                    AutoSyncStore.clear services.AutoSyncStore target.Path
-
-                let disabled = mergedBranches |> String.concat ", "
-                Log.log "AutoSync" $"Disabled auto-sync for merged branches in {RepoId.value repoId}: {disabled}"
 
         | RefreshFetch repoId ->
             let root = rootPaths |> Map.find repoId

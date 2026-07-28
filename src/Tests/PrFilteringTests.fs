@@ -10,6 +10,7 @@ let private mkPr branch prId isMerged closedDate =
       PrId = prId
       Title = $"PR for {branch}"
       IsDraft = false
+      IsOpen = not isMerged
       IsMerged = isMerged
       HasConflicts = false
       ClosedDate = closedDate }

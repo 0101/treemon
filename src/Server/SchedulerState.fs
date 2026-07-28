@@ -58,7 +58,6 @@ type DashboardState =
       // time-since-last-write), and cleared when the status leaves Idle (a new Working turn moves it).
       // In-memory only: a restart rebuilds it from the reloaded sessions (re-stamping at reload time).
       CodingToolSinceByWorktree: Map<string, DateTimeOffset>
-      AutoSyncTriggeredRevisions: Map<string, AutoSync.ClaimedRevision>
       AutoSyncLaunchesInFlight: Set<string>
       /// Worktrees with an auto-sync operation running: target selection, Treemon's own Git sync, and
       /// delivery. Separate from the launch guard, which one of those operations may take inside it.
@@ -76,7 +75,6 @@ module DashboardState =
           SessionStatusesHydrated = false
           SessionStatuses = Map.empty
           CodingToolSinceByWorktree = Map.empty
-          AutoSyncTriggeredRevisions = Map.empty
           AutoSyncLaunchesInFlight = Set.empty
           AutoSyncOperationsInFlight = Set.empty }
 
@@ -111,26 +109,6 @@ type StateMsg =
     /// oldest-replayed row, which the per-row UpdateSessionStatus path would freeze in, overstating the
     /// chip for the whole post-restart idle span (F11/C-14).
     | SeedSessionStatuses of SessionActivityStore.StoredStatus list
-    | ClaimAutoSyncTrigger of
-        path: string *
-        baseRevision: string *
-        reason: AutoSync.ClaimReason *
-        AsyncReplyChannel<bool>
-    /// The delivery this claim was taken for was accepted: suppression passes to the durable record
-    /// published under `acceptance`, which is the only layer that can retire it again.
-    | AcceptAutoSyncTrigger of
-        path: string *
-        baseRevision: string *
-        acceptance: AutoSyncStore.AcceptanceGeneration
-    /// One acceptance's durable record was cleared, so the accepted claim published under the same
-    /// generation goes too — otherwise it would suppress the same revision for the rest of the
-    /// process with no record left to age out. Scoped to that generation, never to the path alone: a
-    /// claim accepted after the clear was decided is a *later* acceptance with a record of its own,
-    /// and retiring it would recreate exactly the orphaned-claim state this message exists to
-    /// prevent. A delivery still in flight owns its revision and is never superseded either.
-    | ClearAcceptedAutoSyncTrigger of path: string * acceptance: AutoSyncStore.AcceptanceGeneration
-    | ReleaseAutoSyncTrigger of path: string * baseRevision: string
-    | ClearAutoSyncTrigger of path: string
     | TryBeginAutoSyncLaunch of path: string * AsyncReplyChannel<bool>
     | CompleteAutoSyncLaunch of path: string
     /// The per-worktree operation guard `AutoSync.trigger` holds for a whole sync attempt.
@@ -246,10 +224,6 @@ let private updateWorktreeList
         removedPaths
         |> Set.fold (fun m path -> Map.remove path m) state.CodingToolSinceByWorktree
 
-    let prunedAutoSync =
-        removedPaths
-        |> Set.fold (fun revisions path -> Map.remove path revisions) state.AutoSyncTriggeredRevisions
-
     // AutoSyncOperationsInFlight is deliberately NOT pruned here: AutoSync.trigger releases it in a
     // finally, so it already self-cleans for every operation that ends. Dropping it because the path
     // vanished from a discovery could only hand the guard to a second trigger while the first is
@@ -257,7 +231,6 @@ let private updateWorktreeList
     updateRepo repoId updated
         { state with
             CodingToolSinceByWorktree = prunedSince
-            AutoSyncTriggeredRevisions = prunedAutoSync
             AutoSyncLaunchesInFlight = Set.difference state.AutoSyncLaunchesInFlight removedPaths }
 
 /// Both auto-sync guards are the same thing at different scopes — one path may hold it, everyone
@@ -344,7 +317,6 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         updateRepo repoId (removeWorktreeData path repo)
             { state with
                 CodingToolSinceByWorktree = prunedSince
-                AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path
                 AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path }
 
     | GetState replyChannel ->
@@ -433,55 +405,6 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             SessionStatuses = seeded
             LatestByCategory = latestByCategory
             CodingToolSinceByWorktree = idleSince }
-
-    | ClaimAutoSyncTrigger(path, baseRevision, reason, reply) ->
-        let claimed =
-            match state.AutoSyncTriggeredRevisions |> Map.tryFind path, reason with
-            | None, _ -> true
-            // A newer base revision is new work: it supersedes whatever is held for the old one.
-            | Some(AutoSync.Delivering held), _ -> held <> baseRevision
-            | Some(AutoSync.Accepted(held, _)), AutoSync.FirstAttempt -> held <> baseRevision
-            // The durable record aged out, and nothing is in flight to duplicate.
-            | Some(AutoSync.Accepted _), AutoSync.RetryExpiredAccept -> true
-
-        reply.Reply claimed
-
-        if claimed then
-            { state with
-                AutoSyncTriggeredRevisions =
-                    state.AutoSyncTriggeredRevisions
-                    |> Map.add path (AutoSync.Delivering baseRevision) }
-        else
-            state
-
-    | AcceptAutoSyncTrigger(path, baseRevision, acceptance) ->
-        // Only the claim this delivery still holds may be marked: a newer revision claimed while it
-        // was in flight owns the entry now and must not inherit the older prompt's acceptance.
-        match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
-        | Some(AutoSync.Delivering held) when held = baseRevision ->
-            { state with
-                AutoSyncTriggeredRevisions =
-                    state.AutoSyncTriggeredRevisions
-                    |> Map.add path (AutoSync.Accepted(baseRevision, acceptance)) }
-        | _ -> state
-
-    | ClearAcceptedAutoSyncTrigger(path, acceptance) ->
-        match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
-        | Some(AutoSync.Accepted(_, held)) when held = acceptance ->
-            { state with
-                AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
-        | _ -> state
-
-    | ReleaseAutoSyncTrigger(path, baseRevision) ->
-        match state.AutoSyncTriggeredRevisions |> Map.tryFind path with
-        | Some(AutoSync.Delivering held) when held = baseRevision ->
-            { state with
-                AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
-        | _ -> state
-
-    | ClearAutoSyncTrigger path ->
-        { state with
-            AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
 
     | TryBeginAutoSyncLaunch(path, reply) ->
         let claimed, inFlight = tryBeginGuard path state.AutoSyncLaunchesInFlight
