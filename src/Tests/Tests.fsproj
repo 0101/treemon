@@ -12,6 +12,7 @@
     <Compile Include="GitTestHelpers.fs" />
     <Compile Include="TerminalSessionFixture.fs" />
     <Compile Include="TerminalSessionFixtureTests.fs" />
+    <Compile Include="ProcessRunnerTests.fs" />
     <Compile Include="WorktreeDiffTests.fs" />
     <Compile Include="DiffEndpointTests.fs" />
     <Compile Include="ServerFixture.fs" />

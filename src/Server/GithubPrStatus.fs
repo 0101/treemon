@@ -21,8 +21,10 @@ let parseGithubUrl (url: string) =
         else
             None)
 
-let private runGh (arguments: string) =
-    ProcessRunner.run "GH" "gh" arguments
+let private gh =
+    { ProcessRunner.Spawn.create "gh" with Context = "GH" }
+
+let private runGh (arguments: string list) = ProcessRunner.text gh arguments
 
 type internal ParsedGithubPr =
     { BranchName: string
@@ -83,9 +85,9 @@ let internal parseReviewThreads (json: string) =
 let private fetchPrThreadCounts (remote: GithubRemote) (prNumber: int) =
     async {
         let query =
-            $"""{{ repository(owner: \"{remote.Owner}\", name: \"{remote.Repo}\") {{ pullRequest(number: {prNumber}) {{ reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"""
+            $"""{{ repository(owner: "{remote.Owner}", name: "{remote.Repo}") {{ pullRequest(number: {prNumber}) {{ reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"""
 
-        let! output = runGh $"api graphql -f query=\"{query}\""
+        let! output = runGh [ "api"; "graphql"; "-f"; $"query={query}" ]
         return output |> Option.map parseReviewThreads |> Option.defaultValue (WithResolution(0, 0))
     }
 
@@ -158,7 +160,7 @@ let internal parseFailedJobs (json: string) =
 
 let private fetchFailedStepName (remote: GithubRemote) (runId: int64) =
     async {
-        let! output = runGh $"api /repos/{remote.Owner}/{remote.Repo}/actions/runs/{runId}/jobs"
+        let! output = runGh [ "api"; $"/repos/{remote.Owner}/{remote.Repo}/actions/runs/{runId}/jobs" ]
 
         return output |> Option.bind parseFailedJobs
     }
@@ -174,14 +176,16 @@ let internal parsePrMergeability (json: string) =
 
 let private fetchMergeability (remote: GithubRemote) (prNumber: int) =
     async {
-        let! output = runGh $"api /repos/{remote.Owner}/{remote.Repo}/pulls/{prNumber}"
+        let! output = runGh [ "api"; $"/repos/{remote.Owner}/{remote.Repo}/pulls/{prNumber}" ]
         return output |> Option.map parsePrMergeability |> Option.defaultValue false
     }
 
 let private fetchActionRuns (remote: GithubRemote) (branch: string) =
     async {
         let! output =
-            runGh $"api \"/repos/{remote.Owner}/{remote.Repo}/actions/runs?branch={Uri.EscapeDataString(branch)}&per_page=10\""
+            runGh
+                [ "api"
+                  $"/repos/{remote.Owner}/{remote.Repo}/actions/runs?branch={Uri.EscapeDataString(branch)}&per_page=10" ]
 
         let runs =
             output
@@ -225,7 +229,7 @@ let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedGithubPr
 let private fetchPrList (remote: GithubRemote) (state: string) (extraParams: string) =
     async {
         let! output =
-            runGh $"api \"/repos/{remote.Owner}/{remote.Repo}/pulls?state={state}{extraParams}\""
+            runGh [ "api"; $"/repos/{remote.Owner}/{remote.Repo}/pulls?state={state}{extraParams}" ]
 
         return
             output
