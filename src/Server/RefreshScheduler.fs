@@ -254,20 +254,22 @@ let private updateWorktreeList
         removedPaths
         |> Set.fold (fun revisions path -> Map.remove path revisions) state.AutoSyncTriggeredRevisions
 
+    // AutoSyncOperationsInFlight is deliberately NOT pruned here: AutoSync.trigger releases it in a
+    // finally, so it already self-cleans for every operation that ends. Dropping it because the path
+    // vanished from a discovery could only hand the guard to a second trigger while the first is
+    // still merging, breaking the one-operation-per-worktree invariant (docs/spec/worktree-monitor.md).
     updateRepo repoId updated
         { state with
             CodingToolSinceByWorktree = prunedSince
             AutoSyncTriggeredRevisions = prunedAutoSync
-            AutoSyncLaunchesInFlight = Set.difference state.AutoSyncLaunchesInFlight removedPaths
-            AutoSyncOperationsInFlight = Set.difference state.AutoSyncOperationsInFlight removedPaths }
+            AutoSyncLaunchesInFlight = Set.difference state.AutoSyncLaunchesInFlight removedPaths }
 
 /// Both auto-sync guards are the same thing at different scopes — one path may hold it, everyone
-/// else is told no — so they share the claim/answer/record step and differ only in which set they
-/// live in.
-let private tryBeginGuard path (reply: AsyncReplyChannel<bool>) (inFlight: Set<string>) =
+/// else is refused — so they share the claim/record step and differ only in which set they live in.
+/// The answer is returned rather than replied to here, so the reply stays visible at the call site.
+let private tryBeginGuard path (inFlight: Set<string>) =
     let claimed = not (Set.contains path inFlight)
-    reply.Reply claimed
-    if claimed then Set.add path inFlight else inFlight
+    claimed, (if claimed then Set.add path inFlight else inFlight)
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -341,12 +343,13 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         // Also drop the worktree's GLOBAL time-since-idle stamp (same reason as UpdateWorktreeList —
         // it lives on DashboardState, not PerRepoState, so removeWorktreeData can't reach it; F10/C-13).
         let prunedSince = state.CodingToolSinceByWorktree |> Map.remove path
+        // AutoSyncOperationsInFlight is left alone for the same reason as in updateWorktreeList: only
+        // the operation that holds the guard may release it.
         updateRepo repoId (removeWorktreeData path repo)
             { state with
                 CodingToolSinceByWorktree = prunedSince
                 AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path
-                AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path
-                AutoSyncOperationsInFlight = state.AutoSyncOperationsInFlight |> Set.remove path }
+                AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path }
 
     | GetState replyChannel ->
         replyChannel.Reply(state)
@@ -485,16 +488,18 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             AutoSyncTriggeredRevisions = state.AutoSyncTriggeredRevisions |> Map.remove path }
 
     | TryBeginAutoSyncLaunch(path, reply) ->
-        { state with
-            AutoSyncLaunchesInFlight = tryBeginGuard path reply state.AutoSyncLaunchesInFlight }
+        let claimed, inFlight = tryBeginGuard path state.AutoSyncLaunchesInFlight
+        reply.Reply claimed
+        { state with AutoSyncLaunchesInFlight = inFlight }
 
     | CompleteAutoSyncLaunch path ->
         { state with
             AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path }
 
     | TryBeginAutoSyncOperation(path, reply) ->
-        { state with
-            AutoSyncOperationsInFlight = tryBeginGuard path reply state.AutoSyncOperationsInFlight }
+        let claimed, inFlight = tryBeginGuard path state.AutoSyncOperationsInFlight
+        reply.Reply claimed
+        { state with AutoSyncOperationsInFlight = inFlight }
 
     | CompleteAutoSyncOperation path ->
         { state with

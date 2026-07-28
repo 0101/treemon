@@ -1301,6 +1301,46 @@ type AutoSyncMechanicalTests() =
                     Is.EqualTo(2),
                     "the guard is released with the operation, so the next observation runs")))
 
+    [<Test>]
+    member _.``A worktree that disappears mid-operation keeps its guard until the operation completes``() =
+        TestUtils.withTempDir "treemon-auto-sync-operation-guard-removal" (fun root ->
+            let observation = enabledObservation root
+            let agent = createAgent ()
+            let repoId = PathUtils.toRepoId root
+
+            let tryBegin path =
+                agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncOperation(path, reply))
+
+            agent.Post(
+                UpdateWorktreeList(
+                    repoId,
+                    [ { GitWorktree.WorktreeInfo.Path = observation.Path
+                        Head = "head"
+                        Branch = Some "feature-a" } ]))
+
+            let held = tryBegin observation.Path |> TestUtils.runAsync
+
+            // A discovery that no longer lists the path, and an explicit removal: a worktree can vanish
+            // from either while its operation is still merging, and neither may hand the guard on.
+            agent.Post(UpdateWorktreeList(repoId, []))
+            agent.Post(RemoveWorktree(repoId, observation.Path))
+
+            let afterRemoval = tryBegin observation.Path |> TestUtils.runAsync
+
+            agent.Post(CompleteAutoSyncOperation observation.Path)
+            let afterCompletion = tryBegin observation.Path |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(held, Is.True, "the first operation takes the guard")
+                Assert.That(
+                    afterRemoval,
+                    Is.False,
+                    "removal must not release a guard the running operation still holds")
+                Assert.That(
+                    afterCompletion,
+                    Is.True,
+                    "only the operation's own completion releases the guard")))
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
