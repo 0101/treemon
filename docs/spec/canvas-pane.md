@@ -129,7 +129,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 
 ### Message Queue
 
-- If no live bridge can take the message, the server queues it per worktree (cap 10, 5-min TTL) and returns `Queued`. An identical pending envelope for the same target session occupies one entry; different targets or payloads remain distinct. Draining re-resolves the current target — see `docs/spec/canvas-interaction-routing.md`.
+- If no live bridge can take the message, the server queues it per worktree (cap 10, 5-min TTL) and returns `Queued`. Draining re-resolves the current target — see `docs/spec/canvas-interaction-routing.md`.
 - While queued, the client shows a `Waiting for session…` banner instead of an immediate error.
 - The banner clears to `Idle` only when the target worktree's session actually delivers (never flipped to `Failed` by a wall-clock timer). The user may dismiss it manually, and the server may silently expire the message after its TTL.
 

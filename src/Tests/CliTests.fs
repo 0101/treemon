@@ -46,8 +46,7 @@ type FormatPrTests() =
           IsDraft = false
           Comments = WithResolution(0, 0)
           Builds = []
-          IsOpen = true
-          IsMerged = false
+          State = PrState.Open
           AutoMergeEnabled = false
           HasConflicts = false }
 
@@ -67,7 +66,7 @@ type FormatPrTests() =
 
     [<Test>]
     member _.``HasPr merged shows merged flag``() =
-        let result = formatPr (HasPr { basePr with Id = 10; Title = "Done"; IsMerged = true })
+        let result = formatPr (HasPr { basePr with Id = 10; Title = "Done"; State = PrState.Merged })
         Assert.That(result, Is.EqualTo("PR #10 [merged]: Done"))
 
     [<Test>]
@@ -89,7 +88,7 @@ type FormatPrTests() =
                         Id = 99
                         Title = "Everything"
                         IsDraft = true
-                        IsMerged = true
+                        State = PrState.Merged
                         AutoMergeEnabled = true
                         HasConflicts = true })
 

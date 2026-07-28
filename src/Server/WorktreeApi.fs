@@ -197,7 +197,7 @@ let internal assembleFromState
         |> Option.map _.Comparison
         |> Option.defaultValue GitWorktree.Undetermined
     let prBranch = gitData |> Option.bind GitWorktree.prBranchName
-    let pr = PrStatus.lookupPrStatus repo.PrData prBranch
+    let pr = PrStatus.tryLookupPrStatus repo.PrData prBranch |> Option.defaultValue NoPr
 
     { Path = PathUtils.toWorktreePath wt.Path
       Branch = wt.Branch |> Option.defaultValue WorktreeStatus.DetachedBranchName
@@ -632,8 +632,7 @@ let worktreeApi
 
     /// Ends auto-sync bookkeeping for a worktree: disabling the preference or deleting the worktree
     /// leaves nothing for the accepted-revision record to suppress.
-    let clearAcceptedRecord path =
-        autoSyncStore |> Option.iter (fun store -> AutoSyncStore.clear store path)
+    let clearAcceptedRecord = autoSyncDependencies.ClearAcceptedRevision
 
     let validatePath path =
         async {
@@ -693,7 +692,9 @@ let worktreeApi
                       let repo = state.Repos |> Map.tryFind ctx.RepoId
                       let worktreeGit =
                           repo |> Option.bind (fun repo -> repo.GitData |> Map.tryFind ctx.Worktree.Path)
-                      let prStatus = RefreshScheduler.prStatusForPath state ctx.Worktree.Path
+                      let prStatus =
+                          RefreshScheduler.prStatusForPath state ctx.Worktree.Path
+                          |> Option.defaultValue NoPr
 
                       try
                           TreemonConfig.modifyAutoSyncBranches ctx.RepoRoot (fun existing ->

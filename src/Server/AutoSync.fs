@@ -58,7 +58,7 @@ type TriggerDependencies =
       /// The worktree's current PR status, keyed by canonical worktree path so the lookup resolves
       /// inside that worktree's own repo and a same-named branch elsewhere can never answer for it.
       /// Read again at action boundaries because `RefreshPr` runs on its own cadence.
-      ReadPrStatus: string -> Async<PrStatus>
+      ReadPrStatus: string -> Async<PrStatus option>
       SelectTarget: string -> Async<SyncTarget>
       /// One operation per worktree, held across target selection, mechanical work, and delivery, so
       /// a later observation cannot start a second fetch and merge over one still running.
@@ -113,7 +113,7 @@ let internal pushOutcomeResult =
 /// one has nothing to advance, so the sync finishes locally.
 let isOpenPr (prStatus: PrStatus) =
     match prStatus with
-    | HasPr pr -> pr.IsOpen
+    | HasPr pr -> pr.State = PrState.Open
     | NoPr -> false
 
 /// Treemon's whole token-free path as one operation: the Git sync, then the push an open pull
@@ -139,7 +139,7 @@ let mechanicalSync
 /// leftover `.treemon.json` entry must not keep it syncing.
 let isMergedPr (prStatus: PrStatus) =
     match prStatus with
-    | HasPr pr -> pr.IsMerged
+    | HasPr pr -> pr.State = PrState.Merged
     | NoPr -> false
 
 /// The single eligibility rule, shared by the first observation and every pre-action re-check.
@@ -204,6 +204,14 @@ let selectTarget
 
 let internal registrationGraceMilliseconds = 3000
 
+/// The answer of the pre-action gate: the PR status the operation may act on, or why it may not act.
+type SyncEligibility =
+    | Eligible of PrStatus
+    | Ineligible
+    /// No PR refresh has succeeded for the repository yet, so nothing can say whether a mechanically
+    /// synced branch has a pull request to publish to.
+    | PrStatusUnknown
+
 /// The gate an operation must re-pass immediately before it acts, answering with the PR status it
 /// read. `RefreshPr` runs on its own cadence, so it can remove the preference — or learn the PR
 /// merged — after the Git observation that started this operation, and the same reading decides
@@ -211,20 +219,23 @@ let internal registrationGraceMilliseconds = 3000
 /// delivered yet; nothing may cancel once a prompt has been accepted or a Git command is running.
 let eligiblePrStatus (dependencies: TriggerDependencies) (repoRoot: string) (gitData: GitWorktree.GitData) =
     async {
-        let! prStatus = dependencies.ReadPrStatus gitData.Path
+        let enabled = readEnabledPreference repoRoot gitData.Branch
 
-        return
-            if isEligible (readEnabledPreference repoRoot gitData.Branch) prStatus then
-                Some prStatus
-            else
-                None
+        if not enabled then
+            return Ineligible
+        else
+            let! prStatus = dependencies.ReadPrStatus gitData.Path
+
+            return
+                match prStatus with
+                | None -> PrStatusUnknown
+                | Some status when isEligible enabled status -> Eligible status
+                | Some _ -> Ineligible
     }
 
 let deliver
     (tryDeliver: SessionBridge.SendRequest -> Async<SessionBridge.DeliveryResult>)
     (waitForRegistration: unit -> Async<unit>)
-    (tryBeginLaunch: string -> Async<bool>)
-    (completeLaunch: string -> unit)
     (launch: WorktreePath -> string -> Async<Result<unit, string>>)
     (request: DeliveryRequest)
     =
@@ -239,25 +250,17 @@ let deliver
 
         let launchFallback () =
             async {
-                let! canLaunch = tryBeginLaunch path
-
-                if not canLaunch then
+                try
+                    let! result = launch request.WorktreePath request.Prompt
+                    match result with
+                    | Ok () ->
+                        do! waitForRegistration ()
+                        return true
+                    | Error _ ->
+                        return false
+                with ex ->
+                    Log.log "AutoSync" $"Fallback launch failed for {path}: {ex.Message}"
                     return false
-                else
-                    try
-                        try
-                            let! result = launch request.WorktreePath request.Prompt
-                            match result with
-                            | Ok () ->
-                                do! waitForRegistration ()
-                                return true
-                            | Error _ ->
-                                return false
-                        with ex ->
-                            Log.log "AutoSync" $"Fallback launch failed for {path}: {ex.Message}"
-                            return false
-                    finally
-                        completeLaunch path
             }
 
         match! tryDeliver sendRequest with
@@ -291,21 +294,25 @@ let private deliverPrompt
 /// Where the two paths part, once an operation holds the guard and has passed the eligibility gate.
 /// An open session — even an idle one — is attached to its worktree and owns it, so Treemon only
 /// asks it to sync. With no session open Treemon syncs the worktree itself and spends an agent only
-/// on what it could not finish.
+/// on what it could not finish; that is also the only path that decides whether to publish, so it is
+/// the only one that carries the PR status.
+type private SyncPlan =
+    | AskOpenSession of SyncTarget
+    | SyncMechanically of SyncTarget * PrStatus
+
 let private attemptSync
     (dependencies: TriggerDependencies)
     (repoRoot: string)
     upstreamRemote
     baseBranch
-    (prStatus: PrStatus)
     (gitData: GitWorktree.GitData)
-    (target: SyncTarget)
+    (plan: SyncPlan)
     =
     async {
-        match target with
-        | OpenSession _ ->
+        match plan with
+        | AskOpenSession target ->
             return! deliverPrompt dependencies gitData target (prompt upstreamRemote baseBranch)
-        | NoOpenSession _ ->
+        | SyncMechanically(target, prStatus) ->
             let request =
                 { Sync =
                     { WorktreePath = gitData.Path
@@ -321,12 +328,14 @@ let private attemptSync
             | Error failure ->
                 // The gate is re-passed here because a fetch and a merge have run since it was last
                 // read: a branch disabled or reconciled merged meanwhile must not be handed to an
-                // agent either.
+                // agent either. An unread PR cache does not stop the handover — the agent resolves
+                // PR state itself, and the work this path could not finish still needs doing.
                 match! eligiblePrStatus dependencies repoRoot gitData with
-                | None ->
+                | Ineligible ->
                     Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: no longer eligible"
                     return false
-                | Some _ ->
+                | Eligible _
+                | PrStatusUnknown ->
                     return!
                         fallbackPrompt upstreamRemote baseBranch failure
                         |> deliverPrompt dependencies gitData target
@@ -356,19 +365,28 @@ let private runOperation
             if not (isAlreadyAccepted DateTimeOffset.UtcNow baseRevision acceptedRecord) then
                 try
                     let! target = dependencies.SelectTarget gitData.Path
+                    let! eligibility = eligiblePrStatus dependencies repoRoot gitData
 
-                    match! eligiblePrStatus dependencies repoRoot gitData with
-                    | None -> Log.log "AutoSync" $"Dropped sync for {gitData.Branch}: no longer eligible"
-                    | Some currentPrStatus ->
+                    let plan =
+                        match eligibility, target with
+                        | Ineligible, _ ->
+                            Error $"Dropped sync for {gitData.Branch}: no longer eligible"
+                        // An open session resolves PR state for itself, so an unread cache withholds
+                        // nothing this path needs.
+                        | (Eligible _ | PrStatusUnknown), OpenSession _ -> Ok(AskOpenSession target)
+                        | Eligible prStatus, NoOpenSession _ -> Ok(SyncMechanically(target, prStatus))
+                        // Merging now would finish the observation and record it as accepted, and the
+                        // branch is only ever behind this base revision once — so the push this run
+                        // cannot decide on would never be retried. The next refresh, once PR data has
+                        // loaded, observes the same worktree and syncs it with the decision in hand.
+                        | PrStatusUnknown, NoOpenSession _ ->
+                            Error $"Deferred sync for {gitData.Branch}: PR status not loaded yet"
+
+                    match plan with
+                    | Error reason -> Log.log "AutoSync" reason
+                    | Ok plan ->
                         let! accepted =
-                            attemptSync
-                                dependencies
-                                repoRoot
-                                upstreamRemote
-                                baseBranch
-                                currentPrStatus
-                                gitData
-                                target
+                            attemptSync dependencies repoRoot upstreamRemote baseBranch gitData plan
 
                         // Recorded only once the sync is certain to have happened: a crash, a
                         // rejected prompt, or a mechanical run that stopped must leave no record,

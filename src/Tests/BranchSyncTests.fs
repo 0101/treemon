@@ -253,6 +253,25 @@ type BranchPushTests() =
             Assert.That(remoteRef repoDir originDir "refs/heads/unpublished", Is.EqualTo(None)))
 
     [<Test>]
+    member _.``an upstream naming a different branch is refused and leaves that branch untouched``() =
+        withTempDir "treemon-branch-push-foreign-upstream" (fun tempDir ->
+            let repoDir, originDir = publishedFeature tempDir
+            let mainBefore = remoteRef repoDir originDir "refs/heads/main"
+            // Branching off a remote branch leaves the new branch tracking that branch's name, which
+            // git's own `push.default = simple` refuses for exactly this reason.
+            gitOk repoDir [ "switch"; "-c"; "fix-typo"; "--no-track" ]
+            gitOk repoDir [ "config"; "branch.fix-typo.remote"; "origin" ]
+            gitOk repoDir [ "config"; "branch.fix-typo.merge"; "refs/heads/main" ]
+            commitFile repoDir "unreviewed.txt" "unreviewed work"
+
+            let outcome = push repoDir "fix-typo"
+
+            Assert.That(outcome, Is.EqualTo(BranchPushOutcome.PushFailed))
+            // The branch's commits must not land on the branch its upstream happens to name.
+            Assert.That(remoteRef repoDir originDir "refs/heads/main", Is.EqualTo(mainBefore))
+            Assert.That(remoteRef repoDir originDir "refs/heads/fix-typo", Is.EqualTo(None)))
+
+    [<Test>]
     member _.``a detached head is not the named branch and publishes nothing``() =
         withTempDir "treemon-branch-push-detached" (fun tempDir ->
             let repoDir, originDir = publishedFeature tempDir
@@ -329,8 +348,7 @@ type MechanicalSyncCompositionTests() =
               IsDraft = false
               Comments = Shared.WithResolution(0, 0)
               Builds = []
-              IsOpen = true
-              IsMerged = false
+              State = Shared.PrState.Open
               AutoMergeEnabled = false
               HasConflicts = false }
 

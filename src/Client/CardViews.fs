@@ -64,7 +64,7 @@ let sessionDotsPlain (wt: WorktreeStatus) =
 
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
-    | HasPr pr -> pr.IsMerged
+    | HasPr pr -> pr.State = PrState.Merged
     | NoPr -> false
 
 let cardClassName (wt: WorktreeStatus) =
@@ -501,7 +501,8 @@ let prActionButton (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
 
 let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
     React.Fragment [
-        if pr.IsMerged then
+        match pr.State with
+        | PrState.Merged ->
             HtmlHelper.createElement "a" [
                 prop.className "pr-badge merged"
                 prop.title pr.Title
@@ -509,7 +510,11 @@ let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
                 prop.target "_blank"
                 prop.text "Merged"
             ]
-        else
+        // A closed-unmerged pull request still renders as a live one, keeping its review and build
+        // affordances; distinguishing it in the UI is a product decision, not a consequence of the
+        // state being representable.
+        | PrState.Open
+        | PrState.ClosedUnmerged ->
             HtmlHelper.createElement "a" [
                 prop.className (if pr.IsDraft then "pr-badge draft" else "pr-badge")
                 prop.title pr.Title

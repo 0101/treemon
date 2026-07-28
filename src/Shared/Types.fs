@@ -160,6 +160,13 @@ type PrStatus =
     | NoPr
     | HasPr of PrInfo
 
+/// A pull request is open, merged, or closed without merging. The three are mutually exclusive, and
+/// telling the last two apart is what the auto-sync push decision and the PR badge both need.
+and [<RequireQualifiedAccess>] PrState =
+    | Open
+    | Merged
+    | ClosedUnmerged
+
 and PrInfo =
     { Id: int
       Title: string
@@ -167,10 +174,7 @@ and PrInfo =
       IsDraft: bool
       Comments: CommentSummary
       Builds: BuildInfo list
-      /// A pull request is open, merged, or closed unmerged. `IsMerged` alone cannot tell the last
-      /// two apart, which is what the auto-sync push decision needs.
-      IsOpen: bool
-      IsMerged: bool
+      State: PrState
       /// GitHub auto-merge or AzDo auto-complete is set: the provider merges the PR on its own
       /// once the remaining checks and policies pass. Always `false` for merged PRs.
       AutoMergeEnabled: bool

@@ -1550,15 +1550,14 @@ type MergedPrBranchScopeTests() =
                   IsDraft = false
                   Comments = WithResolution(0, 0)
                   Builds = []
-                  IsOpen = false
-                  IsMerged = true
+                  State = PrState.Merged
                   AutoMergeEnabled = false
                   HasConflicts = false }
 
         let repo =
             { PerRepoState.empty with
                 GitData = Map.ofList [ path, gitData ]
-                PrData = Map.ofList [ "local-name", mergedPr ] }
+                PrData = Some(Map.ofList [ "local-name", mergedPr ]) }
 
         let card =
             Server.WorktreeApi.assembleFromState

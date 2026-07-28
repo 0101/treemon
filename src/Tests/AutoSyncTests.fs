@@ -53,7 +53,7 @@ let private withoutAcceptedRecords: TriggerDependencies =
     { ReadAcceptedRevision = fun _ -> async { return None }
       RecordAcceptedRevision = fun _ _ -> async { return () }
       ClearAcceptedRevision = ignore
-      ReadPrStatus = fun _ -> async { return NoPr }
+      ReadPrStatus = fun _ -> async { return Some NoPr }
       SelectTarget = fun _ -> async { return OpenSession "session-a" }
       TryBeginOperation = fun _ -> async { return true }
       CompleteOperation = ignore
@@ -68,8 +68,7 @@ let private prInfo isMerged : PrStatus =
           IsDraft = false
           Comments = CommentSummary.WithResolution(0, 0)
           Builds = []
-          IsOpen = not isMerged
-          IsMerged = isMerged
+          State = if isMerged then PrState.Merged else PrState.Open
           AutoMergeEnabled = false
           HasConflicts = false }
 
@@ -249,30 +248,6 @@ type AutoSyncSelectionTests() =
 type AutoSyncTriggerTests() =
 
     [<Test>]
-    member _.``Fallback launch guard allows only one in-flight launch per worktree``() =
-        async {
-            let agent = createAgent ()
-            let path = "/repo/wt"
-
-            let! first =
-                agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply))
-
-            let! duplicate =
-                agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply))
-
-            agent.Post(CompleteAutoSyncLaunch path)
-
-            let! afterCompletion =
-                agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply))
-
-            Assert.Multiple(fun () ->
-                Assert.That(first, Is.True)
-                Assert.That(duplicate, Is.False)
-                Assert.That(afterCompletion, Is.True))
-        }
-        |> Async.RunSynchronously
-
-    [<Test>]
     [<Category("AutoSyncVerification")>]
     member _.``Dirty behind worktrees remain eligible and up-to-date worktrees do not``() =
         let dirtyBehind = gitData "/repo/wt" "feature" 2 (Some "base-a") true
@@ -377,7 +352,7 @@ type AutoSyncTriggerTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    ReadPrStatus = fun _ -> async { return observedPr }
+                    ReadPrStatus = fun _ -> async { return Some observedPr }
                     SelectTarget =
                         fun _ ->
                             async {
@@ -400,6 +375,83 @@ type AutoSyncTriggerTests() =
                 deliveries,
                 Is.Zero,
                 "the pre-delivery gate must re-read the merged state, not trust the starting observation"))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A sessionless worktree is left for the next refresh while PR status is unknown``() =
+        TestUtils.withTempDir "treemon-auto-sync-pr-unknown" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // Counters cross the async dependency boundary, so they cannot be immutable locals.
+            let mutable syncs = 0
+            let mutable deliveries = 0
+            let mutable recorded = []
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    // No PR refresh has succeeded yet, so nothing can say whether the merged branch
+                    // would need publishing.
+                    ReadPrStatus = fun _ -> async { return None }
+                    SelectTarget = fun _ -> async { return NoOpenSession None }
+                    MechanicalSync =
+                        fun _ ->
+                            async {
+                                syncs <- syncs + 1
+                                return Ok()
+                            }
+                    RecordAcceptedRevision =
+                        fun path baseRevision -> async { recorded <- (path, baseRevision) :: recorded }
+                    Deliver =
+                        fun _ ->
+                            async {
+                                deliveries <- deliveries + 1
+                                return true
+                            } }
+
+            gitData worktree "feature-a" 2 (Some "base-a") false
+            |> trigger dependencies root "origin" "main" NoPr
+            |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    syncs,
+                    Is.Zero,
+                    "merging now would consume the only observation of this base revision without deciding the push")
+                Assert.That(deliveries, Is.Zero)
+                Assert.That(
+                    recorded,
+                    Is.Empty,
+                    "an accepted record would suppress the retry that is the whole point of deferring")))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``An open session is still asked to sync while PR status is unknown``() =
+        TestUtils.withTempDir "treemon-auto-sync-pr-unknown-session" (fun root ->
+            let worktree = Path.Combine(root, "feature-a")
+            TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
+            // The delivery callback is the impure boundary under test.
+            let mutable deliveries = 0
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    ReadPrStatus = fun _ -> async { return None }
+                    SelectTarget = fun _ -> async { return OpenSession "session-a" }
+                    MechanicalSync = fun _ -> failwith "an owned worktree is never synced mechanically"
+                    Deliver =
+                        fun _ ->
+                            async {
+                                deliveries <- deliveries + 1
+                                return true
+                            } }
+
+            gitData worktree "feature-a" 2 (Some "base-a") false
+            |> trigger dependencies root "origin" "main" NoPr
+            |> TestUtils.runAsync
+
+            Assert.That(
+                deliveries,
+                Is.EqualTo(1),
+                "the session resolves PR state itself, so an unread cache withholds nothing it needs"))
 
     [<Test>]
     member _.``Only the same revision inside the retry age counts as already accepted``() =
@@ -715,8 +767,6 @@ type AutoSyncMechanicalTests() =
                                     return SessionBridge.DeliveryResult.NoLiveSession
                                 })
                             (fun () -> async { return () })
-                            (fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply)))
-                            (CompleteAutoSyncLaunch >> agent.Post)
                             (fun _ _ ->
                                 async {
                                     launches <- launches + 1
@@ -842,7 +892,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    ReadPrStatus = fun _ -> async { return observedPr }
+                    ReadPrStatus = fun _ -> async { return Some observedPr }
                     RecordAcceptedRevision =
                         fun path baseRevision -> async { recorded <- (path, baseRevision) :: recorded }
                     SelectTarget =
@@ -1100,8 +1150,6 @@ type AutoSyncDeliveryTests() =
             deliver
                 tryDeliver
                 (fun () -> failwith "registration grace must not run")
-                (fun _ -> async { return true })
-                ignore
                 launch
                 request
             |> Async.RunSynchronously
@@ -1143,15 +1191,12 @@ type AutoSyncDeliveryTests() =
                     return SessionBridge.DeliveryResult.Delivered
                 }
 
-            let tryBeginLaunch _ = failwith "fallback launch guard must not run"
             let launch _ _ = failwith "fallback launch must not run"
 
             let accepted =
                 deliver
                     tryDeliver
                     (fun () -> failwith "registration grace must not run")
-                    tryBeginLaunch
-                    ignore
                     launch
                     { request with Target = target }
                 |> Async.RunSynchronously
@@ -1193,8 +1238,6 @@ type AutoSyncDeliveryTests() =
                         graceCalls <- graceCalls + 1
                         registrationCompleted <- true
                     })
-                (fun _ -> failwith "fallback launch guard must not run")
-                ignore
                 (fun _ _ ->
                     async {
                         launchAttempts <- launchAttempts + 1
@@ -1209,69 +1252,6 @@ type AutoSyncDeliveryTests() =
             Assert.That(graceCalls, Is.EqualTo(1))
             Assert.That(registrationGraceMilliseconds, Is.InRange(1, 5000))
             Assert.That(launchAttempts, Is.Zero))
-
-    [<Test>]
-    member _.``Successful fallback holds the launch guard through registration grace``() =
-        // Callback probes cross async boundaries, so immutable values cannot capture invocation counts.
-        let mutable guardHeld = false
-        let mutable completions = 0
-        let graceStarted =
-            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
-        let releaseGrace =
-            TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
-
-        let tryBeginLaunch _ =
-            async {
-                if guardHeld then
-                    return false
-                else
-                    guardHeld <- true
-                    return true
-            }
-
-        let delivery =
-            deliver
-                (fun value ->
-                    async {
-                        Assert.That(value.SessionId, Is.EqualTo None)
-                        return SessionBridge.DeliveryResult.NoLiveSession
-                    })
-                (fun () ->
-                    async {
-                        graceStarted.TrySetResult(()) |> ignore
-                        do! releaseGrace.Task |> Async.AwaitTask
-                    })
-                tryBeginLaunch
-                (fun _ ->
-                    completions <- completions + 1
-                    guardHeld <- false)
-                (fun path prompt ->
-                    async {
-                        Assert.That(path, Is.EqualTo(WorktreePath "/repo/wt"))
-                        Assert.That(prompt, Is.EqualTo("Sync with upstream/main."))
-                        return Ok ()
-                    })
-                { request with Target = NoOpenSession None }
-            |> Async.StartAsTask
-
-        graceStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
-        let duplicateAccepted = tryBeginLaunch "/repo/wt" |> Async.RunSynchronously
-
-        Assert.Multiple(fun () ->
-            Assert.That(duplicateAccepted, Is.False)
-            Assert.That(guardHeld, Is.True)
-            Assert.That(completions, Is.Zero)
-            Assert.That(delivery.IsCompleted, Is.False))
-
-        releaseGrace.TrySetResult(()) |> ignore
-        let accepted =
-            delivery.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
-        let acceptedAfterGrace = tryBeginLaunch "/repo/wt" |> Async.RunSynchronously
-
-        Assert.Multiple(fun () ->
-            Assert.That(accepted, Is.True)
-            Assert.That(completions, Is.EqualTo(1))
-            Assert.That(acceptedAfterGrace, Is.True))
 
     [<Test>]
     member _.``No selected session attempts bridge before fallback launch``() =
@@ -1292,8 +1272,6 @@ type AutoSyncDeliveryTests() =
                     async {
                         graceCalls <- graceCalls + 1
                     })
-                (fun _ -> async { return true })
-                ignore
                 (fun _ _ ->
                     async {
                         launchAttempts <- launchAttempts + 1
@@ -1310,23 +1288,11 @@ type AutoSyncDeliveryTests() =
 
     [<TestCase("error")>]
     [<TestCase("exception")>]
-    member _.``Failed fallback releases the launch guard immediately``(failureKind: string) =
-        // Callback probes cross async boundaries, so immutable values cannot capture guard state.
-        let mutable guardHeld = false
-        let mutable completions = 0
-
+    member _.``A fallback launch that fails is not accepted``(failureKind: string) =
         let accepted =
             deliver
                 (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })
                 (fun () -> failwith "registration grace must not run after failed launch")
-                (fun _ ->
-                    async {
-                        guardHeld <- true
-                        return true
-                    })
-                (fun _ ->
-                    completions <- completions + 1
-                    guardHeld <- false)
                 (fun _ _ ->
                     async {
                         if failureKind = "exception" then
@@ -1337,10 +1303,7 @@ type AutoSyncDeliveryTests() =
                 { request with Target = NoOpenSession None }
             |> Async.RunSynchronously
 
-        Assert.Multiple(fun () ->
-            Assert.That(accepted, Is.False)
-            Assert.That(guardHeld, Is.False)
-            Assert.That(completions, Is.EqualTo(1)))
+        Assert.That(accepted, Is.False)
 
     [<Test>]
     member _.``Delivery failure is accepted for queued retry without fallback launch``() =
@@ -1348,29 +1311,11 @@ type AutoSyncDeliveryTests() =
             deliver
                 (fun _ -> async { return SessionBridge.DeliveryResult.DeliveryFailed })
                 (fun () -> failwith "registration grace must not run")
-                (fun _ -> failwith "fallback launch guard must not run")
-                ignore
                 (fun _ _ -> failwith "fallback launch must not run")
                 request
             |> Async.RunSynchronously
 
         Assert.That(accepted, Is.True)
-
-    [<Test>]
-    member _.``In-flight fallback guard prevents a duplicate launch after grace``() =
-        let launch _ _ = failwith "duplicate launch must not run"
-
-        let accepted =
-            deliver
-                (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })
-                (fun () -> async { return () })
-                (fun _ -> async { return false })
-                ignore
-                launch
-                request
-            |> Async.RunSynchronously
-
-        Assert.That(accepted, Is.False)
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
@@ -1379,7 +1324,6 @@ type AutoSyncDeliveryTests() =
         let sessionId = $"session-{Guid.NewGuid():N}"
         let port = TestUtils.getFreeTcpPort ()
         // Delivery callbacks cross async HTTP boundaries, so counters must be captured mutably.
-        let mutable fallbackGuardAttempts = 0
         let mutable fallbackLaunchAttempts = 0
 
         use listener = new HttpListener()
@@ -1393,12 +1337,6 @@ type AutoSyncDeliveryTests() =
             deliver
                 SessionBridge.tryDeliver
                 (fun () -> failwith "registration grace must not run")
-                (fun _ ->
-                    async {
-                        fallbackGuardAttempts <- fallbackGuardAttempts + 1
-                        return true
-                    })
-                ignore
                 (fun _ _ ->
                     async {
                         fallbackLaunchAttempts <- fallbackLaunchAttempts + 1
@@ -1433,7 +1371,6 @@ type AutoSyncDeliveryTests() =
         Assert.Multiple(fun () ->
             Assert.That(accepted, Is.True)
             Assert.That(body, Is.EqualTo expectedBody)
-            Assert.That(fallbackGuardAttempts, Is.Zero)
             Assert.That(fallbackLaunchAttempts, Is.Zero))
 
 [<TestFixture>]
@@ -1717,10 +1654,6 @@ type AutoSyncVerificationTests() =
                         deliver
                             (fun _ -> async { return SessionBridge.DeliveryResult.NoLiveSession })
                             (fun () -> async { return () })
-                            (fun worktreePath ->
-                                agent.PostAndAsyncReply(fun reply ->
-                                    TryBeginAutoSyncLaunch(worktreePath, reply)))
-                            (CompleteAutoSyncLaunch >> agent.Post)
                             (fun worktreePath promptText ->
                                 async {
                                     launches <- (worktreePath, promptText) :: launches

@@ -178,7 +178,7 @@ let syncWithBase (request: BranchSyncRequest) =
                 let! fetchExit =
                     branchSyncExitCode
                         worktreePath
-                        [ "fetch"; "--quiet"; request.UpstreamRemote; "--"; request.BaseBranch ]
+                        [ "fetch"; "--quiet"; "--"; request.UpstreamRemote; request.BaseBranch ]
 
                 if fetchExit <> 0 then
                     return! Error BranchSyncOutcome.CommandFailed
@@ -237,9 +237,9 @@ let private branchPushValue worktreePath arguments =
 
 /// Where the branch has to go, taken from the two config keys git itself writes for a tracking
 /// branch. Reading `remote` and `merge` separately avoids splitting a combined `origin/feature` at a
-/// slash, which guesses wrong for any branch name containing one. The remote is the one argument the
-/// push `--` cannot cover, since it has to precede it, so a value git would read as an option rather
-/// than as a destination is refused before the command is built.
+/// slash, which guesses wrong for any branch name containing one. `branch.<name>.remote` is read raw
+/// from git config with no pattern validation behind it, so a value git would read as an option
+/// rather than as a destination is refused before the command is built.
 let private configuredUpstreamTarget worktreePath branch =
     asyncResult {
         let! remote = branchPushValue worktreePath [ "config"; "--get"; $"branch.{branch}.remote" ]
@@ -254,6 +254,13 @@ let private configuredUpstreamTarget worktreePath branch =
                 mergeRef
             else
                 $"refs/heads/{mergeRef}"
+
+        // Git does not require a tracking branch's upstream to carry the same name, and the open-PR
+        // gate is evaluated on the upstream name, so it passes precisely when the names differ. An
+        // unattended push must never publish this branch's commits onto a differently named remote
+        // branch, so a mismatch is refused and the worktree goes to an agent instead.
+        if remoteRef <> $"refs/heads/{branch}" then
+            return! Error BranchPushOutcome.PushFailed
 
         return remote, remoteRef
     }
@@ -274,7 +281,7 @@ let pushSyncedBranch (worktreePath: string) (branch: string) =
                 let! output =
                     runBranchPushGit
                         worktreePath
-                        [ "push"; "--quiet"; remote; "--"; $"refs/heads/{branch}:{remoteRef}" ]
+                        [ "push"; "--quiet"; "--"; remote; $"refs/heads/{branch}:{remoteRef}" ]
 
                 if output.ExitCode = 0 then
                     return BranchPushOutcome.Pushed

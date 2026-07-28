@@ -84,14 +84,46 @@ let getRemoteUrl (repoRoot: string) (remoteName: string) =
         { ProcessRunner.Spawn.create "git" with Context = "PR" }
         (buildRemoteUrlArgs repoRoot remoteName)
 
+let private buildRemotePushUrlArgs (repoRoot: string) (remoteName: string) =
+    [ "-C"; repoRoot; "remote"; "get-url"; "--push"; remoteName ]
+
+let internal parseRemoteNames (output: string) =
+    output.Split('\n')
+    |> Array.toList
+    |> List.map _.Trim()
+    |> List.filter (String.IsNullOrWhiteSpace >> not)
+
+/// The GitHub logins this checkout could itself push a branch to: the owner of every configured
+/// remote's push URL. A fork workflow adds the fork as a remote, so its pull requests keep counting,
+/// while an arbitrary outsider's fork — which no local branch can publish to — does not.
+let internal configuredGithubOwners (repoRoot: string) =
+    async {
+        let gitPr = { ProcessRunner.Spawn.create "git" with Context = "PR" }
+        let! remoteNames = ProcessRunner.text gitPr [ "-C"; repoRoot; "remote" ]
+
+        match remoteNames with
+        | None -> return Set.empty
+        | Some output ->
+            let! urls =
+                parseRemoteNames output
+                |> List.map (buildRemotePushUrlArgs repoRoot >> ProcessRunner.text gitPr)
+                |> Async.Parallel
+
+            return
+                urls
+                |> Array.toList
+                |> List.choose (Option.bind (fun url -> GithubPrStatus.parseGithubUrl (url.Trim())))
+                |> List.map (fun remote -> remote.Owner.ToLowerInvariant())
+                |> Set.ofList
+    }
+
 type internal ParsedPr =
     { BranchName: string
       HeadSha: string option
       PrId: int
       Title: string
       IsDraft: bool
-      IsOpen: bool
-      IsMerged: bool
+      State: PrState
       AutoMergeEnabled: bool
       HasConflicts: bool
       ClosedDate: DateTimeOffset option }
@@ -126,8 +158,12 @@ let internal parsePrList (json: string) =
                     let branchName = branchFromRef sourceRef
 
                     let status = el.GetProperty("status").GetString()
-                    let isMerged = status = "completed"
-                    let isOpen = status = "active"
+
+                    let state =
+                        match status with
+                        | "completed" -> PrState.Merged
+                        | "active" -> PrState.Open
+                        | _ -> PrState.ClosedUnmerged
 
                     let closedDate =
                         el
@@ -141,7 +177,7 @@ let internal parsePrList (json: string) =
                         el |> tryString "mergeStatus" = Some "conflicts"
 
                     let autoMergeEnabled =
-                        not isMerged && (el |> tryProp "autoCompleteSetBy" |> Option.isSome)
+                        state <> PrState.Merged && (el |> tryProp "autoCompleteSetBy" |> Option.isSome)
 
                     let headSha =
                         el
@@ -154,8 +190,7 @@ let internal parsePrList (json: string) =
                           PrId = prId
                           Title = title
                           IsDraft = isDraft
-                          IsOpen = isOpen
-                          IsMerged = isMerged
+                          State = state
                           AutoMergeEnabled = autoMergeEnabled
                           HasConflicts = hasConflicts
                           ClosedDate = closedDate }
@@ -400,7 +435,8 @@ let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int)
 let internal firstPerBranch (prs: ParsedPr list) =
     prs
     |> List.sortBy (fun pr ->
-        (pr.IsMerged, pr.ClosedDate |> Option.map (fun d -> -d.Ticks) |> Option.defaultValue Int64.MaxValue))
+        (pr.State = PrState.Merged,
+         pr.ClosedDate |> Option.map (fun d -> -d.Ticks) |> Option.defaultValue Int64.MaxValue))
     |> List.distinctBy _.BranchName
 
 let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedPr list) =
@@ -454,7 +490,7 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                 |> List.map (fun pr ->
                     async {
                         let! threadCounts, builds =
-                            if pr.IsMerged then
+                            if pr.State = PrState.Merged then
                                 async { return WithResolution(0, 0), [] }
                             else
                                 async {
@@ -481,8 +517,7 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                                   IsDraft = pr.IsDraft
                                   Comments = threadCounts
                                   Builds = builds
-                                  IsOpen = pr.IsOpen
-                                  IsMerged = pr.IsMerged
+                                  State = pr.State
                                   AutoMergeEnabled = pr.AutoMergeEnabled
                                   HasConflicts = pr.HasConflicts },
                              pr.HeadSha)
@@ -501,7 +536,11 @@ let fetchPrStatusesByRepoRoot (repoRoot: string) (upstreamRemote: string) (known
 
         match provider with
         | Some(AzureDevOps remote) -> return! fetchPrStatuses remote knownBranches
-        | Some(GitHub remote) -> return! GithubPrStatus.fetchGithubPrStatuses remote knownBranches
+        | Some(GitHub remote) ->
+            let! configuredOwners = configuredGithubOwners repoRoot
+            // The upstream owner is always trusted: it owns the branches this repo pushes to.
+            let headOwners = configuredOwners |> Set.add (remote.Owner.ToLowerInvariant())
+            return! GithubPrStatus.fetchGithubPrStatuses remote headOwners knownBranches
         | None -> return Map.empty
     }
 
@@ -509,3 +548,9 @@ let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =
     branchName
     |> Option.bind (fun b -> prMap |> Map.tryFind b)
     |> Option.defaultValue NoPr
+
+/// The PR status of `branchName`, once the repository's PR data has been loaded at all. `None` means
+/// no PR refresh has succeeded for that repository yet, which is a different answer from "this
+/// branch has no pull request" and must not be read as one where a push decision depends on it.
+let tryLookupPrStatus (prData: Map<string, PrStatus> option) (branchName: string option) =
+    prData |> Option.map (fun prMap -> lookupPrStatus prMap branchName)

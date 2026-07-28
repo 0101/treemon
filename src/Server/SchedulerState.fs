@@ -10,7 +10,7 @@ type PerRepoState =
       GitData: Map<string, GitWorktree.GitData>
       BeadsData: Map<string, BeadsSummary>
       PlanningData: Map<string, BeadsPlanning>
-      PrData: Map<string, PrStatus>
+      PrData: Map<string, PrStatus> option
       CanvasData: Map<string, CanvasDoc list>
       Provider: RepoProvider option
       UpstreamRemote: string
@@ -24,7 +24,7 @@ module PerRepoState =
           GitData = Map.empty
           BeadsData = Map.empty
           PlanningData = Map.empty
-          PrData = Map.empty
+          PrData = None
           CanvasData = Map.empty
           Provider = None
           UpstreamRemote = "origin"
@@ -58,9 +58,8 @@ type DashboardState =
       // time-since-last-write), and cleared when the status leaves Idle (a new Working turn moves it).
       // In-memory only: a restart rebuilds it from the reloaded sessions (re-stamping at reload time).
       CodingToolSinceByWorktree: Map<string, DateTimeOffset>
-      AutoSyncLaunchesInFlight: Set<string>
       /// Worktrees with an auto-sync operation running: target selection, Treemon's own Git sync, and
-      /// delivery. Separate from the launch guard, which one of those operations may take inside it.
+      /// delivery, including any fallback launch one of those operations makes.
       AutoSyncOperationsInFlight: Set<string> }
 
 module DashboardState =
@@ -75,7 +74,6 @@ module DashboardState =
           SessionStatusesHydrated = false
           SessionStatuses = Map.empty
           CodingToolSinceByWorktree = Map.empty
-          AutoSyncLaunchesInFlight = Set.empty
           AutoSyncOperationsInFlight = Set.empty }
 
 type RepositoryDiscovery =
@@ -109,8 +107,6 @@ type StateMsg =
     /// oldest-replayed row, which the per-row UpdateSessionStatus path would freeze in, overstating the
     /// chip for the whole post-restart idle span (F11/C-14).
     | SeedSessionStatuses of SessionActivityStore.StoredStatus list
-    | TryBeginAutoSyncLaunch of path: string * AsyncReplyChannel<bool>
-    | CompleteAutoSyncLaunch of path: string
     /// The per-worktree operation guard `AutoSync.trigger` holds for a whole sync attempt.
     | TryBeginAutoSyncOperation of path: string * AsyncReplyChannel<bool>
     | CompleteAutoSyncOperation of path: string
@@ -228,17 +224,7 @@ let private updateWorktreeList
     // finally, so it already self-cleans for every operation that ends. Dropping it because the path
     // vanished from a discovery could only hand the guard to a second trigger while the first is
     // still merging, breaking the one-operation-per-worktree invariant (docs/spec/worktree-monitor.md).
-    updateRepo repoId updated
-        { state with
-            CodingToolSinceByWorktree = prunedSince
-            AutoSyncLaunchesInFlight = Set.difference state.AutoSyncLaunchesInFlight removedPaths }
-
-/// Both auto-sync guards are the same thing at different scopes — one path may hold it, everyone
-/// else is refused — so they share the claim/record step and differ only in which set they live in.
-/// The answer is returned rather than replied to here, so the reply stays visible at the call site.
-let private tryBeginGuard path (inFlight: Set<string>) =
-    let claimed = not (Set.contains path inFlight)
-    claimed, (if claimed then Set.add path inFlight else inFlight)
+    updateRepo repoId updated { state with CodingToolSinceByWorktree = prunedSince }
 
 let private processMessage (state: DashboardState) (msg: StateMsg) =
     match msg with
@@ -293,7 +279,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
 
     | UpdatePr(repoId, prMap) ->
         let repo = getRepo repoId state
-        updateRepo repoId { repo with PrData = prMap } state
+        updateRepo repoId { repo with PrData = Some prMap } state
 
     | UpdateProvider(repoId, provider) ->
         let repo = getRepo repoId state
@@ -315,9 +301,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         // AutoSyncOperationsInFlight is left alone for the same reason as in updateWorktreeList: only
         // the operation that holds the guard may release it.
         updateRepo repoId (removeWorktreeData path repo)
-            { state with
-                CodingToolSinceByWorktree = prunedSince
-                AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path }
+            { state with CodingToolSinceByWorktree = prunedSince }
 
     | GetState replyChannel ->
         replyChannel.Reply(state)
@@ -406,19 +390,15 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             LatestByCategory = latestByCategory
             CodingToolSinceByWorktree = idleSince }
 
-    | TryBeginAutoSyncLaunch(path, reply) ->
-        let claimed, inFlight = tryBeginGuard path state.AutoSyncLaunchesInFlight
-        reply.Reply claimed
-        { state with AutoSyncLaunchesInFlight = inFlight }
-
-    | CompleteAutoSyncLaunch path ->
-        { state with
-            AutoSyncLaunchesInFlight = state.AutoSyncLaunchesInFlight |> Set.remove path }
-
     | TryBeginAutoSyncOperation(path, reply) ->
-        let claimed, inFlight = tryBeginGuard path state.AutoSyncOperationsInFlight
+        // One path may hold the guard; everyone else is refused until the holder releases it.
+        let claimed = not (Set.contains path state.AutoSyncOperationsInFlight)
         reply.Reply claimed
-        { state with AutoSyncOperationsInFlight = inFlight }
+
+        if claimed then
+            { state with AutoSyncOperationsInFlight = Set.add path state.AutoSyncOperationsInFlight }
+        else
+            state
 
     | CompleteAutoSyncOperation path ->
         { state with

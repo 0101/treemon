@@ -50,15 +50,15 @@ type ParsePrListFixtureTests() =
         Assert.That(pr1.Title, Is.EqualTo("Add contributing guide and CI workflow"))
 
     [<Test>]
-    member _.``Open PRs are not merged``() =
+    member _.``Open PRs are parsed as open``() =
         let prs = readFixture "pr-list.json" |> parsePrList
-        Assert.That(prs |> List.forall (fun pr -> not pr.IsMerged), Is.True)
+        Assert.That(prs |> List.forall (fun pr -> pr.State = PrState.Open), Is.True)
 
     [<Test>]
     member _.``Closed PR with merged_at is marked as merged``() =
         let prs = readFixture "pr-list-with-closed.json" |> parsePrList
         let merged = prs |> List.find (fun pr -> pr.PrNumber = 3)
-        Assert.That(merged.IsMerged, Is.True)
+        Assert.That(merged.State, Is.EqualTo(PrState.Merged))
 
     [<Test>]
     member _.``Draft PR has IsDraft set``() =
@@ -110,12 +110,64 @@ type ParsePrListFixtureTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type GithubHeadOwnerFixtureTests() =
+
+    let forkPrs () = readFixture "pr-list-fork.json" |> parsePrList
+
+    /// The repo's own owner plus a colleague whose fork is a configured remote.
+    let knownOwners = set [ "contoso"; "colleague" ]
+
+    [<Test>]
+    member _.``The head owner is read from the head repository``() =
+        let owners = forkPrs () |> List.map _.HeadOwner
+        Assert.That(owners, Is.EquivalentTo([ Some "Contoso"; Some "colleague"; Some "outsider"; None ]))
+
+    [<Test>]
+    member _.``An outsider's fork PR cannot speak for a local branch of the same name``() =
+        let kept = forkPrs () |> fromKnownOwners knownOwners
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                kept |> List.map _.PrNumber,
+                Is.EquivalentTo([ 30; 31 ]),
+                "only heads this checkout could push to may decide a branch's PR status")
+            Assert.That(
+                kept |> List.exists (fun pr -> pr.BranchName = "feature/shared-name" && pr.PrNumber = 32),
+                Is.False,
+                "the outsider PR reuses a local branch name and would otherwise open the push gate"))
+
+    [<Test>]
+    member _.``Owner matching ignores login case``() =
+        // The fixture's upstream head owner is "Contoso"; GitHub logins are case-insensitive.
+        let kept = forkPrs () |> fromKnownOwners (set [ "contoso" ]) |> List.map _.PrNumber
+        Assert.That(kept, Is.EquivalentTo([ 30 ]))
+
+    [<Test>]
+    member _.``A pull request whose head repository is gone is excluded``() =
+        let kept = forkPrs () |> fromKnownOwners knownOwners
+        Assert.That(
+            kept |> List.exists (fun pr -> pr.PrNumber = 33),
+            Is.False,
+            "a deleted fork head cannot be attributed to an owner, so it cannot be trusted either")
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type GithubFirstPerBranchFixtureTests() =
 
     /// Mirrors fetchGithubPrStatuses: open PRs first, then closed PRs newest-updated first.
     let fetchedPrs () =
         (readFixture "pr-list-branch-reuse-open.json" |> parsePrList)
         @ (readFixture "pr-list-branch-reuse-closed.json" |> parsePrList)
+
+    [<Test>]
+    member _.``A closed pull request without a merge is parsed as closed unmerged``() =
+        let prs = readFixture "pr-list-branch-reuse-closed.json" |> parsePrList
+        let abandoned = prs |> List.find (fun pr -> pr.PrNumber = 18)
+        // The state git cannot infer from `merged_at` alone, and the one the push gate must not
+        // mistake for an open pull request.
+        Assert.That(abandoned.State, Is.EqualTo(PrState.ClosedUnmerged))
 
     [<Test>]
     member _.``One PR per branch is kept``() =
@@ -128,21 +180,21 @@ type GithubFirstPerBranchFixtureTests() =
         let result = fetchedPrs () |> firstPerBranch
         let pr = result |> List.find (fun pr -> pr.BranchName = "feature/reused-name")
         Assert.That(pr.PrNumber, Is.EqualTo(20))
-        Assert.That(pr.IsMerged, Is.True)
+        Assert.That(pr.State, Is.EqualTo(PrState.Merged))
 
     [<Test>]
     member _.``Open PR wins over merged PR on the same branch``() =
         let result = fetchedPrs () |> firstPerBranch
         let pr = result |> List.find (fun pr -> pr.BranchName = "feature/reopened-work")
         Assert.That(pr.PrNumber, Is.EqualTo(21))
-        Assert.That(pr.IsMerged, Is.False)
+        Assert.That(pr.State, Is.EqualTo(PrState.Open))
 
     [<Test>]
     member _.``Filtering to known branches keeps the merged winner``() =
         let result = fetchedPrs () |> filterRelevantPrs (set [ "feature/reused-name" ])
         Assert.That(result, Has.Exactly(1).Items)
         Assert.That(result[0].PrNumber, Is.EqualTo(20))
-        Assert.That(result[0].IsMerged, Is.True)
+        Assert.That(result[0].State, Is.EqualTo(PrState.Merged))
 
 
 [<TestFixture>]

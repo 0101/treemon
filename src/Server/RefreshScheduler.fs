@@ -15,15 +15,17 @@ type SchedulerServices =
       AutoSyncStore: AutoSyncStore.Store }
 
 /// The PR status of the branch checked out at `path`, resolved inside that worktree's own repo:
-/// PR data is keyed by provider branch, which is only unambiguous within one repository.
+/// PR data is keyed by provider branch, which is only unambiguous within one repository. `None` is
+/// "not known yet" — no PR refresh has succeeded for that repository — and is deliberately not
+/// collapsed into `NoPr`, which the mechanical push decision would read as "nothing to publish to".
 let internal prStatusForPath (state: DashboardState) (path: string) =
     state.Repos
     |> Map.values
     |> Seq.tryPick (fun repo ->
         repo.GitData
         |> Map.tryFind path
-        |> Option.map (fun gitData -> PrStatus.lookupPrStatus repo.PrData (GitWorktree.prBranchName gitData)))
-    |> Option.defaultValue NoPr
+        |> Option.map (fun gitData -> PrStatus.tryLookupPrStatus repo.PrData (GitWorktree.prBranchName gitData)))
+    |> Option.flatten
 
 let internal autoSyncDependencies
     (agent: MailboxProcessor<StateMsg>)
@@ -31,9 +33,6 @@ let internal autoSyncDependencies
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (autoSyncStore: AutoSyncStore.Store option)
     : AutoSync.TriggerDependencies =
-    let tryBeginLaunch path =
-        agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncLaunch(path, reply))
-
     let launch worktreePath text =
         let provider = CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
         let command =
@@ -79,8 +78,6 @@ let internal autoSyncDependencies
         AutoSync.deliver
             SessionBridge.tryDeliver
             (fun () -> Async.Sleep AutoSync.registrationGraceMilliseconds)
-            tryBeginLaunch
-            (CompleteAutoSyncLaunch >> agent.Post)
             launch }
 
 type RefreshTask =
@@ -326,7 +323,8 @@ let internal executeTask
                 repoRoot
                 repo.UpstreamRemote
                 repo.BaseBranch
-                (PrStatus.lookupPrStatus repo.PrData (GitWorktree.prBranchName gitData))
+                (PrStatus.tryLookupPrStatus repo.PrData (GitWorktree.prBranchName gitData)
+                 |> Option.defaultValue NoPr)
                 gitData
 
             DiffProvisioner.provisionViewer path
