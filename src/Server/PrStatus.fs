@@ -91,6 +91,7 @@ type internal ParsedPr =
       Title: string
       IsDraft: bool
       IsMerged: bool
+      AutoMergeEnabled: bool
       HasConflicts: bool
       ClosedDate: DateTimeOffset option }
 
@@ -135,6 +136,9 @@ let internal parsePrList (json: string) =
                     let hasConflicts =
                         el |> tryString "mergeStatus" = Some "conflicts"
 
+                    let autoMergeEnabled =
+                        not isMerged && (el |> tryProp "autoCompleteSetBy" |> Option.isSome)
+
                     let headSha =
                         el
                         |> tryProp "lastMergeSourceCommit"
@@ -147,6 +151,7 @@ let internal parsePrList (json: string) =
                           Title = title
                           IsDraft = isDraft
                           IsMerged = isMerged
+                          AutoMergeEnabled = autoMergeEnabled
                           HasConflicts = hasConflicts
                           ClosedDate = closedDate }
                 with ex ->
@@ -472,6 +477,7 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                                   Comments = threadCounts
                                   Builds = builds
                                   IsMerged = pr.IsMerged
+                                  AutoMergeEnabled = pr.AutoMergeEnabled
                                   HasConflicts = pr.HasConflicts },
                              pr.HeadSha)
                     })

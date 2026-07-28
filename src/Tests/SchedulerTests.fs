@@ -1548,6 +1548,7 @@ type MergedPrBranchScopeTests() =
                   Comments = WithResolution(0, 0)
                   Builds = []
                   IsMerged = true
+                  AutoMergeEnabled = false
                   HasConflicts = false }
 
         let repo =

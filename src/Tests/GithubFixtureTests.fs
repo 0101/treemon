@@ -73,6 +73,30 @@ type ParsePrListFixtureTests() =
         Assert.That(nonDraft.IsDraft, Is.False)
 
     [<Test>]
+    member _.``PR with auto_merge object has AutoMergeEnabled set``() =
+        let prs = readFixture "pr-list.json" |> parsePrList
+        let autoMerging = prs |> List.find (fun pr -> pr.PrNumber = 1)
+        Assert.That(autoMerging.AutoMergeEnabled, Is.True)
+
+    [<Test>]
+    member _.``PR without auto_merge property has AutoMergeEnabled false``() =
+        let prs = readFixture "pr-list.json" |> parsePrList
+        let plain = prs |> List.find (fun pr -> pr.PrNumber = 2)
+        Assert.That(plain.AutoMergeEnabled, Is.False)
+
+    [<Test>]
+    member _.``PR with null auto_merge has AutoMergeEnabled false``() =
+        let prs = readFixture "pr-list-with-closed.json" |> parsePrList
+        let draft = prs |> List.find (fun pr -> pr.PrNumber = 4)
+        Assert.That(draft.AutoMergeEnabled, Is.False)
+
+    [<Test>]
+    member _.``Merged PR keeps AutoMergeEnabled false despite auto_merge object``() =
+        let prs = readFixture "pr-list-with-closed.json" |> parsePrList
+        let merged = prs |> List.find (fun pr -> pr.PrNumber = 3)
+        Assert.That(merged.AutoMergeEnabled, Is.False)
+
+    [<Test>]
     member _.``Empty array returns empty list``() =
         let prs = parsePrList "[]"
         Assert.That(prs, Is.Empty)
