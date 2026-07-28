@@ -47,9 +47,14 @@ let archiveCard dispatch (wt: WorktreeStatus) =
         prop.key (WorktreePath.value wt.Path)
         prop.className "archive-card"
         prop.children [
-            Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
-            workMetricsView wt.WorkMetrics
-            Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
+            Html.div [
+                prop.className "header-info"
+                prop.children [
+                    Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
+                    FitOrHide (workMetricsItems wt.WorkMetrics)
+                ]
+            ]
+            Html.span [ prop.className "commit-time"; prop.text (relativeTimeCompact System.DateTimeOffset.Now wt.LastCommitTime) ]
             Html.button [
                 prop.className "unarchive-btn"
                 prop.title "Unarchive worktree"
