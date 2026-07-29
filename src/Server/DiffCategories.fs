@@ -38,6 +38,13 @@ let private maxNameLength = 100
 let private maxPatternsPerLeaf = 50
 let private maxPatternLength = 200
 
+// Classification runs synchronously per summary request, and a pattern costs its own length times the
+// path length on every one of the diff's files. The per-leaf limits alone would still admit thousands
+// of long star-crowded patterns, whose combined cost is minutes of CPU rather than milliseconds, so
+// the whole configuration's pattern text is what carries the bound. It is far above any real
+// configuration: an ordinary repository declares a few hundred characters of patterns in total.
+let private maxPatternCharacters = 5000
+
 /// The trailing group label the viewer reserves for unmatched files. `internal` for the same reason
 /// as `maxDepth`: the template names it too, and a test holds the two together.
 let internal reservedTopLevelName = "Other"
@@ -57,6 +64,9 @@ let private depthReason = $"categories may nest at most {maxDepth} levels deep"
 let private nodeCountReason = $"a repository may declare at most {maxNodes} categories"
 let private patternCountReason = $"a category may list at most {maxPatternsPerLeaf} patterns"
 let private patternLengthReason = $"a pattern may be at most {maxPatternLength} characters long"
+
+let private patternBudgetReason =
+    $"a repository may declare at most {maxPatternCharacters} characters of patterns in total"
 let private nameLengthReason = $"a name may be at most {maxNameLength} characters long"
 
 /// Ordinal case-insensitive equality, the comparison sibling uniqueness and the reserved top-level
@@ -72,6 +82,11 @@ let rec private countNodes node =
     match node with
     | Leaf _ -> 1
     | Branch branch -> 1 + (branch.Children |> List.sumBy countNodes)
+
+let rec private countPatternCharacters node =
+    match node with
+    | Leaf leaf -> leaf.Patterns |> List.sumBy _.Length
+    | Branch branch -> branch.Children |> List.sumBy countPatternCharacters
 
 let private tryProperty (propertyName: string) (element: JsonElement) =
     match element.TryGetProperty(propertyName) with
@@ -155,7 +170,15 @@ let private validate element =
                 else
                     Ok()
 
-            return! if (roots |> List.sumBy countNodes) > maxNodes then Error nodeCountReason else Ok roots
+            do!
+                if (roots |> List.sumBy countNodes) > maxNodes then Error nodeCountReason
+                else Ok()
+
+            return!
+                if (roots |> List.sumBy countPatternCharacters) > maxPatternCharacters then
+                    Error patternBudgetReason
+                else
+                    Ok roots
         }
 
     match validated with
@@ -173,22 +196,27 @@ let read (repoRoot: string) : Configuration =
 /// bytes, so reformatting `.treemon.json` is correctly not a change, while a rewrite that keeps the
 /// `Configured` status but alters names, nesting, order, or patterns is.
 let revision (configuration: Configuration) =
+    // Length-prefixed, because a name or pattern may contain any of the punctuation that separates
+    // one from the next: without it the single pattern `x|y` and the pair `x`, `y` encode alike, and
+    // a poller watching for a rewrite would miss the difference between them.
+    let encode (value: string) = $"{value.Length}:{value}"
+
     let rec outline node =
         match node with
         | Leaf leaf ->
-            let patterns = String.concat "|" leaf.Patterns
-            $"L:{leaf.Name}({patterns})"
+            let patterns = leaf.Patterns |> List.map encode |> String.concat ""
+            $"L{encode leaf.Name}{leaf.Patterns.Length}({patterns})"
         | Branch branch ->
-            let children = branch.Children |> List.map outline |> String.concat ","
-            $"B:{branch.Name}[{children}]"
+            let children = branch.Children |> List.map outline |> String.concat ""
+            $"B{encode branch.Name}{branch.Children.Length}[{children}]"
 
     let content =
         match configuration with
         | Missing -> "missing"
-        | Invalid reason -> $"invalid:{reason}"
+        | Invalid reason -> $"invalid:{encode reason}"
         | Configured roots ->
-            let roots = roots |> List.map outline |> String.concat ","
-            $"configured:{roots}"
+            let roots = roots |> List.map outline |> String.concat ""
+            $"configured:{roots.Length}({roots})"
 
     use sha = System.Security.Cryptography.SHA256.Create()
 

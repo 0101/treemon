@@ -105,6 +105,17 @@ let readySummaryJsonWithCounts committed local untracked files =
 let readySummaryJson files =
     readySummaryJsonWithCounts 2 3 1 files
 
+/// A comparison with nothing to show. Like the server's, it carries no categorization at all, which
+/// is what leaves a viewer without a revision to start a configure wait from.
+let cleanSummaryJson =
+    JsonSerializer.Serialize(
+        {| status = "clean"
+           baseRef = "origin/main"
+           fileCount = 0
+           files = ([||]: obj array)
+           layerCounts = readyLayerCounts 0 0 0 |}
+    )
+
 let configuredSummaryJson files =
     summaryJsonWithCategorization (categorizationJson "configured" None) 2 3 1 files
 

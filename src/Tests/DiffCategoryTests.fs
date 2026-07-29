@@ -1487,6 +1487,79 @@ type DiffCategoryE2ETests() =
         }
 
     [<Test>]
+    member this.``a configuration written before the first poll still ends the wait``() =
+        task {
+            // A clean comparison carries no categorization, so the only baseline available is one the
+            // viewer reads itself. It must do that before dispatching: an agent can write
+            // `.treemon.json` within a poll interval, and a baseline taken from the first poll would
+            // already be the new configuration, hiding the rewrite the viewer waits for.
+            do!
+                this.RouteSummaries(
+                    [| cleanSummaryJson
+                       summaryJsonWithCategorization
+                           (categorizationJsonAt "configured" None "rev-2")
+                           2
+                           3
+                           1
+                           (categoryFiles [ "Client" ] 1) |]
+                )
+
+            // Playwright hands the handler no place to carry a count, and the count is what the
+            // ordering is visible through: the read must already have happened when the message posts.
+            let mutable reads = 0
+
+            do!
+                this.Page.RouteAsync(
+                    "**/diff-categorization",
+                    fun (route: IRoute) ->
+                        reads <- reads + 1
+
+                        let body =
+                            if reads = 1 then categorizationBody "missing" None "rev-1"
+                            else categorizationBody "configured" None "rev-2"
+
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                        |> ignore
+                )
+
+            do! this.GotoEmbedded(pageUrl)
+            let frame = this.EmbeddedFrame()
+            let action = frame.Locator(configureSelector)
+            do! action.WaitForAsync()
+            do! this.ActivateConfigure(action)
+
+            let readsBeforeDispatch = reads
+
+            do! frame.Locator(".category-entry").First.WaitForAsync()
+
+            let! settled =
+                action.EvaluateAsync<string array>(
+                    """action => [
+                        String(action.disabled),
+                        String(action.getAttribute('aria-busy'))
+                    ]"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    readsBeforeDispatch,
+                    Is.EqualTo(1),
+                    "the baseline must be read before the request is dispatched"
+                )
+
+                Assert.That(
+                    settled,
+                    Is.EqualTo([| "false"; "false" |]),
+                    "the rewrite must be observed against the pre-dispatch revision"
+                ))
+        }
+
+    [<Test>]
     member this.``the embedded configure action reuses the refresh control's treatment``() =
         task {
             do! this.RouteSummary(readySummaryJson [| firstFile |])

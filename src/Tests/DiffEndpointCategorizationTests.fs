@@ -393,6 +393,53 @@ type DiffEndpointRepositoryConfigurationTests() =
                         ))))
 
     [<Test>]
+    member _.``the categorization route requires a viewer instance and takes no parameters``() =
+        withRepository "contract" (fun repoRoot _ ->
+            File.WriteAllText(Path.Combine(repoRoot, ".treemon.json"), rootConfiguration)
+
+            let neverCallService: WorktreeDiffApi.Service =
+                { GetSummary = fun _ _ _ -> failwith "the categorization route ran a diff"
+                  GetLayerCounts =
+                    fun _ _ -> failwith "the categorization route counted layers"
+                  GetFile = fun _ _ _ _ _ -> failwith "the categorization route read a file" }
+
+            withServer
+                repoRoot
+                [ repoRoot ]
+                neverCallService
+                _.Path
+                (fun client baseUrl ->
+                    let url = worktreeUrl baseUrl repoRoot "diff-categorization"
+
+                    use headerless = new HttpClient()
+                    use missingViewer = get headerless url
+                    use parameterized = get client $"{url}?committed=true"
+                    use accepted = get client url
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(
+                            missingViewer.StatusCode,
+                            Is.EqualTo(HttpStatusCode.BadRequest)
+                        )
+
+                        Assert.That(
+                            getResponseBody missingViewer,
+                            Is.EqualTo("Invalid diff viewer")
+                        )
+
+                        Assert.That(
+                            parameterized.StatusCode,
+                            Is.EqualTo(HttpStatusCode.BadRequest)
+                        )
+
+                        Assert.That(
+                            getResponseBody parameterized,
+                            Is.EqualTo("Invalid diff-categorization query")
+                        )
+
+                        Assert.That(accepted.StatusCode, Is.EqualTo(HttpStatusCode.OK)))))
+
+    [<Test>]
     member _.``an unknown worktree still 404s instead of resolving a configuration``() =
         withRepository "unknown" (fun repoRoot _ ->
             File.WriteAllText(Path.Combine(repoRoot, ".treemon.json"), rootConfiguration)

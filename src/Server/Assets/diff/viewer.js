@@ -587,12 +587,38 @@ function canvasTransportAvailable() {
 
 // The single place the configure payload is built. Existing SystemView routing owns delivery,
 // session startup, and the waiting/error banners, so this only posts the fixed request.
-function sendConfigureRequest() {
+// The revision the repository has right now, for the case where no rendered summary carries one.
+// Null when the read fails, which leaves the wait to establish its baseline from the first poll.
+async function fetchCurrentRevision() {
+    try {
+        var current = await fetchJson('diff-categorization', { cache: 'no-store' });
+        return current.revision;
+    } catch (_) {
+        return null;
+    }
+}
+
+// The baseline is captured before the request is dispatched, not on the first poll: an agent can
+// write `.treemon.json` within one poll interval, and a baseline read afterwards would already be
+// the new configuration, so the change the viewer is waiting for would never be observed.
+async function sendConfigureRequest() {
     if (state.configurePending) return;
+    // Marked pending across the baseline read too, so a second activation during it cannot dispatch
+    // a second request.
+    state.configurePending = true;
+    applyConfigurePending();
+
+    var baseline = configuredRevision();
+    if (baseline === null) baseline = await fetchCurrentRevision();
+
     // canvasSend reports only whether the message left the page. A dropped message never reaches an
     // agent, so entering the waiting state then would strand the control until it timed out.
-    if (window.canvasSend(CONFIGURE_ACTION, { request: CONFIGURE_REQUEST }) === false) return;
-    beginConfigureWait();
+    if (window.canvasSend(CONFIGURE_ACTION, { request: CONFIGURE_REQUEST }) === false) {
+        endConfigureWait();
+        return;
+    }
+
+    beginConfigureWait(baseline);
 }
 
 function configuredRevision() {
@@ -624,10 +650,7 @@ function endConfigureWait() {
 // Watches the repository's categorization rather than the agent: an agent can finish its turn
 // without writing anything, and what the viewer must react to is the configuration actually
 // changing. The revision covers a rewrite that leaves the status `configured`.
-function beginConfigureWait() {
-    // Null when no ready summary has been rendered — a clean or failed comparison still shows the
-    // action. The first poll then establishes the baseline instead of counting as a change.
-    var baseline = configuredRevision();
+function beginConfigureWait(baseline) {
     var deadline = Date.now() + CONFIGURE_TIMEOUT_MS;
     var polling = false;
     state.configurePending = true;
@@ -646,6 +669,8 @@ function beginConfigureWait() {
         try {
             var current = await fetchJson('diff-categorization', { cache: 'no-store' });
             if (!state.configurePending) return;
+            // Only reached when the pre-dispatch read failed: the first poll that answers then
+            // stands in for it.
             if (baseline === null) baseline = current.revision;
             if (current.revision === baseline) return;
             endConfigureWait();

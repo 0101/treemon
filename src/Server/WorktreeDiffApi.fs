@@ -1038,16 +1038,20 @@ let private handleFile
 
 /// The categorization on its own, so a viewer waiting for an agent to write `diffCategories` can
 /// watch for the change without paying for a diff: this reads and validates `.treemon.json` and runs
-/// no Git command.
+/// no Git command. It takes no parameters, and like the other two routes it answers only a request
+/// carrying a viewer instance.
 let private handleCategorization
     deadline
     (categorization: DiffCategories.Configuration option)
     (ctx: HttpContext)
     =
     task {
-        match categorization with
-        | None -> do! writeError deadline ctx 404 "Unknown worktree"
-        | Some configuration ->
+        match categorization, viewerInstance ctx, ctx.Request.Query.Count with
+        | None, _, _ -> do! writeError deadline ctx 404 "Unknown worktree"
+        | Some _, None, _ -> do! writeError deadline ctx 400 "Invalid diff viewer"
+        | Some _, Some _, count when count <> 0 ->
+            do! writeError deadline ctx 400 "Invalid diff-categorization query"
+        | Some configuration, Some _, _ ->
             do!
                 configuration
                 |> categorizationJson

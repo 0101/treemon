@@ -318,6 +318,20 @@ type DiffCategoriesValidationTests() =
         assertInvalid (categoriesJson [ leafJson "Docs" [ String('a', 201) ] ]) "at most 200 characters"
 
     [<Test>]
+    member _.``patterns totalling five thousand code units are allowed``() =
+        let patterns = List.init 25 (fun i -> $"{String('a', 197)}{i:D3}")
+        Assert.That(readFrom (categoriesJson [ leafJson "Docs" patterns ]) |> outlineOf |> List.length, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``patterns totalling more than five thousand code units are invalid``() =
+        // Well inside every per-node bound — 26 leaves of 10 twenty-character patterns — yet enough
+        // matching work that classification would cost minutes rather than milliseconds.
+        let nodes =
+            List.init 26 (fun leaf -> leafJson $"C{leaf}" (List.init 10 (fun i -> $"{String('a', 17)}{leaf:D2}{i}")))
+
+        assertInvalid (categoriesJson nodes) "at most 5000 characters of patterns"
+
+    [<Test>]
     member _.``a name of one hundred characters is allowed``() =
         let name = String('n', 100)
         Assert.That(readFrom (categoriesJson [ leafJson name [ "a/**" ] ]) |> outlineOf, Is.EqualTo([ $"{name} [a/**]" ]))
@@ -394,6 +408,25 @@ type DiffCategoriesRevisionTests() =
             Assert.That(repatterned, Is.Not.EqualTo(before), "an edited pattern is a change")
             Assert.That(reordered, Is.Not.EqualTo(before), "precedence order is a change")
             Assert.That(nested, Is.Not.EqualTo(before), "nesting is a change"))
+
+    [<Test>]
+    member _.``names and patterns containing the encoding's punctuation still differ``() =
+        // Names and patterns are repository-authored, so any separator they might be joined with can
+        // appear inside them. Each of these pairs would collide under a plain join.
+        let distinct =
+            [ Configured [ leafNode "Client" [ "x|y" ] ], Configured [ leafNode "Client" [ "x"; "y" ] ]
+              Configured [ leafNode "A,B" [ "*" ] ], Configured [ leafNode "A" [ "*" ]; leafNode "B" [ "*" ] ]
+              Configured [ leafNode "Client[Docs]" [ "*" ] ],
+              Configured [ Branch { Name = "Client"; Children = [ leafNode "Docs" [ "*" ] ] } ] ]
+
+        Assert.Multiple(fun () ->
+            distinct
+            |> List.iter (fun (left, right) ->
+                Assert.That(
+                    DiffCategories.revision left,
+                    Is.Not.EqualTo(DiffCategories.revision right),
+                    $"{left} and {right} must not share a revision"
+                )))
 
     [<Test>]
     member _.``reformatting the configuration file is not a change``() =
