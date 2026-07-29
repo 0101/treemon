@@ -38,6 +38,10 @@ type IWorktreeApi =
       addRoot: string -> Async<Result<unit, string>>
       removeRoot: string -> Async<Result<unit, string>>
       getRoots: unit -> Async<string list>
+      /// What the diff categorization of the repository owning the given worktree path does to that
+      /// repository's tracked files, so an agent that just wrote `diffCategories` can check its own
+      /// work. A path outside every watched root is an error.
+      getDiffCategoryReport: string -> Async<Result<DiffCategoryReport, string>>
       /// Count-only Overview history for the explicitly requested window, anchored to the server
       /// computation instant so every caller renders identical timeline edges.
       getOverviewHistory: OverviewData.HistoryWindow -> Async<OverviewData.OverviewHistoryResponse> }

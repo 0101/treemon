@@ -32,15 +32,27 @@ type internal Service =
                  >
              > }
 
+/// What one diff summary request is about: the comparison to run and the categorization that
+/// orders its result. Both are derived from the same resolved repository, so pairing them in one
+/// value keeps a context from one repository and a categorization from another unrepresentable.
+type internal DiffSummaryTarget =
+    { Comparison: WorktreeDiff.DiffComparisonContext
+      Categorization: DiffCategories.Configuration }
+
 type internal Handlers =
     { Summary:
         ProcessRunner.ResponseDeadline
-            -> WorktreeDiff.DiffComparisonContext option
+            -> DiffSummaryTarget option
             -> HttpContext
             -> System.Threading.Tasks.Task<unit>
       File:
         ProcessRunner.ResponseDeadline
             -> WorktreeDiff.DiffComparisonContext option
+            -> HttpContext
+            -> System.Threading.Tasks.Task<unit>
+      Categorization:
+        ProcessRunner.ResponseDeadline
+            -> DiffCategories.Configuration option
             -> HttpContext
             -> System.Threading.Tasks.Task<unit> }
 
@@ -463,7 +475,29 @@ let private diffFileJson (file: DiffFileSummary) =
        oldDisplayPath = file.OldDisplayPath
        linesAdded = file.LinesAdded
        linesRemoved = file.LinesRemoved
-       change = diffChangeName file.Change |}
+       change = diffChangeName file.Change
+       categoryPath = file.CategoryPath |}
+
+/// The categorization state of the repository, without a single repository-authored pattern: the
+/// browser receives only the status, for an invalid configuration the fixed validation reason, and a
+/// revision that changes whenever the configuration does — including a rewrite that stays
+/// `configured`, which a status alone cannot distinguish.
+let private categorizationJson (categorization: DiffCategories.Configuration) =
+    let revision = DiffCategories.revision categorization
+
+    match categorization with
+    | DiffCategories.Missing ->
+        {| status = "missing"
+           reason = None
+           revision = revision |}
+    | DiffCategories.Configured _ ->
+        {| status = "configured"
+           reason = None
+           revision = revision |}
+    | DiffCategories.Invalid reason ->
+        {| status = "invalid"
+           reason = Some reason
+           revision = revision |}
 
 let private diffReplacementName =
     function
@@ -502,7 +536,7 @@ let private layerCountsJson (counts: DiffLayerCounts) =
        local = layerCountJson counts.LocalChanges
        untracked = layerCountJson counts.Untracked |}
 
-let internal serializeSummaryResult counts =
+let internal serializeSummaryResult counts categorization =
     let countsJson = layerCountsJson counts
 
     function
@@ -512,6 +546,7 @@ let internal serializeSummaryResult counts =
                baseRef = details.BaseRef
                fileCount = details.FileCount
                files = details.Files |> List.map diffFileJson
+               categorization = categorizationJson categorization
                layerCounts = countsJson |}
         )
     | DiffSummaryResult.Clean baseRef ->
@@ -612,6 +647,7 @@ let internal serializeFileResult =
 
 let private issueFile
     (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
+    categoryPath
     (entry: WorktreeDiff.WorktreeDiffEntry)
     =
     { Identity = newIdentity entry
@@ -619,7 +655,8 @@ let private issueFile
       OldDisplayPath = entry.OldPath
       LinesAdded = entry.LinesAdded
       LinesRemoved = entry.LinesRemoved
-      Change = diffChangeKind entry.Status }
+      Change = diffChangeKind entry.Status
+      CategoryPath = categoryPath }
 
 let private summaryErrorResult =
     function
@@ -804,14 +841,15 @@ let private handleSummary
     (store: DiffIdentityStore)
     newIdentity
     deadline
-    (comparisonContext: WorktreeDiff.DiffComparisonContext option)
+    (target: DiffSummaryTarget option)
     (ctx: HttpContext)
     =
     task {
-        match comparisonContext with
+        match target with
         | None ->
             do! writeError deadline ctx 404 "Unknown worktree"
-        | Some comparisonContext ->
+        | Some { Comparison = comparisonContext
+                 Categorization = categorization } ->
             let worktreePath = comparisonContext.WorktreePath
 
             match viewerInstance ctx, summaryLayers ctx with
@@ -844,7 +882,9 @@ let private handleSummary
                 do!
                     DiffSummaryResult.FilteredEmpty
                     |> summaryResultIfCurrent isCurrent
-                    |> serializeSummaryResult (layerCounts counts)
+                    |> serializeSummaryResult
+                        (layerCounts counts)
+                        categorization
                     |> writeJson deadline ctx
             | Some viewer, Some layers ->
                 let! generation =
@@ -891,10 +931,24 @@ let private handleSummary
                                 DiffSummaryResult.Clean summary.BaseRef
                                 |> summaryResultIfCurrent isCurrent
                         | Ok summary ->
+                            let entryPaths
+                                (entry: WorktreeDiff.WorktreeDiffEntry)
+                                =
+                                entry.Path, entry.OldPath
+
+                            // Classified before identities are issued, so the stored snapshot and
+                            // the browser agree on both file order and grouping.
                             let issued =
                                 summary.Files
-                                |> List.map (fun entry ->
-                                    issueFile newIdentity entry, entry)
+                                |> DiffCategories.classifyAndOrder
+                                    categorization
+                                    entryPaths
+                                |> List.map (fun (entry, categoryPath) ->
+                                    issueFile
+                                        newIdentity
+                                        categoryPath
+                                        entry,
+                                    entry)
 
                             let! isCurrent =
                                 store.ReplaceCurrent(
@@ -930,7 +984,9 @@ let private handleSummary
 
                 do!
                     response
-                    |> serializeSummaryResult (layerCounts counts)
+                    |> serializeSummaryResult
+                        (layerCounts counts)
+                        categorization
                     |> writeJson deadline ctx
     }
 
@@ -980,13 +1036,37 @@ let private handleFile
                 do! writeError deadline ctx 400 "Invalid diff-file query"
     }
 
+/// The categorization on its own, so a viewer waiting for an agent to write `diffCategories` can
+/// watch for the change without paying for a diff: this reads and validates `.treemon.json` and runs
+/// no Git command. It takes no parameters, and like the other two routes it answers only a request
+/// carrying a viewer instance.
+let private handleCategorization
+    deadline
+    (categorization: DiffCategories.Configuration option)
+    (ctx: HttpContext)
+    =
+    task {
+        match categorization, viewerInstance ctx, ctx.Request.Query.Count with
+        | None, _, _ -> do! writeError deadline ctx 404 "Unknown worktree"
+        | Some _, None, _ -> do! writeError deadline ctx 400 "Invalid diff viewer"
+        | Some _, Some _, count when count <> 0 ->
+            do! writeError deadline ctx 400 "Invalid diff-categorization query"
+        | Some configuration, Some _, _ ->
+            do!
+                configuration
+                |> categorizationJson
+                |> JsonSerializer.Serialize
+                |> writeJson deadline ctx
+    }
+
 let internal createHandlersWithStore
     (store: DiffIdentityStore)
     (service: Service)
     newIdentity
     =
     { Summary = handleSummary service store newIdentity
-      File = handleFile service store }
+      File = handleFile service store
+      Categorization = handleCategorization }
 
 let internal createHandlers
     (service: Service)

@@ -1,5 +1,6 @@
 module Tests.CliTests
 
+open System
 open NUnit.Framework
 open Shared
 open Cli.Program
@@ -149,3 +150,71 @@ type FoldRootResultsTests() =
         // Degenerate (CLI arity is OneOrMore, so unreachable in practice): no failures → 0.
         let result = foldRootResults "Added" (stubOp Set.empty) [||]
         Assert.That(result, Is.EqualTo(0))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type FormatDiffCategoryReportTests() =
+
+    let coverage path count : DiffCategoryCoverage = { CategoryPath = path; FileCount = count }
+
+    let linesOf report = formatDiffCategoryReport report |> fst
+
+    let exitCodeOf report = formatDiffCategoryReport report |> snd
+
+    let configured =
+        DiffCategoryReport.Configured(
+            [ coverage [ "Production code"; "Client" ] 8
+              coverage [ "Production code"; "Server" ] 112
+              coverage [ "Docs" ] 0 ],
+            14
+        )
+
+    [<Test>]
+    member _.``a missing configuration exits non-zero so the command works as a check``() =
+        Assert.That(exitCodeOf DiffCategoryReport.Missing, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``an invalid configuration exits non-zero and reports the validation reason``() =
+        let reason = "categories sharing a parent need distinct names"
+        let lines = linesOf (DiffCategoryReport.Invalid reason)
+
+        Assert.That(exitCodeOf (DiffCategoryReport.Invalid reason), Is.EqualTo(1))
+        Assert.That(String.Join("\n", lines), Does.Contain(reason))
+
+    [<Test>]
+    member _.``a configured repository exits zero even when a category matches nothing``() =
+        // Exit status reports the configuration state; a zero-match leaf is surfaced in the output
+        // instead, so a caller cannot mistake "configured but useless" for "not configured".
+        Assert.That(exitCodeOf configured, Is.EqualTo(0))
+
+    [<Test>]
+    member _.``every declared category is listed with its count, in configuration order``() =
+        let listed =
+            linesOf configured
+            |> List.filter (fun line -> line.StartsWith("  "))
+            |> List.map (fun line -> line.Trim())
+
+        Assert.That(
+            listed,
+            Is.EqualTo(
+                [ "8  Production code > Client"
+                  "112  Production code > Server"
+                  "0  Docs  ⚠ matches no tracked file" ]),
+            "counts are right-aligned and a zero-match category is flagged")
+
+    [<Test>]
+    member _.``the summary reports matched and unmatched totals``() =
+        let summary = linesOf configured |> List.last
+
+        Assert.That(summary, Does.Contain("120 of 134 tracked files matched"))
+        Assert.That(summary, Does.Contain("14 unmatched"))
+
+    [<Test>]
+    member _.``a repository-authored category name cannot emit terminal control characters``() =
+        let hostile = DiffCategoryReport.Configured([ coverage [ "Cli\u001b[2Jent" ] 1 ], 0)
+        let rendered = linesOf hostile |> String.concat " "
+
+        Assert.That(rendered |> Seq.filter Char.IsControl |> Seq.toList, Is.Empty)
+        Assert.That(rendered, Does.Contain("Cli[2Jent"), "the name still renders, without the escape")

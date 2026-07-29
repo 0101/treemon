@@ -13,20 +13,36 @@ let private configPath repoRoot = Path.Combine(repoRoot, ".treemon.json")
 let private validRemoteNamePattern = Regex(@"^[a-zA-Z0-9._-]+$")
 let private validBranchNamePattern = Regex(@"^[a-zA-Z0-9][a-zA-Z0-9._/-]*$")
 
-let private withJsonProperty (path: string) (propertyName: string) (onFound: JsonElement -> 'a) (defaultValue: 'a) : 'a =
+/// One `.treemon.json` property read as a value the caller owns. `Absent` covers a missing file or a
+/// missing key; `Unreadable` covers a file that failed to parse. Readers that must not report a
+/// broken file as "not configured" need that distinction.
+type internal PropertyRead =
+    | Absent
+    | Unreadable
+    | Present of JsonElement
+
+/// Cloned before the `JsonDocument` is disposed, so the returned element is never borrowed from a
+/// disposed document.
+let private readProperty (path: string) (propertyName: string) : PropertyRead =
     if not (File.Exists(path)) then
-        defaultValue
+        Absent
     else
         try
             let json = File.ReadAllText(path)
             use doc = JsonDocument.Parse(json)
 
             match doc.RootElement.TryGetProperty(propertyName) with
-            | true, elem -> onFound elem
-            | _ -> defaultValue
+            | true, elem -> Present(elem.Clone())
+            | _ -> Absent
         with ex ->
             Log.log "TreemonConfig" $"Failed to read {propertyName} from {path}: {ex.Message}"
-            defaultValue
+            Unreadable
+
+let private withJsonProperty (path: string) (propertyName: string) (onFound: JsonElement -> 'a) (defaultValue: 'a) : 'a =
+    match readProperty path propertyName with
+    | Present elem -> onFound elem
+    | Absent
+    | Unreadable -> defaultValue
 
 let private readStringArrayCore (path: string) (propertyName: string) : string list =
     withJsonProperty path propertyName (fun elem ->
@@ -115,3 +131,8 @@ let readBaseBranch (repoRoot: string) : string =
             Log.log "TreemonConfig" $"Rejected invalid baseBranch value: '{value}'"
             None)
     |> Option.defaultValue "main"
+
+/// Reads the raw `diffCategories` value. `DiffCategories` owns the schema and validates the shape;
+/// this module stays the only reader of `.treemon.json`.
+let internal readDiffCategories (repoRoot: string) : PropertyRead =
+    lock configLock (fun () -> readProperty (configPath repoRoot) "diffCategories")

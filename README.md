@@ -83,6 +83,7 @@ tm worktrees                                                 # list all worktree
 tm add C:\code\my-project                                   # watch a root (applies on next server restart)
 tm remove C:\code\my-project                                # stop watching a root
 tm roots                                                     # list watched roots
+tm categories                                                # report what the repo's diff categories match
 ```
 
 All commands accept `--port` (default: 5000, env: `TREEMON_PORT`). You can also run `.\tm.ps1` directly from the repo root without installing.

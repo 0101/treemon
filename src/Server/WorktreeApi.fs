@@ -78,6 +78,7 @@ let readOnlyApi
       addRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
       removeRoot = fun _ -> async { return Error $"Root management is not available in {modeName}" }
       getRoots = fun () -> async { return [] }
+      getDiffCategoryReport = fun _ -> async { return Error $"Diff categories are not available in {modeName}" }
       // No durable activity history in demo/fixture modes, but preserve the anchored wire contract.
       getOverviewHistory =
         fun _ ->
@@ -611,6 +612,22 @@ let private updateArchivedBranches
             return Ok ()
     }
 
+/// What one repository's declared diff categories do to its tracked files. Only a `Configured`
+/// repository pays for enumerating them — the other states are the whole report — and the enumeration
+/// runs at the repository root the shared `.treemon.json` was read from, so every linked worktree
+/// gets the same answer for the configuration they share.
+let internal diffCategoryReport (repoRoot: string) : Async<Result<DiffCategoryReport, string>> =
+    asyncResult {
+        match DiffCategories.read repoRoot with
+        | DiffCategories.Configured _ as configuration ->
+            let! tracked =
+                WorktreeDiff.listTrackedFiles repoRoot
+                |> AsyncResult.mapError (fun _ -> $"Could not list the tracked files of '{repoRoot}'")
+
+            return DiffCategories.coverage configuration tracked
+        | unconfigured -> return DiffCategories.coverage unconfigured []
+    }
+
 let worktreeApi
     (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
     (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
@@ -958,6 +975,15 @@ let worktreeApi
           addRoot = fun path -> async { return addRootToConfig path }
           removeRoot = fun path -> async { return removeRootFromConfig path }
           getRoots = fun () -> async { return readWorktreeRootsConfig () }
+          getDiffCategoryReport =
+            fun path ->
+                async {
+                    let! state = agent.PostAndAsyncReply(RefreshScheduler.StateMsg.GetState)
+
+                    match RefreshScheduler.tryFindOwningRepo state path with
+                    | None -> return Error $"No watched worktree found at '{path}'"
+                    | Some(repoId, _) -> return! diffCategoryReport (RepoId.value repoId)
+                }
           getOverviewHistory =
             fun requestedWindow ->
                 match snapshotStore with
