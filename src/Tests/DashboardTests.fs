@@ -720,6 +720,36 @@ type DashboardTests() =
                 Assert.That(title, Is.EqualTo("Auto-sync with main (S)"), "Tooltip should name the base branch"))
         }
 
+    [<Test>]
+    member this.``Auto-sync in-flight state is visible without animation``() =
+        task {
+            // A sync can reach the network, so the toggle must show it is working. The cue has to be
+            // static: a machine with animations disabled reports prefers-reduced-motion, which drops
+            // the spin, and the in-flight button is undimmed — so an animation-only cue leaves such a
+            // user with no feedback at all. Comparing computed colour catches exactly that regression.
+            let toggle = this.Page.Locator(".auto-sync-btn.active").First
+            do! toggle.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let readPaint =
+                "const s = getComputedStyle(el); return s.color + '|' + s.borderTopColor + '|' + s.opacity;"
+
+            let readPaint =
+                "el => { const s = getComputedStyle(el); return s.color + '|' + s.borderTopColor + '|' + s.opacity; }"
+
+            let! resting = toggle.EvaluateAsync<string>(readPaint)
+            let! _ = toggle.EvaluateAsync<obj>("el => el.classList.add('syncing')")
+            // The button transitions colour over 0.15s, so an immediate read still returns the
+            // pre-transition paint. Wait past it before sampling.
+            do! this.Page.WaitForTimeoutAsync(400.0f)
+            let! syncing = toggle.EvaluateAsync<string>(readPaint)
+            let! _ = toggle.EvaluateAsync<obj>("el => el.classList.remove('syncing')")
+
+            Assert.That(
+                syncing,
+                Is.Not.EqualTo(resting),
+                "the syncing toggle must differ from the resting one by paint alone, not only by animation")
+        }
+
     [<TestCase("working")>]
     [<TestCase("waiting")>]
     member this.``Auto-sync toggle stays enabled while Copilot session is busy``(status: string) =
@@ -2064,7 +2094,8 @@ type DashboardTests() =
             do! toggle.ClickAsync()
             let! firstRoute = nextRoute ()
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
-            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn active")
+            // In flight: optimistically enabled AND marked syncing, so the wait is visible.
+            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn active syncing")
             do! Assertions.Expect(toggle).ToBeDisabledAsync()
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-disabled", "true")
 
@@ -2101,7 +2132,8 @@ type DashboardTests() =
             do! toggle.ClickAsync()
             let! disableRoute = nextRoute ()
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "false")
-            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn")
+            // Disabling is in flight: optimistically off, and still marked syncing until it returns.
+            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn syncing")
             do! Assertions.Expect(toggle).ToBeDisabledAsync()
             do! disableRoute.FulfillAsync(
                 RouteFulfillOptions(

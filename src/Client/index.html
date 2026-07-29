@@ -107,10 +107,15 @@
         .resume-btn:hover { color: #fab387; border-color: #fab387; }
         .has-session .terminal-btn, .auto-sync-btn.active { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
         .auto-sync-btn:disabled { opacity: 0.55; cursor: not-allowed; }
-        /* A sync can reach the network, so the toggle reports progress rather than only going dead:
-           the two-arrow glyph turns for as long as the request is in flight. Reduced motion keeps
-           the undimmed state, and the title says "Syncing…" either way. */
-        .auto-sync-btn.syncing { opacity: 1; }
+        /* A sync can reach the network, so the toggle reports progress rather than only going dead.
+           The state must read WITHOUT animation: undimming the disabled button removes the only
+           other cue, so a reduced-motion user would otherwise see nothing at all. Yellow is the
+           palette's existing in-progress tint, and it also distinguishes "working" from the green
+           "enabled" state; the glyph additionally turns where motion is allowed. */
+        .auto-sync-btn.syncing {
+            opacity: 1; color: #f9e2af; border-color: #f9e2af;
+            text-shadow: none; box-shadow: none;
+        }
         .auto-sync-btn.syncing .btn-icon { animation: sync-spin 1s linear infinite; }
         @keyframes sync-spin { to { transform: rotate(360deg); } }
         @media (prefers-reduced-motion: reduce) {
