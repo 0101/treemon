@@ -44,7 +44,7 @@ This project uses strict functional F# style. These rules are non-negotiable.
 - **Immutable collections** — use F# `list`, `Map`, `Set` instead of `Dictionary<>`, `ResizeArray`, `List<T>` (mutable .NET types)
 - **String interpolation** — `$"text {x}"` instead of `sprintf "text %s" x`
 - **Modern indexing** — `collection[0]` not `collection.[0]` (dot-bracket obsolete since F# 6)
-- **Nested record copy-and-update** — collapse hand-nested updates with F# 7+ dotted syntax: `{ x with A.B = v }`, and multi-field `{ x with A.B = v1; A.C = v2 }`, instead of `{ x with A = { x.A with B = v } }`. Only applies when the inner record copies the *same* field of the *same* source (`x.A`); it does **not** apply inside a full record literal such as `{ A = { x.A with B = v }; C = ... }` (no outer `with`). Fable 4.28 supports this syntax.
+- **Nested record copy-and-update** — collapse hand-nested updates with F# 7+ dotted syntax: `{ x with A.B = v }`, and multi-field `{ x with A.B = v1; A.C = v2 }`, instead of `{ x with A = { x.A with B = v } }`. Only applies when the inner record copies the *same* field of the *same* source (`x.A`); it does **not** apply inside a full record literal such as `{ A = { x.A with B = v }; C = ... }` (no outer `with`). Fable 5.0 supports this syntax.
 - **CSS over inline styles** — use `prop.className` with CSS classes, not `style.*` in Feliz views (inline styles bypass the theme)
 - **`Path.Combine()`** for paths, **`Environment.NewLine`** for line endings
 
@@ -82,6 +82,11 @@ Before implementing a helper, utility, or any non-trivial logic, **search the co
 - Do not test trivial property accessors or simple constructors
 - E2E tests use Playwright + NUnit against live data
 - Tests should assert on CSS classes and DOM structure, not specific data values
+- Tests or verification harnesses that exercise real session spawning must use an isolated temporary
+  worktree and session store, call `killSession` for every tracked worktree before stopping or
+  restarting the test server, and fail when cleanup is incomplete. A crash fallback may stop only
+  `pwsh.exe` PIDs whose decoded `-EncodedCommand` starts in that unique fixture path; never terminate
+  the shared `WindowsTerminal.exe`/HWND-owner PID.
 
 ## Ports
 

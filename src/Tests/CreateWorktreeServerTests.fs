@@ -19,6 +19,18 @@ let private writePostForkArgsScript (repoDir: string) =
         File.WriteAllText(Path.Combine(repoDir, "post-fork.sh"), script)
 
 
+/// Writes an OS-appropriate `post-fork` hook that records the argument count and every value it
+/// received, one per line, in the process working directory — so a split, dropped, or literally
+/// quoted argument is visible byte-for-byte.
+let private writePostForkArgvScript (repoDir: string) =
+    if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+        let script = "Set-Content -LiteralPath 'pf-argv.txt' -Value (@($args.Count) + $args)"
+        File.WriteAllText(Path.Combine(repoDir, "post-fork.ps1"), script)
+    else
+        let script = "#!/usr/bin/env bash\n{ printf '%s\\n' \"$#\"; printf '%s\\n' \"$@\"; } > pf-argv.txt\n"
+        File.WriteAllText(Path.Combine(repoDir, "post-fork.sh"), script)
+
+
 // ─── listWorktrees: git-failure signal against real git repos ───
 
 [<TestFixture>]
@@ -66,34 +78,63 @@ type ListWorktreesTests() =
 type ResolveWorktreeCommandTests() =
 
     [<Test>]
-    member _.``forks the new branch from the base ref``() =
-        let _, args, _ = resolveWorktreeCommand "Q:\\code\\repo" "origin/main" "my-branch"
-        Assert.That(args, Does.Contain("worktree add -b \"my-branch\""))
-        Assert.That(args, Does.Contain("\"origin/main\""), "base ref must be passed as the fork point")
+    member _.``builds the exact git worktree add argv``() =
+        let fileName, args, worktreePath = resolveWorktreeCommand "Q:\\code\\repo" "origin/main" "my-branch"
+
+        Assert.Multiple(fun () ->
+            Assert.That(fileName, Is.EqualTo("git"))
+            Assert.That(Path.GetFileName(worktreePath), Is.EqualTo("tm-my-branch"), "the worktree is a tm-prefixed sibling")
+            Assert.That(Path.GetDirectoryName(worktreePath), Is.EqualTo(Path.GetDirectoryName("Q:\\code\\repo")))
+            Assert.That(
+                args,
+                Is.EqualTo(
+                    [ "-C"
+                      "Q:\\code\\repo"
+                      "worktree"
+                      "add"
+                      "-b"
+                      "my-branch"
+                      "--no-track"
+                      worktreePath
+                      "origin/main" ]),
+                "every value is one argument carrying no quoting characters of its own"))
 
     [<Test>]
     member _.``forks with --no-track so the new branch does not inherit the base upstream``() =
         let _, args, _ = resolveWorktreeCommand "Q:\\code\\repo" "origin/feature" "my-branch"
-        Assert.That(args, Does.Contain("--no-track"),
-            "a tracking branch would point @{u} at the base's remote branch and mis-detect its PR")
+
+        Assert.Multiple(fun () ->
+            Assert.That(args, Does.Contain("--no-track"),
+                "a tracking branch would point @{u} at the base's remote branch and mis-detect its PR")
+            Assert.That(args, Does.Contain("origin/feature"), "the base ref is the fork point, unquoted"))
 
     [<Test>]
-    member _.``runs git against the repo root``() =
-        let fileName, args, _ = resolveWorktreeCommand "Q:\\code\\repo" "main" "my-branch"
-        Assert.That(fileName, Is.EqualTo("git"))
-        Assert.That(args, Does.Contain("-C \"Q:\\code\\repo\""))
+    member _.``passes paths and refs containing spaces and quotes as single arguments``() =
+        let repoRoot = "Q:\\code\\my repo"
+        let _, args, worktreePath = resolveWorktreeCommand repoRoot "origin/base \"ref\"" "my \"odd\" branch"
 
-    [<Test>]
-    member _.``places the worktree as a tm-prefixed sibling of the repo root``() =
-        let _, args, worktreePath = resolveWorktreeCommand "Q:\\code\\repo" "main" "my-branch"
-        Assert.That(args, Does.Contain("tm-my-branch"))
-        Assert.That(worktreePath, Does.EndWith("tm-my-branch"))
+        Assert.That(
+            args,
+            Is.EqualTo(
+                [ "-C"
+                  repoRoot
+                  "worktree"
+                  "add"
+                  "-b"
+                  "my \"odd\" branch"
+                  "--no-track"
+                  worktreePath
+                  "origin/base \"ref\"" ]),
+            "spaces and quotes are data, not command-line syntax")
 
     [<Test>]
     member _.``slashes in the branch name become dashes in the worktree dir``() =
         let _, args, worktreePath = resolveWorktreeCommand "Q:\\code\\repo" "main" "feature/foo"
-        Assert.That(worktreePath, Does.EndWith("tm-feature-foo"))
-        Assert.That(args, Does.Contain("worktree add -b \"feature/foo\""), "branch keeps its slash")
+
+        Assert.Multiple(fun () ->
+            Assert.That(Path.GetFileName(worktreePath), Is.EqualTo("tm-feature-foo"))
+            Assert.That(args, Does.Contain("feature/foo"), "the branch keeps its slash")
+            Assert.That(args, Does.Contain(worktreePath)))
 
 
 // ─── resolveBaseRef: ref resolution precedence ───
@@ -147,6 +188,28 @@ type ResolveBaseRefTests() =
 
         let result = resolveBaseRef repoDir "origin" "does-not-exist" |> Async.RunSynchronously
         Assert.That(Result.isError result, Is.True, $"Expected Error but got: {result}")
+
+    [<Test>]
+    member _.``an absent ref is distinguishable from a probe that could not answer``() =
+        // The fallback to a local base is only safe for a ref proven absent. If a failed probe were
+        // also reported as absence, an unreadable remote ref would silently resolve to a possibly
+        // stale local branch, and a clean comparison against it would wrongly read as clean.
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        let notARepo = Path.Combine(tempDir, "not-a-repo")
+        Directory.CreateDirectory(notARepo) |> ignore
+
+        let present = probeRef repoDir "refs/heads/main" |> Async.RunSynchronously
+        let absent = probeRef repoDir "refs/remotes/origin/main" |> Async.RunSynchronously
+        let unanswerable = probeRef notARepo "refs/heads/main" |> Async.RunSynchronously
+
+        Assert.Multiple(fun () ->
+            Assert.That((present = Ok true), Is.True, $"Expected Ok true but got: {present}")
+            Assert.That(
+                (absent = Ok false),
+                Is.True,
+                $"git exits 1 for a ref it can confirm is absent, but got: {absent}")
+            Assert.That(Result.isError unanswerable, Is.True, "A probe that could not run is not absence"))
 
 
 // ─── forkWorktree / runPostFork: end-to-end against real git repos ───
@@ -286,6 +349,38 @@ type CreateWorktreeIntegrationTests() =
             Assert.That(contents, Does.Contain("repo"), "post-fork should receive the source repo root")
 
     [<Test>]
+    member _.``post-fork receives all four values as single arguments despite spaces and quotes``() =
+        // Ref characters git accepts — including `"` — must reach the hook as data. A crafted branch
+        // is never created here: the argv contract is the subject, not git's ref validation.
+        let repoRoot = Path.Combine(tempDir, "repo root with space")
+        let worktreePath = Path.Combine(tempDir, "work tree with space")
+        Directory.CreateDirectory(repoRoot) |> ignore
+        Directory.CreateDirectory(worktreePath) |> ignore
+        writePostForkArgvScript repoRoot
+
+        let baseRef = "origin/base \"ref\" with space"
+        let branchName = "feature/my \"quoted\" branch"
+
+        let result =
+            runPostForkWithTimeout 60_000 repoRoot worktreePath baseRef branchName
+            |> Async.RunSynchronously
+
+        Assert.That(Result.isOk result, Is.True, $"Expected Ok but got: {result}")
+
+        let recorded = File.ReadAllLines(Path.Combine(worktreePath, "pf-argv.txt"))
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                recorded[0],
+                Is.EqualTo("4"),
+                $"the hook must receive exactly four arguments but recorded: {String.Join('|', recorded)}")
+
+            Assert.That(
+                recorded |> Array.skip 1,
+                Is.EqualTo([| worktreePath; repoRoot; baseRef; branchName |]),
+                "each value arrives byte-for-byte, unsplit and without literal quote wrappers"))
+
+    [<Test>]
     member _.``runPostFork is a no-op when no post-fork script exists``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
@@ -312,6 +407,24 @@ type CreateWorktreeIntegrationTests() =
             Assert.That(Directory.Exists(fork.WorktreePath), Is.True, "worktree should still be created")
             let result = runPostFork repoDir fork.WorktreePath fork.BaseRef "postfork-fails" |> Async.RunSynchronously
             Assert.That(Result.isError result, Is.True, $"Expected Error but got: {result}")
+
+    [<Test>]
+    member _.``runPostFork succeeds when the script outgrows its capture limit but exits 0``() =
+        // The hook's output is never read, only its exit code — a setup script that logs more than
+        // the capture caps hold (native build tooling, npm) must not be reported as a failed step.
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+
+        if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
+            File.WriteAllText(Path.Combine(repoDir, "post-fork.ps1"), "[Console]::Error.Write('x' * 200000)")
+        else
+            File.WriteAllText(Path.Combine(repoDir, "post-fork.sh"), "#!/usr/bin/env bash\nprintf '%200000s' '' >&2\n")
+
+        match forkWorktree repoDir "main" "postfork-chatty" |> Async.RunSynchronously with
+        | Error e -> Assert.Fail($"Expected Ok but got Error: {e}")
+        | Ok fork ->
+            let result = runPostFork repoDir fork.WorktreePath fork.BaseRef "postfork-chatty" |> Async.RunSynchronously
+            Assert.That(Result.isOk result, Is.True, $"Expected Ok for a verbose successful hook but got: {result}")
 
     [<Test>]
     member _.``runPostForkWithTimeout kills a hung post-fork script and reports a timeout``() =

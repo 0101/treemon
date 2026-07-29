@@ -36,7 +36,7 @@ let private gitData path branch behind revision dirty : GitWorktree.GitData =
       MainBehindCount = behind
       BaseRevision = revision
       IsDirty = dirty
-      HasDiff = false
+      Comparison = GitWorktree.Clean
       WorkMetrics = None }
 
 [<TestFixture>]

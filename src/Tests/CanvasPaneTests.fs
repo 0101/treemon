@@ -198,7 +198,7 @@ type CanvasPaneTests() =
             // The product reloads a changed canvas doc IN PLACE: it stabilises the iframe src (no
             // ?v=<hash> cache-buster) and posts {action:'content-updated'} to the iframe, which
             // idiomorph-morphs its body — the src never changes (CanvasPane.iframeSrc, App.fs
-            // MorphActiveDoc, IdiomorphScript.morphController; docs/spec/canvas-pane.md).
+            // MorphActiveDoc, CanvasMorphScript/canvas-morph.js; docs/spec/canvas-pane.md).
             //
             // We drive the morph signal purely from the UI: re-selecting an already-visited AgentDoc
             // tab dispatches MorphActiveDoc (App.fs SelectCanvasDoc, wasAlreadyVisited), which posts

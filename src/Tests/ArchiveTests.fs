@@ -353,7 +353,7 @@ type ArchiveE2ETests() =
 
     let baseUrl = ServerFixture.viteUrl
 
-    let makeWorktreeJson (branch: string) (isArchived: bool) =
+    let makeWorktreeJsonWithMetrics (branch: string) (isArchived: bool) (workMetrics: string) =
         let archived = if isArchived then "true" else "false"
         $"""{{
             "Path":{{"WorktreePath":"Q:/test/{branch}"}},"Branch":"{branch}",
@@ -362,9 +362,12 @@ type ArchiveE2ETests() =
             "Planning":{{"Planned":0,"Queued":0,"Loose":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"AutoSyncEnabled":false,"IsDirty":false,
-            "HasDiff":false,"WorkMetrics":null,"HasActiveSession":false,
+            "HasDiff":false,"WorkMetrics":{workMetrics},"HasActiveSession":false,
             "IsArchived":{archived},"IsMainWorktree":false,"CanvasDocs":[],"Sessions":[]
         }}"""
+
+    let makeWorktreeJson (branch: string) (isArchived: bool) =
+        makeWorktreeJsonWithMetrics branch isArchived "null"
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
@@ -686,7 +689,7 @@ type ArchiveE2ETests() =
         }
 
     [<Test>]
-    member this.``Archive section uses flex-wrap layout``() =
+    member this.``Archive cards share the worktree card grid width``() =
         task {
             let! page = this.Context.NewPageAsync()
             let json = makeDashboardJson [
@@ -702,16 +705,21 @@ type ArchiveE2ETests() =
             do! archiveSection.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! display = archiveSection.EvaluateAsync<string>("el => getComputedStyle(el).display")
-            Assert.That(display, Is.EqualTo("flex"), "Archive section should use flex layout")
+            Assert.That(display, Is.EqualTo("grid"), "Archive section should use the card grid layout")
 
-            let! flexWrap = archiveSection.EvaluateAsync<string>("el => getComputedStyle(el).flexWrap")
-            Assert.That(flexWrap, Is.EqualTo("wrap"), "Archive section should use flex-wrap")
+            let! columns = archiveSection.EvaluateAsync<string>("el => getComputedStyle(el).gridTemplateColumns")
+            let! cardColumns = page.Locator(".card-grid").First.EvaluateAsync<string>("el => getComputedStyle(el).gridTemplateColumns")
+            Assert.That(columns, Is.EqualTo(cardColumns), "Archive section columns should match the worktree card grid")
+
+            let! archiveWidth = page.Locator(".archive-card").First.EvaluateAsync<float>("el => el.getBoundingClientRect().width")
+            let! cardWidth = page.Locator(".card-grid .wt-card:not(.skeleton)").First.EvaluateAsync<float>("el => el.getBoundingClientRect().width")
+            Assert.That(archiveWidth, Is.EqualTo(cardWidth).Within(1.0), "Archive card should be as wide as a worktree card")
 
             do! page.CloseAsync()
         }
 
     [<Test>]
-    member this.``Archive card shows commit time``() =
+    member this.``Archive card shows compact commit time``() =
         task {
             let! page = this.Context.NewPageAsync()
             let json = makeDashboardJson [
@@ -725,7 +733,37 @@ type ArchiveE2ETests() =
             let commitTime = page.Locator(".archive-card .commit-time")
             do! commitTime.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! text = commitTime.First.TextContentAsync()
-            Assert.That(text, Does.Contain("ago"), "Archive card should show relative commit time")
+            Assert.That(text, Does.Match(@"^\d+[mhd]$"), "Archive card should show the commit age without an 'ago' suffix")
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``Archive card shows branch name with work metrics``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let json = makeDashboardJson [
+                makeWorktreeJson "active" false
+                makeWorktreeJsonWithMetrics "archived-work" true """{"CommitCount":7,"LinesAdded":120,"LinesRemoved":34}"""
+            ]
+
+            do! setupMockedPage page (fun () -> json) (System.Collections.Generic.List()) (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let archiveCard = page.Locator(".archive-card")
+            do! archiveCard.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let branchName = archiveCard.First.Locator(".branch-name")
+            let! isNameVisible = branchName.IsVisibleAsync()
+            Assert.That(isNameVisible, Is.True, "Archive card should always show the branch name")
+
+            let! squares = archiveCard.First.Locator(".commit-grid .commit-square").CountAsync()
+            Assert.That(squares, Is.EqualTo(7), "Archive card should render one commit square per commit")
+
+            let! added = archiveCard.First.Locator(".diff-added").TextContentAsync()
+            let! removed = archiveCard.First.Locator(".diff-removed").TextContentAsync()
+            Assert.That(added, Is.EqualTo("+120"), "Archive card should show added lines")
+            Assert.That(removed, Is.EqualTo("-34"), "Archive card should show removed lines")
 
             do! page.CloseAsync()
         }

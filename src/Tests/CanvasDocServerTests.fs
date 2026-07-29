@@ -83,7 +83,7 @@ type BuildInjectionTests() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.idiomorphJs),
                     "A system view must never morph, so the idiomorph runtime is omitted")
-        Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.morphController),
+        Assert.That(injection, Does.Not.Contain(Server.CanvasMorphScript.script),
                     "A system view must never morph, so the morph controller is omitted")
 
     [<Test>]
@@ -163,10 +163,37 @@ type BuildInjectionTests() =
     member _.``AgentDoc injection includes the full morph + bridge machinery``() =
         let injection = buildInjection AgentDoc "status.html"
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs), "Agent docs keep the idiomorph runtime")
-        Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController), "Agent docs keep the morph controller")
+        Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script), "Agent docs keep the morph controller")
         Assert.That(injection, Does.Contain(bridgeMarker), "Agent docs keep the message-bridge heartbeat")
         Assert.That(injection, Does.Contain(baseStyleMarker))
         Assert.That(injection, Does.Contain(linkInterceptorMarker))
+
+    // ── Changed-content highlight ─────────────────────────────────────────────
+    // The morph marks what it changed with `canvas-updated`. Style and behaviour ship together and
+    // only for AgentDocs: a SystemView never morphs, so a highlight rule there could never match.
+
+    [<Test>]
+    member _.``AgentDoc injection carries the changed-content highlight style``() =
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain(Server.CanvasMorphScript.style),
+                    "the highlight must be styled wherever the morph that applies it is injected")
+        Assert.That(injection, Does.Contain(".canvas-updated{"),
+                    "the class the morph controller applies must have a rule")
+
+    [<Test>]
+    member _.``SystemView injection omits the changed-content highlight style``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.That(injection, Does.Not.Contain(".canvas-updated"),
+                    "a system view never morphs, so it never has changed content to mark")
+
+    [<Test>]
+    member _.``the highlight never changes layout``() =
+        // The tint has to breathe around the text without moving it: a doc that reflows on every
+        // update would defeat the morph's whole point of preserving scroll position.
+        let style = Server.CanvasMorphScript.style
+        Assert.That(style, Does.Contain("box-shadow"), "the tint is extended with a shadow spread")
+        Assert.That(style, Does.Not.Contain("padding"), "padding would reflow the doc on every update")
+        Assert.That(style, Does.Not.Contain("margin"), "margin would reflow the doc on every update")
 
     // ── Item 2: injected window.canvasSend(action, payload) helper ────────────
     // canvasSend wraps the flat postMessage contract and enforces the SAME size cap the client
@@ -413,13 +440,13 @@ type BuildInjectionTests() =
     member _.``beads.html classifies as a SystemView and gets the stripped injection``() =
         let injection = buildInjection (CanvasDocKinds.classify "beads.html") "beads.html"
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.idiomorphJs))
-        Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.morphController))
+        Assert.That(injection, Does.Not.Contain(Server.CanvasMorphScript.script))
 
     [<Test>]
     member _.``an agent .html classifies as an AgentDoc and gets the full injection``() =
         let injection = buildInjection (CanvasDocKinds.classify "status.html") "status.html"
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs))
-        Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController))
+        Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script))
 
 // ── injectUrl loopback guard (Finding 10 / SSRF) ──────────────────────────────
 // injectUrl is registered then used as a POST target by SessionBridge, so a non-loopback value
@@ -470,26 +497,30 @@ type DiffComparisonContextTests() =
                 UpstreamRemote = "upstream"
                 BaseBranch = "dev" }
 
+        // The scheduler keys repositories by PathUtils.toRepoId of the repository root, so the
+        // retained key is exactly the root whose .treemon.json a linked worktree shares.
         let state =
             { RefreshScheduler.DashboardState.empty with
                 Repos =
                     Map.ofList
-                        [ RepoId "context-repo",
+                        [ PathUtils.toRepoId repoRoot,
                           repo ] }
 
         [ repoRoot; linked ]
         |> List.iter (fun path ->
-            let context =
+            let target =
                 tryFindDiffComparisonContext state path
 
             Assert.That(
-                context,
+                target,
                 Is.EqualTo(
-                    Some
+                    Some(
+                        PathUtils.toRepoId repoRoot,
                         ({ WorktreePath = path
                            UpstreamRemote = "upstream"
                            BaseBranch = "dev" }
                          : WorktreeDiff.DiffComparisonContext)
+                    )
                 )
             ))
 
@@ -507,6 +538,7 @@ type DiffComparisonContextTests() =
                 Path.Combine(Path.GetTempPath(), "treemon-context", "atomic-linked")
                 |> PathUtils.normalizePath
 
+            let repoId = RepoId "atomic-context-repo"
             let agent = RefreshScheduler.createAgent ()
 
             Assert.That(
@@ -521,7 +553,7 @@ type DiffComparisonContextTests() =
 
             agent.Post(
                 RefreshScheduler.repositoryDiscoveryUpdate
-                    (RepoId "atomic-context-repo")
+                    repoId
                     (Some [ info ])
                     "upstream"
                     "develop"
@@ -532,11 +564,13 @@ type DiffComparisonContextTests() =
             Assert.That(
                 tryFindDiffComparisonContext state linked,
                 Is.EqualTo(
-                    Some
+                    Some(
+                        repoId,
                         ({ WorktreePath = linked
                            UpstreamRemote = "upstream"
                            BaseBranch = "develop" }
                          : WorktreeDiff.DiffComparisonContext)
+                    )
                 )
             )
         }

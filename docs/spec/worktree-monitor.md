@@ -57,6 +57,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Event log (up to the last 2 events), diff/auto-sync/terminal/delete actions
 - Green left border on cards with active terminal sessions
 - Contextual action buttons: fix PR comments, fix failed builds, and create PRs
+- Archived worktrees render below the card grid as one-line cards on the same responsive grid columns, so they align with the full cards above. Each shows the branch name (never dropped), then the commit grid and diff stats only while they fit the remaining width, the compact commit age (`123d`, no "ago" suffix), and the unarchive button.
 
 ### Branch Sync
 
@@ -150,7 +151,7 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 
 ### Merged-PR Persistence
 
-- Live provider results are authoritative. PR association uses the resolved provider branch. When a deleted remote ref makes `@{u}` unresolvable, Treemon reads Git's still-configured upstream name; only if both reads fail does it fall back to the local branch while disabling pruning. This keeps merged PRs linked when the provider deletes their source branch, including differently named local/provider branches. When the bounded PR fetch no longer returns the branch, a persisted merged record supplies a fallback `HasPr`; live open PRs and identity-matched merged PRs take precedence. Only the terminal merged fact is retained — open PRs and volatile builds, comments, draft, and conflict state are not persisted.
+- Live provider results are authoritative. PR association uses the resolved provider branch. When a deleted remote ref makes `@{u}` unresolvable, Treemon reads Git's still-configured upstream name; only if both reads fail does it fall back to the local branch while disabling pruning. This keeps merged PRs linked when the provider deletes their source branch, including differently named local/provider branches. When the bounded PR fetch no longer returns the branch, a persisted merged record supplies a fallback `HasPr`; live open PRs and identity-matched merged PRs take precedence. Only the terminal merged fact is retained — open PRs and volatile builds, comments, draft, auto-merge, and conflict state are not persisted.
 - `MergedPrStore` keeps `repo → upstream branch → { Id; Title; Url; HeadSha }` in port-scoped gitignored runtime state at `data/merged-prs-{port}.json`. Each server instance owns its store; missing, corrupt, identity-less, or older incompatible records start empty, and failed writes remain dirty in memory until a retry succeeds.
 - Records are pruned to live branches only from a trustworthy enumeration: at least one eligible worktree and branch exist, every eligible worktree has collected git data, and no eligible worktree's upstream read failed. Archived worktrees are exempt from the completeness requirement — the steady-state refresh skips them, so one first seen while already archived never collects git data; its worktree-list branch enters the enumeration instead, keeping its record safe without blocking pruning. Otherwise live merge upserts and fallback overlay still run, but pruning is skipped.
 - The provider branch identifies the association; `HeadSha` is the immutable provider-reported PR source commit. A merged provider result or persisted fallback is accepted only when its SHA matches a current worktree tip when both are known. A present mismatch evicts or suppresses the stale result so branch-name reuse or later unmerged commits cannot inherit an old merged badge.
@@ -163,6 +164,14 @@ Windows Terminal integration for spawning, tracking, and focusing terminal windo
 - GitHub: parsed from `mergeable` field in per-PR detail response (`false` → conflicts, `true`/`null` → no conflicts)
 - Merged PRs always have `HasConflicts = false`; unknown/computing states treated as no conflicts (resolves on next poll)
 - Client renders an inline conflict icon (⚔) on the PR badge when `HasConflicts = true`
+
+### Auto-Merge Indicator
+
+- `AutoMergeEnabled: bool` on `PrInfo` — the provider will merge the PR by itself once the remaining checks and policies pass
+- GitHub: `auto_merge` in the existing `/pulls` list response (object → true, `null`/absent → false)
+- AzDo: `autoCompleteSetBy` in the existing `az repos pr list` response (identity → true, `null`/absent → false); AzDo names the same feature auto-complete
+- Both providers keep the field populated after the PR merges, so parsing forces `false` for merged PRs — the fact is only meaningful while the PR is open
+- Client renders an inline check-circle icon on the PR badge when `AutoMergeEnabled = true`; `tm status` adds an `auto-merge` flag
 
 ### Demo Mode
 
@@ -212,6 +221,16 @@ Each repo can configure which branch is considered the "base" for ahead/behind c
 - **Stored** per-repo in `PerRepoState.BaseBranch`, resolved during worktree list refresh. The dashboard and generated diff viewer therefore expose the same base branch, including for linked worktrees without their own `.treemon.json`.
 - **Config example**: `{ "baseBranch": "dev" }` in `.treemon.json` at repo root
 
+### Diff Categories
+
+The diff viewer's optional per-repository grouping of changed files:
+
+- **Resolution**: `.treemon.json` `"diffCategories"` array → absent means the flat file list
+- **Affects**: only the generated diff viewer's grouping and its categorization warning; comparison semantics, layers, and file identities are unchanged
+- **Not stored** in scheduler state: the canvas server resolves the request's owning repository root and reads and validates the field on every diff-summary request, so an edited or agent-written configuration shows up on the next Refresh instead of at the next scheduler cycle. Linked worktrees therefore read the repo-root value, like `baseBranch` and `upstreamRemote`.
+- **Schema, matching, and validation**: see `docs/spec/diff-file-categories.md`
+- **Config example**: `{ "diffCategories": [ { "name": "Server", "patterns": ["src/Server/**"] } ] }` in `.treemon.json` at repo root
+
 ### CommentSummary
 
 - `WithResolution of unresolved * total` — thread resolution tracking (both AzDo and GitHub)
@@ -245,7 +264,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/GithubPrStatus.fs` | GitHub PR/Actions fetching via `gh` CLI, including the bounded recent-closed window |
 | `src/Server/MergedPrStore.fs` | Durable merged-PR fallback reconciliation, identity checks, and runtime-state persistence |
 | `src/Server/GitWorktree.fs` | Worktree enumeration, commit data, upstream-read state, HEAD identity, observed base revision, dirty detection, work metrics |
-| `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, and upstream remote |
+| `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, upstream remote, and the raw `diffCategories` read |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
 | `src/Server/SessionManager.fs` | MailboxProcessor session agent, spawn/focus/kill, persistence |
@@ -281,11 +300,11 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
   unnecessary second session.
 - Generic `SessionBridge` under canvas routing: session registration, liveness, queueing, and prompt forwarding are shared infrastructure; `CanvasBridge` retains only document ownership and canvas-specific message semantics.
 - New session fallback: wait briefly for a selected session's bridge registration, then launch a new prompted session only when no live bridge exists; delivery failures to known live bridges stay queued for that session rather than creating parallel agents.
-- net9.0 (not net10.0): Fable 4.28.0 FCS hangs with .NET 10 preview SDK
+- net10.0 with Fable pinned to 5.0.0: Fable 4.x deadlocks when the compiled project targets net10.0, so the client needs Fable 5 (which in turn requires Feliz 3 — the Feliz 2 compiler plugin targets the Fable 4 AST). Later Fable 5 releases each break the client: 5.1.0 made F# reflection report `option` as a union, which `Fable.SimpleJson` classifies before its option case, so every `option` field in a remoting response fails to deserialize; 5.5.0 does the same for `list` and additionally rejects `Fable.Remoting.MsgPack`'s `inline private` helpers with a check stricter than `fsc`'s own. 5.0.0 predates all three. Revisit when `Fable.SimpleJson` and `Fable.Remoting` publish fixes.
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
 - Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups
 - Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start (the `treemon.ps1` shims trigger it when prod is running). Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The server is the single writer of `config.json` (with an internal write lock); the online-only CLI never writes config files, which removes the cross-process clobber hazard.
-- `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the repo-local `.treemon.json` (`autoSyncBranches`, `baseBranch`, `upstreamRemote`) are deliberately separate stores in separate modules, named so the machine-vs-repo scope is obvious and the two never collide.
+- `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the repo-local `.treemon.json` (`autoSyncBranches`, `baseBranch`, `upstreamRemote`, `diffCategories`) are deliberately separate stores in separate modules, named so the machine-vs-repo scope is obvious and the two never collide.
 - Create-worktree prompt auto-launch is **fire-and-forget, server-side, and reuses `launchAction`**: repo root, provider, and the new path are all in scope on the server, so it orchestrates the launch there rather than via a client follow-up. A failed spawn is logged, not surfaced (the worktree already exists), and it launches even after a post-fork warning. Provider is read **directly** from the new worktree's `.treemon.json` (it isn't in scheduler state yet, so `resolveProvider` would return `None` there), and the worktree path is single-quote-escaped in `SessionManager.buildScript` so a path containing `'` can't break the launch script.
 - The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The prompt (and skill) are single-quote-escaped at the CLI sink, so an odd skill value is a no-op for the tool, not an injection concern, making validation pure complication.
 

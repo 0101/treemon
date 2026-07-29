@@ -70,6 +70,12 @@ let gitOutput workingDir arguments =
     Assert.That(exitCode, Is.EqualTo(0), $"git failed: {stderr}")
     stdout
 
+/// Writes `content` to `relativePath` under `repoDir`, creating parent directories.
+let writeText (repoDir: string) (relativePath: string) (content: string) =
+    let path = Path.Combine(repoDir, relativePath)
+    Path.GetDirectoryName(path) |> Directory.CreateDirectory |> ignore
+    File.WriteAllText(path, content)
+
 /// Creates a fresh git repo with an identity configured (no commits yet).
 let initRepo (repoDir: string) =
     Directory.CreateDirectory(repoDir) |> ignore

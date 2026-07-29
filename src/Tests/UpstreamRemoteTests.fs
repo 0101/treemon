@@ -368,18 +368,12 @@ type GitCommandConstructionTests() =
     [<Test>]
     member _.``PrStatus buildRemoteUrlArgs queries the specified remote``() =
         let args = Server.PrStatus.buildRemoteUrlArgs "/repo/root" "upstream"
-        Assert.That(args, Does.Contain("remote get-url upstream"))
+        Assert.That(args, Is.EqualTo([ "-C"; "/repo/root"; "remote"; "get-url"; "upstream" ]))
 
     [<Test>]
-    member _.``PrStatus buildRemoteUrlArgs with origin queries origin``() =
-        let args = Server.PrStatus.buildRemoteUrlArgs "/repo/root" "origin"
-        Assert.That(args, Does.Contain("remote get-url origin"))
-
-    [<Test>]
-    member _.``PrStatus buildRemoteUrlArgs includes repo root path``() =
-        let args = Server.PrStatus.buildRemoteUrlArgs "Q:\\code\\myproject" "upstream"
-        Assert.That(args, Does.Contain("Q:\\code\\myproject"))
-        Assert.That(args, Does.Contain("remote get-url upstream"))
+    member _.``PrStatus buildRemoteUrlArgs keeps a spaced Windows repo root as one argument``() =
+        let args = Server.PrStatus.buildRemoteUrlArgs "Q:\\code\\my project" "upstream"
+        Assert.That(args, Is.EqualTo([ "-C"; "Q:\\code\\my project"; "remote"; "get-url"; "upstream" ]))
 
     [<Test>]
     member _.``branchSortKey gives configured baseBranch priority 0``() =
@@ -497,7 +491,7 @@ type SchedulerUpstreamTests() =
                   MainBehindCount = 0
                   BaseRevision = None
                   IsDirty = false
-                  HasDiff = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/main", gitData))

@@ -14,11 +14,6 @@ open Server.WorktreeDiff
 open Shared
 open Tests.GitTestHelpers
 
-let private writeText (repoDir: string) (relativePath: string) (content: string) =
-    let path = Path.Combine(repoDir, relativePath)
-    Path.GetDirectoryName(path) |> Directory.CreateDirectory |> ignore
-    File.WriteAllText(path, content)
-
 let private normalizeNewlines (value: string) =
     value.Replace("\r\n", "\n").Replace("\r", "\n")
 
@@ -112,176 +107,6 @@ let private initializeDiffRepo repoDir =
     gitOk repoDir [ "add"; "--"; "." ]
     gitOk repoDir [ "commit"; "-m"; "base files" ]
     gitOk repoDir [ "checkout"; "-b"; "feature" ]
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type ProcessRunnerArgumentListTests() =
-
-    let mutable tempDir = "" // NUnit SetUp and TearDown must share the per-test directory through fixture state.
-
-    [<SetUp>]
-    member _.Setup() =
-        tempDir <-
-            Path.Combine(
-                Path.GetTempPath(),
-                $"treemon-process-runner {Guid.NewGuid():N}"
-            )
-
-        Directory.CreateDirectory(tempDir) |> ignore
-        initRepoOnMain tempDir
-
-    [<TearDown>]
-    member _.TearDown() =
-        if Directory.Exists(tempDir) then
-            try
-                Directory.Delete(tempDir, recursive = true)
-            with _ ->
-                ()
-
-    [<Test>]
-    member _.``argument-list execution preserves a working path containing spaces``() =
-        let result =
-            ProcessRunner.runArgumentList
-                1024
-                1024
-                "Test"
-                "git"
-                [ "-C"; tempDir; "rev-parse"; "--is-inside-work-tree" ]
-                None
-            |> TestUtils.runAsync
-
-        match result with
-        | Ok output ->
-            Assert.That(output.ExitCode, Is.EqualTo(0))
-            Assert.That(Encoding.UTF8.GetString(output.Stdout).Trim(), Is.EqualTo("true"))
-        | Error error -> Assert.Fail($"Expected process output, got {error}")
-
-    [<Test>]
-    member _.``stdout capture reports its byte limit instead of returning a prefix``() =
-        writeText tempDir "large.txt" (String('x', 4096))
-        gitOk tempDir [ "add"; "--"; "large.txt" ]
-        gitOk tempDir [ "commit"; "-m"; "large output" ]
-
-        let result =
-            ProcessRunner.runArgumentList
-                16
-                1024
-                "Test"
-                "git"
-                [ "-C"; tempDir; "show"; "HEAD:large.txt" ]
-                None
-            |> TestUtils.runAsync
-
-        let expected =
-            Error(
-                ProcessRunner.CaptureLimitExceeded
-                    ProcessRunner.StandardOutput
-            )
-
-        Assert.That(
-            (result = expected),
-            Is.True,
-            $"Expected stdout capture limit, got {result}"
-        )
-
-    [<Test>]
-    member _.``stderr capture reports its byte limit``() =
-        let result =
-            ProcessRunner.runArgumentList
-                1024
-                1
-                "Test"
-                "git"
-                [ "not-a-real-git-command" ]
-                None
-            |> TestUtils.runAsync
-
-        let expected =
-            Error(
-                ProcessRunner.CaptureLimitExceeded
-                    ProcessRunner.StandardError
-            )
-
-        Assert.That(
-            (result = expected),
-            Is.True,
-            $"Expected stderr capture limit, got {result}"
-        )
-
-    [<Test>]
-    member _.``timeout returns a typed error and terminates the process tree``() =
-        let childPidPath = Path.Combine(tempDir, "child.pid")
-
-        let fileName, arguments =
-            if RuntimeInformation.IsOSPlatform(OSPlatform.Windows) then
-                let escapedPidPath = childPidPath.Replace("'", "''")
-
-                "powershell",
-                [ "-NoProfile"
-                  "-Command"
-                  $"$child = Start-Process ping -ArgumentList '127.0.0.1','-n','30' -PassThru; Set-Content -NoNewline -Path '{escapedPidPath}' -Value $child.Id; Wait-Process -Id $child.Id" ]
-            else
-                let escapedPidPath = childPidPath.Replace("'", "'\\''")
-                "sh", [ "-c"; $"sleep 30 & echo $! > '{escapedPidPath}'; wait" ]
-
-        let result =
-            ProcessRunner.runArgumentListWithTimeout
-                2_000
-                1024
-                1024
-                "Test"
-                fileName
-                arguments
-                None
-            |> TestUtils.runAsync
-
-        Assert.That(
-            (result = Error ProcessRunner.TimedOut),
-            Is.True,
-            $"Expected timeout, got {result}"
-        )
-
-        Assert.That(
-            File.Exists(childPidPath),
-            Is.True,
-            "The child process did not start before the timeout"
-        )
-
-        let childPid = File.ReadAllText(childPidPath) |> Int32.Parse
-
-        let childExited =
-            SpinWait.SpinUntil(
-                (fun () ->
-                    try
-                        use child = Process.GetProcessById(childPid)
-                        child.HasExited
-                    with :? ArgumentException ->
-                        true),
-                TimeSpan.FromSeconds(5.0)
-            )
-
-        if not childExited then
-            use child = Process.GetProcessById(childPid)
-            child.Kill(entireProcessTree = true)
-
-        Assert.That(childExited, Is.True, "Timed-out child process was left running")
-
-    [<Test>]
-    member _.``missing executable returns a typed start failure``() =
-        let result =
-            ProcessRunner.runArgumentList
-                1024
-                1024
-                "Test"
-                $"missing-executable-{Guid.NewGuid():N}"
-                []
-                None
-            |> TestUtils.runAsync
-
-        match result with
-        | Error(ProcessRunner.StartFailed _) -> ()
-        | _ -> Assert.Fail($"Expected start failure, got {result}")
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -854,7 +679,7 @@ type WorktreeDiffIntegrationTests() =
         | _ -> Assert.Fail($"Expected composed replacement, got {result}")
 
     [<Test>]
-    member _.``HasDiff_untracked stays independent from tracked dirty``() =
+    member _.``Comparison_untracked stays independent from tracked dirty``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initializeDiffRepo repoDir
 
@@ -862,7 +687,7 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(GitWorktree.isDirty repoDir |> TestUtils.runAsync, Is.False)
-            Assert.That(GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync, Is.True))
+            Assert.That(GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync, Is.EqualTo(GitWorktree.HasContent)))
 
         File.Delete(Path.Combine(repoDir, "untracked.txt"))
         let manyUntracked =
@@ -880,7 +705,7 @@ type WorktreeDiffIntegrationTests() =
                   "--untracked-files=all" ]
 
         Assert.That(Encoding.UTF8.GetByteCount(porcelain), Is.GreaterThan(1024))
-        Assert.That(GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync, Is.True)
+        Assert.That(GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync, Is.EqualTo(GitWorktree.HasContent))
 
         manyUntracked
         |> List.iter (fun path -> File.Delete(Path.Combine(repoDir, path)))
@@ -889,16 +714,16 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(GitWorktree.isDirty repoDir |> TestUtils.runAsync, Is.True)
-            Assert.That(GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync, Is.True))
+            Assert.That(GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync, Is.EqualTo(GitWorktree.HasContent)))
 
         gitOk repoDir [ "add"; "--"; "tracked.txt" ]
 
         Assert.Multiple(fun () ->
             Assert.That(GitWorktree.isDirty repoDir |> TestUtils.runAsync, Is.True)
-            Assert.That(GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync, Is.True))
+            Assert.That(GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync, Is.EqualTo(GitWorktree.HasContent)))
 
     [<Test>]
-    member _.``HasDiff_net follows committed comparison content``() =
+    member _.``Comparison_net follows committed comparison content``() =
         let repoDir = Path.Combine(tempDir, "repo")
         initRepoOnMain repoDir
         writeText repoDir "tracked.txt" "base"
@@ -914,7 +739,7 @@ type WorktreeDiffIntegrationTests() =
             |> TestUtils.runAsync
 
         Assert.Multiple(fun () ->
-            Assert.That(committed.HasDiff, Is.True)
+            Assert.That(committed.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(committed.IsDirty, Is.False)
             Assert.That(committed.WorkMetrics.IsSome, Is.True))
 
@@ -925,7 +750,7 @@ type WorktreeDiffIntegrationTests() =
             |> TestUtils.runAsync
 
         Assert.Multiple(fun () ->
-            Assert.That(reverted.HasDiff, Is.False)
+            Assert.That(reverted.Comparison, Is.EqualTo(GitWorktree.Clean))
             Assert.That(reverted.IsDirty, Is.False)
             Assert.That(reverted.WorkMetrics, Is.EqualTo(None)))
 
@@ -958,15 +783,15 @@ type WorktreeDiffIntegrationTests() =
             "Untracked files must not affect the tracked-dirty sync guard"
         )
         Assert.That(
-            GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync,
-            Is.False,
+            GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync,
+            Is.EqualTo(GitWorktree.Clean),
             "The generated untracked viewer must not count as comparison content"
         )
         Assert.That(
             (collectWorktreeGitData repoDir (Some "feature") "origin" "main"
              |> TestUtils.runAsync)
-                .HasDiff,
-            Is.False
+                .Comparison,
+            Is.EqualTo(GitWorktree.Clean)
         )
 
         writeText repoDir (Path.Combine(".agents", "canvas", "diff.html.backup")) "content"
@@ -977,8 +802,8 @@ type WorktreeDiffIntegrationTests() =
             "Untracked files must not affect the tracked-dirty sync guard"
         )
         Assert.That(
-            GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync,
-            Is.True,
+            GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync,
+            Is.EqualTo(GitWorktree.HasContent),
             "Only the exact generated viewer path may be excluded"
         )
 
@@ -1006,7 +831,7 @@ type WorktreeDiffIntegrationTests() =
         Assert.Multiple(fun () ->
             Assert.That(summary.BaseRef, Is.EqualTo("main"))
             Assert.That(summary.Files |> List.map _.Path, Is.EqualTo([ "tracked.txt" ]))
-            Assert.That(gitData.HasDiff, Is.True)
+            Assert.That(gitData.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(gitData.MainBehindCount, Is.EqualTo(0))
             Assert.That(
                 gitData.WorkMetrics,
@@ -1054,7 +879,7 @@ type WorktreeDiffIntegrationTests() =
             exitCode = 0
 
         Assert.Multiple(fun () ->
-            Assert.That(gitData.HasDiff, Is.True)
+            Assert.That(gitData.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(gitData.IsDirty, Is.False)
             Assert.That(
                 gitData.WorkMetrics,
@@ -1089,7 +914,7 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(viewerOnlySummary.Files, Is.Empty)
-            Assert.That(viewerOnlyGitData.HasDiff, Is.False)
+            Assert.That(viewerOnlyGitData.Comparison, Is.EqualTo(GitWorktree.Clean))
             Assert.That(viewerOnlyGitData.IsDirty, Is.False)
             Assert.That(viewerOnlyGitData.WorkMetrics, Is.EqualTo(None)))
 
@@ -1109,9 +934,46 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(backupSummary.Files |> List.map _.Path, Is.EqualTo([ backupGitPath ]))
-            Assert.That(backupGitData.HasDiff, Is.True)
+            Assert.That(backupGitData.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(backupGitData.IsDirty, Is.False)
             Assert.That(backupGitData.WorkMetrics.IsSome, Is.True))
+
+    [<Test>]
+    member _.``a worktree Git cannot read is undetermined rather than clean``() =
+        let nonRepo = Path.Combine(tempDir, "not-a-repo")
+        Directory.CreateDirectory(nonRepo) |> ignore
+
+        let gitData =
+            collectWorktreeGitData nonRepo (Some "main") "origin" "main"
+            |> TestUtils.runAsync
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                GitWorktree.localComparisonContent nonRepo |> TestUtils.runAsync,
+                Is.EqualTo(GitWorktree.Undetermined),
+                "A status command that cannot answer must not be read as an empty worktree")
+            Assert.That(
+                gitData.Comparison,
+                Is.EqualTo(GitWorktree.Undetermined),
+                "No probe answered, so nothing licenses removing the viewer")
+            Assert.That(gitData.WorkMetrics, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``GitMetrics_missing_base keeps committed work out of the clean verdict``() =
+        let repoDir = Path.Combine(tempDir, "repo")
+        initRepoOnMain repoDir
+        writeText repoDir "committed.txt" "work"
+        gitOk repoDir [ "add"; "--"; "committed.txt" ]
+        gitOk repoDir [ "commit"; "-m"; "committed work" ]
+
+        let gitData =
+            collectWorktreeGitData repoDir (Some "main") "origin" "missing"
+            |> TestUtils.runAsync
+
+        Assert.That(
+            gitData.Comparison,
+            Is.EqualTo(GitWorktree.Undetermined),
+            "An unresolvable base hides committed work, so the worktree is not known to be clean")
 
     [<Test>]
     member _.``GitMetrics_missing_base keeps local changes without committed metrics``() =
@@ -1126,7 +988,7 @@ type WorktreeDiffIntegrationTests() =
         Assert.Multiple(fun () ->
             Assert.That(gitData.LastCommitMessage, Is.EqualTo("init"))
             Assert.That(gitData.IsDirty, Is.False)
-            Assert.That(gitData.HasDiff, Is.True)
+            Assert.That(gitData.Comparison, Is.EqualTo(GitWorktree.HasContent))
             Assert.That(gitData.WorkMetrics, Is.EqualTo(None))
             Assert.That(gitData.MainBehindCount, Is.Zero))
 
@@ -1147,7 +1009,7 @@ type WorktreeDiffIntegrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(gitData.MainBehindCount, Is.EqualTo(1))
-            Assert.That(gitData.HasDiff, Is.False)
+            Assert.That(gitData.Comparison, Is.EqualTo(GitWorktree.Clean))
             Assert.That(gitData.WorkMetrics, Is.EqualTo(None)))
 
     [<Test>]
@@ -1180,8 +1042,8 @@ type WorktreeDiffIntegrationTests() =
             "The tracked-dirty Sync guard retains its prior semantics"
         )
         Assert.That(
-            GitWorktree.hasLocalDiff repoDir |> TestUtils.runAsync,
-            Is.False,
+            GitWorktree.localComparisonContent repoDir |> TestUtils.runAsync,
+            Is.EqualTo(GitWorktree.Clean),
             "A tracked generated viewer update must not count as comparison content"
         )
 

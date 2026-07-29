@@ -74,6 +74,7 @@ let private prRetryBuilding: PrInfo =
             Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88801"
             Failure = None } ]
       IsMerged = false
+      AutoMergeEnabled = false
       HasConflicts = false }
 
 let private prRetryFailed =
@@ -114,6 +115,7 @@ let private prAuth: PrInfo =
             Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88810"
             Failure = None } ]
       IsMerged = false
+      AutoMergeEnabled = false
       HasConflicts = false }
 
 let private prStreaming: PrInfo =
@@ -132,6 +134,7 @@ let private prStreaming: PrInfo =
             Url = Some "https://github.com/acme/data-pipeline/actions/runs/99002"
             Failure = None } ]
       IsMerged = false
+      AutoMergeEnabled = true
       HasConflicts = false }
 
 let private prCsvMerged: PrInfo =
@@ -146,6 +149,7 @@ let private prCsvMerged: PrInfo =
             Url = Some "https://github.com/acme/data-pipeline/actions/runs/98800"
             Failure = None } ]
       IsMerged = true
+      AutoMergeEnabled = false
       HasConflicts = false }
 
 // --- Worktrees (base definitions) ---

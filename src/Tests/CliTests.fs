@@ -1,5 +1,6 @@
 module Tests.CliTests
 
+open System
 open NUnit.Framework
 open Shared
 open Cli.Program
@@ -39,16 +40,16 @@ type ResolvePortTests() =
 [<Category("Fast")>]
 type FormatPrTests() =
 
-    let makePrInfo id title isDraft isMerged hasConflicts =
-        HasPr
-            { Id = id
-              Title = title
-              Url = $"https://example.com/pr/{id}"
-              IsDraft = isDraft
-              Comments = WithResolution(0, 0)
-              Builds = []
-              IsMerged = isMerged
-              HasConflicts = hasConflicts }
+    let basePr =
+        { Id = 1
+          Title = "A pull request"
+          Url = "https://example.com/pr/1"
+          IsDraft = false
+          Comments = WithResolution(0, 0)
+          Builds = []
+          IsMerged = false
+          AutoMergeEnabled = false
+          HasConflicts = false }
 
     [<Test>]
     member _.``NoPr formats as No PR``() =
@@ -56,32 +57,49 @@ type FormatPrTests() =
 
     [<Test>]
     member _.``HasPr with no flags shows PR number and title``() =
-        let result = formatPr (makePrInfo 42 "Add feature X" false false false)
+        let result = formatPr (HasPr { basePr with Id = 42; Title = "Add feature X" })
         Assert.That(result, Is.EqualTo("PR #42: Add feature X"))
 
     [<Test>]
     member _.``HasPr draft shows draft flag``() =
-        let result = formatPr (makePrInfo 7 "WIP changes" true false false)
+        let result = formatPr (HasPr { basePr with Id = 7; Title = "WIP changes"; IsDraft = true })
         Assert.That(result, Is.EqualTo("PR #7 [draft]: WIP changes"))
 
     [<Test>]
     member _.``HasPr merged shows merged flag``() =
-        let result = formatPr (makePrInfo 10 "Done" false true false)
+        let result = formatPr (HasPr { basePr with Id = 10; Title = "Done"; IsMerged = true })
         Assert.That(result, Is.EqualTo("PR #10 [merged]: Done"))
 
     [<Test>]
+    member _.``HasPr with auto-merge shows auto-merge flag``() =
+        let result = formatPr (HasPr { basePr with Id = 8; Title = "Queued"; AutoMergeEnabled = true })
+        Assert.That(result, Is.EqualTo("PR #8 [auto-merge]: Queued"))
+
+    [<Test>]
     member _.``HasPr with conflicts shows conflicts flag``() =
-        let result = formatPr (makePrInfo 5 "Conflicting" false false true)
+        let result = formatPr (HasPr { basePr with Id = 5; Title = "Conflicting"; HasConflicts = true })
         Assert.That(result, Is.EqualTo("PR #5 [conflicts]: Conflicting"))
 
     [<Test>]
     member _.``HasPr with all flags shows all flags``() =
-        let result = formatPr (makePrInfo 99 "Everything" true true true)
-        Assert.That(result, Is.EqualTo("PR #99 [draft, merged, conflicts]: Everything"))
+        let result =
+            formatPr (
+                HasPr
+                    { basePr with
+                        Id = 99
+                        Title = "Everything"
+                        IsDraft = true
+                        IsMerged = true
+                        AutoMergeEnabled = true
+                        HasConflicts = true })
+
+        Assert.That(result, Is.EqualTo("PR #99 [draft, merged, auto-merge, conflicts]: Everything"))
 
     [<Test>]
     member _.``HasPr draft and conflicts shows both flags``() =
-        let result = formatPr (makePrInfo 3 "Draft conflict" true false true)
+        let result =
+            formatPr (HasPr { basePr with Id = 3; Title = "Draft conflict"; IsDraft = true; HasConflicts = true })
+
         Assert.That(result, Is.EqualTo("PR #3 [draft, conflicts]: Draft conflict"))
 
 [<TestFixture>]
@@ -132,3 +150,71 @@ type FoldRootResultsTests() =
         // Degenerate (CLI arity is OneOrMore, so unreachable in practice): no failures → 0.
         let result = foldRootResults "Added" (stubOp Set.empty) [||]
         Assert.That(result, Is.EqualTo(0))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type FormatDiffCategoryReportTests() =
+
+    let coverage path count : DiffCategoryCoverage = { CategoryPath = path; FileCount = count }
+
+    let linesOf report = formatDiffCategoryReport report |> fst
+
+    let exitCodeOf report = formatDiffCategoryReport report |> snd
+
+    let configured =
+        DiffCategoryReport.Configured(
+            [ coverage [ "Production code"; "Client" ] 8
+              coverage [ "Production code"; "Server" ] 112
+              coverage [ "Docs" ] 0 ],
+            14
+        )
+
+    [<Test>]
+    member _.``a missing configuration exits non-zero so the command works as a check``() =
+        Assert.That(exitCodeOf DiffCategoryReport.Missing, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``an invalid configuration exits non-zero and reports the validation reason``() =
+        let reason = "categories sharing a parent need distinct names"
+        let lines = linesOf (DiffCategoryReport.Invalid reason)
+
+        Assert.That(exitCodeOf (DiffCategoryReport.Invalid reason), Is.EqualTo(1))
+        Assert.That(String.Join("\n", lines), Does.Contain(reason))
+
+    [<Test>]
+    member _.``a configured repository exits zero even when a category matches nothing``() =
+        // Exit status reports the configuration state; a zero-match leaf is surfaced in the output
+        // instead, so a caller cannot mistake "configured but useless" for "not configured".
+        Assert.That(exitCodeOf configured, Is.EqualTo(0))
+
+    [<Test>]
+    member _.``every declared category is listed with its count, in configuration order``() =
+        let listed =
+            linesOf configured
+            |> List.filter (fun line -> line.StartsWith("  "))
+            |> List.map (fun line -> line.Trim())
+
+        Assert.That(
+            listed,
+            Is.EqualTo(
+                [ "8  Production code > Client"
+                  "112  Production code > Server"
+                  "0  Docs  ⚠ matches no tracked file" ]),
+            "counts are right-aligned and a zero-match category is flagged")
+
+    [<Test>]
+    member _.``the summary reports matched and unmatched totals``() =
+        let summary = linesOf configured |> List.last
+
+        Assert.That(summary, Does.Contain("120 of 134 tracked files matched"))
+        Assert.That(summary, Does.Contain("14 unmatched"))
+
+    [<Test>]
+    member _.``a repository-authored category name cannot emit terminal control characters``() =
+        let hostile = DiffCategoryReport.Configured([ coverage [ "Cli\u001b[2Jent" ] 1 ], 0)
+        let rendered = linesOf hostile |> String.concat " "
+
+        Assert.That(rendered |> Seq.filter Char.IsControl |> Seq.toList, Is.Empty)
+        Assert.That(rendered, Does.Contain("Cli[2Jent"), "the name still renders, without the escape")

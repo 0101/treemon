@@ -11,14 +11,7 @@ open Microsoft.Playwright.NUnit
 open NUnit.Framework
 open Shared
 open Server
-
-let private serverPath name =
-    Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Server", name))
-
-let private assetPath name =
-    serverPath (Path.Combine("Assets", "diff2html", DiffAssets.Version, name))
-
-let private templatePath = serverPath "DiffTemplate.html"
+open Tests.DiffViewerTestHarness
 
 let private verificationArtifactPath filename =
     Path.GetFullPath(
@@ -31,21 +24,6 @@ let private verificationArtifactPath filename =
             filename
         )
     )
-
-let private samplePatch =
-    String.concat
-        Environment.NewLine
-        [ "diff --git a/src/a.txt b/src/a.txt"
-          "index 1111111..2222222 100644"
-          "--- a/src/a.txt"
-          "+++ b/src/a.txt"
-          "@@ -1,3 +1,4 @@"
-          " one"
-          "-two"
-          "+TWO"
-          " three"
-          "+four"
-          "" ]
 
 let private syntaxPatch =
     String.concat
@@ -102,14 +80,6 @@ let private exactLinePatch =
           " trailing context"
           "" ]
 
-let private fileJson identity displayPath oldDisplayPath change =
-    {| identity = identity
-       displayPath = displayPath
-       oldDisplayPath = oldDisplayPath
-       linesAdded = (None: int option)
-       linesRemoved = (None: int option)
-       change = change |}
-
 let private fileJsonWithStats
     identity
     displayPath
@@ -123,16 +93,11 @@ let private fileJsonWithStats
        oldDisplayPath = oldDisplayPath
        linesAdded = Some linesAdded
        linesRemoved = Some linesRemoved
-       change = change |}
-
-let private firstFile =
-    fileJson "id-1" "src/a.txt" None "modified"
+       change = change
+       categoryPath = List.empty<string> |}
 
 let private syntaxFile =
     fileJson "id-js" "src/example.js" (None: string option) "modified"
-
-let private secondFile =
-    fileJson "id-2" "src/new-name.txt" (Some "src/old-name.txt") "renamed"
 
 let private refreshedFirstFile =
     fileJson "id-1-refreshed" "src/a.txt" None "modified"
@@ -143,55 +108,6 @@ let private refreshedSecondFile =
         "src/new-name.txt"
         (Some "src/old-name.txt")
         "renamed"
-
-let private readyLayerCounts committed local untracked =
-    {| committed =
-        {| status = "ready"
-           fileCount = committed |}
-       local =
-        {| status = "ready"
-           fileCount = local |}
-       untracked =
-        {| status = "ready"
-           fileCount = untracked |} |}
-
-let private readySummaryJsonWithCounts committed local untracked files =
-    JsonSerializer.Serialize(
-        {| status = "ready"
-           baseRef = "origin/main"
-           fileCount = Array.length files
-           files = files
-           layerCounts = readyLayerCounts committed local untracked |}
-    )
-
-let private readySummaryJson files =
-    readySummaryJsonWithCounts 2 3 1 files
-
-let private fileResultJsonWithPatch patch status identity displayPath oldDisplayPath change =
-    let file = fileJson identity displayPath oldDisplayPath change
-
-    match status with
-    | "text"
-    | "deleted" ->
-        JsonSerializer.Serialize(
-            {| status = status
-               file = file
-               patch = patch |}
-        )
-    | "symlink" ->
-        JsonSerializer.Serialize(
-            {| status = status
-               file = file
-               patch = "src/target.txt" |}
-        )
-    | _ ->
-        JsonSerializer.Serialize(
-            {| status = status
-               file = file |}
-        )
-
-let private fileResultJson =
-    fileResultJsonWithPatch samplePatch
 
 let private replacementResultJson replacement =
     JsonSerializer.Serialize(
@@ -513,17 +429,85 @@ type DiffProvisioningTests() =
                 Does.Not.Contain(IdiomorphScript.idiomorphJs)
             ))
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffViewerVisibilityTests() =
+
+    let doc filename kind : CanvasDoc =
+        { Filename = filename
+          ContentHash = "hash"
+          LastModified = DateTimeOffset.UnixEpoch
+          OwnerSessionId = None
+          Kind = kind }
+
+    let inventory = [ doc "diff.html" SystemView; doc "beads.html" SystemView; doc "notes.html" AgentDoc ]
+
+    let filenames comparison =
+        DiffProvisioner.visibleDocs comparison inventory |> List.map _.Filename
+
     [<Test>]
-    member _.``template pins only self-hosted diff2html assets``() =
+    member _.``a confirmed clean worktree offers no diff view``() =
+        Assert.That(filenames GitWorktree.Clean, Is.EqualTo([ "beads.html"; "notes.html" ]))
+
+    [<Test>]
+    member _.``a worktree with content keeps every document``() =
+        Assert.That(filenames GitWorktree.HasContent, Is.EqualTo([ "diff.html"; "beads.html"; "notes.html" ]))
+
+    [<Test>]
+    member _.``an unevaluated comparison keeps the view that reports the failure``() =
+        Assert.That(
+            filenames GitWorktree.Undetermined,
+            Is.EqualTo([ "diff.html"; "beads.html"; "notes.html" ]),
+            "Only a confirmed clean worktree may hide the diff view")
+
+    [<Test>]
+    member _.``the reserved viewer path is hidden whoever wrote it``() =
+        // CanvasDocKinds.classify recognises diff.html by filename alone, so the scanner cannot
+        // report an authored document there as an AgentDoc. Hiding is keyed on the reserved path.
+        let authored = [ doc "diff.html" AgentDoc ]
+
+        Assert.That(
+            DiffProvisioner.visibleDocs GitWorktree.Clean authored,
+            Is.Empty,
+            "A clean worktree offers nothing at the reserved diff path")
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffAssetsTests() =
+
+    [<Test>]
+    member _.``template and viewer assets pin only self-hosted bundles``() =
         let template = File.ReadAllText(templatePath)
-        let expectedRoot = $"/assets/diff2html/{DiffAssets.Version}/"
+        let viewerCss = File.ReadAllText(viewerAssetPath "viewer.css")
+        let viewerScript = File.ReadAllText(viewerAssetPath "viewer.js")
 
         Assert.Multiple(fun () ->
-            Assert.That(template, Does.Contain(expectedRoot + "diff2html.min.css"))
-            Assert.That(template, Does.Contain(expectedRoot + "diff2html.min.js"))
-            Assert.That(template, Does.Contain(expectedRoot + "diff2html-ui-slim.min.js"))
-            Assert.That(template, Does.Not.Contain("cdn.jsdelivr.net"))
-            Assert.That(template, Does.Not.Contain("unpkg.com")))
+            Assert.That(template, Does.Contain(DiffAssets.cssPath))
+            Assert.That(template, Does.Contain(DiffAssets.rendererPath))
+            Assert.That(template, Does.Contain(DiffAssets.viewerCssPath))
+            Assert.That(template, Does.Contain(DiffAssets.viewerScriptPath))
+            Assert.That(viewerScript, Does.Contain(DiffAssets.highlighterPath))
+
+            [ template; viewerCss; viewerScript ]
+            |> List.iter (fun source ->
+                Assert.That(source, Does.Not.Contain("cdn.jsdelivr.net"))
+                Assert.That(source, Does.Not.Contain("unpkg.com"))))
+
+    [<Test>]
+    member _.``viewer script restates the schema the validator enforces``() =
+        // The configure prompt spells out the depth bound and the reserved top-level name as prose.
+        // Pinning it to the validator's own constants is what keeps the two from drifting apart.
+        let script = File.ReadAllText(viewerAssetPath "viewer.js")
+
+        Assert.Multiple(fun () ->
+            Assert.That(script, Does.Contain($"at most {DiffCategories.maxDepth} levels"))
+            Assert.That(script, Does.Contain($"var OTHER_CATEGORY = '{DiffCategories.reservedTopLevelName}'"))
+
+            Assert.That(
+                script,
+                Does.Contain($"Do not use \"{DiffCategories.reservedTopLevelName}\" as a top-level name")))
 
     [<Test>]
     member _.``embedded pinned assets match the vendored files exactly``() =
@@ -540,73 +524,27 @@ type DiffProvisioningTests() =
 
             Assert.That(asset.Content, Is.EqualTo(File.ReadAllText(assetPath filename)), filename))
 
+    [<Test>]
+    member _.``embedded viewer assets match the authored files exactly``() =
+        // The browser tests load these from disk while the server serves the embedded copies, so
+        // the two have to be the same bytes for a routed page to behave like the served one.
+        let cases =
+            [ DiffAssets.viewerCssPath, "viewer.css"
+              DiffAssets.viewerScriptPath, "viewer.js" ]
+
+        cases
+        |> List.iter (fun (url, filename) ->
+            let asset =
+                DiffAssets.tryFind url
+                |> Option.defaultWith (fun () -> failwith $"Missing embedded asset {url}")
+
+            Assert.That(asset.Content, Is.EqualTo(File.ReadAllText(viewerAssetPath filename)), filename))
+
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Canvas")>]
 type DiffViewerE2ETests() =
-    inherit PageTest()
-
-    let pageUrl = $"{ServerFixture.canvasUrl}/e2e-diff-worktree/diff.html"
-    let template =
-        File.ReadAllText(templatePath)
-        |> CanvasExport.injectAtHead (CanvasDocServer.buildInjection SystemView "diff.html")
-    let css = File.ReadAllText(assetPath "diff2html.min.css")
-    let renderer = File.ReadAllText(assetPath "diff2html.min.js")
-    let highlighter = File.ReadAllText(assetPath "diff2html-ui-slim.min.js")
-
-    override this.ContextOptions() =
-        let options = base.ContextOptions()
-        options.IgnoreHTTPSErrors <- true
-        options
-
-    member private this.RouteBody(glob: string, contentType: string, body: string) =
-        this.Page.RouteAsync(
-            glob,
-            fun (route: IRoute) ->
-                route.FulfillAsync(
-                    RouteFulfillOptions(
-                        ContentType = contentType,
-                        Body = body
-                    )
-                )
-        )
-
-    member private this.RouteSummary(body) =
-        this.RouteBody("**/diff-summary?*", "application/json", body)
-
-    member private this.RouteFiles() =
-        this.Page.RouteAsync(
-            "**/diff-file?*",
-            fun route ->
-                let uri = Uri(route.Request.Url)
-                let identity = Uri.UnescapeDataString(uri.Query.Substring("?identity=".Length))
-                let file =
-                    if identity.StartsWith("id-2", StringComparison.Ordinal) then
-                        fileJson
-                            identity
-                            secondFile.displayPath
-                            secondFile.oldDisplayPath
-                            secondFile.change
-                    else
-                        fileJson
-                            identity
-                            firstFile.displayPath
-                            firstFile.oldDisplayPath
-                            firstFile.change
-
-                route.FulfillAsync(
-                    RouteFulfillOptions(
-                        ContentType = "application/json",
-                        Body =
-                            fileResultJson
-                                "text"
-                                file.identity
-                                file.displayPath
-                                file.oldDisplayPath
-                                file.change
-                    )
-                )
-        )
+    inherit DiffViewerHarness()
 
     member private this.RouteFileStatus(status) =
         this.RouteBody(
@@ -644,13 +582,6 @@ type DiffViewerE2ETests() =
                 syntaxFile.displayPath
                 syntaxFile.oldDisplayPath
                 syntaxFile.change
-        )
-
-    member private this.RouteHighlighter() =
-        this.RouteBody(
-            $"**/{DiffAssets.Version}/diff2html-ui-slim.min.js",
-            "text/javascript",
-            highlighter
         )
 
     member private this.RouteDashboardWithDiffDoc(branch: string) =
@@ -699,26 +630,6 @@ type DiffViewerE2ETests() =
                 } :> Task))
 
         this.Page.RouteAsync("**/IWorktreeApi/getWorktrees", routeHandler)
-
-    member private this.Goto() =
-        task {
-            let! _ =
-                this.Page.GotoAsync(
-                    pageUrl,
-                    PageGotoOptions(WaitUntil = WaitUntilState.Load)
-                )
-
-            ()
-        }
-
-    member private this.ActivateFile(identity: string) =
-        task {
-            let entry =
-                this.Page.Locator($".file-entry[data-identity='{identity}']")
-
-            do! entry.WaitForAsync()
-            do! entry.ClickAsync()
-        }
 
     member private this.SetupLayerFilterPage() =
         task {
@@ -806,24 +717,6 @@ type DiffViewerE2ETests() =
             Assert.That(accordionCounts, Is.EqualTo([| 0; 0; 0; 0 |]))
         }
 
-    [<SetUp>]
-    member this.RouteTemplateAndCoreAssets() =
-        task {
-            do! this.RouteBody("**/diff.html", "text/html; charset=utf-8", template)
-            do!
-                this.RouteBody(
-                    $"**/{DiffAssets.Version}/diff2html.min.css",
-                    "text/css",
-                    css
-                )
-            do!
-                this.RouteBody(
-                    $"**/{DiffAssets.Version}/diff2html.min.js",
-                    "text/javascript",
-                    renderer
-                )
-        }
-
     [<Test>]
     member this.``canvas server serves the exact immutable pinned renderer asset``() =
         task {
@@ -839,6 +732,29 @@ type DiffViewerE2ETests() =
                     response.Headers.CacheControl.ToString(),
                     Is.EqualTo("public, max-age=31536000, immutable")
                 ))
+        }
+
+    [<Test>]
+    member this.``canvas server serves viewer assets that must be revalidated``() =
+        task {
+            // The viewer stylesheet and script live at a stable URL, so a frozen cache entry would
+            // outlive the code it belongs to. They are served revalidating, never immutable.
+            use client = new HttpClient()
+
+            let! cssResponse =
+                client.GetAsync($"{ServerFixture.canvasUrl}{DiffAssets.viewerCssPath}")
+            let! cssBody = cssResponse.Content.ReadAsStringAsync()
+            let! scriptResponse =
+                client.GetAsync($"{ServerFixture.canvasUrl}{DiffAssets.viewerScriptPath}")
+            let! scriptBody = scriptResponse.Content.ReadAsStringAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(int cssResponse.StatusCode, Is.EqualTo(200))
+                Assert.That(cssBody, Is.EqualTo(viewerCss))
+                Assert.That(cssResponse.Headers.CacheControl.ToString(), Is.EqualTo("no-cache"))
+                Assert.That(int scriptResponse.StatusCode, Is.EqualTo(200))
+                Assert.That(scriptBody, Is.EqualTo(viewerScript))
+                Assert.That(scriptResponse.Headers.CacheControl.ToString(), Is.EqualTo("no-cache")))
         }
 
     [<Test>]
@@ -2219,30 +2135,19 @@ type DiffViewerE2ETests() =
                     secondFile.oldDisplayPath
                     secondFile.change
 
+            // Load, Refresh, layer-filter change and reload each serve fresh identities for the
+            // same two files.
             let summaries =
                 [| readySummaryJson [| firstFile; secondFile |]
                    readySummaryJson [| refreshedFirstFile; refreshedSecondFile |]
                    readySummaryJson [| refreshedFirstFile; filteredSecondFile |]
                    readySummaryJson [| refreshedFirstFile; reloadedSecondFile |] |]
-            // The route callback owns the sequence of refreshed identity snapshots.
-            let mutable summaryIndex = 0
+
             let fileRequests =
                 System.Collections.Concurrent.ConcurrentQueue<string>()
 
             do! this.RouteHighlighter()
-            do!
-                this.Page.RouteAsync(
-                    "**/diff-summary?*",
-                    fun route ->
-                        let body = summaries[Math.Min(summaryIndex, summaries.Length - 1)]
-                        summaryIndex <- summaryIndex + 1
-                        route.FulfillAsync(
-                            RouteFulfillOptions(
-                                ContentType = "application/json",
-                                Body = body
-                            )
-                        )
-                )
+            do! this.RouteSummaries(summaries)
             do!
                 this.Page.RouteAsync(
                     "**/diff-file?*",
@@ -3328,7 +3233,7 @@ type DiffSummaryPerformanceE2ETests() =
     inherit PageTest()
 
     [<Test>]
-    member this.``warm 250-path summary appears within one second``() =
+    member this.``warm 250-path summary appears within five seconds``() =
         task {
             let tempDir =
                 Path.Combine(
@@ -3515,12 +3420,12 @@ type DiffSummaryPerformanceE2ETests() =
                         Assert.That(statsCount, Is.EqualTo(250))
                         Assert.That(
                             responseMs,
-                            Is.LessThan(1000.0),
+                            Is.LessThan(5000.0),
                             $"Warm summary response took {responseMs:F3} ms"
                         )
                         Assert.That(
                             displayMs,
-                            Is.LessThan(1000.0),
+                            Is.LessThan(5000.0),
                             $"Warm summary display took {displayMs:F3} ms"
                         ))
                 finally

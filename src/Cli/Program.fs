@@ -73,6 +73,7 @@ let formatPr = function
         let flags =
             [ if pr.IsDraft then "draft"
               if pr.IsMerged then "merged"
+              if pr.AutoMergeEnabled then "auto-merge"
               if pr.HasConflicts then "conflicts" ]
 
         let flagStr =
@@ -288,6 +289,64 @@ let rootsCmd =
         setAction handler
     }
 
+/// Renders a diff category report and the exit code that goes with it: 0 only for a configured
+/// repository, so the command is usable as a check and not just a printer. Category names come from
+/// the repository's `.treemon.json`, so they are sanitized before they reach the terminal.
+let formatDiffCategoryReport (report: DiffCategoryReport) : string list * int =
+    match report with
+    | DiffCategoryReport.Missing ->
+        [ "Diff categories: not configured"
+          "The repository root's .treemon.json declares no diffCategories, so the diff view shows a flat file list." ],
+        1
+    | DiffCategoryReport.Invalid reason ->
+        [ "Diff categories: invalid (the diff view falls back to a flat file list)"
+          $"Reason: %s{reason}" ],
+        1
+    | DiffCategoryReport.Configured(leaves, unmatched) ->
+        let matched = leaves |> List.sumBy _.FileCount
+
+        let countWidth =
+            unmatched :: (leaves |> List.map _.FileCount)
+            |> List.map (fun count -> (string count).Length)
+            |> List.fold max 1
+
+        let categoryLines =
+            leaves
+            |> List.map (fun leaf ->
+                let name = leaf.CategoryPath |> List.map sanitizeForTerminal |> String.concat " > "
+                let marker = if leaf.FileCount = 0 then "  ⚠ matches no tracked file" else ""
+                $"""  %s{(string leaf.FileCount).PadLeft(countWidth)}  %s{name}%s{marker}""")
+
+        [ "Diff categories: configured"; "" ]
+        @ categoryLines
+        @ [ ""
+            $"%d{matched} of %d{matched + unmatched} tracked files matched; %d{unmatched} unmatched (the viewer's Other group)" ],
+        0
+
+let categoriesCmd =
+    let handler (path: string option, port: int option) =
+        withPort port (fun port ->
+            let target = path |> Option.defaultValue "." |> Path.GetFullPath
+
+            tryCallServer port (fun api ->
+                match api.getDiffCategoryReport target |> Async.RunSynchronously with
+                | Error e -> eprintfn $"Error: %s{e}"; 1
+                | Ok report ->
+                    let lines, exitCode = formatDiffCategoryReport report
+                    lines |> List.iter (printfn "%s")
+                    exitCode))
+
+    command "categories" {
+        description "Report what a repository's diff categories match (exit code 0 only when configured)"
+
+        inputs (
+            argumentMaybe<string> "path" |> desc "Worktree path (default: current directory)",
+            optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)"
+        )
+
+        setAction handler
+    }
+
 [<EntryPoint>]
 let main argv =
     rootCommand argv {
@@ -300,4 +359,5 @@ let main argv =
         addCommand addCmd
         addCommand removeCmd
         addCommand rootsCmd
+        addCommand categoriesCmd
     }

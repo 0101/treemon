@@ -87,9 +87,9 @@ let FitOrHide (items: ReactElement list) =
         | Some el when not (isNull el.parentElement) ->
             let observer = createResizeObserver (fun _ -> checkOverflow ())
             observeElement observer el.parentElement
-            React.createDisposable (fun () -> disconnectObserver observer)
+            fun () -> disconnectObserver observer
         | _ ->
-            React.createDisposable ignore
+            fun () -> ()
     ), [| |])
 
     Html.span [
@@ -104,7 +104,7 @@ let FitOrHide (items: ReactElement list) =
 let private commitGridElement (m: WorkMetrics) =
     let displayCount = min m.CommitCount 90
     let overflow = m.CommitCount - displayCount
-    React.fragment [
+    React.Fragment [
         Html.span [
             prop.className "commit-grid"
             prop.children (List.init displayCount (fun _ -> Html.span [ prop.className "commit-square" ]))
@@ -132,19 +132,4 @@ let workMetricsItems (metrics: WorkMetrics option) : ReactElement list =
             commitGridElement m
             if m.LinesAdded <> 0 || m.LinesRemoved <> 0 then
                 diffStatsElement m.LinesAdded m.LinesRemoved
-        ]
-
-let workMetricsView (metrics: WorkMetrics option) =
-    match metrics with
-    | None -> Html.none
-    | Some m when m.CommitCount = 0 -> Html.none
-    | Some m ->
-        Html.span [
-            prop.className "work-metrics"
-            prop.children [
-                commitGridElement m
-                match m.LinesAdded, m.LinesRemoved with
-                | 0, 0 -> Html.none
-                | added, removed -> diffStatsElement added removed
-            ]
         ]

@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>Treemon</AssemblyName>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RollForward>LatestMajor</RollForward>
   </PropertyGroup>
 
@@ -23,6 +23,7 @@
     <Compile Include="SessionManager.fs" />
     <Compile Include="GlobalConfig.fs" />
     <Compile Include="TreemonConfig.fs" />
+    <Compile Include="DiffCategories.fs" />
     <Compile Include="GitWorktree.fs" />
     <Compile Include="WorktreeDiff.fs" />
     <Compile Include="WorktreeDiffApi.fs" />
@@ -61,6 +62,7 @@
     <Compile Include="OverviewSnapshotCapture.fs" />
     <Compile Include="IdiomorphScript.fs" />
     <Compile Include="CanvasSendScript.fs" />
+    <Compile Include="CanvasMorphScript.fs" />
     <Compile Include="CanvasSelectionScript.fs" />
     <Compile Include="HttpSecurity.fs" />
     <Compile Include="CanvasDocServer.fs" />
@@ -79,6 +81,14 @@
     <EmbeddedResource Include="DiffTemplate.html">
       <LogicalName>DiffTemplate.html</LogicalName>
     </EmbeddedResource>
+    <!-- The viewer's own stylesheet and script, self-hosted next to the pinned diff2html bundle
+         and embedded so the runtime serves exactly what the browser tests load from disk. -->
+    <EmbeddedResource Include="Assets\diff\viewer.css">
+      <LogicalName>DiffViewerCss</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\diff\viewer.js">
+      <LogicalName>DiffViewerScript</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="Assets\diff2html\3.4.52\diff2html.min.css">
       <LogicalName>Diff2HtmlCss</LogicalName>
     </EmbeddedResource>
@@ -94,6 +104,9 @@
     <EmbeddedResource Include="..\Extension\canvas-send.js">
       <LogicalName>CanvasSend.js</LogicalName>
     </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-morph.js">
+      <LogicalName>CanvasMorph.js</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="..\Extension\canvas-doc-kinds.json">
       <LogicalName>CanvasDocKinds.json</LogicalName>
     </EmbeddedResource>
@@ -108,7 +121,16 @@
     <PackageReference Include="Saturn" Version="0.17.0" />
     <PackageReference Include="Fable.Remoting.Giraffe" Version="5.*" />
     <PackageReference Include="Azure.Storage.Blobs" Version="12.29.1" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.11" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pins for vulnerable transitive dependencies we never call directly: Saturn drags in
+         JwtBearer 6.0.3 with the Microsoft.IdentityModel 6.10.0 chain (NU1902), and
+         Microsoft.Data.Sqlite drags in SQLitePCLRaw 2.1.11 with a vulnerable SQLite native
+         build (NU1903). -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
   </ItemGroup>
 
   <ItemGroup>
