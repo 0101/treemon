@@ -18,16 +18,16 @@ let private snapshot timestamp count : OverviewSnapshot =
 
 let private createApi store =
     WorktreeApi.worktreeApi
-        (SchedulerState.createAgent ())
-        (CardEventLog.createAgent ())
-        (SessionManager.createAgent ())
-        None
-        (Some store)
-        None
-        []
-        None
-        "test"
-        None
+        { Agent = SchedulerState.createAgent ()
+          CardLog = CardEventLog.createAgent ()
+          SessionAgent = SessionManager.createAgent ()
+          ActivityStore = None
+          SnapshotStore = Some store
+          AutoSyncStore = None
+          WorktreeRoots = []
+          TestFixtures = None
+          AppVersion = "test"
+          DeployBranch = None }
 
 let private readHistory store window =
     (createApi store).getOverviewHistory window

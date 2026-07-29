@@ -336,16 +336,16 @@ let main args =
                     System.Environment.Exit(1)
 
                 WorktreeApi.worktreeApi
-                    agent
-                    cardLog
-                    sessionAgent
-                    None
-                    None
-                    None
-                    worktreeRoots
-                    config.TestFixtures
-                    appVersion
-                    deployBranch
+                    { Agent = agent
+                      CardLog = cardLog
+                      SessionAgent = sessionAgent
+                      ActivityStore = None
+                      SnapshotStore = None
+                      AutoSyncStore = None
+                      WorktreeRoots = worktreeRoots
+                      TestFixtures = config.TestFixtures
+                      AppVersion = appVersion
+                      DeployBranch = deployBranch }
                 |> buildRemotingHandler,
                 Some agent,
                 None,
@@ -397,16 +397,16 @@ let main args =
                     Log.log "Startup" "Scheduler background loop started"
 
                     WorktreeApi.worktreeApi
-                        agent
-                        cardLog
-                        sessionAgent
-                        (Some store)
-                        (Some activity.SnapshotStore)
-                        (Some autoSyncStore)
-                        worktreeRoots
-                        config.TestFixtures
-                        appVersion
-                        deployBranch
+                        { Agent = agent
+                          CardLog = cardLog
+                          SessionAgent = sessionAgent
+                          ActivityStore = Some store
+                          SnapshotStore = Some activity.SnapshotStore
+                          AutoSyncStore = Some autoSyncStore
+                          WorktreeRoots = worktreeRoots
+                          TestFixtures = config.TestFixtures
+                          AppVersion = appVersion
+                          DeployBranch = deployBranch }
                     |> buildRemotingHandler,
                     Some agent,
                     Some activity,

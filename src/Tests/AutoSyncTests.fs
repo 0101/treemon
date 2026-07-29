@@ -1536,16 +1536,16 @@ type AutoSyncEndpointTests() =
 
         let api =
             WorktreeApi.worktreeApi
-                agent
-                (CardEventLog.createAgent ())
-                sessionAgent
-                None
-                None
-                (Some store)
-                [ root ]
-                None
-                "1.0"
-                None
+                { Agent = agent
+                  CardLog = CardEventLog.createAgent ()
+                  SessionAgent = sessionAgent
+                  ActivityStore = None
+                  SnapshotStore = None
+                  AutoSyncStore = Some store
+                  WorktreeRoots = [ root ]
+                  TestFixtures = None
+                  AppVersion = "1.0"
+                  DeployBranch = None }
 
         let enableAndReceive apiWorktreePath =
             let receive = listener.GetContextAsync()
@@ -1672,16 +1672,16 @@ type AutoSyncVerificationTests() =
 
             let api =
                 WorktreeApi.worktreeApi
-                    agent
-                    (CardEventLog.createAgent ())
-                    sessionAgent
-                    None
-                    None
-                    None
-                    [ root ]
-                    None
-                    "1.0"
-                    None
+                    { Agent = agent
+                      CardLog = CardEventLog.createAgent ()
+                      SessionAgent = sessionAgent
+                      ActivityStore = None
+                      SnapshotStore = None
+                      AutoSyncStore = None
+                      WorktreeRoots = [ root ]
+                      TestFixtures = None
+                      AppVersion = "1.0"
+                      DeployBranch = None }
 
             let selectedRequest = selectedListener.GetContextAsync()
             let otherRequest = otherListener.GetContextAsync()

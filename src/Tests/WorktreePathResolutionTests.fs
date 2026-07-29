@@ -33,16 +33,16 @@ let private populateAgent (agent: MailboxProcessor<StateMsg>) (repos: (RepoId * 
 
 let private createApi agent roots =
     WorktreeApi.worktreeApi
-        agent
-        (CardEventLog.createAgent ())
-        (SessionManager.createAgent ())
-        None
-        None
-        None
-        roots
-        None
-        "1.0"
-        None
+        { Agent = agent
+          CardLog = CardEventLog.createAgent ()
+          SessionAgent = SessionManager.createAgent ()
+          ActivityStore = None
+          SnapshotStore = None
+          AutoSyncStore = None
+          WorktreeRoots = roots
+          TestFixtures = None
+          AppVersion = "1.0"
+          DeployBranch = None }
 
 let private deleteWorktree agent worktreeRoots wtPath =
     WorktreeApi.deleteWorktreeWith

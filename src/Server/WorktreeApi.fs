@@ -612,18 +612,36 @@ let private updateArchivedBranches
             return Ok ()
     }
 
-let worktreeApi
-    (agent: MailboxProcessor<SchedulerState.StateMsg>)
-    (cardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>)
-    (sessionAgent: SessionManager.SessionAgent)
-    (activityStore: SessionActivityStore.SessionActivityStore option)
-    (snapshotStore: OverviewSnapshotStore.OverviewSnapshotStore option)
-    (autoSyncStore: AutoSyncStore.Store option)
-    (worktreeRoots: string list)
-    (testFixtures: string option)
-    (appVersion: string)
-    (deployBranch: string option)
-    : IWorktreeApi =
+/// Everything `worktreeApi` needs to serve the dashboard. A record rather than a parameter list
+/// because most of these are optional or plain strings — `TestFixtures` and `DeployBranch` are both
+/// `string option`, so a positional call could transpose them silently, and the three optional
+/// stores read as a run of bare `None`s at every call site. Naming each one makes the fixture-mode
+/// wiring readable and a swap a compile error.
+type WorktreeApiDependencies =
+    { Agent: MailboxProcessor<SchedulerState.StateMsg>
+      CardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>
+      SessionAgent: SessionManager.SessionAgent
+      ActivityStore: SessionActivityStore.SessionActivityStore option
+      SnapshotStore: OverviewSnapshotStore.OverviewSnapshotStore option
+      AutoSyncStore: AutoSyncStore.Store option
+      WorktreeRoots: string list
+      TestFixtures: string option
+      AppVersion: string
+      DeployBranch: string option }
+
+let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
+    let { Agent = agent
+          CardLog = cardLog
+          SessionAgent = sessionAgent
+          ActivityStore = activityStore
+          SnapshotStore = snapshotStore
+          AutoSyncStore = autoSyncStore
+          WorktreeRoots = worktreeRoots
+          TestFixtures = testFixtures
+          AppVersion = appVersion
+          DeployBranch = deployBranch } =
+        dependencies
+
     let fixtures = testFixtures |> Option.bind (fun p -> loadFixtures p |> Result.toOption)
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
