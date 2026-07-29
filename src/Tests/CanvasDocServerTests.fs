@@ -497,26 +497,30 @@ type DiffComparisonContextTests() =
                 UpstreamRemote = "upstream"
                 BaseBranch = "dev" }
 
+        // The scheduler keys repositories by PathUtils.toRepoId of the repository root, so the
+        // retained key is exactly the root whose .treemon.json a linked worktree shares.
         let state =
             { SchedulerState.DashboardState.empty with
                 Repos =
                     Map.ofList
-                        [ RepoId "context-repo",
+                        [ PathUtils.toRepoId repoRoot,
                           repo ] }
 
         [ repoRoot; linked ]
         |> List.iter (fun path ->
-            let context =
+            let target =
                 tryFindDiffComparisonContext state path
 
             Assert.That(
-                context,
+                target,
                 Is.EqualTo(
-                    Some
+                    Some(
+                        PathUtils.toRepoId repoRoot,
                         ({ WorktreePath = path
                            UpstreamRemote = "upstream"
                            BaseBranch = "dev" }
                          : WorktreeDiff.DiffComparisonContext)
+                    )
                 )
             ))
 
@@ -534,6 +538,7 @@ type DiffComparisonContextTests() =
                 Path.Combine(Path.GetTempPath(), "treemon-context", "atomic-linked")
                 |> PathUtils.normalizePath
 
+            let repoId = RepoId "atomic-context-repo"
             let agent = SchedulerState.createAgent ()
 
             Assert.That(
@@ -548,7 +553,7 @@ type DiffComparisonContextTests() =
 
             agent.Post(
                 RefreshScheduler.repositoryDiscoveryUpdate
-                    (RepoId "atomic-context-repo")
+                    repoId
                     (Some [ info ])
                     "upstream"
                     "develop"
@@ -559,11 +564,13 @@ type DiffComparisonContextTests() =
             Assert.That(
                 tryFindDiffComparisonContext state linked,
                 Is.EqualTo(
-                    Some
+                    Some(
+                        repoId,
                         ({ WorktreePath = linked
                            UpstreamRemote = "upstream"
                            BaseBranch = "develop" }
                          : WorktreeDiff.DiffComparisonContext)
+                    )
                 )
             )
         }

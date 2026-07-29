@@ -542,6 +542,27 @@ let private untrackedEnumerationArguments =
       "-z"
       "--" ]
 
+let private trackedFileEnumerationArguments = [ "ls-files"; "-z"; "--" ]
+
+/// Every path Git tracks in the repository, independent of any comparison. This is the file set a
+/// repository's categorization is measured against, so coverage does not depend on there being an
+/// interesting diff to classify.
+let internal listTrackedFiles (repoRoot: string) : Async<Result<string list, WorktreeDiffError>> =
+    asyncResult {
+        let deadline =
+            ProcessRunner.createResponseDeadline ProcessRunner.argumentListResponseDeadlineMs
+
+        let! bytes =
+            runDiffGit
+                deadline
+                EnumerateTracked
+                ProcessRunner.CaptureLimits.data
+                repoRoot
+                trackedFileEnumerationArguments
+
+        return! parseNulTokens EnumerateTracked bytes
+    }
+
 let private resolveComparison
     (deadline: ProcessRunner.ResponseDeadline)
     (context: DiffComparisonContext)

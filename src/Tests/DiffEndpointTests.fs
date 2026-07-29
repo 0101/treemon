@@ -7,21 +7,11 @@ open System.Net
 open System.Net.Http
 open System.Text.Json
 open System.Text.Json.Nodes
-open System.Threading
 open System.Threading.Tasks
 open NUnit.Framework
 open Shared
 open global.Server
-
-let private assertJson (expected: string) (actual: string) =
-    let expectedNode = JsonNode.Parse(expected)
-    let actualNode = JsonNode.Parse(actual)
-
-    Assert.That(
-        JsonNode.DeepEquals(expectedNode, actualNode),
-        Is.True,
-        $"Expected:{Environment.NewLine}{expected}{Environment.NewLine}Actual:{Environment.NewLine}{actual}"
-    )
+open Tests.DiffEndpointTestHelpers
 
 [<RequireQualifiedAccess>]
 type private ExpectedLayerCount =
@@ -56,19 +46,6 @@ let private withUniformLayerError status =
         (ExpectedLayerCount.Error status)
         (ExpectedLayerCount.Error status)
 
-let private getResponseBody (response: HttpResponseMessage) : string =
-    response.Content.ReadAsStringAsync()
-    |> Async.AwaitTask
-    |> TestUtils.runAsync
-
-let private get
-    (client: HttpClient)
-    (url: string)
-    : HttpResponseMessage =
-    client.GetAsync(url)
-    |> Async.AwaitTask
-    |> TestUtils.runAsync
-
 let private getWithHost
     (client: HttpClient)
     (host: string)
@@ -80,163 +57,6 @@ let private getWithHost
     client.SendAsync(request)
     |> Async.AwaitTask
     |> TestUtils.runAsync
-
-let private worktreeUrl
-    (baseUrl: string)
-    (worktreePath: string)
-    (endpoint: string)
-    =
-    let encoded =
-        worktreePath
-        |> PathUtils.normalizePath
-        |> Uri.EscapeDataString
-
-    $"{baseUrl}/{encoded}/{endpoint}"
-
-let private agentKnowingWithConfiguration
-    (worktreePaths: string list)
-    upstreamRemote
-    baseBranch
-    : MailboxProcessor<SchedulerState.StateMsg> =
-    let agent = SchedulerState.createAgent ()
-
-    let worktrees =
-        worktreePaths
-        |> List.map (fun path ->
-            let info: GitWorktree.WorktreeInfo =
-                { Path = PathUtils.normalizePath path
-                  Head = ""
-                  Branch = Some "test" }
-
-            info)
-
-    let repoId = RepoId "diff-endpoint-tests"
-    agent.Post(
-        RefreshScheduler.repositoryDiscoveryUpdate
-            repoId
-            (Some worktrees)
-            upstreamRemote
-            baseBranch
-    )
-
-    agent.PostAndAsyncReply(SchedulerState.GetState)
-    |> TestUtils.runAsync
-    |> ignore
-
-    agent
-
-let private agentKnowing worktreePaths =
-    agentKnowingWithConfiguration worktreePaths "origin" "main"
-
-let private withDiffServerConfiguration
-    responseDeadlineMs
-    (worktreePaths: string list)
-    upstreamRemote
-    baseBranch
-    (service: WorktreeDiffApi.Service)
-    (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
-    (action: MailboxProcessor<SchedulerState.StateMsg> -> HttpClient -> string -> unit)
-    =
-    let port = TestUtils.getFreeTcpPort ()
-    let agent =
-        agentKnowingWithConfiguration
-            worktreePaths
-            upstreamRemote
-            baseBranch
-
-    use host =
-        CanvasDocServer.createHostWithDiffDeadline
-            responseDeadlineMs
-            agent
-            service
-            newIdentity
-            port
-
-    host.StartAsync(CancellationToken.None)
-        .GetAwaiter()
-        .GetResult()
-
-    try
-        use client = new HttpClient()
-        client.DefaultRequestHeaders.Add(
-            WorktreeDiffApi.viewerHeaderName,
-            Guid.NewGuid().ToString("D")
-        )
-        action agent client $"http://127.0.0.1:{port}"
-    finally
-        host.StopAsync(CancellationToken.None)
-            .GetAwaiter()
-            .GetResult()
-
-let private withDiffServerDeadline
-    responseDeadlineMs
-    (worktreePaths: string list)
-    (service: WorktreeDiffApi.Service)
-    (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
-    (action: HttpClient -> string -> unit)
-    =
-    withDiffServerConfiguration
-        responseDeadlineMs
-        worktreePaths
-        "origin"
-        "main"
-        service
-        newIdentity
-        (fun _ client baseUrl -> action client baseUrl)
-
-let private withDiffServer
-    worktreePaths
-    service
-    newIdentity
-    action
-    =
-    withDiffServerDeadline
-        ProcessRunner.argumentListResponseDeadlineMs
-        worktreePaths
-        service
-        newIdentity
-        action
-
-let private fakeService
-    (summary:
-        Result<
-            WorktreeDiff.WorktreeDiffSummary,
-            WorktreeDiff.WorktreeDiffError
-         >)
-    (file:
-        WorktreeDiff.WorktreeDiffEntry
-            -> Result<
-                WorktreeDiff.WorktreeDiffFile,
-                WorktreeDiff.WorktreeDiffError
-             >)
-    : WorktreeDiffApi.Service =
-    let counts: WorktreeDiff.WorktreeDiffLayerCounts =
-        match summary with
-        | Ok value ->
-            { CommittedCount = Ok value.Files.Length
-              LocalCount = Ok value.Files.Length
-              UntrackedCount = Ok value.Files.Length }
-        | Error error ->
-            { CommittedCount = Error error
-              LocalCount = Error error
-              UntrackedCount = Error error }
-
-    { GetSummary = fun _ _ _ -> async.Return summary
-      GetLayerCounts = fun _ _ -> async.Return counts
-      GetFile = fun _ _ _ _ entry -> async.Return(file entry) }
-
-let private summaryIdentity
-    (displayPath: string)
-    (json: string)
-    =
-    use doc = JsonDocument.Parse(json)
-
-    let file =
-        doc.RootElement.GetProperty("files").EnumerateArray()
-        |> Seq.find (fun file ->
-            file.GetProperty("displayPath").GetString() = displayPath)
-
-    file.GetProperty("identity").GetString()
 
 let private summaryPaths (json: string) =
     use doc = JsonDocument.Parse(json)
@@ -250,49 +70,10 @@ let private layerQuery committed local untracked =
 
     $"?committed={value committed}&local={value local}&untracked={value untracked}"
 
-let private entry
-    (path: string)
-    (oldPath: string option)
-    (status: WorktreeDiff.WorktreeDiffStatus)
-    : WorktreeDiff.WorktreeDiffEntry =
-    { Path = path
-      OldPath = oldPath
-      LinesAdded = None
-      LinesRemoved = None
-      Status = status }
-
-let private summary
-    (files: WorktreeDiff.WorktreeDiffEntry list)
-    : WorktreeDiff.WorktreeDiffSummary =
-    { BaseRef = "origin/main"
-      MergeBase = "merge-base"
-      Files = files }
-
-let private availableLayerCounts committed local untracked : WorktreeDiff.WorktreeDiffLayerCounts =
-    { CommittedCount = Ok committed
-      LocalCount = Ok local
-      UntrackedCount = Ok untracked }
-
-let private uniformLayerCounts count =
-    availableLayerCounts count count count
-
 let private serializedLayerCounts =
     { AlreadyCommitted = DiffLayerCountResult.Available 2
       LocalChanges = DiffLayerCountResult.Available 3
       Untracked = DiffLayerCountResult.BaseError }
-
-let private fileSummary
-    (identity: string)
-    (path: string)
-    (oldPath: string option)
-    (change: DiffChangeKind)
-    : DiffFileSummary =
-    { Identity = identity
-      DisplayPath = path
-      OldDisplayPath = oldPath
-      LinesAdded = None
-      LinesRemoved = None
-      Change = change }
 
 let private replaceIdentity
     (store: WorktreeDiffApi.DiffIdentityStore)
@@ -463,7 +244,7 @@ type DiffSerializationTests() =
                    { BaseRef = "origin/main"
                      FileCount = 1
                      Files = [ file ] },
-               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed"}],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
+               """{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed","categoryPath":[]}],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.Clean "main",
                """{"status":"clean","baseRef":"main","fileCount":0,"files":[],"layerCounts":{"committed":{"status":"ready","fileCount":2},"local":{"status":"ready","fileCount":3},"untracked":{"status":"base-error","fileCount":null}}}""")
               (DiffSummaryResult.FilteredEmpty,
@@ -482,8 +263,69 @@ type DiffSerializationTests() =
         cases
         |> List.iter (fun (result, expected) ->
             result
-            |> WorktreeDiffApi.serializeSummaryResult serializedLayerCounts
+            |> WorktreeDiffApi.serializeSummaryResult
+                serializedLayerCounts
+                DiffCategories.Missing
             |> assertJson expected)
+
+    [<Test>]
+    member _.``ready summaries report the categorization state without exposing patterns``() =
+        let ready categoryPath =
+            DiffSummaryResult.Ready
+                { BaseRef = "origin/main"
+                  FileCount = 1
+                  Files = [ { file with CategoryPath = categoryPath } ] }
+
+        let configured =
+            DiffCategories.Configured
+                [ DiffCategories.Branch
+                      { Name = "Production code"
+                        Children =
+                          [ DiffCategories.Leaf
+                                { Name = "Server"
+                                  Patterns = [ "src/Server/**" ] } ] } ]
+
+        // Status and reason stay stated as literals rather than derived from `categorization`, which
+        // would just reimplement the serializer under test. The revision is whatever the
+        // configuration hashes to, so it is stated through the same function the server uses; what
+        // the contract fixes is that every state carries one.
+        let expectedCategorization status reason revision =
+            let reasonJson =
+                match reason with
+                | Some text -> $"\"{text}\""
+                | None -> "null"
+
+            $"""{{"status":"{status}","reason":{reasonJson},"revision":"{revision}"}}"""
+
+        let cases =
+            [ (DiffCategories.Missing, ready [], "missing", None, "[]")
+              (configured,
+               ready [ "Production code"; "Server" ],
+               "configured",
+               None,
+               """["Production code","Server"]""")
+              (DiffCategories.Invalid "each category needs a name",
+               ready [],
+               "invalid",
+               Some "each category needs a name",
+               "[]") ]
+
+        cases
+        |> List.iter (fun (categorization, result, status, reason, expectedPath) ->
+            let categorizationJson =
+                expectedCategorization status reason (DiffCategories.revision categorization)
+
+            result
+            |> WorktreeDiffApi.serializeSummaryResult
+                serializedLayerCounts
+                categorization
+            |> assertJson (
+                $"""{{"status":"ready","baseRef":"origin/main","fileCount":1,"files":[{{"identity":"opaque-1","displayPath":"new.txt","oldDisplayPath":"old.txt","linesAdded":4,"linesRemoved":2,"change":"renamed","categoryPath":{expectedPath}}}],"categorization":{categorizationJson}}}"""
+                |> withLayerCounts
+                    (ExpectedLayerCount.Available 2)
+                    (ExpectedLayerCount.Available 3)
+                    (ExpectedLayerCount.Error "base-error")
+            ))
 
     [<Test>]
     member _.``file results serialize every semantic state without renderer concepts``() =
