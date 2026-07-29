@@ -6,21 +6,28 @@ open Shared
 open Server.SessionActivity
 open Server.SessionActivityStore
 
-/// Who — if anyone — is listening in a worktree. Openness is a case, not a flag on an id, because
-/// both cases can carry a session id: `NoOpenSession` may still know a retained/offline identity
-/// from a closed CLI, and that identity is only a delivery hint, never evidence that a live agent
-/// will act on a prompt. `OpenSession` means a CLI was seen inside `SessionActivity.openWindow`,
-/// including an idle one — an idle open CLI is still attached and still owns its worktree.
+/// Who — if anyone — is *working* in a worktree. Openness alone is not the question: a CLI that is
+/// merely open is a terminal somebody left running, and waiting for it to close before Treemon will
+/// help is a condition no user would guess. Only a session mid-turn owns its worktree. Every case
+/// can carry a session id, and that id is only a delivery hint — never evidence that a live agent
+/// will act on a prompt.
 type SyncTarget =
-    | OpenSession of sessionId: string
+    /// A CLI seen inside `SessionActivity.openWindow` and mid-turn, background agents included.
+    /// It owns the worktree, so Treemon only asks it to sync.
+    | WorkingSession of sessionId: string
+    /// A CLI is open but between turns, or blocked on a user who is not there. Treemon syncs the
+    /// worktree itself and prompts this session only if it could not finish.
+    | IdleSession of sessionId: string
+    /// No CLI is open. A retained/offline identity from a closed CLI may still be known.
     | NoOpenSession of retainedSessionId: string option
 
 module SyncTarget =
-    /// The id a bridge send is addressed to, which both cases can supply. Callers that need to know
-    /// whether anyone is listening must match on the case instead.
+    /// The id a bridge send is addressed to, which every case can supply. Callers that need to know
+    /// whether anyone is working must match on the case instead.
     let sessionId =
         function
-        | OpenSession sessionId -> Some sessionId
+        | WorkingSession sessionId
+        | IdleSession sessionId -> Some sessionId
         | NoOpenSession retainedSessionId -> retainedSessionId
 
 type DeliveryRequest =
@@ -171,24 +178,34 @@ let internal isAlreadyAccepted
         record.BaseRevision = baseRevision && age >= TimeSpan.Zero && age < acceptedRetryAge
     | None -> false
 
-/// The open winner decides the target; retained identity is consulted only once no session is open,
-/// so an open idle CLI can never be mistaken for an offline one that merely left an id behind.
+/// A session mid-turn decides the target; anything else open is a terminal left running, and an
+/// offline identity is consulted only once nothing is open at all — so an open idle CLI can never be
+/// mistaken for one that merely left an id behind, nor for one that is still working.
 let internal selectTargetFromSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
     let openSessions =
         sessions |> List.filter (fun session -> now - session.LastSeen < openWindow)
 
-    let openWinner =
-        openSessions
-        |> pickActive _.Status StoredStatus.activityOrderKey
-        |> Option.orElseWith (fun () -> openSessions |> StoredStatus.tryMostRecentActivity)
+    // Background agents count as work: `effectiveStatus` reports Working while one is running, even
+    // between the session's own turns.
+    let isWorking (session: StoredStatus) =
+        SessionActivity.effectiveStatus session.Status = SessionActivity.SessionLevelStatus.Working
 
-    match openWinner with
-    | Some winner -> OpenSession(SessionId.value winner.SessionId)
+    let workingWinner =
+        openSessions
+        |> List.filter isWorking
+        |> List.sortByDescending StoredStatus.activityOrderKey
+        |> List.tryHead
+
+    match workingWinner with
+    | Some winner -> WorkingSession(SessionId.value winner.SessionId)
     | None ->
-        sessions
-        |> StoredStatus.tryMostRecentActivity
-        |> Option.map (_.SessionId >> SessionId.value)
-        |> NoOpenSession
+        match openSessions |> StoredStatus.tryMostRecentActivity with
+        | Some idle -> IdleSession(SessionId.value idle.SessionId)
+        | None ->
+            sessions
+            |> StoredStatus.tryMostRecentActivity
+            |> Option.map (_.SessionId >> SessionId.value)
+            |> NoOpenSession
 
 let selectTarget
     (activityStore: SessionActivityStore.SessionActivityStore option)
@@ -296,12 +313,11 @@ let private deliverPrompt
           Prompt = promptText }
 
 /// Where the two paths part, once an operation holds the guard and has passed the eligibility gate.
-/// An open session — even an idle one — is attached to its worktree and owns it, so Treemon only
-/// asks it to sync. With no session open Treemon syncs the worktree itself and spends an agent only
-/// on what it could not finish; that is also the only path that decides whether to publish, so it is
-/// the only one that carries the PR status.
+/// A session mid-turn owns its worktree, so Treemon only asks it to sync. Otherwise Treemon syncs the
+/// worktree itself and spends an agent only on what it could not finish; that is also the only path
+/// that decides whether to publish, so it is the only one that carries the PR status.
 type private SyncPlan =
-    | AskOpenSession of SyncTarget
+    | AskWorkingSession of SyncTarget
     | SyncMechanically of SyncTarget * PrStatus
 
 let private attemptSync
@@ -314,7 +330,7 @@ let private attemptSync
     =
     async {
         match plan with
-        | AskOpenSession target ->
+        | AskWorkingSession target ->
             return! deliverPrompt dependencies gitData target (prompt upstreamRemote baseBranch)
         | SyncMechanically(target, prStatus) ->
             let request =
@@ -375,15 +391,17 @@ let private runOperation
                         match eligibility, target with
                         | Ineligible, _ ->
                             Error $"Dropped sync for {gitData.Branch}: no longer eligible"
-                        // An open session resolves PR state for itself, so an unread cache withholds
-                        // nothing this path needs.
-                        | (Eligible _ | PrStatusUnknown), OpenSession _ -> Ok(AskOpenSession target)
-                        | Eligible prStatus, NoOpenSession _ -> Ok(SyncMechanically(target, prStatus))
+                        // A working session resolves PR state for itself, so an unread cache
+                        // withholds nothing this path needs.
+                        | (Eligible _ | PrStatusUnknown), WorkingSession _ ->
+                            Ok(AskWorkingSession target)
+                        | Eligible prStatus, (IdleSession _ | NoOpenSession _) ->
+                            Ok(SyncMechanically(target, prStatus))
                         // Merging now would finish the observation and record it as accepted, and the
                         // branch is only ever behind this base revision once — so the push this run
                         // cannot decide on would never be retried. The next refresh, once PR data has
                         // loaded, observes the same worktree and syncs it with the decision in hand.
-                        | PrStatusUnknown, NoOpenSession _ ->
+                        | PrStatusUnknown, (IdleSession _ | NoOpenSession _) ->
                             Error $"Deferred sync for {gitData.Branch}: PR status not loaded yet"
 
                     match plan with

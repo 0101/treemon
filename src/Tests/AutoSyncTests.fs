@@ -54,7 +54,7 @@ let private withoutAcceptedRecords: TriggerDependencies =
       RecordAcceptedRevision = fun _ _ -> async { return () }
       ClearAcceptedRevision = ignore
       ReadPrStatus = fun _ -> async { return Some NoPr }
-      SelectTarget = fun _ -> async { return OpenSession "session-a" }
+      SelectTarget = fun _ -> async { return WorkingSession "session-a" }
       TryBeginOperation = fun _ -> async { return true }
       CompleteOperation = ignore
       MechanicalSync = fun _ -> async { return Ok() }
@@ -82,7 +82,7 @@ let private openPr = prInfo false
 /// `AutoSyncMechanicalTests` covers the guard itself.
 let private withAcceptedRecords agent store deliver =
     { autoSyncDependencies agent (SessionManager.createAgent ()) None (Some store) with
-        SelectTarget = fun _ -> async { return OpenSession "session-a" }
+        SelectTarget = fun _ -> async { return WorkingSession "session-a" }
         TryBeginOperation = fun _ -> async { return true }
         CompleteOperation = ignore
         Deliver = deliver }
@@ -168,7 +168,7 @@ type AutoSyncSelectionTests() =
 
         Assert.That(
             selectTargetFromSessions now [ newerIdle; active ],
-            Is.EqualTo(OpenSession "active"))
+            Is.EqualTo(WorkingSession "active"))
 
     [<Test>]
     member _.``Greatest activity UpdatedAt supplies the open idle auto-sync session id``() =
@@ -190,7 +190,7 @@ type AutoSyncSelectionTests() =
 
         Assert.That(
             selectTargetFromSessions now [ older; newer ],
-            Is.EqualTo(OpenSession "newer"))
+            Is.EqualTo(IdleSession "newer"))
 
     [<Test>]
     member _.``Greatest activity UpdatedAt supplies a retained id only when no session is open``() =
@@ -226,7 +226,7 @@ type AutoSyncSelectionTests() =
         Assert.Multiple(fun () ->
             Assert.That(
                 openIdle,
-                Is.EqualTo(OpenSession "shared-id"),
+                Is.EqualTo(IdleSession "shared-id"),
                 "an idle CLI inside the openness window is still attached")
             Assert.That(
                 retainedOnly,
@@ -320,7 +320,7 @@ type AutoSyncTriggerTests() =
                                     root
                                     (Set.ofList >> Set.remove "feature-a" >> Set.toList)
 
-                                return OpenSession "session-a"
+                                return WorkingSession "session-a"
                             }
                     Deliver =
                         fun _ ->
@@ -358,7 +358,7 @@ type AutoSyncTriggerTests() =
                             async {
                                 // The PR refresh reconciles the merge while the target is chosen.
                                 observedPr <- mergedPr
-                                return OpenSession "session-a"
+                                return WorkingSession "session-a"
                             }
                     Deliver =
                         fun _ ->
@@ -435,7 +435,7 @@ type AutoSyncTriggerTests() =
             let dependencies =
                 { withoutAcceptedRecords with
                     ReadPrStatus = fun _ -> async { return None }
-                    SelectTarget = fun _ -> async { return OpenSession "session-a" }
+                    SelectTarget = fun _ -> async { return WorkingSession "session-a" }
                     MechanicalSync = fun _ -> failwith "an owned worktree is never synced mechanically"
                     Deliver =
                         fun _ ->
@@ -703,7 +703,8 @@ type AutoSyncMechanicalTests() =
         gitData (Path.Combine(root, "feature-a")) "feature-a" 2 (Some "base-a") false
 
     [<Test>]
-    member _.``An open idle session keeps the sync on the agent path``() =
+    [<Category("AutoSyncVerification")>]
+    member _.``An open idle session is synced mechanically rather than prompted``() =
         TestUtils.withTempDir "treemon-auto-sync-idle-open" (fun root ->
             let observation = enabledObservation root
             // Mutable because delivery and the mechanical sync are the impure boundaries under test.
@@ -734,10 +735,102 @@ type AutoSyncMechanicalTests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     mechanicalRuns,
-                    Is.Zero,
-                    "an idle CLI is still attached to its worktree, so Treemon must not mutate it")
-                Assert.That(deliveries |> List.map _.Target, Is.EqualTo([ OpenSession "idle-session" ]))
+                    Is.EqualTo(1),
+                    "an open terminal nobody is working in is the case this path exists for")
+                Assert.That(
+                    deliveries,
+                    Is.Empty,
+                    "a completed mechanical sync spends no agent turn"))) 
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A session waiting for its user is synced mechanically``() =
+        TestUtils.withTempDir "treemon-auto-sync-waiting-open" (fun root ->
+            let observation = enabledObservation root
+            // The mechanical callback is the impure boundary under test.
+            let mutable mechanicalRuns = 0
+
+            let waiting =
+                storedSession "waiting-session" observation.Path SessionLevelStatus.WaitingForUser now now
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    SelectTarget = fun _ -> async { return selectTargetFromSessions now [ waiting ] }
+                    MechanicalSync =
+                        fun _ ->
+                            async {
+                                mechanicalRuns <- mechanicalRuns + 1
+                                return Ok()
+                            }
+                    Deliver = fun _ -> failwith "a session blocked on an absent user must not be prompted" }
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            Assert.That(
+                mechanicalRuns,
+                Is.EqualTo(1),
+                "a session blocked on a user who is not there is not going to sync the worktree"))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A working session keeps the sync on the agent path``() =
+        TestUtils.withTempDir "treemon-auto-sync-working-open" (fun root ->
+            let observation = enabledObservation root
+            // Delivery and the mechanical sync are the impure boundaries under test.
+            let mutable deliveries = []
+
+            let working =
+                storedSession "working-session" observation.Path SessionLevelStatus.Working now now
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    SelectTarget = fun _ -> async { return selectTargetFromSessions now [ working ] }
+                    MechanicalSync = fun _ -> failwith "a worktree mid-turn must never be mutated underneath its agent"
+                    Deliver =
+                        fun request ->
+                            async {
+                                deliveries <- request :: deliveries
+                                return true
+                            } }
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(deliveries |> List.map _.Target, Is.EqualTo([ WorkingSession "working-session" ]))
                 Assert.That(deliveries |> List.map _.Prompt, Is.EqualTo([ prompt "origin" "main" ]))))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A mechanical sync that fails hands the idle session its own fallback prompt``() =
+        TestUtils.withTempDir "treemon-auto-sync-idle-fallback" (fun root ->
+            let observation = enabledObservation root
+            // Delivery is the impure boundary under test.
+            let mutable deliveries = []
+
+            let idleButOpen =
+                storedSession "idle-session" observation.Path SessionLevelStatus.Idle now now
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    SelectTarget = fun _ -> async { return selectTargetFromSessions now [ idleButOpen ] }
+                    MechanicalSync = fun _ -> async { return Error DirtyWorktree }
+                    Deliver =
+                        fun request ->
+                            async {
+                                deliveries <- request :: deliveries
+                                return true
+                            } }
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    deliveries |> List.map _.Target,
+                    Is.EqualTo([ IdleSession "idle-session" ]),
+                    "the open terminal is where the work should land, not a freshly launched one")
+                Assert.That(
+                    deliveries |> List.map _.Prompt,
+                    Is.EqualTo([ fallbackPrompt "origin" "main" DirtyWorktree ]))))
 
     [<Test>]
     member _.``No open session completes the sync mechanically without prompting anyone``() =
@@ -1071,7 +1164,7 @@ type AutoSyncSchedulerDispatchTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget = fun _ -> async { return OpenSession "session-a" }
+                    SelectTarget = fun _ -> async { return WorkingSession "session-a" }
                     Deliver =
                         fun _ ->
                             async {
@@ -1132,7 +1225,7 @@ type AutoSyncDeliveryTests() =
 
     let request =
         { WorktreePath = WorktreePath "/repo/wt"
-          Target = OpenSession "session-a"
+          Target = WorkingSession "session-a"
           Prompt = "Sync with upstream/main." }
 
     [<Test>]
@@ -1208,7 +1301,7 @@ type AutoSyncDeliveryTests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     target,
-                    Is.EqualTo(OpenSession "open-idle"),
+                    Is.EqualTo(IdleSession "open-idle"),
                     "an open idle session wins over newer retained identity as an OPEN target")
                 Assert.That(accepted, Is.True))
         finally
@@ -1348,7 +1441,7 @@ type AutoSyncDeliveryTests() =
                     })
                 { request with
                     WorktreePath = WorktreePath path
-                    Target = OpenSession sessionId }
+                    Target = WorkingSession sessionId }
             |> Async.StartAsTask
 
         let firstContext =
@@ -1710,7 +1803,7 @@ type AutoSyncVerificationTests() =
                             }
                     ClearAcceptedRevision =
                         fun worktreePath -> acceptedRecords <- Map.remove worktreePath acceptedRecords
-                    SelectTarget = fun _ -> async { return OpenSession "selected-working" }
+                    SelectTarget = fun _ -> async { return WorkingSession "selected-working" }
                     Deliver =
                         fun request ->
                             async {

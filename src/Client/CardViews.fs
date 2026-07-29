@@ -220,9 +220,18 @@ let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: strin
 
 let autoSyncButton (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
     let isPending = pendingPaths.Contains wt.Path
+
+    let className =
+        [ "auto-sync-btn"
+          if wt.AutoSyncEnabled then "active"
+          if isPending then "syncing" ]
+        |> String.concat " "
+
     Html.button [
-        prop.className (if wt.AutoSyncEnabled then "auto-sync-btn active" else "auto-sync-btn")
-        prop.title $"Auto-sync with {baseBranch} (S)"
+        prop.className className
+        prop.title (
+            if isPending then $"Syncing with {baseBranch}…"
+            else $"Auto-sync with {baseBranch} (S)")
         prop.ariaPressed wt.AutoSyncEnabled
         prop.ariaDisabled isPending
         prop.disabled isPending
