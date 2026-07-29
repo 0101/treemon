@@ -180,23 +180,14 @@ let internal isAlreadyAccepted
 
 /// A session mid-turn decides the target; anything else open is a terminal left running, and an
 /// offline identity is consulted only once nothing is open at all — so an open idle CLI can never be
-/// mistaken for one that merely left an id behind, nor for one that is still working.
+/// mistaken for one that merely left an id behind, nor for one that is still working. Background
+/// agents count as work: `effectiveStatus` reports Working while one runs, even between the
+/// session's own turns.
 let internal selectTargetFromSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
     let openSessions =
         sessions |> List.filter (fun session -> now - session.LastSeen < openWindow)
 
-    // Background agents count as work: `effectiveStatus` reports Working while one is running, even
-    // between the session's own turns.
-    let isWorking (session: StoredStatus) =
-        SessionActivity.effectiveStatus session.Status = SessionActivity.SessionLevelStatus.Working
-
-    let workingWinner =
-        openSessions
-        |> List.filter isWorking
-        |> List.sortByDescending StoredStatus.activityOrderKey
-        |> List.tryHead
-
-    match workingWinner with
+    match openSessions |> pickWorking _.Status StoredStatus.activityOrderKey with
     | Some winner -> WorkingSession(SessionId.value winner.SessionId)
     | None ->
         match openSessions |> StoredStatus.tryMostRecentActivity with
