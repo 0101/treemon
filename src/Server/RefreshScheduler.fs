@@ -947,6 +947,19 @@ let buildRootPaths (worktreeRoots: string list) =
     |> List.map (fun root -> PathUtils.toRepoId root, root)
     |> Map.ofList
 
+/// The repository owning a worktree path, resolved from one snapshot. `RepoId`'s value is the
+/// normalized repository root, so a linked worktree resolves to the root it shares `.treemon.json`
+/// with — which is what lets a per-worktree request read repository-level configuration.
+let tryFindOwningRepo (state: DashboardState) (worktreePath: string) =
+    let normalizedPath = PathUtils.normalizePath worktreePath
+
+    state.Repos
+    |> Map.tryPick (fun repoId repo ->
+        if repo.KnownPaths |> Set.contains normalizedPath then
+            Some(repoId, repo)
+        else
+            None)
+
 module CanvasWatchers =
     /// Fallback attribution target for a worktree's scanner. Explicit `/api/canvas/attribute`
     /// declarations are the primary attribution path; the scanner only fills the gap for docs

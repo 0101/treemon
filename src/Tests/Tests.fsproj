@@ -13,7 +13,10 @@
     <Compile Include="TerminalSessionFixture.fs" />
     <Compile Include="TerminalSessionFixtureTests.fs" />
     <Compile Include="ProcessRunnerTests.fs" />
+    <Compile Include="DiffCategoriesTests.fs" />
     <Compile Include="WorktreeDiffTests.fs" />
+    <Compile Include="DiffEndpointTestHelpers.fs" />
+    <Compile Include="DiffEndpointCategorizationTests.fs" />
     <Compile Include="DiffEndpointTests.fs" />
     <Compile Include="ServerFixture.fs" />
     <Compile Include="MultiRepoApiTests.fs" />
@@ -75,6 +78,9 @@
     <Compile Include="CanvasBridgeTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />
+    <Compile Include="DiffViewerTestHarness.fs" />
+    <Compile Include="DiffCategoryTests.fs" />
+    <Compile Include="DiffCategoryEndToEndTests.fs" />
     <Compile Include="DiffViewerTests.fs" />
     <Compile Include="BeadsPlanningTests.fs" />
     <Compile Include="ActivityClassifierTests.fs" />
