@@ -70,7 +70,7 @@ let private tallPatch =
            "index 1111111..2222222 100644"
            "--- a/src/pinned.txt"
            "+++ b/src/pinned.txt"
-           "@@ -1 +1,200 @@" ]
+           "@@ -0,0 +1,200 @@" ]
          @ List.init 200 (fun index -> $"+line {index + 1}")
          @ [ "" ])
 
@@ -2031,10 +2031,21 @@ type DiffViewerE2ETests() =
 
             let identity = "id-pinned"
             let displayPath = "src/pinned.txt"
-            let file = fileJson identity displayPath (None: string option) "modified"
+
+            // Collapsed rows below the open file give the scroller room to carry that file's item
+            // fully past the pin line, which is where the heading must release.
+            let files =
+                Array.append
+                    [| fileJson identity displayPath (None: string option) "modified" |]
+                    (Array.init 20 (fun index ->
+                        fileJson
+                            $"id-follow-{index + 1}"
+                            $"src/follow-{index + 1:D2}.txt"
+                            (None: string option)
+                            "modified"))
 
             do! this.RouteHighlighter()
-            do! this.RouteSummary(readySummaryJson [| file |])
+            do! this.RouteSummary(readySummaryJson files)
 
             do!
                 this.RouteBody(
@@ -2057,7 +2068,9 @@ type DiffViewerE2ETests() =
                 this.Page.EvaluateAsync<string array>(
                     """() => {
                         const content = document.getElementById('content');
-                        const heading = document.querySelector('.file-item .file-heading');
+                        const items = [...document.querySelectorAll('.file-item')];
+                        const heading = items[0].querySelector('.file-heading');
+                        const nextHeading = items[1].querySelector('.file-heading');
                         const summary = document.getElementById('change-summary');
                         const offset = summary.getBoundingClientRect().height;
 
@@ -2068,6 +2081,13 @@ type DiffViewerE2ETests() =
                             pinnedRect.left + pinnedRect.width / 2,
                             pinnedRect.top + pinnedRect.height / 2
                         );
+
+                        content.scrollTop +=
+                            items[0].getBoundingClientRect().bottom -
+                                (contentRect.top + offset);
+                        const releasedRect = heading.getBoundingClientRect();
+                        const openItemRect = items[0].getBoundingClientRect();
+                        const nextRect = nextHeading.getBoundingClientRect();
 
                         content.scrollTop = 0;
                         const restedTop = heading.getBoundingClientRect().top;
@@ -2084,7 +2104,13 @@ type DiffViewerE2ETests() =
                                     Number(getComputedStyle(summary).zIndex)
                             ),
                             getComputedStyle(heading).backgroundColor,
-                            String(restedTop > contentRect.top + offset + 1)
+                            String(restedTop > contentRect.top + offset + 1),
+                            String(
+                                Math.round(releasedRect.top - contentRect.top) <
+                                    Math.round(offset)
+                            ),
+                            String(releasedRect.bottom <= openItemRect.bottom + 1),
+                            String(nextRect.top >= releasedRect.bottom - 1)
                         ];
                     }"""
                 )
@@ -2095,7 +2121,10 @@ type DiffViewerE2ETests() =
                 Assert.That(pinning[2], Is.EqualTo("true"), "patch does not paint over the pinned heading")
                 Assert.That(pinning[3], Is.EqualTo("true"), "heading stacks below the summary")
                 Assert.That(pinning[4], Is.Not.EqualTo("rgba(0, 0, 0, 0)"))
-                Assert.That(pinning[5], Is.EqualTo("true"), "heading rests in flow when scrolled to top"))
+                Assert.That(pinning[5], Is.EqualTo("true"), "heading rests in flow when scrolled to top")
+                Assert.That(pinning[6], Is.EqualTo("true"), "heading releases once its file leaves the viewport")
+                Assert.That(pinning[7], Is.EqualTo("true"), "heading stays within its own file item")
+                Assert.That(pinning[8], Is.EqualTo("true"), "released heading does not overlap the next file"))
         }
 
     [<Test>]
