@@ -61,6 +61,19 @@ let private wrappedPatch =
           longLine "+second added line " "new"
           "" ]
 
+/// Tall enough that the expanded panel scrolls far past the viewport, giving the file heading room
+/// to pin and release inside one file.
+let private tallPatch =
+    String.concat
+        Environment.NewLine
+        ([ "diff --git a/src/pinned.txt b/src/pinned.txt"
+           "index 1111111..2222222 100644"
+           "--- a/src/pinned.txt"
+           "+++ b/src/pinned.txt"
+           "@@ -1 +1,200 @@" ]
+         @ List.init 200 (fun index -> $"+line {index + 1}")
+         @ [ "" ])
+
 let private exactLinePatch =
     let longLine prefix word =
         prefix + String.replicate 80 $"{word} "
@@ -2009,6 +2022,80 @@ type DiffViewerE2ETests() =
             Assert.Multiple(fun () ->
                 Assert.That(headerState, Is.All.True)
                 Assert.That(patchState, Is.All.True))
+        }
+
+    [<Test>]
+    member this.``expanded file heading pins below the change summary while its patch scrolls``() =
+        task {
+            do! this.Page.SetViewportSizeAsync(900, 520)
+
+            let identity = "id-pinned"
+            let displayPath = "src/pinned.txt"
+            let file = fileJson identity displayPath (None: string option) "modified"
+
+            do! this.RouteHighlighter()
+            do! this.RouteSummary(readySummaryJson [| file |])
+
+            do!
+                this.RouteBody(
+                    "**/diff-file?*",
+                    "application/json",
+                    fileResultJsonWithPatch
+                        tallPatch
+                        "text"
+                        identity
+                        displayPath
+                        (None: string option)
+                        "modified"
+                )
+
+            do! this.Goto()
+            do! this.ActivateFile(identity)
+            do! this.Page.Locator("#patch .d2h-wrapper").WaitForAsync()
+
+            let! pinning =
+                this.Page.EvaluateAsync<string array>(
+                    """() => {
+                        const content = document.getElementById('content');
+                        const heading = document.querySelector('.file-item .file-heading');
+                        const summary = document.getElementById('change-summary');
+                        const offset = summary.getBoundingClientRect().height;
+
+                        content.scrollTop = 600;
+                        const contentRect = content.getBoundingClientRect();
+                        const pinnedRect = heading.getBoundingClientRect();
+                        const covered = document.elementFromPoint(
+                            pinnedRect.left + pinnedRect.width / 2,
+                            pinnedRect.top + pinnedRect.height / 2
+                        );
+
+                        content.scrollTop = 0;
+                        const restedTop = heading.getBoundingClientRect().top;
+
+                        return [
+                            getComputedStyle(heading).position,
+                            String(
+                                Math.round(pinnedRect.top - contentRect.top) ===
+                                    Math.round(offset)
+                            ),
+                            String(heading.contains(covered)),
+                            String(
+                                Number(getComputedStyle(heading).zIndex) <
+                                    Number(getComputedStyle(summary).zIndex)
+                            ),
+                            getComputedStyle(heading).backgroundColor,
+                            String(restedTop > contentRect.top + offset + 1)
+                        ];
+                    }"""
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(pinning[0], Is.EqualTo("sticky"))
+                Assert.That(pinning[1], Is.EqualTo("true"), "heading pins directly below the summary")
+                Assert.That(pinning[2], Is.EqualTo("true"), "patch does not paint over the pinned heading")
+                Assert.That(pinning[3], Is.EqualTo("true"), "heading stacks below the summary")
+                Assert.That(pinning[4], Is.Not.EqualTo("rgba(0, 0, 0, 0)"))
+                Assert.That(pinning[5], Is.EqualTo("true"), "heading rests in flow when scrolled to top"))
         }
 
     [<Test>]
