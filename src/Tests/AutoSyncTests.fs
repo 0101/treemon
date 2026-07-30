@@ -196,6 +196,26 @@ type AutoSyncSelectionTests() =
         Assert.That(selectTargetFromSessions now [ settled ], Is.EqualTo(IdleSession "settled"))
 
     [<Test>]
+    member _.``A session with no status event yet is not two thousand years settled``() =
+        let hydratedOnly =
+            storedSession "hydrated" "/repo/wt" SessionLevelStatus.Idle DateTimeOffset.MinValue now
+
+        Assert.That(
+            selectTargetFromSessions now [ hydratedOnly ],
+            Is.EqualTo(SessionBusy),
+            "a title or intent hydration leaves the ordering clock at its sentinel, which is not evidence of idleness")
+
+    [<Test>]
+    member _.``A status stamped ahead of server time counts as settled rather than pinning the worktree busy``() =
+        let skewed =
+            storedSession "skewed" "/repo/wt" SessionLevelStatus.Idle (now.AddMinutes 2.0) now
+
+        Assert.That(
+            selectTargetFromSessions now [ skewed ],
+            Is.EqualTo(IdleSession "skewed"),
+            "reports are clamped only five minutes into the future, so negative idleness must not defer forever")
+
+    [<Test>]
     member _.``Greatest activity UpdatedAt supplies the open idle auto-sync session id``() =
         let older =
             storedSession
@@ -871,6 +891,53 @@ type AutoSyncMechanicalTests() =
                 Assert.That(
                     deliveries |> List.map _.Prompt,
                     Is.EqualTo([ fallbackPrompt "origin" "main" DirtyWorktree ]))))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A session that starts working during the mechanical sync is not handed the fallback prompt``() =
+        TestUtils.withTempDir "treemon-auto-sync-busy-during-sync" (fun root ->
+            let observation = enabledObservation root
+            // Mutable because the target changes between the two selections the operation makes,
+            // which is the sequence under test, and because delivery and the record are impure.
+            let mutable selections = 0
+            let mutable deliveries = []
+            let mutable recorded = []
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    SelectTarget =
+                        fun _ ->
+                            async {
+                                selections <- selections + 1
+                                // The agent resumes while the fetch and merge run — which is also
+                                // what makes the worktree dirty enough for the merge to refuse.
+                                return
+                                    if selections = 1 then
+                                        IdleSession "idle-session"
+                                    else
+                                        SessionBusy
+                            }
+                    MechanicalSync = fun _ -> async { return Error DirtyWorktree }
+                    RecordAcceptedRevision =
+                        fun path baseRevision -> async { recorded <- (path, baseRevision) :: recorded }
+                    Deliver =
+                        fun request ->
+                            async {
+                                deliveries <- request :: deliveries
+                                return true
+                            } }
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    deliveries,
+                    Is.Empty,
+                    "the session that was settled when the sync started is mid-turn by the time it stopped")
+                Assert.That(
+                    recorded,
+                    Is.Empty,
+                    "nothing was delivered, so the revision must stay retryable")))
 
     [<Test>]
     member _.``No open session completes the sync mechanically without prompting anyone``() =

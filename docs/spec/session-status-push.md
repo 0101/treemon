@@ -73,9 +73,10 @@ titles, context usage, and session resume all use this shared state; no session-
   to several activity groups at once.
 - `CodingToolSince` is captured when the collapsed worktree status changes and remains stable while
   Idle heartbeats advance `last_seen`.
-- Auto-sync selects the active open winner, then the greatest-`UpdatedAt` open Idle session, and
-  only then a retained identity when no session is open. This delivery-aware ordering avoids
-  launching a second CLI while an existing bridge can accept the prompt.
+- Auto-sync defers entirely while any open session is mid-turn or has been idle for less than
+  `settleWindow` (30 s). Otherwise it takes the greatest-`UpdatedAt` open session that has settled,
+  and only then a retained identity when no session is open. That ordering keeps any fallback prompt
+  on an existing bridge rather than launching a second CLI.
 
 ### Context usage, resume, and restart
 
@@ -223,7 +224,7 @@ projection but persists the complete count-only aggregate independently; see
 | Context usage | Persist the last-known gauge and ordering timestamp; do not append it to activity events. |
 | Persistence | Store latest session state plus idempotent accepted events in SQLite WAL. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
-| Auto-sync | Prefer an active/open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
+| Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Resume | Query durable most-recent activity identity, not the bounded live cache or heartbeat recency. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |

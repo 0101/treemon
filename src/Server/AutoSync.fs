@@ -186,6 +186,20 @@ let internal isAlreadyAccepted
 /// transient dips or genuine idle with nothing in between, so the exact value is not delicate.
 let internal settleWindow = TimeSpan.FromSeconds 30.0
 
+/// Whether an open session has been idle long enough for Treemon to act in its worktree. `UpdatedAt`
+/// is a last-write-wins ordering clock rather than an "entered idle at" stamp, so the raw
+/// subtraction needs two guards. The `MinValue` sentinel of a session whose only report so far is a
+/// title or intent hydration is not two thousand years of idleness — it is a session nobody has
+/// observed working yet, which must wait. And a stamp ahead of server time (reports are clamped only
+/// five minutes into the future) would otherwise read as negative idleness and pin the worktree busy
+/// until the clock catches up, so it counts as settled — the same direction `isAlreadyAccepted`
+/// takes for a future acceptance.
+let internal hasSettled (now: DateTimeOffset) (updatedAt: DateTimeOffset) =
+    let idleFor = now - updatedAt
+
+    updatedAt > DateTimeOffset.MinValue
+    && (idleFor >= settleWindow || idleFor < TimeSpan.Zero)
+
 /// A session mid-turn decides that Treemon waits, and so does one that has only just stopped —
 /// neither is a worktree Treemon may fetch and merge in. Anything else open has settled, and an
 /// offline identity is consulted only once nothing is open at all, so an open idle CLI can never be
@@ -199,7 +213,7 @@ let internal selectTargetFromSessions (now: DateTimeOffset) (sessions: StoredSta
     | Some _ -> SessionBusy
     | None ->
         match openSessions |> StoredStatus.tryMostRecentActivity with
-        | Some settled when now - settled.UpdatedAt >= settleWindow ->
+        | Some settled when hasSettled now settled.UpdatedAt ->
             IdleSession(SessionId.value settled.SessionId)
         | Some _ -> SessionBusy
         | None ->
@@ -319,7 +333,6 @@ let private attemptSync
     upstreamRemote
     baseBranch
     (gitData: GitWorktree.GitData)
-    (target: SyncTarget)
     (prStatus: PrStatus)
     =
     async {
@@ -346,9 +359,19 @@ let private attemptSync
                 return false
             | Eligible _
             | PrStatusUnknown ->
-                return!
-                    fallbackPrompt upstreamRemote baseBranch failure
-                    |> deliverPrompt dependencies gitData target
+                // The target is re-selected rather than carried in from before the mutation, for the
+                // same reason: a session that had settled when the fetch started can be mid-turn by
+                // the time it stops — and an agent resuming is itself the likeliest cause of the
+                // dirty worktree that brought the sync here. Nothing is recorded, so the next
+                // observation retries once the worktree is free.
+                match! dependencies.SelectTarget gitData.Path with
+                | SessionBusy ->
+                    Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: a session is now working in the worktree"
+                    return false
+                | target ->
+                    return!
+                        fallbackPrompt upstreamRemote baseBranch failure
+                        |> deliverPrompt dependencies gitData target
     }
 
 let private runOperation
@@ -374,40 +397,45 @@ let private runOperation
 
             if not (isAlreadyAccepted DateTimeOffset.UtcNow baseRevision acceptedRecord) then
                 try
-                    let! target = dependencies.SelectTarget gitData.Path
-                    let! eligibility = eligiblePrStatus dependencies repoRoot gitData
+                    // The target is read before the eligibility gate so a deferred observation pays
+                    // nothing for it: the gate reads `.treemon.json` under the process-wide config
+                    // lock and takes a scheduler mailbox round-trip, and a busy worktree acts on
+                    // neither answer. A session mid-turn — or one that has only just stopped — owns
+                    // its worktree, so Treemon waits for the next observation rather than mutating
+                    // under it or queueing a prompt the agent may not reach for hours.
+                    match! dependencies.SelectTarget gitData.Path with
+                    | SessionBusy ->
+                        Log.log "AutoSync" $"Deferred sync for {gitData.Branch}: a session is working in the worktree"
+                    | IdleSession _
+                    | NoOpenSession _ ->
+                        let! eligibility = eligiblePrStatus dependencies repoRoot gitData
 
-                    let plan =
-                        match eligibility, target with
-                        | Ineligible, _ ->
-                            Error $"Dropped sync for {gitData.Branch}: no longer eligible"
-                        // A session mid-turn, or one that has only just stopped, owns its worktree.
-                        // Treemon waits for the next observation rather than mutating under it or
-                        // queueing a prompt the agent may not reach for hours.
-                        | _, SessionBusy ->
-                            Error $"Deferred sync for {gitData.Branch}: a session is working in the worktree"
-                        | Eligible prStatus, (IdleSession _ | NoOpenSession _) ->
-                            Ok prStatus
-                        // Merging now would finish the observation and record it as accepted, and the
-                        // branch is only ever behind this base revision once — so the push this run
-                        // cannot decide on would never be retried. The next refresh, once PR data has
-                        // loaded, observes the same worktree and syncs it with the decision in hand.
-                        | PrStatusUnknown, (IdleSession _ | NoOpenSession _) ->
-                            Error $"Deferred sync for {gitData.Branch}: PR status not loaded yet"
+                        let plan =
+                            match eligibility with
+                            | Ineligible ->
+                                Error $"Dropped sync for {gitData.Branch}: no longer eligible"
+                            // Merging now would finish the observation and record it as accepted, and
+                            // the branch is only ever behind this base revision once — so the push
+                            // this run cannot decide on would never be retried. The next refresh,
+                            // once PR data has loaded, observes the same worktree and syncs it with
+                            // the decision in hand.
+                            | PrStatusUnknown ->
+                                Error $"Deferred sync for {gitData.Branch}: PR status not loaded yet"
+                            | Eligible prStatus -> Ok prStatus
 
-                    match plan with
-                    | Error reason -> Log.log "AutoSync" reason
-                    | Ok prStatus ->
-                        let! accepted =
-                            attemptSync dependencies repoRoot upstreamRemote baseBranch gitData target prStatus
+                        match plan with
+                        | Error reason -> Log.log "AutoSync" reason
+                        | Ok prStatus ->
+                            let! accepted =
+                                attemptSync dependencies repoRoot upstreamRemote baseBranch gitData prStatus
 
-                        // Recorded only once the sync is certain to have happened: a crash, a
-                        // rejected prompt, or a mechanical run that stopped must leave no record,
-                        // so the revision can be retried. A completed mechanical run is an
-                        // acceptance in its own right — the work it was started for is done.
-                        if accepted then
-                            do! dependencies.RecordAcceptedRevision gitData.Path baseRevision
-                            Log.log "AutoSync" $"Sync accepted for {gitData.Branch} at base revision {baseRevision}"
+                            // Recorded only once the sync is certain to have happened: a crash, a
+                            // rejected prompt, or a mechanical run that stopped must leave no record,
+                            // so the revision can be retried. A completed mechanical run is an
+                            // acceptance in its own right — the work it was started for is done.
+                            if accepted then
+                                do! dependencies.RecordAcceptedRevision gitData.Path baseRevision
+                                Log.log "AutoSync" $"Sync accepted for {gitData.Branch} at base revision {baseRevision}"
                 with ex ->
                     Log.log "AutoSync" $"Trigger failed for {gitData.Branch}: {ex.Message}"
     }
