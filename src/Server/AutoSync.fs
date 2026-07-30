@@ -6,29 +6,30 @@ open Shared
 open Server.SessionActivity
 open Server.SessionActivityStore
 
-/// Who — if anyone — is *working* in a worktree. Openness alone is not the question: a CLI that is
-/// merely open is a terminal somebody left running, and waiting for it to close before Treemon will
-/// help is a condition no user would guess. Only a session mid-turn owns its worktree. Every case
-/// can carry a session id, and that id is only a delivery hint — never evidence that a live agent
-/// will act on a prompt.
+/// Who — if anyone — is working in a worktree, and therefore what Treemon may do about a sync.
+/// Openness alone is not the question: a CLI that is merely open is a terminal somebody left
+/// running, and waiting for it to close before Treemon will help is a condition no user would guess.
+/// A session that is mid-turn — or one that has only just stopped — owns its worktree, so Treemon
+/// waits for it rather than queueing a prompt the agent may not reach for hours.
 type SyncTarget =
-    /// A CLI seen inside `SessionActivity.openWindow` and mid-turn, background agents included.
-    /// It owns the worktree, so Treemon only asks it to sync.
-    | WorkingSession of sessionId: string
-    /// A CLI is open but between turns, or blocked on a user who is not there. Treemon syncs the
-    /// worktree itself and prompts this session only if it could not finish.
+    /// A CLI seen inside `SessionActivity.openWindow` is mid-turn (background agents included), or
+    /// went idle too recently to have settled. Nothing is delivered and nothing is mutated; the next
+    /// observation looks again.
+    | SessionBusy
+    /// A CLI is open and has settled — idle for `settleWindow`, or blocked on a user who is not
+    /// there. Treemon syncs the worktree itself and prompts this session only if it could not finish.
     | IdleSession of sessionId: string
     /// No CLI is open. A retained/offline identity from a closed CLI may still be known.
     | NoOpenSession of retainedSessionId: string option
 
 module SyncTarget =
-    /// The id a bridge send is addressed to, which every case can supply. Callers that need to know
-    /// whether anyone is working must match on the case instead.
+    /// The id a fallback prompt is addressed to, which is only ever a delivery hint — never evidence
+    /// that a live agent will act on it. `SessionBusy` is never delivered to.
     let sessionId =
         function
-        | WorkingSession sessionId
         | IdleSession sessionId -> Some sessionId
         | NoOpenSession retainedSessionId -> retainedSessionId
+        | SessionBusy -> None
 
 type DeliveryRequest =
     { WorktreePath: WorktreePath
@@ -71,7 +72,7 @@ type TriggerDependencies =
       /// a later observation cannot start a second fetch and merge over one still running.
       TryBeginOperation: string -> Async<bool>
       CompleteOperation: string -> unit
-      /// Treemon's own sync, run only when no session is open to do it.
+      /// Treemon's own sync, run once no session is working in the worktree.
       MechanicalSync: MechanicalSyncRequest -> Async<Result<unit, SyncFailure>>
       Deliver: DeliveryRequest -> Async<bool> }
 
@@ -178,20 +179,29 @@ let internal isAlreadyAccepted
         record.BaseRevision = baseRevision && age >= TimeSpan.Zero && age < acceptedRetryAge
     | None -> false
 
-/// A session mid-turn decides the target; anything else open is a terminal left running, and an
-/// offline identity is consulted only once nothing is open at all — so an open idle CLI can never be
-/// mistaken for one that merely left an id behind, nor for one that is still working. Background
-/// agents count as work: `effectiveStatus` reports Working while one runs, even between the
-/// session's own turns.
+/// How long a session must have been idle before Treemon treats the worktree as free. Status dips to
+/// idle for milliseconds between back-to-back turns, so an instantaneous reading would let a fetch
+/// and merge start under an agent about to resume. Measured over 3,267 real inter-turn gaps, 87% are
+/// under half a second and only 0.7% fall between two seconds and this window: the distribution is
+/// transient dips or genuine idle with nothing in between, so the exact value is not delicate.
+let internal settleWindow = TimeSpan.FromSeconds 30.0
+
+/// A session mid-turn decides that Treemon waits, and so does one that has only just stopped —
+/// neither is a worktree Treemon may fetch and merge in. Anything else open has settled, and an
+/// offline identity is consulted only once nothing is open at all, so an open idle CLI can never be
+/// mistaken for one that merely left an id behind. Background agents count as work: `effectiveStatus`
+/// reports Working while one runs, even between the session's own turns.
 let internal selectTargetFromSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
     let openSessions =
         sessions |> List.filter (fun session -> now - session.LastSeen < openWindow)
 
     match openSessions |> pickWorking _.Status StoredStatus.activityOrderKey with
-    | Some winner -> WorkingSession(SessionId.value winner.SessionId)
+    | Some _ -> SessionBusy
     | None ->
         match openSessions |> StoredStatus.tryMostRecentActivity with
-        | Some idle -> IdleSession(SessionId.value idle.SessionId)
+        | Some settled when now - settled.UpdatedAt >= settleWindow ->
+            IdleSession(SessionId.value settled.SessionId)
+        | Some _ -> SessionBusy
         | None ->
             sessions
             |> StoredStatus.tryMostRecentActivity
@@ -303,53 +313,42 @@ let private deliverPrompt
           Target = target
           Prompt = promptText }
 
-/// Where the two paths part, once an operation holds the guard and has passed the eligibility gate.
-/// A session mid-turn owns its worktree, so Treemon only asks it to sync. Otherwise Treemon syncs the
-/// worktree itself and spends an agent only on what it could not finish; that is also the only path
-/// that decides whether to publish, so it is the only one that carries the PR status.
-type private SyncPlan =
-    | AskWorkingSession of SyncTarget
-    | SyncMechanically of SyncTarget * PrStatus
-
 let private attemptSync
     (dependencies: TriggerDependencies)
     (repoRoot: string)
     upstreamRemote
     baseBranch
     (gitData: GitWorktree.GitData)
-    (plan: SyncPlan)
+    (target: SyncTarget)
+    (prStatus: PrStatus)
     =
     async {
-        match plan with
-        | AskWorkingSession target ->
-            return! deliverPrompt dependencies gitData target (prompt upstreamRemote baseBranch)
-        | SyncMechanically(target, prStatus) ->
-            let request =
-                { Sync =
-                    { WorktreePath = gitData.Path
-                      UpstreamRemote = upstreamRemote
-                      BaseBranch = baseBranch
-                      Branch = gitData.Branch }
-                  PrStatus = prStatus }
+        let request =
+            { Sync =
+                { WorktreePath = gitData.Path
+                  UpstreamRemote = upstreamRemote
+                  BaseBranch = baseBranch
+                  Branch = gitData.Branch }
+              PrStatus = prStatus }
 
-            match! dependencies.MechanicalSync request with
-            | Ok() ->
-                Log.log "AutoSync" $"Mechanical sync completed for {gitData.Branch}"
-                return true
-            | Error failure ->
-                // The gate is re-passed here because a fetch and a merge have run since it was last
-                // read: a branch disabled or reconciled merged meanwhile must not be handed to an
-                // agent either. An unread PR cache does not stop the handover — the agent resolves
-                // PR state itself, and the work this path could not finish still needs doing.
-                match! eligiblePrStatus dependencies repoRoot gitData with
-                | Ineligible ->
-                    Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: no longer eligible"
-                    return false
-                | Eligible _
-                | PrStatusUnknown ->
-                    return!
-                        fallbackPrompt upstreamRemote baseBranch failure
-                        |> deliverPrompt dependencies gitData target
+        match! dependencies.MechanicalSync request with
+        | Ok() ->
+            Log.log "AutoSync" $"Mechanical sync completed for {gitData.Branch}"
+            return true
+        | Error failure ->
+            // The gate is re-passed here because a fetch and a merge have run since it was last
+            // read: a branch disabled or reconciled merged meanwhile must not be handed to an
+            // agent either. An unread PR cache does not stop the handover — the agent resolves
+            // PR state itself, and the work this path could not finish still needs doing.
+            match! eligiblePrStatus dependencies repoRoot gitData with
+            | Ineligible ->
+                Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: no longer eligible"
+                return false
+            | Eligible _
+            | PrStatusUnknown ->
+                return!
+                    fallbackPrompt upstreamRemote baseBranch failure
+                    |> deliverPrompt dependencies gitData target
     }
 
 let private runOperation
@@ -382,12 +381,13 @@ let private runOperation
                         match eligibility, target with
                         | Ineligible, _ ->
                             Error $"Dropped sync for {gitData.Branch}: no longer eligible"
-                        // A working session resolves PR state for itself, so an unread cache
-                        // withholds nothing this path needs.
-                        | (Eligible _ | PrStatusUnknown), WorkingSession _ ->
-                            Ok(AskWorkingSession target)
+                        // A session mid-turn, or one that has only just stopped, owns its worktree.
+                        // Treemon waits for the next observation rather than mutating under it or
+                        // queueing a prompt the agent may not reach for hours.
+                        | _, SessionBusy ->
+                            Error $"Deferred sync for {gitData.Branch}: a session is working in the worktree"
                         | Eligible prStatus, (IdleSession _ | NoOpenSession _) ->
-                            Ok(SyncMechanically(target, prStatus))
+                            Ok prStatus
                         // Merging now would finish the observation and record it as accepted, and the
                         // branch is only ever behind this base revision once — so the push this run
                         // cannot decide on would never be retried. The next refresh, once PR data has
@@ -397,9 +397,9 @@ let private runOperation
 
                     match plan with
                     | Error reason -> Log.log "AutoSync" reason
-                    | Ok plan ->
+                    | Ok prStatus ->
                         let! accepted =
-                            attemptSync dependencies repoRoot upstreamRemote baseBranch gitData plan
+                            attemptSync dependencies repoRoot upstreamRemote baseBranch gitData target prStatus
 
                         // Recorded only once the sync is certain to have happened: a crash, a
                         // rejected prompt, or a mechanical run that stopped must leave no record,

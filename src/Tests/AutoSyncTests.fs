@@ -47,17 +47,18 @@ let private trackedGitData path branch upstream behind revision dirty =
         Upstream = GitWorktree.Upstream upstream }
 
 /// Trigger dependencies with no durable layer: nothing is ever recorded, so every observation is a
-/// first one. A session is open, so a test that does not say otherwise exercises the agent path.
-/// Tests override the fields whose behavior they assert on.
+/// first one. A settled-idle session is open and the mechanical sync stops, so a test that does not
+/// say otherwise exercises the fallback agent path. Tests override the fields whose behavior they
+/// assert on.
 let private withoutAcceptedRecords: TriggerDependencies =
     { ReadAcceptedRevision = fun _ -> async { return None }
       RecordAcceptedRevision = fun _ _ -> async { return () }
       ClearAcceptedRevision = ignore
       ReadPrStatus = fun _ -> async { return Some NoPr }
-      SelectTarget = fun _ -> async { return WorkingSession "session-a" }
+      SelectTarget = fun _ -> async { return IdleSession "session-a" }
       TryBeginOperation = fun _ -> async { return true }
       CompleteOperation = ignore
-      MechanicalSync = fun _ -> async { return Ok() }
+      MechanicalSync = fun _ -> async { return Error DirtyWorktree }
       Deliver = fun _ -> async { return true } }
 
 let private prInfo isMerged : PrStatus =
@@ -76,15 +77,19 @@ let private mergedPr = prInfo true
 let private openPr = prInfo false
 
 /// The production wiring against a real durable store, with only the delivery outcome faked, so the
-/// read/record/clear functions the scheduler injects are the ones under test. The per-worktree
-/// operation guard is neutralized on purpose: these fixtures model two observations overlapping
-/// inside the durable-record layer, which the guard serializes in production, and
+/// read/record/clear functions the scheduler injects are the ones under test. PR status and the
+/// mechanical sync are stubbed because these fixtures assert on the durable record, not on Git: a
+/// stopped mechanical sync is what routes the observation to the fallback prompt they measure. The
+/// per-worktree operation guard is neutralized on purpose: these fixtures model two observations
+/// overlapping inside the durable-record layer, which the guard serializes in production, and
 /// `AutoSyncMechanicalTests` covers the guard itself.
 let private withAcceptedRecords agent store deliver =
     { autoSyncDependencies agent (SessionManager.createAgent ()) None (Some store) with
-        SelectTarget = fun _ -> async { return WorkingSession "session-a" }
+        ReadPrStatus = fun _ -> async { return Some NoPr }
+        SelectTarget = fun _ -> async { return IdleSession "session-a" }
         TryBeginOperation = fun _ -> async { return true }
         CompleteOperation = ignore
+        MechanicalSync = fun _ -> async { return Error DirtyWorktree }
         Deliver = deliver }
 
 let private acceptedRecord revision acceptedAt : AutoSyncStore.AcceptedSyncRecord =
@@ -149,7 +154,7 @@ type AutoSyncSelectionTests() =
     let now = DateTimeOffset(2026, 7, 23, 12, 0, 0, TimeSpan.Zero)
 
     [<Test>]
-    member _.``Active open winner supplies the auto-sync session id``() =
+    member _.``A working session makes Treemon wait instead of choosing a target``() =
         let active =
             storedSession
                 "active"
@@ -166,9 +171,29 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-1.0))
                 (now.AddMinutes(-1.0))
 
+        Assert.That(selectTargetFromSessions now [ newerIdle; active ], Is.EqualTo(SessionBusy))
+
+    [<Test>]
+    member _.``A session that went idle within the settle window is not yet a target``() =
+        let justStopped =
+            storedSession
+                "just-stopped"
+                "/repo/wt"
+                SessionLevelStatus.Idle
+                (now - settleWindow + TimeSpan.FromSeconds 1.0)
+                now
+
         Assert.That(
-            selectTargetFromSessions now [ newerIdle; active ],
-            Is.EqualTo(WorkingSession "active"))
+            selectTargetFromSessions now [ justStopped ],
+            Is.EqualTo(SessionBusy),
+            "status dips to idle between back-to-back turns, so an instant reading would merge under a resuming agent")
+
+    [<Test>]
+    member _.``A session idle for the whole settle window becomes the target``() =
+        let settled =
+            storedSession "settled" "/repo/wt" SessionLevelStatus.Idle (now - settleWindow) now
+
+        Assert.That(selectTargetFromSessions now [ settled ], Is.EqualTo(IdleSession "settled"))
 
     [<Test>]
     member _.``Greatest activity UpdatedAt supplies the open idle auto-sync session id``() =
@@ -320,7 +345,7 @@ type AutoSyncTriggerTests() =
                                     root
                                     (Set.ofList >> Set.remove "feature-a" >> Set.toList)
 
-                                return WorkingSession "session-a"
+                                return IdleSession "session-a"
                             }
                     Deliver =
                         fun _ ->
@@ -358,7 +383,7 @@ type AutoSyncTriggerTests() =
                             async {
                                 // The PR refresh reconciles the merge while the target is chosen.
                                 observedPr <- mergedPr
-                                return WorkingSession "session-a"
+                                return IdleSession "session-a"
                             }
                     Deliver =
                         fun _ ->
@@ -425,7 +450,7 @@ type AutoSyncTriggerTests() =
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
-    member _.``An open session is still asked to sync while PR status is unknown``() =
+    member _.``A busy session defers the sync even when PR status is unknown``() =
         TestUtils.withTempDir "treemon-auto-sync-pr-unknown-session" (fun root ->
             let worktree = Path.Combine(root, "feature-a")
             TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
@@ -435,7 +460,7 @@ type AutoSyncTriggerTests() =
             let dependencies =
                 { withoutAcceptedRecords with
                     ReadPrStatus = fun _ -> async { return None }
-                    SelectTarget = fun _ -> async { return WorkingSession "session-a" }
+                    SelectTarget = fun _ -> async { return SessionBusy }
                     MechanicalSync = fun _ -> failwith "an owned worktree is never synced mechanically"
                     Deliver =
                         fun _ ->
@@ -450,8 +475,8 @@ type AutoSyncTriggerTests() =
 
             Assert.That(
                 deliveries,
-                Is.EqualTo(1),
-                "the session resolves PR state itself, so an unread cache withholds nothing it needs"))
+                Is.Zero,
+                "a busy worktree is waited for, so an unread PR cache cannot route around the deferral"))
 
     [<Test>]
     member _.``Only the same revision inside the retry age counts as already accepted``() =
@@ -712,7 +737,7 @@ type AutoSyncMechanicalTests() =
             let mutable mechanicalRuns = 0
 
             let idleButOpen =
-                storedSession "idle-session" observation.Path SessionLevelStatus.Idle now now
+                storedSession "idle-session" observation.Path SessionLevelStatus.Idle (now - settleWindow) now
 
             let dependencies =
                 { withoutAcceptedRecords with
@@ -751,7 +776,12 @@ type AutoSyncMechanicalTests() =
             let mutable mechanicalRuns = 0
 
             let waiting =
-                storedSession "waiting-session" observation.Path SessionLevelStatus.WaitingForUser now now
+                storedSession
+                    "waiting-session"
+                    observation.Path
+                    SessionLevelStatus.WaitingForUser
+                    (now - settleWindow)
+                    now
 
             let dependencies =
                 { withoutAcceptedRecords with
@@ -773,11 +803,12 @@ type AutoSyncMechanicalTests() =
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
-    member _.``A working session keeps the sync on the agent path``() =
+    member _.``A working session defers the sync entirely``() =
         TestUtils.withTempDir "treemon-auto-sync-working-open" (fun root ->
             let observation = enabledObservation root
-            // Delivery and the mechanical sync are the impure boundaries under test.
+            // Delivery and the accepted record are the impure boundaries under test.
             let mutable deliveries = []
+            let mutable recorded = []
 
             let working =
                 storedSession "working-session" observation.Path SessionLevelStatus.Working now now
@@ -786,6 +817,9 @@ type AutoSyncMechanicalTests() =
                 { withoutAcceptedRecords with
                     SelectTarget = fun _ -> async { return selectTargetFromSessions now [ working ] }
                     MechanicalSync = fun _ -> failwith "a worktree mid-turn must never be mutated underneath its agent"
+                    RecordAcceptedRevision =
+                        fun path baseRevision ->
+                            async { recorded <- (path, baseRevision) :: recorded }
                     Deliver =
                         fun request ->
                             async {
@@ -796,8 +830,14 @@ type AutoSyncMechanicalTests() =
             trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
 
             Assert.Multiple(fun () ->
-                Assert.That(deliveries |> List.map _.Target, Is.EqualTo([ WorkingSession "working-session" ]))
-                Assert.That(deliveries |> List.map _.Prompt, Is.EqualTo([ prompt "origin" "main" ]))))
+                Assert.That(
+                    deliveries,
+                    Is.Empty,
+                    "a prompt queued behind a mid-turn agent can sit unread for hours and be sent again")
+                Assert.That(
+                    recorded,
+                    Is.Empty,
+                    "nothing happened, so nothing may suppress the observation that follows")))
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
@@ -808,7 +848,7 @@ type AutoSyncMechanicalTests() =
             let mutable deliveries = []
 
             let idleButOpen =
-                storedSession "idle-session" observation.Path SessionLevelStatus.Idle now now
+                storedSession "idle-session" observation.Path SessionLevelStatus.Idle (now - settleWindow) now
 
             let dependencies =
                 { withoutAcceptedRecords with
@@ -1164,7 +1204,7 @@ type AutoSyncSchedulerDispatchTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget = fun _ -> async { return WorkingSession "session-a" }
+                    SelectTarget = fun _ -> async { return IdleSession "session-a" }
                     Deliver =
                         fun _ ->
                             async {
@@ -1225,7 +1265,7 @@ type AutoSyncDeliveryTests() =
 
     let request =
         { WorktreePath = WorktreePath "/repo/wt"
-          Target = WorkingSession "session-a"
+          Target = IdleSession "session-a"
           Prompt = "Sync with upstream/main." }
 
     [<Test>]
@@ -1441,7 +1481,7 @@ type AutoSyncDeliveryTests() =
                     })
                 { request with
                     WorktreePath = WorktreePath path
-                    Target = WorkingSession sessionId }
+                    Target = IdleSession sessionId }
             |> Async.StartAsTask
 
         let firstContext =
@@ -1517,13 +1557,17 @@ type AutoSyncEndpointTests() =
                 normalizedPath,
                 gitData normalizedPath "feature-a" 2 (Some "base-a") true))
 
+        // A loaded (empty) PR map and a settled-idle session are what let the observation act at
+        // all: a busy session defers, and an unloaded PR status defers the mechanical path.
+        agent.Post(UpdatePr(repoId, Map.empty))
+
         agent.Post(
             UpdateSessionStatus(
                 storedSession
                     "session-a"
                     normalizedPath
-                    SessionLevelStatus.Working
-                    now
+                    SessionLevelStatus.Idle
+                    (now - settleWindow)
                     now))
 
         SessionBridge.registerSession
@@ -1572,10 +1616,9 @@ type AutoSyncEndpointTests() =
                 TreemonConfig.readAutoSyncBranchSet (Some root),
                 Is.EqualTo(Set.singleton "feature-a"))
             Assert.That(
-                body,
-                Is.EqualTo(
-                    SessionBridge.serializePrompt(
-                    SessionBridge.Prompt.agentPrompt(prompt "origin" "main"))))
+                body.Contains(prompt "origin" "main", StringComparison.Ordinal),
+                Is.True,
+                "the fallback prompt carries the generic sync request for the resolved base")
             Assert.That(status.AutoSyncEnabled, Is.True)
             Assert.That(
                 enabledRecord |> Option.map _.BaseRevision,
@@ -1608,7 +1651,7 @@ type AutoSyncEndpointTests() =
 type AutoSyncVerificationTests() =
 
     [<Test>]
-    member _.``Verification selected working session receives one configured generic prompt``() =
+    member _.``Verification the selected settled-idle session alone receives the fallback prompt``() =
         let root = tempDirectory ()
         let worktree = Path.Combine(root, "feature-a")
         Directory.CreateDirectory(worktree) |> ignore
@@ -1644,13 +1687,16 @@ type AutoSyncVerificationTests() =
                     repoId,
                     normalizedPath,
                     gitData normalizedPath "feature-a" 2 (Some "base-a") true))
+            // An empty PR map is a LOADED status (no pull request), which the sessionless-style
+            // mechanical path requires before it may act; `None` would defer the observation.
+            agent.Post(UpdatePr(repoId, Map.empty))
             agent.Post(
                 UpdateSessionStatus(
                     storedSession
-                        "selected-working"
+                        "selected-idle"
                         normalizedPath
-                        SessionLevelStatus.Working
-                        (now.AddMinutes(-2.0))
+                        SessionLevelStatus.Idle
+                        (now.AddMinutes(-1.0))
                         now))
             agent.Post(
                 UpdateSessionStatus(
@@ -1658,13 +1704,13 @@ type AutoSyncVerificationTests() =
                         "other-idle"
                         normalizedPath
                         SessionLevelStatus.Idle
-                        (now.AddMinutes(-1.0))
+                        (now.AddMinutes(-2.0))
                         now))
 
             SessionBridge.registerSession
                 normalizedPath
                 $"http://127.0.0.1:{selectedPort}/"
-                (Some "selected-working")
+                (Some "selected-idle")
             SessionBridge.registerSession
                 normalizedPath
                 $"http://127.0.0.1:{otherPort}/"
@@ -1698,17 +1744,24 @@ type AutoSyncVerificationTests() =
 
             let result = toggleTask.GetAwaiter().GetResult()
             let duplicateSelectedRequest = selectedListener.GetContextAsync()
-            let expectedPrompt = prompt "upstream" "develop"
-            let expectedBody =
-                SessionBridge.serializePrompt(
-                    SessionBridge.Prompt.agentPrompt expectedPrompt)
             let otherReceived = otherRequest.IsCompleted
             let duplicateDelivery = duplicateSelectedRequest.IsCompleted
 
             Assert.Multiple(fun () ->
                 Assert.That(Result.isOk result, Is.True)
-                Assert.That(body, Is.EqualTo expectedBody)
                 Assert.That(body.StartsWith("{\"kind\":\"agent-prompt\"", StringComparison.Ordinal), Is.True)
+                // The mechanical sync runs for real against a directory that is not a repository, so
+                // it stops and hands the settled-idle session the work it could not finish. Which
+                // stopping reason git produces is not the point here — that the prompt is a fallback,
+                // and that it reaches exactly one named session, is.
+                Assert.That(
+                    body.Contains(prompt "upstream" "develop", StringComparison.Ordinal),
+                    Is.True,
+                    "the configured upstream and base branch must reach the agent")
+                Assert.That(
+                    body.Contains("Treemon already attempted this sync itself", StringComparison.Ordinal),
+                    Is.True,
+                    "an open terminal is synced mechanically first and only prompted with the remainder")
                 Assert.That(body.Contains("[canvas]", StringComparison.Ordinal), Is.False)
                 Assert.That(otherReceived, Is.False, "The other session must not receive the prompt")
                 Assert.That(duplicateDelivery, Is.False, "Delivery must occur exactly once"))
@@ -1803,7 +1856,7 @@ type AutoSyncVerificationTests() =
                             }
                     ClearAcceptedRevision =
                         fun worktreePath -> acceptedRecords <- Map.remove worktreePath acceptedRecords
-                    SelectTarget = fun _ -> async { return WorkingSession "selected-working" }
+                    SelectTarget = fun _ -> async { return IdleSession "selected-working" }
                     Deliver =
                         fun request ->
                             async {
@@ -1836,7 +1889,7 @@ type AutoSyncVerificationTests() =
                 System.Text.Json.JsonDocument.Parse(
                     File.ReadAllText(Path.Combine(root, ".treemon.json")))
             let custom = config.RootElement.GetProperty("custom").GetProperty("keep").GetBoolean()
-            let expectedPrompt = prompt "upstream" "develop"
+            let expectedPrompt = fallbackPrompt "upstream" "develop" DirtyWorktree
 
             Assert.Multiple(fun () ->
                 Assert.That(afterRepeated, Is.EqualTo(1))
