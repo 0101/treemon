@@ -73,10 +73,10 @@ let private agentDefs : SeriesDef list =
 // Task series in canonical stacking order, mirroring OverviewData.taskOrder and the band's task-* palette.
 let private taskDefs : SeriesDef list =
     [ TaskBucketKind.Planned
-      TaskBucketKind.Queued
-      TaskBucketKind.InProgress
+      TaskBucketKind.Underway
       TaskBucketKind.Blocked
       TaskBucketKind.Done
+      TaskBucketKind.ToLand
       TaskBucketKind.Unattended ]
     |> List.map (fun kind -> { Label = taskLabel kind; Accent = taskClass kind; ValueAt = taskCount kind })
 
