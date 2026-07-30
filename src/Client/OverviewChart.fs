@@ -148,7 +148,7 @@ let agentPoints (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSna
     buildPoints agentDefs now window snapshots
 
 /// Windowed points for the TASK series (counts aligned to the canonical task order
-/// Planned, Queued, In progress, Blocked, Done, Unattended). Pure test/reuse seam.
+/// Planned, Underway, Blocked, Done, To land, Unattended). Pure test/reuse seam.
 let taskPoints (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : Point list =
     buildPoints taskDefs now window snapshots
 

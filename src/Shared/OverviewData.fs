@@ -11,7 +11,8 @@ module OverviewData
 //     Unattended catch-all instead, so Unattended is exactly Underway's inactive mirror. Closed
 //     tasks split by whether their worktree still has work left: Done while it does, To land once
 //     it does not (nothing open, in-progress or blocked remains — the agent is finished and a human
-//     has to land it). Blocked sums across all (non-archived) worktrees.
+//     has to land it). Blocked sums across all (non-archived) worktrees. Every bucket except Planned
+//     is feature-inclusive, since BeadsSummary counts every beads issue type.
 //   - Agents: red-dot WORKING agents (CodingTool = Working) grouped by the skill each is running,
 //     classified through the shared Shared.Activity.classify, PLUS a distinct Waiting group for
 //     agents parked on the user (CodingTool = WaitingForUser, yellow dot), PLUS a distinct Idle
@@ -201,13 +202,16 @@ let aggregate (repos: RepoWorktrees list) : Overview =
           Contribution = contribution }
 
     // A worktree's contribution to one task bucket. Underway is all started work — beads in_progress
-    // tasks plus open tasks under an in_progress feature — and only counts when the worktree has an
+    // issues plus open tasks under an in_progress feature — and only counts when the worktree has an
     // ACTIVE agent (CodingTool = Working or WaitingForUser); on an inactive worktree (Idle/NoSession)
     // it is likely stale beads status nobody is working, so it folds into the muted Unattended
-    // catch-all instead, making Unattended exactly Underway's inactive mirror. Closed tasks split on
-    // whether the worktree has finished: while work remains they are Done, and once nothing open,
-    // in-progress or blocked is left they become To land — the agent is finished and a human has to
-    // land it (open/merge the PR). Archived worktrees never reach here (dropped when building
+    // catch-all instead, making Unattended exactly Underway's inactive mirror. Beads.InProgress counts
+    // every issue type, so an in_progress FEATURE counts as started work alongside its own queued
+    // children — the same feature-inclusive basis Blocked, Done and To land use (Planned is the lone
+    // feature-free bucket, since its classifier excludes containers). Closed tasks split on whether
+    // the worktree has finished: while work remains they are Done, and once nothing open, in-progress
+    // or blocked is left they become To land — the agent is finished and a human has to land it
+    // (open/merge the PR). Archived worktrees never reach here (dropped when building
     // taggedWorktrees), so every bucket sums only non-archived worktrees. Planned folds Loose in
     // (Loose -> Planned, decision #6). This single per-worktree predicate is the one source of truth:
     // the bucket Count sums it and Members keep every worktree whose contribution is > 0 — they can
