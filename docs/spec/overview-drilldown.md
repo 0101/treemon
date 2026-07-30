@@ -47,7 +47,7 @@ Builds on the Overview band from `docs/spec/beads-overview-band.md`.
 - The panel's only chrome is the ✕ close button, positioned in the top-right corner so it takes no
   vertical space. (An earlier design placed a header above the members showing the group label in the
   group's accent color plus a muted summary — e.g. `Executing · 3 agents · 2 repos`;
-  `In progress · 12 tasks · 4 worktrees` — but that only repeated the selected column tab sitting
+  `Underway · 12 tasks · 4 worktrees` — but that only repeated the selected column tab sitting
   flush above the panel, so it was removed.)
 - Member worktrees are **grouped by repo**, each repo introduced by a small uppercase muted repo
   name (matching the band's section-header style).
@@ -114,8 +114,9 @@ type AgentGroup = { Kind: AgentGroupKind; Count: int; Members: GroupMember list 
   `Members |> List.sumBy _.Contribution`. For agents, one worktree can appear in several groups and
   contributes the number of its sessions matching that group. Members preserve repo and group order.
 - Archived worktrees are removed before any grouping. Task-bucket membership then follows the
-  per-bucket predicates exactly (for example, `InProgress` counts `Beads.InProgress` only where
-  `isActive`; `Planned` folds `Loose`; `Unattended` is inactive worktrees' `InProgress + Queued`).
+  per-bucket predicates exactly (for example, `Underway` counts `Beads.InProgress + Planning.Queued`
+  only where `isActive`; `Planned` folds `Loose`; `Unattended` is inactive worktrees' Underway work;
+  `Done` and `ToLand` split `Beads.Closed` on whether the worktree still has work left).
   A worktree is a member iff its contribution to that bucket is greater than zero.
 
 ### 2. State + messages (`src/Client/AppTypes.fs`, `src/Client/App.fs`)
