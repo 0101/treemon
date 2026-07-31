@@ -167,6 +167,16 @@ let private bandProbeJs =
     }
     """
 
+/// Scrolls the dashboard just past the sticky boundary, where the band is fully pinned.
+let private scrollPastStickyBoundaryJs =
+    """
+    () => {
+      const dashboard = document.querySelector('.dashboard');
+      const morphRange = parseFloat(getComputedStyle(dashboard).getPropertyValue('--overview-agents-morph-range'));
+      dashboard.scrollTop = morphRange + 1;
+    }
+    """
+
 let private cardProbeJs =
     """
     () => {
@@ -989,6 +999,147 @@ type OverviewBandE2ETests() =
                         && !!document.querySelector('.overview-agents-band .overview-item-selected')
                         && !!document.querySelector('.overview-breakdown');
                     }""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+            ()
+        }
+
+    // Docking left/top used to reverse the two .app-layout children, which React reconciled by
+    // index — the pinned-state observers silently ended up watching the canvas pane, so neither
+    // scroll-closes-drill-down nor pinned-click-scrolls-to-top fired again.
+    [<Test>]
+    member this.``Docking the canvas left keeps pinned-state detection alive``() =
+        task {
+            let canvasBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
+            do! canvasBtn.ClickAsync()
+            do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! this.Page.Locator(".canvas-pos-btn[title='Dock left']").ClickAsync()
+            do! this.Page.Locator(".app-layout.canvas-left").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! layoutJson =
+                this.Page.EvaluateAsync<string>(
+                    """() => {
+                      const layout = document.querySelector('.app-layout');
+                      const dashboard = document.querySelector('.dashboard');
+                      const pane = document.querySelector('.canvas-pane');
+                      return JSON.stringify({
+                        firstChildIsDashboard: layout.firstElementChild === dashboard,
+                        panePaintsLeft: pane.getBoundingClientRect().left < dashboard.getBoundingClientRect().left
+                      });
+                    }""")
+
+            let investigating =
+                this.Page.Locator(".overview-agents-band .overview-item", PageLocatorOptions(HasText = "Investigating"))
+            do! investigating.ClickAsync()
+            do! this.Page.Locator(".overview-breakdown").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! _ = this.Page.EvaluateAsync(scrollPastStickyBoundaryJs)
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """() => !document.querySelector('.overview-breakdown')
+                             && !document.querySelector('.overview-item-selected')""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            do! investigating.Locator(".overview-circle").First.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """() => document.querySelector('.dashboard').scrollTop <= 0.5
+                             && !!document.querySelector('.overview-breakdown')""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let layout = JObject.Parse(layoutJson)
+            Assert.That(layout.Value<bool>("firstChildIsDashboard"), Is.True, "the dashboard stays layout child #0 in every dock position")
+            Assert.That(layout.Value<bool>("panePaintsLeft"), Is.True, "canvas-left paints the pane left of the dashboard via CSS order")
+        }
+
+    // A first attach that lands before React has committed the band must not give up silently: the
+    // sentinel is withheld from the first few lookups here, standing in for the real commit race
+    // that leaves the strip glued from page load.
+    [<Test>]
+    member this.``Pinned-state observers retry until the band is committed``() =
+        task {
+            do!
+                this.Page.AddInitScriptAsync(
+                    """
+                    window.__sentinelMissBudget = 3;
+                    const original = Document.prototype.querySelector;
+                    Document.prototype.querySelector = function (selector) {
+                      if (selector === '.overview-agents-stick-sentinel' && window.__sentinelMissBudget > 0) {
+                        window.__sentinelMissBudget--;
+                        return null;
+                      }
+                      return original.call(this, selector);
+                    };
+                    """)
+
+            let! _ = this.Page.ReloadAsync()
+            do! this.Page.Locator(".wt-card .branch-name").First.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+
+            let overviewBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Overview"))
+            do! overviewBtn.ClickAsync()
+            do! this.Page.Locator(".overview-agents-band").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__sentinelMissBudget === 0",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            do!
+                this.Page
+                    .Locator(".overview-agents-band .overview-item", PageLocatorOptions(HasText = "Investigating"))
+                    .ClickAsync()
+            do! this.Page.Locator(".overview-breakdown").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! _ = this.Page.EvaluateAsync(scrollPastStickyBoundaryJs)
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """() => !document.querySelector('.overview-breakdown')
+                             && !document.querySelector('.overview-item-selected')""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+            ()
+        }
+
+    // Opening the band below the sticky boundary must report the pinned state on attach, with no
+    // scroll to trigger it — the observers resolve their nodes after the React commit, not before.
+    [<Test>]
+    member this.``Overview opened while the dashboard is scrolled starts pinned``() =
+        task {
+            let overviewBtn =
+                this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Overview"))
+            do! overviewBtn.ClickAsync()
+            do! Assertions.Expect(this.Page.Locator(".overview-agents-band")).ToHaveCountAsync(0)
+
+            let! scrolled =
+                this.Page.EvaluateAsync<float>(
+                    """() => {
+                      const dashboard = document.querySelector('.dashboard');
+                      dashboard.scrollTop = dashboard.scrollHeight;
+                      return dashboard.scrollTop;
+                    }""")
+
+            Assert.That(scrolled, Is.GreaterThan(150.0), "the dashboard must be scrollable for this scenario to mean anything")
+
+            do! overviewBtn.ClickAsync()
+            do! this.Page.Locator(".overview-agents-band").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do!
+                this.Page
+                    .Locator(".overview-agents-band .overview-item", PageLocatorOptions(HasText = "Investigating"))
+                    .Locator(".overview-circle")
+                    .First.ClickAsync()
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    """() => document.querySelector('.dashboard').scrollTop <= 0.5
+                             && !!document.querySelector('.overview-breakdown')""",
                     null,
                     PageWaitForFunctionOptions(Timeout = 5000.0f))
             ()

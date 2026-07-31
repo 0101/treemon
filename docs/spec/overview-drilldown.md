@@ -157,7 +157,9 @@ type OverviewSelection =
   translation is derived from rendered geometry and refreshed by `ResizeObserver`, so platform font
   metrics land on the same center. An `IntersectionObserver` is active only while agent groups
   exist, watches only the sentinel, closes an agent selection after it passes strictly above the
-  dashboard boundary, and enables the pinned `nowrap` layout with horizontal overflow.
+  dashboard boundary, and enables the pinned `nowrap` layout with horizontal overflow. It re-resolves
+  its nodes each frame until the band is committed, so a subscription that starts ahead of React's
+  commit still attaches.
 - Render the breakdown panel below the relevant row when a matching group is selected: the ✕ close
   button (top-right corner, absolutely positioned so it adds no vertical space), repo-grouped members,
   agent chips vs. task bars.
