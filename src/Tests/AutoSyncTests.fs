@@ -55,7 +55,7 @@ let private withoutAcceptedRecords: TriggerDependencies =
       RecordAcceptedRevision = fun _ _ -> async { return () }
       ClearAcceptedRevision = ignore
       ReadPrStatus = fun _ -> async { return Some NoPr }
-      SelectTarget = fun _ -> async { return IdleSession "session-a" }
+      ReadOwnership = fun _ -> async { return Free(IdleSession "session-a") }
       TryBeginOperation = fun _ -> async { return true }
       CompleteOperation = ignore
       MechanicalSync = fun _ -> async { return Error DirtyWorktree }
@@ -86,7 +86,7 @@ let private openPr = prInfo false
 let private withAcceptedRecords agent store deliver =
     { autoSyncDependencies agent (SessionManager.createAgent ()) None (Some store) with
         ReadPrStatus = fun _ -> async { return Some NoPr }
-        SelectTarget = fun _ -> async { return IdleSession "session-a" }
+        ReadOwnership = fun _ -> async { return Free(IdleSession "session-a") }
         TryBeginOperation = fun _ -> async { return true }
         CompleteOperation = ignore
         MechanicalSync = fun _ -> async { return Error DirtyWorktree }
@@ -171,7 +171,7 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-1.0))
                 (now.AddMinutes(-1.0))
 
-        Assert.That(selectTargetFromSessions now [ newerIdle; active ], Is.EqualTo(SessionBusy))
+        Assert.That(ownershipFromSessions now [ newerIdle; active ], Is.EqualTo(Busy))
 
     [<Test>]
     member _.``A session that went idle within the settle window is not yet a target``() =
@@ -184,8 +184,8 @@ type AutoSyncSelectionTests() =
                 now
 
         Assert.That(
-            selectTargetFromSessions now [ justStopped ],
-            Is.EqualTo(SessionBusy),
+            ownershipFromSessions now [ justStopped ],
+            Is.EqualTo(Busy),
             "status dips to idle between back-to-back turns, so an instant reading would merge under a resuming agent")
 
     [<Test>]
@@ -193,7 +193,7 @@ type AutoSyncSelectionTests() =
         let settled =
             storedSession "settled" "/repo/wt" SessionLevelStatus.Idle (now - settleWindow) now
 
-        Assert.That(selectTargetFromSessions now [ settled ], Is.EqualTo(IdleSession "settled"))
+        Assert.That(ownershipFromSessions now [ settled ], Is.EqualTo(Free(IdleSession "settled")))
 
     [<Test>]
     member _.``A session with no status event yet is not two thousand years settled``() =
@@ -201,8 +201,8 @@ type AutoSyncSelectionTests() =
             storedSession "hydrated" "/repo/wt" SessionLevelStatus.Idle DateTimeOffset.MinValue now
 
         Assert.That(
-            selectTargetFromSessions now [ hydratedOnly ],
-            Is.EqualTo(SessionBusy),
+            ownershipFromSessions now [ hydratedOnly ],
+            Is.EqualTo(Busy),
             "a title or intent hydration leaves the ordering clock at its sentinel, which is not evidence of idleness")
 
     [<Test>]
@@ -211,8 +211,8 @@ type AutoSyncSelectionTests() =
             storedSession "skewed" "/repo/wt" SessionLevelStatus.Idle (now.AddMinutes 2.0) now
 
         Assert.That(
-            selectTargetFromSessions now [ skewed ],
-            Is.EqualTo(IdleSession "skewed"),
+            ownershipFromSessions now [ skewed ],
+            Is.EqualTo(Free(IdleSession "skewed")),
             "reports are clamped only five minutes into the future, so negative idleness must not defer forever")
 
     [<Test>]
@@ -234,8 +234,8 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-2.0))
 
         Assert.That(
-            selectTargetFromSessions now [ older; newer ],
-            Is.EqualTo(IdleSession "newer"))
+            ownershipFromSessions now [ older; newer ],
+            Is.EqualTo(Free(IdleSession "newer")))
 
     [<Test>]
     member _.``Greatest activity UpdatedAt supplies a retained id only when no session is open``() =
@@ -256,8 +256,8 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-10.0))
 
         Assert.That(
-            selectTargetFromSessions now [ older; newer ],
-            Is.EqualTo(NoOpenSession(Some "newer")))
+            ownershipFromSessions now [ older; newer ],
+            Is.EqualTo(Free(NoOpenSession(Some "newer"))))
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
@@ -265,27 +265,33 @@ type AutoSyncSelectionTests() =
         let session lastSeen =
             storedSession "shared-id" "/repo/wt" SessionLevelStatus.Idle (now.AddMinutes(-1.0)) lastSeen
 
-        let openIdle = selectTargetFromSessions now [ session (now.AddSeconds(-30.0)) ]
-        let retainedOnly = selectTargetFromSessions now [ session (now.AddMinutes(-10.0)) ]
+        let openIdle = ownershipFromSessions now [ session (now.AddSeconds(-30.0)) ]
+        let retainedOnly = ownershipFromSessions now [ session (now.AddMinutes(-10.0)) ]
 
         Assert.Multiple(fun () ->
             Assert.That(
                 openIdle,
-                Is.EqualTo(IdleSession "shared-id"),
+                Is.EqualTo(Free(IdleSession "shared-id")),
                 "an idle CLI inside the openness window is still attached")
             Assert.That(
                 retainedOnly,
-                Is.EqualTo(NoOpenSession(Some "shared-id")),
+                Is.EqualTo(Free(NoOpenSession(Some "shared-id"))),
                 "the same id from a closed CLI is retained identity, not an open session")
             Assert.That(openIdle, Is.Not.EqualTo retainedOnly)
+
+            let addressOf =
+                function
+                | Free target -> SyncTarget.sessionId target
+                | Busy -> None
+
             Assert.That(
-                SyncTarget.sessionId openIdle,
-                Is.EqualTo(SyncTarget.sessionId retainedOnly),
+                addressOf openIdle,
+                Is.EqualTo(addressOf retainedOnly),
                 "the id alone cannot tell the two apart, which is why openness is its own case"))
 
     [<Test>]
     member _.``A worktree with no sessions has no open session and no retained identity``() =
-        Assert.That(selectTargetFromSessions now [], Is.EqualTo(NoOpenSession None))
+        Assert.That(ownershipFromSessions now [], Is.EqualTo(Free(NoOpenSession None)))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -357,7 +363,7 @@ type AutoSyncTriggerTests() =
                     RecordAcceptedRevision =
                         fun path baseRevision ->
                             async { recorded <- (path, baseRevision) :: recorded }
-                    SelectTarget =
+                    ReadOwnership =
                         fun _ ->
                             async {
                                 // Stands in for the RefreshPr cleanup landing mid-operation.
@@ -365,7 +371,7 @@ type AutoSyncTriggerTests() =
                                     root
                                     (Set.ofList >> Set.remove "feature-a" >> Set.toList)
 
-                                return IdleSession "session-a"
+                                return Free(IdleSession "session-a")
                             }
                     Deliver =
                         fun _ ->
@@ -398,12 +404,12 @@ type AutoSyncTriggerTests() =
             let dependencies =
                 { withoutAcceptedRecords with
                     ReadPrStatus = fun _ -> async { return Some observedPr }
-                    SelectTarget =
+                    ReadOwnership =
                         fun _ ->
                             async {
                                 // The PR refresh reconciles the merge while the target is chosen.
                                 observedPr <- mergedPr
-                                return IdleSession "session-a"
+                                return Free(IdleSession "session-a")
                             }
                     Deliver =
                         fun _ ->
@@ -437,7 +443,7 @@ type AutoSyncTriggerTests() =
                     // No PR refresh has succeeded yet, so nothing can say whether the merged branch
                     // would need publishing.
                     ReadPrStatus = fun _ -> async { return None }
-                    SelectTarget = fun _ -> async { return NoOpenSession None }
+                    ReadOwnership = fun _ -> async { return Free(NoOpenSession None) }
                     MechanicalSync =
                         fun _ ->
                             async {
@@ -480,7 +486,7 @@ type AutoSyncTriggerTests() =
             let dependencies =
                 { withoutAcceptedRecords with
                     ReadPrStatus = fun _ -> async { return None }
-                    SelectTarget = fun _ -> async { return SessionBusy }
+                    ReadOwnership = fun _ -> async { return Busy }
                     MechanicalSync = fun _ -> failwith "an owned worktree is never synced mechanically"
                     Deliver =
                         fun _ ->
@@ -761,7 +767,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget = fun _ -> async { return selectTargetFromSessions now [ idleButOpen ] }
+                    ReadOwnership = fun _ -> async { return ownershipFromSessions now [ idleButOpen ] }
                     MechanicalSync =
                         fun _ ->
                             async {
@@ -805,7 +811,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget = fun _ -> async { return selectTargetFromSessions now [ waiting ] }
+                    ReadOwnership = fun _ -> async { return ownershipFromSessions now [ waiting ] }
                     MechanicalSync =
                         fun _ ->
                             async {
@@ -835,7 +841,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget = fun _ -> async { return selectTargetFromSessions now [ working ] }
+                    ReadOwnership = fun _ -> async { return ownershipFromSessions now [ working ] }
                     MechanicalSync = fun _ -> failwith "a worktree mid-turn must never be mutated underneath its agent"
                     RecordAcceptedRevision =
                         fun path baseRevision ->
@@ -872,7 +878,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget = fun _ -> async { return selectTargetFromSessions now [ idleButOpen ] }
+                    ReadOwnership = fun _ -> async { return ownershipFromSessions now [ idleButOpen ] }
                     MechanicalSync = fun _ -> async { return Error DirtyWorktree }
                     Deliver =
                         fun request ->
@@ -905,7 +911,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget =
+                    ReadOwnership =
                         fun _ ->
                             async {
                                 selections <- selections + 1
@@ -913,9 +919,9 @@ type AutoSyncMechanicalTests() =
                                 // what makes the worktree dirty enough for the merge to refuse.
                                 return
                                     if selections = 1 then
-                                        IdleSession "idle-session"
+                                        Free(IdleSession "idle-session")
                                     else
-                                        SessionBusy
+                                        Busy
                             }
                     MechanicalSync = fun _ -> async { return Error DirtyWorktree }
                     RecordAcceptedRevision =
@@ -953,7 +959,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget = fun _ -> async { return NoOpenSession None }
+                    ReadOwnership = fun _ -> async { return Free(NoOpenSession None) }
                     RecordAcceptedRevision =
                         fun path baseRevision -> async { recorded <- (path, baseRevision) :: recorded }
                     MechanicalSync =
@@ -1009,7 +1015,7 @@ type AutoSyncMechanicalTests() =
 
                 let dependencies =
                     { withoutAcceptedRecords with
-                        SelectTarget = fun _ -> async { return NoOpenSession None }
+                        ReadOwnership = fun _ -> async { return Free(NoOpenSession None) }
                         MechanicalSync =
                             fun request ->
                                 mechanicalSync
@@ -1099,12 +1105,12 @@ type AutoSyncMechanicalTests() =
                     ReadPrStatus = fun _ -> async { return Some observedPr }
                     RecordAcceptedRevision =
                         fun path baseRevision -> async { recorded <- (path, baseRevision) :: recorded }
-                    SelectTarget =
+                    ReadOwnership =
                         fun _ ->
                             async {
                                 // The PR refresh reconciles the merge while the target is chosen.
                                 observedPr <- mergedPr
-                                return NoOpenSession None
+                                return Free(NoOpenSession None)
                             }
                     MechanicalSync =
                         fun _ ->
@@ -1135,7 +1141,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget = fun _ -> async { return NoOpenSession None }
+                    ReadOwnership = fun _ -> async { return Free(NoOpenSession None) }
                     MechanicalSync =
                         fun _ ->
                             async {
@@ -1175,7 +1181,7 @@ type AutoSyncMechanicalTests() =
                     TryBeginOperation =
                         fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncOperation(path, reply))
                     CompleteOperation = CompleteAutoSyncOperation >> agent.Post
-                    SelectTarget = fun _ -> async { return NoOpenSession None }
+                    ReadOwnership = fun _ -> async { return Free(NoOpenSession None) }
                     MechanicalSync =
                         fun _ ->
                             async {
@@ -1271,7 +1277,7 @@ type AutoSyncSchedulerDispatchTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    SelectTarget = fun _ -> async { return IdleSession "session-a" }
+                    ReadOwnership = fun _ -> async { return Free(IdleSession "session-a") }
                     Deliver =
                         fun _ ->
                             async {
@@ -1387,7 +1393,12 @@ type AutoSyncDeliveryTests() =
             use store = new SessionActivityStore(Path.Combine(root, "session-activity.db"))
             store.UpsertStatus newerClosed
 
-            let target = selectTarget (Some store) [ openIdle ] path
+            let ownership = readOwnership (Some store) [ openIdle ] path
+
+            let target =
+                match ownership with
+                | Free target -> target
+                | Busy -> failwith "a settled idle session is not a busy worktree"
 
             let tryDeliver (value: SessionBridge.SendRequest) =
                 async {
@@ -1863,7 +1874,7 @@ type AutoSyncVerificationTests() =
                                         worktreePath
                                         (acceptedRecord baseRevision DateTimeOffset.UtcNow)
                             }
-                    SelectTarget = fun _ -> async { return NoOpenSession(Some "retained-session") }
+                    ReadOwnership = fun _ -> async { return Free(NoOpenSession(Some "retained-session")) }
                     // The observation is dirty, so Treemon's own sync refuses it and the worktree
                     // reaches the agent path the way production would send it there.
                     MechanicalSync = fun _ -> async { return Error DirtyWorktree }
@@ -1923,7 +1934,7 @@ type AutoSyncVerificationTests() =
                             }
                     ClearAcceptedRevision =
                         fun worktreePath -> acceptedRecords <- Map.remove worktreePath acceptedRecords
-                    SelectTarget = fun _ -> async { return IdleSession "selected-working" }
+                    ReadOwnership = fun _ -> async { return Free(IdleSession "selected-working") }
                     Deliver =
                         fun request ->
                             async {

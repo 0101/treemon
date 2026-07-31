@@ -64,11 +64,11 @@ let internal autoSyncDependencies
                 let! state = agent.PostAndAsyncReply(GetState)
                 return prStatusForPath state path
             }
-      SelectTarget =
+      ReadOwnership =
         fun path ->
             async {
                 let! state = agent.PostAndAsyncReply(GetState)
-                return AutoSync.selectTarget activityStore (state.SessionStatuses |> Map.values) path
+                return AutoSync.readOwnership activityStore (state.SessionStatuses |> Map.values) path
             }
       TryBeginOperation =
         fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncOperation(path, reply))

@@ -6,16 +6,10 @@ open Shared
 open Server.SessionActivity
 open Server.SessionActivityStore
 
-/// Who — if anyone — is working in a worktree, and therefore what Treemon may do about a sync.
-/// Openness alone is not the question: a CLI that is merely open is a terminal somebody left
-/// running, and waiting for it to close before Treemon will help is a condition no user would guess.
-/// A session that is mid-turn — or one that has only just stopped — owns its worktree, so Treemon
-/// waits for it rather than queueing a prompt the agent may not reach for hours.
+/// Where a fallback prompt goes once Treemon has tried to sync a worktree nobody is working in.
+/// Every case is an address, so a prompt can only ever be built for somewhere it can actually go —
+/// the "nobody may be prompted here" verdict lives in `WorktreeOwnership` instead.
 type SyncTarget =
-    /// A CLI seen inside `SessionActivity.openWindow` is mid-turn (background agents included), or
-    /// went idle too recently to have settled. Nothing is delivered and nothing is mutated; the next
-    /// observation looks again.
-    | SessionBusy
     /// A CLI is open and has settled — idle for `settleWindow`, or blocked on a user who is not
     /// there. Treemon syncs the worktree itself and prompts this session only if it could not finish.
     | IdleSession of sessionId: string
@@ -24,12 +18,27 @@ type SyncTarget =
 
 module SyncTarget =
     /// The id a fallback prompt is addressed to, which is only ever a delivery hint — never evidence
-    /// that a live agent will act on it. `SessionBusy` is never delivered to.
+    /// that a live agent will act on it.
     let sessionId =
         function
         | IdleSession sessionId -> Some sessionId
         | NoOpenSession retainedSessionId -> retainedSessionId
-        | SessionBusy -> None
+
+/// Who — if anyone — is working in a worktree, and therefore what Treemon may do about a sync.
+/// Openness alone is not the question: a CLI that is merely open is a terminal somebody left
+/// running, and waiting for it to close before Treemon will help is a condition no user would guess.
+/// A session that is mid-turn — or one that has only just stopped — owns its worktree, so Treemon
+/// waits for it rather than queueing a prompt the agent may not reach for hours. Keeping that
+/// verdict out of `SyncTarget` is what makes delivering into a busy worktree unrepresentable rather
+/// than merely unreached: `Busy` carries no address to deliver to.
+type WorktreeOwnership =
+    /// A CLI seen inside `SessionActivity.openWindow` is mid-turn (background agents included), or
+    /// went idle too recently to have settled. Nothing is delivered and nothing is mutated; the next
+    /// observation looks again.
+    | Busy
+    /// Nobody is working here, so Treemon may sync the worktree itself — and knows where to hand
+    /// over whatever it could not finish.
+    | Free of SyncTarget
 
 type DeliveryRequest =
     { WorktreePath: WorktreePath
@@ -67,7 +76,8 @@ type TriggerDependencies =
       /// inside that worktree's own repo and a same-named branch elsewhere can never answer for it.
       /// Read again at action boundaries because `RefreshPr` runs on its own cadence.
       ReadPrStatus: string -> Async<PrStatus option>
-      SelectTarget: string -> Async<SyncTarget>
+      /// Whether anyone is working in the worktree, and where a fallback prompt goes when nobody is.
+      ReadOwnership: string -> Async<WorktreeOwnership>
       /// One operation per worktree, held across target selection, mechanical work, and delivery, so
       /// a later observation cannot start a second fetch and merge over one still running.
       TryBeginOperation: string -> Async<bool>
@@ -205,24 +215,25 @@ let internal hasSettled (now: DateTimeOffset) (updatedAt: DateTimeOffset) =
 /// offline identity is consulted only once nothing is open at all, so an open idle CLI can never be
 /// mistaken for one that merely left an id behind. Background agents count as work: `effectiveStatus`
 /// reports Working while one runs, even between the session's own turns.
-let internal selectTargetFromSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
+let internal ownershipFromSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
     let openSessions =
         sessions |> List.filter (fun session -> now - session.LastSeen < openWindow)
 
     match openSessions |> pickWorking _.Status StoredStatus.activityOrderKey with
-    | Some _ -> SessionBusy
+    | Some _ -> Busy
     | None ->
         match openSessions |> StoredStatus.tryMostRecentActivity with
         | Some settled when hasSettled now settled.UpdatedAt ->
-            IdleSession(SessionId.value settled.SessionId)
-        | Some _ -> SessionBusy
+            Free(IdleSession(SessionId.value settled.SessionId))
+        | Some _ -> Busy
         | None ->
             sessions
             |> StoredStatus.tryMostRecentActivity
             |> Option.map (_.SessionId >> SessionId.value)
             |> NoOpenSession
+            |> Free
 
-let selectTarget
+let readOwnership
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (liveSessions: StoredStatus seq)
     (path: string)
@@ -236,7 +247,7 @@ let selectTarget
     |> CodingToolStatus.includeRetainedSessions retained
     |> Seq.filter (fun stored -> WorktreePath.value stored.WorktreePath = path)
     |> Seq.toList
-    |> selectTargetFromSessions DateTimeOffset.UtcNow
+    |> ownershipFromSessions DateTimeOffset.UtcNow
 
 let internal registrationGraceMilliseconds = 3000
 
@@ -364,11 +375,11 @@ let private attemptSync
                 // the time it stops — and an agent resuming is itself the likeliest cause of the
                 // dirty worktree that brought the sync here. Nothing is recorded, so the next
                 // observation retries once the worktree is free.
-                match! dependencies.SelectTarget gitData.Path with
-                | SessionBusy ->
+                match! dependencies.ReadOwnership gitData.Path with
+                | Busy ->
                     Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: a session is now working in the worktree"
                     return false
-                | target ->
+                | Free target ->
                     return!
                         fallbackPrompt upstreamRemote baseBranch failure
                         |> deliverPrompt dependencies gitData target
@@ -397,17 +408,16 @@ let private runOperation
 
             if not (isAlreadyAccepted DateTimeOffset.UtcNow baseRevision acceptedRecord) then
                 try
-                    // The target is read before the eligibility gate so a deferred observation pays
+                    // Ownership is read before the eligibility gate so a deferred observation pays
                     // nothing for it: the gate reads `.treemon.json` under the process-wide config
                     // lock and takes a scheduler mailbox round-trip, and a busy worktree acts on
                     // neither answer. A session mid-turn — or one that has only just stopped — owns
                     // its worktree, so Treemon waits for the next observation rather than mutating
                     // under it or queueing a prompt the agent may not reach for hours.
-                    match! dependencies.SelectTarget gitData.Path with
-                    | SessionBusy ->
+                    match! dependencies.ReadOwnership gitData.Path with
+                    | Busy ->
                         Log.log "AutoSync" $"Deferred sync for {gitData.Branch}: a session is working in the worktree"
-                    | IdleSession _
-                    | NoOpenSession _ ->
+                    | Free _ ->
                         let! eligibility = eligiblePrStatus dependencies repoRoot gitData
 
                         let plan =
