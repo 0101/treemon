@@ -27,10 +27,7 @@ let [<Literal>] private MaxPayloadBytes = 64_000
 let private isDocAlive (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
     match doc.OwnerSessionId with
     | None -> false
-    | Some ownerId ->
-        bridgeLiveness
-        |> Map.values
-        |> Seq.exists (fun bl -> bl.SessionId = Some ownerId && bl.IsAlive)
+    | Some ownerId -> BridgeLiveness.hasLiveSession ownerId bridgeLiveness
 
 let private livenessDot (isAlive: bool) =
     Html.span [

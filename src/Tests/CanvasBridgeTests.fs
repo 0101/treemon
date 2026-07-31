@@ -262,8 +262,10 @@ type RegisterAndStatusTests() =
         Assert.That(result |> Map.containsKey path1, Is.True)
         Assert.That(result[path1].IsAlive, Is.True)
         Assert.That(result[path1].SessionId, Is.EqualTo(Some sid1))
+        Assert.That(result[path1].LiveSessionIds, Is.EqualTo [ sid1 ])
         Assert.That(result |> Map.containsKey path2, Is.True)
         Assert.That(result[path2].SessionId, Is.EqualTo(None))
+        Assert.That(result[path2].LiveSessionIds, Is.Empty)
         Assert.That(result |> Map.containsKey path3, Is.False, "Unregistered path should not appear")
 
     [<Test>]
@@ -559,7 +561,7 @@ type MultiSessionRegistryTests() =
         Assert.That(getSessionForWorktree path, Is.EqualTo(Some newer))
 
     [<Test>]
-    member _.``Multi-session worktree reports alive while at least one session is live``() =
+    member _.``Multi-session liveness keeps every live session available to authored docs``() =
         let path = uniquePath "multi-live"
         let a = uniqueSid "a"
         let b = uniqueSid "b"
@@ -569,7 +571,10 @@ type MultiSessionRegistryTests() =
         let liveness = getAllLiveness [ path ]
         Assert.That(liveness |> Map.containsKey path, Is.True)
         Assert.That(liveness[path].IsAlive, Is.True)
-        Assert.That(liveness[path].SessionId, Is.EqualTo(Some b), "Liveness reflects the freshest session")
+        Assert.That(liveness[path].SessionId, Is.EqualTo(Some b), "Aggregate status keeps the freshest session")
+        Assert.That(liveness[path].LiveSessionIds, Is.EqualTo(List.sort [ a; b ]))
+        Assert.That(BridgeLiveness.hasLiveSession a liveness, Is.True, "The non-freshest document owner remains alive")
+        Assert.That(BridgeLiveness.hasLiveSession b liveness, Is.True)
 
 
 // ── owner-aware routing (sendMessage by doc owner) ──────────────────
