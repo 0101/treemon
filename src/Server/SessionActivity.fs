@@ -305,7 +305,7 @@ let idleDebounceWindow = TimeSpan.FromSeconds 10.0
 /// WaitingForUser agent normally resumes via `user_prompt`→Working rather than `turn_ended`→Idle, so
 /// a spurious ≤`graceWindow` red hold on a waiting card is only a rare edge, not the common path.
 /// `idleSince` is the frozen "entered Idle" stamp (`CodingToolSinceByWorktree`), which the scheduler
-/// (`RefreshScheduler.stampIdleSince`) resets on every new Working turn — so each turn restarts the
+/// (`SchedulerState.stampIdleSince`) resets on every new Working turn — so each turn restarts the
 /// window. With no stamp there is no reference instant, so the real Idle status falls through. The
 /// classified activity (Reviewing/Investigating/…) is unaffected: it is derived from the retained
 /// skill, so a held-Working worktree keeps its group.
@@ -321,11 +321,21 @@ let debounceIdle
 
 // --- Multi-session collapse -------------------------------------------------------------------
 
-/// Select a worktree's winning candidate: drop Idle, then the candidate with the greatest
-/// caller-provided activity key wins; all Idle → None. Returning the whole candidate keeps every
-/// winner-owned field sourced from one session.
-let pickActive statusOf activityKey sessions =
+/// Select a worktree's winning candidate among the sessions whose effective status `wanted` accepts:
+/// the candidate with the greatest caller-provided activity key wins, none matching → None.
+/// Returning the whole candidate keeps every winner-owned field sourced from one session.
+let private pickWinnerBy wanted statusOf activityKey sessions =
     sessions
-    |> List.filter (fun candidate -> statusOf candidate |> effectiveStatus <> SessionLevelStatus.Idle)
+    |> List.filter (fun candidate -> statusOf candidate |> effectiveStatus |> wanted)
     |> List.sortByDescending activityKey
     |> List.tryHead
+
+/// Display collapse: drop Idle, so a session waiting on its user still lights the status dot.
+let pickActive statusOf activityKey sessions =
+    pickWinnerBy (fun status -> status <> SessionLevelStatus.Idle) statusOf activityKey sessions
+
+/// Sync-ownership collapse: only a session mid-turn owns its worktree. Stricter than `pickActive`
+/// because a session blocked on an absent user is not going to sync anything, so auto-sync treats it
+/// as an open terminal rather than as an owner.
+let pickWorking statusOf activityKey sessions =
+    pickWinnerBy (fun status -> status = SessionLevelStatus.Working) statusOf activityKey sessions

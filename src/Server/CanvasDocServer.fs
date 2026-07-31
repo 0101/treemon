@@ -48,7 +48,7 @@ let internal isValidSessionId (sessionId: string) =
 /// context Git needs and the `RepoId` that owns the worktree, so a linked worktree reads the root
 /// repository's shared `.treemon.json` instead of a worktree-local one.
 let internal tryFindDiffComparisonContext
-    (state: RefreshScheduler.DashboardState)
+    (state: SchedulerState.DashboardState)
     (selectedWorktreePath: string)
     : (RepoId * WorktreeDiff.DiffComparisonContext) option =
     RefreshScheduler.tryFindOwningRepo state selectedWorktreePath
@@ -62,11 +62,11 @@ let internal tryFindDiffComparisonContext
 /// The repository root and comparison context behind one diff request, resolved from a single
 /// scheduler snapshot so both always describe the same repository.
 let private resolveDiffTarget
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
     path
     =
     async {
-        let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
+        let! state = agent.PostAndAsyncReply SchedulerState.GetState
         return tryFindDiffComparisonContext state path
     }
 
@@ -87,7 +87,7 @@ let isLoopbackInjectUrl (injectUrl: string) : bool =
         && HttpSecurity.isLoopbackHost uri.Host
     | false, _ -> false
 
-let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) : HttpHandler =
+let canvasRegisterHandler (agent: MailboxProcessor<SchedulerState.StateMsg>) : HttpHandler =
     fun next ctx -> task {
         try
             let! body = ctx.BindJsonAsync<CanvasRegisterRequest>()
@@ -126,7 +126,7 @@ let canvasRegisterHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) :
 /// AgentDoc concept: a SystemView has no author and its routing is resolved per interaction, so a
 /// claim for one is reported as `NotAttributable` rather than stored.
 let attributeOwnership
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (worktreePath: string)
     (filename: string)
     (sessionId: string)
@@ -157,7 +157,7 @@ let attributeOwnership
 /// POST /api/canvas/attribute {worktreePath, filename, sessionId}: the authoring session's
 /// extension declares which session owns an AgentDoc or handles interactions for a SystemView.
 /// Repeating this call explicitly reassigns the target.
-let canvasAttributeHandler (agent: MailboxProcessor<RefreshScheduler.StateMsg>) : HttpHandler =
+let canvasAttributeHandler (agent: MailboxProcessor<SchedulerState.StateMsg>) : HttpHandler =
     fun next ctx -> task {
         try
             let! body = ctx.BindJsonAsync<CanvasAttributeRequest>()
@@ -194,7 +194,7 @@ let bridgeStatusHandler : HttpHandler =
         | _ ->
             RequestErrors.BAD_REQUEST "missing worktreePath query parameter" next ctx
 
-let private handleHeartbeat (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
+let private handleHeartbeat (agent: MailboxProcessor<SchedulerState.StateMsg>) (ctx: HttpContext) : System.Threading.Tasks.Task = task {
     try
         let! body = ctx.Request.ReadFromJsonAsync<JsonElement>()
 
@@ -425,7 +425,7 @@ let private refuseUnknownWorktree (ctx: HttpContext) (worktreePath: string) : Sy
 }
 
 let private handleCanvasRequest
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (diffHandlers: WorktreeDiffApi.Handlers)
     diffResponseDeadlineMs
     (ctx: HttpContext)
@@ -511,7 +511,7 @@ let private requireLoopbackHost
 
 let internal createHostWithDiffDeadline
     diffResponseDeadlineMs
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (service: WorktreeDiffApi.Service)
     newIdentity
     (canvasPort: int)
@@ -545,7 +545,7 @@ let internal createHostWithDiffDeadline
     app
 
 let internal createHost
-    (agent: MailboxProcessor<RefreshScheduler.StateMsg>)
+    (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (service: WorktreeDiffApi.Service)
     newIdentity
     (canvasPort: int)
@@ -557,7 +557,7 @@ let internal createHost
         newIdentity
         canvasPort
 
-let start (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (canvasPort: int) =
+let start (agent: MailboxProcessor<SchedulerState.StateMsg>) (canvasPort: int) =
     let host =
         createHost
             agent

@@ -73,7 +73,7 @@ let private prRetryBuilding: PrInfo =
             Status = Building
             Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88801"
             Failure = None } ]
-      IsMerged = false
+      State = PrState.Open
       AutoMergeEnabled = false
       HasConflicts = false }
 
@@ -114,7 +114,7 @@ let private prAuth: PrInfo =
             Status = Succeeded
             Url = Some "https://dev.azure.com/contoso/CloudPlatform/_build/results?buildId=88810"
             Failure = None } ]
-      IsMerged = false
+      State = PrState.Open
       AutoMergeEnabled = false
       HasConflicts = false }
 
@@ -133,7 +133,7 @@ let private prStreaming: PrInfo =
             Status = PartiallySucceeded
             Url = Some "https://github.com/acme/data-pipeline/actions/runs/99002"
             Failure = None } ]
-      IsMerged = false
+      State = PrState.Open
       AutoMergeEnabled = true
       HasConflicts = false }
 
@@ -148,7 +148,7 @@ let private prCsvMerged: PrInfo =
             Status = Succeeded
             Url = Some "https://github.com/acme/data-pipeline/actions/runs/98800"
             Failure = None } ]
-      IsMerged = true
+      State = PrState.Merged
       AutoMergeEnabled = false
       HasConflicts = false }
 

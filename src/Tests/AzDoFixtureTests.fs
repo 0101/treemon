@@ -47,16 +47,16 @@ type ParsePrListFixtureTests() =
         Assert.That(completed.HeadSha, Is.EqualTo(Some "sha-refactor-data-layer"))
 
     [<Test>]
-    member _.``Active PR is not merged``() =
+    member _.``Active PR is parsed as open``() =
         let _, prs = readFixture "pr-list.json" |> parsePrList
         let active = prs |> List.find (fun pr -> pr.PrId = 101)
-        Assert.That(active.IsMerged, Is.False)
+        Assert.That(active.State, Is.EqualTo(PrState.Open))
 
     [<Test>]
     member _.``Completed PR is marked as merged``() =
         let _, prs = readFixture "pr-list.json" |> parsePrList
         let completed = prs |> List.find (fun pr -> pr.PrId = 100)
-        Assert.That(completed.IsMerged, Is.True)
+        Assert.That(completed.State, Is.EqualTo(PrState.Merged))
 
     [<Test>]
     member _.``Draft PR has IsDraft set``() =

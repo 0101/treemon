@@ -12,7 +12,7 @@ type MergedPrRecord =
       HeadSha: string }
 
 /// Reconstructs the `PrInfo` a persisted record stands in for. Only the merged fact is stored, so
-/// volatile fields get inert defaults; the badge renders from `IsMerged`/`Title`/`Url`.
+/// volatile fields get inert defaults; the badge renders from `State`/`Title`/`Url`.
 let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
     HasPr
         { Id = record.Id
@@ -21,7 +21,7 @@ let private toMergedPrStatus (record: MergedPrRecord) : PrStatus =
           IsDraft = false
           Comments = WithResolution(0, 0)
           Builds = []
-          IsMerged = true
+          State = PrState.Merged
           AutoMergeEnabled = false
           HasConflicts = false }
 
@@ -47,7 +47,7 @@ let reconcileMergedPrs
         livePrMap
         |> Map.filter (fun branch status ->
             match status with
-            | HasPr pr when pr.IsMerged ->
+            | HasPr pr when pr.State = PrState.Merged ->
                 liveHeadShas |> Map.tryFind branch |> Option.forall (describesBranch branch)
             | _ -> true)
 
@@ -56,7 +56,7 @@ let reconcileMergedPrs
         |> Map.fold
             (fun acc branch status ->
                 match status with
-                | HasPr pr when pr.IsMerged ->
+                | HasPr pr when pr.State = PrState.Merged ->
                     match liveHeadShas |> Map.tryFind branch |> Option.filter (System.String.IsNullOrWhiteSpace >> not) with
                     | Some headSha ->
                         acc |> Map.add branch { Id = pr.Id; Title = pr.Title; Url = pr.Url; HeadSha = headSha }

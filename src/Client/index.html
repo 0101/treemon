@@ -116,6 +116,19 @@
         .resume-btn:hover { color: #fab387; border-color: #fab387; }
         .has-session .terminal-btn, .auto-sync-btn.active { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
         .auto-sync-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+        /* A sync can reach the network, so the toggle reports progress rather than only going dead.
+           The glyph turns for as long as the sync is in flight, and the palette's yellow in-progress
+           tint carries the same state statically — so it still reads in a still screenshot, and
+           "working" stays distinct from the green "enabled" state. The rotation is deliberately not
+           suppressed under prefers-reduced-motion: a 13px glyph turning in place is the whole signal
+           that a multi-second fetch and merge is running, and dropping it left that state looking
+           identical to a button that is merely disabled. */
+        .auto-sync-btn.syncing {
+            opacity: 1; color: #f9e2af; border-color: #f9e2af;
+            text-shadow: none; box-shadow: none;
+        }
+        .auto-sync-btn.syncing .btn-icon { animation: sync-spin 1s linear infinite; }
+        @keyframes sync-spin { to { transform: rotate(360deg); } }
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
         .btn-icon { width: 13px; height: 13px; display: block; }
 

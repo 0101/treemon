@@ -9,6 +9,7 @@ import {
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
 import { promptForSession } from "./session-prompt.mjs";
+import { createSendQueue } from "./send-queue.mjs";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
@@ -59,13 +60,7 @@ const CONTENT_POLL_SCRIPT = `<script>
 
 const CANVAS_DIR = resolve(process.cwd(), ".agents", "canvas");
 
-let sendQueue = Promise.resolve();
-const enqueueSend = (session, prompt) => {
-  sendQueue = sendQueue
-    .then(() => session.send({ prompt }))
-    .then(() => log(`session.send succeeded (${prompt.length} chars)`))
-    .catch((err) => log(`session.send FAILED: ${err?.message ?? err}`));
-};
+const { enqueue: enqueueSend } = createSendQueue({ log });
 
 function readBody(req, maxBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -145,16 +140,17 @@ function startHttpServer(session, state) {
           res.end("Payload Too Large");
           return;
         }
-        let prompt;
+        let transport;
         try {
-          prompt = promptForSession(body);
+          transport = promptForSession(body);
         } catch (err) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: err.message }));
           return;
         }
+        const { kind, prompt } = transport;
         log(`/inject received: transport length=${body.length}, prompt length=${prompt.length}`);
-        enqueueSend(session, prompt);
+        enqueueSend(session, kind, prompt);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -186,7 +182,7 @@ function startHttpServer(session, state) {
             res.end(JSON.stringify({ ok: false, error: "missing action" }));
             return;
           }
-          enqueueSend(session, `[canvas] ${JSON.stringify(parsed)}`);
+          enqueueSend(session, "canvas", `[canvas] ${JSON.stringify(parsed)}`);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true }));
           return;
@@ -360,6 +356,7 @@ async function handleCanvasWrite(session, state, filename) {
   log(`canvas write: serving ${filename} in browser mode → ${url}`);
   enqueueSend(
     session,
+    "agent-prompt",
     `Canvas doc "${filename}" is served in browser-fallback mode at ${url} — Treemon is not monitoring this worktree. Share this ctrl+clickable URL with the user (or open it) to view the doc; it auto-reloads on changes and interactions are forwarded back to this session.`,
   );
 }

@@ -193,7 +193,7 @@ let private configurationState (repoRoot: string) =
 /// A scheduler that knows the repository exactly as discovery does — keyed by its root — because
 /// the diff endpoint reads the categorization from that key.
 let private agentKnowing (repoRoot: string) =
-    let agent = RefreshScheduler.createAgent ()
+    let agent = SchedulerState.createAgent ()
 
     let info: GitWorktree.WorktreeInfo =
         { Path = PathUtils.normalizePath repoRoot
@@ -208,7 +208,7 @@ let private agentKnowing (repoRoot: string) =
             "main"
     )
 
-    agent.PostAndAsyncReply(RefreshScheduler.GetState)
+    agent.PostAndAsyncReply(SchedulerState.GetState)
     |> TestUtils.runAsync
     |> ignore
 

@@ -72,7 +72,7 @@ let formatPr = function
     | HasPr pr ->
         let flags =
             [ if pr.IsDraft then "draft"
-              if pr.IsMerged then "merged"
+              if pr.State = PrState.Merged then "merged"
               if pr.AutoMergeEnabled then "auto-merge"
               if pr.HasConflicts then "conflicts" ]
 

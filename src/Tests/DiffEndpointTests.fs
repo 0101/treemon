@@ -2188,7 +2188,7 @@ type DiffIdentityLifecycleHttpTests() =
                 let identity =
                     issueIdentity client summaryUrl
 
-                let deleteAgent = RefreshScheduler.createAgent ()
+                let deleteAgent = SchedulerState.createAgent ()
                 let repoId = PathUtils.toRepoId repoRoot
 
                 let worktreeInfo: GitWorktree.WorktreeInfo =
@@ -2197,7 +2197,7 @@ type DiffIdentityLifecycleHttpTests() =
                       Branch = Some "feature" }
 
                 deleteAgent.Post(
-                    RefreshScheduler.UpdateWorktreeList(
+                    SchedulerState.UpdateWorktreeList(
                         repoId,
                         [ worktreeInfo ]
                     )
@@ -2270,7 +2270,7 @@ type DiffIdentityLifecycleHttpTests() =
                     issueIdentity client removedSummaryUrl
 
                 let reconcileAgent =
-                    RefreshScheduler.createAgent ()
+                    SchedulerState.createAgent ()
 
                 let retainedInfo: GitWorktree.WorktreeInfo =
                     { Path =
@@ -2280,13 +2280,13 @@ type DiffIdentityLifecycleHttpTests() =
                       Branch = Some "retained" }
 
                 let retainedRepo =
-                    { RefreshScheduler.PerRepoState.empty with
+                    { SchedulerState.PerRepoState.empty with
                         WorktreeList = [ retainedInfo ]
                         KnownPaths = Set.singleton retainedInfo.Path
                         IsReady = true }
 
                 let pendingRepo =
-                    { RefreshScheduler.PerRepoState.empty with
+                    { SchedulerState.PerRepoState.empty with
                         IsReady = false }
 
                 let pendingRepoId = RepoId "pending"
