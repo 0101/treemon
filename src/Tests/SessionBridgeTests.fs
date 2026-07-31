@@ -62,6 +62,7 @@ type ClockTests() =
         Assert.That(age, Is.EqualTo((clockSnapshot - liveHeartbeat).TotalSeconds))
         Assert.That(liveness.IsAlive, Is.True)
         Assert.That(liveness.SessionId, Is.EqualTo(staleSession.SessionId))
+        Assert.That(liveness.LiveSessionIds, Is.Empty)
 
 [<TestFixture>]
 [<Category("Unit")>]
