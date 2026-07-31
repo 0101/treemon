@@ -313,7 +313,14 @@ type CanvasMessageResult =
 
 type BridgeLiveness =
     { IsAlive: bool
-      SessionId: string option }
+      SessionId: string option
+      LiveSessionIds: string list }
+
+module BridgeLiveness =
+    let hasLiveSession sessionId (byWorktree: Map<string, BridgeLiveness>) =
+        byWorktree
+        |> Map.values
+        |> Seq.exists (fun liveness -> liveness.LiveSessionIds |> List.contains sessionId)
 
 type ActionKind =
     | FixPr of url: string
