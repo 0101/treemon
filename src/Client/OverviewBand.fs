@@ -81,11 +81,21 @@ let private createPinnedObservers (onChange: bool -> unit) =
     | _ -> []
 
 let observePinnedState (onChange: bool -> unit) =
-    // Observer attachment follows the React commit, so the handles must live across the frame callback.
+    // The band's nodes only exist once React has committed, which can happen after this
+    // subscription starts, so re-resolve them every frame until they appear rather than giving up
+    // silently on the first miss. Mutation is the impure boundary: the frame callback runs after
+    // this function returns, yet Dispose has to reach whatever it eventually attached.
     let mutable observers = []
-    let frameId: int =
-        Dom.window?requestAnimationFrame(fun (_: float) ->
-            observers <- createPinnedObservers onChange)
+    let mutable frameId = 0
+
+    let rec attachOnNextFrame () =
+        frameId <-
+            Dom.window?requestAnimationFrame(fun (_: float) ->
+                match createPinnedObservers onChange with
+                | [] -> attachOnNextFrame ()
+                | attached -> observers <- attached)
+
+    attachOnNextFrame ()
 
     { new System.IDisposable with
         member _.Dispose() =

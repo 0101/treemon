@@ -1076,18 +1076,15 @@ let view model dispatch =
     let canvasEl =
         CanvasView.view model dispatch
 
-    let children =
-        match model.Canvas.CanvasPosition with
-        | CanvasPosition.Left
-        | CanvasPosition.Top -> [ canvasEl; dashboardEl ]
-        | CanvasPosition.Right
-        | CanvasPosition.Bottom -> [ dashboardEl; canvasEl ]
-
+    // DOM order is fixed; the dock position is applied by CSS `order` on .app-layout's position
+    // class. Reordering these two same-typed divs instead makes React reconcile them by index, which
+    // silently re-renders each existing node with the other subtree and leaves node-bound resources
+    // (the Overview sticky observers) watching the wrong pane.
     React.Fragment [
         viewAppHeader model dispatch
         Html.div [
             prop.className layoutClass
-            prop.children children
+            prop.children [ dashboardEl; canvasEl ]
         ]
     ]
 

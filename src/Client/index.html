@@ -777,6 +777,9 @@
         .app-layout.canvas-size-2to1.canvas-bottom > .canvas-pane.open {
             flex: 0 0 66.667%;
         }
+        /* Docking left/top paints the pane first without changing DOM order (see App.fs view). */
+        .app-layout.canvas-left > .canvas-pane,
+        .app-layout.canvas-top > .canvas-pane { order: -1; }
         .app-layout.canvas-right > .canvas-pane { border-left: 1px solid #313244; }
         .app-layout.canvas-left > .canvas-pane { border-right: 1px solid #313244; }
         .app-layout.canvas-top > .canvas-pane { border-bottom: 1px solid #313244; }

@@ -290,7 +290,10 @@ the solution compiling (no compat shims, per house rules).
   geometry and refreshed by `ResizeObserver`, avoiding platform-font pixel tuning. An
   `IntersectionObserver` watches only the sentinel and reports pinned after it passes strictly above
   the dashboard boundary. Its Elmish subscription exists only while agent groups are rendered, so
-  removing the Agents DOM disposes the observers and resets pinned state. Entering the pinned state
+  removing the Agents DOM disposes the observers and resets pinned state. Attachment resolves its
+  nodes on each animation frame until they exist, because the subscription can start before React
+  has committed the band and a single missed lookup would otherwise leave the strip permanently
+  unpinned with no error. Entering the pinned state
   closes an agent drill-down and switches Agents to one `nowrap` row with hidden-scrollbar horizontal
   overflow. Expanded category columns still wrap normally.
 
