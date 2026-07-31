@@ -49,10 +49,10 @@ guard covers only Treemon's own spawns.
 An AgentDoc interaction with no reachable author is queued without launching, because a new session
 would not be that document's author.
 
-Queued messages retain the existing cap of 10 and five-minute TTL. On drain, an AgentDoc prompt goes
-only to its recorded owner, so ownership changes made while a message waits are honored. A SystemView
-prompt stays bound to the session resolution picked, if any; when nothing was reachable it drains to
-the next identified registration — the session the queue caused to launch. An anonymous
+Queued messages retain the existing cap of 10 and five-minute TTL. On drain, an AgentDoc
+prompt goes only to its recorded owner, so ownership changes made while a message waits are honored.
+A SystemView prompt stays bound to the session resolution picked, if any; when nothing was reachable
+it drains to the next identified registration — the session the queue caused to launch. An anonymous
 (session-less) registration never drains either kind.
 
 ### Persistence and Cleanup

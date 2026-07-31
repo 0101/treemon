@@ -64,7 +64,7 @@ let sessionDotsPlain (wt: WorktreeStatus) =
 
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
-    | HasPr pr -> pr.IsMerged
+    | HasPr pr -> pr.State = PrState.Merged
     | NoPr -> false
 
 let cardClassName (wt: WorktreeStatus) =
@@ -182,20 +182,23 @@ let private providerDisplayName (provider: CodingToolProvider option) =
     | Some CopilotCli -> "Copilot"
     | None -> "Coding tool"
 
+/// Two arrows bent into a circle — the sync glyph. Circular rather than the straight swap arrows it
+/// replaced, because the same element turns while a sync is in flight: rotating a straight-arrow
+/// glyph reads as a symbol falling over, whereas rotation is the motion this shape already implies.
 let autoSyncIcon () =
     Svg.svg [
         svg.className "btn-icon"
-        svg.viewBox (0, 0, 16, 16)
+        svg.viewBox (0, 0, 24, 24)
         svg.fill "none"
         svg.stroke "currentColor"
-        svg.custom ("strokeWidth", "1.5")
+        svg.custom ("strokeWidth", "2")
         svg.custom ("strokeLinecap", "round")
         svg.custom ("strokeLinejoin", "round")
         svg.children [
-            Svg.path [ svg.d "M2 5h10" ]
-            Svg.path [ svg.d "m9 2 3 3-3 3" ]
-            Svg.path [ svg.d "M14 11H4" ]
-            Svg.path [ svg.d "m7 8-3 3 3 3" ]
+            Svg.path [ svg.d "M3 12a9 9 0 0 1 14.65-7" ]
+            Svg.path [ svg.d "M21 12a9 9 0 0 1-14.65 7" ]
+            Svg.path [ svg.d "M17 2v4h-4" ]
+            Svg.path [ svg.d "M7 22v-4h4" ]
         ]
     ]
 
@@ -220,9 +223,18 @@ let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: strin
 
 let autoSyncButton (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
     let isPending = pendingPaths.Contains wt.Path
+
+    let className =
+        [ "auto-sync-btn"
+          if wt.AutoSyncEnabled then "active"
+          if isPending then "syncing" ]
+        |> String.concat " "
+
     Html.button [
-        prop.className (if wt.AutoSyncEnabled then "auto-sync-btn active" else "auto-sync-btn")
-        prop.title $"Auto-sync with {baseBranch} (S)"
+        prop.className className
+        prop.title (
+            if isPending then $"Syncing with {baseBranch}…"
+            else $"Auto-sync with {baseBranch} (S)")
         prop.ariaPressed wt.AutoSyncEnabled
         prop.ariaDisabled isPending
         prop.disabled isPending
@@ -501,7 +513,8 @@ let prActionButton (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
 
 let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
     React.Fragment [
-        if pr.IsMerged then
+        match pr.State with
+        | PrState.Merged ->
             HtmlHelper.createElement "a" [
                 prop.className "pr-badge merged"
                 prop.title pr.Title
@@ -509,7 +522,11 @@ let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
                 prop.target "_blank"
                 prop.text "Merged"
             ]
-        else
+        // A closed-unmerged pull request still renders as a live one, keeping its review and build
+        // affordances; distinguishing it in the UI is a product decision, not a consequence of the
+        // state being representable.
+        | PrState.Open
+        | PrState.ClosedUnmerged ->
             HtmlHelper.createElement "a" [
                 prop.className (if pr.IsDraft then "pr-badge draft" else "pr-badge")
                 prop.title pr.Title

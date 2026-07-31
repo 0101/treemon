@@ -53,7 +53,7 @@ The `activityDetection` Elmish subscription registers DOM event listeners (mouse
 
 On activity level transitions, `reportActivity` is called to inform the server.
 
-### Server-Side (`src/Server/RefreshScheduler.fs`)
+### Server-Side (`src/Server/SchedulerState.fs`, `src/Server/RefreshScheduler.fs`)
 
 `DashboardState` gets a `ClientActivity: ActivityLevel` field, defaulting to `Idle`. New `ReportClientActivity` message updates it. `intervalOf` becomes a function of `(ActivityLevel * RefreshTask)` with explicit intervals per combination (no multiplier math).
 

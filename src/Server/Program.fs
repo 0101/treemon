@@ -102,7 +102,7 @@ let parseArgs (args: string array) =
               TestFixtures = testFixtures
               Demo = false }
 
-let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: FixtureData) =
+let private populateAgentFromFixtures (agent: MailboxProcessor<SchedulerState.StateMsg>) (fixtures: FixtureData) =
     fixtures.Worktrees.Repos
     |> List.iter (fun repo ->
         let worktreeInfos =
@@ -112,7 +112,7 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
                   Head = ""
                   Branch = Some wt.Branch }: GitWorktree.WorktreeInfo)
 
-        agent.Post(RefreshScheduler.UpdateWorktreeList(repo.RepoId, worktreeInfos))
+        agent.Post(SchedulerState.UpdateWorktreeList(repo.RepoId, worktreeInfos))
         Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees for repo '{RepoId.value repo.RepoId}'")
 
 let private buildDemoApi (startTime: System.DateTimeOffset) : IWorktreeApi =
@@ -234,6 +234,30 @@ let internal persistResolvedRoots (resolution: RootsResolution) =
 let internal usesSessionActivity (config: ServerConfig) =
     not config.Demo && config.TestFixtures.IsNone
 
+/// Creates one port-scoped runtime store and seeds it from disk, logging the path so a stale or
+/// unexpected file is visible in the startup log.
+let private loadRuntimeStore
+    (label: string)
+    (path: string)
+    (create: string -> PersistentStore.Store<'K, 'V>)
+    : PersistentStore.Store<'K, 'V> =
+    Log.log "Startup" $"{label}: {path}"
+    let store = create path
+    store.Load()
+    store
+
+/// Flushes runtime stores at shutdown, bounded so a wedged disk cannot hang exit. Each store
+/// contributes a labelled flush rather than its own copy of this timeout handling.
+let private flushRuntimeStores (stores: (string * (unit -> Async<Result<unit, string>>)) list) =
+    stores
+    |> List.iter (fun (label, flush) ->
+        try
+            match Async.RunSynchronously(flush (), timeout = 5000) with
+            | Ok() -> ()
+            | Error error -> Log.log "Shutdown" error
+        with :? System.TimeoutException ->
+            Log.log "Shutdown" $"Timed out flushing {label}")
+
 let internal runHostWithCapture
     (startHost: unit -> unit)
     (waitForShutdown: unit -> unit)
@@ -291,12 +315,12 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
-    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, mergedPrStore =
+    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, runtimeStoreFlushes =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
-            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None, None
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None, []
         else
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
@@ -312,20 +336,21 @@ let main args =
                     System.Environment.Exit(1)
 
                 WorktreeApi.worktreeApi
-                    agent
-                    cardLog
-                    sessionAgent
-                    None
-                    None
-                    worktreeRoots
-                    config.TestFixtures
-                    appVersion
-                    deployBranch
+                    { Agent = agent
+                      CardLog = cardLog
+                      SessionAgent = sessionAgent
+                      ActivityStore = None
+                      SnapshotStore = None
+                      AutoSyncStore = None
+                      WorktreeRoots = worktreeRoots
+                      TestFixtures = config.TestFixtures
+                      AppVersion = appVersion
+                      DeployBranch = deployBranch }
                 |> buildRemotingHandler,
                 Some agent,
                 None,
                 None,
-                None
+                []
             | None ->
                 let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
                 Log.log "Startup" $"Session activity store db: {dbPath}"
@@ -338,16 +363,22 @@ let main args =
                 let store = activity.Components.Store
 
                 let mergedStore =
-                    let path = MergedPrStore.filePathForPort config.Port
-                    Log.log "Startup" $"Merged PR store: {path}"
-                    let created = MergedPrStore.create path
-                    created.Load()
-                    created
+                    loadRuntimeStore
+                        "Merged PR store"
+                        (MergedPrStore.filePathForPort config.Port)
+                        MergedPrStore.create
+
+                let autoSyncStore =
+                    loadRuntimeStore
+                        "Auto-sync store"
+                        (AutoSyncStore.filePathForPort config.Port)
+                        AutoSyncStore.create
 
                 let schedulerServices: RefreshScheduler.SchedulerServices =
                     { SessionAgent = sessionAgent
                       ActivityStore = Some store
-                      MergedPrStore = mergedStore }
+                      MergedPrStore = mergedStore
+                      AutoSyncStore = autoSyncStore }
 
                 let scheduler =
                     try
@@ -366,20 +397,22 @@ let main args =
                     Log.log "Startup" "Scheduler background loop started"
 
                     WorktreeApi.worktreeApi
-                        agent
-                        cardLog
-                        sessionAgent
-                        (Some store)
-                        (Some activity.SnapshotStore)
-                        worktreeRoots
-                        config.TestFixtures
-                        appVersion
-                        deployBranch
+                        { Agent = agent
+                          CardLog = cardLog
+                          SessionAgent = sessionAgent
+                          ActivityStore = Some store
+                          SnapshotStore = Some activity.SnapshotStore
+                          AutoSyncStore = Some autoSyncStore
+                          WorktreeRoots = worktreeRoots
+                          TestFixtures = config.TestFixtures
+                          AppVersion = appVersion
+                          DeployBranch = deployBranch }
                     |> buildRemotingHandler,
                     Some agent,
                     Some activity,
                     Some scheduler,
-                    Some mergedStore
+                    [ "merged PR store", mergedStore.Flush
+                      "auto-sync store", autoSyncStore.Flush ]
                 with _ ->
                     SessionActivityRuntime.shutdown activity (Some scheduler)
                     reraise ()
@@ -467,13 +500,6 @@ let main args =
             Log.log "Shutdown" "Stopping session activity"
             SessionActivityRuntime.shutdown runtime schedulerLoop)
 
-        mergedPrStore
-        |> Option.iter (fun store ->
-            try
-                match Async.RunSynchronously(store.Flush(), timeout = 5000) with
-                | Ok() -> ()
-                | Error error -> Log.log "Shutdown" error
-            with :? System.TimeoutException ->
-                Log.log "Shutdown" "Timed out flushing merged PR store")
+        flushRuntimeStores runtimeStoreFlushes
 
     0

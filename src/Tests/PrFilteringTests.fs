@@ -2,6 +2,7 @@ module Tests.PrFilteringTests
 
 open System
 open NUnit.Framework
+open Shared
 open Server.PrStatus
 
 let private mkPr branch prId isMerged closedDate =
@@ -10,7 +11,7 @@ let private mkPr branch prId isMerged closedDate =
       PrId = prId
       Title = $"PR for {branch}"
       IsDraft = false
-      IsMerged = isMerged
+      State = if isMerged then PrState.Merged else PrState.Open
       AutoMergeEnabled = false
       HasConflicts = false
       ClosedDate = closedDate }
@@ -96,7 +97,7 @@ type FilterRelevantPrsTests() =
         let result = filterRelevantPrs known prs
 
         Assert.That(result, Has.Exactly(1).Items)
-        Assert.That(result[0].IsMerged, Is.True)
+        Assert.That(result[0].State, Is.EqualTo(PrState.Merged))
 
     [<Test>]
     member _.``Deduplication happens before filtering``() =
