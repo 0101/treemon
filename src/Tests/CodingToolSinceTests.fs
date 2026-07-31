@@ -4,6 +4,7 @@ open System
 open NUnit.Framework
 open Server.GitWorktree
 open Server.RefreshScheduler
+open Server.SchedulerState
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Shared

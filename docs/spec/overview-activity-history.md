@@ -27,7 +27,7 @@ missed time, late inputs, or downtime.
   a gap. Within that bounded skew, mailbox order is authoritative: updates ordered before the
   barrier may appear in `B`, while updates ordered after it cannot.
 - For boundary `B`, the capture uses `B` as `RepoAssemblyInputs.Now`, one immutable
-  barriered `RefreshScheduler.GetState` result, one set of assembly inputs, one
+  barriered `SchedulerState.GetState` result, one set of assembly inputs, one
   `WorktreeApi.assembleRepos` result, and one `OverviewData.aggregate` result. Wall-clock reads
   performed later in the attempt cannot change the projection time.
 - Tasks and agents are reduced from that same `Overview` value and committed atomically as one
@@ -173,7 +173,7 @@ start/cancel/await lifecycle machinery while retaining independent cadence polic
 | `src/Server/OverviewSnapshotStore.fs` | Direct snapshot schema, migration, retention, and bounded reads |
 | `src/Server/OverviewSnapshotCapture.fs` | Serial capture scheduling, shared projection, and atomic capture |
 | `src/Server/WorktreeApi.fs` | Shared repo assembly and bounded history query |
-| `src/Server/RefreshScheduler.fs` | Immutable live state and `GetState` |
+| `src/Server/SchedulerState.fs` | Immutable live state and `GetState` |
 | `src/Server/Program.fs` | Capture lifecycle |
 | `src/Client/App.fs` | Window state, fetching, and refresh cadence |
 | `src/Client/OverviewChart.fs` | Stepped chart geometry and hover |

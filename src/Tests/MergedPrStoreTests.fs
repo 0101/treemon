@@ -203,7 +203,7 @@ let private openLivePr id : PrStatus =
           IsDraft = true
           Comments = WithResolution(2, 5)
           Builds = [ { Name = "ci"; Status = Building; Url = None; Failure = None } ]
-          IsMerged = false
+          State = PrState.Open
           AutoMergeEnabled = true
           HasConflicts = true }
 
@@ -216,7 +216,7 @@ let private mergedLivePr id title url : PrStatus =
           IsDraft = true
           Comments = WithResolution(1, 3)
           Builds = [ { Name = "ci"; Status = Succeeded; Url = Some "https://example.test/ci"; Failure = None } ]
-          IsMerged = true
+          State = PrState.Merged
           AutoMergeEnabled = true
           HasConflicts = true }
 
@@ -229,7 +229,7 @@ let private reconstructed (r: MergedPrRecord) : PrStatus =
           IsDraft = false
           Comments = WithResolution(0, 0)
           Builds = []
-          IsMerged = true
+          State = PrState.Merged
           AutoMergeEnabled = false
           HasConflicts = false }
 
@@ -561,7 +561,7 @@ type MergedPrStoreEndToEndTests() =
               IsDraft = true
               Comments = WithResolution(1, 2)
               Builds = [ { Name = "ci"; Status = Succeeded; Url = Some "https://example.test/ci"; Failure = None } ]
-              IsMerged = true
+              State = PrState.Merged
               AutoMergeEnabled = true
               HasConflicts = true }
 

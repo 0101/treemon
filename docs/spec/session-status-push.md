@@ -73,9 +73,10 @@ titles, context usage, and session resume all use this shared state; no session-
   to several activity groups at once.
 - `CodingToolSince` is captured when the collapsed worktree status changes and remains stable while
   Idle heartbeats advance `last_seen`.
-- Auto-sync selects the active open winner, then the greatest-`UpdatedAt` open Idle session, and
-  only then a retained identity when no session is open. This delivery-aware ordering avoids
-  launching a second CLI while an existing bridge can accept the prompt.
+- Auto-sync defers entirely while any open session is mid-turn or has been idle for less than
+  `settleWindow` (30 s). Otherwise it takes the greatest-`UpdatedAt` open session that has settled,
+  and only then a retained identity when no session is open. That ordering keeps any fallback prompt
+  on an existing bridge rather than launching a second CLI.
 
 ### Context usage, resume, and restart
 
@@ -193,10 +194,13 @@ candidate set before collapsing it. The representative's own `LastSeen` still de
 contributes an open dot, while its `UpdatedAt` keeps it eligible for footer and resume ownership.
 
 The remoting contract exposes `toggleAutoSync`. When enabled and the branch falls behind, `AutoSync`
-uses the same live and retained session state to select a target identity, then sends a typed
-agent-prompt through `SessionBridge`. A matching live registration receives it directly; transient
-delivery failure queues it for retry, while no live target triggers the guarded fallback launch.
-The passive reporting extension never sends prompts.
+uses the same live and retained session state but preserves whether the selected identity is busy,
+settled-idle, or offline. A session mid-turn — or one that went idle within the settle window — makes
+the worktree busy, and the observation is deferred without delivering anything. Otherwise — no
+session, or one that has settled or is waiting on its user — AutoSync attempts the bounded mechanical
+path defined in `docs/spec/worktree-monitor.md`, and uses the idle session, retained identity, or a
+guarded launch only when that path requires agent fallback; transient delivery failure queues that
+prompt for retry. The passive reporting extension never originates prompts.
 
 The projection keeps the activity source through the `AgentActivity` union and exposes every open
 session for status/context rendering. Overview snapshot capture uses the same live session
@@ -220,7 +224,7 @@ projection but persists the complete count-only aggregate independently; see
 | Context usage | Persist the last-known gauge and ordering timestamp; do not append it to activity events. |
 | Persistence | Store latest session state plus idempotent accepted events in SQLite WAL. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
-| Auto-sync | Prefer an active/open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
+| Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Resume | Query durable most-recent activity identity, not the bounded live cache or heartbeat recency. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
@@ -237,7 +241,7 @@ projection but persists the complete count-only aggregate independently; see
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
 | `src/Server/SessionActivityStore.fs` | Session persistence, additive migration, idempotent event append, representative queries, and retention. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
-| `src/Server/RefreshScheduler.fs` | Live session state and `CodingToolSince` transitions. |
+| `src/Server/SchedulerState.fs` | Live session state and `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |
 | `src/Server/SessionBridge.fs` | Session registration, targeted prompt delivery, retry queue, and bridge liveness. |
 | `src/Server/AutoSync.fs` | Delivery-aware session selection and guarded sync-prompt fallback launch. |

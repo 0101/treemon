@@ -25,6 +25,7 @@
     <Compile Include="TreemonConfig.fs" />
     <Compile Include="DiffCategories.fs" />
     <Compile Include="GitWorktree.fs" />
+    <Compile Include="GitBranchSync.fs" />
     <Compile Include="WorktreeDiff.fs" />
     <Compile Include="WorktreeDiffApi.fs" />
     <Compile Include="JsonHelpers.fs" />
@@ -44,6 +45,7 @@
     <Compile Include="CanvasDocKinds.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
     <Compile Include="MergedPrStore.fs" />
+    <Compile Include="AutoSyncStore.fs" />
     <Compile Include="SessionBridge.fs" />
     <Compile Include="AutoSync.fs" />
     <Compile Include="CanvasBridge.fs" />
@@ -55,6 +57,7 @@
     <Compile Include="CanvasScanner.fs" />
     <Compile Include="CanvasExport.fs" />
     <Compile Include="CanvasShare.fs" />
+    <Compile Include="SchedulerState.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="CardEventLog.fs" />
     <Compile Include="DemoFixture.fs" />

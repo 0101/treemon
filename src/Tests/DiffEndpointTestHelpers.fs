@@ -95,8 +95,8 @@ let private agentKnowingRepository
     (worktreePaths: string list)
     upstreamRemote
     baseBranch
-    : MailboxProcessor<RefreshScheduler.StateMsg> =
-    let agent = RefreshScheduler.createAgent ()
+    : MailboxProcessor<SchedulerState.StateMsg> =
+    let agent = SchedulerState.createAgent ()
 
     let worktrees =
         worktreePaths
@@ -116,7 +116,7 @@ let private agentKnowingRepository
             baseBranch
     )
 
-    agent.PostAndAsyncReply(RefreshScheduler.GetState)
+    agent.PostAndAsyncReply(SchedulerState.GetState)
     |> TestUtils.runAsync
     |> ignore
 
@@ -130,7 +130,7 @@ let withDiffServerRepository
     baseBranch
     (service: WorktreeDiffApi.Service)
     (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
-    (action: MailboxProcessor<RefreshScheduler.StateMsg> -> HttpClient -> string -> unit)
+    (action: MailboxProcessor<SchedulerState.StateMsg> -> HttpClient -> string -> unit)
     =
     let port = TestUtils.getFreeTcpPort ()
     let agent =
@@ -171,7 +171,7 @@ let withDiffServerConfiguration
     baseBranch
     (service: WorktreeDiffApi.Service)
     (newIdentity: WorktreeDiff.WorktreeDiffEntry -> string)
-    (action: MailboxProcessor<RefreshScheduler.StateMsg> -> HttpClient -> string -> unit)
+    (action: MailboxProcessor<SchedulerState.StateMsg> -> HttpClient -> string -> unit)
     =
     withDiffServerRepository
         (RepoId "diff-endpoint-tests")

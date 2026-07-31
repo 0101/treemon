@@ -22,10 +22,10 @@ let private assemblyInputs now : WorktreeApi.OverviewAssemblyInputs =
       ArchivedBranches = Map.empty }
 
 let private nonEmptyState =
-    { RefreshScheduler.DashboardState.empty with
+    { SchedulerState.DashboardState.empty with
         Repos =
             Map.ofList
-                [ RepoId "capture-test", RefreshScheduler.PerRepoState.empty ] }
+                [ RepoId "capture-test", SchedulerState.PerRepoState.empty ] }
 
 let private worktree path branch : GitWorktree.WorktreeInfo =
     { Path = path
@@ -61,7 +61,7 @@ let private overview =
       Scale = 3 }
 
 let private defaultDependencies insert : CaptureDependencies =
-    { CaptureState = fun () -> async.Return RefreshScheduler.DashboardState.empty
+    { CaptureState = fun () -> async.Return SchedulerState.DashboardState.empty
       LoadAssemblyInputs = assemblyInputs
       IsReady = fun _ _ -> true
       AssembleRepos = fun _ _ -> []
@@ -224,10 +224,10 @@ type OverviewSnapshotCaptureTests() =
                 None
                 (boundary.AddMilliseconds(100.0))
 
-        let scheduler = RefreshScheduler.createAgent()
-        scheduler.Post(RefreshScheduler.InitializeRepo repoId)
-        scheduler.Post(RefreshScheduler.UpdateSessionStatus beforeBoundary)
-        scheduler.PostAndReply RefreshScheduler.GetState |> ignore
+        let scheduler = SchedulerState.createAgent()
+        scheduler.Post(SchedulerState.InitializeRepo repoId)
+        scheduler.Post(SchedulerState.UpdateSessionStatus beforeBoundary)
+        scheduler.PostAndReply SchedulerState.GetState |> ignore
 
         let clock = ControllableClock(initial)
         let stateCaptured =
@@ -243,7 +243,7 @@ type OverviewSnapshotCaptureTests() =
                 true) with
                 CaptureState =
                     fun () -> async {
-                        let state = scheduler.PostAndReply RefreshScheduler.GetState
+                        let state = scheduler.PostAndReply SchedulerState.GetState
                         stateCaptured.SetResult()
                         do! releaseCapture.Task |> Async.AwaitTask
                         return state
@@ -264,8 +264,8 @@ type OverviewSnapshotCaptureTests() =
         stateCaptured.Task.WaitAsync(timeout).GetAwaiter().GetResult()
 
         clock.AdvanceTo afterBoundary.LastSeen
-        scheduler.Post(RefreshScheduler.UpdateSessionStatus afterBoundary)
-        let liveState = scheduler.PostAndReply RefreshScheduler.GetState
+        scheduler.Post(SchedulerState.UpdateSessionStatus afterBoundary)
+        let liveState = scheduler.PostAndReply SchedulerState.GetState
         releaseCapture.SetResult()
 
         let snapshot =
@@ -365,7 +365,7 @@ type OverviewSnapshotCaptureTests() =
         let ignoredPath = Path.Combine(root, "ignored")
 
         let repo =
-            { RefreshScheduler.PerRepoState.empty with
+            { SchedulerState.PerRepoState.empty with
                 WorktreeList =
                     [ worktree activePath "active"
                       worktree archivedPath "archived"
@@ -380,7 +380,7 @@ type OverviewSnapshotCaptureTests() =
 
         let rootPaths = Map.ofList [ repoId, root ]
         let state repo sessionStatusesHydrated =
-            { RefreshScheduler.DashboardState.empty with
+            { SchedulerState.DashboardState.empty with
                 Repos = Map.ofList [ repoId, repo ]
                 SessionStatusesHydrated = sessionStatusesHydrated }
 
@@ -420,7 +420,7 @@ type OverviewSnapshotCaptureTests() =
                 WorktreeApi.isOverviewCaptureReady
                     Map.empty
                     None
-                    { RefreshScheduler.DashboardState.empty with
+                    { SchedulerState.DashboardState.empty with
                         SessionStatusesHydrated = true },
                 Is.True,
                 "an intentionally empty root set is ready after the session seed"
@@ -436,7 +436,7 @@ type OverviewSnapshotCaptureTests() =
             { CaptureState =
                 fun () -> async {
                     calls.Enqueue "state"
-                    return RefreshScheduler.DashboardState.empty
+                    return SchedulerState.DashboardState.empty
                 }
               LoadAssemblyInputs =
                 fun _ ->
@@ -509,7 +509,7 @@ type OverviewSnapshotCaptureTests() =
                 (boundary.AddDays(-1.0))
 
         let repo =
-            { RefreshScheduler.PerRepoState.empty with
+            { SchedulerState.PerRepoState.empty with
                 WorktreeList =
                     [ worktree activePath "active"
                       worktree retainedPath "retained"
@@ -558,7 +558,7 @@ type OverviewSnapshotCaptureTests() =
                 IsReady = true }
 
         let state =
-            { RefreshScheduler.DashboardState.empty with
+            { SchedulerState.DashboardState.empty with
                 Repos = Map.ofList [ repoId, repo ]
                 SessionStatuses =
                     Map.ofList
@@ -731,7 +731,7 @@ type OverviewSnapshotCaptureTests() =
                             do! releaseFirst.Task |> Async.AwaitTask
 
                         Interlocked.Decrement(&active) |> ignore
-                        return RefreshScheduler.DashboardState.empty
+                        return SchedulerState.DashboardState.empty
                     } }
 
         let cancellation, running =
@@ -776,7 +776,7 @@ type OverviewSnapshotCaptureTests() =
                     fun () -> async {
                         projectionStarted.SetResult()
                         do! releaseProjection.Task |> Async.AwaitTask
-                        return RefreshScheduler.DashboardState.empty
+                        return SchedulerState.DashboardState.empty
                     } }
 
         let cancellation, running =

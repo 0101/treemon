@@ -5,6 +5,7 @@ open System.IO
 open NUnit.Framework
 open Server
 open Server.RefreshScheduler
+open Server.SchedulerState
 open Server.GitWorktree
 open Shared
 
@@ -32,15 +33,16 @@ let private populateAgent (agent: MailboxProcessor<StateMsg>) (repos: (RepoId * 
 
 let private createApi agent roots =
     WorktreeApi.worktreeApi
-        agent
-        (CardEventLog.createAgent ())
-        (SessionManager.createAgent ())
-        None
-        None
-        roots
-        None
-        "1.0"
-        None
+        { Agent = agent
+          CardLog = CardEventLog.createAgent ()
+          SessionAgent = SessionManager.createAgent ()
+          ActivityStore = None
+          SnapshotStore = None
+          AutoSyncStore = None
+          WorktreeRoots = roots
+          TestFixtures = None
+          AppVersion = "1.0"
+          DeployBranch = None }
 
 let private deleteWorktree agent worktreeRoots wtPath =
     WorktreeApi.deleteWorktreeWith
@@ -74,7 +76,7 @@ type DeleteWorktreeResolutionTests() =
     [<Test>]
     member _.``deleteWorktree with WorktreePath targets correct repo when branches are duplicated``() =
         task {
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
             let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
@@ -123,7 +125,7 @@ type DeleteWorktreeResolutionTests() =
     [<Test>]
     member _.``deleteWorktree with WorktreePath for repoB does not affect repoA``() =
         task {
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
             let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
@@ -167,7 +169,7 @@ type DeleteWorktreeResolutionTests() =
     [<Test>]
     member _.``deleteWorktree with unknown path returns error``() =
         task {
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
 
             let worktreesA =
@@ -210,7 +212,7 @@ type ArchiveWorktreeResolutionTests() =
     [<Test>]
     member _.``archiveWorktree with WorktreePath archives correct repo branch when duplicated``() =
         task {
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
             let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
@@ -242,7 +244,7 @@ type ArchiveWorktreeResolutionTests() =
     [<Test>]
     member _.``archiveWorktree for repoB does not affect repoA``() =
         task {
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
             let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
@@ -274,7 +276,7 @@ type ArchiveWorktreeResolutionTests() =
     [<Test>]
     member _.``unarchiveWorktree with WorktreePath targets correct repo``() =
         task {
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
             let repoBId = PathUtils.toRepoId (Path.GetFullPath tempDirB)
 
@@ -309,7 +311,7 @@ type ArchiveWorktreeResolutionTests() =
     [<Test>]
     member _.``archiveWorktree with detached HEAD returns error``() =
         task {
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let repoAId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
 
             let worktreesA =
