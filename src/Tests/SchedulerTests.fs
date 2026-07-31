@@ -1792,3 +1792,41 @@ type SessionStatusEvictionTests() =
             Assert.That(ids, Is.EqualTo(Set.ofList [ "fresh" ]))
         }
         |> Async.RunSynchronously
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type RemovedWorktreePathTests() =
+
+    let discovered paths =
+        paths
+        |> List.map (fun path -> { WorktreeInfo.Path = path; Head = "abc123"; Branch = Some "feature" })
+        |> Some
+
+    [<Test>]
+    member _.``A path missing from a successful discovery is reported removed``() =
+        let previous = Set.ofList [ "/repo/a"; "/repo/b" ]
+
+        Assert.That(
+            removedWorktreePaths previous (discovered [ "/repo/a" ]),
+            Is.EqualTo(Set.singleton "/repo/b"))
+
+    [<Test>]
+    member _.``A failed discovery removes nothing``() =
+        let previous = Set.ofList [ "/repo/a"; "/repo/b" ]
+
+        Assert.That(
+            removedWorktreePaths previous None,
+            Is.Empty,
+            "listWorktrees answers None on a Git failure, which must never read as every worktree vanishing")
+
+    [<Test>]
+    member _.``A discovery that lists everything still known removes nothing``() =
+        let previous = Set.ofList [ "/repo/a"; "/repo/b" ]
+
+        Assert.That(removedWorktreePaths previous (discovered [ "/repo/b"; "/repo/a" ]), Is.Empty)
+
+    [<Test>]
+    member _.``A newly discovered path is not mistaken for a removal``() =
+        Assert.That(removedWorktreePaths Set.empty (discovered [ "/repo/new" ]), Is.Empty)

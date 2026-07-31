@@ -309,6 +309,14 @@ let repositoryDiscoveryUpdate
           BaseBranch = baseBranch }
     )
 
+/// Paths a successful discovery no longer lists. `None` is a Git failure, not an empty repository:
+/// treating it as "everything vanished" would clear live records on a transient error, so it removes
+/// nothing.
+let internal removedWorktreePaths (previous: Set<string>) (discovered: GitWorktree.WorktreeInfo list option) =
+    match discovered with
+    | None -> Set.empty
+    | Some live -> Set.difference previous (live |> List.map _.Path |> Set.ofList)
+
 let private deadlineOf (activity: ActivityLevel) (lastRuns: Map<RefreshTask, DateTimeOffset>) (task: RefreshTask) =
     lastRuns
     |> Map.tryFind task
@@ -330,6 +338,20 @@ let internal executeTask
             let baseBranch = TreemonConfig.readBaseBranch root
             let! state = agent.PostAndAsyncReply(GetState)
             agent.Post(repositoryDiscoveryUpdate repoId worktrees upstreamRemote baseBranch)
+
+            // A worktree removed outside Treemon never gets another observation, so nothing would
+            // ever clear its accepted-revision record and it could suppress the first sync of a
+            // worktree later recreated at the same path — which the deletion cleanup documented in
+            // `docs/spec/worktree-monitor.md` (Branch Sync) promises does not happen. The API
+            // deletion path already clears its own; this covers every other way one disappears.
+            let knownPaths =
+                state.Repos
+                |> Map.tryFind repoId
+                |> Option.map _.KnownPaths
+                |> Option.defaultValue Set.empty
+
+            removedWorktreePaths knownPaths worktrees
+            |> Set.iter (AutoSyncStore.clear services.AutoSyncStore)
 
             let alreadyDetected =
                 state.Repos |> Map.tryFind repoId |> Option.bind _.Provider |> Option.isSome
