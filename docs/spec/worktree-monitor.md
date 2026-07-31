@@ -50,7 +50,7 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Branch name header with work metrics (commit grid + diff stats) only when committed history has a net diff from the base
 - Coding tool status dots — one per live session (Working / WaitingForUser / Idle), each a context-usage donut (arc = remaining context) when that session has reported usage, else a plain dot; the last known gauge survives server restart for sessions restored from the durable live window. A worktree with no live session shows the single grey NoSession dot. Tooltip shows the status.
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
-- "N behind {base}" with an always-visible two-arrow auto-sync toggle and tracked staged/unstaged dirty indicator
+- "N behind {base}" with an always-visible circular two-arrow auto-sync toggle and tracked staged/unstaged dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
 - PR badge linking to PR page; merge conflict icon when conflicts detected; AzDo: thread resolution ("3/10 threads"), GitHub: comment count
 - Build badges per pipeline/workflow run; failed builds show step name (AzDo also shows log tooltip)
@@ -61,10 +61,10 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 
 ### Branch Sync
 
-- Every card shows a two-arrow auto-sync toggle in the behind-base row, including when the worktree is clean, dirty, behind, or up to date.
+- Every card shows a circular two-arrow auto-sync toggle in the behind-base row, including when the worktree is clean, dirty, behind, or up to date.
 - The unpressed toggle uses the normal neutral card-action style. The pressed state reuses the green glow of the active-terminal button and persists per branch in `.treemon.json` under `autoSyncBranches`.
 - Clicking the toggle updates the card optimistically and calls `IWorktreeApi.toggleAutoSync`; an API error restores the previous state and activates the dashboard's normal error surface until the next successful data refresh. The card's `S` key binding invokes the same toggle action.
-- While the request is in flight for a worktree, the toggle is disabled and additional mouse or `S` key inputs for that path are ignored; it spins its two-arrow glyph and reads "Syncing with {base}…" so an enable that reaches the network is visibly working rather than dead. Other worktrees remain independently toggleable, and the pending state clears on either success or failure.
+- While the request is in flight for a worktree, the toggle is disabled and additional mouse or `S` key inputs for that path are ignored; it turns its circular two-arrow glyph and reads "Syncing with {base}…" so an enable that reaches the network is visibly working rather than dead. Other worktrees remain independently toggleable, and the pending state clears on either success or failure.
 - Archiving or deleting a worktree does not prune `autoSyncBranches`; branch-name reuse may restore the preference. A merged PR needs no cleanup either: eligibility refuses it on every observation.
 - Eligibility is the persisted preference *and* the absence of a known merged PR, and it is re-read immediately before an operation acts, since PR refresh runs on its own cadence. A branch disabled or reconciled merged after the observation that started the operation delivers nothing and records nothing. Nothing is cancelled once a prompt has been accepted or a Git command is already running.
 - When enabled, fresh Git observations start a sync only when the worktree is behind a newly observed base revision. The canonical worktree path plus that base revision, not repeated polling of the same behind count, is the deduplication identity. One durable accepted record carries it: the per-worktree operation guard already serializes work inside one process, so the record only has to answer whether this exact revision was already prompted and how long ago, which it does across a restart too.
@@ -278,7 +278,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/SessionManager.fs` | MailboxProcessor session agent, spawn/focus/kill, persistence |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, `appSubscriptions`, top-level `view` wiring |
-| `src/Client/CardViews.fs` | Worktree card rendering, including the persistent two-arrow auto-sync toggle, action buttons, badges, and event-log helpers |
+| `src/Client/CardViews.fs` | Worktree card rendering, including the persistent circular two-arrow auto-sync toggle, action buttons, badges, and event-log helpers |
 | `src/Client/OverviewViews.fs` | Status-overview row + scheduler footer rendering |
 | `src/Client/MascotState.fs` / `MascotView.fs` | Mascot eyes: gaze slice + eye SVG render (observes `ActivityLevel`) |
 | `src/Client/ActivityState.fs` / `ActivityUpdate.fs` | User-activity / idle-detection: state slice + `Tick`/`UserActivity` bodies + activity subscription |
