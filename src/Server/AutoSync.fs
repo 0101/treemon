@@ -84,6 +84,9 @@ type TriggerDependencies =
       CompleteOperation: string -> unit
       /// Treemon's own sync, run once no session is working in the worktree.
       MechanicalSync: MechanicalSyncRequest -> Async<Result<unit, SyncFailure>>
+      /// Re-reads the worktree's Git state after Treemon's own sync moved the branch, so the card
+      /// stops reporting a behind count the sync has already cleared.
+      ReloadGitData: string -> Async<unit>
       Deliver: DeliveryRequest -> Async<bool> }
 
 /// The push rule lives in the prompt itself rather than being decided for the agent: the agent can
@@ -358,6 +361,9 @@ let private attemptSync
         match! dependencies.MechanicalSync request with
         | Ok() ->
             Log.log "AutoSync" $"Mechanical sync completed for {gitData.Branch}"
+            // This sync is what made the card's behind count wrong, so the worktree is re-read now
+            // rather than whenever the scheduler next comes round to it.
+            do! dependencies.ReloadGitData gitData.Path
             return true
         | Error failure ->
             // The gate is re-passed here because a fetch and a merge have run since it was last

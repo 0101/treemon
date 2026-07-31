@@ -27,6 +27,40 @@ let internal prStatusForPath (state: DashboardState) (path: string) =
         |> Option.map (fun gitData -> PrStatus.tryLookupPrStatus repo.PrData (GitWorktree.prBranchName gitData)))
     |> Option.flatten
 
+/// The repository owning a worktree path, resolved from one snapshot. `RepoId`'s value is the
+/// normalized repository root, so a linked worktree resolves to the root it shares `.treemon.json`
+/// with — which is what lets a per-worktree request read repository-level configuration.
+let tryFindOwningRepo (state: DashboardState) (worktreePath: string) =
+    let normalizedPath = PathUtils.normalizePath worktreePath
+
+    state.Repos
+    |> Map.tryPick (fun repoId repo ->
+        if repo.KnownPaths |> Set.contains normalizedPath then
+            Some(repoId, repo)
+        else
+            None)
+
+/// Re-read one worktree's Git state into the dashboard. The scheduler's own `RefreshGit` pass uses
+/// it, and so does a mechanical auto-sync: that sync moves the branch itself, so the behind count on
+/// the card is stale the moment it succeeds and would otherwise stand until the next scheduled pass.
+/// Returns the observation so a caller that needs it does not collect twice.
+let internal reloadGitData (agent: MailboxProcessor<StateMsg>) (repoId: RepoId) (path: string) =
+    async {
+        let! state = agent.PostAndAsyncReply(GetState)
+        let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
+
+        let branch =
+            repo.WorktreeList
+            |> List.tryFind (fun wt -> wt.Path = path)
+            |> Option.bind _.Branch
+
+        let! gitData =
+            GitWorktree.collectWorktreeGitData path branch repo.UpstreamRemote repo.BaseBranch
+
+        agent.Post(UpdateGit(repoId, path, gitData))
+        return gitData
+    }
+
 let internal autoSyncDependencies
     (agent: MailboxProcessor<StateMsg>)
     (sessionAgent: SessionManager.SessionAgent)
@@ -74,6 +108,15 @@ let internal autoSyncDependencies
         fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncOperation(path, reply))
       CompleteOperation = CompleteAutoSyncOperation >> agent.Post
       MechanicalSync = AutoSync.mechanicalSync GitBranchSync.syncWithBase GitBranchSync.pushSyncedBranch
+      ReloadGitData =
+        fun path ->
+            async {
+                let! state = agent.PostAndAsyncReply(GetState)
+
+                match tryFindOwningRepo state path with
+                | Some(repoId, _) -> do! reloadGitData agent repoId path |> Async.Ignore
+                | None -> Log.log "AutoSync" $"No repository owns {Path.GetFileName path}; skipped Git reload"
+            }
       Deliver =
         AutoSync.deliver
             SessionBridge.tryDeliver
@@ -297,22 +340,9 @@ let internal executeTask
                 agent.Post(UpdateProvider(repoId, Some provider))
 
         | RefreshGit(repoId, path) ->
+            let! gitData = reloadGitData agent repoId path
             let! state = agent.PostAndAsyncReply(GetState)
             let repo = state.Repos |> Map.tryFind repoId |> Option.defaultValue PerRepoState.empty
-
-            let branch =
-                repo.WorktreeList
-                |> List.tryFind (fun wt -> wt.Path = path)
-                |> Option.bind _.Branch
-
-            let! gitData =
-                GitWorktree.collectWorktreeGitData
-                    path
-                    branch
-                    repo.UpstreamRemote
-                    repo.BaseBranch
-
-            agent.Post(UpdateGit(repoId, path, gitData))
             let repoRoot = rootPaths |> Map.find repoId
             AutoSync.triggerInBackground
                 (autoSyncDependencies
@@ -547,19 +577,6 @@ let buildRootPaths (worktreeRoots: string list) =
     worktreeRoots
     |> List.map (fun root -> PathUtils.toRepoId root, root)
     |> Map.ofList
-
-/// The repository owning a worktree path, resolved from one snapshot. `RepoId`'s value is the
-/// normalized repository root, so a linked worktree resolves to the root it shares `.treemon.json`
-/// with — which is what lets a per-worktree request read repository-level configuration.
-let tryFindOwningRepo (state: DashboardState) (worktreePath: string) =
-    let normalizedPath = PathUtils.normalizePath worktreePath
-
-    state.Repos
-    |> Map.tryPick (fun repoId repo ->
-        if repo.KnownPaths |> Set.contains normalizedPath then
-            Some(repoId, repo)
-        else
-            None)
 
 module CanvasWatchers =
     /// Fallback attribution target for a worktree's scanner. Explicit `/api/canvas/attribute`

@@ -59,6 +59,7 @@ let private withoutAcceptedRecords: TriggerDependencies =
       TryBeginOperation = fun _ -> async { return true }
       CompleteOperation = ignore
       MechanicalSync = fun _ -> async { return Error DirtyWorktree }
+      ReloadGitData = fun _ -> async { return () }
       Deliver = fun _ -> async { return true } }
 
 let private prInfo isMerged : PrStatus =
@@ -752,6 +753,51 @@ type AutoSyncMechanicalTests() =
     let enabledObservation root =
         TreemonConfig.setAutoSyncBranches root [ "feature-a" ]
         gitData (Path.Combine(root, "feature-a")) "feature-a" 2 (Some "base-a") false
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A completed mechanical sync re-reads the worktree instead of leaving a stale behind count``() =
+        TestUtils.withTempDir "treemon-auto-sync-reload" (fun root ->
+            let observation = enabledObservation root
+            // Mutable because the reload is the impure boundary under test, and its ordering against
+            // the mechanical sync is what the assertions pin.
+            let mutable events = []
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    ReadOwnership = fun _ -> async { return Free(NoOpenSession None) }
+                    MechanicalSync =
+                        fun _ ->
+                            async {
+                                events <- "sync" :: events
+                                return Ok()
+                            }
+                    ReloadGitData = fun path -> async { events <- $"reload:{path}" :: events } }
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            Assert.That(
+                List.rev events,
+                Is.EqualTo([ "sync"; $"reload:{observation.Path}" ]),
+                "the sync is what made the behind count stale, so the re-read follows it immediately"))
+
+    [<Test>]
+    [<Category("AutoSyncVerification")>]
+    member _.``A mechanical sync that stopped does not re-read the worktree``() =
+        TestUtils.withTempDir "treemon-auto-sync-no-reload" (fun root ->
+            let observation = enabledObservation root
+            // Mutable because the reload callback is the impure boundary under test.
+            let mutable reloads = 0
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    ReadOwnership = fun _ -> async { return Free(NoOpenSession None) }
+                    MechanicalSync = fun _ -> async { return Error DirtyWorktree }
+                    ReloadGitData = fun _ -> async { reloads <- reloads + 1 } }
+
+            trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+
+            Assert.That(reloads, Is.Zero, "nothing moved, so the observation the card holds is still current"))
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
