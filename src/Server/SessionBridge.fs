@@ -339,13 +339,29 @@ let internal computeLiveness now (session: SessionEntry option) (poll: bool * Da
             min
                 (now - entry.RegisteredAt).TotalSeconds
                 (now - heartbeat).TotalSeconds
-        Some (age, { IsAlive = isSessionAlive now entry || isPollAlive now heartbeat; SessionId = entry.SessionId })
+        let liveSessionIds =
+            if isSessionAlive now entry then entry.SessionId |> Option.toList else []
+        Some (
+            age,
+            { IsAlive = isSessionAlive now entry || isPollAlive now heartbeat
+              SessionId = entry.SessionId
+              LiveSessionIds = liveSessionIds })
     | Some entry, (false, _) ->
         let age = (now - entry.RegisteredAt).TotalSeconds
-        Some (age, { IsAlive = isSessionAlive now entry; SessionId = entry.SessionId })
+        let liveSessionIds =
+            if isSessionAlive now entry then entry.SessionId |> Option.toList else []
+        Some (
+            age,
+            { IsAlive = isSessionAlive now entry
+              SessionId = entry.SessionId
+              LiveSessionIds = liveSessionIds })
     | None, (true, heartbeat) ->
         let age = (now - heartbeat).TotalSeconds
-        Some (age, { IsAlive = isPollAlive now heartbeat; SessionId = None })
+        Some (
+            age,
+            { IsAlive = isPollAlive now heartbeat
+              SessionId = None
+              LiveSessionIds = [] })
     | None, (false, _) -> None
 
 let getStatus (worktreePath: string) =
@@ -375,7 +391,17 @@ let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
     worktreePaths
     |> List.choose (fun path ->
         let key = normalizePath path
-        let session = freshestSession path
+        let sessions = sessionsForWorktree path
+        let session = sessions |> List.sortByDescending _.RegisteredAt |> List.tryHead
         let poll = pollRegistry.TryGetValue(key)
-        computeLiveness now session poll |> Option.map (fun (_, liveness) -> path, liveness))
+        let liveSessionIds =
+            sessions
+            |> List.filter (isSessionAlive now)
+            |> List.choose _.SessionId
+            |> List.distinct
+            |> List.sort
+
+        computeLiveness now session poll
+        |> Option.map (fun (_, liveness) ->
+            path, { liveness with LiveSessionIds = liveSessionIds }))
     |> Map.ofList
