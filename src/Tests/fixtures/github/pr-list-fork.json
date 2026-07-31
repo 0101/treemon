@@ -1,0 +1,49 @@
+[
+  {
+    "number": 30,
+    "title": "Fix the sync gate",
+    "draft": false,
+    "state": "open",
+    "merged_at": null,
+    "head": {
+      "ref": "feature/shared-name",
+      "sha": "sha-upstream-open",
+      "repo": { "owner": { "login": "Contoso" } }
+    }
+  },
+  {
+    "number": 31,
+    "title": "Collaborator work from a fork",
+    "draft": false,
+    "state": "open",
+    "merged_at": null,
+    "head": {
+      "ref": "feature/collaborator",
+      "sha": "sha-collaborator-open",
+      "repo": { "owner": { "login": "colleague" } }
+    }
+  },
+  {
+    "number": 32,
+    "title": "Outsider fork PR reusing a local branch name",
+    "draft": false,
+    "state": "open",
+    "merged_at": null,
+    "head": {
+      "ref": "feature/shared-name",
+      "sha": "sha-outsider-open",
+      "repo": { "owner": { "login": "outsider" } }
+    }
+  },
+  {
+    "number": 33,
+    "title": "Head repository deleted",
+    "draft": false,
+    "state": "open",
+    "merged_at": null,
+    "head": {
+      "ref": "feature/gone",
+      "sha": "sha-gone"
+    }
+  }
+]

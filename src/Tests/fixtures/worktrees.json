@@ -39,7 +39,7 @@
                     }
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
                 "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
@@ -74,7 +74,7 @@
                     "Failure": null
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
                 "AutoMergeEnabled": true,
                 "HasConflicts": false
               }
@@ -137,7 +137,7 @@
                     "Failure": null
                   }
                 ],
-                "IsMerged": true,
+                "State": "Merged",
                 "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
@@ -178,7 +178,7 @@
                     "Failure": null
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
                 "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
@@ -256,7 +256,7 @@
                     }
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
                 "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
@@ -292,7 +292,7 @@
                     }
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
                 "AutoMergeEnabled": false,
                 "HasConflicts": false
               }

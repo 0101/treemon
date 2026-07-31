@@ -1,3 +1,5 @@
+// Returns the transport kind alongside the session prompt text, so the send queue can compare exact
+// payloads without re-parsing the body or conflating a canvas payload with a same-text agent prompt.
 export function promptForSession(body) {
   let transport;
   try {
@@ -12,9 +14,9 @@ export function promptForSession(body) {
 
   switch (transport.kind) {
     case "canvas":
-      return `[canvas] ${transport.prompt}`;
+      return { kind: transport.kind, prompt: `[canvas] ${transport.prompt}` };
     case "agent-prompt":
-      return transport.prompt;
+      return { kind: transport.kind, prompt: transport.prompt };
     default:
       throw new Error("unknown prompt kind");
   }

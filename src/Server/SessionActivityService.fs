@@ -211,8 +211,8 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
 
 // --- Known-worktree guard (mirrors CanvasDocServer) --------------------------------------------
 
-let private allKnownPaths (agent: MailboxProcessor<RefreshScheduler.StateMsg>) = async {
-    let! state = agent.PostAndAsyncReply RefreshScheduler.GetState
+let private allKnownPaths (agent: MailboxProcessor<SchedulerState.StateMsg>) = async {
+    let! state = agent.PostAndAsyncReply SchedulerState.GetState
     return state.Repos |> Map.values |> Seq.collect _.KnownPaths |> Set.ofSeq
 }
 
@@ -242,7 +242,7 @@ type AcceptOutcome =
 /// Validate + guard a request without touching HTTP or the mailbox: parse the DTO to a domain
 /// report, then apply the known-worktree guard against the scheduler's monitored paths. Returns the
 /// outcome so the handler can map it to a response and tests can assert it directly.
-let tryAcceptReport (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (req: SessionActivityRequest) : Async<AcceptOutcome> =
+let tryAcceptReport (agent: MailboxProcessor<SchedulerState.StateMsg>) (req: SessionActivityRequest) : Async<AcceptOutcome> =
     async {
         match parseReport DateTimeOffset.UtcNow req with
         | Error reason -> return Rejected reason
@@ -298,7 +298,7 @@ let private historyState
 type SessionActivityService internal
     (
         store: SessionActivityStore,
-        scheduler: MailboxProcessor<RefreshScheduler.StateMsg>
+        scheduler: MailboxProcessor<SchedulerState.StateMsg>
     ) =
 
     let dispositionGate = obj ()
@@ -366,7 +366,7 @@ type SessionActivityService internal
                 { persisted with
                     Status.BackgroundAgentClocks = clocks }
 
-            scheduler.Post(RefreshScheduler.UpdateSessionStatus current)
+            scheduler.Post(SchedulerState.UpdateSessionStatus current)
             live |> Map.add report.SessionId current
 
         match report.Event with
@@ -618,7 +618,7 @@ type SessionActivityService internal
         // Seed the scheduler in ONE batch so the time-since-idle chip is stamped from each worktree's
         // NEWEST session rather than the oldest-replayed row (LoadLiveStatuses is ordered oldest-first);
         // feeding rows individually would freeze a stale idle stamp and overstate the chip (F11/C-14).
-        scheduler.Post(RefreshScheduler.SeedSessionStatuses loaded)
+        scheduler.Post(SchedulerState.SeedSessionStatuses loaded)
         mailbox.Post(Seed loaded)
         Log.log "Activity" $"Rebuilt {List.length loaded} live session status(es) from store"
         pruneTimer.Change(pruneInterval, pruneInterval) |> ignore

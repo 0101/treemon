@@ -81,7 +81,7 @@ let private withServiceSeededAndPath
     (seed: SessionActivityStore -> unit)
     (action:
         SessionActivityService
-            * MailboxProcessor<RefreshScheduler.StateMsg>
+            * MailboxProcessor<SchedulerState.StateMsg>
             * SessionActivityStore
             * string
             -> unit)
@@ -92,14 +92,14 @@ let private withServiceSeededAndPath
     let store = new SessionActivityStore(dbPath)
     seed store
 
-    let agent = RefreshScheduler.createAgent ()
+    let agent = SchedulerState.createAgent ()
 
     let info: GitWorktree.WorktreeInfo =
         { Path = PathUtils.normalizePath knownWorktree
           Head = ""
           Branch = Some "test" }
 
-    agent.Post(RefreshScheduler.UpdateWorktreeList(RepoId "svc-test-repo", [ info ]))
+    agent.Post(SchedulerState.UpdateWorktreeList(RepoId "svc-test-repo", [ info ]))
 
     let svc = new SessionActivityService(store, agent)
 
@@ -163,8 +163,8 @@ let private persistedEvents dbPath =
 
 /// The scheduler's live status for a session (fed via UpdateSessionStatus). GetState is a barrier,
 /// so calling it after a LiveSnapshot barrier guarantees the mailbox's feed has been applied.
-let private schedulerStatus (agent: MailboxProcessor<RefreshScheduler.StateMsg>) sid =
-    let state = agent.PostAndReply RefreshScheduler.GetState
+let private schedulerStatus (agent: MailboxProcessor<SchedulerState.StateMsg>) sid =
+    let state = agent.PostAndReply SchedulerState.GetState
     state.SessionStatuses |> Map.tryFind (SessionId sid)
 
 let private resumePathEvent path at =

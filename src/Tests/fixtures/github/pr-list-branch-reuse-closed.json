@@ -1,0 +1,29 @@
+[
+  {
+    "number": 20,
+    "title": "Reused branch, merged on the second try",
+    "state": "closed",
+    "draft": false,
+    "merged_at": "2026-03-05T09:00:00Z",
+    "updated_at": "2026-03-05T09:00:00Z",
+    "head": { "ref": "feature/reused-name", "sha": "sha-reused-name-merged" }
+  },
+  {
+    "number": 19,
+    "title": "First attempt at the shared feature, merged",
+    "state": "closed",
+    "draft": false,
+    "merged_at": "2026-03-01T12:00:00Z",
+    "updated_at": "2026-03-01T12:00:00Z",
+    "head": { "ref": "feature/reopened-work", "sha": "sha-reopened-work-merged" }
+  },
+  {
+    "number": 18,
+    "title": "Reused branch, abandoned first attempt",
+    "state": "closed",
+    "draft": false,
+    "merged_at": null,
+    "updated_at": "2026-02-10T08:00:00Z",
+    "head": { "ref": "feature/reused-name", "sha": "sha-reused-name-abandoned" }
+  }
+]

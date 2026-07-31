@@ -720,6 +720,45 @@ type DashboardTests() =
                 Assert.That(title, Is.EqualTo("Auto-sync with main (S)"), "Tooltip should name the base branch"))
         }
 
+    [<Test>]
+    member this.``Auto-sync in-flight state turns the glyph and tints the button``() =
+        task {
+            // A sync can reach the network, so the toggle must show it is working. The turning glyph
+            // is the primary cue; the yellow tint carries the same state a second time so it still
+            // reads in a still screenshot and never looks like a merely disabled button. Both halves
+            // are pinned here: the spin has been dropped once already (a reduced-motion override),
+            // which left a multi-second fetch and merge looking identical to a dead button.
+            let toggle = this.Page.Locator(".auto-sync-btn.active").First
+            do! toggle.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let readPaint =
+                "el => { const s = getComputedStyle(el); return s.color + '|' + s.borderTopColor + '|' + s.opacity; }"
+
+            let readGlyphAnimation =
+                "el => { const s = getComputedStyle(el.querySelector('.btn-icon')); return s.animationName + '|' + s.animationPlayState; }"
+
+            let! resting = toggle.EvaluateAsync<string>(readPaint)
+            let! restingGlyph = toggle.EvaluateAsync<string>(readGlyphAnimation)
+            let! _ = toggle.EvaluateAsync<obj>("el => el.classList.add('syncing')")
+            // The button transitions colour over 0.15s, so an immediate read still returns the
+            // pre-transition paint. Wait past it before sampling.
+            do! this.Page.WaitForTimeoutAsync(400.0f)
+            let! syncing = toggle.EvaluateAsync<string>(readPaint)
+            let! syncingGlyph = toggle.EvaluateAsync<string>(readGlyphAnimation)
+            let! _ = toggle.EvaluateAsync<obj>("el => el.classList.remove('syncing')")
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    syncing,
+                    Is.Not.EqualTo(resting),
+                    "the syncing toggle must differ from the resting one by paint alone, not only by animation")
+                Assert.That(restingGlyph, Is.EqualTo("none|running"), "a resting toggle must not animate")
+                Assert.That(
+                    syncingGlyph,
+                    Is.EqualTo("sync-spin|running"),
+                    "the glyph must actually turn while the sync is in flight, in every motion setting"))
+        }
+
     [<TestCase("working")>]
     [<TestCase("waiting")>]
     member this.``Auto-sync toggle stays enabled while Copilot session is busy``(status: string) =
@@ -2064,7 +2103,8 @@ type DashboardTests() =
             do! toggle.ClickAsync()
             let! firstRoute = nextRoute ()
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "true")
-            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn active")
+            // In flight: optimistically enabled AND marked syncing, so the wait is visible.
+            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn active syncing")
             do! Assertions.Expect(toggle).ToBeDisabledAsync()
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-disabled", "true")
 
@@ -2101,7 +2141,8 @@ type DashboardTests() =
             do! toggle.ClickAsync()
             let! disableRoute = nextRoute ()
             do! Assertions.Expect(toggle).ToHaveAttributeAsync("aria-pressed", "false")
-            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn")
+            // Disabling is in flight: optimistically off, and still marked syncing until it returns.
+            do! Assertions.Expect(toggle).ToHaveClassAsync("auto-sync-btn syncing")
             do! Assertions.Expect(toggle).ToBeDisabledAsync()
             do! disableRoute.FulfillAsync(
                 RouteFulfillOptions(

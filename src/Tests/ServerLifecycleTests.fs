@@ -24,7 +24,7 @@ type ServerLifecycleTests() =
     [<Test>]
     member _.``runtime shares one store and ingestion drains before releasing its borrow``() =
         withDbPath (fun path ->
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let components = SessionActivityRuntime.createComponents path agent
             let occurredAt = DateTimeOffset.UtcNow
 
@@ -68,7 +68,7 @@ type ServerLifecycleTests() =
     [<Test>]
     member _.``an empty new snapshot store starts without publication preparation``() =
         withDbPath (fun path ->
-            let agent = RefreshScheduler.createAgent ()
+            let agent = SchedulerState.createAgent ()
             let runtime =
                 SessionActivityRuntime.create
                     path
@@ -78,7 +78,7 @@ type ServerLifecycleTests() =
             try
                 runtime.Components.Service.Start()
                 let state =
-                    agent.PostAndAsyncReply RefreshScheduler.GetState
+                    agent.PostAndAsyncReply SchedulerState.GetState
                     |> Async.RunSynchronously
 
                 Assert.That(state.SessionStatusesHydrated, Is.True)
