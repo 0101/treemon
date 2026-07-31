@@ -137,7 +137,9 @@ type ProcessRunnerArgumentListTests() =
                 "powershell",
                 [ "-NoProfile"
                   "-Command"
-                  $"$child = Start-Process ping -ArgumentList '127.0.0.1','-n','30' -PassThru; Set-Content -NoNewline -Path '{escapedPidPath}' -Value $child.Id; Wait-Process -Id $child.Id" ]
+                  // -NoNewWindow keeps ping in the (already hidden) parent console; without it
+                  // Start-Process allocates a visible console that flashes on screen mid-test.
+                  $"$child = Start-Process ping -ArgumentList '127.0.0.1','-n','30' -NoNewWindow -PassThru; Set-Content -NoNewline -Path '{escapedPidPath}' -Value $child.Id; Wait-Process -Id $child.Id" ]
             else
                 let escapedPidPath = childPidPath.Replace("'", "'\\''")
                 "sh", [ "-c"; $"sleep 30 & echo $! > '{escapedPidPath}'; wait" ]
