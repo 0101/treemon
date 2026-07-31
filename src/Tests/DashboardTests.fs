@@ -721,33 +721,42 @@ type DashboardTests() =
         }
 
     [<Test>]
-    member this.``Auto-sync in-flight state is visible without animation``() =
+    member this.``Auto-sync in-flight state turns the glyph and tints the button``() =
         task {
-            // A sync can reach the network, so the toggle must show it is working. The cue has to be
-            // static: a machine with animations disabled reports prefers-reduced-motion, which drops
-            // the spin, and the in-flight button is undimmed — so an animation-only cue leaves such a
-            // user with no feedback at all. Comparing computed colour catches exactly that regression.
+            // A sync can reach the network, so the toggle must show it is working. The turning glyph
+            // is the primary cue; the yellow tint carries the same state a second time so it still
+            // reads in a still screenshot and never looks like a merely disabled button. Both halves
+            // are pinned here: the spin has been dropped once already (a reduced-motion override),
+            // which left a multi-second fetch and merge looking identical to a dead button.
             let toggle = this.Page.Locator(".auto-sync-btn.active").First
             do! toggle.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let readPaint =
-                "const s = getComputedStyle(el); return s.color + '|' + s.borderTopColor + '|' + s.opacity;"
-
-            let readPaint =
                 "el => { const s = getComputedStyle(el); return s.color + '|' + s.borderTopColor + '|' + s.opacity; }"
 
+            let readGlyphAnimation =
+                "el => { const s = getComputedStyle(el.querySelector('.btn-icon')); return s.animationName + '|' + s.animationPlayState; }"
+
             let! resting = toggle.EvaluateAsync<string>(readPaint)
+            let! restingGlyph = toggle.EvaluateAsync<string>(readGlyphAnimation)
             let! _ = toggle.EvaluateAsync<obj>("el => el.classList.add('syncing')")
             // The button transitions colour over 0.15s, so an immediate read still returns the
             // pre-transition paint. Wait past it before sampling.
             do! this.Page.WaitForTimeoutAsync(400.0f)
             let! syncing = toggle.EvaluateAsync<string>(readPaint)
+            let! syncingGlyph = toggle.EvaluateAsync<string>(readGlyphAnimation)
             let! _ = toggle.EvaluateAsync<obj>("el => el.classList.remove('syncing')")
 
-            Assert.That(
-                syncing,
-                Is.Not.EqualTo(resting),
-                "the syncing toggle must differ from the resting one by paint alone, not only by animation")
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    syncing,
+                    Is.Not.EqualTo(resting),
+                    "the syncing toggle must differ from the resting one by paint alone, not only by animation")
+                Assert.That(restingGlyph, Is.EqualTo("none|running"), "a resting toggle must not animate")
+                Assert.That(
+                    syncingGlyph,
+                    Is.EqualTo("sync-spin|running"),
+                    "the glyph must actually turn while the sync is in flight, in every motion setting"))
         }
 
     [<TestCase("working")>]
