@@ -251,6 +251,41 @@ let internal mergedPrBranchScope (ignoredPaths: Set<string>) (archivedPaths: Set
             readFailedPaths
             knownBranches }
 
+let internal mergedAutoSyncWorktrees
+    (enabledBranches: Set<string>)
+    (prData: Map<string, PrStatus>)
+    (gitData: Map<string, GitWorktree.GitData>)
+    =
+    gitData
+    |> Map.toList
+    |> List.choose (fun (path, worktreeGit) ->
+        let prStatus = PrStatus.lookupPrStatus prData (GitWorktree.prBranchName worktreeGit)
+
+        if Set.contains worktreeGit.Branch enabledBranches && AutoSync.isMergedPr prStatus then
+            Some(path, worktreeGit.Branch)
+        else
+            None)
+
+let internal deactivateMergedAutoSync
+    (store: AutoSyncStore.Store)
+    repoRoot
+    prData
+    gitData
+    =
+    let enabledBranches = TreemonConfig.readAutoSyncBranchSet (Some repoRoot)
+    let mergedAutoSync = mergedAutoSyncWorktrees enabledBranches prData gitData
+
+    if not (List.isEmpty mergedAutoSync) then
+        let mergedBranches = mergedAutoSync |> List.map snd |> Set.ofList
+
+        TreemonConfig.modifyAutoSyncBranches
+            repoRoot
+            (Set.ofList >> fun branches -> Set.difference branches mergedBranches |> Set.toList)
+
+        mergedAutoSync
+        |> List.map fst
+        |> List.iter (AutoSyncStore.clear store)
+
 let buildTaskList (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
     let repoList = repos |> Map.toList
 
@@ -464,6 +499,7 @@ let internal executeTask
             if newPersisted <> persisted then
                 MergedPrStore.setForRepo services.MergedPrStore repoId newPersisted
 
+            deactivateMergedAutoSync services.AutoSyncStore root effectiveMap branchScope.GitData
             agent.Post(UpdatePr(repoId, effectiveMap))
 
         | RefreshFetch repoId ->
