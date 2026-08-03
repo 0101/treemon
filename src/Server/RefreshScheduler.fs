@@ -251,40 +251,50 @@ let internal mergedPrBranchScope (ignoredPaths: Set<string>) (archivedPaths: Set
             readFailedPaths
             knownBranches }
 
-let internal mergedAutoSyncWorktrees
-    (enabledBranches: Set<string>)
-    (prData: Map<string, PrStatus>)
-    (gitData: Map<string, GitWorktree.GitData>)
-    =
+/// Worktrees whose PR is merged, paired with their local branch. Deliberately not filtered by the
+/// persisted preference: an operation already past its eligibility check when the preference was
+/// removed records its revision afterwards, and a preference-filtered cleanup would never look at
+/// that worktree again.
+let internal mergedPrWorktrees (prData: Map<string, PrStatus>) (gitData: Map<string, GitWorktree.GitData>) =
     gitData
     |> Map.toList
     |> List.choose (fun (path, worktreeGit) ->
         let prStatus = PrStatus.lookupPrStatus prData (GitWorktree.prBranchName worktreeGit)
 
-        if Set.contains worktreeGit.Branch enabledBranches && AutoSync.isMergedPr prStatus then
+        if AutoSync.isMergedPr prStatus then
             Some(path, worktreeGit.Branch)
         else
             None)
 
+/// Merged is terminal, so PR reconciliation ends auto-sync for every worktree it observes merged:
+/// all of them lose their accepted-revision record, and those still holding the persisted
+/// preference lose that too.
 let internal deactivateMergedAutoSync
     (store: AutoSyncStore.Store)
     repoRoot
     prData
     gitData
     =
-    let enabledBranches = TreemonConfig.readAutoSyncBranchSet (Some repoRoot)
-    let mergedAutoSync = mergedAutoSyncWorktrees enabledBranches prData gitData
+    let merged = mergedPrWorktrees prData gitData
+    merged |> List.iter (fst >> AutoSyncStore.clear store)
 
-    if not (List.isEmpty mergedAutoSync) then
-        let mergedBranches = mergedAutoSync |> List.map snd |> Set.ofList
+    let enabledMergedBranches =
+        merged
+        |> List.map snd
+        |> Set.ofList
+        |> Set.intersect (TreemonConfig.readAutoSyncBranchSet (Some repoRoot))
 
-        TreemonConfig.modifyAutoSyncBranches
-            repoRoot
-            (Set.ofList >> fun branches -> Set.difference branches mergedBranches |> Set.toList)
-
-        mergedAutoSync
-        |> List.map fst
-        |> List.iter (AutoSyncStore.clear store)
+    if not (Set.isEmpty enabledMergedBranches) then
+        // A `.treemon.json` another process holds open, or that is read-only, must not discard the
+        // PR refresh that reached this point. The preference survives the failure, so the next
+        // reconciliation observes the same merged branch and writes again.
+        try
+            TreemonConfig.modifyAutoSyncBranches
+                repoRoot
+                (Set.ofList
+                 >> fun branches -> Set.difference branches enabledMergedBranches |> Set.toList)
+        with ex ->
+            Log.log "AutoSync" $"Failed to disable auto-sync for merged branches in {repoRoot}: {ex.Message}"
 
 let buildTaskList (filters: PathFilters) (repos: Map<RepoId, PerRepoState>) =
     let repoList = repos |> Map.toList
