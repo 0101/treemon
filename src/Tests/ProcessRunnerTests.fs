@@ -10,6 +10,37 @@ open NUnit.Framework
 open Server
 open Tests.GitTestHelpers
 
+// Five tests below need a real child process that outlives a deadline, overruns a capture limit, or
+// spawns a grandchild for the process-tree kill to reach, so each one shells out. On Unix that
+// shell is `sh` and is unremarkable. On Windows it is PowerShell, and running it trips Microsoft
+// Defender for Endpoint's "Suspicious PowerShell command line" rule on a managed device, raising a
+// security incident that has to be attested by hand. It has fired twice — 30 Jul 2026, and
+// 03 Aug 2026 (MSDetectID 24562977), the latter quoting the `%TEMP%\treemon-process-runner
+// <guid>\child.pid` path written by the timeout test below.
+//
+// What scores is the scaffolding, not the code under test: `ping 127.0.0.1 -n 30` is a documented
+// evasion sleep (MITRE T1497.003), and around it sit an inline `-Command`, a detached `-PassThru`
+// spawn, a PID persisted under a GUID-named temp directory, and `Wait-Process` — collectively the
+// shape of a loader. Substituting the delay (`timeout /t`, `waitfor /t`, `Start-Sleep`) does not
+// help: those are the same technique, the surrounding shape still scores, and the rule is a
+// heuristic we cannot read, so no tweak can be confirmed short of provoking another incident.
+//
+// They are therefore excluded on Windows only. CI runs `ubuntu-latest`, so the `sh` branches keep
+// covering real-process timeout, process-tree termination, and the shell-driven truncation paths on
+// every push; what a Windows developer gives up is local pre-push feedback on these five.
+//
+// To restore them on Windows, replace the shell scaffolding rather than these attributes. Add
+// `src/TestChild` (`OutputType=Exe`, ~40 lines) supporting `sleep <ms>`, `spawn-child <pidFile>
+// <ms>` (re-launches itself via `Environment.ProcessPath`, writes the grandchild PID, then waits),
+// and `emit --stdout <n> --stderr <n> --exit <code>`; reference it from `Tests.fsproj` and resolve
+// it at `AppContext.BaseDirectory`. A `ProjectReference` to an `Exe` copies its apphost into the
+// test output — `Cli.exe` and `Treemon.exe` already arrive that way — so no new build machinery is
+// needed, and `Kill(entireProcessTree = true)` still reaches the grandchild. That also retires the
+// `IsOSPlatform` command branching and both quote-escaping schemes in this file, since one helper
+// serves both platforms.
+let [<Literal>] private WindowsEdrExclusion =
+    "Spawns PowerShell, which trips Defender's suspicious-command-line rule; see the note at the top of this file"
+
 /// An OS-appropriate command that writes `stderrBytes` bytes to stderr, `ok` to stdout, and exits 0
 /// — a chatty-but-successful child, which is what a real `post-fork` hook looks like.
 let private noisyStderrCommand (stderrBytes: int) =
@@ -127,6 +158,7 @@ type ProcessRunnerArgumentListTests() =
                 Assert.That(output.ExitCode, Is.Not.EqualTo(0), "the failing exit code survives"))
 
     [<Test>]
+    [<Platform(Exclude = "Win", Reason = WindowsEdrExclusion)>]
     member _.``timeout returns a typed error and terminates the process tree``() =
         let childPidPath = Path.Combine(tempDir, "child.pid")
 
@@ -264,6 +296,7 @@ type ProcessRunnerArgumentListTests() =
             )
 
     [<Test>]
+    [<Platform(Exclude = "Win", Reason = WindowsEdrExclusion)>]
     member _.``text capture maps a timeout to a message naming the configured timeout``() =
         // The sleeper only has to outlive the deadline; the deadline itself is the test's whole
         // wall-clock cost, so it stays short.
@@ -311,6 +344,7 @@ type ProcessRunnerArgumentListTests() =
         )
 
     [<Test>]
+    [<Platform(Exclude = "Win", Reason = WindowsEdrExclusion)>]
     member _.``text capture reports stderr when a failing command also truncated stdout``() =
         // Both conditions at once: the command fails *and* overruns its stdout cap. stdout is never
         // returned on the failure path, so the capture limit must not mask the actual diagnostic.
@@ -331,6 +365,7 @@ type ProcessRunnerArgumentListTests() =
         )
 
     [<Test>]
+    [<Platform(Exclude = "Win", Reason = WindowsEdrExclusion)>]
     member _.``text capture keeps complete stdout when only stderr was truncated``() =
         let fileName, arguments = noisyStderrCommand 4096
 
@@ -349,6 +384,7 @@ type ProcessRunnerArgumentListTests() =
         )
 
     [<Test>]
+    [<Platform(Exclude = "Win", Reason = WindowsEdrExclusion)>]
     member _.``exit-code capture succeeds on exit 0 despite a truncated capture``() =
         let fileName, arguments = noisyStderrCommand 4096
 
