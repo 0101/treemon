@@ -58,6 +58,10 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - The pane opens and closes from the header Canvas button and the `C` key.
 - Open or closed state persists in global config.
 - Position selector supports left, right, top, and bottom docking, and the selected position persists.
+  `.app-layout` always renders the dashboard first and the pane second; docking is purely a CSS
+  concern (`flex-direction` plus `order` keyed off the layout's position class). Reordering the two
+  same-typed children in the DOM instead would make React reconcile them by index, silently
+  re-rendering each existing node with the other subtree and stranding anything bound to those nodes.
 - Size selector supports 1:1 (default) and 2:1 — at 2:1 the open pane takes two-thirds of the layout instead of half — and the selected size persists in global config.
 - The pane normally follows the focused worktree. An explicit card-level SystemView action may target another worktree without moving dashboard card focus; the next explicit card selection clears that override.
 - The worktree diff is explicit-only when another canvas document exists. Automatic fallback and explicit card selection prefer another document; `diff.html` is selected automatically only when it is the worktree's sole canvas document. The card Diff action and direct tab selection still open it. The server omits the generated `diff.html` from a confirmed-clean worktree's inventory (`docs/spec/worktree-diff-viewer.md`), so a clean worktree shows no diff tab — the tab strip needs no per-view visibility rule of its own.
