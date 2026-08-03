@@ -24,6 +24,9 @@
     --fs-lg: 15px;
     --diff-code-size: var(--fs-base);
     --diff-code-line-height: 1.45;
+    /* The change summary pins to the top of the scroller, so every element that pins below it
+       offsets by this height. Both the bar and its followers read it from here. */
+    --summary-height: 1.9rem;
 }
 
 * { box-sizing: border-box; }
@@ -212,7 +215,7 @@ button { font: inherit; }
     display: flex;
     align-items: center;
     gap: 1rem;
-    min-height: 1.9rem;
+    min-height: var(--summary-height);
     padding: .25rem .75rem .45rem;
     border-bottom: 1px solid var(--border);
     color: var(--text-secondary);
@@ -328,13 +331,21 @@ button { font: inherit; }
     border-bottom: 1px solid var(--border);
 }
 
+/* The heading pins while its own file is on screen: its containing block is the .file-item that
+   holds the heading and that file's patch, so it releases exactly as the next file arrives. The
+   z-index is load-bearing — the patch follows the heading in document order and would otherwise
+   paint over it. */
 .file-heading {
+    position: sticky;
+    top: var(--summary-height);
+    z-index: 3;
     display: grid;
     grid-template-columns: minmax(0, auto) auto minmax(0, 1fr) auto;
     gap: 0 .25rem;
     align-items: start;
     margin: 0;
     font: inherit;
+    background: var(--bg-deep);
     cursor: pointer;
 }
 
@@ -351,6 +362,7 @@ button { font: inherit; }
     text-align: left;
     color: var(--text-secondary);
     background: transparent;
+    scroll-margin-top: var(--summary-height);
     cursor: pointer;
 }
 
@@ -388,7 +400,10 @@ button { font: inherit; }
     color: var(--text-primary);
 }
 
+/* Pinned over its own patch, the open heading needs a closing edge of its own: .file-item's divider
+   sits at the bottom of the whole file, far below the pinned row. */
 .file-heading:has(.file-entry.active) {
+    border-bottom: 1px solid var(--border);
     background: var(--bg-surface);
 }
 
