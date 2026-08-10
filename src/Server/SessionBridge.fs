@@ -317,8 +317,7 @@ let drainForSession (worktreePath: string) (sessionId: string) =
     let now = DateTime.UtcNow
 
     sessionsForWorktree worktreePath
-    |> List.filter (isSessionAlive now)
-    |> List.tryFind (fun entry -> entry.SessionId = Some sessionId)
+    |> selectLiveTarget now PromptKind.Canvas (Some sessionId)
     |> Option.iter (drainQueue now (normalizePath worktreePath))
 
 /// Atomically drain anonymous pending prompts of one transport kind. Canvas iframe heartbeats use

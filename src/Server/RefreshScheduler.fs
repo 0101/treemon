@@ -673,12 +673,13 @@ module CanvasWatchers =
     /// overwrites it. SystemViews never participate. With zero or many live sessions,
     /// nothing is attributed.
     let attributeChangedDocs
+        (now: DateTime)
         (sessions: SessionBridge.SessionEntry list)
         (worktreePath: string)
         (previousDocs: CanvasDoc list)
         (currentDocs: CanvasDoc list)
         =
-        match fallbackOwner DateTime.UtcNow sessions with
+        match fallbackOwner now sessions with
         | None -> ()
         | Some sessionId ->
             let prevByName = previousDocs |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
@@ -746,9 +747,9 @@ module CanvasWatchers =
                             let prev = previousDocs.Value
                             // Fallback-only attribution: explicit /api/canvas/attribute declarations are the
                             // primary path. The scanner only attributes a no-owner changed doc when exactly one
-                            // session is registered for the worktree — never the old last-registered guess that
-                            // misattributed every changed doc whenever two sessions shared a worktree.
-                            attributeChangedDocs (SessionBridge.sessionsForWorktree path) path prev canvasDocs
+                            // LIVE session is registered for the worktree — never the old last-registered guess
+                            // that misattributed every changed doc whenever two sessions shared a worktree.
+                            attributeChangedDocs DateTime.UtcNow (SessionBridge.sessionsForWorktree path) path prev canvasDocs
                             previousDocs.Value <- canvasDocs
                             agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
                         return

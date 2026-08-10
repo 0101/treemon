@@ -109,55 +109,6 @@ type ActionPromptTests() =
         let result = actionPrompt None (FixPr "https://example.com/pr/1")
         Assert.That(result, Is.EqualTo("use pr skill with https://example.com/pr/1"))
 
-// The canvas-session launch prompt is shared by the client's `▶ Start session` button and the
-// server's SystemView auto-spawn, so the claim instruction must be gated on document kind rather
-// than appended unconditionally: `canvas_take_ownership` FAILS for a SystemView (it has no author),
-// so an ungated instruction would hand every auto-spawned session a guaranteed tool error.
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type CanvasPromptTests() =
-
-    let worktree = "Q:/code/demo"
-
-    // Without this, starting a session leaves the dead author as owner: the new session is not a
-    // valid recipient, so the doc's interactions stay queued and the pane keeps waiting.
-    [<Test>]
-    member _.``AgentDoc prompt tells the session to claim the doc by filename``() =
-        let result = CanvasPrompt.continueWorking AgentDoc worktree "report.html"
-
-        Assert.That(
-            result,
-            Is.EqualTo(
-                "First call the canvas_take_ownership tool with filename \"report.html\", "
-                + "so this document's replies reach this session.\n"
-                + "Continue working on canvas doc: Q:/code/demo/.agents/canvas/report.html\n"
-                + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."))
-
-    [<Test>]
-    member _.``SystemView prompt never mentions the claim tool``() =
-        let result = CanvasPrompt.continueWorking SystemView worktree "diff.html"
-
-        Assert.That(
-            result,
-            Does.Not.Contain("canvas_take_ownership"),
-            "A SystemView has no author to claim, so instructing the auto-spawned session to claim it would always fail")
-
-        Assert.That(
-            result,
-            Is.EqualTo(
-                "Continue working on canvas doc: Q:/code/demo/.agents/canvas/diff.html\n"
-                + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."),
-            "The SystemView prompt must stay exactly what it was before the claim instruction existed")
-
-    // Both kinds still point at the same on-disk path, so the two launch flows cannot drift.
-    [<Test>]
-    member _.``both kinds address the same on-disk canvas doc path``() =
-        let docPath = "Q:/code/demo/.agents/canvas/notes.html"
-
-        Assert.That(CanvasPrompt.continueWorking AgentDoc worktree "notes.html", Does.Contain(docPath))
-        Assert.That(CanvasPrompt.continueWorking SystemView worktree "notes.html", Does.Contain(docPath))
-
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]

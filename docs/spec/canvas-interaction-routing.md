@@ -59,10 +59,11 @@ would not be that document's author.
 Queued messages retain the existing cap of 10 and five-minute TTL. On drain, an AgentDoc
 prompt goes only to its recorded owner, so ownership changes made while a message waits are honored.
 Because `deliverableTo` re-reads the owner at drain time, an ownership change is what makes a waiting
-interaction deliverable, so recording a claim drains that worktree's queue for the claiming session
-immediately instead of leaving the message until the claimant's next heartbeat re-registration. A
-claim from a session holding no live registration drains nothing and leaves the message queued for
-the registration that follows.
+interaction deliverable, so recording a **claim** drains that worktree's queue for the claiming
+session immediately instead of leaving the message until the claimant's next heartbeat
+re-registration. A claim from a session holding no live registration drains nothing and leaves the
+message queued for the registration that follows. Scanner fallback attribution does not drain — it
+only ever attributes to a live session, whose next heartbeat delivers within 30 seconds.
 A SystemView prompt stays bound to the session resolution picked, if any; when nothing was reachable
 it drains to the next identified registration — the session the queue caused to launch. An anonymous
 (session-less) registration never drains either kind.
@@ -128,9 +129,10 @@ permanently ambiguous, silently disabling the fallback instead of making it ambi
   along the two documented paths, and the launch needs no pending-claim state, no expiry, and no
   exception to stickiness. It depends on the started session honoring the instruction; a session
   that does not leaves the document as unreachable as it already was.
-- **Ownership changes drain the queue:** recording a claim is what makes a waiting interaction
-  deliverable, so it drains immediately instead of waiting for the claimant's next 30-second
-  heartbeat re-registration to notice.
+- **Recording a claim drains the queue:** a claim is what makes a waiting interaction deliverable, so
+  `/api/canvas/attribute` drains immediately instead of waiting for the claimant's next 30-second
+  heartbeat re-registration to notice. Scanner fallback attribution does not drain; a doc it
+  attributes is owned by a live session by construction, so that session's next heartbeat delivers.
 - **Case-preserving filename identity:** ownership keys retain the real on-disk filename case; only
   worktree paths are normalized, so scanner lookup and pruning share one identity on
   case-sensitive hosts.

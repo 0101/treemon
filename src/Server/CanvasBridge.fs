@@ -114,7 +114,7 @@ let internal resolveTarget
 /// so it decides whether to spawn, without re-deriving the document kind.
 type internal CanvasSendOutcome =
     | Routed of CanvasMessageResult
-    | QueuedNeedingSession of CanvasMessageResult
+    | QueuedNeedingSession of CanvasMessageResult * CanvasDocKind
 
 /// Route one canvas interaction.
 let internal sendMessage (sessionStatuses: StoredStatus seq) (request: CanvasMessageRequest) =
@@ -134,10 +134,11 @@ let internal sendMessage (sessionStatuses: StoredStatus seq) (request: CanvasMes
             | SessionBridge.SendResult.Queued -> CanvasMessageResult.Queued
 
         // Only a SystemView may be served by a freshly started session; an AgentDoc waits for the
-        // author that owns it, so a new session would be the wrong recipient.
+        // author that owns it, so a new session would be the wrong recipient. The kind travels with
+        // the outcome so the caller can build the launch prompt without re-deriving it.
         return
             match target, CanvasDocKinds.classify request.Filename with
-            | None, SystemView -> QueuedNeedingSession result
+            | None, (SystemView as kind) -> QueuedNeedingSession(result, kind)
             | _ -> Routed result
     }
 
