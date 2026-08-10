@@ -22,10 +22,11 @@ through another author write or another explicit claim.
 
 Because ownership is sticky, starting a session does not by itself make that session the recipient
 for a document. The `▶ Start session` launch therefore instructs the session it starts to claim the
-focused AgentDoc, via the launch prompt built by `CanvasPrompt.continueWorking` — routing still
-changes only through the explicit claim path, and the launched session becomes the owner through it
-rather than beside it. The instruction is gated on document kind: a SystemView has no author, and
-`canvas_take_ownership` refuses one, so only an AgentDoc launch carries it.
+focused AgentDoc, via the launch prompt built by `CanvasPrompt.forLaunch` — routing still changes
+only through the explicit claim path, and the launched session becomes the owner through it rather
+than beside it. The prompt branches on document kind: a SystemView has no author, `canvas_take_ownership`
+refuses one, and Treemon regenerates the file over any edit, so that session is told to claim
+nothing and write nothing — it acts on the interaction instead.
 
 A **SystemView** is server-generated and has no author, so nothing is persisted for it. Each
 interaction resolves, at send time, to the most recently active session that currently holds a live

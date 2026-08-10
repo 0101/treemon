@@ -299,30 +299,52 @@ type DiffCategoryReport =
 /// (LaunchCanvasSession) and the server (sendCanvasMessage) so the two cannot drift.
 module CanvasPrompt =
 
-    /// Prompt handed to the coding tool to (re)start work on an existing canvas doc.
+    /// Orientation handed to a coding session Treemon has just started for a canvas document.
     ///
-    /// An `AgentDoc` is additionally told to claim the document. Starting a session does not by
-    /// itself reassign ownership — it moves only through an author write or an explicit claim — so
-    /// without this instruction the started session is not the owner, the document's interactions
-    /// stay queued for the unreachable author, and the pane keeps showing "Waiting for session…".
+    /// This is the session's FIRST message: it has no prior context, no memory of the document,
+    /// and no idea why it exists. So the text states the situation, names the one file to read,
+    /// and warns off the two wrong moves a cold agent makes — trying to serve/open the file
+    /// (Treemon already renders it) and answering in the terminal instead of in the document.
     ///
-    /// The instruction is gated on `kind` rather than sent unconditionally because a `SystemView`
-    /// has no author to claim: `canvas_take_ownership` fails for one, so telling the server's
-    /// auto-spawned session to call it would hand it a guaranteed tool error.
-    let continueWorking (kind: CanvasDocKind) (worktreePath: string) (filename: string) =
-        let claimOwnership =
-            match kind with
-            | AgentDoc ->
-                $"First call the canvas_take_ownership tool with filename \"{filename}\", "
-                + "so this document's replies reach this session.\n"
-            | SystemView -> ""
-
+    /// The two kinds get materially different instructions, not just different wording:
+    ///   - `AgentDoc` is authored and owned. The session must claim it (`canvas_take_ownership`)
+    ///     or the user's interactions keep routing to the author that is gone, and it edits the
+    ///     file to respond.
+    ///   - `SystemView` is generated from live data and regenerated over any edit, so the session
+    ///     must NOT write to it, and has nothing to claim — the claim tool refuses one.
+    /// Matching on the kind keeps a new `CanvasDocKind` case a compile error rather than a
+    /// silently wrong prompt.
+    ///
+    /// Both kinds are launched in response to a real interaction that is queued and drains into
+    /// the new session, so both tell it to expect that as its next message.
+    let forLaunch (kind: CanvasDocKind) (worktreePath: string) (filename: string) =
         // On-disk path of the canvas doc within the worktree. Forward slashes are used
         // deliberately: they work on Windows, Linux and macOS, and src/Shared is
         // Fable-compiled to JS so System.IO.Path.Combine is not available here.
-        claimOwnership
-        + $"Continue working on canvas doc: {worktreePath}/.agents/canvas/{filename}\n"
-        + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
+        let docPath = $"{worktreePath}/.agents/canvas/{filename}"
+
+        match kind with
+        | AgentDoc ->
+            $"Take over a canvas doc: {docPath}\n\n"
+            + "A canvas doc is an HTML file Treemon displays beside the dashboard. The user reads "
+            + "and clicks in it there, and whatever you write to the file appears in front of them "
+            + "immediately. The session that authored this one has ended — that is why you were started.\n\n"
+            + $"Start by calling the canvas_take_ownership tool with filename \"{filename}\", so the "
+            + "user's interactions with the doc reach you. Then read the file to see what it is and "
+            + "what state it is in.\n\n"
+            + "If the user interacted with the doc before you started, that interaction is already "
+            + "queued and arrives as your next message. Respond by editing the doc rather than by "
+            + "writing in the terminal — the doc is what the user is looking at. Do not try to serve, "
+            + "open, or preview the file; Treemon already renders it."
+        | SystemView ->
+            $"Handle an interaction with a generated view: {docPath}\n\n"
+            + "Treemon generates this file from live data and displays it beside the dashboard. The "
+            + "user interacted with it while no session was running here, so you were started to "
+            + "handle that interaction — it arrives as your next message.\n\n"
+            + "Do not edit the file. Treemon regenerates it and would discard your changes, and it "
+            + "has no author to claim. Act on what the user asked about instead — the code, branch, "
+            + "or task the view is showing. Do not try to serve, open, or preview the file; Treemon "
+            + "already renders it."
 
 type CanvasMessageRequest =
     { WorktreePath: WorktreePath
