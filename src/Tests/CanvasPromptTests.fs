@@ -52,6 +52,18 @@ type CanvasPromptTests() =
         Assert.That(agentDocPrompt, Does.Contain("editing the doc"))
         Assert.That(agentDocPrompt, Does.Contain("terminal"))
 
+    // The skill carries what a launch prompt cannot: canvasSend, canvasExpand, and how to read the
+    // canvas-selection / expand-section payload that is very often the session's next message.
+    [<Test>]
+    member _.``an AgentDoc session is pointed at the canvas skill``() =
+        Assert.That(agentDocPrompt, Does.Contain("canvas skill"))
+
+    // The canvas skill is an authoring contract, and a SystemView session must not author — sending
+    // it there would invite the edit the same prompt forbids two sentences later.
+    [<Test>]
+    member _.``a SystemView session is not pointed at the authoring skill``() =
+        Assert.That(systemViewPrompt, Does.Not.Contain("canvas skill"))
+
     // Both launches are triggered by a queued interaction that drains into the new session, so the
     // agent should expect it instead of inventing work.
     [<Test>]

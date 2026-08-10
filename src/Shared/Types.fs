@@ -309,9 +309,15 @@ module CanvasPrompt =
     /// The two kinds get materially different instructions, not just different wording:
     ///   - `AgentDoc` is authored and owned. The session must claim it (`canvas_take_ownership`)
     ///     or the user's interactions keep routing to the author that is gone, and it edits the
-    ///     file to respond.
+    ///     file to respond. It is also pointed at the `canvas` skill, which carries what a prompt
+    ///     cannot: `canvasSend`, `canvasExpand`, and how to read the `canvas-selection` /
+    ///     `expand-section` payload that is very often the next message it receives. The skill
+    ///     ships and installs with the canvas-bridge extension (`treemon.ps1`), so it is present
+    ///     wherever `canvas_take_ownership` is.
     ///   - `SystemView` is generated from live data and regenerated over any edit, so the session
-    ///     must NOT write to it, and has nothing to claim — the claim tool refuses one.
+    ///     must NOT write to it, and has nothing to claim — the claim tool refuses one. It is
+    ///     deliberately NOT sent to the `canvas` skill: that skill is an authoring contract, and
+    ///     pointing a session that must not author at it invites the edit this branch forbids.
     /// Matching on the kind keeps a new `CanvasDocKind` case a compile error rather than a
     /// silently wrong prompt.
     ///
@@ -326,14 +332,17 @@ module CanvasPrompt =
         match kind with
         | AgentDoc ->
             $"Take over a canvas doc: {docPath}\n\n"
-            + "A canvas doc is an HTML file Treemon displays beside the dashboard. The user reads "
-            + "and clicks in it there, and whatever you write to the file appears in front of them "
-            + "immediately. The session that authored this one has ended — that is why you were started.\n\n"
-            + $"Start by calling the canvas_take_ownership tool with filename \"{filename}\", so the "
-            + "user's interactions with the doc reach you. Then read the file to see what it is and "
-            + "what state it is in.\n\n"
+            + "The session that authored this doc has ended — that is why you were started. The user "
+            + "is looking at the doc beside the dashboard right now, and whatever you write to the "
+            + "file appears in front of them immediately.\n\n"
+            + "Do this in order:\n"
+            + $"1. Call the canvas_take_ownership tool with filename \"{filename}\", so the user's "
+            + "interactions with the doc reach you.\n"
+            + "2. Use the canvas skill — it is the authoring contract for these documents and "
+            + "explains how the user's messages arrive and how to answer them.\n"
+            + "3. Read the doc to see what it is and what state it is in.\n\n"
             + "If the user interacted with the doc before you started, that interaction is already "
-            + "queued and arrives as your next message. Respond by editing the doc rather than by "
+            + "queued and arrives as your next message. Answer it by editing the doc rather than by "
             + "writing in the terminal — the doc is what the user is looking at. Do not try to serve, "
             + "open, or preview the file; Treemon already renders it."
         | SystemView ->
