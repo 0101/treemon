@@ -2,6 +2,7 @@ module Tests.SchedulerTests
 
 open System
 open System.IO
+open System.Runtime.InteropServices
 open NUnit.Framework
 open Server.GitWorktree
 open Server.RefreshScheduler
@@ -1571,6 +1572,135 @@ type MergedPrBranchScopeTests() =
                 worktree
 
         Assert.That(card.Pr, Is.EqualTo(mergedPr))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DeactivateMergedAutoSyncTests() =
+
+    let pr id state : PrStatus =
+        HasPr
+            { Id = id
+              Title = "PR"
+              Url = $"https://example.test/pull/{id}"
+              IsDraft = false
+              Comments = WithResolution(0, 0)
+              Builds = []
+              State = state
+              AutoMergeEnabled = false
+              HasConflicts = false }
+
+    let gitData path branch upstreamBranch : GitData =
+        { Path = path
+          Branch = branch
+          HeadCommit = $"{branch}-sha"
+          LastCommitMessage = branch
+          LastCommitTime = DateTimeOffset.UtcNow
+          Upstream = Upstream upstreamBranch
+          MainBehindCount = 0
+          BaseRevision = None
+          IsDirty = false
+          Comparison = Clean
+          WorkMetrics = None }
+
+    let acceptedRecord: Server.AutoSyncStore.AcceptedSyncRecord =
+        { BaseRevision = "base-a"
+          AcceptedAt = DateTimeOffset.UtcNow }
+
+    /// Store writes are posts, so reading the same store drains them before an assertion looks.
+    let recordOf (store: Server.AutoSyncStore.Store) path = store.Get path |> TestUtils.runAsync
+
+    let denyWrites (path: string) =
+        if RuntimeInformation.IsOSPlatform OSPlatform.Windows then
+            File.SetAttributes(path, FileAttributes.ReadOnly)
+        else
+            File.SetUnixFileMode(path, UnixFileMode.UserRead)
+
+    let allowWrites (path: string) =
+        if RuntimeInformation.IsOSPlatform OSPlatform.Windows then
+            File.SetAttributes(path, FileAttributes.Normal)
+        else
+            File.SetUnixFileMode(path, UnixFileMode.UserRead ||| UnixFileMode.UserWrite)
+
+    [<Test>]
+    member _.``merged PR deactivates its enabled local auto-sync preference``() =
+        TestUtils.withTempDir "treemon-merged-auto-sync" (fun root ->
+            let mergedPath = Path.Combine(root, "merged")
+            let openPath = Path.Combine(root, "open")
+            let store = Server.AutoSyncStore.create (Path.Combine(root, "auto-sync.json"))
+
+            Server.TreemonConfig.setAutoSyncBranches root [ "local-merged"; "local-open" ]
+            Server.AutoSyncStore.setAccepted store mergedPath acceptedRecord
+            Server.AutoSyncStore.setAccepted store openPath acceptedRecord
+            recordOf store openPath |> ignore
+
+            deactivateMergedAutoSync
+                store
+                root
+                (Map.ofList [ "provider-merged", pr 42 PrState.Merged; "provider-open", pr 43 PrState.Open ])
+                (Map.ofList
+                    [ mergedPath, gitData mergedPath "local-merged" "provider-merged"
+                      openPath, gitData openPath "local-open" "provider-open" ])
+
+            let mergedRecord = recordOf store mergedPath
+            let openRecord = recordOf store openPath
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    Server.TreemonConfig.readAutoSyncBranchSet (Some root),
+                    Is.EqualTo(Set.singleton "local-open"))
+                Assert.That(mergedRecord, Is.EqualTo(None))
+                Assert.That(Option.isSome openRecord, Is.True, "an open PR keeps both its preference and its record")))
+
+    [<Test>]
+    member _.``merged worktree loses its accepted record even without the preference``() =
+        TestUtils.withTempDir "treemon-merged-auto-sync-race" (fun root ->
+            let mergedPath = Path.Combine(root, "merged")
+            let store = Server.AutoSyncStore.create (Path.Combine(root, "auto-sync.json"))
+
+            Server.TreemonConfig.setAutoSyncBranches root []
+            Server.AutoSyncStore.setAccepted store mergedPath acceptedRecord
+            recordOf store mergedPath |> ignore
+
+            deactivateMergedAutoSync
+                store
+                root
+                (Map.ofList [ "provider-merged", pr 42 PrState.Merged ])
+                (Map.ofList [ mergedPath, gitData mergedPath "local-merged" "provider-merged" ])
+
+            Assert.That(
+                recordOf store mergedPath,
+                Is.EqualTo(None),
+                "a record an operation writes after its preference was already removed must not survive"))
+
+    [<Test>]
+    member _.``unwritable config does not abort merged auto-sync cleanup``() =
+        TestUtils.withTempDir "treemon-merged-auto-sync-unwritable" (fun root ->
+            let mergedPath = Path.Combine(root, "merged")
+            let store = Server.AutoSyncStore.create (Path.Combine(root, "auto-sync.json"))
+            let configPath = Path.Combine(root, ".treemon.json")
+
+            Server.TreemonConfig.setAutoSyncBranches root [ "local-merged" ]
+            Server.AutoSyncStore.setAccepted store mergedPath acceptedRecord
+            recordOf store mergedPath |> ignore
+            denyWrites configPath
+
+            try
+                deactivateMergedAutoSync
+                    store
+                    root
+                    (Map.ofList [ "provider-merged", pr 42 PrState.Merged ])
+                    (Map.ofList [ mergedPath, gitData mergedPath "local-merged" "provider-merged" ])
+            finally
+                allowWrites configPath
+
+            Assert.Multiple(fun () ->
+                Assert.That(recordOf store mergedPath, Is.EqualTo(None))
+                Assert.That(
+                    Server.TreemonConfig.readAutoSyncBranchSet (Some root),
+                    Is.EqualTo(Set.singleton "local-merged"),
+                    "the preference must survive a failed write so the next reconciliation retries it")))
 
 
 [<TestFixture>]
