@@ -960,7 +960,10 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                               return result
                           | CanvasBridge.PendingLaunchStarted ->
                               let provider = CodingToolStatus.readConfiguredProvider path
-                              let prompt = CanvasPrompt.continueWorking path request.Filename
+                              // Only a SystemView reaches this arm: CanvasBridge produces
+                              // QueuedNeedingSession solely for `None, SystemView`, so the launched
+                              // session must not be told to claim a document that has no author.
+                              let prompt = CanvasPrompt.continueWorking SystemView path request.Filename
                               let command =
                                   CodingToolCli.build provider (CodingToolCli.Interactive prompt)
 

@@ -300,11 +300,28 @@ type DiffCategoryReport =
 module CanvasPrompt =
 
     /// Prompt handed to the coding tool to (re)start work on an existing canvas doc.
-    let continueWorking (worktreePath: string) (filename: string) =
+    ///
+    /// An `AgentDoc` is additionally told to claim the document. Starting a session does not by
+    /// itself reassign ownership — it moves only through an author write or an explicit claim — so
+    /// without this instruction the started session is not the owner, the document's interactions
+    /// stay queued for the unreachable author, and the pane keeps showing "Waiting for session…".
+    ///
+    /// The instruction is gated on `kind` rather than sent unconditionally because a `SystemView`
+    /// has no author to claim: `canvas_take_ownership` fails for one, so telling the server's
+    /// auto-spawned session to call it would hand it a guaranteed tool error.
+    let continueWorking (kind: CanvasDocKind) (worktreePath: string) (filename: string) =
+        let claimOwnership =
+            match kind with
+            | AgentDoc ->
+                $"First call the canvas_take_ownership tool with filename \"{filename}\", "
+                + "so this document's replies reach this session.\n"
+            | SystemView -> ""
+
         // On-disk path of the canvas doc within the worktree. Forward slashes are used
         // deliberately: they work on Windows, Linux and macOS, and src/Shared is
         // Fable-compiled to JS so System.IO.Path.Combine is not available here.
-        $"Continue working on canvas doc: {worktreePath}/.agents/canvas/{filename}\n"
+        claimOwnership
+        + $"Continue working on canvas doc: {worktreePath}/.agents/canvas/{filename}\n"
         + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
 
 type CanvasMessageRequest =
