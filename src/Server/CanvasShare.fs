@@ -79,6 +79,18 @@ let internal buildSasBuilder (containerName: string) (blob: string) (expiresOn: 
 let internal blobEndpoint (accountName: string) : Uri =
     Uri($"https://{accountName}.blob.core.windows.net")
 
+/// The Azure credential, built ONCE and reused. This is a performance requirement, not a style
+/// preference: `DefaultAzureCredential` caches its resolved token per instance, and on a dev host the
+/// chain resolves through `AzureCliCredential`, which *spawns the `az` CLI* — a 3-5 second process
+/// launch. Constructing a fresh credential per publish paid that cost every time and pushed the share
+/// round-trip past the browser's transient-activation window, so the clipboard write was rejected and
+/// the user got "copy it manually" instead of a copied link. Reusing the instance keeps the token
+/// cached (and refreshed by the SDK) across shares.
+///
+/// `lazy` rather than a module-level value so merely loading this module never touches the credential
+/// chain — tests reference `CanvasShare` and must not shell out to `az`.
+let private credential = lazy (DefaultAzureCredential())
+
 /// The client-facing "not configured" message. Names the config key to set; there is no secret to
 /// mention because the design has none — the credential is the host's ambient Entra identity.
 let internal notConfiguredMessage =
@@ -111,7 +123,7 @@ let publish (filename: string) (html: string) : Async<Result<string, string>> =
         // The try/with stays around the Azure SDK calls (a genuine interop boundary); the
         // Option→Error gate above is flattened into the asyncResult track.
         try
-            let serviceClient = BlobServiceClient(blobEndpoint accountName, DefaultAzureCredential())
+            let serviceClient = BlobServiceClient(blobEndpoint accountName, credential.Value)
             // Backdate the start to absorb clock skew between this host and the storage service, and
             // derive the expiry from it so the window stays strictly inside Azure's 7-day limit on a
             // user delegation key — at the maximum configured expiry, `expiresOn` is a few minutes

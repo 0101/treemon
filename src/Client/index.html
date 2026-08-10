@@ -833,6 +833,15 @@
         }
         .canvas-share-btn .btn-icon { width: 14px; height: 14px; }
         .canvas-share-btn:hover { color: #a6e3a1; border-color: #a6e3a1; opacity: 1; }
+        /* Publishing is a multi-second round-trip (Entra token + user delegation key + upload). Hold the
+           button lit and spinning for the whole wait — the same reason .auto-sync-btn.syncing exists:
+           without it an in-flight share is indistinguishable from a button that did nothing. */
+        .canvas-share-btn.sharing { opacity: 1; color: #a6e3a1; border-color: #a6e3a1; cursor: default; }
+        .canvas-share-btn.sharing .share-spinner {
+            width: 12px; height: 12px; margin: 1px;
+            border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%;
+            animation: sync-spin 0.7s linear infinite;
+        }
         .canvas-launch-btn {
             flex-shrink: 0;
             background: none; border: 1px solid #45475a; border-radius: 4px;

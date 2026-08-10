@@ -1089,6 +1089,23 @@ type ShareCanvasDocResultTests() =
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "A live 'waiting for session' banner is an independent fact and must survive a share")
 
+    // The Share button spins and is disabled while SharingDoc names its doc, so a share that settles
+    // without clearing it would leave the button stuck spinning and permanently unclickable — sharing
+    // would appear broken until reload. Both outcomes must clear it.
+    [<Test>]
+    member _.``Ok clears SharingDoc so the button stops spinning``() =
+        let sharing = { defaultModel with Canvas = { defaultModel.Canvas with SharingDoc = Some "status.html" } }
+        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) sharing
+        Assert.That(updated.Canvas.SharingDoc, Is.EqualTo(None),
+            "A settled share must release the button, even though the banner still awaits the clipboard write")
+
+    [<Test>]
+    member _.``Error clears SharingDoc so a failed share does not strand the spinner``() =
+        let sharing = { defaultModel with Canvas = { defaultModel.Canvas with SharingDoc = Some "status.html" } }
+        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Error "publish boom")) sharing
+        Assert.That(updated.Canvas.SharingDoc, Is.EqualTo(None),
+            "A failed share must release the button so the user can retry")
+
     // F6: the "link copied" banner reflects the async clipboard write's ACTUAL outcome, routed back
     // through ClipboardWriteResult. A landed write confirms the copy; a rejected write (transient
     // activation / focus lost across the share round-trip, revoked permission, or an unsupported

@@ -249,7 +249,11 @@ let shareCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     match findWorktree scopedKey model with
     | Some wt ->
         let request: ShareCanvasDocRequest = { WorktreePath = wt.Path; Filename = filename }
-        model, Cmd.OfAsync.either worktreeApi.Value.shareCanvasDoc request (fun r -> ShareCanvasDocResult (scopedKey, filename, r)) (_.Message >> Error >> fun r -> ShareCanvasDocResult (scopedKey, filename, r))
+        // Mark the share in flight so the button shows a spinner and stops accepting clicks: the
+        // round-trip takes seconds (Entra token + user delegation key + upload), and without this the
+        // button looks idle throughout, inviting repeat clicks that each publish another copy.
+        { model with Canvas = { model.Canvas with SharingDoc = Some filename } },
+        Cmd.OfAsync.either worktreeApi.Value.shareCanvasDoc request (fun r -> ShareCanvasDocResult (scopedKey, filename, r)) (_.Message >> Error >> fun r -> ShareCanvasDocResult (scopedKey, filename, r))
     | None -> model, Cmd.none
 
 /// Send-state transition for a *failed* share. Mirrors the Ok arm's guard and the banner-XOR model
@@ -278,14 +282,14 @@ let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<
             match model.Canvas.CanvasSendState with
             | CanvasSendState.Failed _ -> CanvasSendState.Idle
             | other -> other
-        { model with Canvas = { model.Canvas with CanvasSendState = clearedSendState; ShareNotice = None } },
+        { model with Canvas = { model.Canvas with CanvasSendState = clearedSendState; ShareNotice = None; SharingDoc = None } },
         writeClipboardCmd (buildClipboardPayload shareResult)
     | Error msg ->
         // Raise the existing dismissible delivery-error banner and clear any stale success notice so
         // the two never show together. A live Waiting banner is an independent fact and is preserved
         // (see preserveWaitingOnShareFailure) — its queued message may still be delivered, so Waiting
         // must never be reported as a share failure (Decision #10 banner-XOR model).
-        { model with Canvas = { model.Canvas with CanvasSendState = preserveWaitingOnShareFailure model.Canvas.CanvasSendState msg; ShareNotice = None } },
+        { model with Canvas = { model.Canvas with CanvasSendState = preserveWaitingOnShareFailure model.Canvas.CanvasSendState msg; ShareNotice = None; SharingDoc = None } },
         Cmd.ofEffect (fun _ -> Fable.Core.JS.console.error ($"Share canvas doc error ({scopedKey}/{filename}):", msg))
 
 /// Banner text for a *settled* clipboard write after a successful share (Decision #10). A landed write

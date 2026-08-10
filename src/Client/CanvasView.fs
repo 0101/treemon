@@ -102,6 +102,7 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           SendState = model.Canvas.CanvasSendState
           DocError = model.Canvas.DocError
           ShareNotice = model.Canvas.ShareNotice
+          SharingDoc = model.Canvas.SharingDoc
           BridgeLiveness = model.Canvas.BridgeLiveness }
 
     let canvasAwareness: CanvasPane.CanvasPaneAwareness =

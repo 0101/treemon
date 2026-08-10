@@ -19,6 +19,13 @@
 - Clicking it: static-exports the focused doc → uploads it to Azure Blob Storage → mints a per-doc
   read-only SAS URL → writes a **rich link + plain URL** to the clipboard → shows a success banner
   (`Shared — link copied`). On failure it shows the existing dismissible error banner.
+- **The button shows progress and refuses re-entry while a share is in flight.** Publishing is a
+  multi-second round-trip (Entra token → user delegation key → upload), so `CanvasState.SharingDoc`
+  names the doc being shared: its button swaps the glyph for a spinner, lights up, and is `disabled`
+  until the result arrives. Without this an in-flight share is indistinguishable from a button that
+  did nothing, and repeat clicks each publish another copy. Both result arms clear `SharingDoc` —
+  including the failure arm, or the spinner would strand and sharing would look broken until reload
+  (locked by `ShareCanvasDocResultTests`).
 - The action operates on a **single, self-contained doc**. Docs that link to sibling `.html` tabs
   are shared as just the focused file; sibling links are inert in the export. Multi-doc bundles are
   out of scope.
@@ -155,6 +162,16 @@ banner never claims a copy that did not happen (Decision #10).
   for `startsOn`, and the `CancellationToken` must be passed **explicitly** — with two arguments F#
   binds the same-arity `(BlobGetUserDelegationKeyOptions, CancellationToken)` overload instead and
   fails to compile.
+
+  **The credential is built once (`lazy`) and reused — this is a requirement, not a micro-optimization.**
+  `DefaultAzureCredential` caches its token per instance, and on a dev host the chain resolves through
+  `AzureCliCredential`, which *spawns the `az` CLI* (measured at 3–5 s). Constructing one per publish
+  paid that cost every time: shares took 9–11 s, which exceeds the browser's ~5 s transient-activation
+  window, so `navigator.clipboard.write` was rejected and the user got the "copy it manually"
+  correction instead of a copied link. Reusing the instance brings a warm share to 3–4 s and the
+  clipboard write back inside the window. The first share after a server restart is still slow (cold
+  JIT + credential chain); the spinner covers it, and the banner degrades honestly if the write is
+  rejected.
 - **Server wiring** (`src/Server/WorktreeApi.fs`): `shareCanvasDocImpl` =
   `validateCanvasPath → read file → CanvasExport.buildStaticHtml → CanvasShare.publish → Result`,
   wired into the live `IWorktreeApi` record via `withValidatedPath` (mirroring `archiveCanvasDoc`),
@@ -350,9 +367,10 @@ Recording both here so each is a documented decision, not a blind spot:
 | `scripts/canvas-share-lifecycle-policy.json` | Storage lifecycle rule — deletes canvas-share blobs after 8 days (see **Storage Account Setup**) |
 | `src/Server/WorktreeApi.fs` | `shareCanvasDocImpl` + live wiring (`withValidatedPath`) + demo-mode stub |
 | `src/Server/GlobalConfig.fs` | Reads the `canvasShare` config section (`accountName`, `container`, `defaultExpiryDays`) |
-| `src/Client/CanvasPane.fs` | Share button (AgentDoc-only) + `ShareDoc` callback + success banner |
+| `src/Client/CanvasPane.fs` | Share button (AgentDoc-only, spinner + disabled while in flight) + `ShareDoc` callback + success banner |
+| `src/Client/CanvasState.fs` | `SharingDoc` — the in-flight share that drives the button's spinner |
 | `src/Client/CanvasUpdate.fs` | `ShareCanvasDoc` / `ShareCanvasDocResult` / `ClipboardWriteResult` arms + dual-format clipboard write (outcome-routed banner) |
-| `src/Client/index.html` | Share button styling |
+| `src/Client/index.html` | Share button styling + `.canvas-share-btn.sharing` spinner |
 | `src/Tests/*` | Static-export transform tests, publish-backend unit tests (naming, SAS grant, config, unconfigured gate), clipboard payload test, Share-button AgentDoc-gating unit test (mirrors the archive-button SystemView-gating test) |
 
 ## Verification
