@@ -281,40 +281,40 @@ let internal writeCanvasSize (size: CanvasSize) =
     updateGlobalConfig "canvas size" [ "canvasSize", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
 
 /// Machine-level config for the canvas Share backend (the `canvasShare` section of `config.json`):
-/// which PRIVATE blob container published docs land in, and the default per-doc SAS expiry. The
-/// Azure credential is deliberately NOT here — it is the `AZURE_STORAGE_CONNECTION_STRING` secret,
-/// read by `CanvasShare` straight from the environment, so no account key is ever written to the
-/// JSON file (spec docs/spec/canvas-sharing.md, Configuration).
+/// which storage account published docs go to, which PRIVATE container they land in, and the default
+/// per-doc SAS expiry. There is no credential here — and none anywhere else either: links are signed
+/// with an Entra *user delegation key* obtained through `DefaultAzureCredential`, so the account name
+/// is ordinary non-secret config (spec docs/spec/canvas-sharing.md, Configuration).
 type CanvasShareConfig =
-    { Container: string
+    { AccountName: string option
+      Container: string
       DefaultExpiryDays: int }
 
-/// Defaults for a missing `canvasShare` section or field: a conventional private-container name and
-/// the spec's 90-day SAS lifetime. With these, setting only `AZURE_STORAGE_CONNECTION_STRING` is
-/// enough to share — matching the spec's framing that the connection string is the one thing an
-/// operator must supply.
-let defaultCanvasShareConfig = { Container = "canvas-shared"; DefaultExpiryDays = 90 }
+/// Defaults for a missing `canvasShare` section or field. `AccountName` has no default — without it
+/// there is nothing to publish to, so it is the single value an operator must supply and its absence
+/// is what "not configured" means.
+let defaultCanvasShareConfig = { AccountName = None; Container = "canvas-shared"; DefaultExpiryDays = 7 }
 
-/// Upper bound (10 years) on a configured `defaultExpiryDays`. A larger — or non-positive — value is
-/// treated as absent and falls back to the default, keeping the SAS expiry *bounded* (spec Decision
-/// #3) and guaranteeing `DateTimeOffset.UtcNow.AddDays(DefaultExpiryDays)` at publish can never
-/// overflow `DateTimeOffset` (year 9999 is ~2.9M days out) and orphan an already-uploaded blob.
-let internal maxCanvasShareExpiryDays = 3650
+/// Upper bound on a configured `defaultExpiryDays`, set by Azure rather than by us: a user delegation
+/// key is valid for at most **7 days**, and a SAS signed with it dies when the key does regardless of
+/// the expiry written into the token. Requesting more is rejected outright when the key is minted, so
+/// a larger — or non-positive — value is treated as absent and falls back to the default.
+let internal maxCanvasShareExpiryDays = 7
 
 /// Reads the `canvasShare` config section, falling back to `defaultCanvasShareConfig` for a missing
-/// section or field. A blank `container`, or a `defaultExpiryDays` outside `1 .. maxCanvasShareExpiryDays`,
-/// is treated as absent (a non-positive expiry would mint an already-dead link; an unbounded one would
-/// overflow `AddDays` at publish and orphan the blob), so a partial or typo'd section still yields a
-/// working config rather than a broken one.
+/// section or field. A blank `accountName` or `container`, or a `defaultExpiryDays` outside
+/// `1 .. maxCanvasShareExpiryDays`, is treated as absent (a non-positive expiry would mint an
+/// already-dead link; one beyond the 7-day user-delegation-key limit would be refused by Azure at
+/// publish), so a partial or typo'd section still yields a working config rather than a broken one.
 let internal readCanvasShareConfig () : CanvasShareConfig =
     withConfigDocument defaultCanvasShareConfig (fun root ->
         match root.TryGetProperty("canvasShare") with
         | true, section when section.ValueKind = System.Text.Json.JsonValueKind.Object ->
-            let container =
-                match section.TryGetProperty("container") with
-                | true, c when c.ValueKind = System.Text.Json.JsonValueKind.String && c.GetString().Trim() <> "" ->
-                    c.GetString().Trim()
-                | _ -> defaultCanvasShareConfig.Container
+            let trimmedString name =
+                match section.TryGetProperty(name: string) with
+                | true, v when v.ValueKind = System.Text.Json.JsonValueKind.String && v.GetString().Trim() <> "" ->
+                    Some(v.GetString().Trim())
+                | _ -> None
             let expiryDays =
                 match section.TryGetProperty("defaultExpiryDays") with
                 | true, e when e.ValueKind = System.Text.Json.JsonValueKind.Number ->
@@ -322,7 +322,9 @@ let internal readCanvasShareConfig () : CanvasShareConfig =
                     | true, n when n > 0 && n <= maxCanvasShareExpiryDays -> n
                     | _ -> defaultCanvasShareConfig.DefaultExpiryDays
                 | _ -> defaultCanvasShareConfig.DefaultExpiryDays
-            { Container = container; DefaultExpiryDays = expiryDays }
+            { AccountName = trimmedString "accountName"
+              Container = trimmedString "container" |> Option.defaultValue defaultCanvasShareConfig.Container
+              DefaultExpiryDays = expiryDays }
         | _ -> defaultCanvasShareConfig)
 
 let internal readLastViewedHashes () : Map<string, Map<string, string>> =
