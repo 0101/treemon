@@ -5,11 +5,11 @@
 /// the assembly of the `CanvasShareResult`. That keeps this module a thin, replaceable storage
 /// adapter with only three dependencies: `Azure.Storage.Blobs`, `Azure.Identity` and `GlobalConfig`.
 ///
-/// Credential model (docs/spec/canvas-sharing.md, Decision #3): there is **no stored secret**. Links
-/// are signed with a *user delegation key* fetched over Entra ID via `AzureCliCredential` (the
-/// operator's `az login`), so the storage account runs with `allowSharedKeyAccess=false`
-/// and no account key exists to leak, rotate, or commit. The cost is Azure's hard **7-day** ceiling on
-/// a user delegation key — and therefore on every link.
+/// Credential model (docs/spec/canvas-sharing.md, Decision #3): Treemon stores no storage credential.
+/// Links are signed with a *user delegation key* fetched through `AzureCliCredential`, which uses the
+/// operator's persisted Azure CLI login. The account rejects Shared Key authorization, so Treemon
+/// never handles an account key or connection string. The cost is Azure's hard **7-day** ceiling on a
+/// user delegation key — and therefore on every link.
 ///
 /// Secrecy model (Decisions #2/#4/#5): the container is PRIVATE (anonymous access disabled at the
 /// account), the blob lands under an unguessable `<random-prefix>/<filename>` name, and the returned
@@ -75,6 +75,13 @@ let internal buildSasBuilder (containerName: string) (blob: string) (expiresOn: 
         Resource = "b",
         Protocol = SasProtocol.Https)
 
+let internal buildSignedBlobUrl
+    (blobUri: Uri)
+    (accountName: string)
+    (delegationKey: UserDelegationKey)
+    (sasBuilder: BlobSasBuilder) =
+    $"{blobUri}?{sasBuilder.ToSasQueryParameters(delegationKey, accountName)}"
+
 let private credential = lazy (AzureCliCredential())
 
 // The bearer-token cache belongs to the BlobServiceClient pipeline, so clients must survive across
@@ -91,8 +98,8 @@ let internal serviceClient (accountName: string) =
                     credential.Value)))
     client.Value
 
-/// The client-facing "not configured" message. Names the config key to set; there is no secret to
-/// mention because the design has none — the credential is the host's ambient Entra identity.
+/// The client-facing "not configured" message names the non-secret account config rather than
+/// suggesting an application-managed key or connection string.
 let internal notConfiguredMessage =
     "Canvas sharing is not configured — set canvasShare.accountName in ~/.treemon/config.json to an Azure Storage account name."
 
@@ -151,10 +158,12 @@ let publish (filename: string) (html: string) : Async<Result<string, string>> =
             let! _ =
                 blobClient.UploadAsync(stream, BlobUploadOptions(HttpHeaders = headers))
                 |> Async.AwaitTask
-            let sasParameters =
-                (buildSasBuilder config.Container blob expiresOn)
-                    .ToSasQueryParameters(delegationKey.Value, accountName)
-            return $"{blobClient.Uri}?{sasParameters}"
+            return
+                buildSignedBlobUrl
+                    blobClient.Uri
+                    accountName
+                    delegationKey.Value
+                    (buildSasBuilder config.Container blob expiresOn)
         with
         | :? AuthenticationFailedException as ex ->
             // The identity itself is unusable (expired/absent az login). Log the type only — an

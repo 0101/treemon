@@ -4,6 +4,7 @@ open System
 open System.IO
 open System.Text.RegularExpressions
 open NUnit.Framework
+open Azure.Storage.Blobs.Models
 open Azure.Storage.Sas
 open Server
 open Server.CanvasShare
@@ -11,7 +12,7 @@ open Server.GlobalConfig
 open Tests.TestUtils
 
 // This suite covers only the PURE and deterministic parts of the publish backend (spec
-// docs/spec/canvas-sharing.md): blob naming, the SAS grant parameters, service-client reuse and the
+// docs/spec/canvas-sharing.md): blob naming, user-delegation signing, service-client reuse and the
 // config reader — plus the unconfigured gate, which fails before any credential or network use.
 // The Azure round-trip cannot be emulated (Azurite does not implement GetUserDelegationKey), so it is
 // verified against the real account instead — see the spec's "Verification" section.
@@ -98,6 +99,43 @@ type SasBuilderTests() =
         let b = buildSasBuilder "my-container" "abc/report.html" expiresOn
         Assert.That(b.BlobContainerName, Is.EqualTo("my-container"))
         Assert.That(b.BlobName, Is.EqualTo("abc/report.html"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type UserDelegationSigningTests() =
+
+    let startsOn = DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero)
+    let expiresOn = startsOn.AddDays(7.0)
+    let delegationKey =
+        BlobsModelFactory.UserDelegationKey(
+            "object-id",
+            "tenant-id",
+            startsOn,
+            expiresOn,
+            "b",
+            "2025-11-05",
+            Convert.ToBase64String(Array.create 32 42uy))
+
+    [<Test>]
+    member _.``buildSignedBlobUrl applies the delegation identity and blob-scoped grant``() =
+        let blobUri = Uri("https://tmcanvasabc.blob.core.windows.net/canvas-shared/prefix/doc.html")
+        let signedUrl =
+            buildSignedBlobUrl
+                blobUri
+                "tmcanvasabc"
+                delegationKey
+                (buildSasBuilder "canvas-shared" "prefix/doc.html" expiresOn)
+        let signedUri = Uri signedUrl
+
+        Assert.Multiple(fun () ->
+            Assert.That(signedUri.GetLeftPart(UriPartial.Path), Is.EqualTo(blobUri.AbsoluteUri))
+            Assert.That(signedUri.Query, Does.Contain("skoid=object-id"))
+            Assert.That(signedUri.Query, Does.Contain("sktid=tenant-id"))
+            Assert.That(signedUri.Query, Does.Contain("sks=b"))
+            Assert.That(signedUri.Query, Does.Contain("sp=r"))
+            Assert.That(signedUri.Query, Does.Contain("spr=https"))
+            Assert.That(signedUri.Query, Does.Contain("sr=b")))
 
 
 // ── config reader (touches TREEMON_CONFIG_DIR: non-parallel) ───────────────────
@@ -216,9 +254,9 @@ type PublishConfigGateTests() =
             | Ok url -> Assert.Fail($"expected Error when unconfigured, got Ok {url}"))
 
     [<Test>]
-    member _.``the not-configured message names no secret``() =
-        // The design has no stored credential: the message must not send an operator hunting for a
-        // connection string or account key that no longer exists anywhere.
+    member _.``the not-configured message names no application-managed storage credential``() =
+        // Treemon stores no account key or connection string, so the message must not send an
+        // operator hunting for one.
         Assert.That(notConfiguredMessage, Does.Not.Contain("AZURE_STORAGE_CONNECTION_STRING"))
         Assert.That(notConfiguredMessage.ToLowerInvariant(), Does.Not.Contain("key"))
 

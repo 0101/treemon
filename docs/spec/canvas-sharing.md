@@ -113,10 +113,11 @@ banner never claims a copy that did not happen (Decision #10).
   `defaultExpiryDays` (default `7`; **bounded to `1–7` days** — the ceiling is Azure's user
   delegation key limit, not a preference, and a value outside the range falls back to the default so
   a typo can't produce links Azure refuses to sign).
-- **There is no credential to configure.** Links are signed with an Entra user delegation key
-  obtained through `AzureCliCredential`, which uses the operator's existing
-  `az login`. No account key, connection string, or env var exists anywhere in the design — so
-  nothing can be committed, logged, or leaked. `accountName` is ordinary non-secret config.
+- **There is no application credential to configure.** Links are signed with an Entra user
+  delegation key obtained through `AzureCliCredential`, which uses the operator's existing
+  `az login` and its persisted MSAL token cache. Treemon stores no account key, connection string,
+  or credential env var; `accountName` is ordinary non-secret config. The CLI cache remains a host
+  credential and must be protected and revoked normally.
 - The one operator prerequisite is an RBAC grant: **`Storage Blob Data Contributor` on the storage
   account** for the identity running the server. It covers both the blob write and the
   `generateUserDelegationKey` action (which acts at account scope), so no second role is needed.
@@ -197,17 +198,17 @@ banner never claims a copy that did not happen (Decision #10).
 ## Storage Account Setup
 
 One-time, **local-only** provisioning, run by an operator with `az login` to the dev subscription
-(never from CI). Everything below uses the logged-in account; there is no data-plane key at any point.
+(never from CI). Everything below uses the logged-in account; Treemon never receives or uses an
+account key.
 
 ```bash
-# Pass --subscription explicitly on every command: the CLI's default subscription may well be a
-# different (e.g. team) one, and a storage account created in the wrong place is how the previous
-# deployment triggered a security incident.
+# Pass --subscription explicitly on every command so creation, RBAC, policy, and verification all
+# target the intended subscription even when the CLI default points elsewhere.
 SUB=<personal-dev-subscription-id>
 
 az group create -n rg-treemon-canvas-share -l westeurope --subscription $SUB
 
-# Decision #3 — no account key exists to leak; Decision #4 — bare blob URL denied
+# Decision #3 — Treemon never uses Shared Key; Decision #4 — bare blob URL denied
 az storage account create -n <account> -g rg-treemon-canvas-share -l westeurope --subscription $SUB \
   --sku Standard_LRS --kind StorageV2 \
   --allow-shared-key-access false \
@@ -273,7 +274,7 @@ Two invariants keep it correct:
   7-day maximum link lifetime. Published blobs are write-once, so *modification* time equals *share*
   time; the daily lifecycle run (≈1-day granularity) therefore deletes a blob shortly *after* its SAS
   link has already expired — never while the link is live. The 7-day ceiling is fixed by Azure, so
-  unlike the previous 90-day window this number no longer tracks a configurable value.
+  this number does not track a configurable value.
 
 Apply the policy, then confirm the rule is present on the account:
 
@@ -300,17 +301,14 @@ az storage account management-policy show \
 | `allowSharedKeyAccess` / `allowBlobPublicAccess` | `false` / `false` |
 | Role assignment | `Storage Blob Data Contributor` → operator, at account scope |
 
-**Subscription choice is load-bearing, not incidental.** The predecessor account (`tmcanvas92r3du`,
-eastus) was created in `CodeTestingAgentDev` — a *team* subscription — and its shared-key auth
-triggered a security incident; the whole resource group was deleted on 2026-08-05. The replacement
-lives in the personal dev subscription, and because that (correctly) forbids shared keys, the
-credential model had to change with it. When running `az`, pass `--subscription` explicitly: the
-CLI's default may still be the team subscription.
+**Subscription choice is load-bearing, not incidental.** Every provisioning, RBAC, lifecycle, and
+verification command passes `--subscription $SUB` explicitly so the storage account and its policy
+cannot follow an unrelated CLI default.
 
-**Per-host setup is one line:** `az login`. `AzureCliCredential` picks that up, so nothing is
-persisted, no env var is set, and no restart is needed to "install" a credential. `treemon.ps1`
-therefore has no credential plumbing at all (the former `Set-CanvasShareEnv` is gone). Add
-`canvasShare.accountName` to `~/.treemon/config.json` and sharing works:
+**Per-host setup is one line:** `az login`. `AzureCliCredential` uses the Azure CLI's persisted MSAL
+token cache, so Treemon needs no credential env var or restart to install a credential.
+`treemon.ps1` has no credential plumbing. Add `canvasShare.accountName` to
+`~/.treemon/config.json` and sharing works:
 
 ```json
 { "canvasShare": { "accountName": "tmcanvascfievjwm" } }
@@ -327,7 +325,7 @@ propagation; otherwise they live until the 7-day key expiry.
 |---|----------|--------------------|
 | 1 | Hosting backend | **Azure Blob Storage** (user's dev subscription). Rejected: private-repo GitHub Pages (anonymously **un**viewable — recipients must log in), public-repo Pages (obscurity only), gists (served `text/plain`, JS won't run), Netlify/Vercel/Cloudflare (3rd-party data egress — against policy), nginx-on-a-VM (ops overhead Blob avoids). |
 | 2 | URL secrecy model | **Per-doc, blob-scoped, read-only SAS** over a reusable container token. Least privilege: a leaked link exposes exactly one doc (proven — doc A's token can't open doc B, which fails "Signature did not match"). It is **not heavy** — one delegation-key fetch + one signing call at share time, server stores nothing. |
-| 3 | Credential & expiry | **User delegation SAS signed via `AzureCliCredential`; 7-day expiry (the maximum Azure allows).** *Reversal of the original choice:* v1 picked a 90-day account-key SAS and explicitly rejected user delegation *because* of the 7-day cap. That is no longer available — the storage account must run with `allowSharedKeyAccess=false` (SFI "Safe Secrets" — disable shared key and anonymous blob access), and a user delegation SAS is the only SAS type that still works under it. Internal guidance names this exact path ("migrate to Entra ID / UDK SAS"), so it needs no policy exception. Net: **no stored secret anywhere** (the env var is gone), at the cost of link lifetime dropping 90 → 7 days. Per-doc revoke = delete the blob; strongest bulk revoke = `az storage account revoke-delegation-keys`, subject to Azure cache propagation. |
+| 3 | Credential & expiry | **User delegation SAS signed via `AzureCliCredential`; 7-day expiry (Azure's maximum).** The account rejects Shared Key authorization, so Treemon stores no account key, connection string, or credential env var; the operator's Azure CLI MSAL cache remains the host credential. Per-doc revoke = delete the blob; strongest bulk revoke = `az storage account revoke-delegation-keys`, subject to Azure cache propagation. |
 | 4 | Anonymous access | **Disabled** at the account (`allow-blob-public-access=false`). Bare URL → `409`; SAS is the only entry. |
 | 5 | Blob naming | **Unguessable prefix + real filename** (`<random>/<file>.html`). Random prefix gives uniqueness/obscurity; the real filename gives the recipient a meaningful name. The SAS signature is the actual gate. |
 | 6 | Strip vs inject | The on-disk file is already script-free; the export **re-injects** base theme + no-op `canvasSend` and nothing else — a **third `buildInjection` mode**, not a stripping pass. |
@@ -388,7 +386,7 @@ Recording both here so each is a documented decision, not a blind spot:
 | `src/Client/CanvasState.fs` | Scoped `ShareState` phase machine that drives the global share lock and matching spinner |
 | `src/Client/CanvasUpdate.fs` | `ShareCanvasDoc` / `ShareCanvasDocResult` / `ClipboardWriteResult` arms + dual-format clipboard write (outcome-routed banner) |
 | `src/Client/index.html` | Share button styling + `.canvas-share-btn.sharing` spinner |
-| `src/Tests/*` | Static-export transform tests, publish-backend unit tests (naming, SAS grant, config, unconfigured gate), clipboard payload test, Share-button AgentDoc-gating unit test (mirrors the archive-button SystemView-gating test) |
+| `src/Tests/*` | Static-export transform tests, publish-backend unit tests (naming, delegation signing, SAS grant, client reuse, config, unconfigured gate), share-state/clipboard tests, Share-button AgentDoc gating |
 
 ## Verification
 
@@ -397,8 +395,7 @@ Recording both here so each is a documented decision, not a blind spot:
   (including the 7-day ceiling), and the unconfigured gate — which must fail *before* acquiring a
   credential or touching the network.
 - **No Azurite round-trip.** The emulator does not implement `GetUserDelegationKey` at all, so it
-  cannot emulate this design; the former `CanvasShareAzuriteTests` fixture was removed rather than
-  kept passing against a credential model the product no longer uses.
+  cannot emulate this design.
 - **Backend round-trip is verified against the real account** by running the actual
   `CanvasShare.publish` path: publish → `GET` the returned link renders `200 text/html; charset=utf-8`
   with the doc intact; the bare blob URL is denied `409 PublicAccessNotPermitted`; the same token
