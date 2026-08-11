@@ -11,7 +11,7 @@ open Server.GlobalConfig
 open Tests.TestUtils
 
 // This suite covers only the PURE and deterministic parts of the publish backend (spec
-// docs/spec/canvas-sharing.md): blob naming, the SAS grant parameters, endpoint construction and the
+// docs/spec/canvas-sharing.md): blob naming, the SAS grant parameters, service-client reuse and the
 // config reader — plus the unconfigured gate, which fails before any credential or network use.
 // The Azure round-trip cannot be emulated (Azurite does not implement GetUserDelegationKey), so it is
 // verified against the real account instead — see the spec's "Verification" section.
@@ -198,8 +198,10 @@ type CanvasShareConfigTests() =
 type PublishConfigGateTests() =
 
     [<Test>]
-    member _.``blobEndpoint builds the account's blob URL``() =
-        Assert.That(blobEndpoint("tmcanvasabc").ToString(), Is.EqualTo("https://tmcanvasabc.blob.core.windows.net/"))
+    member _.``serviceClient reuses one Azure authentication pipeline per account``() =
+        let first = serviceClient "tmcanvasabc"
+        Assert.That(serviceClient "tmcanvasabc", Is.SameAs(first))
+        Assert.That(serviceClient "tmcanvasxyz", Is.Not.SameAs(first))
 
     [<Test>]
     member _.``publish returns the not-configured error when no account name is set``() =

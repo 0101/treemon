@@ -283,7 +283,7 @@ let internal writeCanvasSize (size: CanvasSize) =
 /// Machine-level config for the canvas Share backend (the `canvasShare` section of `config.json`):
 /// which storage account published docs go to, which PRIVATE container they land in, and the default
 /// per-doc SAS expiry. There is no credential here — and none anywhere else either: links are signed
-/// with an Entra *user delegation key* obtained through `DefaultAzureCredential`, so the account name
+/// with an Entra *user delegation key* obtained through `AzureCliCredential`, so the account name
 /// is ordinary non-secret config (spec docs/spec/canvas-sharing.md, Configuration).
 type CanvasShareConfig =
     { AccountName: string option

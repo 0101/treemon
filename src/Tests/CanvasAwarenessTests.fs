@@ -1045,15 +1045,13 @@ type DocErrorTests() =
             "Switching tabs clears the stored error so it can never re-show when you switch back")
 
 
-// ── ShareCanvasDocResult + ClipboardWriteResult banner state (client share feature) ─────────
+// ── ShareCanvasDoc state machine + result banners (client share feature) ─────────────────────
 // A successful share does NOT immediately claim "link copied": the Ok arm clears a stale Failed
 // send-state (so the red delivery-error and green success banners never stack) plus any stale notice,
 // then defers the banner to the async clipboard write. ClipboardWriteResult routes that write's real
 // outcome back in — Ok → "Shared — link copied", Error → a "copy it manually: <url>" correction (F6)
-// — and is pure, so both outcomes drive straight through `update`. The share Error arm calls
-// Fable.Core.JS.console.error (dummy code that throws under .NET), so its send-state transition is
-// extracted into the pure preserveWaitingOnShareFailure helper and locked here instead. A live Waiting
-// banner is independent and survives both a share success and a share failure.
+// — and is pure, so both outcomes drive straight through `update`. ShareState keeps the action
+// single-flight from publication through clipboard settlement and drops stale mismatched results.
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1063,21 +1061,36 @@ type ShareCanvasDocResultTests() =
     let shareResult : CanvasShareResult =
         { Url = "https://acct.blob.core.windows.net/canvas/x/status.html?sig=s"; Title = "Status" }
 
-    let modelWithSendState state =
-        { defaultModel with Canvas = { defaultModel.Canvas with CanvasSendState = state } }
+    let publishingModel sendState =
+        { defaultModel with
+            Canvas.CanvasSendState = sendState
+            Canvas.ShareState = CanvasShareState.Publishing ("r/feat", "status.html") }
+
+    let writingClipboardModel =
+        { defaultModel with
+            Canvas.ShareState = CanvasShareState.WritingClipboard ("r/feat", "status.html") }
 
     [<Test>]
     member _.``Ok defers the banner — it does not claim a copy before the write settles (F6)``() =
         // The share succeeded but the async clipboard write hasn't settled, so the Ok arm must NOT
         // pre-emptively claim "link copied" (that would lie if the write is later rejected). It clears
         // any stale notice and defers the banner to ClipboardWriteResult.
-        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState CanvasSendState.Idle)
+        let updated, _ =
+            update
+                (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult))
+                (publishingModel CanvasSendState.Idle)
         Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(None),
             "The 'link copied' banner must wait for the clipboard write's actual outcome (F6)")
+        Assert.That(updated.Canvas.ShareState,
+            Is.EqualTo(CanvasShareState.WritingClipboard ("r/feat", "status.html")),
+            "The share lock must remain active until the clipboard write settles")
 
     [<Test>]
     member _.``Ok clears a stale Failed send-state so the error and success banners never stack``() =
-        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState (CanvasSendState.Failed "earlier failure"))
+        let updated, _ =
+            update
+                (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult))
+                (publishingModel (CanvasSendState.Failed "earlier failure"))
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Idle),
             "A prior delivery error must be cleared on a successful share (no red + green banner at once)")
         Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(None),
@@ -1085,41 +1098,55 @@ type ShareCanvasDocResultTests() =
 
     [<Test>]
     member _.``Ok preserves an independent Waiting send-state``() =
-        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) (modelWithSendState (CanvasSendState.Waiting "r/feat"))
+        let updated, _ =
+            update
+                (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult))
+                (publishingModel (CanvasSendState.Waiting "r/feat"))
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "A live 'waiting for session' banner is an independent fact and must survive a share")
 
-    // The Share button spins and is disabled while SharingDoc names its doc, so a share that settles
-    // without clearing it would leave the button stuck spinning and permanently unclickable — sharing
-    // would appear broken until reload. Both outcomes must clear it.
     [<Test>]
-    member _.``Ok clears SharingDoc so the button stops spinning``() =
-        let sharing = { defaultModel with Canvas = { defaultModel.Canvas with SharingDoc = Some "status.html" } }
-        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult)) sharing
-        Assert.That(updated.Canvas.SharingDoc, Is.EqualTo(None),
-            "A settled share must release the button, even though the banner still awaits the clipboard write")
+    member _.``a second share is rejected while another document is publishing``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "other.html" "h" ] ] ]
+                Canvas.ShareState = CanvasShareState.Publishing ("r/feat", "status.html") }
+        let updated, cmd = update (ShareCanvasDoc ("r/feat", "other.html")) model
+        Assert.That(updated, Is.EqualTo(model))
+        Assert.That(cmd, Is.Empty)
 
     [<Test>]
-    member _.``Error clears SharingDoc so a failed share does not strand the spinner``() =
-        let sharing = { defaultModel with Canvas = { defaultModel.Canvas with SharingDoc = Some "status.html" } }
-        let updated, _ = update (ShareCanvasDocResult ("r/feat", "status.html", Error "publish boom")) sharing
-        Assert.That(updated.Canvas.SharingDoc, Is.EqualTo(None),
+    member _.``Error returns the matching share to Idle so the user can retry``() =
+        let updated, _ =
+            update
+                (ShareCanvasDocResult ("r/feat", "status.html", Error "publish boom"))
+                (publishingModel CanvasSendState.Idle)
+        Assert.That(updated.Canvas.ShareState, Is.EqualTo(CanvasShareState.Idle),
             "A failed share must release the button so the user can retry")
 
-    // F6: the "link copied" banner reflects the async clipboard write's ACTUAL outcome, routed back
-    // through ClipboardWriteResult. A landed write confirms the copy; a rejected write (transient
-    // activation / focus lost across the share round-trip, revoked permission, or an unsupported
-    // clipboard API) drops the false claim and surfaces the raw URL for a manual copy. This arm is pure
-    // (the rejection is logged in writeClipboardCmd's .catch), so — unlike the share Error arm — both
-    // outcomes can be driven straight through `update`.
+    [<Test>]
+    member _.``a stale publish result cannot clear the active share``() =
+        let model = publishingModel CanvasSendState.Idle
+        let updated, cmd =
+            update (ShareCanvasDocResult ("r/feat", "other.html", Error "stale")) model
+        Assert.That(updated, Is.EqualTo(model))
+        Assert.That(cmd, Is.Empty)
+
     [<Test>]
     member _.``ClipboardWriteResult Ok raises the 'link copied' banner``() =
-        let updated, _ = update (ClipboardWriteResult (shareResult.Url, Ok ())) defaultModel
+        let updated, _ =
+            update
+                (ClipboardWriteResult ("r/feat", "status.html", shareResult.Url, Ok ()))
+                writingClipboardModel
         Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(Some "Shared — link copied"))
+        Assert.That(updated.Canvas.ShareState, Is.EqualTo(CanvasShareState.Idle))
 
     [<Test>]
     member _.``ClipboardWriteResult Error corrects the claim and surfaces the link for a manual copy (F6)``() =
-        let updated, _ = update (ClipboardWriteResult (shareResult.Url, Error "NotAllowedError")) defaultModel
+        let updated, _ =
+            update
+                (ClipboardWriteResult ("r/feat", "status.html", shareResult.Url, Error "NotAllowedError"))
+                writingClipboardModel
         match updated.Canvas.ShareNotice with
         | Some notice ->
             Assert.That(notice, Does.Not.Contain("link copied"),
@@ -1128,10 +1155,34 @@ type ShareCanvasDocResultTests() =
                 "The raw SAS URL must be surfaced so the user can copy it manually")
         | None -> Assert.Fail("A settled clipboard write must still raise the share banner")
 
-    // The Error arm can't be driven through `update` (its direct Fable.Core.JS.console.error throws
-    // under .NET), so its send-state transition lives in the pure preserveWaitingOnShareFailure helper
-    // and is locked below. F7 regression: a share failure must NOT clobber a live "Waiting for
-    // session" banner — a queued message may still be delivered, so Waiting is never a failure.
+    [<Test>]
+    member _.``a stale clipboard result cannot finish another share``() =
+        let updated, cmd =
+            update
+                (ClipboardWriteResult ("r/feat", "other.html", shareResult.Url, Ok ()))
+                writingClipboardModel
+        Assert.That(updated, Is.EqualTo(writingClipboardModel))
+        Assert.That(cmd, Is.Empty)
+
+    [<TestCase("r/feat", "status.html", true, true)>]
+    [<TestCase("r/other", "status.html", true, false)>]
+    member _.``share button flags keep every doc disabled but spin only the matching scoped doc``
+        (activeScopedKey: string, filename: string, expectedDisabled: bool, expectedSpinner: bool) =
+        let disabled, spinner =
+            CanvasShareState.buttonFlags
+                (Some activeScopedKey)
+                filename
+                (CanvasShareState.Publishing ("r/feat", "status.html"))
+        Assert.That(disabled, Is.EqualTo(expectedDisabled))
+        Assert.That(spinner, Is.EqualTo(expectedSpinner))
+
+    [<Test>]
+    member _.``share button is available when the share state is Idle``() =
+        let disabled, spinner =
+            CanvasShareState.buttonFlags (Some "r/feat") "status.html" CanvasShareState.Idle
+        Assert.That(disabled, Is.False)
+        Assert.That(spinner, Is.False)
+
     [<Test>]
     member _.``Error preserves an independent Waiting send-state (F7 regression)``() =
         Assert.That(preserveWaitingOnShareFailure (CanvasSendState.Waiting "r/feat") "share boom",

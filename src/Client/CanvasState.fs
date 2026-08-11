@@ -37,10 +37,9 @@ type CanvasState =
       // success path needs its own state; kept distinct from CanvasSendState (message delivery) and
       // DocError (doc JS errors) so the banners never overwrite each other.
       ShareNotice: string option
-      // Filename of the doc whose share is in flight, or None when idle. Publishing is a multi-second
-      // round-trip (Entra token + user delegation key + upload), so the Share button needs to show
-      // progress and refuse a second click rather than looking untouched — see CanvasPane's spinner.
-      SharingDoc: string option
+      // Scoped identity and phase of the single in-flight share. The phase keeps the pane locked
+      // through clipboard settlement, while the identity lets stale async results be ignored.
+      ShareState: CanvasShareState
       BridgeLiveness: Map<string, BridgeLiveness> }
 
 /// Initial canvas state: pane closed on the right, all maps empty, send state idle.
@@ -58,7 +57,7 @@ let empty : CanvasState =
       CanvasSendState = CanvasSendState.Idle
       DocError = None
       ShareNotice = None
-      SharingDoc = None
+      ShareState = CanvasShareState.Idle
       BridgeLiveness = Map.empty }
 
 [<Literal>]

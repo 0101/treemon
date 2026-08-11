@@ -6,8 +6,8 @@
 /// adapter with only three dependencies: `Azure.Storage.Blobs`, `Azure.Identity` and `GlobalConfig`.
 ///
 /// Credential model (docs/spec/canvas-sharing.md, Decision #3): there is **no stored secret**. Links
-/// are signed with a *user delegation key* fetched over Entra ID via `DefaultAzureCredential` (on a
-/// dev host, the operator's `az login`), so the storage account runs with `allowSharedKeyAccess=false`
+/// are signed with a *user delegation key* fetched over Entra ID via `AzureCliCredential` (the
+/// operator's `az login`), so the storage account runs with `allowSharedKeyAccess=false`
 /// and no account key exists to leak, rotate, or commit. The cost is Azure's hard **7-day** ceiling on
 /// a user delegation key — and therefore on every link.
 ///
@@ -16,12 +16,13 @@
 /// link is a blob-scoped, read-only, https-only SAS (`sr=b`, `sp=r`, `spr=https`). Because the SAS is
 /// blob-scoped, a leaked link exposes exactly one doc; per-doc revoke is a blob delete.
 ///
-/// The SAS is additionally bound to the *signing identity*: it carries `skoid`/`sktid`, and Azure
-/// re-checks that principal's RBAC on every request. Removing the signer's `Storage Blob Data
-/// Contributor` role therefore kills every outstanding link immediately, not at expiry.
+/// The SAS is additionally bound to the *signing identity*: it carries `skoid`/`sktid`. Azure caches
+/// role assignments and user delegation keys, so role removal or key revocation invalidates existing
+/// links only after cache propagation, not immediately.
 module Server.CanvasShare
 
 open System
+open System.Collections.Concurrent
 open System.IO
 open System.Text
 open Azure.Identity
@@ -74,22 +75,21 @@ let internal buildSasBuilder (containerName: string) (blob: string) (expiresOn: 
         Resource = "b",
         Protocol = SasProtocol.Https)
 
-/// The Azure Blob endpoint for a storage account. Pure, so URL assembly is unit-testable without a
-/// credential or a network call.
-let internal blobEndpoint (accountName: string) : Uri =
-    Uri($"https://{accountName}.blob.core.windows.net")
+let private credential = lazy (AzureCliCredential())
 
-/// The Azure credential, built ONCE and reused. This is a performance requirement, not a style
-/// preference: `DefaultAzureCredential` caches its resolved token per instance, and on a dev host the
-/// chain resolves through `AzureCliCredential`, which *spawns the `az` CLI* — a 3-5 second process
-/// launch. Constructing a fresh credential per publish paid that cost every time and pushed the share
-/// round-trip past the browser's transient-activation window, so the clipboard write was rejected and
-/// the user got "copy it manually" instead of a copied link. Reusing the instance keeps the token
-/// cached (and refreshed by the SDK) across shares.
-///
-/// `lazy` rather than a module-level value so merely loading this module never touches the credential
-/// chain — tests reference `CanvasShare` and must not shell out to `az`.
-let private credential = lazy (DefaultAzureCredential())
+// The bearer-token cache belongs to the BlobServiceClient pipeline, so clients must survive across
+// publishes. Lazy values prevent duplicate construction when concurrent first shares race.
+let private serviceClients = ConcurrentDictionary<string, Lazy<BlobServiceClient>>()
+
+let internal serviceClient (accountName: string) =
+    let client =
+        serviceClients.GetOrAdd(
+            accountName,
+            fun name ->
+                lazy (BlobServiceClient(
+                    Uri($"https://{name}.blob.core.windows.net"),
+                    credential.Value)))
+    client.Value
 
 /// The client-facing "not configured" message. Names the config key to set; there is no secret to
 /// mention because the design has none — the credential is the host's ambient Entra identity.
@@ -123,7 +123,7 @@ let publish (filename: string) (html: string) : Async<Result<string, string>> =
         // The try/with stays around the Azure SDK calls (a genuine interop boundary); the
         // Option→Error gate above is flattened into the asyncResult track.
         try
-            let serviceClient = BlobServiceClient(blobEndpoint accountName, credential.Value)
+            let serviceClient = serviceClient accountName
             // Backdate the start to absorb clock skew between this host and the storage service, and
             // derive the expiry from it so the window stays strictly inside Azure's 7-day limit on a
             // user delegation key — at the maximum configured expiry, `expiresOn` is a few minutes

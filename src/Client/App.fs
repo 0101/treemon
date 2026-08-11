@@ -724,7 +724,8 @@ let update msg model =
 
     | ShareCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.shareCanvasDocResult scopedKey filename result model
 
-    | ClipboardWriteResult (url, outcome) -> CanvasUpdate.clipboardWriteResult url outcome model
+    | ClipboardWriteResult (scopedKey, filename, url, outcome) ->
+        CanvasUpdate.clipboardWriteResult scopedKey filename url outcome model
 
     | DismissShareNotice -> CanvasUpdate.dismissShareNotice model
 

@@ -20,12 +20,12 @@
   read-only SAS URL → writes a **rich link + plain URL** to the clipboard → shows a success banner
   (`Shared — link copied`). On failure it shows the existing dismissible error banner.
 - **The button shows progress and refuses re-entry while a share is in flight.** Publishing is a
-  multi-second round-trip (Entra token → user delegation key → upload), so `CanvasState.SharingDoc`
-  names the doc being shared: its button swaps the glyph for a spinner, lights up, and is `disabled`
-  until the result arrives. Without this an in-flight share is indistinguishable from a button that
-  did nothing, and repeat clicks each publish another copy. Both result arms clear `SharingDoc` —
-  including the failure arm, or the spinner would strand and sharing would look broken until reload
-  (locked by `ShareCanvasDocResultTests`).
+  multi-second round-trip (Entra token → user delegation key → upload → clipboard), so
+  `CanvasState.ShareState` records the scoped worktree/doc and the `Publishing` or
+  `WritingClipboard` phase. Every Share button is disabled while that state is non-idle, only the
+  matching scoped doc shows the spinner, and the reducer rejects another launch. Results transition
+  or clear only the matching operation, so navigation and stale async completions cannot unlock or
+  overwrite a newer share (locked by `ShareCanvasDocResultTests`).
 - The action operates on a **single, self-contained doc**. Docs that link to sibling `.html` tabs
   are shared as just the focused file; sibling links are inert in the export. Multi-doc bundles are
   out of scope.
@@ -71,11 +71,11 @@ two pieces a standalone copy needs, and nothing else.
   guess B's name (least privilege; verified by isolation test — the signature covers the full blob
   path, so a crossed token fails `AuthenticationFailed`/"Signature did not match").
 - The SAS is additionally bound to the **signing identity**: it carries `skoid` (the signer's object
-  id) and `sktid` (the tenant), and Azure re-checks that principal's RBAC on **every** request.
-  Revoking the signer's `Storage Blob Data Contributor` role therefore kills every outstanding link
-  at once — the blast-radius control the account key used to provide via rotation.
-- **Revocation** is per-doc: delete the blob → the link returns `404`. (Bulk revoke = remove the
-  signer's role assignment.)
+  id) and `sktid` (the tenant). Azure caches role assignments and user delegation keys, so removing
+  the role or revoking delegation keys invalidates outstanding links only after cache propagation.
+- **Revocation** is per-doc: delete the blob → the link returns `404`. The strongest bulk operation
+  is `az storage account revoke-delegation-keys`; it invalidates all user delegation SAS grants for
+  the account after Azure's cache propagation, not instantly.
 - **Lifecycle cleanup:** an Azure storage **lifecycle policy** deletes shared blobs older than the
   expiry window (8 days, just behind the 7-day link cap), so a doc's content does not linger at rest
   after its link is dead (privacy) and storage does not accumulate (cost). The policy runs daily
@@ -114,7 +114,7 @@ banner never claims a copy that did not happen (Decision #10).
   delegation key limit, not a preference, and a value outside the range falls back to the default so
   a typo can't produce links Azure refuses to sign).
 - **There is no credential to configure.** Links are signed with an Entra user delegation key
-  obtained through `DefaultAzureCredential`, which on a dev host resolves to the operator's existing
+  obtained through `AzureCliCredential`, which uses the operator's existing
   `az login`. No account key, connection string, or env var exists anywhere in the design — so
   nothing can be committed, logged, or leaked. `accountName` is ordinary non-secret config.
 - The one operator prerequisite is an RBAC grant: **`Storage Blob Data Contributor` on the storage
@@ -145,8 +145,9 @@ banner never claims a copy that did not happen (Decision #10).
   `CanvasShareResult.Title`), which delegates the filename fallback to the shared
   `Shared.Formatting.prettifyFilename` (Decision #11). Every function is a pure
   `string→string`/`string option` for unit testing.
-- **Publish backend** (`src/Server/CanvasShare.fs`): `BlobServiceClient(blobEndpoint accountName,
-  DefaultAzureCredential())` → `GetUserDelegationKeyAsync(startsOn, expiresOn)` →
+- **Publish backend** (`src/Server/CanvasShare.fs`): cached
+  `BlobServiceClient(Uri($"https://{accountName}.blob.core.windows.net"), AzureCliCredential())` →
+  `GetUserDelegationKeyAsync(startsOn, expiresOn)` →
   `CreateIfNotExistsAsync(PublicAccessType.None)` → `UploadAsync(randomPrefix/filename, html)` with
   `BlobHttpHeaders.ContentType = "text/html; charset=utf-8"` →
   `BlobSasBuilder(...).ToSasQueryParameters(delegationKey, accountName)`, returning
@@ -163,15 +164,15 @@ banner never claims a copy that did not happen (Decision #10).
   binds the same-arity `(BlobGetUserDelegationKeyOptions, CancellationToken)` overload instead and
   fails to compile.
 
-  **The credential is built once (`lazy`) and reused — this is a requirement, not a micro-optimization.**
-  `DefaultAzureCredential` caches its token per instance, and on a dev host the chain resolves through
-  `AzureCliCredential`, which *spawns the `az` CLI* (measured at 3–5 s). Constructing one per publish
-  paid that cost every time: shares took 9–11 s, which exceeds the browser's ~5 s transient-activation
-  window, so `navigator.clipboard.write` was rejected and the user got the "copy it manually"
-  correction instead of a copied link. Reusing the instance brings a warm share to 3–4 s and the
-  clipboard write back inside the window. The first share after a server restart is still slow (cold
-  JIT + credential chain); the spinner covers it, and the banner degrades honestly if the write is
-  rejected.
+  **The credential and one `BlobServiceClient` per account are built once (`lazy`) and reused — this
+  is a requirement, not a micro-optimization.** `AzureCliCredential` invokes the `az` CLI, while the
+  reusable bearer-token cache belongs to the service client's authentication pipeline. Constructing
+  a fresh client per publish therefore paid the measured 3–5 s CLI cost every time: shares took
+  9–11 s, which exceeds the browser's ~5 s transient-activation window, so
+  `navigator.clipboard.write` was rejected and the user got the "copy it manually" correction
+  instead of a copied link. Reusing the client brings a warm share to 3–4 s and the clipboard write
+  back inside the window. The first share after a server restart is still slow (cold JIT + CLI);
+  the spinner covers it, and the banner degrades honestly if the write is rejected.
 - **Server wiring** (`src/Server/WorktreeApi.fs`): `shareCanvasDocImpl` =
   `validateCanvasPath → read file → CanvasExport.buildStaticHtml → CanvasShare.publish → Result`,
   wired into the live `IWorktreeApi` record via `withValidatedPath` (mirroring `archiveCanvasDoc`),
@@ -206,17 +207,30 @@ SUB=<personal-dev-subscription-id>
 
 az group create -n rg-treemon-canvas-share -l westeurope --subscription $SUB
 
+# Decision #3 — no account key exists to leak; Decision #4 — bare blob URL denied
 az storage account create -n <account> -g rg-treemon-canvas-share -l westeurope --subscription $SUB \
   --sku Standard_LRS --kind StorageV2 \
-  --allow-shared-key-access false \    # Decision #3 — no account key exists to leak
-  --allow-blob-public-access false \   # Decision #4 — bare blob URL denied
+  --allow-shared-key-access false \
+  --allow-blob-public-access false \
   --https-only true --min-tls-version TLS1_2
 
 # The one RBAC grant. Scope it at the ACCOUNT: generateUserDelegationKey acts at account level, so a
 # container-scoped data role alone cannot sign links (it would need Storage Blob Delegator as well).
 az role assignment create --assignee <operator-object-id> \
   --role "Storage Blob Data Contributor" \
-  --scope /subscriptions/$SUB/resourceGroups/rg-treemon-canvas-share/providers/Microsoft.Storage/storageAccounts/<account>
+  --scope /subscriptions/$SUB/resourceGroups/rg-treemon-canvas-share/providers/Microsoft.Storage/storageAccounts/<account> \
+  --subscription $SUB
+```
+
+The strongest account-wide emergency revocation invalidates all user delegation keys after Azure's
+cache propagation, not immediately. Run it only when revocation is required. This management-plane
+action requires `Microsoft.Storage/storageAccounts/revokeUserDelegationKeys/action`; the app's
+`Storage Blob Data Contributor` role is not enough.
+
+```bash
+az storage account revoke-delegation-keys \
+  --name <account> --resource-group rg-treemon-canvas-share \
+  --subscription $SUB
 ```
 
 - **Lifecycle cleanup** (Decision #9): the management policy below deletes shared blobs after the
@@ -266,10 +280,12 @@ Apply the policy, then confirm the rule is present on the account:
 ```bash
 az storage account management-policy create \
   --account-name <account> --resource-group <rg> \
-  --policy @scripts/canvas-share-lifecycle-policy.json
+  --policy @scripts/canvas-share-lifecycle-policy.json \
+  --subscription $SUB
 
 az storage account management-policy show \
-  --account-name <account> --resource-group <rg>
+  --account-name <account> --resource-group <rg> \
+  --subscription $SUB
 ```
 
 ### Provisioned account & operator setup
@@ -291,7 +307,7 @@ lives in the personal dev subscription, and because that (correctly) forbids sha
 credential model had to change with it. When running `az`, pass `--subscription` explicitly: the
 CLI's default may still be the team subscription.
 
-**Per-host setup is one line:** `az login`. `DefaultAzureCredential` picks that up, so nothing is
+**Per-host setup is one line:** `az login`. `AzureCliCredential` picks that up, so nothing is
 persisted, no env var is set, and no restart is needed to "install" a credential. `treemon.ps1`
 therefore has no credential plumbing at all (the former `Set-CanvasShareEnv` is gone). Add
 `canvasShare.accountName` to `~/.treemon/config.json` and sharing works:
@@ -302,7 +318,8 @@ therefore has no credential plumbing at all (the former `Set-CanvasShareEnv` is 
 
 If the host's `az login` lapses, publishing fails loudly at share time with a "run `az login`"
 message — links already issued keep working, because a signed SAS does not depend on the signer's
-ongoing session (only on the 7-day key expiry and the role assignment still existing).
+ongoing session. Role removal or delegation-key revocation invalidates them only after Azure's cache
+propagation; otherwise they live until the 7-day key expiry.
 
 ## Decisions
 
@@ -310,7 +327,7 @@ ongoing session (only on the 7-day key expiry and the role assignment still exis
 |---|----------|--------------------|
 | 1 | Hosting backend | **Azure Blob Storage** (user's dev subscription). Rejected: private-repo GitHub Pages (anonymously **un**viewable — recipients must log in), public-repo Pages (obscurity only), gists (served `text/plain`, JS won't run), Netlify/Vercel/Cloudflare (3rd-party data egress — against policy), nginx-on-a-VM (ops overhead Blob avoids). |
 | 2 | URL secrecy model | **Per-doc, blob-scoped, read-only SAS** over a reusable container token. Least privilege: a leaked link exposes exactly one doc (proven — doc A's token can't open doc B, which fails "Signature did not match"). It is **not heavy** — one delegation-key fetch + one signing call at share time, server stores nothing. |
-| 3 | Credential & expiry | **User delegation SAS signed via `DefaultAzureCredential`; 7-day expiry (the maximum Azure allows).** *Reversal of the original choice:* v1 picked a 90-day account-key SAS and explicitly rejected user delegation *because* of the 7-day cap. That is no longer available — the storage account must run with `allowSharedKeyAccess=false` (SFI "Safe Secrets" — disable shared key and anonymous blob access), and a user delegation SAS is the only SAS type that still works under it. Internal guidance names this exact path ("migrate to Entra ID / UDK SAS"), so it needs no policy exception. Net: **no stored secret anywhere** (the env var is gone), at the cost of link lifetime dropping 90 → 7 days. Per-doc revoke = delete the blob; bulk revoke = remove the signer's role assignment. |
+| 3 | Credential & expiry | **User delegation SAS signed via `AzureCliCredential`; 7-day expiry (the maximum Azure allows).** *Reversal of the original choice:* v1 picked a 90-day account-key SAS and explicitly rejected user delegation *because* of the 7-day cap. That is no longer available — the storage account must run with `allowSharedKeyAccess=false` (SFI "Safe Secrets" — disable shared key and anonymous blob access), and a user delegation SAS is the only SAS type that still works under it. Internal guidance names this exact path ("migrate to Entra ID / UDK SAS"), so it needs no policy exception. Net: **no stored secret anywhere** (the env var is gone), at the cost of link lifetime dropping 90 → 7 days. Per-doc revoke = delete the blob; strongest bulk revoke = `az storage account revoke-delegation-keys`, subject to Azure cache propagation. |
 | 4 | Anonymous access | **Disabled** at the account (`allow-blob-public-access=false`). Bare URL → `409`; SAS is the only entry. |
 | 5 | Blob naming | **Unguessable prefix + real filename** (`<random>/<file>.html`). Random prefix gives uniqueness/obscurity; the real filename gives the recipient a meaningful name. The SAS signature is the actual gate. |
 | 6 | Strip vs inject | The on-disk file is already script-free; the export **re-injects** base theme + no-op `canvasSend` and nothing else — a **third `buildInjection` mode**, not a stripping pass. |
@@ -362,13 +379,13 @@ Recording both here so each is a documented decision, not a blind spot:
 | `src/Shared/Types.fs` | `ShareCanvasDocRequest`, `CanvasShareResult`, `IWorktreeApi.shareCanvasDoc` |
 | `src/Server/CanvasExport.fs` | `StaticExport` transform: base theme + no-op `canvasSend`; `extractTitle` / `resolveTitle` |
 | `src/Shared/Formatting.fs` | `prettifyFilename` (filename → sentence-case title) — the single Fable-safe source shared by the server's `resolveTitle` and any client caller (Decision #11) |
-| `src/Server/CanvasShare.fs` | Azure Blob upload + per-doc read-only user delegation SAS; reads config, credential from `DefaultAzureCredential` |
+| `src/Server/CanvasShare.fs` | Azure Blob upload + per-doc read-only user delegation SAS; reads config, uses `AzureCliCredential`, and caches one service client per account |
 | `src/Server/Server.fsproj` | `Azure.Storage.Blobs` + `Azure.Identity` package references |
 | `scripts/canvas-share-lifecycle-policy.json` | Storage lifecycle rule — deletes canvas-share blobs after 8 days (see **Storage Account Setup**) |
 | `src/Server/WorktreeApi.fs` | `shareCanvasDocImpl` + live wiring (`withValidatedPath`) + demo-mode stub |
 | `src/Server/GlobalConfig.fs` | Reads the `canvasShare` config section (`accountName`, `container`, `defaultExpiryDays`) |
 | `src/Client/CanvasPane.fs` | Share button (AgentDoc-only, spinner + disabled while in flight) + `ShareDoc` callback + success banner |
-| `src/Client/CanvasState.fs` | `SharingDoc` — the in-flight share that drives the button's spinner |
+| `src/Client/CanvasState.fs` | Scoped `ShareState` phase machine that drives the global share lock and matching spinner |
 | `src/Client/CanvasUpdate.fs` | `ShareCanvasDoc` / `ShareCanvasDocResult` / `ClipboardWriteResult` arms + dual-format clipboard write (outcome-routed banner) |
 | `src/Client/index.html` | Share button styling + `.canvas-share-btn.sharing` spinner |
 | `src/Tests/*` | Static-export transform tests, publish-backend unit tests (naming, SAS grant, config, unconfigured gate), clipboard payload test, Share-button AgentDoc-gating unit test (mirrors the archive-button SystemView-gating test) |
@@ -376,9 +393,9 @@ Recording both here so each is a documented decision, not a blind spot:
 ## Verification
 
 - **Backend unit tests** cover the pure and deterministic parts: blob naming and prefix entropy, the
-  exact SAS grant (`sr=b`/`sp=r`/`spr=https`), endpoint construction, the config reader (including
-  the 7-day ceiling), and the unconfigured gate — which must fail *before* acquiring a credential or
-  touching the network.
+  exact SAS grant (`sr=b`/`sp=r`/`spr=https`), per-account service-client reuse, the config reader
+  (including the 7-day ceiling), and the unconfigured gate — which must fail *before* acquiring a
+  credential or touching the network.
 - **No Azurite round-trip.** The emulator does not implement `GetUserDelegationKey` at all, so it
   cannot emulate this design; the former `CanvasShareAzuriteTests` fixture was removed rather than
   kept passing against a credential model the product no longer uses.
@@ -387,9 +404,10 @@ Recording both here so each is a documented decision, not a blind spot:
   with the doc intact; the bare blob URL is denied `409 PublicAccessNotPermitted`; the same token
   applied to a different blob path fails `AuthenticationFailed` / "Signature did not match" (the
   per-doc isolation property); and a >7-day expiry is refused when the delegation key is minted.
-- **Client** is covered by a unit test of the clipboard-payload builder (both formats) and a
-  view-level unit test that the Share button is AgentDoc-only (mirroring the archive-button
-  SystemView-gating test in `CanvasPaneTests`).
+- **Client** is covered by unit tests for the scoped share-state transitions, stale-result guards,
+  global button lock/matching spinner, and clipboard-payload builder (both formats), plus a
+  view-level test that the Share button is AgentDoc-only (mirroring the archive-button SystemView
+  gating test in `CanvasPaneTests`).
 - The **end-to-end UI clipboard write + paste** (button click → `navigator.clipboard.write` of both
   formats → paste a titled link into a rich app) is confirmed **manually**: browser clipboard
   automation is permission-gated and flaky, so it is not automated. Its constituent parts (payload

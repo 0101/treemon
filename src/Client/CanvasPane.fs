@@ -233,7 +233,8 @@ type CanvasPaneState =
       SendState: CanvasSendState
       DocError: DocJsError option
       ShareNotice: string option
-      SharingDoc: string option
+      ActiveScopedKey: string option
+      ShareState: CanvasShareState
       BridgeLiveness: Map<string, BridgeLiveness> }
 
 /// The awareness/doc slices `view` renders from, bundled into one record for the same reason as
@@ -253,7 +254,8 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           SendState = sendState
           DocError = docError
           ShareNotice = shareNotice
-          SharingDoc = sharingDoc
+          ActiveScopedKey = activeScopedKey
+          ShareState = shareState
           BridgeLiveness = bridgeLiveness } = state
     let { SetPosition = setPosition
           SetSize = setSize
@@ -323,17 +325,17 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                             ]
                         match activeDoc with
                         | Some d when d.Kind = AgentDoc ->
-                            // Publishing takes seconds, so swap the glyph for a spinner and disable the
-                            // button while it runs: an unchanged button reads as "nothing happened" and
-                            // invites repeat clicks, each of which publishes another copy.
-                            let isSharing = sharingDoc = Some d.Filename
+                            let shareActive, isSharing =
+                                CanvasShareState.buttonFlags activeScopedKey d.Filename shareState
                             Html.button [
                                 prop.className (if isSharing then "canvas-share-btn sharing" else "canvas-share-btn")
-                                prop.disabled isSharing
+                                prop.disabled shareActive
                                 prop.onClick (fun _ -> shareDoc d.Filename)
                                 prop.title (
-                                    if isSharing then "Publishing this doc…"
-                                    else "Share this doc — copies a rich link to the clipboard")
+                                    match isSharing, shareActive with
+                                    | true, _ -> "Sharing this doc…"
+                                    | false, true -> "Another canvas doc is being shared"
+                                    | _ -> "Share this doc — copies a rich link to the clipboard")
                                 prop.children [
                                     if isSharing then Html.span [ prop.className "share-spinner" ] else shareIcon
                                 ]
