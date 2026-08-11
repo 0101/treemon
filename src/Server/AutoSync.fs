@@ -89,14 +89,20 @@ type TriggerDependencies =
       ReloadGitData: string -> Async<unit>
       Deliver: DeliveryRequest -> Async<bool> }
 
-/// The push rule lives in the prompt itself rather than being decided for the agent: the agent can
-/// read the live pull-request state at the moment it would push. Provider-neutral and free of any
-/// repository text.
-let private pushPolicy =
-    "If this branch has an open pull request, push the synced branch after the checks pass; otherwise, do not push."
+/// Only an open pull request calls for publishing the synced branch.
+let isOpenPr (prStatus: PrStatus) =
+    match prStatus with
+    | HasPr pr -> pr.State = PrState.Open
+    | NoPr -> false
 
-let prompt upstreamRemote baseBranch =
-    $"Sync this worktree with {upstreamRemote}/{baseBranch} when safe. Preserve any in-progress work, resolve conflicts carefully, and run the appropriate checks before considering the sync complete. {pushPolicy}"
+let private pushInstruction prStatus =
+    if isOpenPr prStatus then
+        "Push the synced branch after the checks pass."
+    else
+        "Do not push the synced branch."
+
+let prompt upstreamRemote baseBranch prStatus =
+    $"Sync this worktree with {upstreamRemote}/{baseBranch} when safe. Preserve any in-progress work, resolve conflicts carefully, and run the appropriate checks before considering the sync complete. {pushInstruction prStatus}"
 
 /// All the agent is told about a mechanical attempt that stopped: what state the worktree may be in,
 /// in Treemon's own words. The agent inspects the repository itself for anything more, which is why
@@ -110,8 +116,8 @@ let internal failureDescription =
     | BranchChanged -> "the worktree is not on the branch this sync was started for"
     | PushFailed -> "the push was rejected"
 
-let fallbackPrompt upstreamRemote baseBranch failure =
-    $"{prompt upstreamRemote baseBranch} Treemon already attempted this sync itself and stopped because {failureDescription failure}."
+let fallbackPrompt upstreamRemote baseBranch prStatus failure =
+    $"{prompt upstreamRemote baseBranch prStatus} Treemon already attempted this sync itself and stopped because {failureDescription failure}."
 
 let internal syncOutcomeResult =
     function
@@ -129,13 +135,6 @@ let internal pushOutcomeResult =
     | GitBranchSync.BranchPushOutcome.Pushed -> Ok()
     | GitBranchSync.BranchPushOutcome.BranchChanged -> Error BranchChanged
     | GitBranchSync.BranchPushOutcome.PushFailed -> Error PushFailed
-
-/// Only an open pull request may receive a mechanically synced branch. A merged or closed-unmerged
-/// one has nothing to advance, so the sync finishes locally.
-let isOpenPr (prStatus: PrStatus) =
-    match prStatus with
-    | HasPr pr -> pr.State = PrState.Open
-    | NoPr -> false
 
 /// Treemon's whole token-free path as one operation: the Git sync, then the push an open pull
 /// request calls for. Only a run that finished all of it may skip agent delivery, so every step
@@ -368,27 +367,32 @@ let private attemptSync
         | Error failure ->
             // The gate is re-passed here because a fetch and a merge have run since it was last
             // read: a branch disabled or reconciled merged meanwhile must not be handed to an
-            // agent either. An unread PR cache does not stop the handover — the agent resolves
-            // PR state itself, and the work this path could not finish still needs doing.
+            // agent either. If the cache is temporarily unreadable, the reconciled status from
+            // before the mutation still gives the prompt its explicit push instruction.
+            let deliverFallback currentPrStatus =
+                async {
+                    // The target is re-selected rather than carried in from before the mutation, for
+                    // the same reason: a session that had settled when the fetch started can be mid-turn
+                    // by the time it stops. Nothing is recorded, so the next observation retries once
+                    // the worktree is free.
+                    match! dependencies.ReadOwnership gitData.Path with
+                    | Busy ->
+                        Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: a session is now working in the worktree"
+                        return false
+                    | Free target ->
+                        return!
+                            fallbackPrompt upstreamRemote baseBranch currentPrStatus failure
+                            |> deliverPrompt dependencies gitData target
+                }
+
             match! eligiblePrStatus dependencies repoRoot gitData with
             | Ineligible ->
                 Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: no longer eligible"
                 return false
-            | Eligible _
+            | Eligible currentPrStatus ->
+                return! deliverFallback currentPrStatus
             | PrStatusUnknown ->
-                // The target is re-selected rather than carried in from before the mutation, for the
-                // same reason: a session that had settled when the fetch started can be mid-turn by
-                // the time it stops — and an agent resuming is itself the likeliest cause of the
-                // dirty worktree that brought the sync here. Nothing is recorded, so the next
-                // observation retries once the worktree is free.
-                match! dependencies.ReadOwnership gitData.Path with
-                | Busy ->
-                    Log.log "AutoSync" $"Dropped fallback prompt for {gitData.Branch}: a session is now working in the worktree"
-                    return false
-                | Free target ->
-                    return!
-                        fallbackPrompt upstreamRemote baseBranch failure
-                        |> deliverPrompt dependencies gitData target
+                return! deliverFallback prStatus
     }
 
 let private runOperation
