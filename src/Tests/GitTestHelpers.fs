@@ -33,6 +33,49 @@ let gitOut (workingDir: string) (args: string) =
     let _, stdout = runGit workingDir args
     stdout
 
+/// Runs `git arguments` using ArgumentList, returning the exit code and raw output.
+let runGitArgs (workingDir: string) (arguments: string list) =
+    let psi =
+        ProcessStartInfo(
+            FileName = "git",
+            WorkingDirectory = workingDir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        )
+
+    arguments |> List.iter psi.ArgumentList.Add
+
+    use proc = Process.Start(psi)
+    let stdout = proc.StandardOutput.ReadToEnd()
+    let stderr = proc.StandardError.ReadToEnd()
+    proc.WaitForExit()
+    proc.ExitCode, stdout, stderr
+
+/// Runs `git arguments`, asserting it exits 0.
+let gitOk workingDir arguments =
+    let exitCode, _, stderr = runGitArgs workingDir arguments
+    Assert.That(exitCode, Is.EqualTo(0), $"git failed: {stderr}")
+
+/// Runs `git arguments` and returns its trimmed stdout.
+let gitText workingDir arguments =
+    let exitCode, stdout, stderr = runGitArgs workingDir arguments
+    Assert.That(exitCode, Is.EqualTo(0), $"git failed: {stderr}")
+    stdout.Trim()
+
+/// Runs `git arguments` and returns its raw stdout.
+let gitOutput workingDir arguments =
+    let exitCode, stdout, stderr = runGitArgs workingDir arguments
+    Assert.That(exitCode, Is.EqualTo(0), $"git failed: {stderr}")
+    stdout
+
+/// Writes `content` to `relativePath` under `repoDir`, creating parent directories.
+let writeText (repoDir: string) (relativePath: string) (content: string) =
+    let path = Path.Combine(repoDir, relativePath)
+    Path.GetDirectoryName(path) |> Directory.CreateDirectory |> ignore
+    File.WriteAllText(path, content)
+
 /// Creates a fresh git repo with an identity configured (no commits yet).
 let initRepo (repoDir: string) =
     Directory.CreateDirectory(repoDir) |> ignore

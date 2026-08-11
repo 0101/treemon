@@ -2,12 +2,18 @@ open Saturn
 open Giraffe
 open Fable.Remoting.Server
 open Fable.Remoting.Giraffe
+open System
 open System.Threading
+open Microsoft.Extensions.Hosting
 open Shared
 open Server
 
 let readDeployBranch () =
-    ProcessRunner.run "Startup" "git" "rev-parse --abbrev-ref HEAD"
+    ProcessRunner.text
+        { ProcessRunner.Spawn.create "git" with
+            Context = "Startup"
+            Limits = ProcessRunner.CaptureLimits.small }
+        [ "rev-parse"; "--abbrev-ref"; "HEAD" ]
     |> Async.RunSynchronously
     |> Option.bind (fun branch ->
         match branch with
@@ -96,7 +102,7 @@ let parseArgs (args: string array) =
               TestFixtures = testFixtures
               Demo = false }
 
-let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.StateMsg>) (fixtures: FixtureData) =
+let private populateAgentFromFixtures (agent: MailboxProcessor<SchedulerState.StateMsg>) (fixtures: FixtureData) =
     fixtures.Worktrees.Repos
     |> List.iter (fun repo ->
         let worktreeInfos =
@@ -106,7 +112,7 @@ let private populateAgentFromFixtures (agent: MailboxProcessor<RefreshScheduler.
                   Head = ""
                   Branch = Some wt.Branch }: GitWorktree.WorktreeInfo)
 
-        agent.Post(RefreshScheduler.UpdateWorktreeList(repo.RepoId, worktreeInfos))
+        agent.Post(SchedulerState.UpdateWorktreeList(repo.RepoId, worktreeInfos))
         Log.log "Startup" $"Populated agent with {List.length worktreeInfos} fixture worktrees for repo '{RepoId.value repo.RepoId}'")
 
 let private buildDemoApi (startTime: System.DateTimeOffset) : IWorktreeApi =
@@ -225,6 +231,56 @@ let internal persistResolvedRoots (resolution: RootsResolution) =
         | Error msg ->
             Log.log "Startup" $"Failed to persist worktree roots: {msg}"
 
+let internal usesSessionActivity (config: ServerConfig) =
+    not config.Demo && config.TestFixtures.IsNone
+
+/// Creates one port-scoped runtime store and seeds it from disk, logging the path so a stale or
+/// unexpected file is visible in the startup log.
+let private loadRuntimeStore
+    (label: string)
+    (path: string)
+    (create: string -> PersistentStore.Store<'K, 'V>)
+    : PersistentStore.Store<'K, 'V> =
+    Log.log "Startup" $"{label}: {path}"
+    let store = create path
+    store.Load()
+    store
+
+/// Flushes runtime stores at shutdown, bounded so a wedged disk cannot hang exit. Each store
+/// contributes a labelled flush rather than its own copy of this timeout handling.
+let private flushRuntimeStores (stores: (string * (unit -> Async<Result<unit, string>>)) list) =
+    stores
+    |> List.iter (fun (label, flush) ->
+        try
+            match Async.RunSynchronously(flush (), timeout = 5000) with
+            | Ok() -> ()
+            | Error error -> Log.log "Shutdown" error
+        with :? System.TimeoutException ->
+            Log.log "Shutdown" $"Timed out flushing {label}")
+
+let internal runHostWithCapture
+    (startHost: unit -> unit)
+    (waitForShutdown: unit -> unit)
+    (stopping: CancellationToken)
+    (capture: (CancellationToken -> Async<unit>) option)
+    =
+    match capture with
+    | None ->
+        startHost ()
+        waitForShutdown ()
+    | Some workflow ->
+        let loop = BackgroundLoop.start workflow
+        let stoppingRegistration =
+            stopping.Register(fun () -> BackgroundLoop.cancel loop)
+        Log.log "Startup" "Overview snapshot capture started"
+
+        try
+            startHost ()
+            waitForShutdown ()
+        finally
+            stoppingRegistration.Dispose()
+            BackgroundLoop.stop "Overview snapshot capture" loop
+
 [<EntryPoint>]
 let main args =
     let config = parseArgs args
@@ -238,7 +294,7 @@ let main args =
     // this startup boundary. Demo and fixture modes bypass resolution entirely — they serve
     // synthetic data, so roots stay [].
     let worktreeRoots =
-        if config.Demo || config.TestFixtures.IsSome then
+        if not (usesSessionActivity config) then
             []
         else
             let resolution = resolveWorktreeRoots config.WorktreeRoots
@@ -259,15 +315,12 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
-    let cts = new CancellationTokenSource()
-
-    let remotingApi, schedulerAgent =
+    let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, runtimeStoreFlushes =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
-            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None
+            buildDemoApi System.DateTimeOffset.Now |> buildRemotingHandler, None, None, None, []
         else
-            let agent = RefreshScheduler.createAgent ()
-            let syncAgent = SyncEngine.createSyncAgent ()
+            let agent = SchedulerState.createAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
             CanvasDocOwnership.load ()
@@ -281,21 +334,95 @@ let main args =
                 | Error msg ->
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
+
+                WorktreeApi.worktreeApi
+                    { Agent = agent
+                      CardLog = cardLog
+                      SessionAgent = sessionAgent
+                      ActivityStore = None
+                      SnapshotStore = None
+                      AutoSyncStore = None
+                      WorktreeRoots = worktreeRoots
+                      TestFixtures = config.TestFixtures
+                      AppVersion = appVersion
+                      DeployBranch = deployBranch }
+                |> buildRemotingHandler,
+                Some agent,
+                None,
+                None,
+                []
             | None ->
-                RefreshScheduler.start agent worktreeRoots cts.Token
-                Log.log "Startup" "Scheduler background loop started"
+                let dbPath = System.IO.Path.Combine("data", $"session-activity-{config.Port}.db")
+                Log.log "Startup" $"Session activity store db: {dbPath}"
+                let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
+                let activity =
+                    SessionActivityRuntime.create
+                        dbPath
+                        agent
+                        rootPaths
+                let store = activity.Components.Store
 
-            WorktreeApi.worktreeApi agent syncAgent cardLog sessionAgent worktreeRoots config.TestFixtures appVersion deployBranch
-            |> buildRemotingHandler, Some agent
+                let mergedStore =
+                    loadRuntimeStore
+                        "Merged PR store"
+                        (MergedPrStore.filePathForPort config.Port)
+                        MergedPrStore.create
 
-    System.AppDomain.CurrentDomain.ProcessExit.Add(fun _ ->
-        Log.log "Shutdown" "Cancelling scheduler"
-        cts.Cancel()
-        cts.Dispose())
+                let autoSyncStore =
+                    loadRuntimeStore
+                        "Auto-sync store"
+                        (AutoSyncStore.filePathForPort config.Port)
+                        AutoSyncStore.create
 
-    match schedulerAgent, config.CanvasPort with
-    | Some agent, Some canvasPort -> CanvasDocServer.start agent canvasPort cts.Token
-    | _ -> ()
+                let schedulerServices: RefreshScheduler.SchedulerServices =
+                    { SessionAgent = sessionAgent
+                      ActivityStore = Some store
+                      MergedPrStore = mergedStore
+                      AutoSyncStore = autoSyncStore }
+
+                let scheduler =
+                    try
+                        BackgroundLoop.start
+                            (RefreshScheduler.run
+                                agent
+                                schedulerServices
+                                worktreeRoots)
+                    with _ ->
+                        SessionActivityRuntime.shutdown activity None
+                        reraise ()
+
+                try
+                    activity.Components.Service.Start()
+                    Log.log "Startup" "Session activity ingestion started"
+                    Log.log "Startup" "Scheduler background loop started"
+
+                    WorktreeApi.worktreeApi
+                        { Agent = agent
+                          CardLog = cardLog
+                          SessionAgent = sessionAgent
+                          ActivityStore = Some store
+                          SnapshotStore = Some activity.SnapshotStore
+                          AutoSyncStore = Some autoSyncStore
+                          WorktreeRoots = worktreeRoots
+                          TestFixtures = config.TestFixtures
+                          AppVersion = appVersion
+                          DeployBranch = deployBranch }
+                    |> buildRemotingHandler,
+                    Some agent,
+                    Some activity,
+                    Some scheduler,
+                    [ "merged PR store", mergedStore.Flush
+                      "auto-sync store", autoSyncStore.Flush ]
+                with _ ->
+                    SessionActivityRuntime.shutdown activity (Some scheduler)
+                    reraise ()
+
+    let sessionActivityService =
+        activityRuntime |> Option.map _.Components.Service
+
+    let capture =
+        activityRuntime
+        |> Option.map _.Capture.Run
 
     // The register/attribute routes need the scheduler agent for their known-worktree guard. In
     // demo mode there is no agent (and the canvas doc server is never started — see above), so
@@ -314,9 +441,19 @@ let main args =
               route "/api/canvas/attribute" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasAttributeHandler agent ]
         | None -> []
 
+    // POST /api/session/activity: the push-model status ingestion endpoint. Same cross-origin
+    // vector as the canvas POSTs, so it carries the same HttpSecurity.csrfGuard (a non-loopback
+    // Origin/Referer is rejected 403; a MISSING one — the non-browser reporting extension's Node
+    // fetch — is allowed). POST filters first so the guard only evaluates the request it protects.
+    let sessionActivityRoutes =
+        match sessionActivityService with
+        | Some svc -> [ route "/api/session/activity" >=> POST >=> HttpSecurity.csrfGuard >=> svc.Handler ]
+        | None -> []
+
     let combinedRouter =
         choose (
             canvasAgentRoutes
+            @ sessionActivityRoutes
             @ [ route "/api/canvas/bridge-status" >=> GET >=> CanvasDocServer.bridgeStatusHandler
                 // CSRF hardening: the Fable.Remoting surface has no auth/CSRF token and does not
                 // enforce a content type, so a cross-origin page could POST to state-changing
@@ -333,5 +470,36 @@ let main args =
             use_gzip
         }
 
-    run app
+    try
+        let canvasHost =
+            match schedulerAgent, config.CanvasPort with
+            | Some agent, Some canvasPort -> Some(CanvasDocServer.start agent canvasPort)
+            | _ -> None
+
+        try
+            use host = app.Build()
+            let applicationLifetime =
+                host.Services.GetService(typeof<IHostApplicationLifetime>)
+                :?> IHostApplicationLifetime
+
+            runHostWithCapture
+                (fun () -> host.Start())
+                (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
+                applicationLifetime.ApplicationStopping
+                capture
+        finally
+            canvasHost
+            |> Option.iter (fun host ->
+                try
+                    host.StopAsync().GetAwaiter().GetResult()
+                finally
+                    host.DisposeAsync().GetAwaiter().GetResult())
+    finally
+        activityRuntime
+        |> Option.iter (fun runtime ->
+            Log.log "Shutdown" "Stopping session activity"
+            SessionActivityRuntime.shutdown runtime schedulerLoop)
+
+        flushRuntimeStores runtimeStoreFlushes
+
     0

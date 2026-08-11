@@ -4,6 +4,7 @@ open Shared
 open Feliz
 open Fable.Core
 open Fable.Core.JsInterop
+open BrowserObserverInterop
 
 /// Shared time-bucketing ladder for relativeTime / relativeTimeCompact: the same four thresholds and
 /// the same int truncation, parameterised only by the sub-minute label and the per-bucket suffix.
@@ -32,8 +33,6 @@ let stepStatusClassName (status: StepStatus option) =
     | Some StepStatus.Running -> "event-status running"
     | Some StepStatus.Succeeded -> "event-status success"
     | Some (StepStatus.Failed _) -> "event-status failed"
-    | Some StepStatus.Cancelled -> "event-status cancelled"
-    | Some StepStatus.NotConfigured -> "event-status not-configured"
     | Some StepStatus.Pending -> "event-status"
     | None -> "event-status"
 
@@ -42,8 +41,6 @@ let stepStatusText (status: StepStatus option) =
     | Some StepStatus.Running -> "running"
     | Some StepStatus.Succeeded -> "success"
     | Some (StepStatus.Failed msg) -> match msg with "" -> "failed" | _ -> $"failed: {msg}"
-    | Some StepStatus.Cancelled -> "cancelled"
-    | Some StepStatus.NotConfigured -> "not configured"
     | _ -> ""
 
 let relativeEventTime (dt: System.DateTimeOffset) =
@@ -53,16 +50,6 @@ let relativeEventTime (dt: System.DateTimeOffset) =
     | d when d.TotalMinutes < 60.0 -> $"{int d.TotalMinutes}m ago"
     | d when d.TotalHours < 24.0 -> $"{int d.TotalHours}h ago"
     | d -> $"{int d.TotalDays}d ago"
-
-// ResizeObserver interop
-[<Emit("new ResizeObserver($0)")>]
-let private createResizeObserver (callback: obj -> unit) : obj = jsNative
-
-[<Emit("$0.observe($1)")>]
-let private observeElement (observer: obj) (el: Browser.Types.Element) : unit = jsNative
-
-[<Emit("$0.disconnect()")>]
-let private disconnectObserver (observer: obj) : unit = jsNative
 
 [<Emit("$0.scrollWidth > $0.clientWidth")>]
 let private hasOverflow (el: Browser.Types.Element) : bool = jsNative
@@ -100,9 +87,9 @@ let FitOrHide (items: ReactElement list) =
         | Some el when not (isNull el.parentElement) ->
             let observer = createResizeObserver (fun _ -> checkOverflow ())
             observeElement observer el.parentElement
-            React.createDisposable (fun () -> disconnectObserver observer)
+            fun () -> disconnectObserver observer
         | _ ->
-            React.createDisposable ignore
+            fun () -> ()
     ), [| |])
 
     Html.span [
@@ -117,7 +104,7 @@ let FitOrHide (items: ReactElement list) =
 let private commitGridElement (m: WorkMetrics) =
     let displayCount = min m.CommitCount 90
     let overflow = m.CommitCount - displayCount
-    React.fragment [
+    React.Fragment [
         Html.span [
             prop.className "commit-grid"
             prop.children (List.init displayCount (fun _ -> Html.span [ prop.className "commit-square" ]))
@@ -145,19 +132,4 @@ let workMetricsItems (metrics: WorkMetrics option) : ReactElement list =
             commitGridElement m
             if m.LinesAdded <> 0 || m.LinesRemoved <> 0 then
                 diffStatsElement m.LinesAdded m.LinesRemoved
-        ]
-
-let workMetricsView (metrics: WorkMetrics option) =
-    match metrics with
-    | None -> Html.none
-    | Some m when m.CommitCount = 0 -> Html.none
-    | Some m ->
-        Html.span [
-            prop.className "work-metrics"
-            prop.children [
-                commitGridElement m
-                match m.LinesAdded, m.LinesRemoved with
-                | 0, 0 -> Html.none
-                | added, removed -> diffStatsElement added removed
-            ]
         ]

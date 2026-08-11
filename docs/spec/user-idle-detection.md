@@ -33,10 +33,6 @@ Dashboard interaction = `mousemove`, `keydown`, `click`, `scroll` on the documen
 | PR | 10s | 120s | 600s (10 min) |
 | Fetch | 10s | 120s | 600s (10 min) |
 
-### Sync Polling
-
-SyncTick (2s interval when a sync is running) is unaffected by activity level. Syncs are user-initiated operations — always show progress regardless of idle state.
-
 ### Wake-Up Behavior
 
 When transitioning from Idle/DeepIdle → Active, the client immediately dispatches a Tick (fetches fresh data) and reports the transition to the server. The user sees fresh data within 1s of touching the dashboard.
@@ -57,7 +53,7 @@ The `activityDetection` Elmish subscription registers DOM event listeners (mouse
 
 On activity level transitions, `reportActivity` is called to inform the server.
 
-### Server-Side (`src/Server/RefreshScheduler.fs`)
+### Server-Side (`src/Server/SchedulerState.fs`, `src/Server/RefreshScheduler.fs`)
 
 `DashboardState` gets a `ClientActivity: ActivityLevel` field, defaulting to `Idle`. New `ReportClientActivity` message updates it. `intervalOf` becomes a function of `(ActivityLevel * RefreshTask)` with explicit intervals per combination (no multiplier math).
 

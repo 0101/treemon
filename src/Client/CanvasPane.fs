@@ -5,6 +5,7 @@ open Navigation
 open CanvasTypes
 open Feliz
 open Browser
+open ActionButtons
 
 // The canvas-doc server origin for THIS build, injected by Vite's `define` (see vite.config.js).
 // Prod/dev default to 127.0.0.1:5002; the E2E test stack overrides CANVAS_PORT so its iframe origin
@@ -18,7 +19,7 @@ let [<Literal>] CanvasOrigin = "http://127.0.0.1:5002"
 #endif
 // Doc→pane message size cap, in UTF-16 code units (JS String.length): the listener below drops a
 // message when JSON.stringify(me.data).length exceeds this. The injected window.canvasSend helper
-// enforces the SAME cap doc-side (var MAX=64000 in canvasSendScript, src/Server/CanvasDocServer.fs)
+// enforces the SAME cap doc-side (var MAX=64000 in src/Extension/canvas-send.js)
 // so its accept/drop verdict matches this check — keep the two literals in sync if you change this
 // value (CanvasDocServerTests pins the helper's copy).
 let [<Literal>] private MaxPayloadBytes = 64_000
@@ -26,10 +27,7 @@ let [<Literal>] private MaxPayloadBytes = 64_000
 let private isDocAlive (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
     match doc.OwnerSessionId with
     | None -> false
-    | Some ownerId ->
-        bridgeLiveness
-        |> Map.values
-        |> Seq.exists (fun bl -> bl.SessionId = Some ownerId && bl.IsAlive)
+    | Some ownerId -> BridgeLiveness.hasLiveSession ownerId bridgeLiveness
 
 let private livenessDot (isAlive: bool) =
     Html.span [
@@ -51,6 +49,18 @@ let private shareIcon =
         ]
     ]
 
+/// The Start-session glyph (a filled play triangle), styled like `shareIcon` (`btn-icon`, 24×24,
+/// `currentColor`) so the icon-only launch button matches the Share and Archive buttons.
+let private playIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.path [ svg.d "M8 5v14l11-7z" ]
+        ]
+    ]
+
 /// Render the liveness dot only for AgentDocs. A SystemView (e.g. the beads dashboard) is
 /// server-generated and has no owner session, so liveness is meaningless and the dot is omitted.
 let private livenessDotFor (bridgeLiveness: Map<string, BridgeLiveness>) (doc: CanvasDoc) =
@@ -62,26 +72,6 @@ let private livenessDotFor (bridgeLiveness: Map<string, BridgeLiveness>) (doc: C
 /// the SystemView entry, replacing the beads dashboard's former top-bar "N issues" meta.
 let private beadsTotal (b: BeadsSummary) =
     b.Open + b.InProgress + b.Blocked + b.Closed
-
-/// Render the SystemView (e.g. the beads dashboard) entry for the tab strip. It is deliberately NOT
-/// a normal agent-doc tab: it uses a distinct CSS class, carries no liveness dot, and labels itself
-/// with the worktree's beads issue count shown as a badge next to a "BD" glyph.
-let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: string -> unit) (doc: CanvasDoc) =
-    Html.button [
-        prop.className (if isActive then "canvas-system-tab active" else "canvas-system-tab")
-        prop.onClick (fun _ -> selectDoc doc.Filename)
-        prop.title "Beads issues"
-        prop.children [
-            Html.span [
-                prop.className "canvas-system-tab-glyph"
-                prop.text "BD"
-            ]
-            Html.span [
-                prop.className "canvas-system-tab-count"
-                prop.text (string (beadsTotal wt.Beads))
-            ]
-        ]
-    ]
 
 let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
     let encodedPath = Fable.Core.JS.encodeURIComponent (WorktreePath.value wt.Path)
@@ -96,8 +86,41 @@ let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
 let openDocInBrowserTab (wt: WorktreeStatus) (doc: CanvasDoc) : unit =
     Fable.Core.JsInterop.emitJsExpr (iframeSrc wt doc) "window.open($0,'_blank','noopener')"
 
-let private latestDocModified (wt: WorktreeStatus) =
-    wt.CanvasDocs
+/// Render a SystemView entry for the tab strip. SystemViews are deliberately not normal AgentDoc
+/// tabs: they use a distinct class, carry no liveness dot, and retain the shared double-click
+/// affordance for opening the exact iframe URL in a standalone browser tab.
+let private systemViewTab (wt: WorktreeStatus) (isActive: bool) (selectDoc: string -> unit) (doc: CanvasDoc) =
+    let glyph, count, label =
+        match doc.Filename.ToLowerInvariant() with
+        | "beads.html" -> Html.text "BD", Some(string (beadsTotal wt.Beads)), "Beads issues"
+        | "diff.html" -> diffIcon, None, "Worktree diff"
+        | _ -> Html.text (doc.Filename.Replace(".html", "")), None, doc.Filename
+
+    Html.button [
+        prop.className (if isActive then "canvas-system-tab active" else "canvas-system-tab")
+        prop.onClick (fun _ -> selectDoc doc.Filename)
+        prop.onDoubleClick (fun _ -> openDocInBrowserTab wt doc)
+        prop.title $"{label} — double-click to open in a browser tab"
+        prop.children [
+            Html.span [
+                prop.className "canvas-system-tab-glyph"
+                prop.children [ glyph ]
+            ]
+            match count with
+            | Some value ->
+                Html.span [
+                    prop.className "canvas-system-tab-count"
+                    prop.text value
+                ]
+            | None -> ()
+        ]
+    ]
+
+let private overviewDocs (wt: WorktreeStatus) =
+    wt.CanvasDocs |> List.filter (fun doc -> doc.Kind = AgentDoc)
+
+let private latestDocModified docs =
+    docs
     |> List.map _.LastModified
     |> List.sortDescending
     |> List.tryHead
@@ -107,18 +130,19 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         repos
         |> List.collect (fun repo ->
             repo.Worktrees
-            |> List.filter (fun wt -> not (List.isEmpty wt.CanvasDocs))
-            |> List.map (fun wt ->
+            |> List.choose (fun wt ->
+                let docs = overviewDocs wt
                 let scopedKey = WorktreePath.value wt.Path
-                repo.Name, wt, scopedKey))
+                if List.isEmpty docs then None
+                else Some (repo.Name, wt, scopedKey, docs)))
 
     let sorted =
         entries
-        |> List.sortByDescending (fun (_, wt, _) -> latestDocModified wt)
+        |> List.sortByDescending (fun (_, _, _, docs) -> latestDocModified docs)
 
     let grouped =
         sorted
-        |> List.groupBy (fun (repoName, _, _) -> repoName)
+        |> List.groupBy (fun (repoName, _, _, _) -> repoName)
 
     Html.div [
         prop.className "canvas-overview"
@@ -135,7 +159,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                             prop.className "canvas-overview-repo-name"
                             prop.text repoName
                         ]
-                        yield! worktrees |> List.map (fun (_, wt, scopedKey) ->
+                        yield! worktrees |> List.map (fun (_, wt, scopedKey, docs) ->
                             // From the badge-source map (`unviewedDocsByScopedKey`), so overview highlights and the badge count agree.
                             let unviewedSet = unviewedByScopedKey |> Map.tryFind scopedKey |> Option.defaultValue Set.empty
                             Html.div [
@@ -151,10 +175,7 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
                                     Html.span [
                                         prop.className "canvas-overview-docs"
                                         prop.children (
-                                            wt.CanvasDocs |> List.map (fun doc ->
-                                                // Unviewed docs render white (`canvas-overview-doc-unviewed`);
-                                                // viewed docs keep the muted base color. SystemView docs are
-                                                // never in `unviewedSet` (excluded at the awareness source).
+                                            docs |> List.map (fun doc ->
                                                 let docClass =
                                                     if Set.contains doc.Filename unviewedSet then "canvas-overview-doc canvas-overview-doc-unviewed"
                                                     else "canvas-overview-doc"
@@ -296,7 +317,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                                 prop.className "canvas-launch-btn"
                                 prop.onClick (fun _ -> launchSession ())
                                 prop.title "Start a session to work on the selected canvas doc"
-                                prop.text "▶ Start session"
+                                prop.children [ playIcon ]
                             ]
                         match activeDoc with
                         | Some d when d.Kind = AgentDoc ->
@@ -325,11 +346,11 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
 
     let errorBanner =
         match sendState with
-        | CanvasSendState.Failed msg ->
+        | CanvasSendState.Failed message ->
             Html.div [
                 prop.className "canvas-error-banner"
                 prop.children [
-                    Html.span [ prop.text msg ]
+                    Html.span [ prop.text message ]
                     Html.button [
                         prop.className "canvas-error-dismiss"
                         prop.onClick (fun _ -> dismissError ())
@@ -463,7 +484,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                             if not isActive then style.display.none
                         ]
                     ])
-            React.fragment [
+            React.Fragment [
                 headerBar tabs (Some doc) (doc.Kind = AgentDoc && not isFocusedDocAlive)
                 errorBanner
                 docErrorBanner
@@ -472,7 +493,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                 yield! iframes
             ]
         | None ->
-            React.fragment [
+            React.Fragment [
                 headerBar [] None false
                 errorBanner
                 docErrorBanner
@@ -506,14 +527,19 @@ type MessageListenerCallbacks =
       OnDocError: string -> string -> string -> unit
       /// A canvas-origin object message arrived with no usable top-level string `action`, from the
       /// active (non-hidden) doc — surfaced instead of silently dropped.
-      OnMalformedMessage: unit -> unit }
+      OnMalformedMessage: unit -> unit
+      /// Escape was pressed inside a canvas doc (reclaim-focus): a cross-origin doc's keydown can't
+      /// reach the dashboard's global focus-reclaim listener, so pull keyboard focus back to the
+      /// dashboard and revive navigation.
+      OnReclaimFocus: unit -> unit }
 
 let messageListener (callbacks: MessageListenerCallbacks) =
     let { Dispatch = dispatch
           SelectDoc = selectDoc
           OnMorphComplete = onMorphComplete
           OnDocError = onDocError
-          OnMalformedMessage = onMalformedMessage } = callbacks
+          OnMalformedMessage = onMalformedMessage
+          OnReclaimFocus = onReclaimFocus } = callbacks
     let handler =
         fun (e: Browser.Types.Event) ->
             let me = e :?> Browser.Types.MessageEvent
@@ -529,6 +555,12 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                 // path is exempt: it self-identifies via wt/doc and may legitimately report from any iframe.
                 let isFromHiddenCanvasIframe () =
                     Fable.Core.JsInterop.emitJsExpr<bool> me "Array.prototype.some.call(document.querySelectorAll('.canvas-iframe:not(.canvas-iframe-active)'), function(f){return f.contentWindow === $0.source})"
+                // Positively identify the ACTIVE doc as sender: me.source must equal the active iframe's
+                // window. Unlike the negative hidden-iframe filter, this rejects any canvas-origin sender
+                // that isn't the active doc — a detached/stale iframe, or a synthetic message with no
+                // source — rather than treating "not hidden" as "active".
+                let isFromActiveCanvasIframe () =
+                    Fable.Core.JsInterop.emitJsExpr<bool> me "(function(f){return !!f && f.contentWindow === $0.source})(document.querySelector('.canvas-iframe-active'))"
                 if Fable.Core.JsInterop.emitJsExpr<bool> me.data "typeof $0.action === 'string'" then
                     let action = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.action"
                     if action = "navigate-canvas-doc" then
@@ -543,6 +575,16 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                     elif action = "morph-complete" then
                         Fable.Core.JS.console.log "[canvas] morph-complete received"
                         onMorphComplete ()
+                    elif action = "reclaim-focus" then
+                        // Escape inside a cross-origin canvas doc can't reach the dashboard's global
+                        // focus-reclaim listener, so the doc posts this instead (reclaimFocusScript).
+                        // Positively require the ACTIVE doc's window as sender — a hidden background,
+                        // stale/detached, or sourceless sender must never yank the dashboard.
+                        if isFromActiveCanvasIframe () then
+                            Fable.Core.JS.console.log "[canvas] reclaim-focus received"
+                            onReclaimFocus ()
+                        else
+                            Fable.Core.JS.console.warn "[canvas] reclaim-focus DROPPED: not from the active canvas doc iframe"
                     elif action = "canvas-doc-error" then
                         // Doc-side JS error from the iframe (errorOverlayScript). Pane-internal — surfaced
                         // in the doc-error banner, never forwarded to the session like a normal payload.

@@ -66,28 +66,74 @@ let private azPythonExe =
             let python = Path.Combine(Path.GetDirectoryName(cmd), "..", "python.exe") |> Path.GetFullPath
             if File.Exists(python) then Some python else None)
 
-let private runAz (arguments: string) =
+let private runAz (arguments: string list) =
     match azPythonExe.Value with
     | Some python ->
-        ProcessRunner.run "PR" python $"-IBm azure.cli {arguments}"
+        ProcessRunner.text
+            { ProcessRunner.Spawn.create python with Context = "PR" }
+            ("-IBm" :: "azure.cli" :: arguments)
     | None ->
         Log.log "PR" "Could not locate Azure CLI python.exe via PATH"
         async { return None }
 
 let buildRemoteUrlArgs (repoRoot: string) (remoteName: string) =
-    $"""-C "{repoRoot}" remote get-url {remoteName}"""
+    [ "-C"; repoRoot; "remote"; "get-url"; remoteName ]
 
 let getRemoteUrl (repoRoot: string) (remoteName: string) =
-    ProcessRunner.run "PR" "git" (buildRemoteUrlArgs repoRoot remoteName)
+    ProcessRunner.text
+        { ProcessRunner.Spawn.create "git" with Context = "PR" }
+        (buildRemoteUrlArgs repoRoot remoteName)
+
+let private buildRemotePushUrlArgs (repoRoot: string) (remoteName: string) =
+    [ "-C"; repoRoot; "remote"; "get-url"; "--push"; remoteName ]
+
+let internal parseRemoteNames (output: string) =
+    output.Split('\n')
+    |> Array.toList
+    |> List.map _.Trim()
+    |> List.filter (String.IsNullOrWhiteSpace >> not)
+
+/// The GitHub logins this checkout could itself push a branch to: the owner of every configured
+/// remote's push URL. A fork workflow adds the fork as a remote, so its pull requests keep counting,
+/// while an arbitrary outsider's fork — which no local branch can publish to — does not.
+let internal configuredGithubOwners (repoRoot: string) =
+    async {
+        let gitPr = { ProcessRunner.Spawn.create "git" with Context = "PR" }
+        let! remoteNames = ProcessRunner.text gitPr [ "-C"; repoRoot; "remote" ]
+
+        match remoteNames with
+        | None -> return Set.empty
+        | Some output ->
+            let! urls =
+                parseRemoteNames output
+                |> List.map (buildRemotePushUrlArgs repoRoot >> ProcessRunner.text gitPr)
+                |> Async.Parallel
+
+            return
+                urls
+                |> Array.toList
+                |> List.choose (Option.bind (fun url -> GithubPrStatus.parseGithubUrl (url.Trim())))
+                |> List.map (fun remote -> remote.Owner.ToLowerInvariant())
+                |> Set.ofList
+    }
 
 type internal ParsedPr =
     { BranchName: string
+      HeadSha: string option
       PrId: int
       Title: string
       IsDraft: bool
-      IsMerged: bool
+      State: PrState
+      AutoMergeEnabled: bool
       HasConflicts: bool
       ClosedDate: DateTimeOffset option }
+
+/// Azure DevOps names branches by full ref; every branch Treemon knows is a short name.
+let private branchFromRef (sourceRef: string) =
+    if sourceRef.StartsWith("refs/heads/") then
+        sourceRef["refs/heads/".Length..]
+    else
+        sourceRef
 
 let internal parsePrList (json: string) =
     try
@@ -109,15 +155,15 @@ let internal parsePrList (json: string) =
                     let isDraft = el.GetProperty("isDraft").GetBoolean()
 
                     let sourceRef = el.GetProperty("sourceRefName").GetString()
-
-                    let branchName =
-                        if sourceRef.StartsWith("refs/heads/") then
-                            sourceRef["refs/heads/".Length..]
-                        else
-                            sourceRef
+                    let branchName = branchFromRef sourceRef
 
                     let status = el.GetProperty("status").GetString()
-                    let isMerged = status = "completed"
+
+                    let state =
+                        match status with
+                        | "completed" -> PrState.Merged
+                        | "active" -> PrState.Open
+                        | _ -> PrState.ClosedUnmerged
 
                     let closedDate =
                         el
@@ -130,12 +176,22 @@ let internal parsePrList (json: string) =
                     let hasConflicts =
                         el |> tryString "mergeStatus" = Some "conflicts"
 
+                    let autoMergeEnabled =
+                        state <> PrState.Merged && (el |> tryProp "autoCompleteSetBy" |> Option.isSome)
+
+                    let headSha =
+                        el
+                        |> tryProp "lastMergeSourceCommit"
+                        |> Option.bind (tryString "commitId")
+
                     Some
                         { BranchName = branchName
+                          HeadSha = headSha
                           PrId = prId
                           Title = title
                           IsDraft = isDraft
-                          IsMerged = isMerged
+                          State = state
+                          AutoMergeEnabled = autoMergeEnabled
                           HasConflicts = hasConflicts
                           ClosedDate = closedDate }
                 with ex ->
@@ -287,7 +343,13 @@ let internal parseBuildLog (json: string) =
 let private fetchBuildFailure (remote: AzDoRemote) (buildId: int) =
     async {
         let timelineArgs =
-            $"devops invoke --area build --resource timeline --route-parameters project={remote.Project} buildId={buildId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+            [ "devops"; "invoke"
+              "--area"; "build"
+              "--resource"; "timeline"
+              "--route-parameters"; $"project={remote.Project}"; $"buildId={buildId}"
+              "--org"; $"https://dev.azure.com/{remote.Org}"
+              "--api-version"; "7.1"
+              "-o"; "json" ]
 
         let! timelineOutput = runAz timelineArgs
 
@@ -295,7 +357,13 @@ let private fetchBuildFailure (remote: AzDoRemote) (buildId: int) =
         | None -> return None
         | Some(stepName, logId) ->
             let logArgs =
-                $"devops invoke --area build --resource logs --route-parameters project={remote.Project} buildId={buildId} logId={logId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+                [ "devops"; "invoke"
+                  "--area"; "build"
+                  "--resource"; "logs"
+                  "--route-parameters"; $"project={remote.Project}"; $"buildId={buildId}"; $"logId={logId}"
+                  "--org"; $"https://dev.azure.com/{remote.Org}"
+                  "--api-version"; "7.1"
+                  "-o"; "json" ]
 
             let! logOutput = runAz logArgs
 
@@ -313,7 +381,13 @@ let private fetchBuildFailure (remote: AzDoRemote) (buildId: int) =
 let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
     async {
         let args =
-            $"devops invoke --area git --resource pullRequestThreads --route-parameters project={remote.Project} repositoryId={remote.Repo} pullRequestId={prId} --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+            [ "devops"; "invoke"
+              "--area"; "git"
+              "--resource"; "pullRequestThreads"
+              "--route-parameters"; $"project={remote.Project}"; $"repositoryId={remote.Repo}"; $"pullRequestId={prId}"
+              "--org"; $"https://dev.azure.com/{remote.Org}"
+              "--api-version"; "7.1"
+              "-o"; "json" ]
 
         let! output = runAz args
 
@@ -326,7 +400,15 @@ let private fetchPrThreadCount (remote: AzDoRemote) (prId: int) =
 let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int) =
     async {
         let args =
-            $"devops invoke --area build --resource builds --route-parameters project={remote.Project} --query-parameters \"repositoryId={repoGuid}&repositoryType=TfsGit&branchName=refs/pull/{prId}/merge&queryOrder=queueTimeDescending&$top=10\" --org https://dev.azure.com/{remote.Org} --api-version 7.1 -o json"
+            [ "devops"; "invoke"
+              "--area"; "build"
+              "--resource"; "builds"
+              "--route-parameters"; $"project={remote.Project}"
+              "--query-parameters"
+              $"repositoryId={repoGuid}&repositoryType=TfsGit&branchName=refs/pull/{prId}/merge&queryOrder=queueTimeDescending&$top=10"
+              "--org"; $"https://dev.azure.com/{remote.Org}"
+              "--api-version"; "7.1"
+              "-o"; "json" ]
 
         let! output = runAz args
 
@@ -353,7 +435,8 @@ let private fetchBuildStatus (remote: AzDoRemote) (repoGuid: string) (prId: int)
 let internal firstPerBranch (prs: ParsedPr list) =
     prs
     |> List.sortBy (fun pr ->
-        (pr.IsMerged, pr.ClosedDate |> Option.map (fun d -> -d.Ticks) |> Option.defaultValue Int64.MaxValue))
+        (pr.State = PrState.Merged,
+         pr.ClosedDate |> Option.map (fun d -> -d.Ticks) |> Option.defaultValue Int64.MaxValue))
     |> List.distinctBy _.BranchName
 
 let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedPr list) =
@@ -363,9 +446,17 @@ let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedPr list)
 
 let private fetchPrList (remote: AzDoRemote) (status: string) (top: int option) =
     async {
-        let topArg = top |> Option.map (fun n -> $" --top {n}") |> Option.defaultValue ""
+        let topArguments =
+            top |> Option.map (fun n -> [ "--top"; string n ]) |> Option.defaultValue []
+
         let args =
-            $"repos pr list --org https://dev.azure.com/{remote.Org} --project \"{remote.Project}\" --repository \"{remote.Repo}\" --status {status}{topArg} -o json"
+            [ "repos"; "pr"; "list"
+              "--org"; $"https://dev.azure.com/{remote.Org}"
+              "--project"; remote.Project
+              "--repository"; remote.Repo
+              "--status"; status ]
+            @ topArguments
+            @ [ "-o"; "json" ]
 
         let! output = runAz args
         return
@@ -399,7 +490,7 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
                 |> List.map (fun pr ->
                     async {
                         let! threadCounts, builds =
-                            if pr.IsMerged then
+                            if pr.State = PrState.Merged then
                                 async { return WithResolution(0, 0), [] }
                             else
                                 async {
@@ -419,15 +510,17 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
 
                         return
                             pr.BranchName,
-                            HasPr
+                            (HasPr
                                 { Id = pr.PrId
                                   Title = pr.Title
                                   Url = url
                                   IsDraft = pr.IsDraft
                                   Comments = threadCounts
                                   Builds = builds
-                                  IsMerged = pr.IsMerged
-                                  HasConflicts = pr.HasConflicts }
+                                  State = pr.State
+                                  AutoMergeEnabled = pr.AutoMergeEnabled
+                                  HasConflicts = pr.HasConflicts },
+                             pr.HeadSha)
                     })
                 |> Async.Parallel
 
@@ -443,7 +536,11 @@ let fetchPrStatusesByRepoRoot (repoRoot: string) (upstreamRemote: string) (known
 
         match provider with
         | Some(AzureDevOps remote) -> return! fetchPrStatuses remote knownBranches
-        | Some(GitHub remote) -> return! GithubPrStatus.fetchGithubPrStatuses remote knownBranches
+        | Some(GitHub remote) ->
+            let! configuredOwners = configuredGithubOwners repoRoot
+            // The upstream owner is always trusted: it owns the branches this repo pushes to.
+            let headOwners = configuredOwners |> Set.add (remote.Owner.ToLowerInvariant())
+            return! GithubPrStatus.fetchGithubPrStatuses remote headOwners knownBranches
         | None -> return Map.empty
     }
 
@@ -451,3 +548,9 @@ let lookupPrStatus (prMap: Map<string, PrStatus>) (branchName: string option) =
     branchName
     |> Option.bind (fun b -> prMap |> Map.tryFind b)
     |> Option.defaultValue NoPr
+
+/// The PR status of `branchName`, once the repository's PR data has been loaded at all. `None` means
+/// no PR refresh has succeeded for that repository yet, which is a different answer from "this
+/// branch has no pull request" and must not be read as one where a push decision depends on it.
+let tryLookupPrStatus (prData: Map<string, PrStatus> option) (branchName: string option) =
+    prData |> Option.map (fun prMap -> lookupPrStatus prMap branchName)

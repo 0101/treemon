@@ -1,13 +1,13 @@
 module Tests.ActionLaunchSpawnTests
 
-open System
-open System.Diagnostics
 open System.Threading
 open NUnit.Framework
 open Shared
 open Server.SessionManager
 open Server.CodingToolStatus
 open Server.CodingToolCli
+open Tests.GitTestHelpers
+open Tests.TerminalSessionFixture
 open Tests.TestUtils
 
 [<TestFixture>]
@@ -16,50 +16,27 @@ open Tests.TestUtils
 [<NonParallelizable>]
 type ActionLaunchSpawnTests() =
 
-    let mutable spawnedPids: int list = []
-    let mutable agent: SessionAgent option = None
-    let testPath = WorktreePath @"Q:\code\AITestAgent"
-    let testPathStr = WorktreePath.value testPath
-
-    let trackWindowPid (hwnd: nativeint) =
-        let pid = Server.Win32.getWindowPid hwnd
-        if pid > 0 then
-            spawnedPids <- pid :: spawnedPids
+    // NUnit owns fixture lifecycle, so the environment must span SetUp, each test, and TearDown.
+    let mutable environment: TerminalTestEnvironment option = None
 
     [<SetUp>]
     member _.Setup() =
-        agent <- Some(createAgent ())
+        environment <- Some(create "treemon-action-spawn" initRepoOnMain)
 
     [<TearDown>]
     member _.Cleanup() =
-        agent
-        |> Option.iter (fun a ->
-            try
-                let sessions = runAsync (getActiveSessions a)
-                sessions |> Map.iter (fun _ hwnd ->
-                    try Server.Win32.closeWindow hwnd |> ignore with _ -> ()
-                    trackWindowPid hwnd)
-            with _ -> ())
-
-        Thread.Sleep(500)
-
-        spawnedPids
-        |> List.iter (fun pid ->
-            try
-                let proc = Process.GetProcessById(pid)
-                if not proc.HasExited then
-                    proc.Kill(entireProcessTree = true)
-                    TestContext.Out.WriteLine($"TearDown: killed PID={pid}")
-            with _ -> ())
-
-        spawnedPids <- []
-        agent <- None
+        let result = environment |> Option.map cleanup |> Option.defaultValue (Ok())
+        environment <- None
+        assertOk result "Terminal fixture cleanup failed"
 
     [<Test>]
     member _.``launchAction with no existing session spawns new window and tracks HWND``() =
-        let a = agent.Value
-        let prompt = actionPrompt (Some CodingToolProvider.Claude) (FixPr "https://dev.azure.com/org/proj/_git/repo/pullrequest/42")
-        let command = (build (Some CodingToolProvider.Claude) (Interactive prompt)).AsShellString
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
+        let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
+        let prompt = actionPrompt (Some CodingToolProvider.CopilotCli) (FixPr "https://dev.azure.com/org/proj/_git/repo/pullrequest/42")
+        let command = (build (Some CodingToolProvider.CopilotCli) (Interactive prompt)).AsShellString
 
         let result = runAsync (launchAction a testPath command)
         assertOk result "launchAction should return Ok when no session exists"
@@ -71,27 +48,28 @@ type ActionLaunchSpawnTests() =
         let hwnd = sessions[testPathStr]
         Assert.That(Server.Win32.isWindowValid hwnd, Is.True,
             "Tracked HWND should be a valid window")
-        trackWindowPid hwnd
         TestContext.Out.WriteLine($"launchAction spawn: HWND={hwnd} for {testPathStr}")
 
     [<Test>]
     member _.``launchAction with existing tracked session opens new tab without new window``() =
-        let a = agent.Value
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
+        let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
 
         let spawnResult = runAsync (spawnTerminal a testPath)
         assertOk spawnResult "Initial spawnTerminal should return Ok"
 
         let sessionsBefore = runAsync (getActiveSessions a)
         let existingHwnd = sessionsBefore[testPathStr]
-        trackWindowPid existingHwnd
         TestContext.Out.WriteLine($"Existing session HWND={existingHwnd}")
 
         let windowsBefore = Server.Win32.listWindowsTerminalWindows () |> Set.ofList
         let windowCountBefore = windowsBefore.Count
         TestContext.Out.WriteLine($"WT windows before launchAction: {windowCountBefore}")
 
-        let prompt = actionPrompt (Some CodingToolProvider.Claude) (FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123")
-        let command = (build (Some CodingToolProvider.Claude) (Interactive prompt)).AsShellString
+        let prompt = actionPrompt (Some CodingToolProvider.CopilotCli) (FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123")
+        let command = (build (Some CodingToolProvider.CopilotCli) (Interactive prompt)).AsShellString
         let actionResult = runAsync (launchAction a testPath command)
         assertOk actionResult "launchAction should return Ok when session exists (new tab)"
 
@@ -110,16 +88,18 @@ type ActionLaunchSpawnTests() =
 
     [<Test>]
     member _.``launchAction spawns session that stays open (interactive mode)``() =
-        let a = agent.Value
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
+        let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
         let prompt = "Commit all changes, push to origin with upstream tracking, and create a pull request for this branch"
-        let command = (build (Some CodingToolProvider.Claude) (Interactive prompt)).AsShellString
+        let command = (build (Some CodingToolProvider.CopilotCli) (Interactive prompt)).AsShellString
 
         let result = runAsync (launchAction a testPath command)
         assertOk result "launchAction should return Ok"
 
         let sessions = runAsync (getActiveSessions a)
         let hwnd = sessions[testPathStr]
-        trackWindowPid hwnd
 
         Thread.Sleep(3000)
 
@@ -129,9 +109,12 @@ type ActionLaunchSpawnTests() =
 
     [<Test>]
     member _.``launchAction with special characters in prompt succeeds``() =
-        let a = agent.Value
-        let prompt = actionPrompt (Some CodingToolProvider.Claude) (FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs&s=abc")
-        let command = (build (Some CodingToolProvider.Claude) (Interactive prompt)).AsShellString
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
+        let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
+        let prompt = actionPrompt (Some CodingToolProvider.CopilotCli) (FixBuild "https://dev.azure.com/org/proj/_build/results?buildId=123&view=logs&s=abc")
+        let command = (build (Some CodingToolProvider.CopilotCli) (Interactive prompt)).AsShellString
 
         let result = runAsync (launchAction a testPath command)
         assertOk result "launchAction with URL containing & and ? should return Ok"
@@ -143,5 +126,4 @@ type ActionLaunchSpawnTests() =
         let hwnd = sessions[testPathStr]
         Assert.That(Server.Win32.isWindowValid hwnd, Is.True,
             "Spawned window with special-character prompt should be valid")
-        trackWindowPid hwnd
         TestContext.Out.WriteLine($"Special-char prompt spawn: HWND={hwnd}")

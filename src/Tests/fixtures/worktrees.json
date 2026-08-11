@@ -12,9 +12,9 @@
             "LastCommitTime": "2026-02-16T22:30:00+00:00",
             "Beads": { "Open": 3, "InProgress": 2, "Blocked": 0, "Closed": 5 },
             "CodingTool": "Working",
-            "CodingToolProvider": "Claude",
+            "CodingToolProvider": "CopilotCli",
             "HasActiveSession": true,
-            "LastUserMessage": ["Add comprehensive input validation for all user-facing forms", "2026-02-16T22:30:00+00:00"],
+            "LastUserMessage": { "Glyph": null, "Text": "Add comprehensive input validation for all user-facing forms", "Timestamp": "2026-02-16T22:30:00+00:00" },
             "Pr": {
               "HasPr": {
                 "Id": 101,
@@ -39,11 +39,14 @@
                     }
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },
             "MainBehindCount": 25,
+            "HasDiff": true,
+            "AutoSyncEnabled": true,
             "WorkMetrics": { "CommitCount": 12, "LinesAdded": 234, "LinesRemoved": 89 },
             "CanvasDocs": [{ "Filename": "e2e-test.html", "ContentHash": "fixture-abc123", "LastModified": "2026-01-15T10:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" }]
           },
@@ -54,8 +57,8 @@
             "LastCommitTime": "2026-02-16T22:00:00+00:00",
             "Beads": { "Open": 1, "InProgress": 1, "Blocked": 0, "Closed": 0 },
             "CodingTool": "WaitingForUser",
-            "CodingToolProvider": "Claude",
-            "LastUserMessage": ["Refactor the data access layer for better separation of concerns", "2026-02-16T21:00:00+00:00"],
+            "CodingToolProvider": "CopilotCli",
+            "LastUserMessage": { "Glyph": null, "Text": "Refactor the data access layer for better separation of concerns", "Timestamp": "2026-02-16T21:00:00+00:00" },
             "Pr": {
               "HasPr": {
                 "Id": 102,
@@ -71,11 +74,14 @@
                     "Failure": null
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
+                "AutoMergeEnabled": true,
                 "HasConflicts": false
               }
             },
             "MainBehindCount": 5,
+            "HasDiff": true,
+            "AutoSyncEnabled": false,
             "WorkMetrics": { "CommitCount": 4, "LinesAdded": 56, "LinesRemoved": 12 },
             "CanvasDocs": []
           },
@@ -89,6 +95,8 @@
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -97,11 +105,13 @@
             "LastCommitMessage": "Initial experiment with caching",
             "LastCommitTime": "2026-02-10T08:00:00+00:00",
             "Beads": { "Open": 1, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 42,
+            "AutoSyncEnabled": false,
             "IsDirty": true,
+            "HasDiff": true,
             "CanvasDocs": []
           },
           {
@@ -110,7 +120,7 @@
             "LastCommitMessage": "Final cleanup before merge",
             "LastCommitTime": "2026-02-15T16:00:00+00:00",
             "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 8 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": {
               "HasPr": {
@@ -127,11 +137,14 @@
                     "Failure": null
                   }
                 ],
-                "IsMerged": true,
+                "State": "Merged",
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },
             "MainBehindCount": 0,
+            "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -141,9 +154,9 @@
             "LastCommitTime": "2026-02-16T21:00:00+00:00",
             "Beads": { "Open": 5, "InProgress": 1, "Blocked": 0, "Closed": 2 },
             "CodingTool": "Working",
-            "CodingToolProvider": "Claude",
+            "CodingToolProvider": "CopilotCli",
             "HasActiveSession": true,
-            "LastUserMessage": ["Wire up API endpoints for the new reporting feature", "2026-02-16T20:00:00+00:00"],
+            "LastUserMessage": { "Glyph": null, "Text": "Wire up API endpoints for the new reporting feature", "Timestamp": "2026-02-16T20:00:00+00:00" },
             "Pr": {
               "HasPr": {
                 "Id": 103,
@@ -165,11 +178,14 @@
                     "Failure": null
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },
             "MainBehindCount": 2,
+            "HasDiff": true,
+            "AutoSyncEnabled": false,
             "WorkMetrics": { "CommitCount": 95, "LinesAdded": 1200, "LinesRemoved": 450 },
             "CanvasDocs": []
           },
@@ -179,10 +195,12 @@
             "LastCommitMessage": "Add multi-doc canvas artifacts",
             "LastCommitTime": "2026-02-16T22:45:00+00:00",
             "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 0,
+            "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": [
               { "Filename": "overview.html", "ContentHash": "multi-hash-001", "LastModified": "2026-02-16T22:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
               { "Filename": "details.html", "ContentHash": "multi-hash-002", "LastModified": "2026-02-16T22:10:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
@@ -195,14 +213,17 @@
             "LastCommitMessage": "Update configuration defaults",
             "LastCommitTime": "2026-02-16T18:00:00+00:00",
             "Beads": { "Open": 2, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 10,
+            "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           }
         ],
         "IsReady": true,
+        "BaseBranch": "main",
         "Provider": { "AzDoProvider": "https://dev.azure.com/myorg/TestProject/_git/TestProject" }
       },
       {
@@ -215,7 +236,7 @@
             "LastCommitMessage": "Add CI workflow and contributing guide",
             "LastCommitTime": "2026-02-22T15:12:00+00:00",
             "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": {
               "HasPr": {
@@ -235,11 +256,14 @@
                     }
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },
             "MainBehindCount": 0,
+            "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -248,7 +272,7 @@
             "LastCommitMessage": "Add editorconfig for consistent formatting",
             "LastCommitTime": "2026-02-22T15:10:00+00:00",
             "Beads": { "Open": 0, "InProgress": 0, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": {
               "HasPr": {
@@ -268,11 +292,14 @@
                     }
                   }
                 ],
-                "IsMerged": false,
+                "State": "Open",
+                "AutoMergeEnabled": false,
                 "HasConflicts": false
               }
             },
             "MainBehindCount": 0,
+            "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": []
           },
           {
@@ -281,10 +308,12 @@
             "LastCommitMessage": "Multi-repo support implementation",
             "LastCommitTime": "2026-02-22T14:00:00+00:00",
             "Beads": { "Open": 1, "InProgress": 1, "Blocked": 0, "Closed": 0 },
-            "CodingTool": "Idle",
+            "CodingTool": "NoSession",
             "CodingToolProvider": null,
             "Pr": "NoPr",
             "MainBehindCount": 3,
+            "HasDiff": false,
+            "AutoSyncEnabled": false,
             "CanvasDocs": [
               { "Filename": "beads.html", "ContentHash": "treemon-beads-000", "LastModified": "2026-02-22T13:45:00+00:00", "OwnerSessionId": null, "Kind": "SystemView" },
               { "Filename": "dashboard.html", "ContentHash": "treemon-hash-001", "LastModified": "2026-02-22T13:00:00+00:00", "OwnerSessionId": null, "Kind": "AgentDoc" },
@@ -293,6 +322,7 @@
           }
         ],
         "IsReady": true,
+        "BaseBranch": "main",
         "Provider": { "GitHubProvider": "https://github.com/user/treemon" }
       }
     ],
@@ -361,67 +391,12 @@
   "SyncStatus": {
     "Q:/code/TestProject/feature-active": [
       {
-        "Source": "sync",
-        "Message": "Merge main",
+        "Source": "post-fork",
+        "Message": "setup",
         "Timestamp": "2026-02-16T20:00:00+00:00",
-        "Status": "Succeeded",
-        "Duration": null
-      },
-      {
-        "Source": "claude",
-        "Message": "Implementing input validation for user forms",
-        "Timestamp": "2026-02-16T22:30:00+00:00",
-        "Status": null,
-        "Duration": null
-      }
-    ],
-    "Q:/code/TestProject/feature-recent": [
-      {
-        "Source": "sync",
-        "Message": "Pull",
-        "Timestamp": "2026-02-16T21:30:00+00:00",
-        "Status": "Succeeded",
-        "Duration": null
-      },
-      {
-        "Source": "claude",
-        "Message": "Refactoring complete, running tests",
-        "Timestamp": "2026-02-16T22:00:00+00:00",
-        "Status": null,
-        "Duration": null
-      }
-    ],
-    "Q:/code/TestProject/feature-draft": [
-      {
-        "Source": "claude",
-        "Message": "Setting up API route handlers",
-        "Timestamp": "2026-02-16T18:30:00+00:00",
-        "Status": null,
-        "Duration": null
-      },
-      {
-        "Source": "sync",
-        "Message": "Merge main",
-        "Timestamp": "2026-02-16T19:00:00+00:00",
         "Status": {
-          "Failed": "Merge conflict in src/Api/Routes.fs"
+          "Failed": "npm install failed"
         },
-        "Duration": null
-      }
-    ],
-    "Q:/code/TestProject/feature-unknown": [
-      {
-        "Source": "sync",
-        "Message": "Check clean",
-        "Timestamp": "2026-02-16T17:29:00+00:00",
-        "Status": "Succeeded",
-        "Duration": null
-      },
-      {
-        "Source": "sync",
-        "Message": "Pull",
-        "Timestamp": "2026-02-16T17:30:00+00:00",
-        "Status": "Running",
         "Duration": null
       }
     ]

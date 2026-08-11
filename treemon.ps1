@@ -41,7 +41,7 @@ if (-not $Command) {
     Write-Host "  log                        Tail the production server log"
     Write-Host "  dev [<path>...]            Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
     Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
-    Write-Host "  deploy                     Build frontend and deploy to wwwroot/ (restarts prod if running)"
+    Write-Host "  deploy                     Build frontend, replace the app on the production port, and start this checkout"
     Write-Host "  add <path> [<path>...]     Add watched root(s) via 'tm add' (restarts prod if running)"
     Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
     Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (restarts prod if running)"
@@ -359,6 +359,25 @@ function Stop-ProductionServer {
     Write-Host "Production server stopped" -ForegroundColor Green
 }
 
+function Stop-ProductionPortListeners {
+    $listenerPids = @(
+        Get-NetTCPConnection -LocalPort $DefaultPort -State Listen -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty OwningProcess -Unique |
+            Where-Object { $_ -gt 0 }
+    )
+
+    $listenerPids | ForEach-Object {
+        Write-Host "Stopping process on production port $DefaultPort (PID: $_)..." -ForegroundColor Yellow
+        Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+    }
+
+    Remove-Item $PidFile -ErrorAction SilentlyContinue
+
+    if (-not (Wait-PortFree $DefaultPort 10)) {
+        throw "Production port $DefaultPort is still in use after stopping its listener"
+    }
+}
+
 function Show-Status {
     $runningPid = Get-RunningPid
     if (-not $runningPid) {
@@ -558,13 +577,30 @@ function Install-Skill {
     }
 }
 
+function Install-CopilotExtension(
+    [string]$SrcDir,
+    [string]$DestName,
+    [string]$FriendlyName,
+    [string[]]$RequiredFiles
+) {
+    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
+    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    Get-ChildItem -Path $SrcDir -Filter "*.mjs" -File |
+        Where-Object { $_.Name -notlike "*.test.mjs" } |
+        Copy-Item -Destination $dest -Force
+    $RequiredFiles | ForEach-Object { Copy-Item (Join-Path $SrcDir $_) $dest -Force }
+    Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green
+}
+
 function Install-Extension {
     $src = Join-Path $PSScriptRoot "src" "Extension"
-    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "canvas-bridge"
-    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
-    Copy-Item (Join-Path $src "extension.mjs") $dest -Force
-    Copy-Item (Join-Path $src "package.json") $dest -Force
-    Write-Host "Canvas bridge extension installed to $dest" -ForegroundColor Green
+    $requiredFiles = @(
+        "package.json",
+        "canvas-doc-kinds.json",
+        "canvas-send.js",
+        "canvas-selection-context.js"
+    )
+    Install-CopilotExtension $src "canvas-bridge" "Canvas bridge extension" $requiredFiles
 
     # Install canvas authoring skill
     $skillSource = Join-Path $src "skill" "SKILL.md"
@@ -591,6 +627,16 @@ function Install-Extension {
     }
 }
 
+function Install-ReportingExtension {
+    # Phase 1 of the push status model: the passive, reporting-only extension. Installed ALONGSIDE
+    # canvas-bridge (a separate extension dir), never replacing it — reporting registers no canvas
+    # and no tools, so both load per session with no canvas_take_ownership collision. It forwards
+    # session-activity events to POST /api/session/activity; set TREEMON_PORTS (comma-separated) to
+    # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
+    $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
+    Install-CopilotExtension $src "treemon-reporting" "Reporting extension" @("package.json")
+}
+
 function Test-WorktreeRootPaths([string[]]$Roots) {
     # Validate that each provided worktree root exists before launching the server.
     # exit inside a function still terminates the script, so callers need no extra guard.
@@ -606,22 +652,14 @@ function Test-WorktreeRootPaths([string[]]$Roots) {
 
 function Restart-ServerIfRunning {
     # Restart the production server only when it is currently running, so persisted
-    # config changes (added/removed roots, redeployed frontend) take effect. Roots are
-    # re-read from the global config at startup, so we restart with empty args (@()).
-    # Optional parameters let Deploy-Frontend keep its distinct log text while sharing
-    # the same lifecycle logic.
-    param(
-        [string]$Message = "Restarting server to apply changes...",
-        [string]$NotRunningMessage = ""
-    )
+    # config changes (added/removed roots) take effect. Roots are re-read from the
+    # global config at startup, so we restart with empty args (@()).
     $runningPid = Get-RunningPid
     if ($runningPid) {
-        Write-Host $Message -ForegroundColor Cyan
+        Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
         Stop-ProductionServer
         Start-Sleep -Seconds 1
         Start-ProductionServer @()
-    } elseif ($NotRunningMessage) {
-        Write-Host $NotRunningMessage -ForegroundColor Gray
     }
 }
 
@@ -633,8 +671,10 @@ function Deploy-Frontend {
     try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
     try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
     try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
+    try { Install-ReportingExtension } catch { Write-Host "Warning: reporting extension install failed: $_" -ForegroundColor Yellow }
 
-    Restart-ServerIfRunning -Message "Restarting production server..." -NotRunningMessage "Production server is not running, skipping restart"
+    Stop-ProductionPortListeners
+    Start-ProductionServer @()
 }
 
 switch ($Command) {

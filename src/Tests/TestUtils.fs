@@ -2,12 +2,25 @@ module Tests.TestUtils
 
 open System
 open System.Diagnostics
+open System.Globalization
 open System.IO
 open System.Net.Http
 open System.Runtime.InteropServices
 open System.Text.RegularExpressions
 open System.Threading.Tasks
 open NUnit.Framework
+open Server.SessionActivity
+
+/// Parse an ISO-8601 timestamp string as a DateTimeOffset using the invariant culture. Shared by the
+/// SessionActivity domain/store/service tests, which all build fixtures from literal timestamps.
+let ts (s: string) : DateTimeOffset = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)
+
+/// Build a push-model `Message` (domain record) from body text and an ISO-8601 timestamp string.
+let msg (text: string) (t: string) : Message = { Text = text; At = ts t }
+
+/// Build a unique temporary path without creating it.
+let uniquePath prefix =
+    Path.Combine(Path.GetTempPath(), $"treemon-{prefix}-{Guid.NewGuid():N}")
 
 let resolveCmdShim (fileName: string) =
     if Path.GetExtension(fileName) = "" then
@@ -101,13 +114,12 @@ let private findPidsOnPortLinux (port: int) =
     |> Array.distinct
     |> Array.toList
 
-let withTempFile (prefix: string) (content: string) (action: string -> 'a) =
-    let tempFile = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid()}.jsonl")
-    try
-        File.WriteAllText(tempFile, content)
-        action tempFile
+let withTempDir (prefix: string) (action: string -> 'a) =
+    let tempDir = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid()}")
+    Directory.CreateDirectory(tempDir) |> ignore
+    try action tempDir
     finally
-        if File.Exists(tempFile) then File.Delete(tempFile)
+        try Directory.Delete(tempDir, recursive = true) with _ -> ()
 
 /// Run `action` with the process CWD swapped to a throwaway temp directory, then
 /// restore and delete it. Tests that persist relative to the current directory
@@ -130,8 +142,8 @@ let withTempCwd (action: unit -> unit) =
 /// the TREEMON_CONFIG_DIR override, then restore the previous value and delete the dir. Required,
 /// not merely convenient: on Windows Environment.GetFolderPath(UserProfile) ignores USERPROFILE/HOME,
 /// so the override is the only way to keep in-process config tests (the global read/write helpers and
-/// the orphan roots.json lookup) off the real ~/.treemon. `prefix` names the temp dir for debugging,
-/// mirroring withTempFile. TREEMON_CONFIG_DIR is process-global, so callers must stay non-parallel.
+/// the orphan roots.json lookup) off the real ~/.treemon. `prefix` names the temp dir for debugging.
+/// TREEMON_CONFIG_DIR is process-global, so callers must stay non-parallel.
 let withTempConfigDir (prefix: string) (action: string -> unit) =
     let tempDir = Path.Combine(Path.GetTempPath(), $"{prefix}-{Guid.NewGuid()}")
     Directory.CreateDirectory(tempDir) |> ignore

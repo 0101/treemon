@@ -1,31 +1,42 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="TestUtils.fs" />
+    <Compile Include="SqliteTestDatabase.fs" />
     <Compile Include="WorktreeFixtures.fs" />
     <Compile Include="GitTestHelpers.fs" />
+    <Compile Include="TerminalSessionFixture.fs" />
+    <Compile Include="TerminalSessionFixtureTests.fs" />
+    <Compile Include="ProcessRunnerTests.fs" />
+    <Compile Include="DiffCategoriesTests.fs" />
+    <Compile Include="WorktreeDiffTests.fs" />
+    <Compile Include="DiffEndpointTestHelpers.fs" />
+    <Compile Include="DiffEndpointCategorizationTests.fs" />
+    <Compile Include="DiffEndpointTests.fs" />
     <Compile Include="ServerFixture.fs" />
     <Compile Include="MultiRepoApiTests.fs" />
     <Compile Include="DashboardTests.fs" />
     <Compile Include="GitParsingTests.fs" />
+    <Compile Include="BranchSyncTests.fs" />
+    <Compile Include="CodingToolSinceTests.fs" />
     <Compile Include="SchedulerTests.fs" />
     <Compile Include="IdleDetectionTests.fs" />
     <Compile Include="ServerParsingTests.fs" />
-    <Compile Include="FileUtilsTests.fs" />
-    <Compile Include="ClaudeDetectorTests.fs" />
-    <Compile Include="ClaudeSessionReplayTests.fs" />
     <Compile Include="PrFilteringTests.fs" />
     <Compile Include="GithubParsingTests.fs" />
     <Compile Include="GithubFixtureTests.fs" />
     <Compile Include="AzDoFixtureTests.fs" />
-    <Compile Include="CopilotDetectorTests.fs" />
+    <Compile Include="SessionActivityTests.fs" />
+    <Compile Include="SessionActivityStoreTests.fs" />
+    <Compile Include="SessionActivityServiceTests.fs" />
+    <Compile Include="UserMessageFormattingTests.fs" />
+    <Compile Include="CodingToolPushSourceTests.fs" />
     <Compile Include="CodingToolOrchestratorTests.fs" />
-    <Compile Include="SyncEngineTests.fs" />
     <Compile Include="CardEventLogTests.fs" />
     <Compile Include="UpstreamRemoteTests.fs" />
     <Compile Include="CreateWorktreeTests.fs" />
@@ -34,6 +45,7 @@
     <Compile Include="NavigationTests.fs" />
     <Compile Include="ComponentsTests.fs" />
     <Compile Include="CardViewsTests.fs" />
+    <Compile Include="AutoSyncClientTests.fs" />
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="WorktreePathResolutionTests.fs" />
@@ -44,10 +56,13 @@
     <Compile Include="SessionPersistenceTests.fs" />
     <Compile Include="SessionManagerBuildScriptTests.fs" />
     <Compile Include="ConfigWriterTests.fs" />
+    <Compile Include="PersistentStoreTests.fs" />
+    <Compile Include="MergedPrStoreTests.fs" />
+    <Compile Include="AutoSyncStoreTests.fs" />
     <Compile Include="SerializationTests.fs" />
     <Compile Include="WorktreeRootsConfigTests.fs" />
     <Compile Include="ServerStartupResolutionTests.fs" />
-    <Compile Include="VsCodeCopilotDetectorTests.fs" />
+    <Compile Include="ServerLifecycleTests.fs" />
     <Compile Include="ActionButtonTests.fs" />
     <Compile Include="DemoModeTests.fs" />
     <Compile Include="OverviewBandE2ETests.fs" />
@@ -59,13 +74,25 @@
     <Compile Include="CanvasAwarenessTests.fs" />
     <Compile Include="CanvasShareClientTests.fs" />
     <Compile Include="FormattingTests.fs" />
+    <Compile Include="CanvasDocOwnershipTests.fs" />
+    <Compile Include="SessionBridgeTests.fs" />
+    <Compile Include="AutoSyncTests.fs" />
     <Compile Include="CanvasBridgeTests.fs" />
     <Compile Include="BeadspaceCanvasTests.fs" />
     <Compile Include="BeadspaceProvisionerTests.fs" />
+    <Compile Include="DiffViewerTestHarness.fs" />
+    <Compile Include="DiffCategoryTests.fs" />
+    <Compile Include="DiffCategoryEndToEndTests.fs" />
+    <Compile Include="DiffViewerTests.fs" />
     <Compile Include="BeadsPlanningTests.fs" />
     <Compile Include="ActivityClassifierTests.fs" />
     <Compile Include="OverviewDataTests.fs" />
+    <Compile Include="OverviewBandStateTests.fs" />
     <Compile Include="OverviewPersistenceTests.fs" />
+    <Compile Include="OverviewSnapshotStoreTests.fs" />
+    <Compile Include="OverviewHistoryApiTests.fs" />
+    <Compile Include="OverviewSnapshotCaptureTests.fs" />
+    <Compile Include="OverviewChartTests.fs" />
     <Compile Include="BeadsDataTests.fs" />
     <Compile Include="CanvasDocServerTests.fs" />
     <Compile Include="HttpSecurityTests.fs" />

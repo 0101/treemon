@@ -1,8 +1,15 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
+import {
+  isValidCanvasFilename,
+  watchCanvasWrites,
+} from "./canvas-ownership.mjs";
+import { promptForSession } from "./session-prompt.mjs";
+import { createSendQueue } from "./send-queue.mjs";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
@@ -15,9 +22,18 @@ const HEARTBEAT_MAX_INTERVAL_MS = 120000;
 const TREEMON_FETCH_TIMEOUT_MS = 5000;
 
 const log = (msg) => console.error(`[canvas-bridge] ${msg}`);
+const CANVAS_SEND_SCRIPT =
+  `<script>${readFileSync(new URL("./canvas-send.js", import.meta.url), "utf8")}</script>`;
+const CANVAS_SELECTION_CONTEXT_SCRIPT =
+  `<script>${readFileSync(new URL("./canvas-selection-context.js", import.meta.url), "utf8")}</script>`;
+const SYSTEM_VIEW_FILENAMES = new Set(
+  JSON.parse(readFileSync(new URL("./canvas-doc-kinds.json", import.meta.url), "utf8"))
+    .map((filename) => filename.toLowerCase()),
+);
 
 const TRANSPORT_SHIM = `<script>
 if (window.parent === window) {
+  window.__canvasTopLevelTransportAvailable = true;
   window.addEventListener('message', function(e) {
     if (e.source === window && e.data && typeof e.data.action === 'string') {
       fetch('http://127.0.0.1:__PORT__/_message', {
@@ -44,13 +60,7 @@ const CONTENT_POLL_SCRIPT = `<script>
 
 const CANVAS_DIR = resolve(process.cwd(), ".agents", "canvas");
 
-let sendQueue = Promise.resolve();
-const enqueueSend = (session, prompt) => {
-  sendQueue = sendQueue
-    .then(() => session.send({ prompt }))
-    .then(() => log(`session.send succeeded (${prompt.length} chars)`))
-    .catch((err) => log(`session.send FAILED: ${err?.message ?? err}`));
-};
+const { enqueue: enqueueSend } = createSendQueue({ log });
 
 function readBody(req, maxBytes = 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -65,10 +75,6 @@ function readBody(req, maxBytes = 1024 * 1024) {
   });
 }
 
-function isValidCanvasFilename(filename) {
-  return typeof filename === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.html$/.test(filename);
-}
-
 async function readCanvasFile(filename) {
   const filePath = resolve(CANVAS_DIR, filename);
   if (!filePath.startsWith(CANVAS_DIR + sep) && filePath !== CANVAS_DIR) {
@@ -81,9 +87,13 @@ function hashContent(content) {
   return createHash("sha256").update(content, "utf-8").digest("hex");
 }
 
-function injectScripts(html, port) {
+function injectScripts(html, port, filename) {
   const shim = TRANSPORT_SHIM.replaceAll("__PORT__", String(port));
-  const scripts = shim + "\n" + CONTENT_POLL_SCRIPT;
+  const agentDocScripts =
+    SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())
+      ? ""
+      : "\n" + CANVAS_SEND_SCRIPT + "\n" + CANVAS_SELECTION_CONTEXT_SCRIPT;
+  const scripts = shim + agentDocScripts + "\n" + CONTENT_POLL_SCRIPT;
   if (html.includes("</head>")) {
     return html.replace("</head>", scripts + "\n</head>");
   }
@@ -130,8 +140,17 @@ function startHttpServer(session, state) {
           res.end("Payload Too Large");
           return;
         }
-        log(`/inject received: payload length=${body.length}`);
-        enqueueSend(session, `[canvas] ${body}`);
+        let transport;
+        try {
+          transport = promptForSession(body);
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+          return;
+        }
+        const { kind, prompt } = transport;
+        log(`/inject received: transport length=${body.length}, prompt length=${prompt.length}`);
+        enqueueSend(session, kind, prompt);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -163,7 +182,7 @@ function startHttpServer(session, state) {
             res.end(JSON.stringify({ ok: false, error: "missing action" }));
             return;
           }
-          enqueueSend(session, `[canvas] ${JSON.stringify(parsed)}`);
+          enqueueSend(session, "canvas", `[canvas] ${JSON.stringify(parsed)}`);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true }));
           return;
@@ -183,8 +202,11 @@ function startHttpServer(session, state) {
               res.end(hashContent(content));
             } else {
               const port = server.address().port;
-              res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-              res.end(injectScripts(content, port));
+              res.writeHead(200, {
+                "Content-Type": "text/html; charset=utf-8",
+                "Content-Security-Policy": "frame-ancestors 'none'",
+              });
+              res.end(injectScripts(content, port, canvasRoute.filename));
             }
           } catch (err) {
             if (err.code === "ENOENT") {
@@ -216,7 +238,11 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
     const res = await fetch(TREEMON_REGISTER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ worktreePath, injectUrl, sessionId }),
+      body: JSON.stringify({
+        worktreePath,
+        injectUrl,
+        sessionId,
+      }),
       signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
@@ -238,27 +264,34 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
   }
 }
 
-// Declare this session as the owner of a canvas doc. Decision 1d: the write hook supplies only the
-// filename; the extension stamps in its own sessionId here and POSTs the triple to Treemon, which
-// records ownership for a monitored worktree and routes that doc's messages back to this session.
-// Best-effort — an unmonitored worktree (200 {attributed:false}) or an unreachable Treemon is a
-// benign no-op, never thrown.
+// Declare ownership for a successful write. The extension stamps its own sessionId;
+// unreachable or unmonitored Treemon remains a best-effort no-op.
 async function declareOwnership(worktreePath, filename, sessionId) {
   try {
     const res = await fetch(TREEMON_ATTRIBUTE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ worktreePath, filename, sessionId }),
+      body: JSON.stringify({
+        worktreePath,
+        filename,
+        sessionId,
+      }),
       signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
       log(`ownership declaration failed for ${filename}: ${res.status} ${res.statusText}`);
-      return { ok: false, error: `Treemon returned ${res.status} ${res.statusText}` };
+      return {
+        ok: false,
+        error: `Treemon returned ${res.status} ${res.statusText}`,
+      };
     }
     const outcome = await res.json().catch(() => ({}));
     const attributed = outcome?.attributed === true;
+    // `monitored` distinguishes the two non-attributed cases: an unmonitored worktree (nothing
+    // recorded) from a SystemView, which has no author to record.
+    const monitored = outcome?.monitored === true;
     log(`declared ownership: ${filename} → ${sessionId} (attributed=${attributed})`);
-    return { ok: true, attributed };
+    return { ok: true, attributed, monitored };
   } catch (err) {
     log(`could not declare ownership for ${filename}: ${err.message}`);
     return { ok: false, error: err.message };
@@ -300,25 +333,6 @@ function startHeartbeat(worktreePath, injectUrl, sessionId) {
   };
 }
 
-function parseToolArgs(toolArgs) {
-  if (typeof toolArgs === "string") {
-    try { return JSON.parse(toolArgs); } catch { return {}; }
-  }
-  return toolArgs ?? {};
-}
-
-const CANVAS_WRITE_RE = /(^|\/)\.agents\/canvas\/[^/]+\.html$/;
-
-// Extract the canvas filename from a create/edit tool's arguments, or null when the write does
-// not target `.agents/canvas/*.html`. The agent supplies only the path; the filename is the tab.
-function canvasFilenameFromArgs(toolArgs) {
-  const args = parseToolArgs(toolArgs);
-  const filePath = args?.path || args?.file_path || "";
-  const normalized = String(filePath).replace(/\\/g, "/");
-  if (!CANVAS_WRITE_RE.test(normalized)) return null;
-  return normalized.split("/").pop();
-}
-
 // React to a successful canvas-doc write. Monitored: declare ownership (the authoritative
 // attribution path; the server's file-watcher is fallback-only) — the extension stamps in its own
 // sessionId, the agent only supplied the filename. Browser mode (Treemon unreachable/unmonitored):
@@ -342,62 +356,21 @@ async function handleCanvasWrite(session, state, filename) {
   log(`canvas write: serving ${filename} in browser mode → ${url}`);
   enqueueSend(
     session,
+    "agent-prompt",
     `Canvas doc "${filename}" is served in browser-fallback mode at ${url} — Treemon is not monitoring this worktree. Share this ctrl+clickable URL with the user (or open it) to view the doc; it auto-reloads on changes and interactions are forwarded back to this session.`,
   );
-}
-
-// The native runtime no longer supports SDK hook callbacks (joinSession({ hooks }) fails the
-// session.resume), so canvas writes are observed via session events instead. tool.execution_complete
-// carries neither the tool name nor its arguments, so the write is captured from tool.execution_start
-// (keyed by toolCallId) and acted on once the matching completion reports success. Listeners are
-// subscribed immediately after joinSession so writes during startup aren't missed; completed writes
-// are buffered until `activate` supplies the handler (state is only valid after Object.freeze).
-function watchCanvasWrites(session) {
-  const pendingByToolCallId = new Map();
-  const bufferedWrites = [];
-  let onCanvasWrite = (filename) => bufferedWrites.push(filename);
-
-  const unsubscribeStart = session.on("tool.execution_start", (event) => {
-    const data = event?.data;
-    if (!data || (data.toolName !== "create" && data.toolName !== "edit")) return;
-    const filename = canvasFilenameFromArgs(data.arguments);
-    if (filename) pendingByToolCallId.set(data.toolCallId, filename);
-  });
-
-  const unsubscribeComplete = session.on("tool.execution_complete", (event) => {
-    const data = event?.data;
-    if (!data) return;
-    const filename = pendingByToolCallId.get(data.toolCallId);
-    if (filename === undefined) return;
-    pendingByToolCallId.delete(data.toolCallId);
-    if (!data.success) return;
-    onCanvasWrite(filename);
-  });
-
-  const stop = () => {
-    unsubscribeStart();
-    unsubscribeComplete();
-  };
-
-  // Switch from buffering to live handling and flush writes captured during startup.
-  const activate = (handler) => {
-    onCanvasWrite = handler;
-    bufferedWrites.splice(0).forEach(handler);
-  };
-
-  return { stop, activate };
 }
 
 const worktreePath = process.cwd();
 const extensionState = { browserMode: false, port: 0, sessionId: null, worktreePath };
 
-// Explicit ownership tool the agent can call on demand — for a doc produced by a script or
-// another tool (no create/edit event fired to auto-declare), or one whose messages are reaching
-// the wrong session. It stamps THIS session's id, so the agent only supplies the filename.
+// Explicit routing tool the agent can call on demand. AgentDocs assign author ownership;
+// SystemViews are not claimable - their interactions resolve to a live session. It stamps THIS session's id,
+// so the agent only supplies the filename.
 const takeOwnershipTool = {
   name: "canvas_take_ownership",
   description:
-    "Declare THIS session as the owner of a canvas doc under .agents/canvas/, so replies from that doc route back to this session. Use it when a canvas doc was produced by a script or another tool (so no create/edit event declared ownership), or when a doc's messages are reaching the wrong session. Pass the doc's filename, e.g. \"review.html\".",
+    "Route an authored canvas doc's replies to THIS session by claiming its author ownership. Pass the filename under .agents/canvas/, e.g. \"review.html\". SystemViews such as diff.html and beads.html are not claimable: they always reach the worktree's most recently active session.",
   parameters: {
     type: "object",
     properties: {
@@ -418,14 +391,20 @@ const takeOwnershipTool = {
     if (!extensionState.sessionId) {
       throw new Error("This session has no id yet; cannot declare ownership.");
     }
-    const result = await declareOwnership(extensionState.worktreePath, name, extensionState.sessionId);
+    const result =
+      await declareOwnership(extensionState.worktreePath, name, extensionState.sessionId);
     if (!result.ok) {
       throw new Error(`Ownership declaration failed: ${result.error}`);
     }
     if (!result.attributed) {
+      if (result.monitored) {
+        throw new Error(
+          `"${name}" is a generated SystemView, so it has no author to claim. Its interactions always reach the worktree's most recently active session.`,
+        );
+      }
       throw new Error(`Treemon is not monitoring this worktree, so ownership was not recorded for ${name}.`);
     }
-    return `This session now owns "${name}" — replies from that canvas doc will route here.`;
+    return `Replies from "${name}" now route to this session.`;
   },
 };
 
@@ -448,7 +427,7 @@ try {
 // are queued rather than delivered (the server's single-session fallback is intentionally gone).
 const sessionId = session.sessionId ?? session.id;
 extensionState.sessionId = sessionId;
-const canvasWrites = watchCanvasWrites(session);
+const canvasWrites = watchCanvasWrites(session, worktreePath);
 
 const { server, port } = await startHttpServer(session, extensionState);
 extensionState.port = port;
@@ -459,7 +438,7 @@ extensionState.browserMode = browserMode;
 Object.freeze(extensionState);
 
 // State is frozen and valid; start handling canvas writes (flushing any buffered during startup).
-canvasWrites.activate((filename) => handleCanvasWrite(session, extensionState, filename));
+canvasWrites.activate((write) => handleCanvasWrite(session, extensionState, write));
 
 if (browserMode) {
   const reason = !registered.reachable ? "Treemon unreachable" : "directory not monitored by Treemon";
@@ -468,7 +447,10 @@ if (browserMode) {
   log(`● canvas-bridge listening on ${injectUrl}`);
 }
 
-const stopHeartbeat = browserMode ? () => {} : startHeartbeat(worktreePath, injectUrl, sessionId);
+const stopHeartbeat =
+  browserMode
+    ? () => {}
+    : startHeartbeat(worktreePath, injectUrl, sessionId);
 
 const cleanup = () => {
   canvasWrites.stop();

@@ -21,14 +21,19 @@ let private makeWorktree repoId branch (canvasDocs: CanvasDoc list) : WorktreeSt
       Planning = BeadsPlanning.zero
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
+      CodingToolSince = None
       CurrentSkill = None
+      AgentActivity = None
+      Sessions = []
       LastUserMessage = None
+      LastAssistantMessage = None
       Pr = PrStatus.NoPr
       MainBehindCount = 0
+      AutoSyncEnabled = false
       IsDirty = false
+      HasDiff = false
       WorkMetrics = None
       HasActiveSession = false
-      HasTestFailureLog = false
       IsMainWorktree = false
       IsArchived = false
       CanvasDocs = canvasDocs }
@@ -66,7 +71,6 @@ let private defaultModel : Model =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
-      SyncPending = Set.empty
       AppVersion = Some "1.0"
       DeployBranch = None
       SystemMetrics = None
@@ -75,12 +79,19 @@ let private defaultModel : Model =
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
       EditorName = "VS Code"
+      WorktreeSkills = []
       ActionCooldowns = Set.empty
+      AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
-      SelectedOverviewGroup = None }
+      OverviewAgentsStuck = false
+      SelectedOverviewGroup = None
+      OverviewHistoryWindow = None
+      OverviewHistory = None
+      OverviewHistoryRequestedAt = System.DateTimeOffset.Now
+      OverviewHistoryRequestInFlight = None }
 
 /// Calls update and returns the model, ignoring the Cmd. Tolerates the
 /// Fable.Remoting.Client proxy build failing under .NET, which surfaces as a
@@ -273,6 +284,87 @@ type DetectCanvasEventsTests() =
 
         Assert.That(result |> Map.containsKey "r1/main", Is.False, "r1/main unchanged")
         Assert.That(result |> Map.containsKey "r2/dev", Is.True, "r2/dev is new")
+
+
+// ── Freshness gate (phantom "published" suppression on restart) ──────
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CanvasEventFreshnessGateTests() =
+
+    let event filename kind : CanvasEvent =
+        { Filename = filename; Timestamp = DateTimeOffset.UtcNow; Kind = kind }
+
+    [<Test>]
+    member _.``gate drops a phantom event whose doc mtime is stale``() =
+        let now = DateTimeOffset.UtcNow
+        let events = Map.ofList [ "r/feat", [ event "old.html" NewDoc ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "old.html", now.AddHours(-3.0) ] ]
+
+        let result = gateCanvasEventsByFreshness now modified events
+
+        Assert.That(result, Is.Empty, "A pre-existing doc (stale mtime) must not surface as a canvas event")
+
+    [<Test>]
+    member _.``gate keeps a fresh event and restamps it with the real mtime``() =
+        let now = DateTimeOffset.UtcNow
+        let mtime = now.AddMinutes(-1.0)
+        let events = Map.ofList [ "r/feat", [ event "new.html" NewDoc ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "new.html", mtime ] ]
+
+        let result = gateCanvasEventsByFreshness now modified events
+
+        let evts = result["r/feat"]
+        Assert.That(evts.Length, Is.EqualTo(1))
+        Assert.That(evts[0].Filename, Is.EqualTo("new.html"))
+        Assert.That(evts[0].Timestamp, Is.EqualTo(mtime), "Event is restamped with the file's real mtime")
+
+    [<Test>]
+    member _.``gate drops events for a doc missing from the modified map``() =
+        let now = DateTimeOffset.UtcNow
+        let events = Map.ofList [ "r/feat", [ event "ghost.html" UpdatedDoc ] ]
+
+        let result = gateCanvasEventsByFreshness now Map.empty events
+
+        Assert.That(result, Is.Empty)
+
+    [<Test>]
+    member _.``detect + gate suppresses a pre-existing doc reappearing after a restart``() =
+        // Baseline was momentarily empty (restart scan gap); the doc reappears as absent->present,
+        // which detectCanvasEvents alone reports as NewDoc — but its mtime is old, so the gate drops it.
+        let now = DateTimeOffset.UtcNow
+        let prev = Map.empty
+        let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "report.html", now.AddDays(-2.0) ] ]
+
+        let result = detectCanvasEvents now prev curr |> gateCanvasEventsByFreshness now modified
+
+        Assert.That(result, Is.Empty, "A pre-existing doc reappearing after restart must not show as published")
+
+    [<Test>]
+    member _.``detect + gate still reports a genuinely fresh new doc``() =
+        let now = DateTimeOffset.UtcNow
+        let prev = Map.empty
+        let curr = Map.ofList [ "r/feat", Map.ofList [ "report.html", "h1" ] ]
+        let modified = Map.ofList [ "r/feat", Map.ofList [ "report.html", now.AddSeconds(-2.0) ] ]
+
+        let result = detectCanvasEvents now prev curr |> gateCanvasEventsByFreshness now modified
+
+        let evts = result["r/feat"]
+        Assert.That(evts[0].Kind, Is.EqualTo(NewDoc), "A truly recent publish still surfaces")
+
+    [<Test>]
+    member _.``isCanvasDocFresh is true within the window and false outside it or when missing``() =
+        let now = DateTimeOffset.UtcNow
+        let modified = Map.ofList [ "r/feat", Map.ofList [
+            "fresh.html", now.AddMinutes(-1.0)
+            "stale.html", now.AddHours(-2.0) ] ]
+
+        Assert.That(isCanvasDocFresh now modified "r/feat" "fresh.html", Is.True)
+        Assert.That(isCanvasDocFresh now modified "r/feat" "stale.html", Is.False)
+        Assert.That(isCanvasDocFresh now modified "r/feat" "missing.html", Is.False)
+        Assert.That(isCanvasDocFresh now modified "r/ghost" "fresh.html", Is.False)
 
 
 // ── Auto-display idle logic ──────────────────────────────────────────
@@ -645,6 +737,33 @@ type SystemViewAwarenessTests() =
         Assert.That(events[0].Filename, Is.EqualTo("status.html"),
             "Only the AgentDoc should yield a NewDoc event")
 
+    [<Test>]
+    member _.``retainAgentDocEvents removes all existing SystemView events``() =
+        let timestamp = DateTimeOffset(2026, 7, 22, 12, 0, 0, TimeSpan.Zero)
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeDoc "status.html" "a1"
+                makeSystemDoc "beads.html" "b1"
+                makeSystemDoc "diff.html" "d1" ] ] ]
+        let existing =
+            Map.ofList [
+                "r/feat", [
+                    { Filename = "beads.html"; Timestamp = timestamp; Kind = NewDoc }
+                    { Filename = "diff.html"; Timestamp = timestamp; Kind = UpdatedDoc }
+                    { Filename = "status.html"; Timestamp = timestamp; Kind = UpdatedDoc }
+                ]
+            ]
+        let expected =
+            Map.ofList [
+                "r/feat", [
+                    { Filename = "status.html"; Timestamp = timestamp; Kind = UpdatedDoc }
+                ]
+            ]
+
+        let result = retainAgentDocEvents (canvasHashesByScopedKey repos) existing
+
+        Assert.That(result, Is.EqualTo(expected))
+
     // seedLastViewedHashes
 
     [<Test>]
@@ -728,6 +847,32 @@ type NavigateCanvasDocTests() =
             Assert.That(filename, Is.EqualTo("plan.html"))
         | other -> Assert.Fail($"expected a single SelectCanvasDoc, got {other}")
 
+    [<Test>]
+    member _.``navigation follows the diff pane target while card focus remains elsewhere``() =
+        let model =
+            { defaultModel with
+                Repos =
+                    [ makeRepo "myrepo" [
+                        makeWorktree "myrepo" "focused" [ makeDoc "details.html" "focused-hash" ]
+                        makeWorktree "myrepo" "target" [
+                            makeSystemDoc "diff.html" "diff-hash"
+                            makeDoc "details.html" "target-hash" ] ] ]
+                FocusedElement = Some (Card "myrepo/focused")
+                Canvas.CanvasPaneOpen = true
+                Canvas.TargetWorktree = Some "myrepo/target"
+                Canvas.ActiveCanvasDoc = Map.ofList [ "myrepo/target", "diff.html" ] }
+
+        let updated, cmd = update (NavigateCanvasDoc "details.html") model
+
+        Assert.That(updated.FocusedElement, Is.EqualTo(Some (Card "myrepo/focused")),
+            "In-doc navigation must not change the dashboard card focus")
+        match dispatchedMsgs cmd with
+        | [ SelectCanvasDoc (scopedKey, filename) ] ->
+            Assert.That(scopedKey, Is.EqualTo("myrepo/target"),
+                "The explicit pane target, not the focused card, owns in-doc navigation")
+            Assert.That(filename, Is.EqualTo("details.html"))
+        | other -> Assert.Fail($"expected a single SelectCanvasDoc for the pane target, got {other}")
+
     // The accept/drop decision is the pure isKnownCanvasDoc predicate (the drop branch itself calls
     // Fable.Core.JS.console.warn, dummy code that throws under .NET, so it can't run through update
     // here). These assert the gate that decides whether a navigation is committed or dropped.
@@ -763,6 +908,39 @@ type NavigateCanvasDocTests() =
                 Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" [ makeDoc "status.html" "h1" ] ] ] }
         Assert.That(isKnownCanvasDoc model "myrepo/ghost" "status.html", Is.False,
             "No worktree for the scoped key means nothing is known, so the navigation is dropped")
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type OpenWorktreeDiffTests() =
+
+    let guardedModel docs =
+        { defaultModel with
+            Repos = [ makeRepo "myrepo" [ makeWorktree "myrepo" "feat" docs ] ]
+            Canvas =
+                { CanvasState.empty with
+                    TargetWorktree = Some "existing/target"
+                    ActiveCanvasDoc = Map.ofList [ "existing/target", "status.html" ]
+                    VisitedCanvasDocs = Map.ofList [ "existing/target", [ "status.html" ] ]
+                    DocError = Some { ScopedKey = "existing/target"; Filename = "status.html"; Message = "keep" } } }
+
+    [<Test>]
+    member _.``OpenWorktreeDiff does nothing when diff view is absent``() =
+        let model = guardedModel [ makeDoc "status.html" "h1" ]
+        let updated, cmd = update (OpenWorktreeDiff "myrepo/feat") model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated, Is.EqualTo(model), "An absent view must not change pane target or document state")
+            Assert.That(cmd, Is.Empty, "An absent view must not dispatch view or persistence effects"))
+
+    [<Test>]
+    member _.``OpenWorktreeDiff rejects an AgentDoc named diff html``() =
+        let model = guardedModel [ makeDoc "diff.html" "h1" ]
+        let updated, cmd = update (OpenWorktreeDiff "myrepo/feat") model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated, Is.EqualTo(model), "Only the scanned diff SystemView may be targeted")
+            Assert.That(cmd, Is.Empty, "A same-named AgentDoc must not dispatch view or persistence effects"))
 
 
 // ── Doc-side JS error (item 3: error overlay → canvas-doc-error banner) ───────
@@ -1010,9 +1188,9 @@ type MostRecentUnviewedDocTests() =
 // ── Focus-transition retarget (select-the-worktree surfaces THAT doc) ─
 // When focus transitions ONTO a worktree card that has an unviewed (newly published/updated) doc,
 // its ActiveCanvasDoc is retargeted to that doc — via update(SetFocus …), the message every
-// "select the worktree" entry point funnels through. No retarget when the card is already focused
-// (manual tab choice preserved) or nothing is unviewed. The doc is marked viewed only when the pane
-// is open (it is actually shown).
+// "select the worktree" entry point funnels through. Manual tab choice is preserved when the card
+// is already focused, except that diff.html is explicit-only and yields to another available doc.
+// The doc is marked viewed only when the pane is open (it is actually shown).
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1056,6 +1234,43 @@ type FocusRetargetTests() =
         let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
         Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "a.html"),
             "re-focusing the already-focused card must preserve a manual in-worktree tab choice")
+
+    [<Test>]
+    member _.``worktree selection replaces a sticky diff with another canvas doc``() =
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeSystemDoc WorktreeDiffFilename "diff"
+                makeDoc "status.html" "status" ] ] ]
+        let model =
+            { defaultModel with
+                Repos = repos
+                FocusedElement = Some (Card "r/feat")
+                Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", WorktreeDiffFilename ] }
+
+        let updated, _ = update (SetFocus (Some (Card "r/feat"))) model
+
+        Assert.That(updated.Canvas.ActiveCanvasDoc |> Map.tryFind "r/feat", Is.EqualTo(Some "status.html"))
+
+    [<Test>]
+    member _.``automatic visible doc skips diff when another canvas doc exists``() =
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeSystemDoc WorktreeDiffFilename "diff"
+                makeDoc "status.html" "status" ] ] ]
+
+        let result = CanvasState.activeVisibleDoc repos (Some (Card "r/feat")) None Map.empty
+
+        Assert.That(result, Is.EqualTo(Some ("r/feat", "status.html")))
+
+    [<Test>]
+    member _.``automatic visible doc uses diff when it is the only canvas doc``() =
+        let repos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeSystemDoc WorktreeDiffFilename "diff" ] ] ]
+
+        let result = CanvasState.activeVisibleDoc repos (Some (Card "r/feat")) None Map.empty
+
+        Assert.That(result, Is.EqualTo(Some ("r/feat", WorktreeDiffFilename)))
 
     [<Test>]
     member _.``no retarget when there are no unviewed docs``() =

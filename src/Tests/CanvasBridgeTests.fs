@@ -9,21 +9,29 @@ open System.Net.Sockets
 open System.Collections.Concurrent
 open NUnit.Framework
 open Shared
+open Server.SessionBridge
 open Server.CanvasBridge
 open Server.RefreshScheduler.CanvasWatchers
 open Tests.TestUtils
-
-// Each test uses a unique worktree path to avoid shared-state interference
-// between tests (the module uses ConcurrentDictionaries at module level).
-let private uniquePath prefix =
-    let id = Guid.NewGuid().ToString("N")[..7]
-    $"/test/{prefix}/{id}"
 
 // Unique session IDs keep tests isolated now that the registry is keyed by sessionId
 // (a shared literal like "s1" would otherwise collide across tests).
 let private uniqueSid prefix =
     let id = Guid.NewGuid().ToString("N")[..7]
     $"{prefix}-{id}"
+
+let private canvasWire payload =
+    serializePrompt (Prompt.canvas payload)
+
+// Most of these tests cover AgentDoc routing, which resolves from recorded ownership and ignores
+// session activity — so the activity snapshot defaults to empty. SystemView resolution is covered
+// directly against `resolveTarget` in SystemViewInteractionRoutingTests.
+let private sendMessage request =
+    async {
+        match! Server.CanvasBridge.sendMessage [] request with
+        | Server.CanvasBridge.Routed result
+        | Server.CanvasBridge.QueuedNeedingSession result -> return result
+    }
 
 // A minimal loopback HTTP sink used to assert *which* inject URL a message reaches.
 // It speaks just enough HTTP/1.1 over a raw TcpListener so no HttpListener URL ACL /
@@ -254,8 +262,10 @@ type RegisterAndStatusTests() =
         Assert.That(result |> Map.containsKey path1, Is.True)
         Assert.That(result[path1].IsAlive, Is.True)
         Assert.That(result[path1].SessionId, Is.EqualTo(Some sid1))
+        Assert.That(result[path1].LiveSessionIds, Is.EqualTo [ sid1 ])
         Assert.That(result |> Map.containsKey path2, Is.True)
         Assert.That(result[path2].SessionId, Is.EqualTo(None))
+        Assert.That(result[path2].LiveSessionIds, Is.Empty)
         Assert.That(result |> Map.containsKey path3, Is.False, "Unregistered path should not appear")
 
     [<Test>]
@@ -285,6 +295,7 @@ type RegisterAndStatusTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+[<NonParallelizable>]
 type EnqueueTests() =
 
     [<Test>]
@@ -310,23 +321,35 @@ type EnqueueTests() =
 
     [<Test>]
     member _.``Queue respects max 10 size limit — oldest messages dropped``() =
-        let path = uniquePath "enq-limit"
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 1
+            use sink = new HttpSink(ports[0])
+            sink.Start()
 
-        // Enqueue 12 messages — only the last 10 should survive (oldest two evicted).
-        [ 1..12 ]
-        |> List.iter (fun i ->
-            let request = { WorktreePath = WorktreePath path; Filename = ""; Payload = $"msg-{i}" }
-            sendMessage request |> Async.RunSynchronously |> ignore)
+            let path = uniquePath "enq-limit"
+            let sid = uniqueSid "owner"
+            runAsync (Server.CanvasDocOwnership.assign path "report.html" sid)
 
-        // Drain in-process (no HTTP) and inspect the survivors directly.
-        let survivors = drainPending path
+            // Enqueue 12 owner-bound messages while the owner is offline.
+            [ 1..12 ]
+            |> List.iter (fun i ->
+                let request =
+                    { WorktreePath = WorktreePath path
+                      Filename = "report.html"
+                      Payload = $"msg-{i}" }
 
-        Assert.That(List.length survivors, Is.EqualTo(10), "Queue should cap at 10 survivors")
-        Assert.That(
-            survivors,
-            Is.EqualTo([ for i in 3..12 -> $"msg-{i}" ]),
-            "Oldest two (msg-1, msg-2) should be evicted, leaving msg-3..msg-12 in order"
-        )
+                sendMessage request |> Async.RunSynchronously |> ignore)
+
+            registerSession path sink.Url (Some sid)
+
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> List.length sink.Bodies = 10), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "The owner registration must drain the capped queue")
+            Assert.That(
+                sink.Bodies,
+                Is.EqualTo([ for i in 3..12 -> canvasWire $"msg-{i}" ]),
+                "Oldest two (msg-1, msg-2) should be evicted, leaving msg-3..msg-12 in order"))
 
 
 // ── drainQueue via register ─────────────────────────────────────────
@@ -334,24 +357,8 @@ type EnqueueTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+[<NonParallelizable>]
 type DrainQueueTests() =
-
-    [<Test>]
-    member _.``Register drains the queued owner-unknown message out of the queue``() =
-        let path = uniquePath "drain-basic"
-
-        // Enqueue a message while no bridge is registered.
-        let req = { WorktreePath = WorktreePath path; Filename = ""; Payload = "queued-msg" }
-        Assert.That(sendMessage req |> Async.RunSynchronously, Is.EqualTo(CanvasMessageResult.Queued))
-
-        // Registering a bridge triggers drainQueue. The queued message has no known owner, so the
-        // registering bridge may drain it: it is removed from the queue (the unreachable URL just
-        // makes the async POST fail silently — it is not re-queued).
-        registerSession path "http://127.0.0.1:1/inject" None
-
-        // The queue is now empty: a subsequent anonymous poll drains nothing.
-        Assert.That(drainPending path, Is.Empty,
-            "drainQueue on register must consume the queued owner-unknown message")
 
     [<Test>]
     member _.``Register with no queued messages works without error``() =
@@ -364,38 +371,114 @@ type DrainQueueTests() =
         Assert.That(status.Registered, Is.True)
 
     [<Test>]
-    member _.``Register with a sessionId drains the worktree-keyed queue``() =
-        let path = uniquePath "drain-sid"
+    member _.``A queued SystemView interaction drains to the next identified registration``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 1
+            use sink = new HttpSink(ports[0])
+            sink.Start()
 
-        // Enqueue with no bridge registered (the queue is keyed by worktree path).
-        let req = { WorktreePath = WorktreePath path; Filename = ""; Payload = "queued-msg" }
-        sendMessage req |> Async.RunSynchronously |> ignore
+            let path = uniquePath "drain-systemview"
+            let sid = uniqueSid "drainer"
+            let req =
+                { WorktreePath = WorktreePath path
+                  Filename = "diff.html"
+                  Payload = "queued-msg" }
 
-        // Register an *identified* (sid:-keyed) session. The registry is no longer
-        // worktree-keyed, so this guards that drainQueue still locates the worktree-keyed
-        // queue and removes it (forwarding to the entry; the unreachable HTTP fails silently).
-        registerSession path "http://127.0.0.1:1/inject" (Some(uniqueSid "drainer"))
+            Assert.That(sendMessage req |> Async.RunSynchronously, Is.EqualTo(CanvasMessageResult.Queued))
 
-        // The worktree-keyed queue was drained on registration — nothing remains to poll.
-        Assert.That(drainPending path, Is.Empty,
-            "A sid-keyed registration must drain the worktree-keyed queue")
+            registerSession path sink.Url (Some sid)
+
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> sink.Bodies = [ canvasWire "queued-msg" ]), TimeSpan.FromSeconds 5.0),
+                Is.True,
+                "A SystemView has no stored owner, so its queued interaction drains to the session that registers")
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(None: string option),
+                "Draining a SystemView interaction must not record an owner for it"))
 
     [<Test>]
-    member _.``Queue is cleared after drain — second register has nothing to drain``() =
-        let path = uniquePath "drain-clear"
+    member _.``Anonymous registration cannot drain a queued SystemView interaction``() =
+        withTempCwd (fun () ->
+            let ports = getFreeTcpPorts 2
+            use anonymousSink = new HttpSink(ports[0])
+            use identifiedSink = new HttpSink(ports[1])
+            anonymousSink.Start()
+            identifiedSink.Start()
 
-        // Enqueue
-        let req = { WorktreePath = WorktreePath path; Filename = ""; Payload = "test" }
-        sendMessage req |> Async.RunSynchronously |> ignore
+            let path = uniquePath "drain-identified"
+            let sid = uniqueSid "identified"
+            let req =
+                { WorktreePath = WorktreePath path
+                  Filename = "diff.html"
+                  Payload = "queued-msg" }
 
-        // First register drains
-        registerSession path "http://127.0.0.1:1/inject" None
-        // Second register — queue should already be empty
-        registerSession path "http://127.0.0.1:2/inject" None
+            sendMessage req |> Async.RunSynchronously |> ignore
 
-        // If queue was properly drained, this just works without issues
-        let status = getStatus path
-        Assert.That(status.Registered, Is.True)
+            registerSession path anonymousSink.Url None
+            Assert.That(anonymousSink.Bodies, Is.Empty)
+
+            registerSession path identifiedSink.Url (Some sid)
+            Assert.That(
+                SpinWait.SpinUntil((fun () -> identifiedSink.Bodies = [ canvasWire "queued-msg" ]), TimeSpan.FromSeconds 5.0),
+                Is.True))
+
+    [<Test>]
+    member _.``A second interaction joins the in-flight launch instead of starting another``() =
+        let path = uniquePath "drain-join"
+
+        let first = runAsync (beginPendingLaunch path)
+        let second = runAsync (beginPendingLaunch path)
+
+        Assert.Multiple(fun () ->
+            Assert.That(first, Is.EqualTo(PendingLaunchStarted))
+            Assert.That(second, Is.EqualTo(PendingLaunchJoined), "Only one launch may be in flight per worktree"))
+
+        runAsync (cancelPendingLaunch path)
+
+    [<Test>]
+    member _.``Pending launches never cross worktree boundaries``() =
+        let pathA = uniquePath "launch-a"
+        let pathB = uniquePath "launch-b"
+
+        let a = runAsync (beginPendingLaunch pathA)
+        let b = runAsync (beginPendingLaunch pathB)
+
+        Assert.Multiple(fun () ->
+            Assert.That(a, Is.EqualTo(PendingLaunchStarted))
+            Assert.That(b, Is.EqualTo(PendingLaunchStarted), "A launch for one worktree must not absorb another's"))
+
+        runAsync (cancelPendingLaunch pathA)
+        runAsync (cancelPendingLaunch pathB)
+
+    [<Test>]
+    member _.``A cancelled launch releases the worktree for a later launch``() =
+        let path = uniquePath "launch-cancel"
+
+        runAsync (beginPendingLaunch path) |> ignore
+        runAsync (cancelPendingLaunch path)
+
+        let next = runAsync (beginPendingLaunch path)
+        Assert.That(next, Is.EqualTo(PendingLaunchStarted))
+
+        runAsync (cancelPendingLaunch path)
+
+    [<Test>]
+    member _.``A registration does not release the launch guard``() =
+        let path = uniquePath "launch-heartbeat"
+
+        runAsync (beginPendingLaunch path) |> ignore
+
+        // Every live session re-registers periodically; an unrelated heartbeat must not be mistaken
+        // for the launch completing, or the guard would let a second spawn through immediately.
+        registerSession path "http://127.0.0.1:1/inject" (Some(uniqueSid "unrelated"))
+
+        Assert.That(
+            runAsync (beginPendingLaunch path),
+            Is.EqualTo(PendingLaunchJoined),
+            "Only expiry or cancellation releases the launch guard")
+
+        runAsync (cancelPendingLaunch path)
 
 
 // ── multi-session registry (sessionId-keyed re-key) ─────────────────
@@ -478,7 +561,7 @@ type MultiSessionRegistryTests() =
         Assert.That(getSessionForWorktree path, Is.EqualTo(Some newer))
 
     [<Test>]
-    member _.``Multi-session worktree reports alive while at least one session is live``() =
+    member _.``Multi-session liveness keeps every live session available to authored docs``() =
         let path = uniquePath "multi-live"
         let a = uniqueSid "a"
         let b = uniqueSid "b"
@@ -488,7 +571,10 @@ type MultiSessionRegistryTests() =
         let liveness = getAllLiveness [ path ]
         Assert.That(liveness |> Map.containsKey path, Is.True)
         Assert.That(liveness[path].IsAlive, Is.True)
-        Assert.That(liveness[path].SessionId, Is.EqualTo(Some b), "Liveness reflects the freshest session")
+        Assert.That(liveness[path].SessionId, Is.EqualTo(Some b), "Aggregate status keeps the freshest session")
+        Assert.That(liveness[path].LiveSessionIds, Is.EqualTo(List.sort [ a; b ]))
+        Assert.That(BridgeLiveness.hasLiveSession a liveness, Is.True, "The non-freshest document owner remains alive")
+        Assert.That(BridgeLiveness.hasLiveSession b liveness, Is.True)
 
 
 // ── owner-aware routing (sendMessage by doc owner) ──────────────────
@@ -530,7 +616,7 @@ type OwnerRoutingTests() =
             let result = runAsync (sendMessage request)
 
             Assert.That(result, Is.EqualTo(CanvasMessageResult.Ok), "Owner is live, so delivery should succeed")
-            Assert.That(ownerSink.Bodies, Is.EqualTo([ "p1" ]), "Owner session must receive the message")
+            Assert.That(ownerSink.Bodies, Is.EqualTo([ canvasWire "p1" ]), "Owner session must receive the message")
             Assert.That(otherSink.Bodies, Is.Empty, "Non-owner in the same worktree must never receive it"))
 
     [<Test>]
@@ -555,8 +641,8 @@ type OwnerRoutingTests() =
 
             Assert.That(rA, Is.EqualTo(CanvasMessageResult.Ok))
             Assert.That(rB, Is.EqualTo(CanvasMessageResult.Ok))
-            Assert.That(sinkA.Bodies, Is.EqualTo([ "pa" ]), "a.html delivers to owner A only")
-            Assert.That(sinkB.Bodies, Is.EqualTo([ "pb" ]), "b.html delivers to owner B only"))
+            Assert.That(sinkA.Bodies, Is.EqualTo([ canvasWire "pa" ]), "a.html delivers to owner A only")
+            Assert.That(sinkB.Bodies, Is.EqualTo([ canvasWire "pb" ]), "b.html delivers to owner B only"))
 
     [<Test>]
     member _.``Owner offline queues and never falls back to a live non-owner``() =
@@ -594,9 +680,9 @@ type OwnerRoutingTests() =
     member _.``Unowned doc never delivers to a co-located non-author (Bug B regression)``() =
         // Direct Bug B guard: an unowned doc with exactly one live, *reachable* session must not
         // hand that session the message. A real sink proves the non-author receives nothing.
-        // Scope: this guards the *send* path (`sendMessage` queues instead of delivering). An
-        // already-queued owner-unknown message may still drain best-effort to a co-located session
-        // by design — see `Register drains the queued owner-unknown message` in DrainQueueTests.
+        // Scope: this guards the *send* path (`sendMessage` queues instead of delivering). Queue
+        // drain also re-resolves the unified target and therefore cannot deliver an untargeted
+        // message to a co-located registration.
         let ports = getFreeTcpPorts 1
         use nonAuthorSink = new HttpSink(ports[0])
         nonAuthorSink.Start()
@@ -672,26 +758,143 @@ type OwnerRoutingTests() =
 
             waitForDelivery ()
 
-            Assert.That(ownerSink.Bodies, Is.EqualTo([ "p1" ]), "Owner must receive its queued message on re-register")
+            Assert.That(ownerSink.Bodies, Is.EqualTo([ canvasWire "p1" ]), "Owner must receive its queued message on re-register")
             Assert.That(otherSink.Bodies, Is.Empty, "Non-owner still must not have received it"))
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type SystemViewInteractionRoutingTests() =
 
-// ── scanner fallback-only attribution (RefreshScheduler.CanvasWatchers) ──────
-// The scanner is the *fallback* attribution path only: it may attribute a no-owner changed
-// doc to the worktree's bridge session ONLY when exactly one session is registered. The
-// original bug attributed every changed doc to the last-registered session
-// (getSessionForWorktree), cross-crediting docs whenever two sessions shared a worktree.
-// These guard the fix end-to-end (through the real CanvasBridge registry + CanvasDocOwnership)
-// and the pure single-session decision in isolation.
+    let ts (s: string) = DateTimeOffset.Parse(s, Globalization.CultureInfo.InvariantCulture)
 
-// A doc as the scanner would surface it: OwnerSessionId carries the owner read from the
-// ownership map during the scan (None = no declared owner yet).
+    let storedAt sid wt updatedAt : Server.SessionActivityStore.StoredStatus =
+        { SessionId = Server.SessionActivity.SessionId sid
+          WorktreePath = WorktreePath wt
+          Provider = CopilotCli
+          Status = Server.SessionActivity.emptyStatus
+          UpdatedAt = ts updatedAt
+          LastSeen = ts updatedAt
+          ContextUsageAt = None }
+
+    [<Test>]
+    member _.``A SystemView routes to the most recently active live session``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-recent"
+            let older = uniqueSid "older"
+            let newer = uniqueSid "newer"
+
+            registerSession path "http://127.0.0.1:1/inject" (Some older)
+            registerSession path "http://127.0.0.1:2/inject" (Some newer)
+
+            let statuses =
+                [ storedAt older path "2026-03-01T12:00:00Z"
+                  storedAt newer path "2026-03-01T12:05:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "diff.html")
+            Assert.That(target, Is.EqualTo(Some newer)))
+
+    [<Test>]
+    member _.``A SystemView ignores a more recently active session that is not live``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-dead"
+            let live = uniqueSid "live"
+            let dead = uniqueSid "dead"
+
+            // Only `live` registers with the bridge, so `dead` is unreachable however recent it is.
+            registerSession path "http://127.0.0.1:1/inject" (Some live)
+
+            let statuses =
+                [ storedAt live path "2026-03-01T12:00:00Z"
+                  storedAt dead path "2026-03-01T12:05:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "diff.html")
+            Assert.That(target, Is.EqualTo(Some live), "Reachability gates the choice; activity only orders it"))
+
+    [<Test>]
+    member _.``A SystemView with no live session resolves no target``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-none"
+            let sid = uniqueSid "offline"
+
+            let statuses = [ storedAt sid path "2026-03-01T12:00:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "diff.html")
+            Assert.That(target, Is.EqualTo(None: string option)))
+
+    [<Test>]
+    member _.``A SystemView ignores sessions from another worktree``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-scope"
+            let otherPath = uniquePath "sv-scope-other"
+            let stranger = uniqueSid "stranger"
+
+            registerSession otherPath "http://127.0.0.1:1/inject" (Some stranger)
+
+            let statuses = [ storedAt stranger otherPath "2026-03-01T12:05:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "diff.html")
+            Assert.That(target, Is.EqualTo(None: string option)))
+
+    [<Test>]
+    member _.``An AgentDoc ignores activity and routes to its recorded owner``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "agentdoc-owner"
+            let owner = uniqueSid "author"
+            let active = uniqueSid "active"
+
+            registerSession path "http://127.0.0.1:1/inject" (Some owner)
+            registerSession path "http://127.0.0.1:2/inject" (Some active)
+            runAsync (Server.CanvasDocOwnership.assign path "notes.html" owner)
+
+            // `active` is both live and more recently active, but an AgentDoc has a real author.
+            let statuses =
+                [ storedAt owner path "2026-03-01T12:00:00Z"
+                  storedAt active path "2026-03-01T12:05:00Z" ]
+
+            let target = runAsync (resolveTarget statuses path "notes.html")
+            Assert.That(target, Is.EqualTo(Some owner)))
+
+    [<Test>]
+    member _.``A SystemView falls back to the freshest reachable session when none has reported activity``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-no-activity"
+            let older = uniqueSid "older"
+            let newer = uniqueSid "newer"
+
+            registerSession path "http://127.0.0.1:1/inject" (Some older)
+            Threading.Thread.Sleep 15
+            registerSession path "http://127.0.0.1:2/inject" (Some newer)
+
+            // Bridge registrations and activity reports come from two independent extensions, so a
+            // reachable session may have no activity row at all. It is still a usable target —
+            // treating it as "no target" would spawn a second session next to a working one.
+            let target = runAsync (resolveTarget [] path "diff.html")
+            Assert.That(target, Is.EqualTo(Some newer)))
+
+    [<Test>]
+    member _.``A SystemView never records an owner when it resolves a target``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "sv-no-write"
+            let sid = uniqueSid "session"
+
+            registerSession path "http://127.0.0.1:1/inject" (Some sid)
+            let statuses = [ storedAt sid path "2026-03-01T12:00:00Z" ]
+
+            runAsync (resolveTarget statuses path "diff.html") |> ignore
+
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(None: string option),
+                "Resolution is read-only: nothing about a SystemView target is persisted"))
+
 let private scannedDoc (owner: string option) filename : CanvasDoc =
     { Filename = filename
       ContentHash = "h-" + filename
       LastModified = DateTimeOffset(DateTime(2026, 1, 1), TimeSpan.Zero)
       OwnerSessionId = owner
-      Kind = CanvasDocKind.classify filename }
+      Kind = Server.CanvasDocKinds.classify filename }
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -740,6 +943,77 @@ type ScannerFallbackAttributionTests() =
                 "A single registered session is the unambiguous fallback owner"))
 
     [<Test>]
+    member _.``scanner fallback never assigns a routing target to a SystemView``() =
+        withTempCwd (fun () ->
+            let path = uniquePath "scan-system"
+            registerSession path "http://localhost:1/inject" (Some(uniqueSid "solo"))
+
+            attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc None "diff.html" ]
+
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(None: string option),
+                "A file scan is not an explicit interaction claim"))
+
+    [<Test>]
+    member _.``CanvasScanner never surfaces a SystemView routing target as its owner``() =
+        withTempCwd (fun () ->
+            let path = Path.Combine(Environment.CurrentDirectory, $"scan-system-owner-{Guid.NewGuid():N}")
+            let canvasDir = Path.Combine(path, ".agents", "canvas")
+            Directory.CreateDirectory(canvasDir) |> ignore
+            File.WriteAllText(Path.Combine(canvasDir, "diff.html"), "<html></html>")
+            File.WriteAllText(Path.Combine(canvasDir, "report.html"), "<html></html>")
+            let systemTarget = uniqueSid "system-target"
+            let agentTarget = uniqueSid "agent-target"
+            Server.CanvasDocOwnership.attribute path "diff.html" systemTarget
+            Server.CanvasDocOwnership.attribute path "report.html" agentTarget
+
+            let docs = runAsync (Server.CanvasScanner.scan path)
+            let diff = docs |> List.find (fun doc -> doc.Filename = "diff.html")
+            let report = docs |> List.find (fun doc -> doc.Filename = "report.html")
+
+            Assert.That(diff.Kind, Is.EqualTo(SystemView))
+            Assert.That(
+                diff.OwnerSessionId,
+                Is.EqualTo(None: string option),
+                "SystemView interaction ownership must never leak through CanvasDoc.OwnerSessionId")
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
+                Is.EqualTo(Some systemTarget),
+                "The SystemView routing target must remain available internally")
+            Assert.That(report.Kind, Is.EqualTo(AgentDoc))
+            Assert.That(
+                report.OwnerSessionId,
+                Is.EqualTo(Some agentTarget),
+                "AgentDoc author ownership remains exposed from the same target store"))
+
+    [<Test>]
+    member _.``mixed-case AgentDoc owner survives scanner lookup and prune``() =
+        withTempCwd (fun () ->
+            let path = Path.Combine(Environment.CurrentDirectory, $"scan-mixed-owner-{Guid.NewGuid():N}")
+            let canvasDir = Path.Combine(path, ".agents", "canvas")
+            Directory.CreateDirectory(canvasDir) |> ignore
+            File.WriteAllText(Path.Combine(canvasDir, "Review.html"), "<html></html>")
+            let sid = uniqueSid "mixed-owner"
+            runAsync (Server.CanvasDocOwnership.assign path "Review.html" sid)
+
+            let assertOwned () =
+                let review =
+                    runAsync (Server.CanvasScanner.scan path)
+                    |> List.find (fun doc -> doc.Filename = "Review.html")
+
+                Assert.That(review.Kind, Is.EqualTo(AgentDoc))
+                Assert.That(review.OwnerSessionId, Is.EqualTo(Some sid))
+
+            assertOwned ()
+            runAsync (Server.CanvasDocOwnership.prune (Set.singleton path))
+            assertOwned ()
+            Assert.That(
+                runAsync (Server.CanvasDocOwnership.getAll path) |> Map.keys,
+                Is.EquivalentTo([ "Review.html" ]),
+                "Pruning must validate the real case-sensitive filename path"))
+
+    [<Test>]
     member _.``A pre-declared owner is never overwritten by the scanner``() =
         withTempCwd (fun () ->
             let path = uniquePath "scan-declared"
@@ -772,7 +1046,7 @@ type ScannerFallbackAttributionTests() =
 
 
 // ── Verification tm-canvas48-gbjq: owner-correct canvas routing (multi-session) ──────────────
-// In-process integration of the 4-step verification scenario through the REAL CanvasBridge
+// In-process integration of the 4-step verification scenario through the REAL SessionBridge
 // registry + CanvasDocOwnership, with two loopback HTTP sinks standing in for the agent inject
 // bridges L_A / L_B. Each test maps to numbered step(s) in the task description and asserts the
 // observable OUTCOME (which inject URL actually received the POST), not just the result code.
@@ -808,14 +1082,14 @@ type VerifyGbjqOwnerCorrectRoutingTests() =
             // Step 1: sendMessage {W,'a.html',p1} -> L_A gets exactly one POST with p1; L_B gets zero.
             let r1 = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "a.html"; Payload = "p1" })
             Assert.That(r1, Is.EqualTo(CanvasMessageResult.Ok), "Step1: owner A live -> Ok")
-            Assert.That(lA.Bodies, Is.EqualTo([ "p1" ]), "Step1: L_A gets exactly one POST with p1")
+            Assert.That(lA.Bodies, Is.EqualTo([ canvasWire "p1" ]), "Step1: L_A gets exactly one POST with p1")
             Assert.That(lB.Bodies, Is.Empty, "Step1: L_B gets zero (FAIL if L_B receives it)")
 
             // Step 2: sendMessage {W,'b.html',p2} -> L_B receives p2; L_A unchanged.
             let r2 = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "b.html"; Payload = "p2" })
             Assert.That(r2, Is.EqualTo(CanvasMessageResult.Ok), "Step2: owner B live -> Ok")
-            Assert.That(lB.Bodies, Is.EqualTo([ "p2" ]), "Step2: L_B receives p2")
-            Assert.That(lA.Bodies, Is.EqualTo([ "p1" ]), "Step2: L_A unchanged (still only p1)"))
+            Assert.That(lB.Bodies, Is.EqualTo([ canvasWire "p2" ]), "Step2: L_B receives p2")
+            Assert.That(lA.Bodies, Is.EqualTo([ canvasWire "p1" ]), "Step2: L_A unchanged (still only p1)"))
 
     // Step 3: with owner A's bridge stopped, a.html's message must QUEUE (never fall back to the
     // co-located non-owner B). The task's literal wording "drainPending W returns p3" predates the
@@ -845,7 +1119,7 @@ type VerifyGbjqOwnerCorrectRoutingTests() =
                 // Sanity: while A is live, a.html delivers to L_A only (precondition for "Stop L_A").
                 let warm = runAsync (sendMessage { WorktreePath = WorktreePath w; Filename = "a.html"; Payload = "p1" })
                 Assert.That(warm, Is.EqualTo(CanvasMessageResult.Ok), "owner A live -> Ok")
-                Assert.That(lA.Bodies, Is.EqualTo([ "p1" ]), "owner A receives p1")
+                Assert.That(lA.Bodies, Is.EqualTo([ canvasWire "p1" ]), "owner A receives p1")
                 Assert.That(lB.Bodies, Is.Empty, "non-owner B receives nothing")
             finally
                 // Stop L_A (owner offline): the listener dies; A's registry entry remains.
@@ -876,7 +1150,7 @@ type VerifyGbjqOwnerCorrectRoutingTests() =
                     waitForDelivery ()
 
             waitForDelivery ()
-            Assert.That(lA2.Bodies, Is.EqualTo([ "p3" ]), "Step3: owner A re-register drains p3 to A (message not lost)")
+            Assert.That(lA2.Bodies, Is.EqualTo([ canvasWire "p3" ]), "Step3: owner A re-register drains p3 to A (message not lost)")
             Assert.That(lB.Bodies, Is.Empty, "Step3: B still never received p3"))
 
     // Step 4: doc c.html has NO declared owner and exactly one live session (B). The single-session

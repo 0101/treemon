@@ -2,6 +2,7 @@ module Tests.CanvasDocServerTests
 
 open System.IO
 open System.Text.RegularExpressions
+open System.Text.Json
 open NUnit.Framework
 open Shared
 open Server
@@ -9,11 +10,12 @@ open Server.CanvasDocServer
 open Tests.TestUtils
 
 // baseStyle, linkInterceptor and bridgeScript are private to the server module, so we assert on
-// stable, unique fragments of each. The idiomorph runtime and morph controller are public, so we
-// assert on the exact strings the spec/verify task reference (IdiomorphScript.idiomorphJs etc.).
+// stable, unique fragments of each. Shared runtime assets and the idiomorph scripts are public, so
+// tests can also verify their canonical disk sources.
 let private baseStyleMarker = "scrollbar-color"          // unique to baseStyle (CSS)
 let private linkInterceptorMarker = "navigate-canvas-doc" // unique to linkInterceptor
 let private bridgeMarker = "/bridge/heartbeat"            // unique to bridgeScript
+let private reclaimMarker = "reclaim-focus"               // unique to reclaimFocusScript (Escape bridge)
 
 // ── Item 1: dark-theme base reset markers ─────────────────────────────────────
 let private resetWrapMarker = ":where(body)"  // reset selectors are :where()-wrapped (zero specificity)
@@ -39,12 +41,17 @@ let private styleBlock (injection: string) =
     m.Groups[1].Value
 
 // ── Item 2: injected window.canvasSend helper markers ─────────────────────────
-let private canvasSendMarker = "window.canvasSend="   // unique to canvasSendScript
+let private canvasSendMarker = "window.canvasSend="   // unique to CanvasSendScript.script
 
 // ── Injected window.canvasExpand expand-in-place helper markers ───────────────
 let private canvasExpandMarker = "window.canvasExpand=" // unique to canvasExpandScript
 let private expandActionMarker = "'expand-section'"     // the action canvasExpand posts (skill + client contract)
 let private spinnerMarker = "canvas-spinner"            // the themed spinner the helper swaps the button for
+
+// ── Injected selected-text contextual actions markers ────────────────────────
+let private selectionContextMarker = "__canvasSelectionContextInstalled"
+let private selectionActionMarker = "'canvas-selection'"
+let private selectionProcessingMarker = "canvas-selection-processing-pulse"
 
 // ── Item 3: injected JS error overlay marker ──────────────────────────────────
 let private errorOverlayMarker = "canvas-doc-error"   // the action the overlay posts (unique to errorOverlayScript)
@@ -69,14 +76,14 @@ let private helperCap (injection: string) =
 [<Category("Fast")>]
 type BuildInjectionTests() =
 
-    // ── SystemView: stripped injection (no morph, no bridge) ──────────────────
+    // ── SystemView: generic interactions without authored-doc machinery ───────
 
     [<Test>]
     member _.``SystemView injection omits the idiomorph runtime and morph controller``() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.idiomorphJs),
                     "A system view must never morph, so the idiomorph runtime is omitted")
-        Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.morphController),
+        Assert.That(injection, Does.Not.Contain(Server.CanvasMorphScript.script),
                     "A system view must never morph, so the morph controller is omitted")
 
     [<Test>]
@@ -90,6 +97,14 @@ type BuildInjectionTests() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Contain(baseStyleMarker), "Both kinds keep the scrollbar base style")
         Assert.That(injection, Does.Contain(linkInterceptorMarker), "Both kinds keep the link interceptor")
+
+    [<Test>]
+    member _.``both doc kinds inject the Escape focus-reclaim bridge``() =
+        [ SystemView; AgentDoc ]
+        |> List.iter (fun kind ->
+            let injection = buildInjection kind "status.html"
+            Assert.That(injection, Does.Contain(reclaimMarker),
+                        $"{kind}: Escape inside a cross-origin canvas doc must post a reclaim-focus message so the pane can refocus the dashboard"))
 
     // ── Item 1: dark-theme base reset, injected for BOTH kinds, zero specificity ──
 
@@ -148,15 +163,42 @@ type BuildInjectionTests() =
     member _.``AgentDoc injection includes the full morph + bridge machinery``() =
         let injection = buildInjection AgentDoc "status.html"
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs), "Agent docs keep the idiomorph runtime")
-        Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController), "Agent docs keep the morph controller")
+        Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script), "Agent docs keep the morph controller")
         Assert.That(injection, Does.Contain(bridgeMarker), "Agent docs keep the message-bridge heartbeat")
         Assert.That(injection, Does.Contain(baseStyleMarker))
         Assert.That(injection, Does.Contain(linkInterceptorMarker))
 
+    // ── Changed-content highlight ─────────────────────────────────────────────
+    // The morph marks what it changed with `canvas-updated`. Style and behaviour ship together and
+    // only for AgentDocs: a SystemView never morphs, so a highlight rule there could never match.
+
+    [<Test>]
+    member _.``AgentDoc injection carries the changed-content highlight style``() =
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain(Server.CanvasMorphScript.style),
+                    "the highlight must be styled wherever the morph that applies it is injected")
+        Assert.That(injection, Does.Contain(".canvas-updated{"),
+                    "the class the morph controller applies must have a rule")
+
+    [<Test>]
+    member _.``SystemView injection omits the changed-content highlight style``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.That(injection, Does.Not.Contain(".canvas-updated"),
+                    "a system view never morphs, so it never has changed content to mark")
+
+    [<Test>]
+    member _.``the highlight never changes layout``() =
+        // The tint has to breathe around the text without moving it: a doc that reflows on every
+        // update would defeat the morph's whole point of preserving scroll position.
+        let style = Server.CanvasMorphScript.style
+        Assert.That(style, Does.Contain("box-shadow"), "the tint is extended with a shadow spread")
+        Assert.That(style, Does.Not.Contain("padding"), "padding would reflow the doc on every update")
+        Assert.That(style, Does.Not.Contain("margin"), "margin would reflow the doc on every update")
+
     // ── Item 2: injected window.canvasSend(action, payload) helper ────────────
     // canvasSend wraps the flat postMessage contract and enforces the SAME size cap the client
-    // applies (CanvasPane.fs drops when JSON.stringify(me.data).length > MaxPayloadBytes). It is
-    // injected for AgentDocs only — a SystemView is server-generated and posts nothing.
+    // applies (CanvasPane.fs drops when JSON.stringify(me.data).length > MaxPayloadBytes). Both doc
+    // kinds need it because the generic selected-text runtime posts through this helper.
 
     [<Test>]
     member _.``AgentDoc injection includes the canvasSend helper``() =
@@ -165,16 +207,23 @@ type BuildInjectionTests() =
                     "Agent docs get the first-class window.canvasSend(action,payload) helper")
 
     [<Test>]
-    member _.``SystemView injection omits the canvasSend helper``() =
+    member _.``SystemView injection includes the canvasSend helper``() =
         let injection = buildInjection SystemView "beads.html"
-        Assert.That(injection, Does.Not.Contain(canvasSendMarker),
-                    "A system view is server-generated and posts nothing, so canvasSend is omitted")
+        Assert.That(injection, Does.Contain(canvasSendMarker),
+                    "SystemViews need canvasSend for generic selected-text interactions")
+
+    [<Test>]
+    member _.``canvasSend requires an explicit transport in a top-level window``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.Multiple(fun () ->
+            Assert.That(injection, Does.Contain("window.parent === window"))
+            Assert.That(injection, Does.Contain("__canvasTopLevelTransportAvailable")))
 
     // ── Injected window.canvasExpand(button, sectionId) helper ────────────────
     // canvasExpand swaps the clicked button for a themed spinner and posts the flat
     // {action:'expand-section', section, doc} request to the owning session, so the agent rewrites
-    // the doc in place. It calls canvasSend, so like canvasSend it is AgentDoc-only — a SystemView
-    // has no owner session to receive the request and posts nothing.
+    // the doc in place. It remains AgentDoc-only because a generated SystemView has no authored
+    // document to expand in response to a session request.
 
     [<Test>]
     member _.``AgentDoc injection includes the canvasExpand helper and its spinner``() =
@@ -215,6 +264,63 @@ type BuildInjectionTests() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(canvasExpandMarker),
                     "A system view has no owner session to expand into, so canvasExpand is omitted")
+
+    [<Test>]
+    member _.``AgentDoc injection includes selected-text contextual actions and processing highlight``() =
+        let injection = buildInjection AgentDoc "status.html"
+        Assert.That(injection, Does.Contain(selectionContextMarker))
+        Assert.That(injection, Does.Contain(selectionActionMarker))
+        Assert.That(injection, Does.Contain(selectionProcessingMarker))
+
+    [<Test>]
+    member _.``SystemView injection includes selected-text contextual actions and processing highlight``() =
+        let injection = buildInjection SystemView "beads.html"
+        Assert.That(injection, Does.Contain(selectionContextMarker))
+        Assert.That(injection, Does.Contain(selectionActionMarker))
+        Assert.That(injection, Does.Contain(selectionProcessingMarker))
+
+    [<Test>]
+    member _.``server embeds the canonical extension selection runtime without drift``() =
+        let runtimePath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-selection-context.js"))
+        let runtime = File.ReadAllText(runtimePath)
+        Assert.That(CanvasSelectionScript.source, Is.EqualTo(runtime))
+
+    [<Test>]
+    member _.``server embeds the canonical canvasSend runtime without drift``() =
+        let runtimePath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-send.js"))
+        let runtime = File.ReadAllText(runtimePath)
+        Assert.That(CanvasSendScript.source, Is.EqualTo(runtime))
+
+    [<Test>]
+    member _.``browser fallback loads canonical runtimes and document kinds``() =
+        let extensionPath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "extension.mjs"))
+        let extension = File.ReadAllText(extensionPath)
+
+        Assert.That(extension, Does.Contain("canvas-send.js"))
+        Assert.That(extension, Does.Contain("canvas-selection-context.js"))
+        Assert.That(extension, Does.Contain("canvas-doc-kinds.json"))
+        Assert.That(extension, Does.Contain("SYSTEM_VIEW_FILENAMES.has(filename.toLowerCase())"))
+        Assert.That(extension, Does.Contain("window.__canvasTopLevelTransportAvailable = true"))
+        Assert.That(extension, Does.Contain("injectScripts(content, port, canvasRoute.filename)"))
+        Assert.That(extension, Does.Contain("\"Content-Security-Policy\": \"frame-ancestors 'none'\""))
+
+    [<Test>]
+    member _.``shared document-kind configuration matches server classification``() =
+        let configPath =
+            Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "Extension", "canvas-doc-kinds.json"))
+        let systemViews =
+            JsonSerializer.Deserialize<string array>(File.ReadAllText(configPath))
+            |> Option.ofObj
+            |> Option.defaultValue [||]
+
+        Assert.That(systemViews, Is.Not.Empty)
+        systemViews
+        |> Array.iter (fun filename ->
+            Assert.That(CanvasDocKinds.classify filename, Is.EqualTo(SystemView), filename))
+        Assert.That(CanvasDocKinds.classify "status.html", Is.EqualTo(AgentDoc))
 
     [<Test>]
     member _.``the canvasSend helper measures the same metric as the client (JSON.stringify length)``() =
@@ -273,7 +379,8 @@ type BuildInjectionTests() =
     // ── Item 3: injected JS error overlay (window.onerror + unhandledrejection) ──
     // The overlay (AgentDoc only) forwards doc-side JS failures to the pane as the flat
     // {action:'canvas-doc-error', wt, doc, message, source, line, col} message the client surfaces in a
-    // dismissible banner. A SystemView runs no author JS, so it never gets the overlay.
+    // dismissible banner. SystemViews keep their own runtime error handling and never get this
+    // authored-document reporting overlay.
 
     [<Test>]
     member _.``AgentDoc injection includes the JS error overlay``() =
@@ -289,7 +396,7 @@ type BuildInjectionTests() =
     member _.``SystemView injection omits the JS error overlay``() =
         let injection = buildInjection SystemView "beads.html"
         Assert.That(injection, Does.Not.Contain(errorOverlayMarker),
-                    "A system view runs no author JS, so the error overlay is omitted")
+                    "SystemViews must not receive the authored-document error overlay")
 
     [<Test>]
     member _.``the error overlay wraps its postMessage in try/catch so the error path can't loop``() =
@@ -331,18 +438,18 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``beads.html classifies as a SystemView and gets the stripped injection``() =
-        let injection = buildInjection (CanvasDocKind.classify "beads.html") "beads.html"
+        let injection = buildInjection (CanvasDocKinds.classify "beads.html") "beads.html"
         Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.idiomorphJs))
-        Assert.That(injection, Does.Not.Contain(Server.IdiomorphScript.morphController))
+        Assert.That(injection, Does.Not.Contain(Server.CanvasMorphScript.script))
 
     [<Test>]
     member _.``an agent .html classifies as an AgentDoc and gets the full injection``() =
-        let injection = buildInjection (CanvasDocKind.classify "status.html") "status.html"
+        let injection = buildInjection (CanvasDocKinds.classify "status.html") "status.html"
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs))
-        Assert.That(injection, Does.Contain(Server.IdiomorphScript.morphController))
+        Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script))
 
 // ── injectUrl loopback guard (Finding 10 / SSRF) ──────────────────────────────
-// injectUrl is registered then used as a POST target by CanvasBridge, so a non-loopback value
+// injectUrl is registered then used as a POST target by SessionBridge, so a non-loopback value
 // would turn /api/canvas/register into an SSRF primitive. Only loopback hosts are accepted.
 [<TestFixture>]
 [<Category("Unit")>]
@@ -369,6 +476,106 @@ type LoopbackInjectUrlTests() =
     member _.``rejects non-loopback or malformed inject URLs``(url: string) =
         Assert.That(isLoopbackInjectUrl url, Is.False, $"{url} must be rejected")
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type DiffComparisonContextTests() =
+
+    [<Test>]
+    member _.``known root and linked paths resolve their scheduler-owned repo comparison``() =
+        let repoRoot =
+            Path.Combine(Path.GetTempPath(), "treemon-context", "repo")
+            |> PathUtils.normalizePath
+
+        let linked =
+            Path.Combine(Path.GetTempPath(), "treemon-context", "linked")
+            |> PathUtils.normalizePath
+
+        let repo =
+            { SchedulerState.PerRepoState.empty with
+                KnownPaths = Set.ofList [ repoRoot; linked ]
+                UpstreamRemote = "upstream"
+                BaseBranch = "dev" }
+
+        // The scheduler keys repositories by PathUtils.toRepoId of the repository root, so the
+        // retained key is exactly the root whose .treemon.json a linked worktree shares.
+        let state =
+            { SchedulerState.DashboardState.empty with
+                Repos =
+                    Map.ofList
+                        [ PathUtils.toRepoId repoRoot,
+                          repo ] }
+
+        [ repoRoot; linked ]
+        |> List.iter (fun path ->
+            let target =
+                tryFindDiffComparisonContext state path
+
+            Assert.That(
+                target,
+                Is.EqualTo(
+                    Some(
+                        PathUtils.toRepoId repoRoot,
+                        ({ WorktreePath = path
+                           UpstreamRemote = "upstream"
+                           BaseBranch = "dev" }
+                         : WorktreeDiff.DiffComparisonContext)
+                    )
+                )
+            ))
+
+        Assert.That(
+            tryFindDiffComparisonContext
+                state
+                (Path.Combine(Path.GetTempPath(), "treemon-context", "unknown")),
+            Is.EqualTo(None)
+        )
+
+    [<Test>]
+    member _.``comparison lookup cannot observe defaults once discovery makes a linked path known``() =
+        async {
+            let linked =
+                Path.Combine(Path.GetTempPath(), "treemon-context", "atomic-linked")
+                |> PathUtils.normalizePath
+
+            let repoId = RepoId "atomic-context-repo"
+            let agent = SchedulerState.createAgent ()
+
+            Assert.That(
+                tryFindDiffComparisonContext SchedulerState.DashboardState.empty linked,
+                Is.EqualTo(None)
+            )
+
+            let info: GitWorktree.WorktreeInfo =
+                { Path = linked
+                  Head = "abc123"
+                  Branch = Some "feature" }
+
+            agent.Post(
+                RefreshScheduler.repositoryDiscoveryUpdate
+                    repoId
+                    (Some [ info ])
+                    "upstream"
+                    "develop"
+            )
+
+            let! state = agent.PostAndAsyncReply(SchedulerState.GetState)
+
+            Assert.That(
+                tryFindDiffComparisonContext state linked,
+                Is.EqualTo(
+                    Some(
+                        repoId,
+                        ({ WorktreePath = linked
+                           UpstreamRemote = "upstream"
+                           BaseBranch = "develop" }
+                         : WorktreeDiff.DiffComparisonContext)
+                    )
+                )
+            )
+        }
+        |> Async.RunSynchronously
+
 // ── /api/canvas/attribute ownership declaration ───────────────────────────────
 // attributeOwnership is the HTTP-free core of canvasAttributeHandler (the same seam extraction
 // isLoopbackInjectUrl uses for canvasRegisterHandler). It records ownership only for a known
@@ -382,11 +589,6 @@ type LoopbackInjectUrlTests() =
 [<NonParallelizable>]
 type AttributeOwnershipTests() =
 
-    // Unique per test so the process-global ownership agent never leaks state between tests.
-    let uniquePath prefix =
-        let id = System.Guid.NewGuid().ToString("N")[..7]
-        $"/test/{prefix}/{id}"
-
     let uniqueSid prefix =
         let id = System.Guid.NewGuid().ToString("N")[..7]
         $"{prefix}-{id}"
@@ -395,12 +597,12 @@ type AttributeOwnershipTests() =
     // verbatim and isKnownWorktree compares the normalized request path, so the path is stored
     // normalized just like the real populate path does.
     let agentKnowing (worktreePath: string) =
-        let agent = RefreshScheduler.createAgent ()
+        let agent = SchedulerState.createAgent ()
 
         let info: GitWorktree.WorktreeInfo =
             { Path = PathUtils.normalizePath worktreePath; Head = ""; Branch = Some "test" }
 
-        agent.Post(RefreshScheduler.UpdateWorktreeList(RepoId "attr-test-repo", [ info ]))
+        agent.Post(SchedulerState.UpdateWorktreeList(RepoId "attr-test-repo", [ info ]))
         agent
 
     [<Test>]
@@ -417,6 +619,23 @@ type AttributeOwnershipTests() =
             let owner = runAsync (CanvasDocOwnership.getOwner worktree "a.html")
             Assert.That(owner, Is.EqualTo(Some sessionId),
                         "getOwner must return the sessionId the authoring session declared"))
+
+    [<Test>]
+    member _.``a SystemView declaration records nothing because its routing is resolved``() =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-system"
+            let agent = agentKnowing worktree
+            let sessionId = uniqueSid "claimer"
+
+            Assert.That(
+                runAsync (attributeOwnership agent worktree "diff.html" sessionId),
+                Is.EqualTo(NotAttributable),
+                "A SystemView has no author, so a claim is reported as not attributable rather than silently stored")
+
+            Assert.That(
+                runAsync (CanvasDocOwnership.getOwner worktree "diff.html"),
+                Is.EqualTo(None: string option),
+                "Nothing reads a stored SystemView target, so nothing may be written"))
 
     [<Test>]
     member _.``an unknown worktree is rejected and records no ownership``() =

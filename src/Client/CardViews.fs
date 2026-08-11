@@ -7,24 +7,64 @@ open Feliz
 open Components
 open ActionButtons
 open CanvasAwareness
+open CanvasState
 
 let ctClassName =
     function
     | Working        -> "working"
     | WaitingForUser -> "waiting"
-    | Done           -> "done"
     | Idle           -> "idle"
+    | NoSession      -> "nosession"
 
 let ctTooltip =
     function
     | Working        -> "Working"
     | WaitingForUser -> "Waiting for user"
-    | Done           -> "Done"
     | Idle           -> "Idle"
+    | NoSession      -> "No session"
+
+let private ctDot (status: CodingToolStatus) =
+    Html.span [ prop.className ($"ct-dot {ctClassName status}"); prop.title (ctTooltip status) ]
+
+/// A per-session marker: a context-usage donut (arc = remaining context) when the session has
+/// reported usage, else a plain status dot. Colour comes from the session's OWN status.
+let private sessionMarker (i: int) (s: SessionDot) =
+    match s.ContextUsage with
+    | Some usage ->
+        Html.span
+            [ prop.key i
+              prop.className $"ct-dot ct-donut {ctClassName s.Status}"
+              prop.title (ctTooltip s.Status)
+              prop.style [ style.custom ("--ctx-remaining", string (ContextUsage.remainingFraction usage)) ] ]
+    | None ->
+        Html.span [ prop.key i; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ]
+
+/// Per-session donuts for a worktree card: one marker per live session (donut when it has usage,
+/// else a plain status dot). Falls back to the single collapsed CodingTool dot when there are no
+/// live sessions (a NoSession worktree → grey), reproducing the pre-per-session single-dot behaviour.
+let sessionDots (wt: WorktreeStatus) =
+    Html.span
+        [ prop.className "ct-dots"
+          prop.children (
+              match wt.Sessions with
+              | [] -> [ ctDot wt.CodingTool ]
+              | sessions -> sessions |> List.mapi sessionMarker) ]
+
+/// Plain per-session status dots for ONE worktree (never a donut — the header is too dense for arcs),
+/// returned as a flat, keyed list so the repo header can `List.collect` every worktree's dots into a
+/// single row with one uniform gap. A worktree with no live session contributes its single collapsed
+/// dot.
+let sessionDotsPlain (wt: WorktreeStatus) =
+    let key = WorktreePath.value wt.Path
+    match wt.Sessions with
+    | [] -> [ Html.span [ prop.key key; prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ] ]
+    | sessions ->
+        sessions
+        |> List.mapi (fun i s -> Html.span [ prop.key $"{key}-{i}"; prop.className ($"ct-dot {ctClassName s.Status}"); prop.title (ctTooltip s.Status) ])
 
 let isMerged (wt: WorktreeStatus) =
     match wt.Pr with
-    | HasPr pr -> pr.IsMerged
+    | HasPr pr -> pr.State = PrState.Merged
     | NoPr -> false
 
 let cardClassName (wt: WorktreeStatus) =
@@ -87,8 +127,8 @@ type CardViewProps =
       IsCompact: bool
       FocusedElement: FocusTarget option
       BranchEvents: Map<string, CardEvent list>
-      SyncPending: Set<string>
       ActionCooldowns: Set<WorktreePath>
+      AutoSyncPending: Set<WorktreePath>
       CanvasEvents: Map<string, CanvasEvent list>
       /// Currently unread by the card views; kept as part of the model read-slice — it
       /// formalizes the previously dead `canvasPaneOpen` arg that was threaded through renderCard.
@@ -113,10 +153,10 @@ type CardCallbacks =
       DeleteWorktree: string -> unit
       /// Raises the archive *confirmation* (ConfirmArchiveWorktree), not an immediate archive.
       ArchiveWorktree: string -> unit
-      StartSync: WorktreePath -> string -> unit
-      CancelSync: WorktreePath -> unit
+      ToggleAutoSync: WorktreeStatus -> unit
       LaunchAction: WorktreePath -> ActionKind -> unit
       OpenCanvasDoc: string -> string -> unit
+      OpenDiff: string -> unit
       DispatchArchive: ArchiveViews.Msg -> unit }
 
 let mainBehindIndicator (baseBranch: string) (count: int) =
@@ -131,56 +171,96 @@ let mainBehindIndicator (baseBranch: string) (count: int) =
             prop.text ($"{count} behind {baseBranch}")
         ]
 
-let isBranchSyncing (events: CardEvent list) =
-    events |> List.exists (fun e -> e.Status = Some StepStatus.Running && e.Source <> EventSource.PostFork)
+/// Post-fork setup is routine when it works, so a successful or still-running run is noise on the
+/// card — only its failures (including timeouts) are worth surfacing.
+let isVisibleCardEvent (evt: CardEvent) =
+    evt.Source <> EventSource.PostFork
+    || (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
 
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
-    | Some Claude -> "Claude"
-    | Some Copilot -> "Copilot"
+    | Some CopilotCli -> "Copilot"
     | None -> "Coding tool"
 
-let syncButton (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
-    if isPending then
-        Html.button [
-            prop.className "sync-starting-btn"
-            prop.disabled true
-            yield! noFocusProps
-            prop.text "Sync starting"
+/// Two arrows bent into a circle — the sync glyph. Circular rather than the straight swap arrows it
+/// replaced, because the same element turns while a sync is in flight: rotating a straight-arrow
+/// glyph reads as a symbol falling over, whereas rotation is the motion this shape already implies.
+let autoSyncIcon () =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "2")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.children [
+            Svg.path [ svg.d "M3 12a9 9 0 0 1 14.65-7" ]
+            Svg.path [ svg.d "M21 12a9 9 0 0 1-14.65 7" ]
+            Svg.path [ svg.d "M17 2v4h-4" ]
+            Svg.path [ svg.d "M7 22v-4h4" ]
         ]
-    else
-        let syncing = isBranchSyncing branchEvents
-        let codingToolBusy = wt.CodingTool = Working || wt.CodingTool = WaitingForUser
-        let disabled = syncing || codingToolBusy
-        if syncing then
-            Html.button [
-                prop.className "sync-cancel-btn"
-                yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); callbacks.CancelSync wt.Path)
-                prop.text "Cancel"
-            ]
-        else
-            Html.button [
-                prop.className (if disabled then "sync-btn disabled" else "sync-btn")
-                prop.disabled disabled
-                yield! noFocusProps
-                prop.onClick (fun e -> e.stopPropagation(); callbacks.StartSync wt.Path scopedKey)
-                prop.title (if codingToolBusy then $"{providerDisplayName wt.CodingToolProvider} is active" else $"Sync with {baseBranch} (S)")
-                prop.text "Sync"
-            ]
+    ]
 
-let mainBehindWithSync (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) (branchEvents: CardEvent list) (isPending: bool) (scopedKey: string) =
+let diffButton (callbacks: CardCallbacks) (wt: WorktreeStatus) (scopedKey: string) =
+    let ready = hasSystemView WorktreeDiffFilename wt
+
+    if wt.IsArchived || not ready || not wt.HasDiff then
+        Html.none
+    else
+        Html.button [
+            prop.className "action-btn diff-action-btn"
+            prop.custom ("aria-label", "Open worktree diff")
+            prop.onKeyDown (fun e ->
+                if e.key = "Enter" || e.key = " " then
+                    e.stopPropagation())
+            prop.onClick (fun e ->
+                e.stopPropagation()
+                callbacks.OpenDiff scopedKey)
+            prop.title "Open worktree diff"
+            prop.children [ diffIcon ]
+        ]
+
+let autoSyncButton (pendingPaths: Set<WorktreePath>) (callbacks: CardCallbacks) (baseBranch: string) (wt: WorktreeStatus) =
+    let isPending = pendingPaths.Contains wt.Path
+
+    let className =
+        [ "auto-sync-btn"
+          if wt.AutoSyncEnabled then "active"
+          if isPending then "syncing" ]
+        |> String.concat " "
+
+    Html.button [
+        prop.className className
+        prop.title (
+            if isPending then $"Syncing with {baseBranch}…"
+            else $"Auto-sync with {baseBranch} (S)")
+        prop.ariaPressed wt.AutoSyncEnabled
+        prop.ariaDisabled isPending
+        prop.disabled isPending
+        yield! noFocusProps
+        prop.onClick (fun e -> e.stopPropagation(); callbacks.ToggleAutoSync wt)
+        prop.children [ autoSyncIcon () ]
+    ]
+
+let mainBehindRow
+    (pendingPaths: Set<WorktreePath>)
+    (callbacks: CardCallbacks)
+    (baseBranch: string)
+    (wt: WorktreeStatus)
+    (scopedKey: string)
+    =
     Html.div [
         prop.className "main-behind-row"
         prop.children [
             mainBehindIndicator baseBranch wt.MainBehindCount
-            if wt.MainBehindCount > 0 then
-                if wt.IsDirty then
-                    Html.span [
-                        prop.className "dirty-warning"
-                        prop.text "uncommitted changes"
-                    ]
-                else syncButton callbacks baseBranch wt branchEvents isPending scopedKey
+            if wt.IsDirty then
+                Html.span [
+                    prop.className "dirty-warning"
+                    prop.text "uncommitted changes"
+                ]
+            autoSyncButton pendingPaths callbacks baseBranch wt
+            diffButton callbacks wt scopedKey
             Html.span [
                 prop.className "git-commit-msg"
                 prop.children [
@@ -191,12 +271,7 @@ let mainBehindWithSync (callbacks: CardCallbacks) (baseBranch: string) (wt: Work
         ]
     ]
 
-let eventLogEntry (onFixTests: (unit -> unit) option) (onConfigureTests: (unit -> unit) option) (evt: CardEvent) =
-    let isTestFailure =
-        evt.Source = EventSource.Test && (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
-    let isTestNotConfigured =
-        evt.Source = EventSource.Test && evt.Status = Some StepStatus.NotConfigured
-    let isClickable = (isTestFailure && onFixTests.IsSome) || (isTestNotConfigured && onConfigureTests.IsSome)
+let eventLogEntry (evt: CardEvent) =
     Html.div [
         prop.className "event-entry"
         prop.children [
@@ -206,41 +281,20 @@ let eventLogEntry (onFixTests: (unit -> unit) option) (onConfigureTests: (unit -
             match evt.Status with
             | Some _ ->
                 Html.span [
-                    prop.className (
-                        if isClickable
-                        then stepStatusClassName evt.Status + " clickable"
-                        else stepStatusClassName evt.Status)
+                    prop.className (stepStatusClassName evt.Status)
                     prop.text (stepStatusText evt.Status)
-                    if isTestFailure then
-                        match onFixTests with
-                        | Some handler ->
-                            prop.title "Click to fix with coding tool"
-                            prop.onClick (fun e -> e.stopPropagation(); handler())
-                        | None -> ()
-                    elif isTestNotConfigured then
-                        match onConfigureTests with
-                        | Some handler ->
-                            prop.title "Click to configure test command"
-                            prop.onClick (fun e -> e.stopPropagation(); handler())
-                        | None -> ()
                 ]
             | None -> Html.none
         ]
     ]
 
-let eventLog (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wtPath: WorktreePath) (hasTestFailureLog: bool) (events: CardEvent list) =
+let eventLog (events: CardEvent list) =
     match events with
     | [] -> Html.none
     | evts ->
-        let onFixTests =
-            if not hasTestFailureLog || cooldowns.Contains wtPath then None
-            else Some (fun () -> callbacks.LaunchAction wtPath FixTests)
-        let onConfigureTests =
-            if cooldowns.Contains wtPath then None
-            else Some (fun () -> callbacks.LaunchAction wtPath ConfigureTests)
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map (eventLogEntry onFixTests onConfigureTests))
+            prop.children (evts |> List.sortBy _.Timestamp |> List.map eventLogEntry)
         ]
 
 let canvasEventEntry (callbacks: CardCallbacks) (scopedKey: string) (evt: CanvasEvent) =
@@ -263,7 +317,7 @@ let canvasEventLog (callbacks: CardCallbacks) (scopedKey: string) (events: Canva
     | evts ->
         Html.div [
             prop.className "event-log"
-            prop.children (evts |> List.map (canvasEventEntry callbacks scopedKey))
+            prop.children (evts |> List.sortBy _.Timestamp |> List.map (canvasEventEntry callbacks scopedKey))
         ]
 
 let abbreviatePipelineName (repoName: string) (name: string) =
@@ -301,7 +355,7 @@ let buildBadge (repoName: string) (build: BuildInfo) =
         | _ -> None
     match build.Url with
     | Some url ->
-        Interop.createElement "a" [
+        HtmlHelper.createElement "a" [
             prop.className className
             prop.text text
             prop.href url
@@ -421,7 +475,7 @@ let archiveButton (callbacks: CardCallbacks) scopedKey (wt: WorktreeStatus) =
 
 let conflictIcon () =
     Svg.svg [
-        svg.className "conflict-icon"
+        svg.className "pr-icon conflict"
         svg.viewBox (0, 0, 1920, 1920)
         svg.custom ("role", "img")
         svg.children [
@@ -429,6 +483,19 @@ let conflictIcon () =
             Svg.path [
                 svg.d "m1359.36 1279.51-79.85 79.85L960 1039.85l-319.398 319.51-79.85-79.85L880.152 960 560.753 640.602l79.85-79.85L960 880.152l319.51-319.398 79.85 79.85L1039.85 960l319.51 319.51ZM960 0C430.645 0 0 430.645 0 960s430.645 960 960 960 960-430.645 960-960S1489.355 0 960 0Z"
                 svg.custom ("fillRule", "evenodd")
+            ]
+        ]
+    ]
+
+let autoMergeIcon () =
+    Svg.svg [
+        svg.className "pr-icon auto-merge"
+        svg.viewBox (0, 0, 16, 16)
+        svg.custom ("role", "img")
+        svg.children [
+            Svg.title "Auto-merge is set — the PR merges itself once all checks pass"
+            Svg.path [
+                svg.d "M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm0-1.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13Zm3.78-9.72a.75.75 0 0 1 0 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L4.22 8.28a.75.75 0 1 1 1.06-1.06L7 8.94l3.72-3.72a.75.75 0 0 1 1.06 0Z"
             ]
         ]
     ]
@@ -445,23 +512,29 @@ let prActionButton (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt
     ]
 
 let prBadgeContent (callbacks: CardCallbacks) (cooldowns: Set<WorktreePath>) (wt: WorktreeStatus) (repoName: string) (pr: PrInfo) =
-    React.fragment [
-        if pr.IsMerged then
-            Interop.createElement "a" [
+    React.Fragment [
+        match pr.State with
+        | PrState.Merged ->
+            HtmlHelper.createElement "a" [
                 prop.className "pr-badge merged"
                 prop.title pr.Title
                 prop.href pr.Url
                 prop.target "_blank"
                 prop.text "Merged"
             ]
-        else
-            Interop.createElement "a" [
+        // A closed-unmerged pull request still renders as a live one, keeping its review and build
+        // affordances; distinguishing it in the UI is a product decision, not a consequence of the
+        // state being representable.
+        | PrState.Open
+        | PrState.ClosedUnmerged ->
+            HtmlHelper.createElement "a" [
                 prop.className (if pr.IsDraft then "pr-badge draft" else "pr-badge")
                 prop.title pr.Title
                 prop.href pr.Url
                 prop.target "_blank"
                 prop.children [
                     Html.text $"PR #{pr.Id}"
+                    if pr.AutoMergeEnabled then autoMergeIcon ()
                     if pr.HasConflicts then conflictIcon ()
                 ]
             ]
@@ -510,43 +583,98 @@ let canResumeSession (wt: WorktreeStatus) =
     && wt.CodingTool <> Working
     && wt.CodingTool <> WaitingForUser
 
-/// What the card's "user line" should surface. Kept as a pure decision (not a ReactElement) so the
-/// skill-vs-message choice is unit-testable without rendering React. When a skill is running we show
-/// the skill; otherwise the genuine last user message. The server now yields a real LastUserMessage
-/// (never a `<skill-context>` injection), so there is no injection text to filter out on the client.
+/// The card's activity line: the freshest source-tagged intent or session title plus, when a skill is
+/// running, that skill as a pill. Kept as a pure decision so presence logic is independently testable.
 [<RequireQualifiedAccess>]
-type CardUserLine =
-    | Skill of name: string
-    | Message of prompt: string * ts: System.DateTimeOffset
+type CardActivityLine =
+    | Line of activity: AgentActivity option * skill: string option
     | Empty
 
-let cardUserLine (wt: WorktreeStatus) : CardUserLine =
-    match wt.CurrentSkill, wt.LastUserMessage with
-    | Some skill, _ when not (System.String.IsNullOrWhiteSpace skill) -> CardUserLine.Skill(skill.Trim())
-    | _, Some (prompt, ts) -> CardUserLine.Message(prompt, ts)
-    | _, None -> CardUserLine.Empty
+let private duplicatesLastUserMessage
+    (lastUserMessage: UserFooterMessage option)
+    (activity: AgentActivity)
+    =
+    let activityText, _ = AgentActivity.textAndTimestamp activity
+    lastUserMessage
+    |> Option.exists (fun userMessage ->
+        System.String.Equals(activityText.Trim(), userMessage.Text.Trim(), System.StringComparison.OrdinalIgnoreCase))
 
-/// Renders the card user line: a `▶ <skill>` label while a skill runs, otherwise the last user
-/// message. CSS-class based (no inline styles); the skill label reuses `.user-prompt` for layout.
-let userLineView (wt: WorktreeStatus) =
-    match cardUserLine wt with
-    | CardUserLine.Skill name ->
+let cardActivityLine (wt: WorktreeStatus) : CardActivityLine =
+    let activity =
+        wt.AgentActivity
+        |> Option.filter (duplicatesLastUserMessage wt.LastUserMessage >> not)
+    let skill =
+        wt.CurrentSkill
+        |> Option.filter (System.String.IsNullOrWhiteSpace >> not)
+        |> Option.map _.Trim()
+    match activity, skill with
+    | None, None -> CardActivityLine.Empty
+    | activity, sk -> CardActivityLine.Line(activity, sk)
+
+/// Line 1 of the footer: the activity text and running skill as a right-aligned pill.
+let activityLineView (wt: WorktreeStatus) =
+    match cardActivityLine wt with
+    | CardActivityLine.Empty -> Html.none
+    | CardActivityLine.Line (activity, skill) ->
         Html.div [
-            prop.className "user-prompt skill-line"
+            prop.className "user-prompt activity-line"
             prop.children [
-                Html.span [ prop.className "skill-indicator"; prop.text "▶" ]
-                Html.span [ prop.className "skill-name"; prop.text name ]
+                match activity |> Option.map AgentActivity.textAndTimestamp with
+                | Some (text, changedAt) ->
+                    Html.span [ prop.className "event-time"; prop.text (relativeEventTime changedAt) ]
+                    Html.span [ prop.className "activity-text"; prop.text text ]
+                | None -> ()
+                match skill with
+                | Some name -> Html.span [ prop.className "skill-pill"; prop.text $"▶ {name}" ]
+                | None -> ()
             ]
         ]
-    | CardUserLine.Message (prompt, ts) ->
-        Html.div [
-            prop.className "user-prompt"
-            prop.children [
-                Html.span [ prop.className "event-time"; prop.text (relativeEventTime ts) ]
-                Html.span [ prop.text prompt ]
+
+let private canvasMessageGlyph =
+    Svg.svg [
+        svg.className "canvas-message-glyph"
+        svg.viewBox (0, 0, 297, 297)
+        svg.fill "currentColor"
+        svg.children [
+            Svg.title "Canvas"
+            Svg.path [
+                svg.d "M247.5,188H241V43h6.5c5.523,0,10-4.478,10-10s-4.477-10-10-10h-89V10c0-5.523-4.477-10-10-10s-10,4.477-10,10v13h-89c-5.522,0-10,4.478-10,10s4.478,10,10,10H56v145h-6.5c-5.522,0-10,4.477-10,10s4.478,10,10,10h53.829l-30.114,75.283c-2.051,5.128,0.443,10.947,5.571,12.999c1.218,0.487,2.475,0.718,3.711,0.718c3.969,0,7.724-2.379,9.288-6.289l33.001-82.5c0.027-0.07,0.046-0.141,0.072-0.211H138.5v78.997c0,5.522,4.477,10,10,10s10-4.478,10-10V208h13.642c0.026,0.07,0.045,0.141,0.072,0.211l33.001,82.5c1.564,3.91,5.319,6.289,9.288,6.289c1.236,0,2.493-0.231,3.711-0.718c5.128-2.052,7.622-7.871,5.571-12.999L193.671,208H247.5c5.523,0,10-4.477,10-10S253.023,188,247.5,188z M76,43h145v145H76V43z"
             ]
         ]
-    | CardUserLine.Empty -> Html.none
+    ]
+
+let private messageLineView
+    (className: string)
+    (source: string option)
+    (glyph: MessageGlyph option)
+    (text: string)
+    (timestamp: System.DateTimeOffset)
+    =
+    Html.div [
+        prop.className className
+        prop.children [
+            Html.span [ prop.className "event-time"; prop.text (relativeEventTime timestamp) ]
+            match source with
+            | Some value -> Html.span [ prop.className "event-source"; prop.text value ]
+            | None -> ()
+            match glyph with
+            | Some MessageGlyph.Canvas -> canvasMessageGlyph
+            | None -> ()
+            Html.span [ prop.text text ]
+        ]
+    ]
+
+/// Line 2 (last user message) and line 3 (last assistant message, tagged by provider) of the footer.
+let userMsgLineView (wt: WorktreeStatus) =
+    match wt.LastUserMessage with
+    | Some message -> messageLineView "user-prompt" None message.Glyph message.Text message.Timestamp
+    | None -> Html.none
+
+let assistantMsgLineView (wt: WorktreeStatus) =
+    match wt.LastAssistantMessage with
+    | Some (text, timestamp) ->
+        messageLineView "user-prompt assistant-line" (Some(providerDisplayName wt.CodingToolProvider)) None text timestamp
+    | None -> Html.none
 
 let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt + " compact"
@@ -562,7 +690,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                     Html.div [
                         prop.className "header-info"
                         prop.children [
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                            sessionDots wt
                             Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
                             FitOrHide (workMetricsItems wt.WorkMetrics)
                         ]
@@ -581,17 +709,23 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                 prop.children [
                     if beadsTotal wt.Beads > 0 then beadsCounts "beads-inline" wt.Beads
                     mainBehindIndicator baseBranch wt.MainBehindCount
+                    diffButton callbacks wt scopedKey
+                    autoSyncButton props.AutoSyncPending callbacks baseBranch wt
                     prSection callbacks props.ActionCooldowns wt repoName
                 ]
             ]
         ]
     ]
 
-let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (isPending: bool) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
+let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: string) (baseBranch: string) (branchEvents: CardEvent list) (canvasEvents: CanvasEvent list) (scopedKey: string) (isFocused: bool) (wt: WorktreeStatus) =
     let baseClass = cardClassName wt
     let className = if isFocused then baseClass + " focused" else baseClass
-    let hasUserLine = match cardUserLine wt with CardUserLine.Empty -> false | _ -> true
-    let hasContent = hasUserLine || (not (List.isEmpty branchEvents)) || (not (List.isEmpty canvasEvents))
+    let hasFooterLines =
+        (match cardActivityLine wt with CardActivityLine.Empty -> false | _ -> true)
+        || wt.LastUserMessage.IsSome
+        || wt.LastAssistantMessage.IsSome
+    let visibleBranchEvents = branchEvents |> List.filter isVisibleCardEvent
+    let hasContent = hasFooterLines || (not (List.isEmpty visibleBranchEvents)) || (not (List.isEmpty canvasEvents))
     let footerClass = if hasContent then "card-footer has-content" else "card-footer"
     Html.div [
         prop.key (WorktreePath.value wt.Path)
@@ -607,7 +741,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             Html.div [
                                 prop.className "header-info"
                                 prop.children [
-                                    Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]
+                                    sessionDots wt
                                     Html.span [ prop.className "branch-name"; prop.text (cardTitle wt) ]
                                     FitOrHide (workMetricsItems wt.WorkMetrics)
                                 ]
@@ -630,7 +764,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                             ]
                         ]
 
-                    mainBehindWithSync callbacks baseBranch wt branchEvents isPending scopedKey
+                    mainBehindRow props.AutoSyncPending callbacks baseBranch wt scopedKey
 
                     prRow callbacks props.ActionCooldowns wt repoName
                 ]
@@ -639,9 +773,11 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
             Html.div [
                 prop.className footerClass
                 prop.children [
-                    if List.isEmpty canvasEvents then userLineView wt
+                    activityLineView wt
+                    userMsgLineView wt
+                    assistantMsgLineView wt
 
-                    eventLog callbacks props.ActionCooldowns wt.Path wt.HasTestFailureLog branchEvents
+                    eventLog visibleBranchEvents
                     canvasEventLog callbacks scopedKey canvasEvents
                 ]
             ]
@@ -652,10 +788,9 @@ let renderCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: stri
     let scopedKey = WorktreePath.value wt.Path
     let events = props.BranchEvents |> Map.tryFind scopedKey |> Option.defaultValue []
     let cvEvents = props.CanvasEvents |> Map.tryFind scopedKey |> Option.defaultValue []
-    let isPending = props.SyncPending |> Set.contains scopedKey
     let isFocused = props.FocusedElement = Some (Card scopedKey)
     if props.IsCompact then compactWorktreeCard props callbacks repoName baseBranch scopedKey isFocused wt
-    else worktreeCard props callbacks repoName baseBranch events cvEvents isPending scopedKey isFocused wt
+    else worktreeCard props callbacks repoName baseBranch events cvEvents scopedKey isFocused wt
 
 let skeletonCard () =
     Html.div [
@@ -685,7 +820,7 @@ let sortLabel =
     | ByActivity -> "Recent"
 
 let providerIcon (provider: RepoProvider option) =
-    let icon viewBox (svgPath: string) =
+    let icon (viewBox: string) (svgPath: string) =
         Svg.svg [
             svg.className "provider-icon"
             svg.viewBox viewBox
@@ -703,7 +838,7 @@ let providerIcon (provider: RepoProvider option) =
             prop.href url
             prop.target "_blank"
             prop.onClick (fun e -> e.stopPropagation())
-            prop.children [ icon (0, 0, 24, 24) githubPath ]
+            prop.children [ icon "0 0 24 24" githubPath ]
         ]
     | Some(AzDoProvider url) ->
         Html.a [
@@ -711,7 +846,7 @@ let providerIcon (provider: RepoProvider option) =
             prop.href url
             prop.target "_blank"
             prop.onClick (fun e -> e.stopPropagation())
-            prop.children [ icon (0, 0, 18, 18) azdoPath ]
+            prop.children [ icon "0 0 18 18" azdoPath ]
         ]
 
 let repoSectionHeader (callbacks: CardCallbacks) (focusedElement: FocusTarget option) (repo: RepoModel) =
@@ -731,10 +866,7 @@ let repoSectionHeader (callbacks: CardCallbacks) (focusedElement: FocusTarget op
             if repo.IsCollapsed then
                 Html.span [
                     prop.className "repo-ct-dots"
-                    prop.children (
-                        repo.Worktrees
-                        |> List.map (fun wt ->
-                            Html.span [ prop.className ($"ct-dot {ctClassName wt.CodingTool}"); prop.title (ctTooltip wt.CodingTool) ]))
+                    prop.children (repo.Worktrees |> List.collect sessionDotsPlain)
                 ]
             Html.button [
                 prop.className "create-wt-btn"

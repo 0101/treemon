@@ -26,15 +26,33 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   directly under the app-header on the dashboard background.
 - **Placement is dashboard-scoped**: rendered inside `.dashboard`, above `.repo-list`. It leaves the
   Canvas pane untouched and reflows via the existing dashboard container-query on narrow panes.
+- The **Agents strip is sticky** at the top of the dashboard scroll container. In its normal
+  top-of-page position it shows the `AGENTS` heading and count/label metadata; once pinned it
+  collapses to a circles-only chrome bar matching the Canvas tab bar's height, background, and solid
+  `#313244` boundary. The pinned bar spans the **full dashboard width**, bleeding over the dashboard
+  padding so scrolling cards never show through at its edges, while its columns stay aligned with the
+  normal-flow sections. The Tasks section and drill-down panel stay in normal document flow.
 - **Aggregate-only**: no per-worktree cards or rows inside the band (the grid below already does
   that). All figures are cross-worktree roll-ups.
-- Two stacked sections are separated by a **1px dashed** rule and headed by small uppercase muted
-  labels: `ACTIVE AGENTS · N WORKING` (extended with waiting when present, with `N` = red-dot
-  working agents) and `TASKS · ACROSS ALL WORKTREES`.
+- Two stacked sections are separated by a **1px solid** `#313244` rule and headed by small uppercase
+  muted labels: `AGENTS` and `TASKS`. The per-group/per-bucket counts live in the columns below, so
+  the headers stay bare (no count suffix, no "across all worktrees" caption).
 - Each category is a column with its **count-first label above the visual**: the count uses the
   category accent, the label stays neutral, and both share the same font size/weight.
-  1. **Active agents** — **circles** (~15px), one per working/waiting agent, grouped by the running
-     skill or waiting state (no per-agent status dot on the circle).
+  1. **Agents** — **circles** (~15px), one **per live session**, each placed in its own group by
+     **that session's own** status and skill: a working session by the skill it is running, a
+     waiting-for-user session in the **waiting** group, an idle session (blue-dot, finished a turn
+     with the CLI still open) in the **idle** group. Grouping is **per session, not per worktree**, so
+     a worktree whose sessions are doing different things (e.g. one running `pr` while two sit idle)
+     splits across the matching groups rather than clumping all its sessions under the worktree's
+     single collapsed activity — only the sessions actually in a state appear under it. A group's
+     count is its number of sessions. Circles share one uniform gap (no per-worktree clustering). Each
+     circle is a **context-usage donut**: a ring filled to the fraction of context-window still
+     **remaining** (`1 − currentTokens / tokenLimit`, from the SDK `session.usage_info` event) — a
+     healthy low-usage session is a nearly full ring and one near its limit thins to a sliver. A
+     session that has not reported usage yet (including a row migrated without a snapshot) falls back
+     to the solid circle. The last known usage survives a Treemon restart for sessions restored into
+     the live window. Idle is a second track sharing the Agents row.
   2. **Tasks** — one solid **bar** per status (**Planned · Queued · In progress · Blocked · Done ·
      Unattended**), width ∝ count on **one true shared linear scale** (no cap, no fade). Each column
      keeps its label width so a short bar still shows its full label.
@@ -44,16 +62,19 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   CSS-classes-only rule.
 - **Palette (Catppuccin Mocha, exact):**
   - Tasks — Planned `#fab387` · Queued `#89dceb` · In progress `#a6e3a1` · Blocked `#f38ba8` · Done `#cba6f7` · Unattended `#7f849c`.
-  - Activities — Investigating `#89dceb` · Planning `#cba6f7` · Executing `#a6e3a1` · Reviewing `#f5c2e7` · Fixing `#fab387` · Working `#ff0000`.
-  - Waiting — `#f9e2af`, matching the card's `WaitingForUser` dot. No two co-occurring agent
-    groups share a hue: Investigating teal, Planning mauve, Executing green, Reviewing pink, Fixing
-    peach, Working red, Waiting yellow.
+  - Activities — Investigating `#89dceb` · Planning `#cba6f7` · Executing `#a6e3a1` · Reviewing `#f5c2e7` · PR `#fab387` · Working `#ff0000`.
+  - Waiting — `#f9e2af`, matching the card's `WaitingForUser` dot.
+  - Idle — `#89b4fa`, matching the card's `Idle` dot. No two co-occurring agent
+    groups share a hue: Investigating teal, Planning mauve, Executing green, Reviewing pink, PR
+    peach, Working red, Waiting yellow, Idle blue.
 - **Empty categories are omitted** — a status or activity with zero items renders no label and no
   bar/circle group (never a `0`).
 - An all-empty band renders nothing.
 - The band has no per-card activity stripe; the band alone conveys activity, and the card red dot is
   unchanged.
-- The band is static — no hover, click, or greenlight interactions (deferred).
+- Each rendered agent-group column and task-bucket column is clickable. Selecting a column toggles
+  the band's single drill-down selection; panel content, close behavior, and worktree navigation are
+  defined in `docs/spec/overview-drilldown.md`.
 
 ### Task buckets (definitions)
 
@@ -64,7 +85,7 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 | **In progress** | Tasks with status `in_progress` (`Beads.InProgress`) **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree they fold into **Unattended**. |
 | **Blocked** | Tasks with status `blocked` (`Beads.Blocked`). |
 | **Done** | Σ closed **issues** (any type) across **non-archived** worktrees (`Beads.Closed` where `not IsArchived`). Naturally bounded — a worktree's `.beads/beads.db` is not committed, so its closed issues drop out when the worktree is merged/deleted. Only filter is `not IsArchived`. |
-| **Unattended** | `In progress` + `Queued` tasks whose worktree has **no active agent** (`CodingTool` = `Done` or `Idle`) — likely stale beads status nobody is working. A single muted catch-all, trailing Done. |
+| **Unattended** | `In progress` + `Queued` tasks whose worktree has **no active agent** (`CodingTool` = `Idle` or `NoSession`) — likely stale beads status nobody is working. A single muted catch-all, trailing Done. |
 
 The **Planned/Queued/Loose** split derives from the **parent-child dependency graph + feature
 status**: for each open task, find its parent feature (parent-child edge) and read that feature's
@@ -82,11 +103,11 @@ distinct server-side bucket for fidelity but folds into **Planned** for display 
 
   | Activity | Skills / commands |
   |---|---|
-  | **Investigating** | `investigate` |
-  | **Planning** | `bd-plan`, `bd-improve`, `bd-autoimprove`, `spec-management` |
-  | **Executing** | `bd-execute`, `bd-phase`, `bd-autopilot`, `refactor` |
-  | **Reviewing** | `pr`, `review-branch`, `reviewing-tests`, `comprehensive-review`, `code-review`, `bd-review`, `contribution`, `review` (focused-review plugin — the actual `skill.invoked` `data.name`; `focused-review:review` also mapped) |
-  | **Fixing** | `fix-build`, `conflict` |
+  | **Investigating** | `investigate`, `research` |
+  | **Planning** | `bd-plan`, `bd-improve`, `bd-autoimprove` |
+  | **Executing** | `execute`, `bd-execute`, `bd-phase`, `bd-autopilot`, `refactor` |
+  | **Reviewing** | `review-branch`, `reviewing-tests`, `comprehensive-review`, `code-review`, `bd-review`, `contribution`, `review` (focused-review plugin — the actual `skill.invoked` `data.name`; `focused-review:review` also mapped) |
+  | **PR** | `babysit-pr`, `pr`, `github`, `fix-build` |
   | **Working** (fallback) | working agent, no recognized skill |
 
 - `Shared.Activity.classify : string -> CurrentActivity` implements the table and **normalizes its
@@ -102,8 +123,8 @@ distinct server-side bucket for fidelity but folds into **Planned** for display 
 
 ## Technical Approach
 
-Two parts: (1) enrich the per-worktree beads data + surface the running skill server-side;
-(2) add the collapsible band + toggle client-side, aggregating client-side across worktrees.
+The server enriches per-worktree beads and session data. The shared Overview aggregate is consumed
+by the client band and by server-side history capture.
 
 ### Data source — parse `.beads/issues.jsonl` (no SQLite dependency)
 
@@ -187,7 +208,7 @@ activity is **derived** from the skill via the pure Shared classifier (no separa
 
 - `BeadsPlanning { Planned; Queued; Loose }` (+ `zero`), new field
   `Planning: BeadsPlanning` on `WorktreeStatus`.
-- `CurrentActivity` DU (`Investigating | Planning | Executing | Reviewing | Fixing | Working`) +
+- `CurrentActivity` DU (`Investigating | Planning | Executing | Reviewing | PR | Working`) +
   `Activity.classify : string -> CurrentActivity`; Waiting is an overview activity group derived
   from `CodingToolStatus.WaitingForUser`, not from skill classification.
 - `CurrentSkill: string option` on `WorktreeStatus` (and `CodingToolResult`).
@@ -196,24 +217,25 @@ activity is **derived** from the skill via the pure Shared classifier (no separa
 
 Adding record fields breaks every construction site (no default record values in F#) — each
 type-growth task must update all sites (`DemoFixture.fs` ×8, `WorktreeApi.fs` mapping,
-`RefreshScheduler.fs`, client/server `IWorktreeApi` impls, test fixtures) in the same change to keep
+`SchedulerState.fs`, client/server `IWorktreeApi` impls, test fixtures) in the same change to keep
 the solution compiling (no compat shims, per house rules).
 
 ### Client aggregation + band
 
-- Aggregate **client-side** (the client already receives every worktree). `Client/OverviewData.fs`
+- Aggregate with the shared `src/Shared/OverviewData.fs`
   (`OverviewData.aggregate : RepoWorktrees list -> Overview`) folds every **non-archived** worktree →
   task buckets (Planned = Σ Planned+Loose, Queued and InProgress only when the worktree has
   `CodingTool = Working` or `WaitingForUser`, inactive Queued/InProgress folded into Unattended,
-  Blocked, Done = Σ Closed) + activity groups (`CodingTool = Working` grouped by
-  `Activity.classify` of `CurrentSkill`, absent skill ⇒ Working; `CodingTool = WaitingForUser` ⇒
-  Waiting) + `Scale` (the largest bucket count — the one true shared linear denominator). **Archived
+  Blocked, Done = Σ Closed) + agent groups (each open `WorktreeStatus.Sessions` entry is classified
+  from its own status and skill via `OverviewData.agentGroupOf`; one worktree can therefore contribute
+  sessions to several groups, while an empty session list / `NoSession` contributes none) + `Scale`
+  (the largest bucket count — the one true shared linear denominator). **Archived
   worktrees are excluded from the entire roll-up** (every task bucket and every agent group), so
   archiving a worktree drops all of its contributions at once. Empty buckets/groups are omitted
   (never a `0`); both lists come back in canonical order, with Unattended trailing Done. The result
   `Overview` carries `Tasks: TaskBucket list` / `Agents: AgentGroup list` / `Scale: int`
-  (`TaskBucketKind` is `[<RequireQualifiedAccess>]` to avoid the `Done`/`Working` collisions with
-  `CodingToolStatus`). **Input contract:** pass the un-split `RepoWorktrees` shape (see decision (f))
+  (`TaskBucketKind` is `[<RequireQualifiedAccess>]` to keep its case names — `Done`, `Blocked`,
+  `InProgress` — from colliding with `BeadsSummary` field labels and other DU cases). **Input contract:** pass the un-split `RepoWorktrees` shape (see decision (f))
   — not the client `RepoModel`.
 - The band is native **Feliz with CSS classes**, with the documented exception that each task bar
   uses a computed inline width or CSS variable for its proportional scale. Toggle mirrors Canvas:
@@ -227,23 +249,42 @@ the solution compiling (no compat shims, per house rules).
   is computed from `Overview.Scale`, with the largest bucket filling the fixed max width and all
   others at `count / Scale` of that width. The computed inline width / CSS variable is the accepted
   exception to static CSS classes because proportional width is inherently data-driven. Agent groups
-  render one `.overview-circle` per working/waiting agent with a normal gap.
+  render one `.overview-circle` **per live session**. A session with a known context-window occupancy
+  also gets `.overview-donut` and an inline
+  `--ctx-remaining` (0–1); the donut's conic-gradient fills that fraction of *remaining* context over
+  a muted track and a radial mask cuts the centre hole — the same accepted inline-custom-property
+  exception the task bars use with `--bar-fill`. Context donuts are 15px with a thin 2.5px ring;
+  no usage reported ⇒ a centred 10px solid circle (donut class not applied). Card markers use the
+  same geometry, but a working context donut adds a fixed-size 10px red centre whose opacity pulses
+  while the ring remains stable. Collapsed repo headers keep their denser 8px plain dots.
 - **Accent colour drives both mark and count via `currentColor`.** One class per category
   (`.task-*` / `.activity-*`) sets `color`; the count text takes it directly and each mark paints
   `background: currentColor`. Label stays neutral, the same inherited `12.5px`/weight `400` as the
   count — so count and label differ only by colour, per spec.
-- **Section chrome.** The band renders `ACTIVE AGENTS · N WORKING` and `TASKS · ACROSS ALL
-  WORKTREES` headings, separated by a 1px dashed rule, and has no top/bottom border hairlines or task
-  footer caption.
-- **RepoModel → RepoWorktrees recombination lives in the band** (`toRepoWorktrees`, the single
-  `aggregate` call site) so decision (f)'s `Worktrees @ ArchivedWorktrees` merge can't be forgotten.
+- **Section chrome.** The band renders bare `AGENTS` and `TASKS` headings (no count suffix, no
+  "across all worktrees" caption — the columns carry the counts), separated by a 1px solid rule,
+  and has no top/bottom border hairlines or task footer caption.
+- **RepoModel → RepoWorktrees recombination lives in the band** (`toRepoWorktrees`) so decision
+  (f)'s `Worktrees @ ArchivedWorktrees` merge can't be forgotten. Durable history capture receives
+  the server-shaped `RepoWorktrees` directly and calls the same shared `aggregate`.
 - **Empty-state collapse.** `view` drops an all-empty lens by pattern-matching (each section is built
   by the `section` helper) and returns `Html.none` when both lenses are empty, so an opened-but-empty
   band adds no chrome (not even margin).
-- **Placement:** rendered in `App.fs` as the first child inside `.dashboard` (above `.repo-list`),
-  gated on `model.OverviewPanelOpen`. The two sections stay **stacked** at every width; the reflow is
-  the category columns wrapping onto new rows via `.overview-items { flex-wrap: wrap }` as the pane
-  narrows — there is no container-query flip to a side-by-side layout.
+- **Placement:** rendered in `App.fs` above `.repo-list`, gated on `model.OverviewPanelOpen`.
+  `OverviewBand.view` emits a 1px zero-net-flow sentinel, one sticky Agents section, and the
+  normal-flow breakdown/Tasks remainder. A dashboard CSS Scroll Timeline morphs that single Agents
+  DOM across the first 112px of scrolling: heading and metadata fade, the existing circle groups
+  translate into one compact row, and `clip-path` reduces the same background to Canvas-header
+  height. No duplicate circle tree exists. The final translation is measured from rendered circle
+  geometry and refreshed by `ResizeObserver`, avoiding platform-font pixel tuning. An
+  `IntersectionObserver` watches only the sentinel and reports pinned after it passes strictly above
+  the dashboard boundary. Its Elmish subscription exists only while agent groups are rendered, so
+  removing the Agents DOM disposes the observers and resets pinned state. Attachment resolves its
+  nodes on each animation frame until they exist, because the subscription can start before React
+  has committed the band and a single missed lookup would otherwise leave the strip permanently
+  unpinned with no error. Entering the pinned state
+  closes an agent drill-down and switches Agents to one `nowrap` row with hidden-scrollbar horizontal
+  overflow. Expanded category columns still wrap normally.
 
 ## Decisions
 
@@ -251,9 +292,9 @@ Authoritative list is "Decisions locked" in `.agents/beads-panel-investigation.m
 band is chrome-less and dashboard-scoped; aggregate-only; agent **circles** + task **true-scale
 bars**; empty categories omitted; **Planned vs Queued** = open vs in_progress parent feature; Loose →
 Planned; **Done** = Σ closed; **archived worktrees excluded from the whole roll-up** (every task
-bucket and every agent group); static interactions; reuse the single `getBeadsData`
-call site; running skill from the existing session scan; per-session context usage (Extension C)
-parked.
+bucket and every agent group); clickable group columns with drill-down delegated to
+`docs/spec/overview-drilldown.md`; reuse the single `getBeadsData`
+call site; running skill and persisted per-session context usage from the existing session scan.
 
 **Resolved during planning:**
 - (a) `BeadsPlanning` is a **sibling record** — a new `Planning` field on `WorktreeStatus`, not a
@@ -279,21 +320,18 @@ parked.
 - (f) **Archived worktrees are excluded from the entire roll-up; the aggregation folds the un-split
   `RepoWorktrees list`.** `OverviewData.aggregate` drops `IsArchived` worktrees up front (when
   building `taggedWorktrees`), so an archived worktree contributes to **no** task bucket and **no**
-  agent group — archiving a worktree removes all of its Overview contributions at once. (This
-  reverses the original decision, which scoped the `not IsArchived` filter to `Done` alone and let
-  archived worktrees keep inflating Planned/Queued/In-progress/Blocked; users reported the residual
-  counts as a bug — archived means "put away", so it should leave the band entirely.) Consequence for
-  wiring: the aggregation receives the server-shaped `RepoWorktrees list` (every worktree present,
-  archived ones flagged via `IsArchived`), **not** the client `RepoModel`, which pre-splits archived
-  worktrees into a separate `ArchivedWorktrees` field. A `RepoModel`-based caller recombines
+  agent group — archiving a worktree removes all of its Overview contributions at once. The
+  aggregation receives the server-shaped `RepoWorktrees list` (every worktree present, archived ones
+  flagged via `IsArchived`), **not** the client `RepoModel`, which pre-splits archived worktrees into
+  a separate `ArchivedWorktrees` field. A `RepoModel`-based caller recombines
   `Worktrees @ ArchivedWorktrees` before calling `aggregate` and lets `aggregate` — the single owner
   of the archived policy — drop the archived ones.
 
 **Additional locked decisions:**
-- The visual contract is the count-first, label-above-mark layout with section headers, dashed
+- The visual contract is the count-first, label-above-mark layout with section headers, a 1px solid
   separator, exact Catppuccin palette, no hairline borders, and no footer caption.
 - Working agents are red-dot worktrees (`CodingTool = Working`); `WaitingForUser` is a separate
-  Waiting group; idle/done sessions do not inflate activity counts.
+  Waiting group; idle sessions form a distinct blue Idle group and do not inflate activity counts.
 - Copilot CLI skill freshness is bounded to the current request; Claude Code and VS Code Copilot may
   report `None`.
 - `review` and `focused-review:review` both classify as Reviewing.
@@ -307,7 +345,7 @@ parked.
 |---|---|
 | Domain types | `src/Shared/Types.fs` (`BeadsSummary`, `WorktreeStatus`, `DashboardResponse`, `IWorktreeApi`) |
 | Beads collection | `src/Server/BeadsStatus.fs` (`getBeadsData`, `getBeadsIssueList`) |
-| Cross-worktree aggregation | `src/Client/OverviewData.fs` (`aggregate`, `Overview`, `TaskBucket`, `AgentGroup`) |
+| Cross-worktree aggregation | `src/Shared/OverviewData.fs` (`aggregate`, `Overview`, `TaskBucket`, `AgentGroup`) |
 | Session/skill scan | `src/Server/CopilotDetector.fs`, `ClaudeDetector.fs`, `VsCodeCopilotDetector.fs`, `CodingToolStatus.fs` |
 | Refresh + assembly | `src/Server/RefreshScheduler.fs`, `src/Server/WorktreeApi.fs` |
 | Toggle precedent | `src/Client/App.fs` (`ToggleCanvasPane`, `header-controls`), `saveCanvasPaneOpen` |
@@ -319,6 +357,8 @@ parked.
 - `docs/spec/canvas-pane.md` — the toggle/persistence pattern this band mirrors.
 - `docs/spec/beadspace-canvas.md` — the per-worktree beads canvas doc (distinct from this
   cross-worktree roll-up; may share the data layer).
+- `docs/spec/overview-drilldown.md` — selection, breakdown panels, and worktree navigation for the
+  clickable group columns.
 - `docs/spec/worktree-monitor.md` — dashboard architecture and domain types.
 
 ## Verification Strategy
@@ -326,7 +366,8 @@ parked.
 - **Unit** (in impl tasks): the planning classifier (feature open/in_progress/closed; task with no
   parent; a `blocks` edge must **not** be treated as parent-child; loose bucket) and the
   skill→activity classifier (each known skill → its bucket; unknown/empty → Working); cross-worktree
-  aggregation (sums match inputs; archived excluded from Done; empty categories omitted).
+  aggregation (sums match inputs; archived excluded from every task and agent group; empty
+  categories omitted).
 - **Data correctness E2E**: the enriched collection over a known worktree's `.beads/issues.jsonl`
   matches the manual issues+dependencies join. Choose a worktree that actually exercises the split
   (open tasks under **both** an open and an in_progress feature) so Planned **and** Queued are

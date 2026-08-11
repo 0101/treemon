@@ -64,15 +64,16 @@ let sanitizeForTerminal (s: string) =
 let formatCodingTool = function
     | Working -> "🔧 Working"
     | WaitingForUser -> "⏳ Waiting"
-    | Done -> "✅ Done"
     | Idle -> "💤 Idle"
+    | NoSession -> "⚫ No session"
 
 let formatPr = function
     | NoPr -> "No PR"
     | HasPr pr ->
         let flags =
             [ if pr.IsDraft then "draft"
-              if pr.IsMerged then "merged"
+              if pr.State = PrState.Merged then "merged"
+              if pr.AutoMergeEnabled then "auto-merge"
               if pr.HasConflicts then "conflicts" ]
 
         let flagStr =
@@ -107,7 +108,6 @@ let launchCmd =
             promptFile: string option,
             fixPr: string option,
             fixBuild: string option,
-            fixTests: bool,
             createPr: bool,
             port: int option
         ) =
@@ -116,7 +116,6 @@ let launchCmd =
                 [ promptFile |> Option.map Choice1Of2
                   fixPr |> Option.map (FixPr >> Choice2Of2)
                   fixBuild |> Option.map (FixBuild >> Choice2Of2)
-                  (if fixTests then Some(Choice2Of2 FixTests) else None)
                   (if createPr then Some(Choice2Of2 CreatePr) else None) ]
                 |> List.choose id
 
@@ -142,7 +141,7 @@ let launchCmd =
                 | Choice2Of2 action ->
                     runApi port (fun api -> api.launchAction { Path = wtPath; Action = action }) "Action launched"
             | _ ->
-                eprintfn "Error: Provide exactly one of: --prompt-file, --fix-pr, --fix-build, --fix-tests, or --create-pr"
+                eprintfn "Error: Provide exactly one of: --prompt-file, --fix-pr, --fix-build, or --create-pr"
                 1)
 
     command "launch" {
@@ -153,7 +152,6 @@ let launchCmd =
             optionMaybe<string> "--prompt-file" |> desc "Path to a prompt file (e.g. instructions.md)",
             optionMaybe<string> "--fix-pr" |> desc "Fix PR comments (provide PR URL)",
             optionMaybe<string> "--fix-build" |> desc "Fix failed build (provide build URL)",
-            option<bool> "--fix-tests" |> def false |> desc "Fix failing tests",
             option<bool> "--create-pr" |> def false |> desc "Create a pull request",
             optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)"
         )
@@ -169,7 +167,8 @@ let newCmd =
                     { RepoId = repo
                       BranchName = BranchName.create branch
                       BaseBranch = BranchName.create baseBranch
-                      Prompt = None }
+                      Prompt = None
+                      Skill = None }
 
                 match api.createWorktree request |> Async.RunSynchronously with
                 | Ok warnings ->
@@ -290,6 +289,64 @@ let rootsCmd =
         setAction handler
     }
 
+/// Renders a diff category report and the exit code that goes with it: 0 only for a configured
+/// repository, so the command is usable as a check and not just a printer. Category names come from
+/// the repository's `.treemon.json`, so they are sanitized before they reach the terminal.
+let formatDiffCategoryReport (report: DiffCategoryReport) : string list * int =
+    match report with
+    | DiffCategoryReport.Missing ->
+        [ "Diff categories: not configured"
+          "The repository root's .treemon.json declares no diffCategories, so the diff view shows a flat file list." ],
+        1
+    | DiffCategoryReport.Invalid reason ->
+        [ "Diff categories: invalid (the diff view falls back to a flat file list)"
+          $"Reason: %s{reason}" ],
+        1
+    | DiffCategoryReport.Configured(leaves, unmatched) ->
+        let matched = leaves |> List.sumBy _.FileCount
+
+        let countWidth =
+            unmatched :: (leaves |> List.map _.FileCount)
+            |> List.map (fun count -> (string count).Length)
+            |> List.fold max 1
+
+        let categoryLines =
+            leaves
+            |> List.map (fun leaf ->
+                let name = leaf.CategoryPath |> List.map sanitizeForTerminal |> String.concat " > "
+                let marker = if leaf.FileCount = 0 then "  ⚠ matches no tracked file" else ""
+                $"""  %s{(string leaf.FileCount).PadLeft(countWidth)}  %s{name}%s{marker}""")
+
+        [ "Diff categories: configured"; "" ]
+        @ categoryLines
+        @ [ ""
+            $"%d{matched} of %d{matched + unmatched} tracked files matched; %d{unmatched} unmatched (the viewer's Other group)" ],
+        0
+
+let categoriesCmd =
+    let handler (path: string option, port: int option) =
+        withPort port (fun port ->
+            let target = path |> Option.defaultValue "." |> Path.GetFullPath
+
+            tryCallServer port (fun api ->
+                match api.getDiffCategoryReport target |> Async.RunSynchronously with
+                | Error e -> eprintfn $"Error: %s{e}"; 1
+                | Ok report ->
+                    let lines, exitCode = formatDiffCategoryReport report
+                    lines |> List.iter (printfn "%s")
+                    exitCode))
+
+    command "categories" {
+        description "Report what a repository's diff categories match (exit code 0 only when configured)"
+
+        inputs (
+            argumentMaybe<string> "path" |> desc "Worktree path (default: current directory)",
+            optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)"
+        )
+
+        setAction handler
+    }
+
 [<EntryPoint>]
 let main argv =
     rootCommand argv {
@@ -302,4 +359,5 @@ let main argv =
         addCommand addCmd
         addCommand removeCmd
         addCommand rootsCmd
+        addCommand categoriesCmd
     }

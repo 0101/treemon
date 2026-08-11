@@ -11,8 +11,17 @@ open Shared
 open Shared.EventUtils
 open Navigation
 open OverviewData
+open OverviewPresentation
 open Elmish
 open Fable.Remoting.Client
+
+type OverviewHistoryRequest =
+    { Window: HistoryWindow
+      RequestedAt: System.DateTimeOffset }
+
+type InstalledOverviewHistory =
+    { Window: HistoryWindow
+      Response: OverviewHistoryResponse }
 
 type Model =
     { Repos: RepoModel list
@@ -23,9 +32,9 @@ type Model =
       SchedulerEvents: CardEvent list
       LatestByCategory: Map<string, CardEvent>
       BranchEvents: Map<string, CardEvent list>
-      SyncPending: Set<string>
       AppVersion: string option
       EditorName: string
+      WorktreeSkills: string list
       FocusedElement: FocusTarget option
       CreateModal: CreateWorktreeModal.ModalState
       ConfirmModal: ConfirmModal.ConfirmModal
@@ -33,11 +42,20 @@ type Model =
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       ActionCooldowns: Set<WorktreePath>
+      AutoSyncPending: Set<WorktreePath>
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
-      SelectedOverviewGroup: OverviewSelection option }
+      OverviewAgentsStuck: bool
+      SelectedOverviewGroup: OverviewSelection option
+      // None is the client-only Hidden state; only a concrete shared HistoryWindow can cross the API.
+      // RequestedAt throttles every request attempt, while the request identity prevents overlapping
+      // polls and stale completions.
+      OverviewHistoryWindow: HistoryWindow option
+      OverviewHistory: InstalledOverviewHistory option
+      OverviewHistoryRequestedAt: System.DateTimeOffset
+      OverviewHistoryRequestInFlight: OverviewHistoryRequest option }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -48,11 +66,9 @@ type Msg =
     | Tick of now: float
     | OpenTerminal of WorktreePath
     | OpenEditor of WorktreePath
-    | StartSync of path: WorktreePath * scopedKey: string
-    | SyncStarted of key: string * Result<unit, string>
+    | ToggleAutoSync of WorktreePath
+    | AutoSyncToggleResult of path: WorktreePath * previousEnabled: bool * Result<unit, string>
     | SyncStatusUpdate of Map<string, CardEvent list>
-    | CancelSync of WorktreePath
-    | SyncTick
     | ConfirmDeleteWorktree of scopedKey: string
     | ConfirmArchiveWorktree of scopedKey: string
     | ConfirmMsg of ConfirmModal.Msg
@@ -74,17 +90,25 @@ type Msg =
     | UserActivity of now: float
     | ToggleCanvasPane
     | ToggleOverviewPanel
+    | SetOverviewAgentsStuck of bool
     // Overview drill-down (spec: docs/spec/overview-drilldown.md). SelectOverviewGroup toggles the
     // clicked group's breakdown panel (re-selecting the current group clears it). SelectOverviewWorktree
     // is the arrow-nav-parity handler: it focuses/expands/scrolls the clicked member card WITHOUT
     // opening the Canvas pane (the deliberate difference from FocusOverviewCard).
     | SelectOverviewGroup of OverviewSelection
     | SelectOverviewWorktree of scopedKey: string
+    // In-band history chart (spec: docs/spec/overview-activity-history.md). CycleOverviewChart advances
+    // Hidden -> 12h -> 24h -> 72h -> Hidden. The requested window travels with the response so a slower
+    // request for a previous selection can be ignored. The request identity also distinguishes
+    // separate requests for the same window when the user cycles away and back.
+    | CycleOverviewChart of now: System.DateTimeOffset
+    | OverviewHistoryLoaded of request: OverviewHistoryRequest * response: OverviewHistoryResponse option
     | SetCanvasPosition of CanvasPosition
     | SetCanvasSize of CanvasSize
     | SelectCanvasDoc of scopedKey: string * filename: string
     | FocusOverviewCard of scopedKey: string
     | OpenCanvasDoc of scopedKey: string * filename: string
+    | OpenWorktreeDiff of scopedKey: string
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     // Share the focused AgentDoc: publish it (server mints a per-doc read-only SAS URL + returns the
@@ -101,7 +125,7 @@ type Msg =
     | DismissShareNotice
     | NavigateCanvasDoc of filename: string
     | CanvasMessageReceived of payload: string
-    | CanvasSendResult of CanvasMessageResult * scopedKey: string
+    | CanvasSendResult of CanvasMessageResult * scopedKey: string * filename: string
     | DismissCanvasMessageError
     // Doc-side JS error forwarded from an AgentDoc iframe (window.onerror / unhandledrejection via
     // the injected errorOverlayScript). `scopedKey`+`filename` are the emitting worktree + doc

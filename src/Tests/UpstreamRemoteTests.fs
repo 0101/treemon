@@ -5,6 +5,7 @@ open System.IO
 open NUnit.Framework
 open Server.TreemonConfig
 open Server.RefreshScheduler
+open Server.SchedulerState
 open Server.GitWorktree
 open Shared
 
@@ -110,7 +111,7 @@ type ReadUpstreamRemoteTests() =
     member _.``readUpstreamRemote coexists with other fields``() =
         File.WriteAllText(
             Path.Combine(tempDir, ".treemon.json"),
-            """{ "archivedBranches": ["old"], "upstreamRemote": "upstream", "testCommand": "dotnet test test.sln" }""")
+            """{ "archivedBranches": ["old"], "upstreamRemote": "upstream", "customSetting": "preserved" }""")
 
         let result = readUpstreamRemote tempDir
         Assert.That(result, Is.EqualTo(Some "upstream"))
@@ -338,76 +339,6 @@ type ReadBaseBranchTests() =
         Assert.That(result, Is.EqualTo("main"))
 
 
-// ─── TreemonConfig: readDefaultSkill ───
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type ReadDefaultSkillTests() =
-
-    // Mutable by necessity: NUnit assigns this in [<SetUp>] before each test and reads it
-    // in [<TearDown>] after; the SetUp/TearDown lifecycle can't populate an immutable let-binding.
-    let mutable tempDir = ""
-
-    [<SetUp>]
-    member _.Setup() =
-        tempDir <- Path.Combine(Path.GetTempPath(), $"treemon-test-{Guid.NewGuid()}")
-        Directory.CreateDirectory(tempDir) |> ignore
-
-    [<TearDown>]
-    member _.TearDown() =
-        if Directory.Exists(tempDir) then
-            Directory.Delete(tempDir, recursive = true)
-
-    [<Test>]
-    member _.``readDefaultSkill returns configured value``() =
-        File.WriteAllText(
-            Path.Combine(tempDir, ".treemon.json"),
-            """{ "defaultSkill": "review" }""")
-
-        let result = readDefaultSkill tempDir
-        Assert.That(result, Is.EqualTo("review"))
-
-    [<Test>]
-    member _.``readDefaultSkill returns unknown skill value as-is (no validation)``() =
-        File.WriteAllText(
-            Path.Combine(tempDir, ".treemon.json"),
-            """{ "defaultSkill": "not-a-real-skill" }""")
-
-        let result = readDefaultSkill tempDir
-        Assert.That(result, Is.EqualTo("not-a-real-skill"))
-
-    [<Test>]
-    member _.``readDefaultSkill returns value with spaces as-is (no validation)``() =
-        File.WriteAllText(
-            Path.Combine(tempDir, ".treemon.json"),
-            """{ "defaultSkill": "odd value" }""")
-
-        let result = readDefaultSkill tempDir
-        Assert.That(result, Is.EqualTo("odd value"))
-
-    [<Test>]
-    member _.``readDefaultSkill returns dash-prefixed value as-is (no validation)``() =
-        File.WriteAllText(
-            Path.Combine(tempDir, ".treemon.json"),
-            """{ "defaultSkill": "--all" }""")
-
-        let result = readDefaultSkill tempDir
-        Assert.That(result, Is.EqualTo("--all"))
-
-    [<Test>]
-    member _.``readDefaultSkill coexists with other fields``() =
-        File.WriteAllText(
-            Path.Combine(tempDir, ".treemon.json"),
-            """{ "archivedBranches": ["old"], "defaultSkill": "review", "baseBranch": "dev" }""")
-
-        let result = readDefaultSkill tempDir
-        Assert.That(result, Is.EqualTo("review"))
-
-        let branch = readBaseBranch tempDir
-        Assert.That(branch, Is.EqualTo("dev"), "Other fields should still be readable")
-
-
 // ─── Git command construction: mainRef, fetch, merge targets ───
 
 [<TestFixture>]
@@ -436,32 +367,14 @@ type GitCommandConstructionTests() =
         Assert.That(mainRef "upstream" "develop", Is.EqualTo("upstream/develop"))
 
     [<Test>]
-    member _.``SyncEngine buildFetchArgs with origin produces fetch origin``() =
-        Assert.That(Server.SyncEngine.buildFetchArgs "origin", Is.EqualTo("fetch origin"))
-
-    [<Test>]
-    member _.``SyncEngine buildFetchArgs with upstream produces fetch upstream``() =
-        Assert.That(Server.SyncEngine.buildFetchArgs "upstream", Is.EqualTo("fetch upstream"))
-
-    [<Test>]
-    member _.``SyncEngine buildFetchArgs with custom remote produces fetch custom``() =
-        Assert.That(Server.SyncEngine.buildFetchArgs "my-fork", Is.EqualTo("fetch my-fork"))
-
-    [<Test>]
     member _.``PrStatus buildRemoteUrlArgs queries the specified remote``() =
         let args = Server.PrStatus.buildRemoteUrlArgs "/repo/root" "upstream"
-        Assert.That(args, Does.Contain("remote get-url upstream"))
+        Assert.That(args, Is.EqualTo([ "-C"; "/repo/root"; "remote"; "get-url"; "upstream" ]))
 
     [<Test>]
-    member _.``PrStatus buildRemoteUrlArgs with origin queries origin``() =
-        let args = Server.PrStatus.buildRemoteUrlArgs "/repo/root" "origin"
-        Assert.That(args, Does.Contain("remote get-url origin"))
-
-    [<Test>]
-    member _.``PrStatus buildRemoteUrlArgs includes repo root path``() =
-        let args = Server.PrStatus.buildRemoteUrlArgs "Q:\\code\\myproject" "upstream"
-        Assert.That(args, Does.Contain("Q:\\code\\myproject"))
-        Assert.That(args, Does.Contain("remote get-url upstream"))
+    member _.``PrStatus buildRemoteUrlArgs keeps a spaced Windows repo root as one argument``() =
+        let args = Server.PrStatus.buildRemoteUrlArgs "Q:\\code\\my project" "upstream"
+        Assert.That(args, Is.EqualTo([ "-C"; "Q:\\code\\my project"; "remote"; "get-url"; "upstream" ]))
 
     [<Test>]
     member _.``branchSortKey gives configured baseBranch priority 0``() =
@@ -572,11 +485,14 @@ type SchedulerUpstreamTests() =
             let gitData : GitData =
                 { Path = "/repo/main"
                   Branch = "main"
+                  HeadCommit = "main-sha"
                   LastCommitMessage = "init"
                   LastCommitTime = DateTimeOffset.UtcNow
-                  UpstreamBranch = None
+                  Upstream = NoUpstream
                   MainBehindCount = 0
+                  BaseRevision = None
                   IsDirty = false
+                  Comparison = Clean
                   WorkMetrics = None }
 
             agent.Post(UpdateGit(testRepoId, "/repo/main", gitData))

@@ -2,6 +2,7 @@ module App
 
 open Shared
 open Shared.EventUtils
+open OverviewData
 open Navigation
 open Elmish
 open Feliz
@@ -12,6 +13,7 @@ open ActionButtons
 open CanvasAwareness
 open CardViews
 open AppTypes
+open OverviewPresentation
 
 let fetchWorktrees () =
     Cmd.OfAsync.either worktreeApi.Value.getWorktrees () (fun r -> DataLoaded (r, System.DateTimeOffset.Now)) DataFailed
@@ -19,15 +21,43 @@ let fetchWorktrees () =
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
-let hasSyncRunning (events: Map<string, CardEvent list>) =
-    events
-    |> Map.exists (fun _ evts ->
-        evts
-        |> List.exists (fun e ->
-            e.Status = Some StepStatus.Running))
+let fetchOverviewHistory request =
+    let loaded response = OverviewHistoryLoaded(request, Some response)
+    Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory request.Window loaded (fun _ -> OverviewHistoryLoaded(request, None))
 
-// Whether an Overview drill-down selection still maps to a present (non-empty) group lives in
-// OverviewBand.overviewSelectionPresent (same pure roll-up pipeline as the band view).
+// The in-band history chart is refreshed no more often than this while open. Snapshot capture itself
+// advances on a 30-second grid, so more frequent request attempts cannot reveal newer history.
+let overviewHistoryRefreshInterval = System.TimeSpan.FromSeconds 30.0
+
+let shouldRefreshOverviewHistory
+    panelOpen
+    historyWindow
+    requestInFlight
+    lastRequestedAt
+    now
+    =
+    panelOpen
+    && Option.isSome historyWindow
+    && Option.isNone requestInFlight
+    && now - lastRequestedAt >= overviewHistoryRefreshInterval
+
+let installOverviewHistory
+    selectedWindow
+    requestedWindow
+    (response: OverviewHistoryResponse option)
+    (current: InstalledOverviewHistory option)
+    =
+    match selectedWindow, response, current with
+    | Some selected, Some loaded, Some installed
+        when selected = requestedWindow
+             && installed.Window = requestedWindow
+             && loaded.Anchor <= installed.Response.Anchor ->
+        current
+    | Some selected, Some loaded, _ when selected = requestedWindow ->
+        Some
+            { Window = requestedWindow
+              Response = loaded }
+    | _ -> current
 
 let init () =
     { Repos = []
@@ -38,9 +68,9 @@ let init () =
       SchedulerEvents = []
       LatestByCategory = Map.empty
       BranchEvents = Map.empty
-      SyncPending = Set.empty
       AppVersion = None
       EditorName = "VS Code"
+      WorktreeSkills = []
       FocusedElement = None
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
@@ -48,11 +78,17 @@ let init () =
       DeployBranch = None
       SystemMetrics = None
       ActionCooldowns = Set.empty
+      AutoSyncPending = Set.empty
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
-      SelectedOverviewGroup = None },
+      OverviewAgentsStuck = false
+      SelectedOverviewGroup = None
+      OverviewHistoryWindow = None
+      OverviewHistory = None
+      OverviewHistoryRequestedAt = System.DateTimeOffset.Now
+      OverviewHistoryRequestInFlight = None },
     Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -67,6 +103,31 @@ let removeFromRepos (path: WorktreePath) (repos: RepoModel list) =
     repos
     |> List.map (fun r ->
         { r with Worktrees = r.Worktrees |> List.filter (fun wt -> WorktreePath.value wt.Path <> pathStr) })
+
+let setAutoSyncEnabled (path: WorktreePath) enabled (repos: RepoModel list) =
+    let update wt =
+        if wt.Path = path then { wt with AutoSyncEnabled = enabled } else wt
+
+    repos
+    |> List.map (fun repo ->
+        { repo with
+            Worktrees = repo.Worktrees |> List.map update
+            ArchivedWorktrees = repo.ArchivedWorktrees |> List.map update })
+
+let private tryAutoSyncEnabled path repos =
+    repos
+    |> List.tryPick (fun repo ->
+        repo.Worktrees @ repo.ArchivedWorktrees
+        |> List.tryFind (fun worktree -> worktree.Path = path))
+    |> Option.map _.AutoSyncEnabled
+
+let preservePendingAutoSync (model: Model) repos =
+    model.AutoSyncPending
+    |> Set.fold (fun refreshed path ->
+        model.Repos
+        |> tryAutoSyncEnabled path
+        |> Option.map (fun enabled -> setAutoSyncEnabled path enabled refreshed)
+        |> Option.defaultValue refreshed) repos
 
 let markDeleted (path: WorktreePath) (deletedPaths: Set<string>) =
     deletedPaths |> Set.add (WorktreePath.value path)
@@ -85,7 +146,7 @@ let terminalAction (wt: WorktreeStatus) =
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
-    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (fun wt -> StartSync (wt.Path, scopedKey))
+    | Card scopedKey, "s" -> findWorktree scopedKey model |> Option.map (_.Path >> ToggleAutoSync)
     | Card scopedKey, "+" -> findWorktree scopedKey model |> Option.bind (fun wt -> if wt.HasActiveSession then Some (OpenNewTab wt.Path) else None)
     | Card scopedKey, "r" -> findWorktree scopedKey model |> Option.bind (fun wt -> if canResumeSession wt then Some (ResumeSession wt.Path) else None)
     | Card scopedKey, "e" -> findWorktree scopedKey model |> Option.map (fun wt -> OpenEditor wt.Path)
@@ -93,7 +154,7 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | Card scopedKey, "a" -> findWorktree scopedKey model |> Option.map (fun _ -> ConfirmArchiveWorktree scopedKey)
     | Card scopedKey, "Delete" -> findWorktree scopedKey model |> Option.bind (fun wt -> if not wt.IsMainWorktree then Some (ConfirmDeleteWorktree scopedKey) else None)
     | RepoHeader repoId, "Enter" -> Some (ToggleCollapse repoId)
-    | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
+    | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
     | _ -> None
 
 let private focusDashboard: Cmd<Msg> =
@@ -133,17 +194,25 @@ let update msg model =
                           else existingCollapse |> Map.tryFind r.RepoId |> Option.defaultValue false
                       Provider = r.Provider
                       BaseBranch = r.BaseBranch })
+                |> preservePendingAutoSync model
                 |> filterDeletedPaths stillPending
             let currentCanvasHashes = canvasHashesByScopedKey repos
+            let currentCanvasModified = canvasModifiedByScopedKey repos
+            let existingCanvasEvents =
+                retainAgentDocEvents currentCanvasHashes model.Canvas.CanvasEvents
             let canvasEvents =
-                if isFirstLoad then model.Canvas.CanvasEvents
+                if isFirstLoad then existingCanvasEvents
                 else
-                    let newEvents = detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
-                    mergeCanvasEvents model.Canvas.CanvasEvents newEvents
+                    let newEvents =
+                        detectCanvasEvents now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                        |> gateCanvasEventsByFreshness now currentCanvasModified
+                    mergeCanvasEvents existingCanvasEvents newEvents
                     |> expireCanvasEvents now
             let changedDocs =
                 if isFirstLoad then []
-                else detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                else
+                    detectChangedCanvasDocs now model.Canvas.PreviousCanvasHashes currentCanvasHashes
+                    |> List.filter (fun (scopedKey, filename) -> isCanvasDocFresh now currentCanvasModified scopedKey filename)
             let now = now.ToUnixTimeMilliseconds() |> float
             let isIdle = now - model.Activity.LastActivityTime > ActivityState.autoDisplayIdleMs
             // Idle auto-display only focus-steals for AgentDoc changes. A SystemView (beads
@@ -183,6 +252,7 @@ let update msg model =
                 LatestByCategory = response.LatestByCategory
                 AppVersion = Some response.AppVersion
                 EditorName = response.EditorName
+                WorktreeSkills = response.WorktreeSkills
                 Mascot.EyeDirection = MascotState.randomEyeDirection ()
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
@@ -197,11 +267,16 @@ let update msg model =
             |> (fun m -> { m with FocusedElement = adjustFocusForVisibility m.Repos m.FocusedElement })
             |> (fun m ->
                 // Drop a now-stale drill-down selection: if the refreshed roll-up no longer contains
-                // the selected group (its count fell to 0), clear it so the panel closes.
-                match m.SelectedOverviewGroup with
-                | Some selection when not (OverviewBand.overviewSelectionPresent selection m.Repos) ->
-                    { m with SelectedOverviewGroup = None }
-                | _ -> m)
+                // the selected group (its count fell to 0), clear it so the panel closes. Removing
+                // every agent group also resets the pinned state before its observer is disposed.
+                let overview = m.Repos |> List.map toRepoWorktrees |> OverviewData.aggregate
+                let selection =
+                    match m.SelectedOverviewGroup with
+                    | Some selection when not (OverviewPresentation.selectionPresent selection overview) -> None
+                    | selection -> selection
+                { m with
+                    OverviewAgentsStuck = m.OverviewAgentsStuck && not (List.isEmpty overview.Agents)
+                    SelectedOverviewGroup = selection })
             |> (fun m ->
                 if isFirstLoad then
                     let seeded = seedLastViewedHashes m.Repos m.Canvas.LastViewedHashes
@@ -294,53 +369,88 @@ let update msg model =
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
+    | ToggleAutoSync path ->
+        if model.AutoSyncPending.Contains path then
+            model, Cmd.none
+        else
+            match findWorktree (WorktreePath.value path) model with
+            | None -> model, Cmd.none
+            | Some wt ->
+                let previousEnabled = wt.AutoSyncEnabled
+                let enabled = not previousEnabled
+                { model with
+                    Repos = setAutoSyncEnabled path enabled model.Repos
+                    AutoSyncPending = model.AutoSyncPending.Add path },
+                Cmd.OfAsync.either
+                    (fun () -> worktreeApi.Value.toggleAutoSync path enabled)
+                    ()
+                    (fun result -> AutoSyncToggleResult (path, previousEnabled, result))
+                    (fun ex -> AutoSyncToggleResult (path, previousEnabled, Error ex.Message))
+
+    | AutoSyncToggleResult (path, _, Ok ()) ->
+        { model with AutoSyncPending = model.AutoSyncPending.Remove path }, Cmd.none
+
+    | AutoSyncToggleResult (path, previousEnabled, Error _) ->
+        let attemptedEnabled = not previousEnabled
+        let completed =
+            { model with
+                HasError = true
+                AutoSyncPending = model.AutoSyncPending.Remove path }
+        match findWorktree (WorktreePath.value path) completed with
+        | Some wt when wt.AutoSyncEnabled = attemptedEnabled ->
+            { completed with Repos = setAutoSyncEnabled path previousEnabled completed.Repos }, Cmd.none
+        | _ ->
+            completed, Cmd.none
+
     | Tick now ->
         // Tick stays in the root update because it also expires canvas events and drives the
-        // worktree/sync poll; only the activity-recompute delegates to ActivityUpdate.
+        // worktree/card-event poll; only the activity-recompute delegates to ActivityUpdate.
         let activity, reportCmd = ActivityUpdate.tickActivity now model.Activity
-        let expiredEvents = expireCanvasEvents (System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)) model.Canvas.CanvasEvents
+        let nowDto = System.DateTimeOffset.FromUnixTimeMilliseconds(int64 now)
+        let expiredEvents = expireCanvasEvents nowDto model.Canvas.CanvasEvents
 
         // A queued canvas message is honestly pending, not failed: it is delivered to the
         // server-side queue and drained when a session registers. Never flip Waiting -> Failed on
         // a wall-clock timer. The delivery signal (an agent doc content-hash change) clears it to
         // Idle in DataLoaded; absent that, it persists until the user dismisses it.
+        // Refresh the in-band history chart while it is open. The in-flight request identity prevents
+        // overlapping polls, and RequestedAt throttles every attempt whether it succeeds or fails.
+        let shouldRefreshHistory =
+            shouldRefreshOverviewHistory
+                model.OverviewPanelOpen
+                model.OverviewHistoryWindow
+                model.OverviewHistoryRequestInFlight
+                model.OverviewHistoryRequestedAt
+                nowDto
+
+        let historyRequest =
+            match shouldRefreshHistory, model.OverviewHistoryWindow with
+            | true, Some window ->
+                Some
+                    { Window = window
+                      RequestedAt = nowDto }
+            | _ -> None
+
+        let historyCmd =
+            historyRequest
+            |> Option.map fetchOverviewHistory
+            |> Option.defaultValue Cmd.none
+
+        let model =
+            match historyRequest with
+            | Some request ->
+                { model with
+                    OverviewHistoryRequestedAt = request.RequestedAt
+                    OverviewHistoryRequestInFlight = Some request }
+            | None -> model
+
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
-        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd ]
+        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd ]
 
     | UserActivity now -> ActivityUpdate.userActivity now model
 
-    | StartSync (path, key) ->
-        let syntheticEvent =
-            { Source = "Sync"
-              Message = "Sync starting"
-              Timestamp = System.DateTimeOffset.Now
-              Status = Some StepStatus.Running
-              Duration = None }
-        let updatedEvents =
-            model.BranchEvents
-            |> Map.add key [ syntheticEvent ]
-        { model with
-            SyncPending = model.SyncPending |> Set.add key
-            BranchEvents = updatedEvents },
-        Cmd.OfAsync.perform worktreeApi.Value.startSync path (fun r -> SyncStarted (key, r))
-
-    | SyncStarted (key, Ok _) ->
-        { model with SyncPending = model.SyncPending |> Set.remove key }, fetchSyncStatus ()
-
-    | SyncStarted (key, Error _) ->
-        { model with
-            SyncPending = model.SyncPending |> Set.remove key
-            BranchEvents = model.BranchEvents |> Map.remove key },
-        Cmd.none
-
     | SyncStatusUpdate events ->
         { model with BranchEvents = events }, Cmd.none
-
-    | CancelSync path ->
-        model, Cmd.OfAsync.attempt worktreeApi.Value.cancelSync path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
-
-    | SyncTick ->
-        model, fetchSyncStatus ()
 
     | ConfirmDeleteWorktree scopedKey ->
         match findWorktree scopedKey model with
@@ -503,13 +613,77 @@ let update msg model =
         let newState = not model.OverviewPanelOpen
         // Closing the band drops any drill-down selection so it can't linger while hidden.
         let selection = if newState then model.SelectedOverviewGroup else None
-        { model with OverviewPanelOpen = newState; SelectedOverviewGroup = selection },
+        { model with
+            OverviewPanelOpen = newState
+            OverviewAgentsStuck = if newState then model.OverviewAgentsStuck else false
+            SelectedOverviewGroup = selection },
         Cmd.OfAsync.attempt worktreeApi.Value.saveOverviewPanelOpen newState (fun _ -> NoOp)
+
+    | SetOverviewAgentsStuck isStuck ->
+        if isStuck = model.OverviewAgentsStuck then
+            model, Cmd.none
+        else
+            let selection =
+                match isStuck, model.SelectedOverviewGroup with
+                | true, Some (OverviewSelection.Agents _) -> None
+                | _ -> model.SelectedOverviewGroup
+            { model with OverviewAgentsStuck = isStuck; SelectedOverviewGroup = selection }, Cmd.none
 
     | SelectOverviewGroup selection ->
         // Toggle: re-selecting the already-selected group clears it (closes the panel).
         let next = if model.SelectedOverviewGroup = Some selection then None else Some selection
-        { model with SelectedOverviewGroup = next }, Cmd.none
+        // Mutual exclusivity: opening a drill-down group hides the history chart.
+        let historyWindow = if Option.isSome next then None else model.OverviewHistoryWindow
+        let scrollCmd =
+            match model.OverviewAgentsStuck, next with
+            | true, Some (OverviewSelection.Agents _) ->
+                Cmd.ofEffect (fun _ -> scrollDashboardToTop ())
+            | _ -> Cmd.none
+        { model with
+            SelectedOverviewGroup = next
+            OverviewHistoryWindow = historyWindow
+            OverviewHistory = if Option.isSome next then None else model.OverviewHistory
+            OverviewHistoryRequestInFlight = if Option.isSome next then None else model.OverviewHistoryRequestInFlight },
+        scrollCmd
+
+    | CycleOverviewChart now ->
+        let next = nextHistoryWindow model.OverviewHistoryWindow
+
+        match next with
+        | None ->
+            { model with
+                OverviewHistoryWindow = None
+                OverviewHistory = None
+                OverviewHistoryRequestInFlight = None },
+            Cmd.none
+        | Some window ->
+            let request =
+                { Window = window
+                  RequestedAt = now }
+
+            // Keep the installed chart mounted while the newly selected window loads. The installed
+            // value carries its own window, so it continues rendering with the old axis/geometry until
+            // this identified request succeeds and replaces it in one model update.
+            { model with
+                OverviewHistoryWindow = next
+                SelectedOverviewGroup = None
+                OverviewHistoryRequestedAt = now
+                OverviewHistoryRequestInFlight = Some request },
+            fetchOverviewHistory request
+
+    | OverviewHistoryLoaded (request, response) ->
+        if model.OverviewHistoryRequestInFlight = Some request then
+            { model with
+                OverviewHistory =
+                    installOverviewHistory
+                        model.OverviewHistoryWindow
+                        request.Window
+                        response
+                        model.OverviewHistory
+                OverviewHistoryRequestInFlight = None },
+            Cmd.none
+        else
+            model, Cmd.none
 
     | SelectOverviewWorktree scopedKey ->
         // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
@@ -554,6 +728,8 @@ let update msg model =
 
     | OpenCanvasDoc (scopedKey, filename) -> CanvasUpdate.openCanvasDoc scopedKey filename model
 
+    | OpenWorktreeDiff scopedKey -> CanvasUpdate.openWorktreeDiff scopedKey model
+
     | ArchiveCanvasDoc (scopedKey, filename) -> CanvasUpdate.archiveCanvasDoc scopedKey filename model
 
     | ArchiveCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.archiveCanvasDocResult scopedKey filename result model
@@ -570,7 +746,7 @@ let update msg model =
 
     | CanvasMessageReceived payload -> CanvasUpdate.canvasMessageReceived payload model
 
-    | CanvasSendResult (result, scopedKey) -> CanvasUpdate.canvasSendResult result scopedKey model
+    | CanvasSendResult (result, scopedKey, filename) -> CanvasUpdate.canvasSendResult result scopedKey filename model
 
     | DismissCanvasMessageError -> CanvasUpdate.dismissCanvasMessageError model
 
@@ -639,12 +815,6 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
-    let syncPolling (dispatch: Dispatch<Msg>) =
-        let intervalId =
-            Fable.Core.JS.setInterval (fun () -> dispatch SyncTick) 2000
-        { new System.IDisposable with
-            member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
-
     // Global "reclaim navigation focus" shortcut. The dashboard's own onKeyDown only fires while
     // DOM focus is on (or inside) the dashboard subtree; once focus escapes to a sibling (canvas
     // pane, header, mascot) or <body>, arrow navigation goes dead. This document-level listener
@@ -666,16 +836,22 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Dom.document.removeEventListener ("keydown", handler) }
 
-    let subs =
+    let overviewSticky (dispatch: Dispatch<Msg>) =
+        OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
+
+    let baseSubs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
           [ "canvas-messages" ], CanvasUpdate.messageListener
           [ "focus-reclaim" ], focusReclaim ]
 
-    if hasSyncRunning model.BranchEvents then
-        ([ "sync-polling" ], syncPolling) :: subs
-    else
-        subs
+    let subs =
+        if model.OverviewPanelOpen && OverviewBand.hasAgentGroups model.Repos then
+            ([ "overview-sticky" ], overviewSticky) :: baseSubs
+        else
+            baseSubs
+
+    subs
 
 let hasAnyActive (repos: RepoModel list) =
     repos |> List.exists (fun r ->
@@ -845,25 +1021,25 @@ let view model dispatch =
           IsCompact = model.IsCompact
           FocusedElement = model.FocusedElement
           BranchEvents = model.BranchEvents
-          SyncPending = model.SyncPending
           ActionCooldowns = model.ActionCooldowns
+          AutoSyncPending = model.AutoSyncPending
           CanvasEvents = model.Canvas.CanvasEvents
           CanvasPaneOpen = model.Canvas.CanvasPaneOpen }
 
     let cardCallbacks: CardCallbacks =
         { FocusCard = fun key -> dispatch (SetFocus (Some (Card key)))
           ToggleRepo = fun repoId -> dispatch (ToggleCollapse repoId)
-          CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree repoId))
+          CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
           OpenTerminal = fun wt -> dispatch (if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path)
           OpenEditor = fun wt -> dispatch (OpenEditor wt.Path)
           OpenNewTab = fun wt -> dispatch (OpenNewTab wt.Path)
           ResumeSession = fun wt -> dispatch (ResumeSession wt.Path)
           DeleteWorktree = fun key -> dispatch (ConfirmDeleteWorktree key)
           ArchiveWorktree = fun key -> dispatch (ConfirmArchiveWorktree key)
-          StartSync = fun path key -> dispatch (StartSync (path, key))
-          CancelSync = fun path -> dispatch (CancelSync path)
+          ToggleAutoSync = fun wt -> dispatch (ToggleAutoSync wt.Path)
           LaunchAction = fun path action -> dispatch (LaunchAction (path, action))
           OpenCanvasDoc = fun key filename -> dispatch (OpenCanvasDoc (key, filename))
+          OpenDiff = OpenWorktreeDiff >> dispatch
           DispatchArchive = ArchiveMsg >> dispatch }
 
     let dashboardEl =
@@ -883,9 +1059,13 @@ let view model dispatch =
             prop.children [
                 if model.OverviewPanelOpen then
                     OverviewBand.view
+                        model.OverviewAgentsStuck
                         model.SelectedOverviewGroup
                         (SelectOverviewGroup >> dispatch)
                         (SelectOverviewWorktree >> dispatch)
+                        model.OverviewHistoryWindow
+                        (fun () -> dispatch (CycleOverviewChart System.DateTimeOffset.Now))
+                        model.OverviewHistory
                         model.Repos
 
                 if not (anyRepoReady model.Repos) && allWorktreesEmpty model.Repos then
@@ -910,18 +1090,15 @@ let view model dispatch =
     let canvasEl =
         CanvasView.view model dispatch
 
-    let children =
-        match model.Canvas.CanvasPosition with
-        | CanvasPosition.Left
-        | CanvasPosition.Top -> [ canvasEl; dashboardEl ]
-        | CanvasPosition.Right
-        | CanvasPosition.Bottom -> [ dashboardEl; canvasEl ]
-
-    React.fragment [
+    // DOM order is fixed; the dock position is applied by CSS `order` on .app-layout's position
+    // class. Reordering these two same-typed divs instead makes React reconcile them by index, which
+    // silently re-renders each existing node with the other subtree and leaves node-bound resources
+    // (the Overview sticky observers) watching the wrong pane.
+    React.Fragment [
         viewAppHeader model dispatch
         Html.div [
             prop.className layoutClass
-            prop.children children
+            prop.children [ dashboardEl; canvasEl ]
         ]
     ]
 

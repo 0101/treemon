@@ -3,7 +3,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>Treemon</AssemblyName>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RollForward>LatestMajor</RollForward>
   </PropertyGroup>
 
@@ -13,6 +13,9 @@
 
   <ItemGroup>
     <Compile Include="Log.fs" />
+    <Compile Include="BackgroundLoop.fs" />
+    <Compile Include="JsonStore.fs" />
+    <Compile Include="PersistentStore.fs" />
     <Compile Include="PathUtils.fs" />
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="Win32.fs" />
@@ -20,32 +23,54 @@
     <Compile Include="SessionManager.fs" />
     <Compile Include="GlobalConfig.fs" />
     <Compile Include="TreemonConfig.fs" />
+    <Compile Include="DiffCategories.fs" />
     <Compile Include="GitWorktree.fs" />
+    <Compile Include="GitBranchSync.fs" />
+    <Compile Include="WorktreeDiff.fs" />
+    <Compile Include="WorktreeDiffApi.fs" />
     <Compile Include="JsonHelpers.fs" />
+    <Compile Include="UserMessageFormatting.fs" />
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
-    <Compile Include="ClaudeDetector.fs" />
-    <Compile Include="CopilotDetector.fs" />
-    <Compile Include="VsCodeCopilotDetector.fs" />
+    <Compile Include="SessionActivity.fs" />
+    <Compile Include="SqliteStorage.fs" />
+    <Compile Include="OverviewSnapshotBoundary.fs" />
+    <Compile Include="OverviewSnapshotStore.fs" />
+    <Compile Include="SessionActivityStore.fs" />
     <Compile Include="CodingToolStatus.fs" />
     <Compile Include="CodingToolCli.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
+    <Compile Include="EmbeddedResource.fs" />
+    <Compile Include="CanvasDocKinds.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
+    <Compile Include="MergedPrStore.fs" />
+    <Compile Include="AutoSyncStore.fs" />
+    <Compile Include="SessionBridge.fs" />
+    <Compile Include="AutoSync.fs" />
     <Compile Include="CanvasBridge.fs" />
     <Compile Include="BeadspaceTemplate.fs" />
     <Compile Include="BeadspaceProvisioner.fs" />
+    <Compile Include="DiffTemplate.fs" />
+    <Compile Include="DiffProvisioner.fs" />
+    <Compile Include="DiffAssets.fs" />
     <Compile Include="CanvasScanner.fs" />
     <Compile Include="CanvasExport.fs" />
     <Compile Include="CanvasShare.fs" />
+    <Compile Include="SchedulerState.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="CardEventLog.fs" />
-    <Compile Include="SyncEngine.fs" />
     <Compile Include="DemoFixture.fs" />
     <Compile Include="WorktreeApi.fs" />
+    <Compile Include="OverviewSnapshotCapture.fs" />
     <Compile Include="IdiomorphScript.fs" />
-    <Compile Include="CanvasDocServer.fs" />
+    <Compile Include="CanvasSendScript.fs" />
+    <Compile Include="CanvasMorphScript.fs" />
+    <Compile Include="CanvasSelectionScript.fs" />
     <Compile Include="HttpSecurity.fs" />
+    <Compile Include="CanvasDocServer.fs" />
+    <Compile Include="SessionActivityService.fs" />
+    <Compile Include="SessionActivityRuntime.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
@@ -55,6 +80,38 @@
          from disk; the two cannot drift. -->
     <EmbeddedResource Include="BeadspaceTemplate.html">
       <LogicalName>BeadspaceTemplate.html</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="DiffTemplate.html">
+      <LogicalName>DiffTemplate.html</LogicalName>
+    </EmbeddedResource>
+    <!-- The viewer's own stylesheet and script, self-hosted next to the pinned diff2html bundle
+         and embedded so the runtime serves exactly what the browser tests load from disk. -->
+    <EmbeddedResource Include="Assets\diff\viewer.css">
+      <LogicalName>DiffViewerCss</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\diff\viewer.js">
+      <LogicalName>DiffViewerScript</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\diff2html\3.4.52\diff2html.min.css">
+      <LogicalName>Diff2HtmlCss</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\diff2html\3.4.52\diff2html.min.js">
+      <LogicalName>Diff2HtmlRenderer</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Assets\diff2html\3.4.52\diff2html-ui-slim.min.js">
+      <LogicalName>Diff2HtmlHighlighter</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-selection-context.js">
+      <LogicalName>CanvasSelectionContext.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-send.js">
+      <LogicalName>CanvasSend.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-morph.js">
+      <LogicalName>CanvasMorph.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-doc-kinds.json">
+      <LogicalName>CanvasDocKinds.json</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
@@ -67,6 +124,16 @@
     <PackageReference Include="Saturn" Version="0.17.0" />
     <PackageReference Include="Fable.Remoting.Giraffe" Version="5.*" />
     <PackageReference Include="Azure.Storage.Blobs" Version="12.29.1" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pins for vulnerable transitive dependencies we never call directly: Saturn drags in
+         JwtBearer 6.0.3 with the Microsoft.IdentityModel 6.10.0 chain (NU1902), and
+         Microsoft.Data.Sqlite drags in SQLitePCLRaw 2.1.11 with a vulnerable SQLite native
+         build (NU1903). -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.10" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.12" />
   </ItemGroup>
 
   <ItemGroup>

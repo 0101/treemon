@@ -3,11 +3,10 @@ module Server.HttpSecurity
 open Giraffe
 open Microsoft.AspNetCore.Http
 
-/// True when a URL host is a loopback address (IPv4 127.0.0.0/8 or IPv6 ::1) or the literal
-/// "localhost". Mirrors the host test in CanvasDocServer.isLoopbackInjectUrl; scheme and port are
-/// intentionally ignored — any local port may serve the SPA and both http/https localhost are the
-/// same machine.
-let private isLoopbackHost (host: string) : bool =
+/// True when a host is a loopback address (IPv4 127.0.0.0/8 or IPv6 ::1) or the literal
+/// "localhost". Scheme and port are intentionally handled by callers so the same host policy can
+/// protect request Host headers, Origin/Referer URLs, and canvas injection URLs.
+let internal isLoopbackHost (host: string) : bool =
     // Uri.Host wraps an IPv6 literal in brackets (e.g. "[::1]"); strip them before IPAddress.TryParse.
     let h = host.Trim('[', ']')
     System.String.Equals(h, "localhost", System.StringComparison.OrdinalIgnoreCase)

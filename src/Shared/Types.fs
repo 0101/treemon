@@ -2,9 +2,6 @@ namespace Shared
 
 open System
 
-module TestFailureLog =
-    let [<Literal>] relPath = ".agents/tests-failure.log"
-
 type RepoId = RepoId of string
 
 module RepoId =
@@ -52,13 +49,44 @@ module BeadsPlanning =
 type CodingToolStatus =
     | Working
     | WaitingForUser
-    | Done
     | Idle
+    | NoSession
 
+/// The coding tool driving a worktree — its launcher, prompt format, and push-status source. A DU of
+/// one today: only the Copilot CLI can push its live status. Adding a provider (e.g. a future GitHub
+/// App) is a new case; the compiler then flags every provider-specific branch that must handle it.
 type CodingToolProvider =
-    | Claude
-    | Copilot
-    static member Default = Copilot
+    | CopilotCli
+    static member Default = CopilotCli
+
+/// A snapshot of a session's context-window occupancy: the tokens currently in the window and the
+/// model's limit. The SDK `session.usage_info` event is ephemeral upstream, so Treemon persists the
+/// last accepted snapshot for restart recovery.
+type ContextUsage = { CurrentTokens: int; TokenLimit: int }
+
+module ContextUsage =
+    /// The fraction of the context window in use, clamped to [0, 1]. A non-positive limit (degenerate)
+    /// reads as 0 rather than dividing by zero.
+    let fraction (u: ContextUsage) : float =
+        if u.TokenLimit <= 0 then 0.0
+        else max 0.0 (min 1.0 (float u.CurrentTokens / float u.TokenLimit))
+
+    /// The fraction of the context window still free, clamped to [0, 1] — the complement of `fraction`.
+    /// The donut fills its accent arc to this, so a healthy low-usage agent reads as a nearly full
+    /// ring and one near its limit thins to a sliver.
+    let remainingFraction (u: ContextUsage) : float = 1.0 - fraction u
+
+/// One live (open) session's own status, the skill it is running, and its context-window occupancy —
+/// the unit behind the per-session donuts. `Skill` is the session's OWN running skill (None when it
+/// is running no recognized skill); the Overview band classifies each session's activity from it
+/// (via Activity.classify) so a worktree's sessions split across activity groups by what each is
+/// actually doing — not the worktree's single collapsed skill. `ContextUsage` is None until the
+/// session first reports usage (including migrated rows with no snapshot), in which case the session
+/// renders as a plain status dot rather than a donut.
+type SessionDot =
+    { Status: CodingToolStatus
+      Skill: string option
+      ContextUsage: ContextUsage option }
 
 /// Live-agent activity buckets derived from the skill/command an agent is running,
 /// surfaced by the same session scan that drives the red dot. Working is the fallback for
@@ -71,7 +99,7 @@ type CurrentActivity =
     | Planning
     | Executing
     | Reviewing
-    | Fixing
+    | PR
     | Working
 
 module Activity =
@@ -93,13 +121,13 @@ module Activity =
             else (firstToken (skill.Trim())).TrimStart('/').ToLowerInvariant()
 
         match normalized with
-        | "investigate" -> CurrentActivity.Investigating
-        | "bd-plan" | "bd-improve" | "bd-autoimprove" | "spec-management" -> CurrentActivity.Planning
-        | "bd-execute" | "bd-phase" | "bd-autopilot" | "refactor" -> CurrentActivity.Executing
-        | "pr" | "review-branch" | "reviewing-tests" | "comprehensive-review"
+        | "investigate" | "research" -> CurrentActivity.Investigating
+        | "bd-plan" | "bd-improve" | "bd-autoimprove" -> CurrentActivity.Planning
+        | "execute" | "bd-execute" | "bd-phase" | "bd-autopilot" | "refactor" -> CurrentActivity.Executing
+        | "review-branch" | "reviewing-tests" | "comprehensive-review"
         | "code-review" | "bd-review" | "contribution"
         | "review" | "focused-review:review" -> CurrentActivity.Reviewing
-        | "fix-build" | "conflict" -> CurrentActivity.Fixing
+        | "babysit-pr" | "pr" | "github" | "fix-build" -> CurrentActivity.PR
         | _ -> CurrentActivity.Working
 
 [<RequireQualifiedAccess>]
@@ -132,6 +160,13 @@ type PrStatus =
     | NoPr
     | HasPr of PrInfo
 
+/// A pull request is open, merged, or closed without merging. The three are mutually exclusive, and
+/// telling the last two apart is what the auto-sync push decision and the PR badge both need.
+and [<RequireQualifiedAccess>] PrState =
+    | Open
+    | Merged
+    | ClosedUnmerged
+
 and PrInfo =
     { Id: int
       Title: string
@@ -139,7 +174,10 @@ and PrInfo =
       IsDraft: bool
       Comments: CommentSummary
       Builds: BuildInfo list
-      IsMerged: bool
+      State: PrState
+      /// GitHub auto-merge or AzDo auto-complete is set: the provider merges the PR on its own
+      /// once the remaining checks and policies pass. Always `false` for merged PRs.
+      AutoMergeEnabled: bool
       HasConflicts: bool }
 
 type WorkMetrics =
@@ -166,22 +204,96 @@ type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven
     | SystemView    // server-generated; data-driven; no owner (e.g. the beads dashboard)
 
-module CanvasDocKind =
-    /// Classify a canvas doc by filename. System views are server-generated, data-driven docs
-    /// with no owner session; currently only the beads dashboard (beads.html) is one. This is the
-    /// single place to register future generated views (e.g. a CI/build view), keeping the
-    /// discriminator out of CanvasScanner and CanvasDocServer.
-    let classify (filename: string) : CanvasDocKind =
-        match filename.ToLowerInvariant() with
-        | "beads.html" -> SystemView
-        | _ -> AgentDoc
-
 type CanvasDoc =
     { Filename: string
       ContentHash: string
       LastModified: DateTimeOffset
       OwnerSessionId: string option
       Kind: CanvasDocKind }
+
+[<RequireQualifiedAccess>]
+type DiffChangeKind =
+    | Added
+    | Modified
+    | Deleted
+    | Renamed
+    | Untracked
+
+type DiffFileSummary =
+    { Identity: string
+      DisplayPath: string
+      OldDisplayPath: string option
+      LinesAdded: int option
+      LinesRemoved: int option
+      Change: DiffChangeKind
+      /// Category names from the root to the matching leaf. Empty when the file matched no category
+      /// and for every file of a repository whose categorization is missing or invalid.
+      CategoryPath: string list }
+
+type DiffSummaryDetails =
+    { BaseRef: string
+      FileCount: int
+      Files: DiffFileSummary list }
+
+[<RequireQualifiedAccess>]
+type DiffLayerCountResult =
+    | Available of fileCount: int
+    | BaseError
+    | TimedOut
+    | GitError
+
+type DiffLayerCounts =
+    { AlreadyCommitted: DiffLayerCountResult
+      LocalChanges: DiffLayerCountResult
+      Untracked: DiffLayerCountResult }
+
+[<RequireQualifiedAccess>]
+type DiffSummaryResult =
+    | Ready of DiffSummaryDetails
+    | Clean of baseRef: string
+    | FilteredEmpty
+    | Stale
+    | BaseError
+    | TimedOut
+    | GitError
+    | TooManyFiles of minimumFileCount: int
+
+[<RequireQualifiedAccess>]
+type DiffReplacementKind =
+    | Binary
+    | Symlink
+
+[<RequireQualifiedAccess>]
+type DiffFileResult =
+    | Text of file: DiffFileSummary * patch: string
+    | Deleted of file: DiffFileSummary * patch: string
+    | Replacement of
+        file: DiffFileSummary *
+        patch: string *
+        replacement: DiffReplacementKind
+    | Binary of file: DiffFileSummary
+    | Oversized of file: DiffFileSummary
+    | Truncated of file: DiffFileSummary
+    | Symlink of file: DiffFileSummary * patch: string option
+    | Unavailable of file: DiffFileSummary
+    | TimedOut of file: DiffFileSummary
+    | GitError of file: DiffFileSummary
+
+/// One declared category leaf and the number of a repository's tracked files that classify into it.
+/// A leaf whose patterns match nothing is still reported, with a zero count: a configuration that is
+/// valid but matches nothing is exactly the silent failure a coverage report exists to expose.
+type DiffCategoryCoverage =
+    { CategoryPath: string list
+      FileCount: int }
+
+/// What a repository's declared `diffCategories` actually do to its tracked files: the configuration
+/// state and, when it is configured, every declared leaf in configuration order together with the
+/// number of files no leaf matched (the viewer's trailing **Other** group).
+[<RequireQualifiedAccess>]
+type DiffCategoryReport =
+    | Missing
+    | Invalid of reason: string
+    | Configured of leaves: DiffCategoryCoverage list * unmatchedCount: int
 
 /// Single source of truth for the canvas-session launch prompt, shared by the client
 /// (LaunchCanvasSession) and the server (sendCanvasMessage) so the two cannot drift.
@@ -208,14 +320,19 @@ type CanvasMessageResult =
 
 type BridgeLiveness =
     { IsAlive: bool
-      SessionId: string option }
+      SessionId: string option
+      LiveSessionIds: string list }
+
+module BridgeLiveness =
+    let hasLiveSession sessionId (byWorktree: Map<string, BridgeLiveness>) =
+        byWorktree
+        |> Map.values
+        |> Seq.exists (fun liveness -> liveness.LiveSessionIds |> List.contains sessionId)
 
 type ActionKind =
     | FixPr of url: string
     | FixBuild of url: string
     | CreatePr
-    | FixTests
-    | ConfigureTests
     | CanvasSession of prompt: string
 
 type ActionRequest =
@@ -230,11 +347,39 @@ type CreateWorktreeRequest =
     { RepoId: string
       BranchName: BranchName
       BaseBranch: BranchName
-      Prompt: string option }
+      Prompt: string option
+      /// Which skill wraps the prompt on launch. `None` sends the prompt verbatim
+      /// (no skill); `Some name` wraps it via a provider-aware skill invocation.
+      Skill: string option }
 
 /// Non-fatal advisories surfaced after a worktree is created (e.g. a legacy fork
 /// script is present, or the post-fork setup hook failed). Empty means a clean create.
 type CreateWorktreeWarnings = string list
+
+[<RequireQualifiedAccess>]
+type AgentActivity =
+    | Intent of text: string * changedAt: DateTimeOffset
+    | SessionTitle of text: string * changedAt: DateTimeOffset
+
+module AgentActivity =
+    let textAndTimestamp =
+        function
+        | AgentActivity.Intent (text, changedAt)
+        | AgentActivity.SessionTitle (text, changedAt) -> text, changedAt
+
+    let mapText transform =
+        function
+        | AgentActivity.Intent (text, changedAt) -> AgentActivity.Intent(transform text, changedAt)
+        | AgentActivity.SessionTitle (text, changedAt) -> AgentActivity.SessionTitle(transform text, changedAt)
+
+[<RequireQualifiedAccess>]
+type MessageGlyph =
+    | Canvas
+
+type UserFooterMessage =
+    { Glyph: MessageGlyph option
+      Text: string
+      Timestamp: DateTimeOffset }
 
 type WorktreeStatus =
     { Path: WorktreePath
@@ -245,14 +390,30 @@ type WorktreeStatus =
       Planning: BeadsPlanning
       CodingTool: CodingToolStatus
       CodingToolProvider: CodingToolProvider option
+      /// When the agent entered its current Overview category — its classified activity while Working
+      /// (Investigating/Executing/…), else its status (WaitingForUser/Idle). Recorded at the transition
+      /// so the Overview band can show "time in category" (incl. time-since-idle). None when NoSession.
+      CodingToolSince: DateTimeOffset option
       CurrentSkill: string option
-      LastUserMessage: (string * DateTimeOffset) option
+      /// The freshest activity signal for the card's "what it's doing" line, preserving whether it
+      /// came from SDK `assistant.intent` or `session.title_changed`.
+      AgentActivity: AgentActivity option
+      /// One entry per live (open) session for this worktree, each carrying that session's own status
+      /// and context-window occupancy — the source of the per-session status donuts. Empty ⇔
+      /// CodingTool = NoSession, so an empty list renders the single grey dot. The collapsed
+      /// CodingTool above still drives the card's overall accent/border.
+      Sessions: SessionDot list
+      LastUserMessage: UserFooterMessage option
+      /// The agent's last message (or pending ask_user question) + its timestamp — the card's third
+      /// footer line. `None` when the session has produced no assistant message yet.
+      LastAssistantMessage: (string * DateTimeOffset) option
       Pr: PrStatus
       MainBehindCount: int
+      AutoSyncEnabled: bool
       IsDirty: bool
+      HasDiff: bool
       WorkMetrics: WorkMetrics option
       HasActiveSession: bool
-      HasTestFailureLog: bool
       IsMainWorktree: bool
       IsArchived: bool
       CanvasDocs: CanvasDoc list }
@@ -266,12 +427,8 @@ type StepStatus =
     | Running
     | Succeeded
     | Failed of message: string
-    | Cancelled
-    | NotConfigured
 
 module EventSource =
-    let [<Literal>] Test = "Test"
-    let [<Literal>] Sync = "sync"
     let [<Literal>] PostFork = "post-fork"
 
 type CardEvent =
@@ -307,6 +464,9 @@ type DashboardResponse =
       DeployBranch: string option
       SystemMetrics: SystemMetrics option
       EditorName: string
+      /// Skills offered in the create-worktree modal (machine-level `worktreeSkills`
+      /// config). Empty means only the built-in "None" option is available.
+      WorktreeSkills: string list
       CollapsedRepos: Set<RepoId>
       CanvasPaneOpen: bool
       OverviewPanelOpen: bool
@@ -332,36 +492,5 @@ type CanvasShareResult =
     { Url: string
       Title: string }
 
-type IWorktreeApi =
-    { getWorktrees: unit -> Async<DashboardResponse>
-      openTerminal: WorktreePath -> Async<unit>
-      openEditor: WorktreePath -> Async<unit>
-      startSync: WorktreePath -> Async<Result<unit, string>>
-      cancelSync: WorktreePath -> Async<unit>
-      getSyncStatus: unit -> Async<Map<string, CardEvent list>>
-      deleteWorktree: WorktreePath -> Async<Result<unit, string>>
-      launchSession: LaunchRequest -> Async<Result<unit, string>>
-      focusSession: WorktreePath -> Async<Result<unit, string>>
-      killSession: WorktreePath -> Async<Result<unit, string>>
-      archiveWorktree: WorktreePath -> Async<Result<unit, string>>
-      unarchiveWorktree: WorktreePath -> Async<Result<unit, string>>
-      getBranches: string -> Async<string list>
-      createWorktree: CreateWorktreeRequest -> Async<Result<CreateWorktreeWarnings, string>>
-      openNewTab: WorktreePath -> Async<Result<unit, string>>
-      launchAction: ActionRequest -> Async<Result<unit, string>>
-      reportActivity: ActivityLevel -> Async<unit>
-      saveCollapsedRepos: RepoId list -> Async<unit>
-      saveCanvasPaneOpen: bool -> Async<unit>
-      saveOverviewPanelOpen: bool -> Async<unit>
-      saveCanvasPosition: CanvasPosition -> Async<unit>
-      saveCanvasSize: CanvasSize -> Async<unit>
-      resumeSession: WorktreePath -> Async<Result<unit, string>>
-      sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
-      archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
-      shareCanvasDoc: ShareCanvasDocRequest -> Async<Result<CanvasShareResult, string>>
-      saveLastViewedHashes: Map<string, Map<string, string>> -> Async<unit>
-      loadLastViewedHashes: unit -> Async<Map<string, Map<string, string>>>
-      getBridgeLiveness: string list -> Async<Map<string, BridgeLiveness>>
-      addRoot: string -> Async<Result<unit, string>>
-      removeRoot: string -> Async<Result<unit, string>>
-      getRoots: unit -> Async<string list> }
+// IWorktreeApi (the Fable.Remoting contract) lives in WorktreeApi.fs, compiled after OverviewData.fs
+// so getOverviewHistory can use the history types defined in OverviewData.

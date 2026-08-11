@@ -20,33 +20,33 @@ type ActivityClassifierTests() =
             Assert.That(Activity.classify skill, Is.EqualTo(expected), $"skill: '{skill}'"))
 
     [<Test>]
-    member _.``investigate maps to Investigating``() =
-        assertAll CurrentActivity.Investigating [ "investigate" ]
+    member _.``investigate and research map to Investigating``() =
+        assertAll CurrentActivity.Investigating [ "investigate"; "research" ]
 
     [<Test>]
     member _.``planning skills map to Planning``() =
-        assertAll CurrentActivity.Planning [ "bd-plan"; "bd-improve"; "bd-autoimprove"; "spec-management" ]
+        assertAll CurrentActivity.Planning [ "bd-plan"; "bd-improve"; "bd-autoimprove" ]
 
     [<Test>]
     member _.``executing skills map to Executing``() =
-        assertAll CurrentActivity.Executing [ "bd-execute"; "bd-phase"; "bd-autopilot"; "refactor" ]
+        assertAll CurrentActivity.Executing [ "execute"; "bd-execute"; "bd-phase"; "bd-autopilot"; "refactor" ]
 
     [<Test>]
     member _.``reviewing skills map to Reviewing``() =
         assertAll
             CurrentActivity.Reviewing
-            [ "pr"; "review-branch"; "reviewing-tests"; "comprehensive-review"; "code-review"; "bd-review"; "contribution"
+            [ "review-branch"; "reviewing-tests"; "comprehensive-review"; "code-review"; "bd-review"; "contribution"
               // The focused-review plugin skill: Copilot CLI emits data.name = "review" (source
               // "plugin"); the fully-qualified "focused-review:review" is matched too for robustness.
               "review"; "focused-review:review" ]
 
     [<Test>]
-    member _.``fixing skills map to Fixing``() =
-        assertAll CurrentActivity.Fixing [ "fix-build"; "conflict" ]
+    member _.``PR skills map to PR``() =
+        assertAll CurrentActivity.PR [ "babysit-pr"; "pr"; "github"; "fix-build" ]
 
     [<Test>]
     member _.``an unrecognized skill falls back to Working``() =
-        assertAll CurrentActivity.Working [ "some-unknown-skill"; "canvas"; "later"; "bd" ]
+        assertAll CurrentActivity.Working [ "some-unknown-skill"; "canvas"; "later"; "bd"; "conflict" ]
 
     [<Test>]
     member _.``empty and whitespace-only input falls back to Working``() =
@@ -58,7 +58,7 @@ type ActivityClassifierTests() =
 
     [<Test>]
     member _.``matching is case-insensitive``() =
-        Assert.That(Activity.classify "PR", Is.EqualTo(CurrentActivity.Reviewing))
+        Assert.That(Activity.classify "PR", Is.EqualTo(CurrentActivity.PR))
         Assert.That(Activity.classify "Investigate", Is.EqualTo(CurrentActivity.Investigating))
         Assert.That(Activity.classify "BD-Plan", Is.EqualTo(CurrentActivity.Planning))
 
@@ -68,13 +68,13 @@ type ActivityClassifierTests() =
 
     [<Test>]
     member _.``a leading slash from a Claude slash command is ignored``() =
-        Assert.That(Activity.classify "/pr", Is.EqualTo(CurrentActivity.Reviewing))
-        Assert.That(Activity.classify "/fix-build", Is.EqualTo(CurrentActivity.Fixing))
+        Assert.That(Activity.classify "/pr", Is.EqualTo(CurrentActivity.PR))
+        Assert.That(Activity.classify "/fix-build", Is.EqualTo(CurrentActivity.PR))
 
     [<Test>]
     member _.``only the first token is significant when a command carries args``() =
         // ClaudeDetector surfaces "<cmd> <args>" (e.g. a /pr command with a URL argument), so
         // everything after the command name must be ignored for classification.
-        Assert.That(Activity.classify "pr https://github.com/org/repo/pull/42", Is.EqualTo(CurrentActivity.Reviewing))
-        Assert.That(Activity.classify "/pr https://github.com/org/repo/pull/42", Is.EqualTo(CurrentActivity.Reviewing))
+        Assert.That(Activity.classify "pr https://github.com/org/repo/pull/42", Is.EqualTo(CurrentActivity.PR))
+        Assert.That(Activity.classify "/pr https://github.com/org/repo/pull/42", Is.EqualTo(CurrentActivity.PR))
         Assert.That(Activity.classify "bd-plan my-feature", Is.EqualTo(CurrentActivity.Planning))

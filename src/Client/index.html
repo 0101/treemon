@@ -7,8 +7,17 @@
     <title>Treemon</title>
     <link rel="manifest" href="/manifest.webmanifest" />
     <style>
+        :root {
+            --fs-sm: 11px;
+            --fs-base: 13px;
+            --fs-lg: 15px;
+        }
+
         * { box-sizing: border-box; }
-        body { margin: 0; font-family: system-ui, -apple-system, sans-serif; background: #1e1e2e; color: #cdd6f4; overflow: hidden; }
+        body { margin: 0; font-family: system-ui, -apple-system, sans-serif; font-size: var(--fs-base); background: #1e1e2e; color: #cdd6f4; overflow: hidden; }
+        /* Form controls don't inherit font-size, so without this they fall back to the UA default
+           (13.333px Arial) instead of the scale. */
+        button, input, select, textarea { font-size: var(--fs-base); }
 
         /* Scrollbar styling */
         * { scrollbar-width: thin; scrollbar-color: rgba(88, 91, 112, 0.5) transparent; }
@@ -17,7 +26,13 @@
         ::-webkit-scrollbar-thumb { background: rgba(88, 91, 112, 0.5); border-radius: 4px; }
         ::-webkit-scrollbar-thumb:hover { background: rgba(88, 91, 112, 0.8); }
 
-        .dashboard { padding: 16px; padding-bottom: 0; max-width: 2000px; margin: 0 auto; }
+        .dashboard {
+            --dashboard-padding: 16px;
+            padding: var(--dashboard-padding);
+            padding-bottom: 0;
+            max-width: 2000px;
+            margin: 0 auto;
+        }
 
         .app-header {
             position: fixed; top: 0; left: 0; right: 0; z-index: 100;
@@ -34,31 +49,31 @@
         .eye-closed { }
         .eye-iris { transition: transform 0.3s ease; }
         .deploy-branch {
-            background: #3a2e20; color: #f9e2af; font-size: 0.78em; font-weight: 600;
+            background: #3a2e20; color: #f9e2af; font-size: var(--fs-base); font-weight: 600;
             padding: 2px 8px; border-radius: 4px; white-space: nowrap;
         }
         .system-metrics { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
         .metric-bar-row { display: flex; align-items: center; gap: 6px; }
         .metric-bar-track { width: 80px; height: 5px; background: #313244; border-radius: 3px; overflow: hidden; }
         .metric-bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease, background-color 0.5s ease; }
-        .metric-bar-label { font-size: 0.65em; color: #585b70; white-space: nowrap; line-height: 1; }
+        .metric-bar-label { font-size: var(--fs-sm); color: #585b70; white-space: nowrap; line-height: 1; }
         .header-controls { display: flex; gap: 6px; }
         .ctrl-btn {
             background: #313244; border: 1px solid #45475a; border-radius: 6px;
-            padding: 4px 10px; font-size: 0.82em; cursor: pointer; color: #bac2de;
+            padding: 4px 10px; font-size: var(--fs-base); cursor: pointer; color: #bac2de;
             font-family: inherit; transition: background 0.15s, border-color 0.15s;
         }
         .ctrl-btn:hover { background: #45475a; border-color: #585b70; }
         .ctrl-btn.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
 
-        .card-grid {
+        .card-grid, .archive-section {
             display: grid;
             gap: 12px;
             grid-template-columns: 1fr;
         }
-        @container dashboard (min-width: 768px)  { .card-grid { grid-template-columns: repeat(2, 1fr); } }
-        @container dashboard (min-width: 1200px) { .card-grid { grid-template-columns: repeat(3, 1fr); } }
-        @container dashboard (min-width: 1800px) { .card-grid { grid-template-columns: repeat(4, 1fr); } }
+        @container dashboard (min-width: 768px)  { .card-grid, .archive-section { grid-template-columns: repeat(2, 1fr); } }
+        @container dashboard (min-width: 1200px) { .card-grid, .archive-section { grid-template-columns: repeat(3, 1fr); } }
+        @container dashboard (min-width: 1800px) { .card-grid, .archive-section { grid-template-columns: repeat(4, 1fr); } }
 
         .wt-card {
             background: #2a2a3c;
@@ -73,8 +88,8 @@
         .wt-card.merged .delete-btn { color: #f38ba8; border-color: #f38ba8; }
         .wt-card.compact     { padding: 6px 10px; }
         .wt-card.compact .card-header { margin-bottom: 2px; }
-        .wt-card.compact .branch-name { font-size: 0.88em; }
-        .compact-detail { display: flex; align-items: center; gap: 6px; font-size: 0.8em; flex-wrap: wrap; }
+        .wt-card.compact .branch-name { font-size: var(--fs-base); }
+        .compact-detail { display: flex; align-items: center; gap: 6px; font-size: var(--fs-sm); flex-wrap: wrap; }
         .beads-inline { display: flex; gap: 4px; align-items: center; color: #a6adc8; }
 
         .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
@@ -82,32 +97,76 @@
         .header-info .branch-name { flex: 1 1 auto; min-width: 100px; }
         .fit-or-hide { flex-shrink: 0; display: flex; align-items: center; gap: 4px; }
         .fit-or-hide > span { flex-shrink: 0; display: flex; align-items: center; gap: 2px; }
-        .branch-name { font-weight: 600; font-size: 0.95em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
+        .branch-name { font-weight: 600; font-size: var(--fs-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
 
-        .terminal-btn, .new-tab-btn, .editor-btn, .delete-btn, .resume-btn {
+        .terminal-btn, .new-tab-btn, .editor-btn, .delete-btn, .resume-btn, .auto-sync-btn {
             flex-shrink: 0;
             background: none; border: 1px solid #45475a; border-radius: 4px;
             color: #7f849c; cursor: pointer; font-family: monospace;
             padding: 1px 6px; line-height: 1.2; transition: color 0.15s, border-color 0.15s;
         }
-        .terminal-btn { margin-left: auto; font-size: 0.78em; padding-top: 2px; padding-bottom: 2px; }
-        .new-tab-btn { font-size: 1em; }
+        .terminal-btn { margin-left: auto; font-size: var(--fs-base); padding-top: 2px; padding-bottom: 2px; }
+        .new-tab-btn { font-size: var(--fs-lg); }
         .editor-btn { padding: 3px 4px; }
         .delete-btn { padding: 3px 4px; }
         .resume-btn { padding: 3px 4px; }
-        .terminal-btn:hover, .new-tab-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
+        .auto-sync-btn { padding: 3px 4px; }
+        .terminal-btn:hover, .new-tab-btn:hover, .auto-sync-btn:not(:disabled):hover { color: #a6e3a1; border-color: #a6e3a1; }
         .editor-btn:hover { color: #89b4fa; border-color: #89b4fa; }
         .resume-btn:hover { color: #fab387; border-color: #fab387; }
-        .has-session .terminal-btn { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
+        .has-session .terminal-btn, .auto-sync-btn.active { color: #a6e3a1; text-shadow: 0 0 6px #a6e3a1, 0 0 12px rgba(166, 227, 161, 0.4); box-shadow: 0 0 4px #a6e3a1, 0 0 2px rgba(166,227,161,0.4); }
+        .auto-sync-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+        /* A sync can reach the network, so the toggle reports progress rather than only going dead.
+           The glyph turns for as long as the sync is in flight, and the palette's yellow in-progress
+           tint carries the same state statically — so it still reads in a still screenshot, and
+           "working" stays distinct from the green "enabled" state. The rotation is deliberately not
+           suppressed under prefers-reduced-motion: a 13px glyph turning in place is the whole signal
+           that a multi-second fetch and merge is running, and dropping it left that state looking
+           identical to a button that is merely disabled. */
+        .auto-sync-btn.syncing {
+            opacity: 1; color: #f9e2af; border-color: #f9e2af;
+            text-shadow: none; box-shadow: none;
+        }
+        .auto-sync-btn.syncing .btn-icon { animation: sync-spin 1s linear infinite; }
+        @keyframes sync-spin { to { transform: rotate(360deg); } }
         .delete-btn:hover { color: #f38ba8; border-color: #f38ba8; }
         .btn-icon { width: 13px; height: 13px; display: block; }
 
         .ct-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-        .ct-dot.working  { background: #ff0000; animation: pulse 2s ease-in-out infinite; }
-        .ct-dot.waiting  { background: #f9e2af; }
-        .ct-dot.done     { background: #89b4fa; }
-        .ct-dot.idle     { background: #585b70; }
-        .canvas-badge { background: #89b4fa; color: #1e1e2e; font-size: 0.7em; font-weight: 700; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; display: inline-block; margin-left: 4px; padding: 0 4px; }
+        .ct-dot.working  { --ct-color: #ff0000; background: var(--ct-color); animation: pulse 2s ease-in-out infinite; }
+        .ct-dot.waiting  { --ct-color: #f9e2af; background: var(--ct-color); }
+        .ct-dot.idle     { --ct-color: #89b4fa; background: var(--ct-color); }
+        .ct-dot.nosession { --ct-color: #585b70; background: var(--ct-color); }
+        .ct-dots { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+        /* Per-session context donut: a stable 15px ring surrounds a 10px centre. The ring arc
+           (the session's status colour) spans `--ctx-remaining` over a muted track; for a working
+           session, only the red centre pulses. A session with no reported usage stays a centred
+           10px plain `.ct-dot`. */
+        .ct-dot.ct-donut {
+          position: relative;
+          width: 15px;
+          height: 15px;
+          background: transparent;
+          animation: none;
+        }
+        .ct-dot.ct-donut::before {
+          position: absolute;
+          inset: 0;
+          content: "";
+          border-radius: 50%;
+          background: conic-gradient(var(--ct-color) calc(var(--ctx-remaining, 1) * 360deg), #45475a 0);
+          -webkit-mask: radial-gradient(circle closest-side, transparent 0 64%, #000 66%);
+                  mask: radial-gradient(circle closest-side, transparent 0 64%, #000 66%);
+        }
+        .ct-dot.ct-donut.working::after {
+          position: absolute;
+          inset: 2.5px;
+          content: "";
+          border-radius: 50%;
+          background: var(--ct-color);
+          animation: pulse 2s ease-in-out infinite;
+        }
+        .canvas-badge { background: #89b4fa; color: #1e1e2e; font-size: var(--fs-sm); font-weight: 600; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; display: inline-block; margin-left: 4px; padding: 0 4px; }
 
         @keyframes pulse {
           0%, 100% { opacity: 1; }
@@ -115,10 +174,10 @@
         }
 
         .commit-time { color: #7f849c; margin-left: 6px; }
-        .wt-card.compact .commit-time { font-size: 10px; }
-        .git-commit-msg { font-size: 0.78em; color: #7f849c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+        .wt-card.compact .commit-time { font-size: var(--fs-sm); }
+        .git-commit-msg { font-size: var(--fs-base); color: #7f849c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 
-        .beads-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 0.82em; }
+        .beads-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: var(--fs-base); }
         .beads-counts { display: flex; gap: 4px; align-items: center; }
         .beads-open { color: #6c7086; font-weight: 600; }
         .beads-inprogress { color: #89b4fa; font-weight: 600; }
@@ -126,7 +185,8 @@
         .beads-closed { color: #a6e3a1; font-weight: 600; }
         .beads-sep { color: #585b70; }
 
-        .main-behind { font-size: 0.82em; color: #a6adc8; margin-bottom: 8px; display: block; }
+        .main-behind { font-size: var(--fs-base); color: #a6adc8; margin-bottom: 8px; display: block; }
+        .wt-card.compact .main-behind { font-size: var(--fs-sm); }
         .main-behind.up-to-date { color: #7f849c; }
         .main-behind.behind-warning { color: #f38ba8; font-weight: 600; }
 
@@ -140,7 +200,7 @@
         /* Overview band (spec: docs/spec/beads-overview-band.md, Corrections v1.1) — chrome-less
            cross-worktree roll-up rendered inside .dashboard above .repo-list, gated on
            Model.OverviewPanelOpen. Rebuilt to match the prototype's .band block exactly
-           (.agents/canvas/beads-panel-prototypes.html): two STACKED sections split by a 1px dashed
+           (.agents/canvas/beads-panel-prototypes.html): two STACKED sections split by a 1px solid
            rule; each opens with an uppercase muted header; each category is a column with a
            count-first meta line ABOVE its visual (count in the accent colour, label neutral, same
            size/weight); agents are ~15px circles (one per working agent, grouped by activity) and
@@ -148,9 +208,106 @@
            from Overview.Scale — the accepted, documented exception to CSS-only, decision (g)). No
            box/title bar or hairlines (the toggle button is the header); the category columns wrap to
            the next line when the pane is too narrow (overview-drilldown). */
-        .overview-band { background: #1e1e2e; padding: 15px 16px; margin-bottom: 16px; }
-        .overview-section + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px dashed #45475a; }
-        .overview-header { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
+        .overview-band { --overview-band-inset: 16px; background: #1e1e2e; padding: 15px var(--overview-band-inset); margin-bottom: 16px; }
+        /* History cycle button toolbar (spec: docs/spec/overview-activity-history.md). Pinned top-right,
+           styled like the band's controls; aria-pressed=true tints it while a window is open. */
+        .overview-toolbar { display: flex; justify-content: flex-end; margin-bottom: 4px; }
+        .history-toggle {
+            font-size: var(--fs-sm); padding: 3px 10px; border-radius: 6px; cursor: pointer;
+            background: #313244; color: #a6adc8; border: 1px solid #45475a;
+        }
+        .history-toggle:hover { background: #3b3f52; color: #cdd6f4; }
+        .history-toggle[aria-pressed="true"] { background: #2e3245; color: #cba6f7; border-color: #585b70; }
+        /* A 1px zero-net-flow sentinel closes an open agent drill-down when the Agents band reaches
+           its sticky point. The visual transition itself is one DOM tree driven by dashboard scroll. */
+        .overview-agents-stick-sentinel { height: 1px; margin-bottom: -1px; }
+        /* The pinned chrome must mask the scrolling cards across the FULL dashboard width, so the band
+           bleeds out over the dashboard padding and re-adds it as its own padding — the columns stay
+           aligned with the normal-flow sections while background, clip, and divider reach both edges. */
+        .overview-agents-band {
+            position: sticky; top: 0; z-index: 20;
+            padding-bottom: 0; margin-bottom: 0;
+            margin-inline: calc(-1 * var(--dashboard-padding));
+            padding-inline: calc(var(--dashboard-padding) + var(--overview-band-inset));
+            border-bottom: 1px solid transparent;
+            animation: overview-agents-shell-morph linear both;
+            animation-timeline: --overview-dashboard-scroll;
+            animation-range: 0 var(--overview-agents-morph-range);
+        }
+        .overview-agents-band::after {
+            content: ''; position: absolute; left: 0; right: 0;
+            top: calc(var(--pane-header-height) - 1px);
+            border-bottom: 1px solid #313244; opacity: 0;
+            animation: overview-agents-line-enter linear both;
+            animation-timeline: --overview-dashboard-scroll;
+            animation-range: 0 var(--overview-agents-morph-range);
+        }
+        .overview-agents-band .overview-header,
+        .overview-agents-band .overview-meta {
+            animation: overview-agents-meta-exit linear both;
+            animation-timeline: --overview-dashboard-scroll;
+            animation-range: 0 24px;
+        }
+        .overview-agents-band .overview-items {
+            animation: overview-agents-items-morph linear both;
+            animation-timeline: --overview-dashboard-scroll;
+            animation-range: 0 var(--overview-agents-morph-range);
+        }
+        .overview-toolbar-agents {
+            position: absolute; top: 15px; z-index: 1; margin-bottom: 0;
+            right: calc(var(--dashboard-padding) + var(--overview-band-inset));
+            animation: overview-agents-meta-exit linear both;
+            animation-timeline: --overview-dashboard-scroll;
+            animation-range: 0 24px;
+        }
+        .overview-agents-band-pinned .overview-items {
+            flex-wrap: nowrap;
+            overflow-x: auto;
+            overflow-y: hidden;
+            overscroll-behavior-inline: contain;
+            scrollbar-width: none;
+        }
+        .overview-agents-band-pinned .overview-toolbar-agents { visibility: hidden; pointer-events: none; }
+        .overview-agents-band-pinned .overview-items::-webkit-scrollbar { display: none; }
+        @keyframes overview-agents-shell-morph {
+            from {
+                transform: translateY(0);
+                clip-path: inset(0 0 0 0);
+                background-color: #1e1e2e;
+            }
+            to {
+                transform: translateY(calc(-1 * var(--dashboard-padding)));
+                clip-path: inset(
+                    0
+                    0
+                    calc(100% - var(--pane-header-height))
+                    0);
+                background-color: #181825;
+            }
+        }
+        @keyframes overview-agents-meta-exit {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
+        @keyframes overview-agents-items-morph {
+            from { transform: translateY(0); }
+            to { transform: translateY(var(--overview-agents-items-shift, -55.5px)); }
+        }
+        @keyframes overview-agents-line-enter {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        @supports not (animation-timeline: scroll()) {
+            .overview-agents-band,
+            .overview-agents-band::after,
+            .overview-agents-band .overview-header,
+            .overview-agents-band .overview-meta,
+            .overview-toolbar-agents,
+            .overview-agents-band .overview-items { animation: none; }
+        }
+        .overview-band-rest { padding-top: 0; }
+        .overview-section-separated { margin-top: 17px; padding-top: 16px; border-top: 1px solid #313244; }
+        .overview-header { font-size: var(--fs-sm); font-weight: 200; text-transform: uppercase; letter-spacing: 0.8px; color: #6c7086; margin: 0 0 11px; }
         /* Shared column layout — identical for both sections; only the visual row differs. The
            group columns wrap to the next line when the pane is too narrow (overview-drilldown
            decision); the row-gap keeps wrapped lines legible without a horizontal scrollbar. */
@@ -168,18 +325,29 @@
            the extra bottom padding + align-self: stretch drop its bottom edge flush against the
            black .overview-breakdown panel rendered below it. */
         .overview-item-selected { background: #11111b; border-color: transparent; border-radius: 10px 10px 0 0; align-self: stretch; padding: 6px 8px 12px; }
-        .overview-meta { font-size: 12.5px; color: #a6adc8; white-space: nowrap; }
+        .overview-meta { font-size: var(--fs-base); color: #a6adc8; white-space: nowrap; }
         /* Count and label share size/weight — only colour differs. The accent class sets `color`, so
            it tints the count text while the label keeps the neutral .overview-meta colour. */
         .overview-count { font-weight: 400; margin-right: 3px; }
         .overview-label { font-weight: 400; }
-        .overview-circles { display: flex; gap: 5px; }
-        .overview-circle { width: 15px; height: 15px; border-radius: 50%; background: currentColor; flex: none; }
+        .overview-circles { display: flex; align-items: center; gap: 6px; }
+        .overview-circle { width: 10px; height: 10px; border-radius: 50%; background: currentColor; flex: none; }
+        /* Context-usage donut: the filled arc (currentColor accent) spans `--ctx-remaining` (0–1, set
+           inline per agent) of the ring over a muted track — so a healthy low-usage agent is a nearly
+           full ring and one near its limit thins to a sliver. Context donuts stay 15px while agents
+           with no reported usage render as centred 10px solid circles. */
+        .overview-donut {
+          width: 15px;
+          height: 15px;
+          background: conic-gradient(currentColor calc(var(--ctx-remaining, 1) * 360deg), #45475a 0);
+          -webkit-mask: radial-gradient(circle closest-side, transparent 0 64%, #000 66%);
+                  mask: radial-gradient(circle closest-side, transparent 0 64%, #000 66%);
+        }
         /* Bar width = its share of the shared scale (`--bar-fill`, set inline per bar) times a
            RESPONSIVE max: min(300px, 80cqi) shrinks with the .dashboard inline-size container so a
            single bar never overflows a narrow pane, while every bar scales together (shared scale
            preserved). min-width keeps a count-1 bar a visible sliver. */
-        .overview-bar { height: 15px; border-radius: 4px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
+        .overview-bar { height: 6px; border-radius: 4px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
         /* Accent colour per category (Catppuccin Mocha, exact — spec Corrections §6). Drives the
            count text and, via currentColor, the circle/bar fill. */
         .task-planned { color: #fab387; }
@@ -192,53 +360,93 @@
         .activity-planning { color: #cba6f7; }
         .activity-executing { color: #a6e3a1; }
         .activity-reviewing { color: #f5c2e7; }
-        .activity-fixing { color: #fab387; }
+        .activity-pr { color: #fab387; }
         .activity-working { color: #ff0000; }
         .activity-waiting { color: #f9e2af; }
+        .activity-idle { color: #89b4fa; }
 
         /* Drill-down breakdown panel (overview-drilldown): the black panel rendered INSIDE a section,
-           flush beneath the selected group's black tab. Header = accent-tinted title + muted summary +
-           ✕ close; members grouped by repo (small uppercase muted repo name matching the band header);
-           agent groups show borderless [dot name] chips (dot in the group's activity colour), task
-           buckets show name + bar rows on the SAME shared scale as the band bars above (--bar-fill is
-           the documented inline-width exception). The panel's accent class tints the title and, via
-           currentColor, the chip dots and task bars. */
-        .overview-breakdown { background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
-        .overview-bd-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 14px; }
-        .overview-bd-title { font-size: 13.5px; font-weight: 600; color: currentColor; }
-        .overview-bd-sub { font-size: 12px; color: #6c7086; }
-        .overview-bd-close { margin-left: auto; align-self: flex-start; cursor: pointer; background: none; border: none; color: #6c7086; font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 5px; }
+           flush beneath the selected group's black tab. Only the ✕ close button remains as chrome
+           (absolutely positioned in the top-right corner so it adds no vertical space); the old title +
+           summary just repeated the selected tab above, so they're gone. Members grouped by repo (small
+           uppercase muted repo name matching the band header); agent groups show borderless [dot name]
+           chips (dot in the group's activity colour), task buckets show name + bar rows on the SAME
+           shared scale as the band bars above (--bar-fill is the documented inline-width exception). The
+           panel's accent class tints the chip dots and task bars via currentColor. */
+        .overview-breakdown { position: relative; background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
+        .overview-bd-close { position: absolute; top: 10px; right: 12px; cursor: pointer; background: none; border: none; color: #6c7086; font-size: var(--fs-lg); line-height: 1; padding: 2px 5px; border-radius: 5px; }
         .overview-bd-close:hover { color: #cdd6f4; background: #1e1e2e; }
         .overview-bd-repo { margin: 0 0 13px; }
         .overview-bd-repo:last-child { margin-bottom: 0; }
-        .overview-bd-repo-name { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px; color: #6c7086; margin: 0 0 7px; }
+        .overview-bd-repo-name { font-size: var(--fs-sm); font-weight: 200; text-transform: uppercase; letter-spacing: 0.6px; color: #6c7086; margin: 0 0 7px; }
         /* Agent breakdown: borderless [dot name] chips, the dot in the group's activity colour (currentColor). */
         .overview-chips { display: flex; flex-wrap: wrap; gap: 6px 10px; }
-        .overview-chip { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; background: #1e1e2e; border: none; border-radius: 6px; padding: 4px 10px; font-size: 12.5px; }
-        .overview-chip:hover { background: #242438; }
-        .overview-chip-dot { width: 9px; height: 9px; border-radius: 50%; background: currentColor; flex: none; }
+        /* The chip background is a subtle progress bar: a low-opacity accent fill (background-image
+           gradient) runs from the left to `--ctx-used` (0–1, the member's most-loaded session's
+           context usage) over the base colour. Kept faint so the label keeps its contrast; hover only
+           shifts the base colour, leaving the fill in place. currentColor is the group accent. */
+        .overview-chip {
+          display: inline-flex; align-items: center; gap: 7px; cursor: pointer; border: none;
+          border-radius: 6px; padding: 4px 10px; font-size: var(--fs-base);
+          background-color: #1e1e2e;
+          background-image: linear-gradient(to right,
+            color-mix(in srgb, currentColor 22%, transparent) 0 calc(var(--ctx-used, 0) * 100%),
+            transparent calc(var(--ctx-used, 0) * 100%));
+        }
+        .overview-chip:hover { background-color: #242438; }
         .overview-chip-name { color: #cdd6f4; }
+        .overview-chip-since { color: #9399b2; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
         /* Task breakdown: worktree name + a bar in the bucket colour, sized on the SAME shared scale as
            the band bars (width = --bar-fill * the same responsive max, floored at the visible min-width),
            so one task is the same pixel width here as in the band above. */
         .overview-task-row { display: grid; grid-template-columns: 210px 1fr; align-items: center; gap: 14px; padding: 4px 6px; border-radius: 5px; cursor: pointer; }
         .overview-task-row:hover { background: #1e1e2e; }
-        .overview-task-name { font-size: 12.5px; color: #cdd6f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .overview-task-name { font-size: var(--fs-base); color: #cdd6f4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .overview-task-track { display: block; }
-        .overview-task-bar { display: block; height: 13px; border-radius: 3px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
+        .overview-task-bar { display: block; height: 6px; border-radius: 3px; min-width: 5px; background: currentColor; width: calc(var(--bar-fill, 1) * var(--overview-bar-max)); }
 
-        .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
-        .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 500; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
+        /* In-band history chart (spec: docs/spec/overview-activity-history.md). Each stacked stepped-area
+           chart hangs directly under its live section, split off by a dashed rule; the areas reuse the
+           band's task and activity accent classes (fill = currentColor). Geometry mirrors the prototype
+           .agents/canvas/overview-chart-prototype.html. Empty series are omitted (chart + legend). */
+        .history-charts { margin-top: 14px; padding-top: 14px; border-top: 1px dashed #45475a; }
+        /* Keep the live Agents/Tasks solid divider when the Agents chart sits between the sections. */
+        .history-charts + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px solid #313244; }
+        .history-charts figure { background: #181825; padding: 12px 14px 6px; border-radius: 10px; margin: 10px 0 0; }
+        .history-charts .chart-stage { position: relative; }
+        .history-charts svg { display: block; width: 100%; height: auto; }
+        .chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 0 0; font-size: var(--fs-sm); color: #a6adc8; }
+        .chart-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+        .chart-legend .swatch { width: 10px; height: 10px; border-radius: 2px; background: currentColor; flex: none; }
+        .chart-legend .chart-legend-label { color: #a6adc8; }
+        /* Axis labels are SVG text inside the fixed 760x170 viewBox, so their size is in user units
+           that scale with the chart — not screen px, and therefore not a type-scale token. */
+        .history-charts .axis-label { fill: #6c7086; font: 10px system-ui; }
+        .history-charts .grid-line { stroke: #313244; stroke-width: 1; }
+        /* Crosshair tooltip (task tm-activity-history-zx6): dashed guide line + a snapped HTML tooltip
+           positioned in the same unpadded stage as the SVG. */
+        .history-charts .cursor-line { stroke: #7f849c; stroke-width: 1; stroke-dasharray: 3 3; pointer-events: none; }
+        .chart-tip { position: absolute; pointer-events: none; z-index: 5; background: #11111b; border: 1px solid #45475a; border-radius: 7px; padding: 7px 9px; font-size: var(--fs-sm); color: #cdd6f4; white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
+        .chart-tip .tip-time { color: #6c7086; margin-bottom: 4px; }
+        .chart-tip .tip-row { display: flex; align-items: center; gap: 6px; line-height: 1.55; }
+        .chart-tip .tip-row .tip-label { color: #a6adc8; }
+        .chart-tip .tip-row b { color: #cdd6f4; font-weight: 600; }
+        .chart-tip .tip-total { margin-top: 4px; padding-top: 4px; border-top: 1px solid #313244; color: #a6adc8; }
+        .chart-tip .swatch { width: 10px; height: 10px; border-radius: 2px; background: currentColor; flex: none; }
+
+        .pr-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--fs-base); }
+        .pr-badge { background: #2e3452; color: #b4befe; padding: 2px 6px; border-radius: 4px; font-weight: 600; white-space: nowrap; max-width: 200px; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; }
         .pr-badge:hover { background: #3b4068; }
         .pr-badge.draft { background: #313244; color: #7f849c; }
         .pr-badge.merged { background: #2e3245; color: #cba6f7; }
         .thread-badge { background: #3b2030; color: #f38ba8; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
         .thread-badge.dimmed { background: #313244; color: #7f849c; font-weight: 400; }
 
-        .conflict-icon { width: 1em; height: 1em; flex-shrink: 0; margin-left: 4px; }
-        .conflict-icon path { fill: #e06c75; }
+        .pr-icon { width: 1em; height: 1em; flex-shrink: 0; margin-left: 4px; }
+        .pr-icon.conflict path { fill: #e06c75; }
+        .pr-icon.auto-merge path { fill: #cba6f7; }
 
-        .build-badge { padding: 1px 6px; border-radius: 4px; font-size: 0.82em; font-weight: 500; white-space: nowrap; }
+        .build-badge { padding: 1px 6px; border-radius: 4px; font-size: var(--fs-sm); font-weight: 600; white-space: nowrap; }
         .build-badge.succeeded { background: #1e3a2f; color: #a6e3a1; }
         .build-badge.failed { background: #3b2030; color: #f38ba8; }
         .build-badge.building { background: #3a3020; color: #f9e2af; }
@@ -254,14 +462,14 @@
         .action-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
         .action-btn.disabled { opacity: 0.4; cursor: not-allowed; }
 
-        .status-bar { display: flex; align-items: center; gap: 8px; font-size: 0.85em; color: #7f849c; padding: 8px 0 4px; }
+        .status-bar { display: flex; align-items: center; gap: 8px; font-size: var(--fs-base); color: #7f849c; padding: 8px 0 4px; }
 
         .scheduler-footer {
             background: #1e1e2e;
             border-top: 1px solid #313244;
             padding: 8px 10px; margin-top: 12px;
             font-family: 'Consolas', 'Cascadia Mono', 'Fira Code', monospace;
-            font-size: 0.78em;
+            font-size: var(--fs-base);
         }
         .pinned-errors {
             background: #2a1525; border: 1px solid #45232e; border-radius: 6px;
@@ -292,38 +500,17 @@
 
         .nav-hint {
             max-width: 580px; margin: 6px auto 0; text-align: center;
-            color: #9399b2; font-size: 0.95em;
+            color: #9399b2; font-size: var(--fs-sm);
         }
         .nav-hint kbd {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;
-            padding: 0 5px; color: #cdd6f4; font-family: inherit; font-size: 0.9em;
+            padding: 0 5px; color: #cdd6f4; font-family: inherit;
         }
 
         .main-behind-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
         .main-behind-row .main-behind { margin-bottom: 0; }
 
-        .sync-btn {
-            background: #313244; border: 1px solid #89b4fa; border-radius: 4px;
-            color: #89b4fa; cursor: pointer; font-family: inherit; font-size: 0.78em;
-            padding: 1px 8px; line-height: 1.3; transition: background 0.15s, border-color 0.15s, opacity 0.15s;
-        }
-        .sync-btn:hover { background: #2e3452; }
-        .sync-btn.disabled { opacity: 0.4; cursor: not-allowed; border-color: #585b70; color: #585b70; }
-
-        .dirty-warning { font-size: 0.78em; color: #f9e2af; font-style: italic; }
-
-        .sync-cancel-btn {
-            background: #3b2030; border: 1px solid #f38ba8; border-radius: 4px;
-            color: #f38ba8; cursor: pointer; font-family: inherit; font-size: 0.78em;
-            padding: 1px 8px; line-height: 1.3; transition: background 0.15s;
-        }
-        .sync-cancel-btn:hover { background: #4a2540; }
-
-        .sync-starting-btn {
-            background: #313244; border: 1px solid #585b70; border-radius: 4px;
-            color: #585b70; cursor: not-allowed; font-family: inherit; font-size: 0.78em;
-            padding: 1px 8px; line-height: 1.3; font-style: italic;
-        }
+        .dirty-warning { font-size: var(--fs-base); color: #f9e2af; font-style: italic; }
 
         .card-footer {
             display: flex; flex-direction: column; gap: 6px;
@@ -333,7 +520,7 @@
         .card-footer .user-prompt {
             color: #89b4fa; font-style: italic;
             font-family: 'Consolas', 'Cascadia Mono', 'Fira Code', monospace;
-            font-size: 0.78em;
+            font-size: var(--fs-base);
             display: flex; align-items: center; gap: 6px;
             overflow: hidden;
             margin: 0;
@@ -341,31 +528,33 @@
         .card-footer .user-prompt > span:last-child {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
         }
-        .card-footer .user-prompt.skill-line { color: #a6e3a1; font-style: normal; }
-        .card-footer .user-prompt.skill-line .skill-indicator {
-            color: #a6e3a1; flex-shrink: 0; font-style: normal;
+        .card-footer .canvas-message-glyph {
+            width: 13px; height: 13px; flex: 0 0 auto; fill: currentColor; font-style: normal;
         }
-        .card-footer .user-prompt.skill-line .skill-name {
+        .card-footer .user-prompt.activity-line { color: #cdd6f4; font-style: normal; }
+        .card-footer .user-prompt.assistant-line { color: #9399b2; font-style: normal; }
+        .card-footer .user-prompt.activity-line .activity-text {
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
-            font-weight: 600;
+        }
+        .card-footer .user-prompt.activity-line .skill-pill {
+            flex: 0 0 auto; margin-left: auto;
+            color: #89dceb; background: #181825; border: 1px solid #313244;
+            border-radius: 8px; padding: 0 7px; font-weight: 600; font-style: normal;
+            white-space: nowrap; max-width: 45%; overflow: hidden; text-overflow: ellipsis;
         }
 
         .event-log {
             font-family: 'Consolas', 'Cascadia Mono', 'Fira Code', monospace;
-            display: flex; flex-direction: column; gap: 3px; font-size: 0.78em;
+            display: flex; flex-direction: column; gap: 3px; font-size: var(--fs-base);
         }
         .event-entry { display: flex; align-items: center; gap: 6px; overflow: hidden; }
         .event-time { color: #585b70; white-space: nowrap; flex-shrink: 0; width: 52px; text-align: right; font-style: normal; }
         .event-source { color: #6c7086; white-space: nowrap; flex-shrink: 0; }
         .event-message { color: #9399b2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-        .event-status { padding: 0 4px; border-radius: 3px; font-size: 0.9em; white-space: nowrap; flex-shrink: 0; }
+        .event-status { padding: 0 4px; border-radius: 3px; font-size: var(--fs-sm); white-space: nowrap; flex-shrink: 0; }
         .event-status.running { background: #2e3452; color: #89b4fa; }
         .event-status.success { background: #1e3a2f; color: #a6e3a1; }
         .event-status.failed { background: #3b2030; color: #f38ba8; }
-        .event-status.cancelled { background: #3a3020; color: #f9e2af; }
-        .event-status.not-configured { background: #2e3040; color: #9399b2; }
-        .event-status.clickable { cursor: pointer; text-decoration: underline; }
-        .event-status.clickable:hover { filter: brightness(1.3); }
         .canvas-event { cursor: pointer; color: #f9e2af; }
         .canvas-event:hover { filter: brightness(1.3); }
         .canvas-event .event-source { color: #f9e2af; }
@@ -378,11 +567,10 @@
             align-self: center;
         }
         .commit-square { width: 3px; height: 3px; background: #cba6f7; border-radius: 0; }
-        .commit-overflow { font-size: 0.7em; color: #7f849c; align-self: center; margin-left: 2px; }
-        .diff-stats { font-size: 0.75em; align-self: center; margin-left: 4px; white-space: nowrap; }
+        .commit-overflow { font-size: var(--fs-sm); color: #7f849c; align-self: center; margin-left: 2px; }
+        .diff-stats { font-size: var(--fs-sm); align-self: center; margin-left: 4px; white-space: nowrap; }
         .diff-added { color: #a6e3a1; }
         .diff-removed { color: #f38ba8; }
-        .work-metrics { display: flex; align-items: center; gap: 4px; }
 
         .wt-card.skeleton { pointer-events: none; }
         .skeleton-dot { width: 10px; height: 10px; border-radius: 50%; background: #313244; flex-shrink: 0; }
@@ -404,12 +592,12 @@
         }
         .repo-header:not(.collapsed) { background: none; border-bottom: none; }
         .repo-header:hover { background: #2a2a3c; }
-        .collapse-arrow { color: #6c7086; font-size: 0.8em; flex-shrink: 0; width: 14px; text-align: center; }
-        .repo-name { font-weight: 600; font-size: 1.05em; color: #cdd6f4; }
+        .collapse-arrow { color: #6c7086; font-size: var(--fs-base); flex-shrink: 0; width: 14px; text-align: center; }
+        .repo-name { font-weight: 600; font-size: var(--fs-lg); color: #cdd6f4; }
         .provider-icon { width: 14px; height: 14px; flex-shrink: 0; opacity: 0.5; }
         .provider-link { display: inline-flex; align-items: center; text-decoration: none; color: inherit; }
         .provider-link:hover .provider-icon { opacity: 1; color: #cdd6f4; }
-        .repo-ct-dots { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+        .repo-ct-dots { display: flex; align-items: center; gap: 5px; margin-left: 8px; }
         .repo-ct-dots .ct-dot { width: 8px; height: 8px; }
 
 
@@ -425,7 +613,6 @@
         .archive-btn:hover { color: #89b4fa; border-color: #89b4fa; }
 
         .archive-section {
-            display: flex; flex-wrap: wrap; gap: 8px;
             margin-top: 10px; padding: 8px 0;
             opacity: 0.5;
         }
@@ -434,15 +621,17 @@
         .archive-card {
             display: flex; align-items: center; gap: 6px;
             background: #232334; border-radius: 6px;
-            padding: 4px 10px; font-size: 0.82em;
-            max-width: 300px;
+            padding: 4px 10px; font-size: var(--fs-base);
+            min-width: 0; overflow: hidden;
         }
+        .archive-card .header-info { gap: 6px; }
         .archive-card .branch-name {
-            font-weight: 500; font-size: 0.9em;
+            font-weight: 400; font-size: var(--fs-base);
+            flex: 0 0 auto; min-width: 0; max-width: 100%;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-            max-width: 150px; color: #9399b2;
+            color: #a6adc8;
         }
-        .archive-card .commit-time { color: #585b70; white-space: nowrap; }
+        .archive-card .commit-time { color: #7f849c; white-space: nowrap; flex-shrink: 0; }
 
         .unarchive-btn {
             flex-shrink: 0;
@@ -455,7 +644,7 @@
         .create-wt-btn {
             margin-left: auto; flex-shrink: 0;
             background: none; border: 1px solid #45475a; border-radius: 4px;
-            color: #7f849c; cursor: pointer; font-size: 1em; font-weight: 600;
+            color: #7f849c; cursor: pointer; font-size: var(--fs-lg); font-weight: 600;
             padding: 1px 7px; line-height: 1.3; transition: color 0.15s, border-color 0.15s;
         }
         .create-wt-btn:hover { color: #a6e3a1; border-color: #a6e3a1; }
@@ -471,20 +660,20 @@
             box-shadow: 0 8px 32px rgba(0,0,0,0.5);
         }
         .modal-header {
-            padding: 14px 18px 0; font-weight: 600; font-size: 1.05em; color: #cdd6f4;
+            padding: 14px 18px 0; font-weight: 600; font-size: var(--fs-lg); color: #cdd6f4;
         }
         .modal-header.error { color: #f38ba8; }
         .modal-header.warning { color: #f9e2af; }
-        .modal-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+        .modal-body { padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; font-size: var(--fs-lg); }
         .modal-body code { color: #89b4fa; font-family: 'Consolas', 'Cascadia Mono', monospace; }
         .modal-body.creating {
             flex-direction: row; align-items: center; justify-content: center;
-            gap: 4px; padding: 28px 18px; font-size: 0.95em; color: #a6adc8;
+            gap: 4px; padding: 28px 18px; color: #a6adc8;
         }
-        .modal-loading { color: #a6adc8; font-size: 0.95em; text-align: center; padding: 18px 0; }
+        .modal-loading { color: #a6adc8; text-align: center; padding: 18px 0; }
         .modal-input, .modal-textarea {
             background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
-            padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: 0.95em;
+            padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: var(--fs-lg);
             outline: none; transition: border-color 0.15s;
         }
         .modal-textarea { resize: vertical; }
@@ -492,14 +681,22 @@
         .modal-input::placeholder, .modal-textarea::placeholder { color: #585b70; }
         .modal-select {
             background: #1e1e2e; border: 1px solid #45475a; border-radius: 6px;
-            padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: 0.95em;
+            padding: 8px 10px; color: #cdd6f4; font-family: inherit; font-size: var(--fs-lg);
             outline: none; cursor: pointer;
         }
         .modal-select:focus { border-color: #89b4fa; }
+        .modal-skill-group { display: flex; flex-direction: column; gap: 6px; }
+        .modal-field-label { font-size: var(--fs-base); font-weight: 200; color: #a6adc8; text-transform: uppercase; letter-spacing: 0.04em; }
+        .modal-radios { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+        .modal-radio { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; color: #cdd6f4; }
+        .modal-radio input { accent-color: #89b4fa; cursor: pointer; margin: 0; }
+        .modal-radio.none { color: #9399b2; font-style: italic; padding-left: 12px; border-left: 1px solid #45475a; }
+        .modal-radio.none input { accent-color: #9399b2; }
+        .modal-skill-hint { color: #9399b2; font-size: var(--fs-base); font-style: italic; }
         .modal-footer { padding: 0 18px 14px; display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
         .modal-btn {
             border-radius: 6px; padding: 6px 14px; cursor: pointer;
-            font-family: inherit; font-size: 0.88em; transition: background 0.15s;
+            font-family: inherit; font-size: var(--fs-base); transition: background 0.15s;
         }
         .modal-btn.cancel {
             background: #313244; border: 1px solid #45475a; color: #bac2de;
@@ -515,11 +712,11 @@
         }
         .modal-btn.danger:hover { background: #4a2540; }
         .modal-error-message {
-            color: #f38ba8; font-size: 0.9em; white-space: pre-wrap; word-break: break-word;
+            color: #f38ba8; white-space: pre-wrap; word-break: break-word;
             background: #1e1e2e; padding: 10px; border-radius: 6px;
         }
         .modal-warning-message {
-            color: #f9e2af; font-size: 0.9em; white-space: pre-wrap; word-break: break-word;
+            color: #f9e2af; white-space: pre-wrap; word-break: break-word;
             background: #1e1e2e; padding: 10px; border-radius: 6px;
         }
 
@@ -536,6 +733,7 @@
 
         /* Canvas pane layout */
         .app-layout {
+            --pane-header-height: 34px;
             display: flex;
             flex-direction: row;
             height: calc(100vh - 36px);
@@ -545,6 +743,7 @@
             flex-direction: column;
         }
         .app-layout > .dashboard {
+            --overview-agents-morph-range: 112px;
             flex: 1;
             min-width: 0;
             min-height: 0;
@@ -553,6 +752,7 @@
             transition: flex 0.2s ease;
             container-type: inline-size;
             container-name: dashboard;
+            scroll-timeline: --overview-dashboard-scroll block;
             --overview-bar-max: min(300px, 80cqi);
         }
         .canvas-pane {
@@ -577,6 +777,9 @@
         .app-layout.canvas-size-2to1.canvas-bottom > .canvas-pane.open {
             flex: 0 0 66.667%;
         }
+        /* Docking left/top paints the pane first without changing DOM order (see App.fs view). */
+        .app-layout.canvas-left > .canvas-pane,
+        .app-layout.canvas-top > .canvas-pane { order: -1; }
         .app-layout.canvas-right > .canvas-pane { border-left: 1px solid #313244; }
         .app-layout.canvas-left > .canvas-pane { border-right: 1px solid #313244; }
         .app-layout.canvas-top > .canvas-pane { border-bottom: 1px solid #313244; }
@@ -584,16 +787,17 @@
         .canvas-tab-bar {
             display: flex;
             justify-content: space-between;
-            align-items: center;
+            align-items: flex-start;
             padding: 4px 8px;
             background: #181825;
             border-bottom: 1px solid #313244;
             flex-shrink: 0;
+            min-height: var(--pane-header-height);
         }
         .canvas-tab-group {
             display: flex;
             gap: 2px;
-            overflow-x: auto;
+            flex-wrap: wrap;
             flex: 1;
             min-width: 0;
         }
@@ -633,14 +837,15 @@
             flex-shrink: 0;
             background: none; border: 1px solid #45475a; border-radius: 4px;
             color: #a6adc8; cursor: pointer;
-            padding: 2px 8px; font-size: 0.75em; font-family: inherit;
+            padding: 2px 6px; display: flex; align-items: center;
             transition: color 0.15s, border-color 0.15s, opacity 0.15s;
             opacity: 0.6;
         }
+        .canvas-launch-btn .btn-icon { width: 14px; height: 14px; }
         .canvas-launch-btn:hover { color: #a6e3a1; border-color: #a6e3a1; opacity: 1; }
         .canvas-pos-btn, .canvas-size-btn {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;
-            padding: 2px 8px; font-size: 0.85em; cursor: pointer; color: #bac2de;
+            padding: 2px 8px; font-size: var(--fs-base); cursor: pointer; color: #bac2de;
             font-family: inherit; transition: background 0.15s, border-color 0.15s, opacity 0.15s;
             line-height: 1.4; opacity: 0.4;
         }
@@ -650,21 +855,21 @@
         .canvas-error-banner {
             display: flex; align-items: center; justify-content: space-between;
             background: #3a1e2a; color: #f38ba8; padding: 4px 12px;
-            font-size: 0.85em; line-height: 1.4;
+            font-size: var(--fs-base); line-height: 1.4;
         }
         .canvas-error-dismiss {
             background: none; border: none; color: #f38ba8; cursor: pointer;
-            font-size: 1em; padding: 0 4px; opacity: 0.6;
+            font-size: var(--fs-base); padding: 0 4px; opacity: 0.6;
         }
         .canvas-error-dismiss:hover { opacity: 1; }
         .canvas-waiting-banner {
             display: flex; align-items: center; justify-content: space-between;
             background: #1e3a5f; color: #89b4fa; padding: 4px 12px;
-            font-size: 0.85em; line-height: 1.4;
+            font-size: var(--fs-base); line-height: 1.4;
         }
         .canvas-waiting-dismiss {
             background: none; border: none; color: #89b4fa; cursor: pointer;
-            font-size: 1em; padding: 0 4px; opacity: 0.6;
+            font-size: var(--fs-base); padding: 0 4px; opacity: 0.6;
         }
         .canvas-waiting-dismiss:hover { opacity: 1; }
         /* Share success banner ("Shared — link copied"). Green signals success and keeps it distinct
@@ -674,11 +879,11 @@
         .canvas-share-banner {
             display: flex; align-items: center; justify-content: space-between;
             background: #1e3a2a; color: #a6e3a1; padding: 4px 12px;
-            font-size: 0.85em; line-height: 1.4;
+            font-size: var(--fs-base); line-height: 1.4;
         }
         .canvas-share-dismiss {
             background: none; border: none; color: #a6e3a1; cursor: pointer;
-            font-size: 1em; padding: 0 4px; opacity: 0.6;
+            font-size: var(--fs-base); padding: 0 4px; opacity: 0.6;
         }
         .canvas-share-dismiss:hover { opacity: 1; }
         /* Doc-side JS error banner. Amber accent keeps it visually distinct from the red
@@ -689,7 +894,7 @@
         .canvas-doc-error-banner {
             display: flex; align-items: center; justify-content: space-between; gap: 8px;
             background: #3a2e1e; color: #fab387; padding: 4px 12px;
-            font-size: 0.85em; line-height: 1.4; border-bottom: 1px solid #5a4420;
+            font-size: var(--fs-base); line-height: 1.4; border-bottom: 1px solid #5a4420;
         }
         .canvas-doc-error-text {
             flex: 1; min-width: 0;
@@ -698,7 +903,7 @@
         }
         .canvas-doc-error-dismiss {
             background: none; border: none; color: #fab387; cursor: pointer;
-            font-size: 1em; padding: 0 4px; opacity: 0.6; flex-shrink: 0;
+            font-size: var(--fs-base); padding: 0 4px; opacity: 0.6; flex-shrink: 0;
         }
         .canvas-doc-error-dismiss:hover { opacity: 1; }
         .canvas-iframe {
@@ -714,11 +919,12 @@
             justify-content: center;
             height: 100%;
             color: #6c7086;
-            font-size: 0.9em;
+            font-size: var(--fs-lg);
+            font-weight: 200;
         }
         .canvas-tab {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;
-            padding: 2px 10px; font-size: 0.8em; cursor: pointer; color: #bac2de;
+            padding: 2px 10px; font-size: var(--fs-base); cursor: pointer; color: #bac2de;
             font-family: inherit; transition: background 0.15s, border-color 0.15s;
             line-height: 1.4; white-space: nowrap;
         }
@@ -726,7 +932,7 @@
         .canvas-tab.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
         .canvas-tab-viewed { opacity: 0.5; }
         .canvas-tab-age {
-            margin-left: 6px; font-size: 0.8em; color: #6c7086;
+            margin-left: 6px; font-size: var(--fs-sm); color: #6c7086;
             font-variant-numeric: tabular-nums;
         }
         .canvas-tab.active .canvas-tab-age { color: #7f9bd6; }
@@ -734,19 +940,21 @@
             display: flex; align-items: center; gap: 5px;
             flex-shrink: 0; margin-right: 6px;
             background: #2b2440; border: 1px solid #45406a; border-radius: 4px;
-            padding: 2px 8px; font-size: 0.8em; cursor: pointer; color: #cba6f7;
+            padding: 2px 8px; font-size: var(--fs-base); cursor: pointer; color: #cba6f7;
             font-family: inherit; transition: background 0.15s, border-color 0.15s;
             line-height: 1.4; white-space: nowrap;
         }
         .canvas-system-tab:hover { background: #353050; border-color: #cba6f7; }
         .canvas-system-tab.active { background: #322a4a; border-color: #cba6f7; color: #cba6f7; }
         .canvas-system-tab-glyph {
-            font-size: 0.7em; font-weight: 700; letter-spacing: 0.06em; opacity: 0.85;
+            display: inline-grid; place-items: center;
+            font-size: var(--fs-sm); font-weight: 600; letter-spacing: 0.06em; opacity: 0.85;
         }
+        .canvas-system-tab-glyph .btn-icon { width: 14px; height: 14px; }
         .canvas-system-tab-count {
             background: #cba6f7; color: #1e1e2e; border-radius: 8px;
             padding: 0 6px; min-width: 16px; text-align: center;
-            font-size: 0.85em; font-weight: 600;
+            font-size: var(--fs-sm); font-weight: 600;
         }
         .canvas-overview {
             padding: 16px;
@@ -754,7 +962,8 @@
             flex: 1;
         }
         .canvas-overview-title {
-            font-size: 0.9em;
+            font-size: var(--fs-lg);
+            font-weight: 200;
             color: #6c7086;
             margin-bottom: 12px;
             text-transform: uppercase;
@@ -764,7 +973,7 @@
             margin-bottom: 12px;
         }
         .canvas-overview-repo-name {
-            font-size: 0.8em;
+            font-size: var(--fs-base);
             color: #6c7086;
             margin-bottom: 4px;
             padding-left: 4px;
@@ -783,7 +992,7 @@
         }
         .canvas-overview-branch {
             color: #cdd6f4;
-            font-size: 0.85em;
+            font-size: var(--fs-base);
             cursor: pointer;
         }
         .canvas-overview-docs {
@@ -793,7 +1002,7 @@
         }
         .canvas-overview-doc {
             color: #6c7086;
-            font-size: 0.75em;
+            font-size: var(--fs-sm);
             cursor: pointer;
             transition: color 0.15s, text-decoration-color 0.15s;
             text-decoration: underline;

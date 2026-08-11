@@ -1,18 +1,11 @@
 module Tests.ConfigWriterTests
 
-open System
 open System.IO
 open System.Text.Json
 open System.Text.Json.Nodes
 open NUnit.Framework
 open Server.GlobalConfig
 open Tests.TestUtils
-
-let private withTempDir (action: string -> unit) =
-    let tempDir = Path.Combine(Path.GetTempPath(), $"treemon-config-test-{Guid.NewGuid()}")
-    Directory.CreateDirectory(tempDir) |> ignore
-    try action tempDir
-    finally try Directory.Delete(tempDir, recursive = true) with _ -> ()
 
 let private str (value: string) : JsonNode = JsonValue.Create(value) :> JsonNode
 
@@ -31,7 +24,7 @@ type UpdateConfigAtPathTests() =
 
     [<Test>]
     member _.``sequential writes of different keys preserve both``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-config-test" (fun dir ->
             let configPath = Path.Combine(dir, "config.json")
 
             assertOk (updateConfigAtPath configPath [ "editor", str "vim" ]) "first write"
@@ -44,7 +37,7 @@ type UpdateConfigAtPathTests() =
 
     [<Test>]
     member _.``unparseable file is backed up, not destroyed``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-config-test" (fun dir ->
             let configPath = Path.Combine(dir, "config.json")
             let corruptContent = "{ this is not valid json "
             File.WriteAllText(configPath, corruptContent)
@@ -62,7 +55,7 @@ type UpdateConfigAtPathTests() =
 
     [<Test>]
     member _.``successful write leaves no temp file behind``() =
-        withTempDir (fun dir ->
+        withTempDir "treemon-config-test" (fun dir ->
             let configPath = Path.Combine(dir, "config.json")
             assertOk (updateConfigAtPath configPath [ "editor", str "vim" ]) "write"
             Assert.That(File.Exists(configPath + ".tmp"), Is.False,

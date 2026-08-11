@@ -38,7 +38,6 @@ The skill may have been auto-loaded because the user mentioned `tm` or worktrees
 tm launch --path <worktree-path> --prompt-file <file.md>
 tm launch --path <worktree-path> --fix-pr <pr-url>
 tm launch --path <worktree-path> --fix-build <build-url>
-tm launch --path <worktree-path> --fix-tests
 tm launch --path <worktree-path> --create-pr
 ```
 

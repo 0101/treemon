@@ -21,15 +21,21 @@ let parseGithubUrl (url: string) =
         else
             None)
 
-let private runGh (arguments: string) =
-    ProcessRunner.run "GH" "gh" arguments
+let private gh =
+    { ProcessRunner.Spawn.create "gh" with Context = "GH" }
+
+let private runGh (arguments: string list) = ProcessRunner.text gh arguments
 
 type internal ParsedGithubPr =
     { BranchName: string
+      HeadSha: string option
+      /// The login owning the head repository, absent when that repository is gone (a deleted fork).
+      HeadOwner: string option
       PrNumber: int
       Title: string
       IsDraft: bool
-      IsMerged: bool }
+      State: PrState
+      AutoMergeEnabled: bool }
 
 let internal parsePrList (json: string) =
     try
@@ -41,14 +47,29 @@ let internal parsePrList (json: string) =
                 let number = el.GetProperty("number").GetInt32()
                 let title = el.GetProperty("title").GetString()
                 let isDraft = el |> tryBool "draft" |> Option.defaultValue false
-                let isMerged = el |> tryProp "merged_at" |> Option.isSome
-                let branchName = el.GetProperty("head").GetProperty("ref").GetString()
+
+                // `merged_at` outranks `state`: GitHub reports a merged pull request as closed.
+                let state =
+                    if el |> tryProp "merged_at" |> Option.isSome then PrState.Merged
+                    elif el |> tryString "state" = Some "open" then PrState.Open
+                    else PrState.ClosedUnmerged
+
+                let head = el.GetProperty("head")
+                let branchName = head.GetProperty("ref").GetString()
                 Some
                     { BranchName = branchName
+                      HeadSha = head |> tryString "sha"
+                      HeadOwner =
+                        head
+                        |> tryProp "repo"
+                        |> Option.bind (tryProp "owner")
+                        |> Option.bind (tryString "login")
                       PrNumber = number
                       Title = title
                       IsDraft = isDraft
-                      IsMerged = isMerged })
+                      State = state
+                      AutoMergeEnabled =
+                        state <> PrState.Merged && (el |> tryProp "auto_merge" |> Option.isSome) })
     with ex ->
         Log.log "GH" $"Failed to parse GitHub PR list JSON: {ex.Message}"
         []
@@ -80,9 +101,9 @@ let internal parseReviewThreads (json: string) =
 let private fetchPrThreadCounts (remote: GithubRemote) (prNumber: int) =
     async {
         let query =
-            $"""{{ repository(owner: \"{remote.Owner}\", name: \"{remote.Repo}\") {{ pullRequest(number: {prNumber}) {{ reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"""
+            $"""{{ repository(owner: "{remote.Owner}", name: "{remote.Repo}") {{ pullRequest(number: {prNumber}) {{ reviewThreads(first: 100) {{ nodes {{ isResolved }} }} }} }} }}"""
 
-        let! output = runGh $"api graphql -f query=\"{query}\""
+        let! output = runGh [ "api"; "graphql"; "-f"; $"query={query}" ]
         return output |> Option.map parseReviewThreads |> Option.defaultValue (WithResolution(0, 0))
     }
 
@@ -155,7 +176,7 @@ let internal parseFailedJobs (json: string) =
 
 let private fetchFailedStepName (remote: GithubRemote) (runId: int64) =
     async {
-        let! output = runGh $"api /repos/{remote.Owner}/{remote.Repo}/actions/runs/{runId}/jobs"
+        let! output = runGh [ "api"; $"/repos/{remote.Owner}/{remote.Repo}/actions/runs/{runId}/jobs" ]
 
         return output |> Option.bind parseFailedJobs
     }
@@ -171,14 +192,16 @@ let internal parsePrMergeability (json: string) =
 
 let private fetchMergeability (remote: GithubRemote) (prNumber: int) =
     async {
-        let! output = runGh $"api /repos/{remote.Owner}/{remote.Repo}/pulls/{prNumber}"
+        let! output = runGh [ "api"; $"/repos/{remote.Owner}/{remote.Repo}/pulls/{prNumber}" ]
         return output |> Option.map parsePrMergeability |> Option.defaultValue false
     }
 
 let private fetchActionRuns (remote: GithubRemote) (branch: string) =
     async {
         let! output =
-            runGh $"api \"/repos/{remote.Owner}/{remote.Repo}/actions/runs?branch={Uri.EscapeDataString(branch)}&per_page=10\""
+            runGh
+                [ "api"
+                  $"/repos/{remote.Owner}/{remote.Repo}/actions/runs?branch={Uri.EscapeDataString(branch)}&per_page=10" ]
 
         let runs =
             output
@@ -209,10 +232,25 @@ let private fetchActionRuns (remote: GithubRemote) (branch: string) =
         return enriched |> Array.toList
     }
 
+/// Expects the fetch order produced by `fetchGithubPrStatuses`: open PRs first, then closed PRs
+/// sorted by most recently updated. `distinctBy` keeps the first occurrence, so an open PR wins and
+/// otherwise the newest closed PR does — sorting by `State` instead would promote an old
+/// closed-unmerged PR above a newer merged one for a reused branch name and mask the merge.
 let internal firstPerBranch (prs: ParsedGithubPr list) =
+    prs |> List.distinctBy _.BranchName
+
+/// A pull request only speaks for a local branch if its head lives in a repository this checkout
+/// could itself push to. GitHub matches pull requests by head *ref*, so an outsider's fork PR shares
+/// the bare branch name of any local branch and would otherwise decide that branch's auto-sync
+/// eligibility and push gate. Owners come from the configured remotes, which is what keeps the fork
+/// workflow working; GitHub logins are case-insensitive, so the comparison is too. A head whose
+/// repository is gone resolves to no owner and is excluded rather than trusted.
+let internal fromKnownOwners (headOwners: Set<string>) (prs: ParsedGithubPr list) =
     prs
-    |> List.sortBy _.IsMerged
-    |> List.distinctBy _.BranchName
+    |> List.filter (fun pr ->
+        pr.HeadOwner
+        |> Option.map (fun owner -> owner.ToLowerInvariant())
+        |> Option.exists (fun owner -> Set.contains owner headOwners))
 
 let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedGithubPr list) =
     prs
@@ -222,7 +260,7 @@ let internal filterRelevantPrs (knownBranches: Set<string>) (prs: ParsedGithubPr
 let private fetchPrList (remote: GithubRemote) (state: string) (extraParams: string) =
     async {
         let! output =
-            runGh $"api \"/repos/{remote.Owner}/{remote.Repo}/pulls?state={state}{extraParams}\""
+            runGh [ "api"; $"/repos/{remote.Owner}/{remote.Repo}/pulls?state={state}{extraParams}" ]
 
         return
             output
@@ -230,14 +268,14 @@ let private fetchPrList (remote: GithubRemote) (state: string) (extraParams: str
             |> Option.defaultValue []
     }
 
-let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
+let fetchGithubPrStatuses (remote: GithubRemote) (headOwners: Set<string>) (knownBranches: Set<string>) =
     async {
         let! openChild = Async.StartChild(fetchPrList remote "open" "")
-        let! closedChild = Async.StartChild(fetchPrList remote "closed" "&sort=updated&direction=desc&per_page=10")
+        let! closedChild = Async.StartChild(fetchPrList remote "closed" "&sort=updated&direction=desc&per_page=30")
         let! openPrs = openChild
         let! closedPrs = closedChild
 
-        let allPrs = openPrs @ closedPrs
+        let allPrs = (openPrs @ closedPrs) |> fromKnownOwners headOwners
 
         match allPrs with
         | [] -> return Map.empty
@@ -251,7 +289,7 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
                 |> List.map (fun pr ->
                     async {
                         let! builds, hasConflicts, threadCounts =
-                            if pr.IsMerged then
+                            if pr.State = PrState.Merged then
                                 async { return [], false, WithResolution(0, 0) }
                             else
                                 async {
@@ -269,15 +307,17 @@ let fetchGithubPrStatuses (remote: GithubRemote) (knownBranches: Set<string>) =
 
                         return
                             pr.BranchName,
-                            HasPr
+                            (HasPr
                                 { Id = pr.PrNumber
                                   Title = pr.Title
                                   Url = url
                                   IsDraft = pr.IsDraft
                                   Comments = threadCounts
                                   Builds = builds
-                                  IsMerged = pr.IsMerged
-                                  HasConflicts = hasConflicts }
+                                  State = pr.State
+                                  AutoMergeEnabled = pr.AutoMergeEnabled
+                                  HasConflicts = hasConflicts },
+                             pr.HeadSha)
                     })
                 |> Async.Parallel
 
