@@ -62,7 +62,7 @@ let private withoutAcceptedRecords: TriggerDependencies =
       ReloadGitData = fun _ -> async { return () }
       Deliver = fun _ -> async { return true } }
 
-let private prInfo isMerged : PrStatus =
+let private prInfo state : PrStatus =
     HasPr
         { Id = 42
           Title = "Sync worktree"
@@ -70,12 +70,13 @@ let private prInfo isMerged : PrStatus =
           IsDraft = false
           Comments = CommentSummary.WithResolution(0, 0)
           Builds = []
-          State = if isMerged then PrState.Merged else PrState.Open
+          State = state
           AutoMergeEnabled = false
           HasConflicts = false }
 
-let private mergedPr = prInfo true
-let private openPr = prInfo false
+let private mergedPr = prInfo PrState.Merged
+let private openPr = prInfo PrState.Open
+let private closedPr = prInfo PrState.ClosedUnmerged
 
 /// The production wiring against a real durable store, with only the delivery outcome faked, so the
 /// read/record/clear functions the scheduler injects are the ones under test. PR status and the
@@ -942,7 +943,7 @@ type AutoSyncMechanicalTests() =
                     "the open terminal is where the work should land, not a freshly launched one")
                 Assert.That(
                     deliveries |> List.map _.Prompt,
-                    Is.EqualTo([ fallbackPrompt "origin" "main" DirtyWorktree ]))))
+                    Is.EqualTo([ fallbackPrompt "origin" "main" NoPr DirtyWorktree ]))))
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
@@ -1061,13 +1062,14 @@ type AutoSyncMechanicalTests() =
 
                 let dependencies =
                     { withoutAcceptedRecords with
+                        ReadPrStatus = fun _ -> async { return Some prStatus }
                         ReadOwnership = fun _ -> async { return Free(NoOpenSession None) }
                         MechanicalSync =
                             fun request ->
                                 mechanicalSync
                                     (fun _ -> async { return syncOutcome })
                                     (fun _ _ -> async { return pushOutcome })
-                                    { request with PrStatus = prStatus }
+                                    request
                         Deliver =
                             fun request ->
                                 async {
@@ -1075,7 +1077,7 @@ type AutoSyncMechanicalTests() =
                                     return true
                                 } }
 
-                trigger dependencies root "origin" "main" NoPr observation |> TestUtils.runAsync
+                trigger dependencies root "origin" "main" prStatus observation |> TestUtils.runAsync
                 delivered |> List.exactlyOne
 
             let dirty =
@@ -1111,10 +1113,10 @@ type AutoSyncMechanicalTests() =
                     || text.Contains(observation.Branch, StringComparison.Ordinal))
 
             Assert.Multiple(fun () ->
-                Assert.That(dirty, Is.EqualTo(fallbackPrompt "origin" "main" DirtyWorktree))
-                Assert.That(conflicted, Is.EqualTo(fallbackPrompt "origin" "main" MergeConflict))
-                Assert.That(pushFailed, Is.EqualTo(fallbackPrompt "origin" "main" PushFailed))
-                Assert.That(branchChanged, Is.EqualTo(fallbackPrompt "origin" "main" BranchChanged))
+                Assert.That(dirty, Is.EqualTo(fallbackPrompt "origin" "main" NoPr DirtyWorktree))
+                Assert.That(conflicted, Is.EqualTo(fallbackPrompt "origin" "main" NoPr MergeConflict))
+                Assert.That(pushFailed, Is.EqualTo(fallbackPrompt "origin" "main" openPr PushFailed))
+                Assert.That(branchChanged, Is.EqualTo(fallbackPrompt "origin" "main" NoPr BranchChanged))
                 Assert.That(
                     prompts |> List.distinct,
                     Has.Exactly(4).Items,
@@ -1125,15 +1127,51 @@ type AutoSyncMechanicalTests() =
                     "a prompt carries the structured reason only — never a path, branch, or Git output")))
 
     [<Test>]
-    member _.``Both prompts state both sides of the push policy``() =
-        let openPrHalf = "If this branch has an open pull request, push the synced branch after the checks pass"
-        let noPrHalf = "otherwise, do not push"
+    member _.``Prompt states the resolved push action``() =
+        let syncInstruction =
+            "Sync this worktree with origin/main when safe. Preserve any in-progress work, resolve conflicts carefully, and run the appropriate checks before considering the sync complete."
 
         Assert.Multiple(fun () ->
-            Assert.That(prompt "origin" "main", Does.Contain(openPrHalf).And.Contains(noPrHalf))
             Assert.That(
-                fallbackPrompt "origin" "main" MergeConflict,
-                Does.Contain(openPrHalf).And.Contains(noPrHalf)))
+                prompt "origin" "main" openPr,
+                Is.EqualTo($"{syncInstruction} Push the synced branch after the checks pass."))
+            Assert.That(
+                prompt "origin" "main" NoPr,
+                Is.EqualTo($"{syncInstruction} Do not push the synced branch."))
+            Assert.That(
+                prompt "origin" "main" closedPr,
+                Is.EqualTo($"{syncInstruction} Do not push the synced branch.")))
+
+    [<Test>]
+    member _.``Fallback prompt keeps the known push action when the PR cache becomes unavailable``() =
+        TestUtils.withTempDir "treemon-auto-sync-known-pr-fallback" (fun root ->
+            let observation = enabledObservation root
+            // Mutable because the PR cache availability and delivery are the impure boundaries under test.
+            let mutable prReads = 0
+            let mutable delivered = []
+
+            let dependencies =
+                { withoutAcceptedRecords with
+                    ReadPrStatus =
+                        fun _ ->
+                            async {
+                                prReads <- prReads + 1
+                                return if prReads = 1 then Some openPr else None
+                            }
+                    ReadOwnership = fun _ -> async { return Free(NoOpenSession None) }
+                    MechanicalSync = fun _ -> async { return Error DirtyWorktree }
+                    Deliver =
+                        fun request ->
+                            async {
+                                delivered <- request.Prompt :: delivered
+                                return true
+                            } }
+
+            trigger dependencies root "origin" "main" openPr observation |> TestUtils.runAsync
+
+            Assert.That(
+                delivered,
+                Is.EqualTo([ fallbackPrompt "origin" "main" openPr DirtyWorktree ])))
 
     [<Test>]
     member _.``A merge reconciled before the mutation stops the sync and records nothing``() =
@@ -1740,7 +1778,7 @@ type AutoSyncEndpointTests() =
                 TreemonConfig.readAutoSyncBranchSet (Some root),
                 Is.EqualTo(Set.singleton "feature-a"))
             Assert.That(
-                body.Contains(prompt "origin" "main", StringComparison.Ordinal),
+                body.Contains(prompt "origin" "main" NoPr, StringComparison.Ordinal),
                 Is.True,
                 "the fallback prompt carries the generic sync request for the resolved base")
             Assert.That(status.AutoSyncEnabled, Is.True)
@@ -1879,7 +1917,7 @@ type AutoSyncVerificationTests() =
                 // stopping reason git produces is not the point here — that the prompt is a fallback,
                 // and that it reaches exactly one named session, is.
                 Assert.That(
-                    body.Contains(prompt "upstream" "develop", StringComparison.Ordinal),
+                    body.Contains(prompt "upstream" "develop" NoPr, StringComparison.Ordinal),
                     Is.True,
                     "the configured upstream and base branch must reach the agent")
                 Assert.That(
@@ -1898,7 +1936,7 @@ type AutoSyncVerificationTests() =
         let path = Path.Combine(root, "feature-a")
         Directory.CreateDirectory(path) |> ignore
         let agent = createAgent ()
-        let expectedPrompt = fallbackPrompt "upstream" "develop" DirtyWorktree
+        let expectedPrompt = fallbackPrompt "upstream" "develop" NoPr DirtyWorktree
         // Mutable because the launch callback is the impure boundary whose invocation count is under
         // test, and because the accepted records stand in for the durable store's own mutation.
         let mutable launches = []
@@ -2013,7 +2051,7 @@ type AutoSyncVerificationTests() =
                 System.Text.Json.JsonDocument.Parse(
                     File.ReadAllText(Path.Combine(root, ".treemon.json")))
             let custom = config.RootElement.GetProperty("custom").GetProperty("keep").GetBoolean()
-            let expectedPrompt = fallbackPrompt "upstream" "develop" DirtyWorktree
+            let expectedPrompt = fallbackPrompt "upstream" "develop" NoPr DirtyWorktree
 
             Assert.Multiple(fun () ->
                 Assert.That(afterRepeated, Is.EqualTo(1))
