@@ -289,17 +289,12 @@ az storage account management-policy show \
   --subscription $SUB
 ```
 
-### Provisioned account & operator setup
+### Operator setup
 
-| Setting | Value |
-|---|---|
-| Storage account | `tmcanvascfievjwm` |
-| Resource group | `rg-treemon-canvas-share` |
-| Location | `westeurope` |
-| Subscription | `petrpokorny dev subscription` — `5f908ae5-baad-4d3c-afbd-1ec3b6d8e874` |
-| Container | `canvas-shared` (private; created on demand on first publish) |
-| `allowSharedKeyAccess` / `allowBlobPublicAccess` | `false` / `false` |
-| Role assignment | `Storage Blob Data Contributor` → operator, at account scope |
+The concrete Azure subscription, resource group, storage-account name, and operator identity are
+deployment-specific and must not be recorded in this public spec. The provisioned account must keep
+Shared Key and anonymous blob access disabled, use a private `canvas-shared` container created on
+demand, and grant the operator `Storage Blob Data Contributor` at account scope.
 
 **Subscription choice is load-bearing, not incidental.** Every provisioning, RBAC, lifecycle, and
 verification command passes `--subscription $SUB` explicitly so the storage account and its policy
@@ -311,7 +306,7 @@ token cache, so Treemon needs no credential env var or restart to install a cred
 `~/.treemon/config.json` and sharing works:
 
 ```json
-{ "canvasShare": { "accountName": "tmcanvascfievjwm" } }
+{ "canvasShare": { "accountName": "<account>" } }
 ```
 
 If the host's `az login` lapses, publishing fails loudly at share time with a "run `az login`"
