@@ -135,7 +135,7 @@ type CanvasPaneTests() =
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let iframe = canvasIframe this.Page
+            let iframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             let emptyState = canvasEmpty this.Page
             let! iframeCount = iframe.CountAsync()
             let! emptyCount = emptyState.CountAsync()
@@ -193,14 +193,13 @@ type CanvasPaneTests() =
     // ── Step 5: In-place morph on content change (stable src, no src-swap) ──
 
     [<Test>]
-    member this.``Re-selecting an unchanged canvas doc tab does not morph it (preserves in-progress input)``() =
+    member this.``Switching away and back to an unchanged canvas doc preserves iframe state without morphing``() =
         task {
-            // Switching back to an already-visited AgentDoc tab must NOT morph it when its on-disk
-            // content is unchanged. A morph re-fetches the on-disk HTML and idiomorph resyncs form
-            // fields to that (empty) markup, wiping in-progress input — so the switch-back morph is
-            // gated on an actual on-disk change (CanvasUpdate.selectCanvasDoc, CanvasState.StaleHiddenDocs;
-            // docs/spec/canvas-pane.md). In --test-fixtures mode ContentHash is static, so nothing is
-            // ever marked stale and re-selecting a tab must post NO {action:'content-updated'}.
+            // Switching back to an already-visited AgentDoc tab must NOT morph it when its loaded
+            // hash still matches disk. Dirty input/textarea values survive necessary morphs, but a
+            // gratuitous refetch + DOM reconciliation can still disturb arbitrary document-owned JS
+            // state. In --test-fixtures mode ContentHash is static, so the switch-back must post no
+            // {action:'content-updated'}.
             // feature-multidoc exposes three AgentDocs (overview/details/metrics).
             //
             // The iframe src stays stable across the switch either way (no ?v=<hash> cache-buster) and
@@ -249,17 +248,39 @@ type CanvasPaneTests() =
             Assert.That(initialSrc, Does.Not.Contain("?"),
                 "Iframe src must carry no cache-buster query param — content changes morph in place, the src is never swapped")
 
-            // Install a listener inside the active details frame to observe the morph signal. Re-selecting
-            // the SAME already-visited+active tab keeps it active (no iframe reorder/reload), so this
-            // injected listener survives to receive the parent app's postMessage.
+            // Install observable document-owned state and a listener inside details, then make the
+            // iframe genuinely hidden by selecting metrics before switching back.
             let! detailsFrameOpt = waitForCanvasFrame "details.html"
             let detailsFrame = detailsFrameOpt |> Option.defaultWith (fun () -> failwith "details iframe never reached the :5002 canvas origin")
-            let! _ = detailsFrame.EvaluateAsync("() => { window.__contentUpdated = false; window.addEventListener('message', (e) => { if (e.data && e.data.action === 'content-updated') window.__contentUpdated = true; }); }")
+            let! _ =
+                detailsFrame.EvaluateAsync(
+                    """() => {
+                        window.__contentUpdated = false;
+                        window.__canvasState = 'kept';
+                        const input = document.createElement('input');
+                        input.id = 'state-probe';
+                        input.value = 'typed';
+                        document.body.appendChild(input);
+                        window.addEventListener('message', (event) => {
+                            if (event.data && event.data.action === 'content-updated') {
+                                window.__contentUpdated = true;
+                            }
+                        });
+                    }""")
 
-            // Re-select the already-visited, unchanged details tab. Because its content hasn't changed
-            // on disk it is not in StaleHiddenDocs, so App must NOT dispatch MorphActiveDoc — no
-            // {action:'content-updated'} should ever reach the iframe.
+            do! (tab "metrics").ClickAsync()
+            let! _ = waitActiveSrcContains "metrics.html"
+            let hiddenDetails =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-iframe:not(.canvas-iframe-active)[src*='details.html']")
+            do!
+                hiddenDetails.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Attached,
+                        Timeout = 5000.0f))
+
             do! (tab "details").ClickAsync()
+            let! _ = waitActiveSrcContains "details.html"
 
             let! contentUpdated =
                 // Tail-recursive task poll (1.5s window, 100ms interval): a negative check — give any
@@ -276,7 +297,7 @@ type CanvasPaneTests() =
                     }
                 poll ()
             Assert.That(contentUpdated, Is.False,
-                "Re-selecting an unchanged AgentDoc tab must NOT post {action:'content-updated'} — a gratuitous morph would wipe in-progress form input")
+                "Switching back to a synchronized AgentDoc must not post {action:'content-updated'}")
 
             // The switch keeps the same mounted iframe: same document, same stable src (no swap).
             let! newSrc = activeIframe.GetAttributeAsync("src")
@@ -285,6 +306,59 @@ type CanvasPaneTests() =
             let! sameFrameUrl = detailsFrame.EvaluateAsync<string>("() => location.href")
             Assert.That(sameFrameUrl, Does.Contain("details.html"),
                 "The same details iframe document must persist across the switch (not be replaced)")
+            let! preservedState =
+                detailsFrame.EvaluateAsync<string>(
+                    "() => JSON.stringify({ state: window.__canvasState, input: document.querySelector('#state-probe')?.value })")
+            Assert.That(preservedState, Is.EqualTo("""{"state":"kept","input":"typed"}"""),
+                "document-owned JS and form state must survive the real details → metrics → details switch")
+        }
+
+    [<Test>]
+    member this.``morph completion from a hidden iframe is rejected``() =
+        task {
+            do! focusCanvasCard this.Page FixtureMultiDocBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let tab name =
+                this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = name))
+
+            do! (tab "details").ClickAsync()
+            do! (tab "metrics").ClickAsync()
+            let hiddenDetails =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-iframe:not(.canvas-iframe-active)[src*='details.html']")
+            do!
+                hiddenDetails.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Attached,
+                        Timeout = 10000.0f))
+
+            let rejected = TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+            this.Page.Console.Add(fun message ->
+                if message.Text.Contains("morph-complete DROPPED") then
+                    rejected.TrySetResult(true) |> ignore)
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    $"() => {{
+                        const hidden = document.querySelector(
+                            '.canvas-iframe:not(.canvas-iframe-active)[src*=\"details.html\"]');
+                        window.dispatchEvent(new MessageEvent('message', {{
+                            origin: '{canvasOrigin}',
+                            source: hidden.contentWindow,
+                            data: {{
+                                action: 'morph-complete',
+                                scopedKey: hidden.getAttribute('data-canvas-scoped-key'),
+                                filename: hidden.getAttribute('data-canvas-filename'),
+                                contentHash: 'forged'
+                            }}
+                        }}));
+                    }}")
+
+            let! completed = Task.WhenAny(rejected.Task, Task.Delay(5000))
+            Assert.That(Object.ReferenceEquals(completed, rejected.Task), Is.True,
+                "a hidden AgentDoc must not be able to complete the active document's morph")
         }
 
     // ── Step 8: PostMessage Dispatch ────────────────────────────────────
@@ -295,7 +369,7 @@ type CanvasPaneTests() =
             do! focusCanvasCard this.Page FixtureCanvasBranch
             do! ensureCanvasPaneOpen this.Page
 
-            let iframe = canvasIframe this.Page
+            let iframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
             // Set up network interception to capture the sendCanvasMessage Remoting call
@@ -604,7 +678,7 @@ type CanvasPaneTests() =
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let iframe = canvasIframe this.Page
+            let iframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
             // Capture initial iframe src — should be the first doc (overview.html)
@@ -618,7 +692,7 @@ type CanvasPaneTests() =
             // Wait for iframe src to change
             let! _ = this.Page.WaitForFunctionAsync(
                 $"(oldSrc) => {{
-                    const iframe = document.querySelector('.canvas-iframe');
+                    const iframe = document.querySelector('.canvas-iframe-active');
                     return iframe && iframe.getAttribute('src') !== oldSrc;
                 }}",
                 initialSrc,

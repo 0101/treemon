@@ -126,6 +126,80 @@ type CanvasInjectionThemeE2ETests() =
             Assert.That(padding, Is.EqualTo("0px"), $"SystemView body padding must stay 0 under the reset (was {padding})")
         }
 
+    [<Test>]
+    member this.``AgentDoc morph preserves user-edited input and textarea values``() =
+        task {
+            let initial =
+                injectInto AgentDoc "form.html"
+                    """<!doctype html><html><head><title>form</title></head><body>
+                    <h1 id="version">Before</h1>
+                    <input id="title" value="Agent title">
+                    <textarea id="notes">Agent notes</textarea>
+                    <input id="untouched" value="Before">
+                    </body></html>"""
+            let updated =
+                injectInto AgentDoc "form.html"
+                    """<!doctype html><html><head><title>form</title></head><body>
+                    <h1 id="version">After</h1>
+                    <input id="title" value="Revised title">
+                    <textarea id="notes">Revised notes</textarea>
+                    <input id="untouched" value="After">
+                    </body></html>"""
+
+            do! this.Page.RouteAsync("**/form.html", fun route ->
+                let body = if route.Request.IsNavigationRequest then initial else updated
+                route.FulfillAsync(RouteFulfillOptions(ContentType = "text/html; charset=utf-8", Body = body)))
+            let! _ =
+                this.Page.GotoAsync(
+                    $"{ServerFixture.canvasUrl}/wt/form.html",
+                    PageGotoOptions(WaitUntil = WaitUntilState.Load))
+
+            do! this.Page.Locator("#title").FillAsync("User title")
+            do! this.Page.Locator("#notes").FillAsync("User notes")
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """() => {
+                        const notes = document.querySelector('#notes');
+                        notes.focus();
+                        notes.setSelectionRange(2, 6, 'forward');
+                        window.__morphComplete = false;
+                        window.addEventListener(
+                            'canvas-morph-complete',
+                            () => { window.__morphComplete = true; },
+                            { once: true });
+                        window.postMessage({ action: 'content-updated' }, '*');
+                    }""")
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__morphComplete === true",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let! state =
+                this.Page.EvaluateAsync<string>(
+                    """() => {
+                        const title = document.querySelector('#title');
+                        const notes = document.querySelector('#notes');
+                        const untouched = document.querySelector('#untouched');
+                        return JSON.stringify({
+                            version: document.querySelector('#version').textContent,
+                            title: title.value,
+                            titleDefault: title.defaultValue,
+                            notes: notes.value,
+                            notesDefault: notes.defaultValue,
+                            untouched: untouched.value,
+                            active: document.activeElement.id,
+                            selectionStart: notes.selectionStart,
+                            selectionEnd: notes.selectionEnd
+                        });
+                    }""")
+
+            Assert.That(
+                state,
+                Is.EqualTo(
+                    """{"version":"After","title":"User title","titleDefault":"Revised title","notes":"User notes","notesDefault":"Revised notes","untouched":"After","active":"notes","selectionStart":2,"selectionEnd":6}"""))
+        }
+
 // ============================================================================
 // Item 2 (canvasSend tab switch) + Item 3 (doc JS error banner)
 //

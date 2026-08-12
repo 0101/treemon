@@ -10,6 +10,7 @@ module AppTypes
 open Shared
 open Shared.EventUtils
 open Navigation
+open CanvasTypes
 open OverviewData
 open OverviewPresentation
 open Elmish
@@ -142,8 +143,8 @@ type Msg =
     | LoadLastViewedHashes of Map<string, Map<string, string>>
     | BridgeLivenessLoaded of Map<string, BridgeLiveness>
     | LaunchCanvasSession of scopedKey: string
-    | MorphActiveDoc
-    | MorphComplete
+    | MorphActiveDoc of CanvasMorph
+    | MorphComplete of CanvasMorph
     | NoOp
 
 // Deferred so that merely loading the AppTypes module does not run buildProxy.

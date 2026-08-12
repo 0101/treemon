@@ -18,6 +18,8 @@ const {
   isFlood,
   selectTargets,
   applyHighlight,
+  captureEditableState,
+  restoreEditableState,
 } = morph;
 
 /** Minimal node stand-ins — the selection logic only needs tree shape, tag names, and classes. */
@@ -73,6 +75,44 @@ const removed = (...nodes) => ({ type: "childList", addedNodes: [], removedNodes
 function docAround(...blocks) {
   const filler = [element("P"), element("P"), element("P"), element("P")];
   return element("BODY", ...blocks, ...filler);
+}
+
+function editableControl(tagName, {
+  type = tagName === "INPUT" ? "text" : "",
+  id = "",
+  name = "",
+  value = "",
+  defaultValue = "",
+  selectionStart = 0,
+  selectionEnd = 0,
+  selectionDirection = "none",
+} = {}) {
+  const node = element(tagName);
+  Object.assign(node, {
+    type,
+    id,
+    name,
+    value,
+    defaultValue,
+    disabled: false,
+    selectionStart,
+    selectionEnd,
+    selectionDirection,
+    focused: false,
+  });
+  node.focus = () => { node.focused = true; };
+  node.setSelectionRange = (start, end, direction) => {
+    node.selectionStart = start;
+    node.selectionEnd = end;
+    node.selectionDirection = direction;
+  };
+  return node;
+}
+
+function editableRoot(...controls) {
+  const root = element("BODY", ...controls);
+  root.querySelectorAll = (selector) => selector === "input, textarea" ? controls : [];
+  return root;
 }
 
 test("a whitespace-only text change is not a change", () => {
@@ -295,4 +335,71 @@ test("applying a highlight clears the blocks that are no longer changed", () => 
 
   assert.equal(stale.classes.has(HIGHLIGHT_CLASS), false);
   assert.equal(fresh.classes.has(HIGHLIGHT_CLASS), true);
+});
+
+test("dirty inputs and textareas survive while untouched controls accept authored values", () => {
+  const title = editableControl("INPUT", {
+    id: "title",
+    value: "User title",
+    defaultValue: "Agent title",
+  });
+  const notes = editableControl("TEXTAREA", {
+    id: "notes",
+    value: "User notes",
+    defaultValue: "Agent notes",
+    selectionStart: 2,
+    selectionEnd: 6,
+    selectionDirection: "forward",
+  });
+  const untouched = editableControl("INPUT", {
+    id: "untouched",
+    value: "Before",
+    defaultValue: "Before",
+  });
+  const root = editableRoot(title, notes, untouched);
+  const snapshot = captureEditableState(root, notes);
+
+  title.value = title.defaultValue = "Revised title";
+  notes.value = notes.defaultValue = "Revised notes";
+  untouched.value = untouched.defaultValue = "After";
+
+  restoreEditableState(root, snapshot);
+
+  assert.equal(title.value, "User title");
+  assert.equal(title.defaultValue, "Revised title");
+  assert.equal(notes.value, "User notes");
+  assert.equal(notes.defaultValue, "Revised notes");
+  assert.equal(notes.focused, true);
+  assert.deepEqual(
+    [notes.selectionStart, notes.selectionEnd, notes.selectionDirection],
+    [2, 6, "forward"]
+  );
+  assert.equal(untouched.value, "After");
+});
+
+test("a replaced unnamed control is restored only when the control layout still matches", () => {
+  const original = editableControl("INPUT", {
+    value: "User value",
+    defaultValue: "",
+  });
+  const snapshot = captureEditableState(editableRoot(original), null);
+  original.isConnected = false;
+
+  const replacement = editableControl("INPUT", {
+    value: "Authored value",
+    defaultValue: "Authored value",
+  });
+  restoreEditableState(editableRoot(replacement), snapshot);
+  assert.equal(replacement.value, "User value");
+
+  const shifted = editableControl("INPUT", {
+    value: "Different field",
+    defaultValue: "Different field",
+  });
+  const authored = editableControl("INPUT", {
+    value: "Authored value",
+    defaultValue: "Authored value",
+  });
+  restoreEditableState(editableRoot(shifted, authored), snapshot);
+  assert.equal(authored.value, "Authored value");
 });

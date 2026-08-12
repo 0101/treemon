@@ -131,9 +131,10 @@ Recorded so future readers know these were evaluated, not missed.
 - **Phase 5 — DOM morph, keep-iframes-alive, dev hot-reload — SHIPPED.** Idiomorph injection +
   in-place morph on content change and cross-tab iframe persistence landed with the feature. "Dev
   hot reload" is subsumed: a content change bumps the content hash, which already drives a morph.
-- **Morph state-preservation polish — not needed.** idiomorph already preserves matched nodes
-  including `<input>`/`<textarea>` values and focus during a morph. Revisit only if input loss is
-  actually observed in practice.
+- **Morph state preservation — shipped.** Idiomorph preserves matched node identity but
+  resynchronizes form values from authored markup. The injected morph controller snapshots dirty
+  `<input>`/`<textarea>` values before each morph and restores them afterward while untouched fields
+  accept the new authored value; see `docs/spec/canvas-pane.md`.
 - **`worktreeId` stable-identity hashing (`base64url(sha256(normalizedPath))`) — superseded.**
   The idea was to replace the raw worktree path used as canvas identity. Today `iframeSrc`
   (`CanvasPane.fs`) builds `http://127.0.0.1:5002/{encodeURIComponent(worktreePath)}/{filename}`

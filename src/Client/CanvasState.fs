@@ -4,7 +4,6 @@ open Shared
 open Navigation
 open CanvasTypes
 open CanvasAwareness
-open Elmish
 
 /// The canvas pane's slice of the dashboard model. Grouped out of App.Model so the
 /// canvas state and its pure helpers live together, away from core worktree/repo concerns
@@ -18,13 +17,10 @@ type CanvasState =
       TargetWorktree: string option
       ActiveCanvasDoc: Map<string, string>
       VisitedCanvasDocs: Map<string, string list>
-      // Mounted-but-hidden AgentDocs whose on-disk content changed while they were hidden, keyed by
-      // (scopedKey, filename). A hidden iframe is not morphed on change (only the active visible doc
-      // is — see App.fs DataLoaded), so it falls out of sync silently. This records the docs that
-      // need a catch-up morph on their next reveal. `selectCanvasDoc` morphs a doc on switch-back
-      // ONLY when it is in this set, then clears it — so an ordinary tab switch (nothing changed on
-      // disk) morphs nothing and the mounted iframe's live form input survives.
-      StaleHiddenDocs: Set<string * string>
+      // Content hash currently loaded by each mounted AgentDoc iframe. Comparing this with the
+      // refreshed CanvasDoc hash determines whether a morph is needed, including while the pane is
+      // collapsed. Fresh mounts seed the current hash; successful morphs advance it.
+      MountedAgentDocHashes: Map<string * string, string>
       LastViewedHashes: Map<string, Map<string, string>>
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
@@ -55,7 +51,7 @@ let empty : CanvasState =
       TargetWorktree = None
       ActiveCanvasDoc = Map.empty
       VisitedCanvasDocs = Map.empty
-      StaleHiddenDocs = Set.empty
+      MountedAgentDocHashes = Map.empty
       LastViewedHashes = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
@@ -83,34 +79,6 @@ let touchVisitedDoc (scopedKey: string) (filename: string) (visited: Map<string,
     let updated = filename :: (current |> List.filter (fun f -> f <> filename))
     let capped = if updated.Length > MaxLiveIframes then updated |> List.take MaxLiveIframes else updated
     visited |> Map.add scopedKey capped
-
-/// True when (scopedKey, filename) currently has a mounted iframe — i.e. it is in the visited
-/// (LRU-capped) set for its scoped key. `StaleHiddenDocs` marks are only meaningful for such docs.
-let private isMounted (visited: Map<string, string list>) (scopedKey: string) (filename: string) =
-    visited |> Map.tryFind scopedKey |> Option.defaultValue [] |> List.contains filename
-
-/// Record AgentDocs that changed on disk while mounted-but-hidden, so their next reveal gets a
-/// catch-up morph. Only a doc that actually has a mounted, hidden iframe earns a mark: it must be
-/// in `visited` (so an unmounted, never-opened or LRU-evicted doc is excluded) and must not be the
-/// active visible doc (which is morphed in place, never via StaleHiddenDocs). Marking anything else
-/// would leave a mark with no live iframe behind it, which later drives a spurious switch-back morph.
-let markStale
-    (changed: (string * string) list)
-    (activeVisible: (string * string) option)
-    (visited: Map<string, string list>)
-    (stale: Set<string * string>) : Set<string * string> =
-    changed
-    |> List.filter (fun (scopedKey, filename) ->
-        Some (scopedKey, filename) <> activeVisible && isMounted visited scopedKey filename)
-    |> List.fold (fun acc d -> Set.add d acc) stale
-
-/// Drop stale marks for docs that no longer have a mounted iframe (evicted past the LRU cap,
-/// archived, or gone from the repo). Once an iframe unmounts, a later fresh mount already loads
-/// current disk content, so the mark is obsolete; keeping it would morph the fresh mount needlessly.
-/// This is the single garbage-collector for the `StaleHiddenDocs` invariant "a mark implies a
-/// mounted hidden iframe".
-let pruneStaleToMounted (visited: Map<string, string list>) (stale: Set<string * string>) : Set<string * string> =
-    stale |> Set.filter (fun (scopedKey, filename) -> isMounted visited scopedKey filename)
 
 /// Look up a canvas doc's kind by scoped key + filename. Used to gate session-document
 /// machinery (morph signaling, idle auto-display focus-steal) to AgentDoc only: a SystemView
@@ -158,9 +126,61 @@ let activeVisibleDoc (repos: RepoModel list) (focused: FocusTarget option) (targ
                 | None -> preferredAutomaticDoc wt
             doc |> Option.map (fun d -> scopedKey, d.Filename)))
 
-/// Command to mark the currently visible doc as viewed. `markViewed` builds the host app's
-/// message from (scopedKey, filename), keeping this module free of any concrete Msg type.
-let markVisibleDocCmd (markViewed: string * string -> 'msg) (repos: RepoModel list) (focused: FocusTarget option) (targetWorktree: string option) (activeCanvasDoc: Map<string, string>) : Cmd<'msg> =
+let agentDocHash (repos: RepoModel list) (scopedKey: string) (filename: string) =
+    findWorktreeByScopedKey repos scopedKey
+    |> Option.bind (fun wt ->
+        wt.CanvasDocs
+        |> List.tryFind (fun doc -> doc.Filename = filename && doc.Kind = AgentDoc))
+    |> Option.map _.ContentHash
+
+/// Current on-disk hashes for the AgentDoc iframes the pane actually renders. The pane keeps this
+/// subtree mounted while collapsed, but renders no iframes on overview/no-focus and only one
+/// worktree's visited LRU plus its active doc.
+let renderedAgentDocHashes
+    (repos: RepoModel list)
+    (focused: FocusTarget option)
+    (targetWorktree: string option)
+    (activeCanvasDoc: Map<string, string>)
+    (visitedCanvasDocs: Map<string, string list>) =
     activeVisibleDoc repos focused targetWorktree activeCanvasDoc
-    |> Option.map (fun (sk, fn) -> Cmd.ofMsg (markViewed (sk, fn)))
-    |> Option.defaultValue Cmd.none
+    |> Option.bind (fun (scopedKey, activeFilename) ->
+        findWorktreeByScopedKey repos scopedKey
+        |> Option.map (fun wt ->
+            let renderedFilenames =
+                visitedCanvasDocs
+                |> Map.tryFind scopedKey
+                |> Option.defaultValue []
+                |> Set.ofList
+                |> Set.add activeFilename
+            wt.CanvasDocs
+            |> List.choose (fun doc ->
+                if doc.Kind = AgentDoc && Set.contains doc.Filename renderedFilenames then
+                    Some ((scopedKey, doc.Filename), doc.ContentHash)
+                else
+                    None)
+            |> Map.ofList))
+    |> Option.defaultValue Map.empty
+
+/// Preserve loaded hashes only for iframes rendered both before and after a transition. Newly
+/// rendered docs are fresh mounts and therefore start synchronized to their current on-disk hash.
+let reconcileMountedAgentDocHashes
+    (previousRendered: Map<string * string, string>)
+    (currentRendered: Map<string * string, string>)
+    (mounted: Map<string * string, string>) =
+    currentRendered
+    |> Map.map (fun key currentHash ->
+        if Map.containsKey key previousRendered then
+            mounted |> Map.tryFind key |> Option.defaultValue currentHash
+        else
+            currentHash)
+
+let isMounted (mounted: Map<string * string, string>) scopedKey filename =
+    Map.containsKey (scopedKey, filename) mounted
+
+let needsMorph
+    (rendered: Map<string * string, string>)
+    (mounted: Map<string * string, string>)
+    key =
+    match Map.tryFind key rendered, Map.tryFind key mounted with
+    | Some currentHash, Some loadedHash -> currentHash <> loadedHash
+    | _ -> false

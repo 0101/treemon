@@ -284,6 +284,7 @@ let update msg model =
                     else { m with Canvas.LastViewedHashes = seeded }
                 else m)
             |> (fun updatedModel ->
+                let updatedModel = CanvasUpdate.reconcileMountedDocs model updatedModel
                 let allPaths =
                     repos
                     |> List.collect _.Worktrees
@@ -292,41 +293,16 @@ let update msg model =
                 let livenessCmd =
                     if List.isEmpty allPaths then Cmd.none
                     else Cmd.OfAsync.perform worktreeApi.Value.getBridgeLiveness allPaths BridgeLivenessLoaded
-                let markVisibleCmd =
-                    if updatedModel.Canvas.CanvasPaneOpen then CanvasUpdate.markVisibleDocCmd updatedModel
+                let visibleSyncCmd =
+                    if updatedModel.Canvas.CanvasPaneOpen then CanvasUpdate.syncVisibleDocCmd updatedModel
                     else Cmd.none
                 let seedSaveCmd =
                     if updatedModel.Canvas.LastViewedHashes <> model.Canvas.LastViewedHashes then
                         Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedModel.Canvas.LastViewedHashes (fun _ -> NoOp)
                     else Cmd.none
-                let morphCmd =
-                    if not isFirstLoad && updatedModel.Canvas.CanvasPaneOpen then
-                        match CanvasUpdate.activeVisibleDoc updatedModel with
-                        | Some (scopedKey, filename) when CanvasState.canvasDocKind updatedModel.Repos scopedKey filename = Some AgentDoc ->
-                            let oldHash = model.Canvas.PreviousCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
-                            let newHash = currentCanvasHashes |> Map.tryFind scopedKey |> Option.bind (Map.tryFind filename)
-                            match oldHash, newHash with
-                            | Some o, Some n when o <> n -> Cmd.ofMsg MorphActiveDoc
-                            | _ -> Cmd.none
-                        | _ -> Cmd.none
-                    else Cmd.none
                 let autoExpandSaveCmd =
                     if autoExpanded then saveCollapsedReposCmd updatedModel.Repos else Cmd.none
-                // Record AgentDocs that changed on disk while mounted-but-hidden, so their next
-                // reveal gets a catch-up morph (selectCanvasDoc). Only currently mounted, hidden docs
-                // earn a mark (markStale); the active visible doc is excluded (morphed in place by
-                // morphCmd above), and never-opened / LRU-evicted docs have no live iframe to sync.
-                // pruneStaleToMounted then GCs any marks whose iframe has since unmounted (eviction,
-                // archive, or removed worktree), keeping the set bounded to live hidden iframes.
-                let staleHiddenDocs =
-                    let marked =
-                        if not isFirstLoad && updatedModel.Canvas.CanvasPaneOpen then
-                            let activeVisible = CanvasUpdate.activeVisibleDoc updatedModel
-                            CanvasState.markStale agentChangedDocs activeVisible updatedModel.Canvas.VisitedCanvasDocs updatedModel.Canvas.StaleHiddenDocs
-                        else updatedModel.Canvas.StaleHiddenDocs
-                    marked |> CanvasState.pruneStaleToMounted updatedModel.Canvas.VisitedCanvasDocs
-                let updatedModel = { updatedModel with Canvas.StaleHiddenDocs = staleHiddenDocs }
-                updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; markVisibleCmd; seedSaveCmd; morphCmd; autoExpandSaveCmd ])
+                updatedModel, Cmd.batch [ autoDisplayCmd; livenessCmd; visibleSyncCmd; seedSaveCmd; autoExpandSaveCmd ])
 
     | DataFailed _ ->
         { model with
@@ -766,14 +742,21 @@ let update msg model =
                 |> Option.map _.ContentHash)
         match worktree, currentHash with
         | Some _, Some hash ->
-            let innerMap =
+            let recordedHash =
                 model.Canvas.LastViewedHashes
                 |> Map.tryFind scopedKey
-                |> Option.defaultValue Map.empty
-                |> Map.add filename hash
-            let updatedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap
-            { model with Canvas.LastViewedHashes = updatedHashes },
-            Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
+                |> Option.bind (Map.tryFind filename)
+            if recordedHash = Some hash then
+                model, Cmd.none
+            else
+                let innerMap =
+                    model.Canvas.LastViewedHashes
+                    |> Map.tryFind scopedKey
+                    |> Option.defaultValue Map.empty
+                    |> Map.add filename hash
+                let updatedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap
+                { model with Canvas.LastViewedHashes = updatedHashes },
+                Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
         | _ -> model, Cmd.none
 
     | LoadLastViewedHashes hashes ->
@@ -786,9 +769,9 @@ let update msg model =
     | BridgeLivenessLoaded liveness ->
         { model with Canvas.BridgeLiveness = liveness }, Cmd.none
 
-    | MorphActiveDoc -> CanvasUpdate.morphActiveDoc model
+    | MorphActiveDoc morph -> CanvasUpdate.morphActiveDoc morph model
 
-    | MorphComplete -> CanvasUpdate.morphComplete model
+    | MorphComplete morph -> CanvasUpdate.morphComplete morph model
 
     | NoOp -> model, Cmd.none
 
