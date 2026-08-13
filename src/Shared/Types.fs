@@ -307,8 +307,9 @@ module CanvasPrompt =
         let docPath = $"{worktreePath}/.agents/canvas/{filename}"
 
         $"Handle a queued interaction from generated canvas view: {docPath}\n\n"
-        + "Treemon generates this file from live data and displays it beside the dashboard. Do not "
-        + "edit or claim the file; Treemon would replace the changes, and a generated view has no owner.\n\n"
+        + "Start by using the canvas skill so you understand how canvas interactions arrive. This is "
+        + "a generated SystemView, so its authoring instructions do not apply: do not edit or claim "
+        + "the file; Treemon would replace the changes, and a generated view has no owner.\n\n"
         + "The user interacted with the view while no session could receive the request. Their request "
         + "will be delivered separately to this session. Act on what they asked about—the code, branch, "
         + "or task shown by the view. Treemon already renders the file, so do not start a server or open "

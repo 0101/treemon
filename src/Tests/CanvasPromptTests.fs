@@ -43,6 +43,7 @@ type CanvasPromptTests() =
             CanvasPrompt.continueWorking "Q:/code/demo" "diff.html"
 
         Assert.That(systemViewPrompt, Does.Contain("Q:/code/demo/.agents/canvas/diff.html"))
+        Assert.That(systemViewPrompt, Does.Contain("canvas skill"))
         Assert.That(systemViewPrompt, Does.Not.Contain("Continue working"))
         Assert.That(systemViewPrompt, Does.Not.Contain("live-reload"))
         Assert.That(systemViewPrompt, Does.Not.Contain("canvas_take_ownership"))

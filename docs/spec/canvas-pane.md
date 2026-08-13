@@ -108,8 +108,9 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - SystemView interactions store no target. Each one resolves to the worktree's most recently active
   session that currently holds a live bridge registration, so nothing is surfaced as
   `OwnerSessionId` and liveness UI is unaffected. If no session can receive the interaction, the
-  server starts one with a SystemView-specific prompt: the view is generated and must not be edited
-  or claimed, and the queued user request will arrive separately. See
+  server starts one with a SystemView-specific prompt: load the canvas skill for its interaction
+  protocol, but do not apply its authoring instructions because the view is generated and must not
+  be edited or claimed; the queued user request will arrive separately. See
   `docs/spec/canvas-interaction-routing.md`.
 
 ### Message Flow
