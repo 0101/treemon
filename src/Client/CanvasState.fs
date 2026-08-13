@@ -37,6 +37,9 @@ type CanvasState =
       // success path needs its own state; kept distinct from CanvasSendState (message delivery) and
       // DocError (doc JS errors) so the banners never overwrite each other.
       ShareNotice: string option
+      // Scoped identity and phase of the single in-flight share. The phase keeps the pane locked
+      // through clipboard settlement, while the identity lets stale async results be ignored.
+      ShareState: CanvasShareState
       BridgeLiveness: Map<string, BridgeLiveness> }
 
 /// Initial canvas state: pane closed on the right, all maps empty, send state idle.
@@ -54,6 +57,7 @@ let empty : CanvasState =
       CanvasSendState = CanvasSendState.Idle
       DocError = None
       ShareNotice = None
+      ShareState = CanvasShareState.Idle
       BridgeLiveness = Map.empty }
 
 [<Literal>]
