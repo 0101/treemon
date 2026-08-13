@@ -233,6 +233,8 @@ type CanvasPaneState =
       SendState: CanvasSendState
       DocError: DocJsError option
       ShareNotice: string option
+      ActiveScopedKey: string option
+      ShareState: CanvasShareState
       BridgeLiveness: Map<string, BridgeLiveness> }
 
 /// The awareness/doc slices `view` renders from, bundled into one record for the same reason as
@@ -252,6 +254,8 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           SendState = sendState
           DocError = docError
           ShareNotice = shareNotice
+          ActiveScopedKey = activeScopedKey
+          ShareState = shareState
           BridgeLiveness = bridgeLiveness } = state
     let { SetPosition = setPosition
           SetSize = setSize
@@ -321,11 +325,20 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                             ]
                         match activeDoc with
                         | Some d when d.Kind = AgentDoc ->
+                            let shareActive, isSharing =
+                                CanvasShareState.buttonFlags activeScopedKey d.Filename shareState
                             Html.button [
-                                prop.className "canvas-share-btn"
+                                prop.className (if isSharing then "canvas-share-btn sharing" else "canvas-share-btn")
+                                prop.disabled shareActive
                                 prop.onClick (fun _ -> shareDoc d.Filename)
-                                prop.title "Share this doc — copies a rich link to the clipboard"
-                                prop.children [ shareIcon ]
+                                prop.title (
+                                    match isSharing, shareActive with
+                                    | true, _ -> "Sharing this doc…"
+                                    | false, true -> "Another canvas doc is being shared"
+                                    | _ -> "Share this doc — copies a rich link to the clipboard")
+                                prop.children [
+                                    if isSharing then Html.span [ prop.className "share-spinner" ] else shareIcon
+                                ]
                             ]
                         | _ -> ()
                         match activeDoc with
