@@ -3,6 +3,7 @@ module Tests.CanvasPromptTests
 open System.IO
 open System.Text.RegularExpressions
 open NUnit.Framework
+open Shared
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -35,3 +36,14 @@ type CanvasPromptTests() =
     [<Test>]
     member _.``prompt tells the replacement session to load the canvas skill``() =
         Assert.That(prompt, Does.Contain("canvas skill"))
+
+    [<Test>]
+    member _.``SystemView prompt never asks the session to edit or claim the generated file``() =
+        let systemViewPrompt =
+            CanvasPrompt.continueWorking "Q:/code/demo" "diff.html"
+
+        Assert.That(systemViewPrompt, Does.Contain("Q:/code/demo/.agents/canvas/diff.html"))
+        Assert.That(systemViewPrompt, Does.Not.Contain("Continue working"))
+        Assert.That(systemViewPrompt, Does.Not.Contain("live-reload"))
+        Assert.That(systemViewPrompt, Does.Not.Contain("canvas_take_ownership"))
+        Assert.That(systemViewPrompt, Does.Not.Contain("5002"))

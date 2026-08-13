@@ -107,7 +107,10 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - If the recorded owner is unreachable, the message queues. After a replacement session claims the doc, its next bridge registration can deliver the waiting message; doc identity never changes.
 - SystemView interactions store no target. Each one resolves to the worktree's most recently active
   session that currently holds a live bridge registration, so nothing is surfaced as
-  `OwnerSessionId` and liveness UI is unaffected. See `docs/spec/canvas-interaction-routing.md`.
+  `OwnerSessionId` and liveness UI is unaffected. If no session can receive the interaction, the
+  server starts one with a SystemView-specific prompt: the view is generated and must not be edited
+  or claimed, and the queued user request will arrive separately. See
+  `docs/spec/canvas-interaction-routing.md`.
 
 ### Message Flow
 
