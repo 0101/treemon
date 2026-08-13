@@ -101,14 +101,17 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - Each canvas filename has a persistent routing target in `CanvasDocOwnership.fs`; AgentDocs assign it from authoring writes, while SystemViews assign it from their affinity policy.
 - `BridgeLiveness.LiveSessionIds` exposes every identified session whose registration is within the liveness TTL. The worktree-level `SessionId` remains the freshest registration for aggregate status and SystemView fallback behavior, but it does not decide authored-document liveness.
 - The liveness dot shown in tabs and overview checks the doc's `OwnerSessionId` against `LiveSessionIds`, so two concurrently heartbeating sessions in one worktree both keep their own documents alive regardless of heartbeat order. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
-- When no live bridge exists for the focused worktree, the pane shows a `▶ Start session` button — only when the active doc is an `AgentDoc` (starting a session for a server-generated `SystemView` is meaningless).
-- `LaunchCanvasSession` uses the existing action-launch flow and includes the full on-disk doc path (`{worktree}/.agents/canvas/{filename}`) plus canvas context in the prompt, so the agent is pointed at the real file the doc server serves. That path is built once by `CanvasPrompt.continueWorking` in `src/Shared/Types.fs` — the single source of truth shared by the client launch and server auto-spawn flows.
+- The pane shows `▶ Start session` only when the active doc is an `AgentDoc` whose recorded owner is not live. A `SystemView` never has this button.
+- `LaunchCanvasSession` uses the existing action-launch flow and sends a cold-start prompt built by `CanvasSessionPrompt.forAgentDoc` in `src/Client/CanvasSessionPrompt.fs`. It tells the replacement session to load the canvas skill, claim the focused doc, and read its on-disk file (`{worktree}/.agents/canvas/{filename}`) before handling user interactions through the doc.
 - Canvas messages route to the author session for the selected doc.
-- If the author session is unreachable, the message queues until that session registers again; doc
-  identity never changes.
+- If the recorded owner is unreachable, the message queues. After a replacement session claims the doc, its next bridge registration can deliver the waiting message; doc identity never changes.
 - SystemView interactions store no target. Each one resolves to the worktree's most recently active
   session that currently holds a live bridge registration, so nothing is surfaced as
-  `OwnerSessionId` and liveness UI is unaffected. See `docs/spec/canvas-interaction-routing.md`.
+  `OwnerSessionId` and liveness UI is unaffected. If no session can receive the interaction, the
+  server starts one with a SystemView-specific prompt: load the canvas skill for its interaction
+  protocol, but do not apply its authoring instructions because the view is generated and must not
+  be edited or claimed; the queued user request will arrive separately. See
+  `docs/spec/canvas-interaction-routing.md`.
 
 ### Message Flow
 
@@ -284,7 +287,7 @@ changed rows already use).
 - **Canvas `update` arms extracted into `CanvasUpdate.fs`** — the canvas `update`-arm bodies (`ToggleCanvasPane`, `SetCanvasPosition`, `SelectCanvasDoc`, `OpenCanvasDoc`, `ArchiveCanvasDoc`, `ArchiveCanvasDocResult`, `ShareCanvasDoc`, `ShareCanvasDocResult`, `ClipboardWriteResult`, `DismissShareNotice`, `NavigateCanvasDoc`, `CanvasMessageReceived`, `CanvasSendResult`, `DismissCanvasMessageError`, `LaunchCanvasSession`, `MorphActiveDoc`, `MorphComplete`), the active-doc/reveal/mounted-hash helpers, and the `messageListener` subscription glue live in `src/Client/CanvasUpdate.fs` (compiled after `AppTypes.fs`, before `App.fs`). Each canvas arm in `App.fs` delegates to this module while `update` remains one function over the flat `Msg` (no sub-`Msg`/`Cmd.map` split).
 - **Canvas model slice as a nested record** — canvas state is a nested `Canvas: CanvasState.CanvasState` record on `App.Model`. `CanvasState.fs` owns pure active-document selection, visited-LRU, rendered-AgentDoc, and loaded-hash reconciliation functions over explicit model slices; `CanvasUpdate.fs` owns the `Model`/`Msg` transitions that compose them.
 - **Exact-equality duplicate coalescing** — the extension queue compares payloads exactly on transport kind and session prompt text. There is no revision metadata and no content normalization, and a payload stops being pending the moment it is handed to `session.send` (`createSendQueue`, key deleted before the call so a rejected send leaves nothing stale). Suppression therefore only ever removes a message that would repeat an undelivered one. The server queue does not coalesce: auto-sync's durable accepted record already prevents a repeat prompt at the source.
-- **Cross-platform canvas doc path** — `CanvasPrompt.continueWorking` (`src/Shared/Types.fs`) builds the canvas-session launch path with forward slashes (`{worktree}/.agents/canvas/{filename}`), which resolve correctly on Windows, Linux, and macOS. `System.IO.Path.Combine` is deliberately not used because `src/Shared` is Fable-compiled to JavaScript and cannot reference `System.IO`.
+- **Cross-platform canvas doc paths** — `CanvasSessionPrompt.forAgentDoc` (`src/Client/CanvasSessionPrompt.fs`) builds the AgentDoc `Start session` prompt, while `CanvasPrompt.continueWorking` (`src/Shared/Types.fs`) builds the server's SystemView auto-spawn prompt. Both use forward slashes (`{worktree}/.agents/canvas/{filename}`), which resolve correctly on Windows, Linux, and macOS. The client and Shared projects are Fable-compiled, so neither prompt uses `System.IO.Path.Combine`.
 
 ## Related Specs
 
