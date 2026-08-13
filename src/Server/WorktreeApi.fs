@@ -950,7 +950,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
 
                       match outcome with
                       | CanvasBridge.Routed result -> return result
-                      | CanvasBridge.QueuedNeedingSession(result, kind) ->
+                      | CanvasBridge.QueuedNeedingSession result ->
                           match! CanvasBridge.beginPendingLaunch path with
                           | CanvasBridge.PendingLaunchJoined ->
                               Log.log
@@ -960,7 +960,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                               return result
                           | CanvasBridge.PendingLaunchStarted ->
                               let provider = CodingToolStatus.readConfiguredProvider path
-                              let prompt = CanvasPrompt.forLaunch kind path request.Filename
+                              let prompt = CanvasPrompt.continueWorking path request.Filename
                               let command =
                                   CodingToolCli.build provider (CodingToolCli.Interactive prompt)
 

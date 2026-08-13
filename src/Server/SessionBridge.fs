@@ -307,19 +307,6 @@ let send (request: SendRequest) =
             return SendResult.Queued
     }
 
-/// Re-run queue delivery for one session after something *other than a registration* made a queued
-/// prompt deliverable to it — today, an ownership claim. `deliverableTo` re-reads the document's
-/// owner at drain time, so a reassignment needs no queue rewriting, only another drain. Without
-/// this, a freshly claimed document's waiting interaction sits until that session's next 30-second
-/// heartbeat re-registration happens to drain it. A session with no live registration is a no-op:
-/// nothing can be posted to it, and its registration will drain the queue when it arrives.
-let drainForSession (worktreePath: string) (sessionId: string) =
-    let now = DateTime.UtcNow
-
-    sessionsForWorktree worktreePath
-    |> selectLiveTarget now PromptKind.Canvas (Some sessionId)
-    |> Option.iter (drainQueue now (normalizePath worktreePath))
-
 /// Atomically drain anonymous pending prompts of one transport kind. Canvas iframe heartbeats use
 /// this for legacy owner-unknown canvas messages; owner-bound and agent prompts stay queued for a
 /// matching live session registration.

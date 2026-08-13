@@ -20,14 +20,6 @@ An **AgentDoc** has a real author. Its `(worktree, filename)` target is persiste
 or when `canvas_take_ownership` claims it explicitly. That ownership is sticky: it changes only
 through another author write or another explicit claim.
 
-Because ownership is sticky, starting a session does not by itself make that session the recipient
-for a document. The `▶ Start session` launch therefore instructs the session it starts to claim the
-focused AgentDoc, via the launch prompt built by `CanvasPrompt.forLaunch` — routing still changes
-only through the explicit claim path, and the launched session becomes the owner through it rather
-than beside it. The prompt branches on document kind: a SystemView has no author, `canvas_take_ownership`
-refuses one, and Treemon regenerates the file over any edit, so that session is told to claim
-nothing and write nothing — it acts on the interaction instead.
-
 A **SystemView** is server-generated and has no author, so nothing is persisted for it. Each
 interaction resolves, at send time, to the most recently active session that currently holds a live
 bridge registration for that worktree. Liveness and activity are separate inputs, fed by two
@@ -59,12 +51,6 @@ would not be that document's author.
 
 Queued messages retain the existing cap of 10 and five-minute TTL. On drain, an AgentDoc
 prompt goes only to its recorded owner, so ownership changes made while a message waits are honored.
-Because `deliverableTo` re-reads the owner at drain time, an ownership change is what makes a waiting
-interaction deliverable, so recording a **claim** drains that worktree's queue for the claiming
-session immediately instead of leaving the message until the claimant's next heartbeat
-re-registration. A claim from a session holding no live registration drains nothing and leaves the
-message queued for the registration that follows. Scanner fallback attribution does not drain — it
-only ever attributes to a live session, whose next heartbeat delivers within 30 seconds.
 A SystemView prompt stays bound to the session resolution picked, if any; when nothing was reachable
 it drains to the next identified registration — the session the queue caused to launch. An anonymous
 (session-less) registration never drains either kind.
@@ -101,16 +87,8 @@ spawn for `launchSuppressionWindow`. It is time-bounded by design: correlating a
 back to a specific launch is exactly the bookkeeping this model set out to remove, and an
 expiry cannot deadlock the way an uncleared entry can.
 
-`SessionBridge.drainForSession` re-runs the queue for one session when something other than a
-registration made a prompt deliverable to it — today, recording an ownership claim. It needs no
-queue rewriting because `deliverableTo` re-reads the owner, and it is a no-op for a session holding
-no live registration.
-
 `CanvasScanner` continues exposing `OwnerSessionId` only for AgentDocs, and the client continues
-gating every lifecycle affordance on `CanvasDoc.Kind`. The scanner's fallback attribution
-(`CanvasWatchers.fallbackOwner`) counts only **live** registrations: `sessionRegistry` never evicts
-entries, so an unfiltered count would read a worktree that has merely hosted a second session as
-permanently ambiguous, silently disabling the fallback instead of making it ambiguous.
+gating every lifecycle affordance on `CanvasDoc.Kind`.
 
 ## Decisions
 
@@ -124,16 +102,6 @@ permanently ambiguous, silently disabling the fallback instead of making it ambi
 - **No resume:** an unreachable session is not restarted to receive an interaction. If nothing is
   reachable, a SystemView launches a new session; an AgentDoc waits for its author. Without a resume
   path there is no resume failure, and therefore no reassignment UI.
-- **The launch claims through the prompt, not around it:** `▶ Start session` makes the session it
-  starts the document's owner by instructing it to call `canvas_take_ownership`, rather than by
-  correlating the spawn with the registration that follows it. Ownership therefore still moves only
-  along the two documented paths, and the launch needs no pending-claim state, no expiry, and no
-  exception to stickiness. It depends on the started session honoring the instruction; a session
-  that does not leaves the document as unreachable as it already was.
-- **Recording a claim drains the queue:** a claim is what makes a waiting interaction deliverable, so
-  `/api/canvas/attribute` drains immediately instead of waiting for the claimant's next 30-second
-  heartbeat re-registration to notice. Scanner fallback attribution does not drain; a doc it
-  attributes is owned by a live session by construction, so that session's next heartbeat delivers.
 - **Case-preserving filename identity:** ownership keys retain the real on-disk filename case; only
   worktree paths are normalized, so scanner lookup and pruning share one identity on
   case-sensitive hosts.

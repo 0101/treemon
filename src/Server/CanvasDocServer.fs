@@ -151,9 +151,6 @@ let attributeOwnership
                 return UnknownWorktree
             else
                 do! CanvasDocOwnership.assign worktreePath filename sessionId
-                // The claim is what makes an already-queued interaction deliverable to this
-                // session, so re-drain now instead of leaving it for the next 30-second heartbeat.
-                SessionBridge.drainForSession worktreePath sessionId
                 return Attributed
     }
 

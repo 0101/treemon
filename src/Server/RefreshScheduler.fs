@@ -650,36 +650,30 @@ module CanvasWatchers =
     /// Fallback attribution target for a worktree's scanner. Explicit `/api/canvas/attribute`
     /// declarations are the primary attribution path; the scanner only fills the gap for docs
     /// with no declared owner, and only when it can do so *unambiguously* — i.e. exactly one
-    /// **live** session is registered for the worktree. Zero or many live sessions (or a single
+    /// session is registered for the worktree. Zero or many registered sessions (or a single
     /// anonymous `SessionId = None` registration) leave the doc unowned. This replaces the
     /// previous last-registered attribution (`getSessionForWorktree`) that credited every
     /// changed doc to whichever session registered last — the misattribution bug that
     /// cross-credited docs whenever two sessions shared a worktree.
-    ///
-    /// Liveness is part of the rule, not a detail: `sessionRegistry` never evicts entries, so
-    /// without this filter "exactly one session" is permanently false for any worktree that has
-    /// hosted a second session since the server started — silently disabling the fallback rather
-    /// than making it ambiguous.
-    let fallbackOwner (now: DateTime) (sessions: SessionBridge.SessionEntry list) : string option =
-        match sessions |> List.filter (SessionBridge.isSessionAlive now) with
+    let fallbackOwner (sessions: SessionBridge.SessionEntry list) : string option =
+        match sessions with
         | [ single ] -> single.SessionId
         | _ -> None
 
     /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. An AgentDoc is
-    /// attributed to the worktree's single live registered session only when it is new-or-changed
+    /// attributed to the worktree's single registered session only when it is new-or-changed
     /// (relative to the watcher's previous baseline) *and* has no declared owner. Ownership is
     /// surfaced as `CanvasDoc.OwnerSessionId` by the scan, so an AgentDoc that already has an owner —
     /// declared via the endpoint or previously attributed — is skipped: the scanner never
-    /// overwrites it. SystemViews never participate. With zero or many live sessions,
+    /// overwrites it. SystemViews never participate. With zero or many registered sessions,
     /// nothing is attributed.
     let attributeChangedDocs
-        (now: DateTime)
         (sessions: SessionBridge.SessionEntry list)
         (worktreePath: string)
         (previousDocs: CanvasDoc list)
         (currentDocs: CanvasDoc list)
         =
-        match fallbackOwner now sessions with
+        match fallbackOwner sessions with
         | None -> ()
         | Some sessionId ->
             let prevByName = previousDocs |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList
@@ -747,9 +741,9 @@ module CanvasWatchers =
                             let prev = previousDocs.Value
                             // Fallback-only attribution: explicit /api/canvas/attribute declarations are the
                             // primary path. The scanner only attributes a no-owner changed doc when exactly one
-                            // LIVE session is registered for the worktree — never the old last-registered guess
-                            // that misattributed every changed doc whenever two sessions shared a worktree.
-                            attributeChangedDocs DateTime.UtcNow (SessionBridge.sessionsForWorktree path) path prev canvasDocs
+                            // session is registered for the worktree — never the old last-registered guess that
+                            // misattributed every changed doc whenever two sessions shared a worktree.
+                            attributeChangedDocs (SessionBridge.sessionsForWorktree path) path prev canvasDocs
                             previousDocs.Value <- canvasDocs
                             agent.Post(UpdateCanvasDoc(repoId, path, canvasDocs))
                         return

@@ -29,8 +29,8 @@ let private canvasWire payload =
 let private sendMessage request =
     async {
         match! Server.CanvasBridge.sendMessage [] request with
-        | Server.CanvasBridge.Routed result -> return result
-        | Server.CanvasBridge.QueuedNeedingSession(result, _) -> return result
+        | Server.CanvasBridge.Routed result
+        | Server.CanvasBridge.QueuedNeedingSession result -> return result
     }
 
 // A minimal loopback HTTP sink used to assert *which* inject URL a message reaches.
@@ -216,7 +216,7 @@ type RegisterAndStatusTests() =
 
         // The downstream scanner fallback therefore finds no id to credit: a single anonymous
         // session leaves docs unowned instead of stamping the sticky, unroutable owner "".
-        Assert.That(fallbackOwner DateTime.UtcNow (sessionsForWorktree path), Is.EqualTo(None: string option),
+        Assert.That(fallbackOwner (sessionsForWorktree path), Is.EqualTo(None: string option),
                     "A single blank-id session must leave docs unowned, not owned by \"\"")
 
     [<Test>]
@@ -906,27 +906,15 @@ let private scannedDoc (owner: string option) filename : CanvasDoc =
 type ScannerFallbackAttributionTests() =
 
     [<Test>]
-    member _.``fallbackOwner attributes only when exactly one LIVE session is registered``() =
-        let now = DateTime.UtcNow
-        let entryAt registeredAt sid : SessionEntry =
-            { WorktreePath = "/w"; InjectUrl = "http://localhost/inject"; SessionId = sid; RegisteredAt = registeredAt }
-        let entry sid = entryAt now sid
-        // Older than the 60s liveness TTL, so the registry still holds it but nothing can reach it.
-        let deadEntry sid = entryAt (now.AddMinutes -10.0) sid
+    member _.``fallbackOwner attributes only when exactly one session is registered``() =
+        let entry sid : SessionEntry =
+            { WorktreePath = "/w"; InjectUrl = "http://localhost/inject"; SessionId = sid; RegisteredAt = DateTime.UtcNow }
 
-        Assert.That(fallbackOwner now [], Is.EqualTo None, "Zero sessions -> no fallback owner")
-        Assert.That(fallbackOwner now [ entry (Some "solo") ], Is.EqualTo(Some "solo"), "Exactly one live session -> it is the owner")
-        Assert.That(fallbackOwner now [ entry None ], Is.EqualTo None, "A single anonymous session has no id to attribute")
-        Assert.That(fallbackOwner now [ entry (Some "a"); entry (Some "b") ], Is.EqualTo None,
-            "Two live sessions are ambiguous -> leave unowned (the misattribution guard)")
-
-        // sessionRegistry never evicts, so a worktree that has hosted a previous session keeps its
-        // entry forever. Counting that dead entry silently disabled the fallback rather than making
-        // it ambiguous — the guard must mean "two LIVE sessions", not "two entries".
-        Assert.That(fallbackOwner now [ deadEntry (Some "gone"); entry (Some "live") ], Is.EqualTo(Some "live"),
-            "A dead registration must not make a single live session look ambiguous")
-        Assert.That(fallbackOwner now [ deadEntry (Some "gone") ], Is.EqualTo None,
-            "A worktree with only dead registrations has no reachable owner to attribute")
+        Assert.That(fallbackOwner [], Is.EqualTo None, "Zero sessions -> no fallback owner")
+        Assert.That(fallbackOwner [ entry (Some "solo") ], Is.EqualTo(Some "solo"), "Exactly one session -> it is the owner")
+        Assert.That(fallbackOwner [ entry None ], Is.EqualTo None, "A single anonymous session has no id to attribute")
+        Assert.That(fallbackOwner [ entry (Some "a"); entry (Some "b") ], Is.EqualTo None,
+            "Two sessions are ambiguous -> leave unowned (the misattribution guard)")
 
     [<Test>]
     member _.``Two registered sessions leave a no-owner changed doc UNOWNED (misattribution regression)``() =
@@ -937,7 +925,7 @@ type ScannerFallbackAttributionTests() =
 
             // previousDocs = [] makes the doc new (change-gate satisfied); two sessions means the
             // scanner must NOT guess an owner — the exact scenario the old last-registered code broke.
-            attributeChangedDocs DateTime.UtcNow (sessionsForWorktree path) path [] [ scannedDoc None "report.html" ]
+            attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc None "report.html" ]
 
             Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo None,
                 "Two sessions share the worktree: a no-owner doc must be left unowned, never last-registered"))
@@ -949,7 +937,7 @@ type ScannerFallbackAttributionTests() =
             let sid = uniqueSid "solo"
             registerSession path "http://localhost:1/inject" (Some sid)
 
-            attributeChangedDocs DateTime.UtcNow (sessionsForWorktree path) path [] [ scannedDoc None "report.html" ]
+            attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc None "report.html" ]
 
             Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "report.html"), Is.EqualTo(Some sid),
                 "A single registered session is the unambiguous fallback owner"))
@@ -960,7 +948,7 @@ type ScannerFallbackAttributionTests() =
             let path = uniquePath "scan-system"
             registerSession path "http://localhost:1/inject" (Some(uniqueSid "solo"))
 
-            attributeChangedDocs DateTime.UtcNow (sessionsForWorktree path) path [] [ scannedDoc None "diff.html" ]
+            attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc None "diff.html" ]
 
             Assert.That(
                 runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
@@ -1037,7 +1025,7 @@ type ScannerFallbackAttributionTests() =
 
             // The scan surfaces the declared owner on the doc (OwnerSessionId = Some declared); the
             // scanner must skip it even though the doc looks new and a single session is registered.
-            attributeChangedDocs DateTime.UtcNow (sessionsForWorktree path) path [] [ scannedDoc (Some declared) "owned.html" ]
+            attributeChangedDocs (sessionsForWorktree path) path [] [ scannedDoc (Some declared) "owned.html" ]
 
             Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "owned.html"), Is.EqualTo(Some declared),
                 "An explicit declaration is primary: the scanner must not overwrite it with the registered session"))
@@ -1051,7 +1039,7 @@ type ScannerFallbackAttributionTests() =
             // Same doc in the previous baseline and current scan (same hash) -> not new-or-changed,
             // so the change-gated fallback leaves it alone.
             let doc = scannedDoc None "stable.html"
-            attributeChangedDocs DateTime.UtcNow (sessionsForWorktree path) path [ doc ] [ doc ]
+            attributeChangedDocs (sessionsForWorktree path) path [ doc ] [ doc ]
 
             Assert.That(runAsync (Server.CanvasDocOwnership.getOwner path "stable.html"), Is.EqualTo None,
                 "Attribution is change-gated: an unchanged doc is left as-is"))
@@ -1185,139 +1173,3 @@ type VerifyGbjqOwnerCorrectRoutingTests() =
             Assert.That(r4, Is.EqualTo(CanvasMessageResult.Queued), "Step4: no owner -> Queued, never delivered to a non-author")
             Thread.Sleep 250 // let any (incorrect) delivery POST land before asserting absence
             Assert.That(lB.Bodies, Is.Empty, "Step4: the lone non-author session L_B must receive nothing"))
-
-
-// ── Ownership claim drains the waiting interaction ───────────────────────────
-// The `▶ Start session` recovery path. A doc's author is gone, the user's interaction is queued for
-// it, and the session Treemon starts claims the doc via /api/canvas/attribute. `deliverableTo`
-// re-reads the owner at drain time, so the claim alone makes the queued prompt deliverable — but
-// only if something drains. These cover the attribute-triggered drain that closes that gap;
-// without it the message waits for the claimant's next 30-second heartbeat re-registration.
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-// CWD-mutating (withTempCwd writes data/canvas-owners.json) and port-reserving (getFreeTcpPorts):
-// keep non-parallel for the same reasons as OwnerRoutingTests above.
-[<NonParallelizable>]
-type ClaimDrainsQueuedInteractionTests() =
-
-    // attributeOwnership only records for a *known* worktree, so the fixture needs a scheduler
-    // agent that knows it (same helper shape as CanvasDocServerTests.AttributeOwnershipTests).
-    let agentKnowing (worktreePath: string) =
-        let agent = Server.SchedulerState.createAgent ()
-
-        let info: Server.GitWorktree.WorktreeInfo =
-            { Path = Server.PathUtils.normalizePath worktreePath; Head = ""; Branch = Some "test" }
-
-        agent.Post(Server.SchedulerState.UpdateWorktreeList(RepoId "claim-drain-repo", [ info ]))
-        agent
-
-    let waitForBodies (sink: HttpSink) =
-        let deadline = DateTime.UtcNow.AddSeconds 3.0
-        let rec poll () =
-            if List.isEmpty sink.Bodies && DateTime.UtcNow < deadline then
-                Thread.Sleep 50
-                poll ()
-        poll ()
-        sink.Bodies
-
-    [<Test>]
-    member _.``Claiming a dead author's doc delivers the queued interaction without a re-registration``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 1
-            use claimantSink = new HttpSink(ports[0])
-            claimantSink.Start()
-
-            let path = uniquePath "claim-drain"
-            let deadAuthor = uniqueSid "dead-author"
-            let claimant = uniqueSid "claimant"
-            let agent = agentKnowing path
-
-            // The author owns the doc but never registers a bridge — the `▶ Start session` state.
-            Server.CanvasDocOwnership.attribute path "report.html" deadAuthor
-            registerSession path claimantSink.Url (Some claimant)
-
-            let queued =
-                runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "report.html"; Payload = "p1" })
-
-            Assert.That(queued, Is.EqualTo(CanvasMessageResult.Queued),
-                "The author is unreachable, so the interaction must queue rather than reach the claimant early")
-            Assert.That(claimantSink.Bodies, Is.Empty, "Nothing may reach the claimant before it owns the doc")
-
-            // The launched session claims the doc. This is the ONLY event between queue and
-            // delivery: no registration happens, so a pass proves the claim itself drained.
-            Assert.That(
-                runAsync (Server.CanvasDocServer.attributeOwnership agent path "report.html" claimant),
-                Is.EqualTo(Server.CanvasDocServer.Attributed))
-
-            Assert.That(waitForBodies claimantSink, Is.EqualTo([ canvasWire "p1" ]),
-                "Claiming the doc must drain the waiting interaction to the new owner immediately"))
-
-    [<Test>]
-    member _.``A claim from a session with no live registration keeps the interaction queued``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 1
-            use claimantSink = new HttpSink(ports[0])
-            claimantSink.Start()
-
-            let path = uniquePath "claim-noreg"
-            let deadAuthor = uniqueSid "dead-author"
-            let claimant = uniqueSid "unregistered-claimant"
-            let agent = agentKnowing path
-
-            Server.CanvasDocOwnership.attribute path "report.html" deadAuthor
-            // A different live session keeps the worktree registered, so any drain that ignored
-            // session identity would hand this message to the wrong bridge.
-            registerSession path "http://127.0.0.1:1/inject" (Some(uniqueSid "bystander"))
-
-            let queued =
-                runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "report.html"; Payload = "p2" })
-
-            Assert.That(queued, Is.EqualTo(CanvasMessageResult.Queued))
-
-            // The claimant has not registered a bridge yet, so there is nothing to post to.
-            Assert.That(
-                runAsync (Server.CanvasDocServer.attributeOwnership agent path "report.html" claimant),
-                Is.EqualTo(Server.CanvasDocServer.Attributed))
-
-            Thread.Sleep 250
-            Assert.That(claimantSink.Bodies, Is.Empty, "An unregistered claimant cannot receive anything yet")
-
-            // The message must have survived the no-op drain: the claimant's own registration
-            // delivers it, exactly as the heartbeat path always did.
-            registerSession path claimantSink.Url (Some claimant)
-
-            Assert.That(waitForBodies claimantSink, Is.EqualTo([ canvasWire "p2" ]),
-                "A no-op drain must leave the interaction queued, not discard it"))
-
-    [<Test>]
-    member _.``A SystemView claim drains nothing because it records no owner``() =
-        withTempCwd (fun () ->
-            let ports = getFreeTcpPorts 1
-            use claimantSink = new HttpSink(ports[0])
-            claimantSink.Start()
-
-            let path = uniquePath "claim-systemview"
-            let claimant = uniqueSid "claimant"
-            let agent = agentKnowing path
-
-            registerSession path claimantSink.Url (Some claimant)
-
-            // Queued AFTER registration, so nothing has drained it yet: the refused claim below is
-            // the only event that could deliver it. A drain placed above attributeOwnership's
-            // SystemView short-circuit would ship `p3` here and fail this test.
-            let queued =
-                runAsync (sendMessage { WorktreePath = WorktreePath path; Filename = "diff.html"; Payload = "p3" })
-
-            Assert.That(queued, Is.EqualTo(CanvasMessageResult.Ok),
-                "A live registration is a valid SystemView target, so this one delivers immediately")
-
-            Assert.That(
-                runAsync (Server.CanvasDocServer.attributeOwnership agent path "diff.html" claimant),
-                Is.EqualTo(Server.CanvasDocServer.NotAttributable),
-                "A SystemView has no author, so the claim is refused before any drain")
-
-            Assert.That(
-                runAsync (Server.CanvasDocOwnership.getOwner path "diff.html"),
-                Is.EqualTo(None: string option),
-                "A refused claim must record no owner"))
