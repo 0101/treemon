@@ -4,8 +4,9 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
+import { isValidCanvasFilename } from "./canvas-filename.mjs";
 import {
-  isValidCanvasFilename,
+  canvasFilenameForClaim,
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
 import { promptForSession } from "./session-prompt.mjs";
@@ -377,15 +378,15 @@ const takeOwnershipTool = {
       filename: {
         type: "string",
         description:
-          "The canvas doc's filename under .agents/canvas/ (e.g. \"review.html\"). A full path is accepted; only the filename is used.",
+          "The bare canvas doc filename under .agents/canvas/ (e.g. \"review.html\"). Paths and directory separators are rejected.",
       },
     },
     required: ["filename"],
   },
   skipPermission: true,
   handler: async ({ filename }) => {
-    const name = String(filename ?? "").split(/[\\/]/).pop();
-    if (!isValidCanvasFilename(name)) {
+    const name = canvasFilenameForClaim(filename);
+    if (name === null) {
       throw new Error(`Not a valid canvas filename: ${JSON.stringify(filename)} (expected e.g. "review.html").`);
     }
     if (!extensionState.sessionId) {

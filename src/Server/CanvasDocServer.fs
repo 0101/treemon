@@ -25,7 +25,7 @@ type CanvasAttributeRequest =
 /// Outcome of an ownership-attribution attempt, decoupled from HTTP so it is unit-testable
 /// (the same extraction the SSRF guard uses with isLoopbackInjectUrl). Ownership is recorded for
 /// a *known* (monitored) worktree with a well-formed body and nothing else: a missing field or an
-/// unmonitored worktree records nothing, so a later getOwner stays None.
+/// invalid canvas filename or unmonitored worktree records nothing, so a later getOwner stays None.
 type AttributeOutcome =
     | Attributed                  // ownership recorded + persisted
     | NotAttributable             // a SystemView has no author — routing is resolved, not stored
@@ -136,6 +136,8 @@ let attributeOwnership
             return Invalid "missing worktreePath"
         elif System.String.IsNullOrWhiteSpace filename then
             return Invalid "missing filename"
+        elif not (CanvasFilename.isValid filename) then
+            return Invalid "invalid canvas filename"
         elif System.String.IsNullOrWhiteSpace sessionId then
             return Invalid "missing sessionId"
         elif not (isValidSessionId sessionId) then
@@ -155,8 +157,8 @@ let attributeOwnership
     }
 
 /// POST /api/canvas/attribute {worktreePath, filename, sessionId}: the authoring session's
-/// extension declares which session owns an AgentDoc or handles interactions for a SystemView.
-/// Repeating this call explicitly reassigns the target.
+/// extension declares which session owns an AgentDoc. SystemView claims are reported but not stored.
+/// Repeating an AgentDoc call explicitly reassigns the target.
 let canvasAttributeHandler (agent: MailboxProcessor<SchedulerState.StateMsg>) : HttpHandler =
     fun next ctx -> task {
         try
@@ -375,14 +377,14 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
         + CanvasMorphScript.style
         + CanvasMorphScript.script
 
-/// Serve a canvas doc from disk with the live injection spliced in, or the matching 400/404 for a
-/// path that escapes the worktree or names a file that isn't there.
+/// Serve a canvas doc from disk with the live injection spliced in, or the matching 400/404 for an
+/// invalid contract filename, a path that escapes the worktree, or a file that isn't there.
 let private serveCanvasDoc (ctx: HttpContext) (worktreePath: string) (filename: string) : System.Threading.Tasks.Task = task {
     match Server.PathUtils.validateCanvasPath worktreePath filename with
     | Error reason ->
         ctx.Response.StatusCode <- 400
         do! ctx.Response.WriteAsync(reason)
-        Log.log "Canvas" $"Doc request 400: path traversal — {filename}"
+        Log.log "Canvas" $"Doc request 400: {reason}; filenameLength={filename.Length}"
     | Ok resolvedPath when not (File.Exists resolvedPath) ->
         ctx.Response.StatusCode <- 404
         do! ctx.Response.WriteAsync("File not found")

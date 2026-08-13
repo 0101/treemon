@@ -22,6 +22,7 @@ let scan (worktreePath: string) =
 
             return
                 Directory.GetFiles(dir, "*.html")
+                |> Array.filter (Path.GetFileName >> CanvasFilename.isValid)
                 |> Array.sort
                 |> Array.map (fun filePath ->
                     let filename = Path.GetFileName(filePath)
