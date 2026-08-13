@@ -13,6 +13,22 @@ type CanvasSendState =
     | Waiting of scopedKey: string
     | Failed of message: string
 
+[<RequireQualifiedAccess>]
+type CanvasShareState =
+    | Idle
+    | Publishing of scopedKey: string * filename: string
+    | WritingClipboard of scopedKey: string * filename: string
+
+module CanvasShareState =
+    let buttonFlags (activeScopedKey: string option) (filename: string) (shareState: CanvasShareState) =
+        let isSharing =
+            match activeScopedKey, shareState with
+            | Some currentScopedKey, CanvasShareState.Publishing (sharingScopedKey, sharingFilename)
+            | Some currentScopedKey, CanvasShareState.WritingClipboard (sharingScopedKey, sharingFilename) ->
+                currentScopedKey = sharingScopedKey && filename = sharingFilename
+            | _ -> false
+        shareState <> CanvasShareState.Idle, isSharing
+
 /// A doc-scoped banner error stamped with the worktree + the doc it is attributed to. Two producers
 /// feed it: (1) a doc-side JS error (window.onerror / unhandledrejection forwarded from an AgentDoc
 /// iframe via the injected errorOverlayScript), which self-identifies via the postMessage `wt`/`doc`
