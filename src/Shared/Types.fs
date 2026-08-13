@@ -295,17 +295,25 @@ type DiffCategoryReport =
     | Invalid of reason: string
     | Configured of leaves: DiffCategoryCoverage list * unmatchedCount: int
 
-/// Single source of truth for the canvas-session launch prompt, shared by the client
-/// (LaunchCanvasSession) and the server (sendCanvasMessage) so the two cannot drift.
+/// Prompt used when the server auto-starts a session for a queued SystemView interaction.
+/// The AgentDoc `Start session` button has its own client prompt in `CanvasSessionPrompt`.
 module CanvasPrompt =
 
-    /// Prompt handed to the coding tool to (re)start work on an existing canvas doc.
+    /// First message for a session auto-started to handle a queued SystemView interaction.
     let continueWorking (worktreePath: string) (filename: string) =
         // On-disk path of the canvas doc within the worktree. Forward slashes are used
         // deliberately: they work on Windows, Linux and macOS, and src/Shared is
         // Fable-compiled to JS so System.IO.Path.Combine is not available here.
-        $"Continue working on canvas doc: {worktreePath}/.agents/canvas/{filename}\n"
-        + "This is an HTML file served at localhost:5002. Edits are live-reloaded in the canvas pane."
+        let docPath = $"{worktreePath}/.agents/canvas/{filename}"
+
+        $"Handle a queued interaction from generated canvas view: {docPath}\n\n"
+        + "Start by using the canvas skill so you understand how canvas interactions arrive. This is "
+        + "a generated SystemView, so its authoring instructions do not apply: do not edit or claim "
+        + "the file; Treemon would replace the changes, and a generated view has no owner.\n\n"
+        + "The user interacted with the view while no session could receive the request. Their request "
+        + "will be delivered separately to this session. Act on what they asked about—the code, branch, "
+        + "or task shown by the view. Treemon already renders the file, so do not start a server or open "
+        + "a separate preview."
 
 type CanvasMessageRequest =
     { WorktreePath: WorktreePath

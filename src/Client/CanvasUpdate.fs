@@ -36,7 +36,7 @@ let launchCanvasSession (scopedKey: string) (model: Model) =
         let wtPath = WorktreePath.value wt.Path
         let prompt =
             activeVisibleDoc model
-            |> Option.map (fun (_, filename) -> CanvasPrompt.continueWorking wtPath filename)
+            |> Option.map (fun (_, filename) -> CanvasSessionPrompt.forAgentDoc wtPath filename)
             |> Option.defaultValue ""
         let action = CanvasSession prompt
         model, Cmd.OfAsync.perform worktreeApi.Value.launchAction { Path = wt.Path; Action = action } LaunchActionResult
