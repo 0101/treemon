@@ -295,8 +295,8 @@ type DiffCategoryReport =
     | Invalid of reason: string
     | Configured of leaves: DiffCategoryCoverage list * unmatchedCount: int
 
-/// Single source of truth for the canvas-session launch prompt, shared by the client
-/// (LaunchCanvasSession) and the server (sendCanvasMessage) so the two cannot drift.
+/// Prompt used when the server auto-starts a session for a queued SystemView interaction.
+/// The AgentDoc `Start session` button has its own client prompt in `CanvasSessionPrompt`.
 module CanvasPrompt =
 
     /// Prompt handed to the coding tool to (re)start work on an existing canvas doc.
