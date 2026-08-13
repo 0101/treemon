@@ -3,22 +3,29 @@
 /// BOTH the Shared API contract and CanvasExport: `publish` takes an already-exported HTML string
 /// plus the doc's filename, so the caller (`WorktreeApi.shareCanvasDocImpl`) owns the export step and
 /// the assembly of the `CanvasShareResult`. That keeps this module a thin, replaceable storage
-/// adapter with only two dependencies: `Azure.Storage.Blobs` and `GlobalConfig`.
+/// adapter with only three dependencies: `Azure.Storage.Blobs`, `Azure.Identity` and `GlobalConfig`.
 ///
-/// Secrecy model (docs/spec/canvas-sharing.md, Decisions #2/#4/#5): the container is PRIVATE
-/// (anonymous access disabled at the account), the blob lands under an unguessable
-/// `<random-prefix>/<filename>` name, and the returned link is a blob-scoped, read-only, https-only
-/// SAS (`sr=b`, `sp=r`, `spr=https`) with a bounded expiry. Because the SAS is blob-scoped, a leaked
-/// link exposes exactly one doc; per-doc revoke is a blob delete.
+/// Credential model (docs/spec/canvas-sharing.md, Decision #3): Treemon stores no storage credential.
+/// Links are signed with a *user delegation key* fetched through `AzureCliCredential`, which uses the
+/// operator's persisted Azure CLI login. The account rejects Shared Key authorization, so Treemon
+/// never handles an account key or connection string. The cost is Azure's hard **7-day** ceiling on a
+/// user delegation key — and therefore on every link.
 ///
-/// The Azure account key is read ONLY from the `AZURE_STORAGE_CONNECTION_STRING` env var and is never
-/// logged; a malformed connection string is reported as "not configured" rather than echoed, and a
-/// storage failure surfaces only its status/error-code, never the account key or the full SAS.
+/// Secrecy model (Decisions #2/#4/#5): the container is PRIVATE (anonymous access disabled at the
+/// account), the blob lands under an unguessable `<random-prefix>/<filename>` name, and the returned
+/// link is a blob-scoped, read-only, https-only SAS (`sr=b`, `sp=r`, `spr=https`). Because the SAS is
+/// blob-scoped, a leaked link exposes exactly one doc; per-doc revoke is a blob delete.
+///
+/// The SAS is additionally bound to the *signing identity*: it carries `skoid`/`sktid`. Azure caches
+/// role assignments and user delegation keys, so role removal or key revocation invalidates existing
+/// links only after cache propagation, not immediately.
 module Server.CanvasShare
 
 open System
+open System.Collections.Concurrent
 open System.IO
 open System.Text
+open Azure.Identity
 open Azure.Storage.Blobs
 open Azure.Storage.Blobs.Models
 open Azure.Storage.Sas
@@ -53,10 +60,13 @@ let internal blobName (prefix: string) (filename: string) : string =
     $"{prefix}/{leafName filename}"
 
 /// Builds the per-doc SAS grant: blob-scoped (`sr=b`, `Resource = "b"`), read-only (`sp=r`),
-/// https-only (`spr=https`), expiring at `expiresOn`. Pure — it holds NO key and touches no network
-/// (the account key is applied later by `BlobClient.GenerateSasUri`), so the exact least-privilege
-/// grant is unit-testable in isolation. Least privilege (Decision #2): a recipient of doc A's link
-/// cannot read doc B because the signature is bound to A's blob.
+/// https-only (`spr=https`), expiring at `expiresOn`. Pure — it holds no credential and touches no
+/// network (the user delegation key is applied later by `ToSasQueryParameters`), so the exact
+/// least-privilege grant is unit-testable in isolation. Least privilege (Decision #2): a recipient of
+/// doc A's link cannot read doc B because the signature is bound to A's blob.
+///
+/// `expiresOn` must fall inside the delegation key's own validity window or the link is refused at
+/// use time regardless of what the token says, so `publish` derives both from one start instant.
 let internal buildSasBuilder (containerName: string) (blob: string) (expiresOn: DateTimeOffset) : BlobSasBuilder =
     BlobSasBuilder(
         BlobSasPermissions.Read, expiresOn,
@@ -65,33 +75,47 @@ let internal buildSasBuilder (containerName: string) (blob: string) (expiresOn: 
         Resource = "b",
         Protocol = SasProtocol.Https)
 
-/// The Azure credential secret. Read ONLY from the environment (never the JSON config), so the key
-/// stays out of any file; blank/unset ⇒ `None` (⇒ "not configured"). Never logged.
-let internal connectionString () : string option =
-    Environment.GetEnvironmentVariable("AZURE_STORAGE_CONNECTION_STRING")
-    |> Option.ofObj
-    |> Option.filter (fun s -> not (String.IsNullOrWhiteSpace s))
+let internal buildSignedBlobUrl
+    (blobUri: Uri)
+    (accountName: string)
+    (delegationKey: UserDelegationKey)
+    (sasBuilder: BlobSasBuilder) =
+    $"{blobUri}?{sasBuilder.ToSasQueryParameters(delegationKey, accountName)}"
 
-/// The client-facing "not configured" message. Names the env var to set; contains no secret.
+let private credential = lazy (AzureCliCredential())
+
+// The bearer-token cache belongs to the BlobServiceClient pipeline, so clients must survive across
+// publishes. Lazy values prevent duplicate construction when concurrent first shares race.
+let private serviceClients = ConcurrentDictionary<string, Lazy<BlobServiceClient>>()
+
+let internal serviceClient (accountName: string) =
+    let client =
+        serviceClients.GetOrAdd(
+            accountName,
+            fun name ->
+                lazy (BlobServiceClient(
+                    Uri($"https://{name}.blob.core.windows.net"),
+                    credential.Value)))
+    client.Value
+
+/// The client-facing "not configured" message names the non-secret account config rather than
+/// suggesting an application-managed key or connection string.
 let internal notConfiguredMessage =
-    "Canvas sharing is not configured — set AZURE_STORAGE_CONNECTION_STRING to an Azure Storage account connection string."
+    "Canvas sharing is not configured — set canvasShare.accountName in ~/.treemon/config.json to an Azure Storage account name."
 
-/// Construct the container client, swallowing a malformed-connection-string exception so the raw
-/// string (which contains the account key) is NEVER surfaced or logged. A parse failure is reported
-/// to the caller as the ordinary "not configured" outcome.
-let private tryContainerClient (connStr: string) (container: string) : BlobContainerClient option =
-    try Some(BlobContainerClient(connStr, container))
-    with _ -> None
+/// The message shown when the host has no usable Entra identity (e.g. `az login` has expired). This
+/// is the one routine operational failure of the credential model, so it names the fix rather than
+/// surfacing an SDK exception type.
+let internal signInRequiredMessage =
+    "Canvas sharing could not authenticate to Azure — run `az login` on this host and try again."
 
 /// Publish an already-exported standalone HTML doc; return a per-doc read-only SAS URL string.
 ///
 /// Uploads `html` to the PRIVATE container (created on first use if absent) at
-/// `<random-prefix>/<filename>` with
-/// `Content-Type: text/html`, then mints a blob-scoped read-only https SAS expiring in the config's
-/// `DefaultExpiryDays` days and returns its absolute URL. Returns `Error` (never throws) when the
-/// backend is unconfigured, when the connection string cannot sign a SAS (a non-account-key
-/// credential — Decision #3), or on any storage failure. No returned message or log line contains
-/// the account key or the full SAS.
+/// `<random-prefix>/<filename>` with `Content-Type: text/html`, then signs a blob-scoped read-only
+/// https SAS with an Entra **user delegation key** and returns its absolute URL. Returns `Error`
+/// (never throws) when the backend is unconfigured, when the host has no Entra identity, or on any
+/// storage failure. No returned message or log line contains the full SAS.
 ///
 /// SECURITY (accepted risk — focused-review F17): `html` is author-controlled canvas content, and it
 /// is published as ACTIVE, non-sandboxed HTML/JS with only `Content-Type` — no CSP, no
@@ -101,49 +125,55 @@ let private tryContainerClient (connStr: string) (container: string) : BlobConta
 /// accepted trade-off — see `docs/spec/canvas-sharing.md` §"Security Posture".
 let publish (filename: string) (html: string) : Async<Result<string, string>> =
     asyncResult {
-        // A missing connection string ⇒ "not configured"; a malformed one is swallowed by
-        // tryContainerClient into the same outcome, so the raw string (account key) is never surfaced.
-        let! connStr = connectionString () |> Result.requireSome notConfiguredMessage
         let config = readCanvasShareConfig ()
-        let! containerClient =
-            tryContainerClient connStr config.Container
-            |> Result.requireSome notConfiguredMessage
-        // The try/with stays around the Azure SDK calls (a genuine interop boundary); the two
-        // Option→Error gates above are flattened into the asyncResult track.
+        let! accountName = config.AccountName |> Result.requireSome notConfiguredMessage
+        // The try/with stays around the Azure SDK calls (a genuine interop boundary); the
+        // Option→Error gate above is flattened into the asyncResult track.
         try
+            let serviceClient = serviceClient accountName
+            // Backdate the start to absorb clock skew between this host and the storage service, and
+            // derive the expiry from it so the window stays strictly inside Azure's 7-day limit on a
+            // user delegation key — at the maximum configured expiry, `expiresOn` is a few minutes
+            // short of `now + 7d` rather than exactly on the boundary, which the service rejects.
+            let startsOn = DateTimeOffset.UtcNow.AddMinutes(-5.0)
+            let expiresOn = startsOn.AddDays(float config.DefaultExpiryDays)
+            let! delegationKey =
+                // The explicit CancellationToken selects the (startsOn, expiresOn, ct) overload; with
+                // two arguments F# binds the same-arity (options, ct) overload instead and fails.
+                serviceClient.GetUserDelegationKeyAsync(
+                    Nullable startsOn, expiresOn, Threading.CancellationToken.None)
+                |> Async.AwaitTask
+            let containerClient = serviceClient.GetBlobContainerClient(config.Container)
+            // Create the PRIVATE container on demand (idempotent) so a fresh account/subscription
+            // works on first publish — the SDK never auto-creates it, and a missing container
+            // otherwise fails the upload with 404 ContainerNotFound. PublicAccessType.None keeps
+            // anonymous access off at the container level (Decision #4).
+            let! _ = containerClient.CreateIfNotExistsAsync(PublicAccessType.None) |> Async.AwaitTask
             let blob = blobName (generatePrefix ()) filename
             let blobClient = containerClient.GetBlobClient(blob)
-            // A SAS can only be signed from a shared-key (account-key) credential; a connection
-            // string carrying only a SAS token can't. Fail clearly instead of throwing, and
-            // before uploading so we don't leave an unreachable orphan blob.
-            if not blobClient.CanGenerateSasUri then
-                return! Error "Canvas sharing needs an account-key connection string so a read-only link can be signed."
-            else
-                // Create the PRIVATE container on demand (idempotent) so a fresh account/subscription
-                // works on first publish — the SDK never auto-creates it, and a missing container
-                // otherwise fails the upload with 404 ContainerNotFound. PublicAccessType.None keeps
-                // anonymous access off at the container level (Decision #4). Placed AFTER the
-                // CanGenerateSasUri gate so a SAS-only credential is still refused offline before any
-                // I/O, and inside the existing try so a create failure (e.g. a key lacking create
-                // permission) surfaces via the same RequestFailedException handler — no new error path.
-                let! _ = containerClient.CreateIfNotExistsAsync(PublicAccessType.None) |> Async.AwaitTask
-                // charset is declared so non-ASCII doc content isn't mojibaked when the blob is
-                // opened standalone (the export injects no <meta charset>).
-                let headers = BlobHttpHeaders(ContentType = "text/html; charset=utf-8")
-                use stream = new MemoryStream(Encoding.UTF8.GetBytes html)
-                let! _ =
-                    blobClient.UploadAsync(stream, BlobUploadOptions(HttpHeaders = headers))
-                    |> Async.AwaitTask
-                // DefaultExpiryDays is clamped to [1, maxCanvasShareExpiryDays] by readCanvasShareConfig,
-                // so AddDays can't overflow DateTimeOffset (year 9999) and orphan the blob just uploaded.
-                let expiresOn = DateTimeOffset.UtcNow.AddDays(float config.DefaultExpiryDays)
-                let sasUri = blobClient.GenerateSasUri(buildSasBuilder config.Container blob expiresOn)
-                return sasUri.ToString()
+            // charset is declared so non-ASCII doc content isn't mojibaked when the blob is
+            // opened standalone (the export injects no <meta charset>).
+            let headers = BlobHttpHeaders(ContentType = "text/html; charset=utf-8")
+            use stream = new MemoryStream(Encoding.UTF8.GetBytes html)
+            let! _ =
+                blobClient.UploadAsync(stream, BlobUploadOptions(HttpHeaders = headers))
+                |> Async.AwaitTask
+            return
+                buildSignedBlobUrl
+                    blobClient.Uri
+                    accountName
+                    delegationKey.Value
+                    (buildSasBuilder config.Container blob expiresOn)
         with
+        | :? AuthenticationFailedException as ex ->
+            // The identity itself is unusable (expired/absent az login). Log the type only — an
+            // Entra failure message can carry tenant and account detail.
+            Log.log "CanvasShare" $"Publish failed to authenticate: {ex.GetType().Name}"
+            return! Error signInRequiredMessage
         | :? Azure.RequestFailedException as ex ->
-            // Log/return the status + error code only (e.g. 404 ContainerNotFound) — a safe,
-            // actionable token that carries no secret; the full message can echo request
-            // details.
+            // Log/return the status + error code only (e.g. 404 ContainerNotFound, 403
+            // AuthorizationPermissionMismatch when the role assignment is missing) — a safe,
+            // actionable token; the full message can echo request details.
             Log.log "CanvasShare" $"Publish to container '{config.Container}' failed: HTTP {ex.Status} {ex.ErrorCode}"
             return! Error $"Failed to publish shared doc: {ex.ErrorCode} (HTTP {ex.Status})."
         | ex ->

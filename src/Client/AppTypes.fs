@@ -122,7 +122,7 @@ type Msg =
     // permission, or an unsupported clipboard API) never made. DismissShareNotice clears the banner.
     | ShareCanvasDoc of scopedKey: string * filename: string
     | ShareCanvasDocResult of scopedKey: string * filename: string * Result<CanvasShareResult, string>
-    | ClipboardWriteResult of url: string * Result<unit, string>
+    | ClipboardWriteResult of scopedKey: string * filename: string * url: string * Result<unit, string>
     | DismissShareNotice
     | NavigateCanvasDoc of filename: string
     | CanvasMessageReceived of payload: string

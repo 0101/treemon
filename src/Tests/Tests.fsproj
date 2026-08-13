@@ -98,7 +98,6 @@
     <Compile Include="HttpSecurityTests.fs" />
     <Compile Include="CanvasExportTests.fs" />
     <Compile Include="CanvasShareTests.fs" />
-    <Compile Include="CanvasShareAzuriteTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
