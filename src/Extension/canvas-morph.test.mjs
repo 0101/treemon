@@ -20,6 +20,7 @@ const {
   applyHighlight,
   captureEditableState,
   restoreEditableState,
+  servedContentHash,
 } = morph;
 
 /** Minimal node stand-ins — the selection logic only needs tree shape, tag names, and classes. */
@@ -83,6 +84,8 @@ function editableControl(tagName, {
   name = "",
   value = "",
   defaultValue = "",
+  checked = false,
+  defaultChecked = false,
   selectionStart = 0,
   selectionEnd = 0,
   selectionDirection = "none",
@@ -94,6 +97,8 @@ function editableControl(tagName, {
     name,
     value,
     defaultValue,
+    checked,
+    defaultChecked,
     disabled: false,
     selectionStart,
     selectionEnd,
@@ -377,6 +382,53 @@ test("dirty inputs and textareas survive while untouched controls accept authore
   assert.equal(untouched.value, "After");
 });
 
+test("dirty checkbox and radio state survives while untouched controls accept authored state", () => {
+  const alerts = editableControl("INPUT", {
+    type: "checkbox",
+    id: "alerts",
+    checked: false,
+    defaultChecked: true,
+  });
+  const modeA = editableControl("INPUT", {
+    type: "radio",
+    id: "mode-a",
+    name: "mode",
+    checked: false,
+    defaultChecked: true,
+  });
+  const modeB = editableControl("INPUT", {
+    type: "radio",
+    id: "mode-b",
+    name: "mode",
+    checked: true,
+    defaultChecked: false,
+  });
+  const untouched = editableControl("INPUT", {
+    type: "checkbox",
+    id: "untouched-check",
+    checked: false,
+    defaultChecked: false,
+  });
+  const root = editableRoot(alerts, modeA, modeB, untouched);
+  const snapshot = captureEditableState(root, modeB);
+
+  alerts.checked = alerts.defaultChecked = true;
+  modeA.checked = modeA.defaultChecked = true;
+  modeB.checked = modeB.defaultChecked = false;
+  untouched.checked = untouched.defaultChecked = true;
+
+  restoreEditableState(root, snapshot);
+
+  assert.equal(alerts.checked, false);
+  assert.equal(alerts.defaultChecked, true);
+  assert.equal(modeA.checked, false);
+  assert.equal(modeA.defaultChecked, true);
+  assert.equal(modeB.checked, true);
+  assert.equal(modeB.defaultChecked, false);
+  assert.equal(modeB.focused, true);
+  assert.equal(untouched.checked, true);
+});
+
 test("a replaced unnamed control is restored only when the control layout still matches", () => {
   const original = editableControl("INPUT", {
     value: "User value",
@@ -402,4 +454,38 @@ test("a replaced unnamed control is restored only when the control layout still 
   });
   restoreEditableState(editableRoot(shifted, authored), snapshot);
   assert.equal(authored.value, "Authored value");
+});
+
+test("a retained control is not restored after its id or name changes", () => {
+  const control = editableControl("INPUT", {
+    id: "old-id",
+    name: "old-name",
+    value: "User value",
+    defaultValue: "Agent value",
+  });
+  const root = editableRoot(control);
+  const snapshot = captureEditableState(root, null);
+
+  control.id = "new-id";
+  control.name = "new-name";
+  control.value = control.defaultValue = "Different field";
+
+  restoreEditableState(root, snapshot);
+
+  assert.equal(control.value, "Different field");
+});
+
+test("the refetch content hash comes from the served response header", () => {
+  const servedHash = "b".repeat(64);
+  const response = {
+    headers: {
+      get: (name) => name === "X-Treemon-Canvas-Content-Hash" ? servedHash : null,
+    },
+  };
+
+  assert.equal(servedContentHash(response), servedHash);
+  assert.throws(
+    () => servedContentHash({ headers: { get: () => null } }),
+    /no valid content hash/
+  );
 });

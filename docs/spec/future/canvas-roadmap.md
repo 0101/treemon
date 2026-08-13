@@ -134,7 +134,9 @@ Recorded so future readers know these were evaluated, not missed.
 - **Morph state preservation — shipped.** Idiomorph preserves matched node identity but
   resynchronizes form values from authored markup. The injected morph controller snapshots dirty
   `<input>`/`<textarea>` values before each morph and restores them afterward while untouched fields
-  accept the new authored value; see `docs/spec/canvas-pane.md`.
+  accept the new authored value; dirty checkbox/radio `checked` state is likewise preserved across
+  the morph while untouched checkbox/radio controls accept the authored `checked` state; see
+  `docs/spec/canvas-pane.md`.
 - **`worktreeId` stable-identity hashing (`base64url(sha256(normalizedPath))`) — superseded.**
   The idea was to replace the raw worktree path used as canvas identity. Today `iframeSrc`
   (`CanvasPane.fs`) builds `http://127.0.0.1:5002/{encodeURIComponent(worktreePath)}/{filename}`

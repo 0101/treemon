@@ -2,9 +2,9 @@
  * Canvas doc morph controller.
  *
  * Listens for the pane's `content-updated` signal, re-fetches the doc, and morphs it into place
- * with idiomorph so scroll position and focus survive an update. Dirty input and textarea values
- * are snapshotted immediately before the morph and restored afterward; untouched controls still
- * receive the new authored value.
+ * with idiomorph so scroll position and focus survive an update. Dirty input and textarea values,
+ * plus checkbox/radio checked state, are snapshotted immediately before the morph and restored
+ * afterward; untouched controls still receive the new authored state.
  *
  * It also marks what the update changed. Idiomorph is mutation-minimal — it writes a text node or
  * an attribute only when the value actually differs — so a MutationObserver wrapped around the
@@ -28,6 +28,7 @@
   'use strict';
 
   var HIGHLIGHT_CLASS = 'canvas-updated';
+  var CONTENT_HASH_HEADER = 'X-Treemon-Canvas-Content-Hash';
 
   /** Beyond this share of the doc's blocks the edit is a whole-file rewrite, and highlighting
    *  everything says nothing — so highlight nothing instead. */
@@ -44,8 +45,9 @@
   var TEXT_NODE = 3;
   var COMMENT_NODE = 8;
   var EXCLUDED_INPUT_TYPES = new Set([
-    'button', 'checkbox', 'file', 'hidden', 'image', 'radio', 'reset', 'submit'
+    'button', 'file', 'hidden', 'image', 'reset', 'submit'
   ]);
+  var CHECKABLE_INPUT_TYPES = new Set(['checkbox', 'radio']);
   var SELECTION_INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'password']);
 
   function text(value) {
@@ -81,6 +83,10 @@
 
   function editableControls(root) {
     return nodesOf(root.querySelectorAll('input, textarea')).filter(isEditableControl);
+  }
+
+  function isCheckableControl(control) {
+    return control.tagName === 'INPUT' && CHECKABLE_INPUT_TYPES.has(control.type);
   }
 
   function controlIdentity(control) {
@@ -135,17 +141,22 @@
     return {
       layout: controls.map(controlIdentity),
       fields: controls.map(function (control, index) {
-        if (control.value === control.defaultValue) return null;
-        return {
+        var checkable = isCheckableControl(control);
+        if (checkable
+          ? control.checked === control.defaultChecked
+          : control.value === control.defaultValue) return null;
+        var state = {
           element: control,
           identity: controlIdentity(control),
           uniqueId: uniqueIdentityValue(controls, control, 'id'),
           uniqueName: uniqueIdentityValue(controls, control, 'name'),
           index: index,
-          value: control.value,
           active: control === focused,
           selection: selectionState(control, focused)
         };
+        if (checkable) state.checked = control.checked;
+        else state.value = control.value;
+        return state;
       }).filter(Boolean)
     };
   }
@@ -161,7 +172,7 @@
     if (state.element &&
         state.element.isConnected &&
         root.contains(state.element) &&
-        sameControlType(state.element, state.identity)) {
+        sameControlIdentity(controlIdentity(state.element), state.identity)) {
       return state.element;
     }
 
@@ -186,7 +197,11 @@
       var control = matchingControl(root, controls, state, layoutMatches);
       if (!control) return;
 
-      control.value = state.value;
+      if (Object.prototype.hasOwnProperty.call(state, 'checked')) {
+        control.checked = state.checked;
+      } else {
+        control.value = state.value;
+      }
 
       if (state.active && !control.disabled) {
         control.focus({ preventScroll: true });
@@ -199,6 +214,14 @@
         }
       }
     });
+  }
+
+  function servedContentHash(response) {
+    var contentHash = response.headers.get(CONTENT_HASH_HEADER);
+    if (!/^[0-9a-f]{64}$/.test(contentHash || '')) {
+      throw new Error('Canvas refetch returned no valid content hash');
+    }
+    return contentHash;
   }
 
   function isVisibleTextChange(record) {
@@ -374,19 +397,22 @@
           // fetch only rejects on network failure, so an error page would otherwise be morphed in
           // as the doc's entire content.
           if (!response.ok) throw new Error('Canvas refetch failed: ' + response.status);
-          return response.text();
+          var contentHash = servedContentHash(response);
+          return response.text().then(function (html) {
+            return { html: html, contentHash: contentHash };
+          });
         })
-        .then(function (html) {
+        .then(function (refetched) {
           if (mine !== generation) return;
           pendingMorph = null;
-          var incoming = new DOMParser().parseFromString(html, 'text/html');
+          var incoming = new DOMParser().parseFromString(refetched.html, 'text/html');
           highlighted = morphAndHighlight(document.body, incoming.body.innerHTML, highlighted);
           window.dispatchEvent(new Event('canvas-morph-complete'));
           parent.postMessage({
             action: 'morph-complete',
             scopedKey: morph.scopedKey,
             filename: morph.filename,
-            contentHash: morph.contentHash
+            contentHash: refetched.contentHash
           }, '*');
         })
         .catch(function (err) {
@@ -424,7 +450,8 @@
       selectTargets: selectTargets,
       applyHighlight: applyHighlight,
       captureEditableState: captureEditableState,
-      restoreEditableState: restoreEditableState
+      restoreEditableState: restoreEditableState,
+      servedContentHash: servedContentHash
     };
   }
 })();

@@ -448,6 +448,32 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script))
 
+    [<Test>]
+    member _.``served AgentDoc reports the hash of the exact raw bytes read``() =
+        withTempDir "canvas-served-content-hash" (fun worktreePath ->
+            let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
+            Directory.CreateDirectory(canvasDir) |> ignore
+            let rawBytes =
+                System.Text.Encoding.UTF8.GetBytes(
+                    "<!doctype html><html><head><title>status</title></head><body>served bytes</body></html>")
+            File.WriteAllBytes(Path.Combine(canvasDir, "status.html"), rawBytes)
+
+            let context = Microsoft.AspNetCore.Http.DefaultHttpContext()
+            use responseBody = new MemoryStream()
+            context.Response.Body <- responseBody
+
+            serveCanvasDoc context worktreePath "status.html"
+            |> _.GetAwaiter().GetResult()
+
+            let expectedHash =
+                System.Security.Cryptography.SHA256.HashData(rawBytes)
+                |> System.Convert.ToHexString
+                |> _.ToLowerInvariant()
+            Assert.That(
+                context.Response.Headers[contentHashHeaderName].ToString(),
+                Is.EqualTo(expectedHash),
+                "The morph completion identity must describe the raw file bytes this response actually served"))
+
 // ── injectUrl loopback guard (Finding 10 / SSRF) ──────────────────────────────
 // injectUrl is registered then used as a POST target by SessionBridge, so a non-loopback value
 // would turn /api/canvas/register into an SSRF primitive. Only loopback hosts are accepted.

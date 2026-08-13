@@ -599,7 +599,7 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                                 { ScopedKey = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.scopedKey"
                                   Filename = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename"
                                   ContentHash = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.contentHash" }
-                            Fable.Core.JS.console.log ($"[canvas] morph-complete received: {morph.ScopedKey}/{morph.Filename}")
+                            Fable.Core.JS.console.log "[canvas] morph-complete received"
                             onMorphComplete morph
                         else
                             Fable.Core.JS.console.warn "[canvas] morph-complete DROPPED: invalid identity or not from the active canvas doc iframe"
