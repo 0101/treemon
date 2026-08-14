@@ -44,3 +44,9 @@ type DocJsError =
     { ScopedKey: string
       Filename: string
       Message: string }
+
+/// Identity and target content version for one in-place AgentDoc morph.
+type CanvasMorph =
+    { ScopedKey: string
+      Filename: string
+      ContentHash: string }

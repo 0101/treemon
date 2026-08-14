@@ -93,6 +93,21 @@ let private defaultModel : Model =
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
       OverviewHistoryRequestInFlight = None }
 
+let private dispatchedMsgs cmd : Msg list =
+    let mutable captured = [] // Elmish effects expose messages only through their dispatch callback.
+    let rec execute = function
+        | [] -> ()
+        | effect :: remaining ->
+            effect (fun message -> captured <- message :: captured)
+            execute remaining
+    execute cmd
+    List.rev captured
+
+let private morph scopedKey filename contentHash =
+    { ScopedKey = scopedKey
+      Filename = filename
+      ContentHash = contentHash }
+
 /// Calls update and returns the model, ignoring the Cmd. Tolerates the
 /// Fable.Remoting.Client proxy build failing under .NET, which surfaces as a
 /// TypeInitializationException (eager static init) or an ArgumentException (the
@@ -588,6 +603,18 @@ type MarkDocViewedTests() =
         Assert.That(viewedHash, Is.EqualTo("hash-v2"), "Should update to current content hash")
 
     [<Test>]
+    member _.``MarkDocViewed skips persistence when the current hash is already recorded``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
+                Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "hash-v2" ] ] }
+
+        let updated, cmd = update (MarkDocViewed ("r/feat", "status.html")) model
+
+        Assert.That(updated, Is.EqualTo(model))
+        Assert.That(cmd, Is.Empty, "a duplicate morph-complete must not trigger another server write")
+
+    [<Test>]
     member _.``MarkDocViewed creates new entry when scoped key not in LastViewedHashes``() =
         let model =
             { defaultModel with
@@ -824,13 +851,6 @@ type SystemViewAwarenessTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type NavigateCanvasDocTests() =
-
-    // Run the Elmish effects and collect the messages they dispatch. Used only on the accept path,
-    // whose Cmd is Cmd.ofMsg — it forces neither the (lazy) Remoting proxy nor Fable.Core.JS.
-    let dispatchedMsgs cmd : Msg list =
-        let captured = ResizeArray<Msg>()
-        cmd |> List.iter (fun effect -> effect (fun m -> captured.Add m))
-        List.ofSeq captured
 
     [<Test>]
     member _.``a known doc filename switches to that tab``() =
@@ -1265,13 +1285,6 @@ type MostRecentUnviewedDocTests() =
 [<Category("Fast")>]
 type FocusRetargetTests() =
 
-    // Run the Cmd's effects and collect the messages they dispatch. The retarget Cmds are only
-    // Cmd.ofMsg/Cmd.none, so this forces neither the (lazy) Remoting proxy nor Fable.Core.JS.
-    let dispatchedMsgs cmd : Msg list =
-        let captured = ResizeArray<Msg>()
-        cmd |> List.iter (fun effect -> effect (fun m -> captured.Add m))
-        List.ofSeq captured
-
     let docAt filename hash (time: DateTimeOffset) =
         { Filename = filename; ContentHash = hash; LastModified = time; OwnerSessionId = None; Kind = AgentDoc }
 
@@ -1481,6 +1494,221 @@ type LoadLastViewedHashesTests() =
             "the server value is kept (not overwritten by the current hash), so the update still registers")
         Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,
             "a doc updated since the server last saw it must remain unviewed")
+
+
+// ── Mounted AgentDoc hash lifecycle / morph gating ───────────────────
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type MountedAgentDocHashTests() =
+
+    let model docs active =
+        { defaultModel with
+            Repos = [ makeRepo "r" [ makeWorktree "r" "feat" docs ] ]
+            FocusedElement = Some (Card "r/feat")
+            Canvas.CanvasPaneOpen = true
+            Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", active ] }
+
+    let morphRequests cmd =
+        dispatchedMsgs cmd
+        |> List.choose (function MorphActiveDoc request -> Some request | _ -> None)
+
+    [<Test>]
+    member _.``switching back to a synchronized mounted doc does not morph``() =
+        let m =
+            { model [ makeDoc "a.html" "h1"; makeDoc "b.html" "h2" ] "b.html" with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "b.html"; "a.html" ] ]
+                Canvas.MountedAgentDocHashes =
+                    Map.ofList [ ("r/feat", "a.html"), "h1"; ("r/feat", "b.html"), "h2" ] }
+        let updated, cmd = update (SelectCanvasDoc ("r/feat", "a.html")) m
+        let messages = dispatchedMsgs cmd
+        Assert.That(messages |> List.choose (function MorphActiveDoc request -> Some request | _ -> None), Is.Empty)
+        Assert.That(messages |> List.contains (MarkDocViewed ("r/feat", "a.html")), Is.True)
+        Assert.That(updated.Canvas.MountedAgentDocHashes["r/feat", "a.html"], Is.EqualTo("h1"))
+
+    [<Test>]
+    member _.``switching back to a changed mounted doc morphs without claiming it viewed``() =
+        let m =
+            { model [ makeDoc "a.html" "h2"; makeDoc "b.html" "hb" ] "b.html" with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "b.html"; "a.html" ] ]
+                Canvas.MountedAgentDocHashes =
+                    Map.ofList [ ("r/feat", "a.html"), "h1"; ("r/feat", "b.html"), "hb" ] }
+        let updated, cmd = update (SelectCanvasDoc ("r/feat", "a.html")) m
+        let messages = dispatchedMsgs cmd
+        Assert.That(
+            messages |> List.choose (function MorphActiveDoc request -> Some request | _ -> None),
+            Is.EqualTo([ morph "r/feat" "a.html" "h2" ]))
+        Assert.That(messages |> List.exists (function MarkDocViewed _ -> true | _ -> false), Is.False)
+        Assert.That(updated.Canvas.MountedAgentDocHashes["r/feat", "a.html"], Is.EqualTo("h1"),
+            "the loaded hash advances only after a matching successful completion")
+
+    [<Test>]
+    member _.``a fresh tab mount seeds its current hash and retains the previous active iframe``() =
+        let m =
+            { model [ makeDoc "a.html" "h1"; makeDoc "b.html" "h2" ] "a.html" with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html" ] ]
+                Canvas.MountedAgentDocHashes = Map.ofList [ ("r/feat", "a.html"), "h1" ] }
+        let updated, cmd = update (SelectCanvasDoc ("r/feat", "b.html")) m
+        Assert.That(morphRequests cmd, Is.Empty)
+        Assert.That(updated.Canvas.VisitedCanvasDocs["r/feat"], Is.EqualTo([ "b.html"; "a.html" ]))
+        Assert.That(updated.Canvas.MountedAgentDocHashes["r/feat", "a.html"], Is.EqualTo("h1"))
+        Assert.That(updated.Canvas.MountedAgentDocHashes["r/feat", "b.html"], Is.EqualTo("h2"))
+
+    [<Test>]
+    member _.``OpenCanvasDoc uses the same stale-aware reveal transition``() =
+        let m =
+            { model [ makeDoc "a.html" "h1"; makeDoc "b.html" "h2" ] "a.html" with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html"; "b.html" ] ]
+                Canvas.MountedAgentDocHashes =
+                    Map.ofList [ ("r/feat", "a.html"), "h1"; ("r/feat", "b.html"), "h1" ] }
+        let _, cmd = update (OpenCanvasDoc ("r/feat", "b.html")) m
+        Assert.That(morphRequests cmd, Is.EqualTo([ morph "r/feat" "b.html" "h2" ]))
+
+    [<Test>]
+    member _.``opening another worktree treats its iframe as a fresh mount``() =
+        let repos =
+            [ makeRepo "r1" [ makeWorktree "r1" "feat" [ makeDoc "a.html" "ha" ] ]
+              makeRepo "r2" [ makeWorktree "r2" "feat" [ makeDoc "b.html" "h2" ] ] ]
+        let m =
+            { defaultModel with
+                Repos = repos
+                FocusedElement = Some (Card "r1/feat")
+                Canvas.CanvasPaneOpen = true
+                Canvas.ActiveCanvasDoc =
+                    Map.ofList [ "r1/feat", "a.html"; "r2/feat", "b.html" ]
+                Canvas.VisitedCanvasDocs =
+                    Map.ofList [ "r1/feat", [ "a.html" ]; "r2/feat", [ "b.html" ] ]
+                Canvas.MountedAgentDocHashes =
+                    Map.ofList [ ("r1/feat", "a.html"), "ha"; ("r2/feat", "b.html"), "old" ] }
+        let updated, cmd = update (OpenCanvasDoc ("r2/feat", "b.html")) m
+        Assert.That(morphRequests cmd, Is.Empty)
+        Assert.That(updated.Canvas.MountedAgentDocHashes, Is.EqualTo(Map.ofList [ ("r2/feat", "b.html"), "h2" ]))
+
+    [<Test>]
+    member _.``a closed mounted doc requests its catch-up morph when shown``() =
+        let m =
+            { model [ makeDoc "a.html" "h2" ] "a.html" with
+                Canvas.CanvasPaneOpen = false
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html" ] ]
+                Canvas.MountedAgentDocHashes = Map.ofList [ ("r/feat", "a.html"), "h1" ] }
+        Assert.That(
+            visibleDocSyncMsg { m with Canvas.CanvasPaneOpen = true },
+            Is.EqualTo(Some (MorphActiveDoc (morph "r/feat" "a.html" "h2"))))
+
+    [<Test>]
+    member _.``a disk revert to the loaded hash cancels the morph``() =
+        let m =
+            { model [ makeDoc "a.html" "h1" ] "a.html" with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html" ] ]
+                Canvas.MountedAgentDocHashes = Map.ofList [ ("r/feat", "a.html"), "h1" ] }
+        Assert.That(visibleDocSyncMsg m, Is.EqualTo(Some (MarkDocViewed ("r/feat", "a.html"))))
+
+    [<Test>]
+    member _.``morph completion updates only its mounted doc and marks only the visible doc viewed``() =
+        let m =
+            { model [ makeDoc "a.html" "h2"; makeDoc "b.html" "hb2" ] "a.html" with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html"; "b.html" ] ]
+                Canvas.MountedAgentDocHashes =
+                    Map.ofList [ ("r/feat", "a.html"), "h1"; ("r/feat", "b.html"), "hb1" ] }
+        let afterA, cmdA = update (MorphComplete (morph "r/feat" "a.html" "h2")) m
+        Assert.That(afterA.Canvas.MountedAgentDocHashes["r/feat", "a.html"], Is.EqualTo("h2"))
+        Assert.That(dispatchedMsgs cmdA, Is.EqualTo([ MarkDocViewed ("r/feat", "a.html") ]))
+
+        let afterB, cmdB = update (MorphComplete (morph "r/feat" "b.html" "hb2")) afterA
+        Assert.That(afterB.Canvas.MountedAgentDocHashes["r/feat", "b.html"], Is.EqualTo("hb2"))
+        Assert.That(dispatchedMsgs cmdB, Is.Empty,
+            "a scoped completion must not mark whichever other document is currently visible")
+
+    [<Test>]
+    member _.``archive fallback morphs a changed mounted replacement``() =
+        let m =
+            { model [ makeDoc "a.html" "h1"; makeDoc "b.html" "h2" ] "a.html" with
+                Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", [ "a.html"; "b.html" ] ]
+                Canvas.MountedAgentDocHashes =
+                    Map.ofList [ ("r/feat", "a.html"), "h1"; ("r/feat", "b.html"), "h1" ] }
+        let updated, cmd = update (ArchiveCanvasDocResult ("r/feat", "a.html", Ok ())) m
+        Assert.That(updated.Canvas.ActiveCanvasDoc["r/feat"], Is.EqualTo("b.html"))
+        Assert.That(morphRequests cmd, Is.EqualTo([ morph "r/feat" "b.html" "h2" ]))
+        Assert.That(updated.Canvas.MountedAgentDocHashes |> Map.containsKey ("r/feat", "a.html"), Is.False)
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type MountedAgentDocRefreshTests() =
+
+    let baseModel repos paneOpen active visited mounted =
+        { defaultModel with
+            Repos = repos
+            FocusedElement = Some (Card "r/feat")
+            Canvas.CanvasPaneOpen = paneOpen
+            Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", active ]
+            Canvas.VisitedCanvasDocs = Map.ofList [ "r/feat", visited ]
+            Canvas.MountedAgentDocHashes = mounted }
+
+    [<Test>]
+    member _.``a delayed hidden-doc hash change remains unsynchronized regardless of file age``() =
+        let now = DateTimeOffset(2026, 8, 12, 12, 0, 0, TimeSpan.Zero)
+        let oldRepos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeDoc "a.html" "ha"
+                { makeDoc "b.html" "h1" with LastModified = now.AddMinutes(-10.0) } ] ] ]
+        let newRepos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeDoc "a.html" "ha"
+                { makeDoc "b.html" "h2" with LastModified = now.AddMinutes(-10.0) } ] ] ]
+        let m =
+            baseModel
+                oldRepos
+                true
+                "a.html"
+                [ "a.html"; "b.html" ]
+                (Map.ofList [ ("r/feat", "a.html"), "ha"; ("r/feat", "b.html"), "h1" ])
+        let updated = reconcileMountedDocs m { m with Repos = newRepos }
+        Assert.That(updated.Canvas.MountedAgentDocHashes["r/feat", "b.html"], Is.EqualTo("h1"))
+        Assert.That(
+            needsMorph
+                (renderedAgentDocHashes updated.Repos updated.FocusedElement updated.Canvas.TargetWorktree updated.Canvas.ActiveCanvasDoc updated.Canvas.VisitedCanvasDocs)
+                updated.Canvas.MountedAgentDocHashes
+                ("r/feat", "b.html"),
+            Is.True)
+
+    [<Test>]
+    member _.``a changed iframe stays stale while the pane is closed and morphs on reopen``() =
+        let now = DateTimeOffset(2026, 8, 12, 12, 0, 0, TimeSpan.Zero)
+        let oldRepos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
+        let newRepos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h2" ] ] ]
+        let m =
+            baseModel
+                oldRepos
+                false
+                "a.html"
+                [ "a.html" ]
+                (Map.ofList [ ("r/feat", "a.html"), "h1" ])
+        let updated = reconcileMountedDocs m { m with Repos = newRepos }
+        Assert.That(updated.Canvas.MountedAgentDocHashes["r/feat", "a.html"], Is.EqualTo("h1"))
+        Assert.That(
+            visibleDocSyncMsg { updated with Canvas.CanvasPaneOpen = true },
+            Is.EqualTo(Some (MorphActiveDoc (morph "r/feat" "a.html" "h2"))))
+
+    [<Test>]
+    member _.``an absent-to-present old doc is a fresh mount rather than a stale update``() =
+        let now = DateTimeOffset(2026, 8, 12, 12, 0, 0, TimeSpan.Zero)
+        let oldRepos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "ha" ] ] ]
+        let newRepos =
+            [ makeRepo "r" [ makeWorktree "r" "feat" [
+                makeDoc "a.html" "ha"
+                { makeDoc "b.html" "hb" with LastModified = now.AddHours(-1.0) } ] ] ]
+        let m =
+            baseModel
+                oldRepos
+                true
+                "a.html"
+                [ "a.html"; "b.html" ]
+                (Map.ofList [ ("r/feat", "a.html"), "ha" ])
+        let updated = reconcileMountedDocs m { m with Repos = newRepos }
+        Assert.That(updated.Canvas.MountedAgentDocHashes["r/feat", "b.html"], Is.EqualTo("hb"))
 
 
 // ── SelectOverviewWorktree archived-row guard (finding F4) ───────────────────

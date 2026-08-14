@@ -27,8 +27,69 @@ let isKnownCanvasDoc (model: Model) (scopedKey: string) (filename: string) : boo
     |> Option.map (fun wt -> wt.CanvasDocs |> List.exists (fun d -> d.Filename = filename))
     |> Option.defaultValue false
 
-let markVisibleDocCmd (model: Model) : Cmd<Msg> =
-    CanvasState.markVisibleDocCmd MarkDocViewed model.Repos model.FocusedElement model.Canvas.TargetWorktree model.Canvas.ActiveCanvasDoc
+let private renderedAgentDocHashes (model: Model) =
+    CanvasState.renderedAgentDocHashes
+        model.Repos
+        model.FocusedElement
+        model.Canvas.TargetWorktree
+        model.Canvas.ActiveCanvasDoc
+        model.Canvas.VisitedCanvasDocs
+
+let reconcileMountedDocs (previous: Model) (current: Model) =
+    let mounted =
+        CanvasState.reconcileMountedAgentDocHashes
+            (renderedAgentDocHashes previous)
+            (renderedAgentDocHashes current)
+            previous.Canvas.MountedAgentDocHashes
+    { current with Canvas.MountedAgentDocHashes = mounted }
+
+let visibleDocSyncMsg (model: Model) =
+    activeVisibleDoc model
+    |> Option.map (fun (scopedKey, filename) ->
+        let key = scopedKey, filename
+        let rendered = renderedAgentDocHashes model
+        if CanvasState.needsMorph rendered model.Canvas.MountedAgentDocHashes key then
+            MorphActiveDoc
+                { ScopedKey = scopedKey
+                  Filename = filename
+                  ContentHash = rendered[key] }
+        else
+            MarkDocViewed key)
+
+let syncVisibleDocCmd model =
+    visibleDocSyncMsg model |> Option.map Cmd.ofMsg |> Option.defaultValue Cmd.none
+
+type private RevealMode =
+    | Visible
+    | Hidden
+
+let private revealCanvasDoc
+    mode
+    (scopedKey: string)
+    (filename: string)
+    (previous: Model)
+    (current: Model) =
+    let visitedWithPrevious =
+        match activeVisibleDoc previous with
+        | Some (previousScopedKey, previousFilename)
+            when previousScopedKey = scopedKey
+                 && isKnownCanvasDoc current previousScopedKey previousFilename ->
+            CanvasState.touchVisitedDoc
+                scopedKey
+                previousFilename
+                current.Canvas.VisitedCanvasDocs
+        | _ -> current.Canvas.VisitedCanvasDocs
+    let selected =
+        { current with
+            Canvas.DocError = None
+            Canvas.ActiveCanvasDoc = current.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
+            Canvas.VisitedCanvasDocs =
+                CanvasState.touchVisitedDoc scopedKey filename visitedWithPrevious }
+        |> reconcileMountedDocs previous
+    selected,
+    match mode with
+    | Visible -> syncVisibleDocCmd selected
+    | Hidden -> Cmd.none
 
 let launchCanvasSession (scopedKey: string) (model: Model) =
     match findWorktree scopedKey model with
@@ -45,10 +106,13 @@ let launchCanvasSession (scopedKey: string) (model: Model) =
 
 let toggleCanvasPane (model: Model) =
     let newState = not model.Canvas.CanvasPaneOpen
-    { model with Canvas.CanvasPaneOpen = newState },
+    let updated =
+        { model with Canvas.CanvasPaneOpen = newState }
+        |> reconcileMountedDocs model
+    updated,
     Cmd.batch [
         Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen newState (fun _ -> NoOp)
-        if newState then markVisibleDocCmd model else Cmd.none
+        if newState then syncVisibleDocCmd updated else Cmd.none
     ]
 
 let setCanvasPosition (position: CanvasPosition) (model: Model) =
@@ -60,36 +124,25 @@ let setCanvasSize (size: CanvasSize) (model: Model) =
     Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasSize size (fun _ -> NoOp)
 
 let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
-    let wasAlreadyVisited =
-        model.Canvas.VisitedCanvasDocs
-        |> Map.tryFind scopedKey
-        |> Option.defaultValue []
-        |> List.contains filename
-    { model with
-        // Doc-scoped error: a tab switch must never carry a stale error from the doc we're
-        // leaving into the one we're showing, so clear it here (it reappears only if the new
-        // doc throws again).
-        Canvas.DocError = None
-        Canvas.TargetWorktree =
-            if model.Canvas.TargetWorktree.IsSome then Some scopedKey
-            else None
-        Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
-        Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
-    Cmd.batch [
-        Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
-        // When switching to a previously hidden iframe, morph it in case content changed while
-        // hidden — but only for AgentDocs. A SystemView (beads dashboard) self-refreshes and is
-        // served without a morph controller, so a morph signal is meaningless for it.
-        if wasAlreadyVisited && CanvasState.canvasDocKind model.Repos scopedKey filename = Some AgentDoc then Cmd.ofMsg MorphActiveDoc
-    ]
+    let targeted =
+        { model with
+            Canvas.TargetWorktree =
+                if model.Canvas.TargetWorktree.IsSome then Some scopedKey
+                else None }
+    revealCanvasDoc
+        (if model.Canvas.CanvasPaneOpen then Visible else Hidden)
+        scopedKey
+        filename
+        model
+        targeted
 
 /// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus selects a
 /// worktree card, that card's active doc is retargeted to its most recently
 /// published *unviewed* AgentDoc (the "select the worktree shows THAT doc" path) — a no-op when the
 /// card was already focused or nothing is unviewed, except that a sticky worktree diff is replaced
-/// by another available doc because Diff is explicit-only. An open pane shows the doc, so it routes
-/// through `selectCanvasDoc` (marks it viewed); a closed pane sets it silently. The idle auto-display
-/// passes `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
+/// by another available doc because Diff is explicit-only. An open pane reveals and synchronizes
+/// the doc; a closed pane selects it without marking it viewed. The idle auto-display passes
+/// `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
 let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
     let previousFocus = model.FocusedElement
     let focused =
@@ -112,44 +165,49 @@ let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : 
                 |> Option.map _.Filename
             | _ -> None
         match unviewedDoc |> Option.orElse nonDiffFallback, focused.Canvas.CanvasPaneOpen with
-        | Some filename, true -> selectCanvasDoc scopedKey filename focused
-        | Some filename, false ->
-            { focused with
-                Canvas.ActiveCanvasDoc = focused.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
-                Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename focused.Canvas.VisitedCanvasDocs },
-            Cmd.none
-        | None, _ -> focused, Cmd.none
-    | _ -> focused, Cmd.none
+        | Some filename, true -> revealCanvasDoc Visible scopedKey filename model focused
+        | Some filename, false -> revealCanvasDoc Hidden scopedKey filename model focused
+        | None, _ -> reconcileMountedDocs model focused, Cmd.none
+    | _ -> reconcileMountedDocs model focused, Cmd.none
 
 let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     let openPane = not model.Canvas.CanvasPaneOpen
     let repos, expanded = expandRepoOwning scopedKey model.Repos
-    { model with
-        Repos = repos
-        FocusedElement = Some (Card scopedKey)
-        Canvas.CanvasPaneOpen = true
-        Canvas.TargetWorktree = None
-        Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
-        Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
+    let opened, revealCmd =
+        revealCanvasDoc
+            Visible
+            scopedKey
+            filename
+            model
+            { model with
+                Repos = repos
+                FocusedElement = Some (Card scopedKey)
+                Canvas.CanvasPaneOpen = true
+                Canvas.TargetWorktree = None }
+    opened,
     Cmd.batch [
         if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
         if expanded then saveCollapsedReposCmd repos
-        Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
+        revealCmd
     ]
 
 let openWorktreeDiff (scopedKey: string) (model: Model) =
     let filename = CanvasState.WorktreeDiffFilename
     if CanvasState.isKnownSystemView model.Repos scopedKey filename then
         let openPane = not model.Canvas.CanvasPaneOpen
-        { model with
-            Canvas.CanvasPaneOpen = true
-            Canvas.DocError = None
-            Canvas.TargetWorktree = Some scopedKey
-            Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.add scopedKey filename
-            Canvas.VisitedCanvasDocs = CanvasState.touchVisitedDoc scopedKey filename model.Canvas.VisitedCanvasDocs },
+        let opened, revealCmd =
+            revealCanvasDoc
+                Visible
+                scopedKey
+                filename
+                model
+                { model with
+                    Canvas.CanvasPaneOpen = true
+                    Canvas.TargetWorktree = Some scopedKey }
+        opened,
         Cmd.batch [
             if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
-            Cmd.ofMsg (MarkDocViewed (scopedKey, filename))
+            revealCmd
         ]
     else
         model, Cmd.none
@@ -183,19 +241,25 @@ let archiveCanvasDocResult (scopedKey: string) (filename: string) (result: Resul
                     if WorktreePath.value wt.Path = scopedKey && not (List.isEmpty wt.CanvasDocs)
                     then Some wt.CanvasDocs
                     else None))
-        let activeDoc =
-            match remainingDocs with
-            | Some (first :: _) -> model.Canvas.ActiveCanvasDoc |> Map.add scopedKey first.Filename
-            | _ -> model.Canvas.ActiveCanvasDoc |> Map.remove scopedKey
         let visitedDocs =
             let current = model.Canvas.VisitedCanvasDocs |> Map.tryFind scopedKey |> Option.defaultValue []
             let filtered = current |> List.filter (fun f -> f <> filename)
-            match remainingDocs with
-            | Some (first :: _) -> CanvasState.touchVisitedDoc scopedKey first.Filename (model.Canvas.VisitedCanvasDocs |> Map.add scopedKey filtered)
-            | _ ->
-                if List.isEmpty filtered then model.Canvas.VisitedCanvasDocs |> Map.remove scopedKey
-                else model.Canvas.VisitedCanvasDocs |> Map.add scopedKey filtered
-        { model with Repos = repos; Canvas.ActiveCanvasDoc = activeDoc; Canvas.VisitedCanvasDocs = visitedDocs }, Cmd.none
+            if List.isEmpty filtered then model.Canvas.VisitedCanvasDocs |> Map.remove scopedKey
+            else model.Canvas.VisitedCanvasDocs |> Map.add scopedKey filtered
+        let withoutArchived =
+            { model with
+                Repos = repos
+                Canvas.ActiveCanvasDoc = model.Canvas.ActiveCanvasDoc |> Map.remove scopedKey
+                Canvas.VisitedCanvasDocs = visitedDocs }
+        match remainingDocs with
+        | Some (first :: _) ->
+            revealCanvasDoc
+                (if model.Canvas.CanvasPaneOpen then Visible else Hidden)
+                scopedKey
+                first.Filename
+                model
+                withoutArchived
+        | _ -> reconcileMountedDocs model withoutArchived, Cmd.none
     | Error msg ->
         Fable.Core.JS.console.error ("Archive canvas doc error:", msg)
         model, Cmd.none
@@ -422,22 +486,41 @@ let canvasMalformedDocMessage (model: Model) =
 let dismissCanvasDocError (model: Model) =
     { model with Canvas.DocError = None }, Cmd.none
 
-let morphActiveDoc (model: Model) =
+let morphActiveDoc (morph: CanvasMorph) (model: Model) =
     model,
     Cmd.ofEffect (fun _ ->
         Dom.document.querySelector ".canvas-iframe-active"
         |> Option.ofObj
         |> Option.iter (fun iframe ->
-            Fable.Core.JsInterop.emitJsExpr (iframe, CanvasPane.CanvasOrigin) "$0.contentWindow.postMessage({action:'content-updated'},$1)"))
+            Fable.Core.JsInterop.emitJsExpr
+                (iframe, CanvasPane.CanvasOrigin, morph.ScopedKey, morph.Filename, morph.ContentHash)
+                "(function(f,origin,scopedKey,filename,contentHash){if(f.getAttribute('data-canvas-scoped-key')===scopedKey&&f.getAttribute('data-canvas-filename')===filename){f.contentWindow.postMessage({action:'content-updated',scopedKey:scopedKey,filename:filename,contentHash:contentHash},origin)}})($0,$1,$2,$3,$4)"))
 
-let morphComplete (model: Model) =
-    model, markVisibleDocCmd model
+let morphComplete (morph: CanvasMorph) (model: Model) =
+    let key = morph.ScopedKey, morph.Filename
+    let rendered = renderedAgentDocHashes model
+    match CanvasState.agentDocHash model.Repos morph.ScopedKey morph.Filename with
+    | Some currentHash
+        when currentHash = morph.ContentHash
+             && Map.containsKey key rendered
+             && CanvasState.isMounted model.Canvas.MountedAgentDocHashes morph.ScopedKey morph.Filename ->
+        let updated =
+            { model with
+                Canvas.MountedAgentDocHashes =
+                    model.Canvas.MountedAgentDocHashes |> Map.add key currentHash }
+        let markViewedCmd =
+            if updated.Canvas.CanvasPaneOpen && activeVisibleDoc updated = Some key then
+                Cmd.ofMsg (MarkDocViewed key)
+            else
+                Cmd.none
+        updated, markViewedCmd
+    | _ -> model, Cmd.none
 
 let messageListener (dispatch: Dispatch<Msg>) =
     CanvasPane.messageListener
         { Dispatch = CanvasMessageReceived >> dispatch
           SelectDoc = NavigateCanvasDoc >> dispatch
-          OnMorphComplete = fun () -> dispatch MorphComplete
+          OnMorphComplete = MorphComplete >> dispatch
           OnDocError = fun scopedKey filename message -> dispatch (CanvasDocError (scopedKey, filename, message))
           OnMalformedMessage = fun () -> dispatch CanvasMalformedDocMessage
           OnReclaimFocus = fun () -> dispatch (KeyPressed ("Escape", false)) }

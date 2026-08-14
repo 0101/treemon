@@ -7,12 +7,14 @@ open Shared
 
 let private canvasDir path = Path.Combine(path, ".agents", "canvas")
 
+let internal contentHash (content: byte array) =
+    SHA256.HashData(content)
+    |> Convert.ToHexString
+    |> _.ToLowerInvariant()
+
 let private hashFile (filePath: string) =
-    use stream = File.OpenRead(filePath)
-    use sha = SHA256.Create()
-    sha.ComputeHash(stream)
-    |> Array.map _.ToString("x2")
-    |> String.Concat
+    File.ReadAllBytes(filePath)
+    |> contentHash
 
 let scan (worktreePath: string) =
     async {
