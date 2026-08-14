@@ -10,6 +10,9 @@ open System.Text.Json
 open global.Microsoft.AspNetCore.Hosting
 open Shared
 
+[<Literal>]
+let internal contentHashHeaderName = "X-Treemon-Canvas-Content-Hash"
+
 [<CLIMutable>]
 type CanvasRegisterRequest =
     { worktreePath: string
@@ -379,7 +382,7 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
 
 /// Serve a canvas doc from disk with the live injection spliced in, or the matching 400/404 for an
 /// invalid contract filename, a path that escapes the worktree, or a file that isn't there.
-let private serveCanvasDoc (ctx: HttpContext) (worktreePath: string) (filename: string) : System.Threading.Tasks.Task = task {
+let internal serveCanvasDoc (ctx: HttpContext) (worktreePath: string) (filename: string) : System.Threading.Tasks.Task = task {
     match Server.PathUtils.validateCanvasPath worktreePath filename with
     | Error reason ->
         ctx.Response.StatusCode <- 400
@@ -398,6 +401,7 @@ let private serveCanvasDoc (ctx: HttpContext) (worktreePath: string) (filename: 
         let injected = CanvasExport.injectAtHead injection html
         ctx.Response.ContentType <- "text/html; charset=utf-8"
         ctx.Response.Headers["Cache-Control"] <- "no-cache"
+        ctx.Response.Headers[contentHashHeaderName] <- CanvasScanner.contentHash rawBytes
         // Restrict who may frame a canvas doc to local treemon UI origins. The dashboard frames
         // docs cross-origin (loopback, with dev/prod ports that vary), so a port-wildcard
         // loopback allowlist permits the pane while blocking any public page from framing a doc
