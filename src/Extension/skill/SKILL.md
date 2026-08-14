@@ -16,7 +16,7 @@ Use the visual medium to make the result easier to understand, not to move a wal
 
 Write an HTML file to `.agents/canvas/<name>.html`. Treemon scans for new files automatically. The filename must be a **bare name** matching `^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.html$`: start with an ASCII letter or digit, use only ASCII letters, digits, `_`, `.`, and `-`, and keep the `.html` suffix lowercase. Spaces, quotes, control characters, paths, and directory separators are rejected and the file will not enter the canvas inventory. Use a descriptive filename — it becomes the tab name (e.g. `build-status.html`, `test-results.html`).
 
-Give the doc a `<title>` too, with the casing you want to read — e.g. `<title>MTP TestExplorer Hang</title>`. It's the human-readable name used for the **shared link** and for the standalone page's browser tab. The filename stays a lowercase kebab slug (it's the tab id and URL), so a doc with **no** `<title>` can only be shared under a sentence-cased version of that slug (`mtp-testexplorer-hang.html` → "Mtp testexplorer hang"), which can't recover acronyms or camelCase. Setting a `<title>` is how you get "MTP TestExplorer Hang" instead.
+Give the doc a `<title>` too, with the casing you want to read — e.g. `<title>MTP TestExplorer Hang</title>`. It's the human-readable name used for the **shared link** and for the standalone page's browser tab. A lowercase kebab-case filename gives the most readable automatic fallback (`mtp-testexplorer-hang.html` → "Mtp testexplorer hang"), but the contract also permits uppercase letters, `_`, and additional dots. The fallback cannot recover acronyms or camelCase, so setting a `<title>` is how you get "MTP TestExplorer Hang" instead.
 
 ## Styling
 

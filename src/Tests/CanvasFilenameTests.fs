@@ -54,6 +54,27 @@ type CanvasFilenameContractTests() =
         Assert.That(CanvasFilename.pattern, Is.EqualTo(sourcePattern))
 
     [<Test>]
+    member _.``canvas path validation resolves a valid bare filename under the canvas directory``() =
+        let worktreePath = Path.Combine(Path.GetTempPath(), "treemon-canvas-path-validation")
+        let expectedPath = Path.Combine(worktreePath, ".agents", "canvas", "Review-1_2.v3.html")
+
+        match PathUtils.validateCanvasPath worktreePath "Review-1_2.v3.html" with
+        | Ok path -> Assert.That(path, Is.EqualTo(expectedPath))
+        | Error error -> Assert.Fail($"Expected a valid path, but validation failed: {error}")
+
+    [<TestCase("unsafe name.html")>]
+    [<TestCase("nested/report.html")>]
+    [<TestCase(@"nested\report.html")>]
+    [<TestCase("../report.html")>]
+    [<TestCase(@"..\report.html")>]
+    member _.``canvas path validation rejects spaces separators and traversal``(filename: string) =
+        let worktreePath = Path.Combine(Path.GetTempPath(), "treemon-canvas-path-validation")
+
+        match PathUtils.validateCanvasPath worktreePath filename with
+        | Error _ -> ()
+        | Ok path -> Assert.Fail($"Expected '{filename}' to be rejected, but it resolved to '{path}'")
+
+    [<Test>]
     member _.``scanner omits invalid filenames from canvas inventory``() =
         let worktreePath =
             Path.Combine(Path.GetTempPath(), $"treemon-canvas-filenames-{Guid.NewGuid():N}")
