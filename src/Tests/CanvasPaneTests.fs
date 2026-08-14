@@ -135,7 +135,7 @@ type CanvasPaneTests() =
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let iframe = canvasIframe this.Page
+            let iframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             let emptyState = canvasEmpty this.Page
             let! iframeCount = iframe.CountAsync()
             let! emptyCount = emptyState.CountAsync()
@@ -193,22 +193,17 @@ type CanvasPaneTests() =
     // ── Step 5: In-place morph on content change (stable src, no src-swap) ──
 
     [<Test>]
-    member this.``Canvas content update morphs the iframe in place without swapping its src``() =
+    member this.``Switching away and back to an unchanged canvas doc preserves iframe state without morphing``() =
         task {
-            // The product reloads a changed canvas doc IN PLACE: it stabilises the iframe src (no
-            // ?v=<hash> cache-buster) and posts {action:'content-updated'} to the iframe, which
-            // idiomorph-morphs its body — the src never changes (CanvasPane.iframeSrc, App.fs
-            // MorphActiveDoc, CanvasMorphScript/canvas-morph.js; docs/spec/canvas-pane.md).
+            // Switching back to an already-visited AgentDoc tab must NOT morph it when its loaded
+            // hash still matches disk. Dirty input/textarea values survive necessary morphs, but a
+            // gratuitous refetch + DOM reconciliation can still disturb arbitrary document-owned JS
+            // state. In --test-fixtures mode ContentHash is static, so the switch-back must post no
+            // {action:'content-updated'}.
+            // feature-multidoc exposes three AgentDocs (overview/details/metrics).
             //
-            // We drive the morph signal purely from the UI: re-selecting an already-visited AgentDoc
-            // tab dispatches MorphActiveDoc (App.fs SelectCanvasDoc, wasAlreadyVisited), which posts
-            // 'content-updated' to the active iframe. This needs no on-disk file and no server-side
-            // hash change — both impossible in --test-fixtures mode (synthetic worktree paths, static
-            // ContentHash). feature-multidoc exposes three AgentDocs (overview/details/metrics).
-            //
-            // NOTE (tm-canvas48-hmb): the previous version modified an on-disk file and expected the
-            // src to CHANGE. It always hit Assert.Inconclusive (the fixture file never exists) and,
-            // had the file existed, asserted the wrong behavior (the src stays stable on morph).
+            // The iframe src stays stable across the switch either way (no ?v=<hash> cache-buster) and
+            // the same iframe document persists — those invariants are still asserted below.
             do! focusCanvasCard this.Page FixtureMultiDocBranch
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
@@ -253,21 +248,44 @@ type CanvasPaneTests() =
             Assert.That(initialSrc, Does.Not.Contain("?"),
                 "Iframe src must carry no cache-buster query param — content changes morph in place, the src is never swapped")
 
-            // Install a listener inside the active details frame to observe the morph signal. Re-selecting
-            // the SAME already-visited+active tab keeps it active (no iframe reorder/reload), so this
-            // injected listener survives to receive the parent app's postMessage.
+            // Install observable document-owned state and a listener inside details, then make the
+            // iframe genuinely hidden by selecting metrics before switching back.
             let! detailsFrameOpt = waitForCanvasFrame "details.html"
             let detailsFrame = detailsFrameOpt |> Option.defaultWith (fun () -> failwith "details iframe never reached the :5002 canvas origin")
-            let! _ = detailsFrame.EvaluateAsync("() => { window.__contentUpdated = false; window.addEventListener('message', (e) => { if (e.data && e.data.action === 'content-updated') window.__contentUpdated = true; }); }")
+            let! _ =
+                detailsFrame.EvaluateAsync(
+                    """() => {
+                        window.__contentUpdated = false;
+                        window.__canvasState = 'kept';
+                        const input = document.createElement('input');
+                        input.id = 'state-probe';
+                        input.value = 'typed';
+                        document.body.appendChild(input);
+                        window.addEventListener('message', (event) => {
+                            if (event.data && event.data.action === 'content-updated') {
+                                window.__contentUpdated = true;
+                            }
+                        });
+                    }""")
 
-            // Re-select the already-visited details tab → App dispatches MorphActiveDoc → posts
-            // {action:'content-updated'} to the active iframe (the morph trigger we can drive from the UI).
+            do! (tab "metrics").ClickAsync()
+            let! _ = waitActiveSrcContains "metrics.html"
+            let hiddenDetails =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-iframe:not(.canvas-iframe-active)[src*='details.html']")
+            do!
+                hiddenDetails.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Attached,
+                        Timeout = 5000.0f))
+
             do! (tab "details").ClickAsync()
+            let! _ = waitActiveSrcContains "details.html"
 
             let! contentUpdated =
-                // Tail-recursive task poll (5s deadline, 100ms interval): probes the iframe flag until
-                // the morph signal is observed or the deadline passes, returning the last observed value.
-                let deadline = DateTime.UtcNow.AddSeconds(5.0)
+                // Tail-recursive task poll (1.5s window, 100ms interval): a negative check — give any
+                // (erroneous) morph signal time to arrive; it must stay false the whole window.
+                let deadline = DateTime.UtcNow.AddSeconds(1.5)
                 let rec poll () =
                     task {
                         let! got = detailsFrame.EvaluateAsync<bool>("() => window.__contentUpdated === true")
@@ -278,16 +296,69 @@ type CanvasPaneTests() =
                             return! poll ()
                     }
                 poll ()
-            Assert.That(contentUpdated, Is.True,
-                "Re-selecting the active AgentDoc tab must post {action:'content-updated'} to its iframe so it can morph in place")
+            Assert.That(contentUpdated, Is.False,
+                "Switching back to a synchronized AgentDoc must not post {action:'content-updated'}")
 
-            // The morph reloads content WITHOUT swapping the iframe: same document, same stable src.
+            // The switch keeps the same mounted iframe: same document, same stable src (no swap).
             let! newSrc = activeIframe.GetAttributeAsync("src")
             Assert.That(newSrc, Is.EqualTo(initialSrc),
-                "Iframe src must stay identical across a content update — the doc morphs in place, the src is never swapped")
+                "Iframe src must stay identical across a tab switch — the doc is never reloaded, the src is never swapped")
             let! sameFrameUrl = detailsFrame.EvaluateAsync<string>("() => location.href")
             Assert.That(sameFrameUrl, Does.Contain("details.html"),
-                "The same details iframe document must persist across the morph (not be replaced)")
+                "The same details iframe document must persist across the switch (not be replaced)")
+            let! preservedState =
+                detailsFrame.EvaluateAsync<string>(
+                    "() => JSON.stringify({ state: window.__canvasState, input: document.querySelector('#state-probe')?.value })")
+            Assert.That(preservedState, Is.EqualTo("""{"state":"kept","input":"typed"}"""),
+                "document-owned JS and form state must survive the real details → metrics → details switch")
+        }
+
+    [<Test>]
+    member this.``morph completion from a hidden iframe is rejected``() =
+        task {
+            do! focusCanvasCard this.Page FixtureMultiDocBranch
+            do! (canvasToggleBtn this.Page).ClickAsync()
+            do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let tab name =
+                this.Page.Locator(".canvas-pane .canvas-tab", PageLocatorOptions(HasText = name))
+
+            do! (tab "details").ClickAsync()
+            do! (tab "metrics").ClickAsync()
+            let hiddenDetails =
+                this.Page.Locator(
+                    ".canvas-pane .canvas-iframe:not(.canvas-iframe-active)[src*='details.html']")
+            do!
+                hiddenDetails.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Attached,
+                        Timeout = 10000.0f))
+
+            let rejected = TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+            this.Page.Console.Add(fun message ->
+                if message.Text.Contains("morph-complete DROPPED") then
+                    rejected.TrySetResult(true) |> ignore)
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    $"() => {{
+                        const hidden = document.querySelector(
+                            '.canvas-iframe:not(.canvas-iframe-active)[src*=\"details.html\"]');
+                        window.dispatchEvent(new MessageEvent('message', {{
+                            origin: '{canvasOrigin}',
+                            source: hidden.contentWindow,
+                            data: {{
+                                action: 'morph-complete',
+                                scopedKey: hidden.getAttribute('data-canvas-scoped-key'),
+                                filename: hidden.getAttribute('data-canvas-filename'),
+                                contentHash: 'forged'
+                            }}
+                        }}));
+                    }}")
+
+            let! completed = Task.WhenAny(rejected.Task, Task.Delay(5000))
+            Assert.That(Object.ReferenceEquals(completed, rejected.Task), Is.True,
+                "a hidden AgentDoc must not be able to complete the active document's morph")
         }
 
     // ── Step 8: PostMessage Dispatch ────────────────────────────────────
@@ -298,7 +369,7 @@ type CanvasPaneTests() =
             do! focusCanvasCard this.Page FixtureCanvasBranch
             do! ensureCanvasPaneOpen this.Page
 
-            let iframe = canvasIframe this.Page
+            let iframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
             // Set up network interception to capture the sendCanvasMessage Remoting call
@@ -607,7 +678,7 @@ type CanvasPaneTests() =
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            let iframe = canvasIframe this.Page
+            let iframe = this.Page.Locator(".canvas-pane .canvas-iframe-active")
             do! iframe.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
 
             // Capture initial iframe src — should be the first doc (overview.html)
@@ -621,7 +692,7 @@ type CanvasPaneTests() =
             // Wait for iframe src to change
             let! _ = this.Page.WaitForFunctionAsync(
                 $"(oldSrc) => {{
-                    const iframe = document.querySelector('.canvas-iframe');
+                    const iframe = document.querySelector('.canvas-iframe-active');
                     return iframe && iframe.getAttribute('src') !== oldSrc;
                 }}",
                 initialSrc,

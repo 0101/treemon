@@ -4,7 +4,6 @@ open Shared
 open Navigation
 open CanvasTypes
 open CanvasAwareness
-open Elmish
 
 /// The canvas pane's slice of the dashboard model. Grouped out of App.Model so the
 /// canvas state and its pure helpers live together, away from core worktree/repo concerns
@@ -18,6 +17,10 @@ type CanvasState =
       TargetWorktree: string option
       ActiveCanvasDoc: Map<string, string>
       VisitedCanvasDocs: Map<string, string list>
+      // Content hash currently loaded by each mounted AgentDoc iframe. Comparing this with the
+      // refreshed CanvasDoc hash determines whether a morph is needed, including while the pane is
+      // collapsed. Fresh mounts seed the current hash; successful morphs advance it.
+      MountedAgentDocHashes: Map<string * string, string>
       LastViewedHashes: Map<string, Map<string, string>>
       PreviousCanvasHashes: Map<string, Map<string, string>>
       CanvasEvents: Map<string, CanvasEvent list>
@@ -51,6 +54,7 @@ let empty : CanvasState =
       TargetWorktree = None
       ActiveCanvasDoc = Map.empty
       VisitedCanvasDocs = Map.empty
+      MountedAgentDocHashes = Map.empty
       LastViewedHashes = Map.empty
       PreviousCanvasHashes = Map.empty
       CanvasEvents = Map.empty
@@ -126,9 +130,61 @@ let activeVisibleDoc (repos: RepoModel list) (focused: FocusTarget option) (targ
                 | None -> preferredAutomaticDoc wt
             doc |> Option.map (fun d -> scopedKey, d.Filename)))
 
-/// Command to mark the currently visible doc as viewed. `markViewed` builds the host app's
-/// message from (scopedKey, filename), keeping this module free of any concrete Msg type.
-let markVisibleDocCmd (markViewed: string * string -> 'msg) (repos: RepoModel list) (focused: FocusTarget option) (targetWorktree: string option) (activeCanvasDoc: Map<string, string>) : Cmd<'msg> =
+let agentDocHash (repos: RepoModel list) (scopedKey: string) (filename: string) =
+    findWorktreeByScopedKey repos scopedKey
+    |> Option.bind (fun wt ->
+        wt.CanvasDocs
+        |> List.tryFind (fun doc -> doc.Filename = filename && doc.Kind = AgentDoc))
+    |> Option.map _.ContentHash
+
+/// Current on-disk hashes for the AgentDoc iframes the pane actually renders. The pane keeps this
+/// subtree mounted while collapsed, but renders no iframes on overview/no-focus and only one
+/// worktree's visited LRU plus its active doc.
+let renderedAgentDocHashes
+    (repos: RepoModel list)
+    (focused: FocusTarget option)
+    (targetWorktree: string option)
+    (activeCanvasDoc: Map<string, string>)
+    (visitedCanvasDocs: Map<string, string list>) =
     activeVisibleDoc repos focused targetWorktree activeCanvasDoc
-    |> Option.map (fun (sk, fn) -> Cmd.ofMsg (markViewed (sk, fn)))
-    |> Option.defaultValue Cmd.none
+    |> Option.bind (fun (scopedKey, activeFilename) ->
+        findWorktreeByScopedKey repos scopedKey
+        |> Option.map (fun wt ->
+            let renderedFilenames =
+                visitedCanvasDocs
+                |> Map.tryFind scopedKey
+                |> Option.defaultValue []
+                |> Set.ofList
+                |> Set.add activeFilename
+            wt.CanvasDocs
+            |> List.choose (fun doc ->
+                if doc.Kind = AgentDoc && Set.contains doc.Filename renderedFilenames then
+                    Some ((scopedKey, doc.Filename), doc.ContentHash)
+                else
+                    None)
+            |> Map.ofList))
+    |> Option.defaultValue Map.empty
+
+/// Preserve loaded hashes only for iframes rendered both before and after a transition. Newly
+/// rendered docs are fresh mounts and therefore start synchronized to their current on-disk hash.
+let reconcileMountedAgentDocHashes
+    (previousRendered: Map<string * string, string>)
+    (currentRendered: Map<string * string, string>)
+    (mounted: Map<string * string, string>) =
+    currentRendered
+    |> Map.map (fun key currentHash ->
+        if Map.containsKey key previousRendered then
+            mounted |> Map.tryFind key |> Option.defaultValue currentHash
+        else
+            currentHash)
+
+let isMounted (mounted: Map<string * string, string>) scopedKey filename =
+    Map.containsKey (scopedKey, filename) mounted
+
+let needsMorph
+    (rendered: Map<string * string, string>)
+    (mounted: Map<string * string, string>)
+    key =
+    match Map.tryFind key rendered, Map.tryFind key mounted with
+    | Some currentHash, Some loadedHash -> currentHash <> loadedHash
+    | _ -> false
