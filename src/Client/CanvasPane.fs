@@ -491,6 +491,8 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                         prop.key (WorktreePath.value wt.Path + "/" + d.Filename)
                         prop.className (if isActive then "canvas-iframe canvas-iframe-active" else "canvas-iframe")
                         prop.src (iframeSrc wt d)
+                        prop.custom ("data-canvas-scoped-key", WorktreePath.value wt.Path)
+                        prop.custom ("data-canvas-filename", d.Filename)
                         prop.custom ("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups")
                         prop.custom ("allow", "clipboard-write")
                         prop.style [
@@ -535,7 +537,7 @@ type MessageListenerCallbacks =
       /// Switch the active tab to the named doc (navigate-canvas-doc).
       SelectDoc: string -> unit
       /// The active doc finished an idiomorph (morph-complete).
-      OnMorphComplete: unit -> unit
+      OnMorphComplete: CanvasMorph -> unit
       /// A doc-side JS error arrived: (emitting worktree scopedKey, emitting filename, display message).
       OnDocError: string -> string -> string -> unit
       /// A canvas-origin object message arrived with no usable top-level string `action`, from the
@@ -586,8 +588,21 @@ let messageListener (callbacks: MessageListenerCallbacks) =
                                 selectDoc filename
                         | _ -> ()
                     elif action = "morph-complete" then
-                        Fable.Core.JS.console.log "[canvas] morph-complete received"
-                        onMorphComplete ()
+                        let hasIdentity =
+                            Fable.Core.JsInterop.emitJsExpr<bool> me.data
+                                "typeof $0.scopedKey === 'string' && typeof $0.filename === 'string' && typeof $0.contentHash === 'string'"
+                        let matchesActiveIframe =
+                            Fable.Core.JsInterop.emitJsExpr<bool> me
+                                "(function(f){return !!f && f.contentWindow === $0.source && f.getAttribute('data-canvas-scoped-key') === $0.data.scopedKey && f.getAttribute('data-canvas-filename') === $0.data.filename})(document.querySelector('.canvas-iframe-active'))"
+                        if hasIdentity && isFromActiveCanvasIframe () && matchesActiveIframe then
+                            let morph =
+                                { ScopedKey = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.scopedKey"
+                                  Filename = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.filename"
+                                  ContentHash = Fable.Core.JsInterop.emitJsExpr<string> me.data "$0.contentHash" }
+                            Fable.Core.JS.console.log "[canvas] morph-complete received"
+                            onMorphComplete morph
+                        else
+                            Fable.Core.JS.console.warn "[canvas] morph-complete DROPPED: invalid identity or not from the active canvas doc iframe"
                     elif action = "reclaim-focus" then
                         // Escape inside a cross-origin canvas doc can't reach the dashboard's global
                         // focus-reclaim listener, so the doc posts this instead (reclaimFocusScript).
