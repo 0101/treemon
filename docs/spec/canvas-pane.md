@@ -270,7 +270,7 @@ changed rows already use).
 | `src/Server/IdiomorphScript.fs` | Vendored idiomorph runtime (library only — the controller lives in `CanvasMorphScript.fs`) |
 | `src/Server/CanvasMorphScript.fs` | Morph controller injection: the embedded `canvas-morph.js` source plus the `canvas-updated` highlight style |
 | `src/Extension/canvas-morph.js` | Morph controller — reacts to `content-updated`, morphs the body via idiomorph, and marks the blocks the morph changed |
-| `src/Extension/extension.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Session bridge registration, `/inject` server, typed prompt-transport decoding, serialized send queue with pending-duplicate coalescing, heartbeat, and reconnect backoff |
+| `src/Extension/extension.mjs`, `injection-request.mjs`, `session-identity.mjs`, `session-prompt.mjs`, `send-queue.mjs` | Session bridge registration, guarded local HTTP headers, SDK session-ID compatibility, typed prompt-transport decoding, serialized send queue with pending-duplicate coalescing, heartbeat, and reconnect backoff |
 | `src/Extension/skill/SKILL.md` | Authoring contract for agent-created canvas docs |
 
 ## Decisions

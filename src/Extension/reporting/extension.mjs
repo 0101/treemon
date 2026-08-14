@@ -1,6 +1,7 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { randomUUID } from "node:crypto";
 import { buildNonBlankMessageReport, mapSdkEvent } from "./reporting-core.mjs";
+import { sessionIdFrom } from "./session-identity.mjs";
 
 // treemon-reporting — the passive, reporting-only extension (Phase 1 of the push status model).
 //
@@ -93,7 +94,7 @@ const SUBSCRIBED_TYPES = [
 const log = (msg) => console.error(`[treemon-reporting] ${msg}`);
 
 const worktreePath = process.cwd();
-let sessionId = null;
+let sessionId = "";
 
 // --- HTTP forwarding ---------------------------------------------------------------------------
 
@@ -182,16 +183,14 @@ try {
   process.exit(0);
 }
 
-// Read the id defensively: the native runtime populates `session.sessionId`; older/other SDK shapes
-// expose `session.id`. The wire contract AND the server's parseReport both require a NON-EMPTY
+// The wire contract AND the server's parseReport both require a NON-EMPTY
 // sessionId — a blank id is rejected as "missing sessionId", so a `?? ""` fallback would silently
 // drop EVERY report from this session. There is no useful anonymous fallback either: reports must
 // key onto the real session so they collapse per-session and the stored id can drive `--resume`
 // (a fabricated id would resume nothing, and `--continue` is the correct never-reported fallback).
 // So when no real id is present we simply don't report — bailing the same clean way, and for the
 // same reason, as the joinSession failure above, rather than POSTing blanks the server will reject.
-const rawSessionId = session.sessionId ?? session.id;
-sessionId = typeof rawSessionId === "string" ? rawSessionId.trim() : "";
+sessionId = sessionIdFrom(session) ?? "";
 if (!sessionId) {
   log("no session id (session.sessionId/session.id both absent) — reporting disabled for this session");
   process.exit(0);

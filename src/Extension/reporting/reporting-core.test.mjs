@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildNonBlankMessageReport,
+  buildReport,
   MAX_TOOL_CALL_ID_CHARS,
   mapSdkEvent,
 } from "./reporting-core.mjs";
@@ -243,4 +244,41 @@ test("live and bootstrap messages share the canonical report shape", () => {
       at: "2026-07-20T12:31:02.493Z",
     },
   });
+});
+
+test("malformed events and non-string fields are dropped without coercion", () => {
+  assert.equal(mapSdkEvent(context, null), null);
+  assert.equal(mapSdkEvent(context, {}), null);
+  assert.equal(mapSdkEvent(context, {
+    type: "assistant.message",
+    data: { content: { text: "not an SDK string" } },
+  }), null);
+  assert.equal(mapSdkEvent(context, {
+    type: "skill.invoked",
+    data: { name: 42 },
+  }), null);
+  assert.equal(mapSdkEvent(context, {
+    type: "subagent.started",
+    data: { toolCallId: 42 },
+  }), null);
+  assert.equal(buildNonBlankMessageReport(context, "title_bootstrap", 42), null);
+});
+
+test("usage mapping accepts finite numeric strings but rejects blank and structured values", () => {
+  assert.deepEqual(mapSdkEvent(context, {
+    type: "session.usage_info",
+    data: { currentTokens: "12.6", tokenLimit: "100" },
+  }), {
+    ...buildReport(context, "usage_info"),
+    currentTokens: 13,
+    tokenLimit: 100,
+  });
+  assert.equal(mapSdkEvent(context, {
+    type: "session.usage_info",
+    data: { currentTokens: "", tokenLimit: 100 },
+  }), null);
+  assert.equal(mapSdkEvent(context, {
+    type: "session.usage_info",
+    data: { currentTokens: { value: 12 }, tokenLimit: 100 },
+  }), null);
 });

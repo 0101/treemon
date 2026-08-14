@@ -66,7 +66,9 @@ is gone, which is the only path that reclaims a per-document entry.
 AgentDocs and SystemViews use the same injected selection runtime and `canvasSend` transport.
 SystemViews may return bounded plain-JSON metadata from `window.canvasSelectionMetadata`; the
 runtime nests it under `sourceContext`. Diff selections identify the file, hunk, and old/new line
-ranges. Beadspace selections identify the task.
+ranges. Beadspace selections identify the task. The runtime clones the metadata before sending and
+rejects non-plain objects, cycles, sparse arrays, symbol keys, non-finite numbers, functions, and
+other values that do not have a stable JSON representation.
 
 ## Technical Approach
 

@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": [
+      "node"
+    ],
+    "useUnknownInCatchVariables": false
+  },
+  "include": [
+    "*.js",
+    "*.mjs",
+    "reporting/*.mjs",
+    "extension-globals.d.ts"
+  ],
+  "exclude": [
+    "*.test.mjs",
+    "reporting/*.test.mjs"
+  ]
+}

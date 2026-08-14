@@ -1,6 +1,8 @@
 (function () {
-  if (window.__canvasSelectionContextInstalled) return;
-  window.__canvasSelectionContextInstalled = true;
+  const hasBrowserRuntime =
+    typeof window !== 'undefined' && typeof document !== 'undefined';
+  if (hasBrowserRuntime && window.__canvasSelectionContextInstalled) return;
+  if (hasBrowserRuntime) window.__canvasSelectionContextInstalled = true;
 
   const editableSelector = 'input,textarea,select,[contenteditable]:not([contenteditable="false"])';
   const sectionPattern = /^[A-Za-z0-9_-]+$/;
@@ -10,15 +12,37 @@
     'Selection source context must be a plain serializable JSON object.';
   const metadataExceptionMessage =
     'Selection source context could not be created.';
+  /**
+   * @typedef SelectionState
+   * @property {'actions' | 'commenting'} mode
+   * @property {Range} range
+   * @property {DOMRect} rect
+   * @property {string} selectedText
+   * @property {string} contextBefore
+   * @property {string} contextAfter
+   * @property {string | null} section
+   */
+  /**
+   * @typedef SelectionUi
+   * @property {HTMLElement} host
+   * @property {HTMLElement} box
+   * @property {HTMLElement} commentForm
+   * @property {HTMLInputElement} commentInput
+   * @property {HTMLElement} errorText
+   */
+  /**
+   * @typedef ProcessingUi
+   * @property {HTMLElement} host
+   * @property {ShadowRoot} shadow
+   */
+  /** @typedef {null | string | number | boolean | JsonValue[] | { [key: string]: JsonValue }} JsonValue */
+  /** @type {SelectionState | null} */
   let state = null;
-  let host = null;
-  let shadow = null;
-  let box = null;
-  let commentForm = null;
-  let commentInput = null;
-  let errorText = null;
-  let processingHost = null;
-  let processingShadow = null;
+  /** @type {SelectionUi | null} */
+  let selectionUi = null;
+  /** @type {ProcessingUi | null} */
+  let processingUi = null;
+  /** @type {Range | null} */
   let processingRange = null;
   let selectionFrame = 0;
   let positionFrame = 0;
@@ -50,12 +74,18 @@
     });
   }
 
+  function requiredElement(root, selector) {
+    const element = root.querySelector(selector);
+    if (!element) throw new Error('Canvas selection UI is incomplete: ' + selector);
+    return element;
+  }
+
   function ensureHost() {
-    if (!host) {
-      host = document.createElement('canvas-selection-context');
+    if (!selectionUi) {
+      const host = document.createElement('canvas-selection-context');
       host.style.cssText =
         'position:fixed;left:0;top:0;z-index:2147483647;display:none;visibility:hidden;';
-      shadow = host.attachShadow({ mode: 'open' });
+      const shadow = host.attachShadow({ mode: 'open' });
       shadow.innerHTML = `
         <style>
           :host {
@@ -141,22 +171,28 @@
           <div class="error" role="status" aria-live="polite"></div>
         </div>`;
 
-      box = shadow.querySelector('.box');
-      commentForm = shadow.querySelector('.comment-form');
-      commentInput = shadow.querySelector('input');
-      errorText = shadow.querySelector('.error');
+      const box = /** @type {HTMLElement} */ (requiredElement(shadow, '.box'));
+      const commentForm =
+        /** @type {HTMLElement} */ (requiredElement(shadow, '.comment-form'));
+      const commentInput =
+        /** @type {HTMLInputElement} */ (requiredElement(shadow, 'input'));
+      const errorText =
+        /** @type {HTMLElement} */ (requiredElement(shadow, '.error'));
 
       shadow.addEventListener('pointerdown', function (event) {
-        if (event.target.closest('button')) event.preventDefault();
+        const target = event.target;
+        if (target instanceof Element && target.closest('button')) event.preventDefault();
       });
 
       shadow.querySelectorAll('[data-intent]').forEach(function (button) {
         button.addEventListener('click', function () {
-          sendSelection(button.dataset.intent);
+          if (!(button instanceof HTMLElement)) return;
+          const intent = button.dataset.intent;
+          if (intent === 'explain' || intent === 'remove') sendSelection(intent);
         });
       });
 
-      shadow.querySelector('[data-comment]').addEventListener('click', function () {
+      requiredElement(shadow, '[data-comment]').addEventListener('click', function () {
         if (!state) return;
         state.mode = 'commenting';
         commentForm.hidden = false;
@@ -174,18 +210,23 @@
         const comment = commentInput.value.trim();
         if (comment) sendSelection('comment', comment);
       });
+
+      selectionUi = { host, box, commentForm, commentInput, errorText };
     }
 
-    if (!host.isConnected) document.body.appendChild(host);
+    const ui = selectionUi;
+    if (!ui) throw new Error('Canvas selection UI was not created');
+    if (!ui.host.isConnected) document.body.appendChild(ui.host);
+    return ui;
   }
 
   function ensureProcessingHost() {
-    if (!processingHost) {
-      processingHost = document.createElement('canvas-selection-processing');
-      processingHost.style.cssText =
+    if (!processingUi) {
+      const host = document.createElement('canvas-selection-processing');
+      host.style.cssText =
         'position:fixed;inset:0;z-index:2147483646;display:none;pointer-events:none;';
-      processingShadow = processingHost.attachShadow({ mode: 'open' });
-      processingShadow.innerHTML = `
+      const shadow = host.attachShadow({ mode: 'open' });
+      shadow.innerHTML = `
         <style>
           .pulse {
             position: fixed;
@@ -210,9 +251,13 @@
           }
         </style>
         <div class="layer" aria-hidden="true"></div>`;
+      processingUi = { host, shadow };
     }
 
-    if (!processingHost.isConnected) document.body.appendChild(processingHost);
+    const ui = processingUi;
+    if (!ui) throw new Error('Canvas selection processing UI was not created');
+    if (!ui.host.isConnected) document.body.appendChild(ui.host);
+    return ui;
   }
 
   function rangeRects(range) {
@@ -240,14 +285,14 @@
     if (!processingRange) return;
     cancelAnimationFrame(processingFrame);
     processingFrame = requestAnimationFrame(function () {
-      ensureProcessingHost();
+      const ui = ensureProcessingHost();
       const allRects = rangeRects(processingRange);
       if (!allRects.length) {
         clearProcessing();
         return;
       }
 
-      const layer = processingShadow.querySelector('.layer');
+      const layer = requiredElement(ui.shadow, '.layer');
       layer.replaceChildren();
       const rects = allRects.filter(function (rect) {
         return (
@@ -258,7 +303,7 @@
         );
       }).slice(0, maxProcessingRects);
       if (!rects.length) {
-        processingHost.style.display = 'none';
+        ui.host.style.display = 'none';
         return;
       }
       rects.forEach(function (rect) {
@@ -270,7 +315,7 @@
         pulse.style.height = Math.round(rect.height) + 'px';
         layer.appendChild(pulse);
       });
-      processingHost.style.display = 'block';
+      ui.host.style.display = 'block';
     });
   }
 
@@ -281,8 +326,10 @@
 
   function clearProcessing() {
     processingRange = null;
-    if (processingHost) processingHost.style.display = 'none';
-    if (processingShadow) processingShadow.querySelector('.layer').replaceChildren();
+    if (processingUi) {
+      processingUi.host.style.display = 'none';
+      requiredElement(processingUi.shadow, '.layer').replaceChildren();
+    }
   }
 
   function surroundingContext(range) {
@@ -314,6 +361,10 @@
     return sectionPattern.test(idValue || '') ? idValue : null;
   }
 
+  /**
+   * @param {Range | null} left
+   * @param {Range | null} right
+   */
   function sameRange(left, right) {
     return left &&
       right &&
@@ -323,6 +374,10 @@
       left.endOffset === right.endOffset;
   }
 
+  /**
+   * @param {Selection | null} selection
+   * @returns {SelectionState | null}
+   */
   function captureSelection(selection) {
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
     if (isEditableSelection(selection)) return null;
@@ -349,15 +404,15 @@
 
   function render() {
     if (!state) return;
-    ensureHost();
-    commentForm.hidden = state.mode !== 'commenting';
-    box.setAttribute('role', state.mode === 'commenting' ? 'dialog' : 'toolbar');
+    const ui = ensureHost();
+    ui.commentForm.hidden = state.mode !== 'commenting';
+    ui.box.setAttribute('role', state.mode === 'commenting' ? 'dialog' : 'toolbar');
     if (state.mode !== 'commenting') {
-      commentInput.blur();
-      commentInput.value = '';
+      ui.commentInput.blur();
+      ui.commentInput.value = '';
     }
-    errorText.textContent = '';
-    host.style.display = 'block';
+    ui.errorText.textContent = '';
+    ui.host.style.display = 'block';
     position();
   }
 
@@ -366,18 +421,18 @@
     cancelAnimationFrame(positionFrame);
     positionFrame = requestAnimationFrame(function () {
       if (!state) return;
-      ensureHost();
+      const ui = ensureHost();
       const rect = rangeRect(state.range) || state.rect;
       if (!rect) return;
 
-      host.style.display = 'block';
-      host.style.visibility = 'hidden';
-      host.style.transform = 'translate(0, 0)';
+      ui.host.style.display = 'block';
+      ui.host.style.visibility = 'hidden';
+      ui.host.style.transform = 'translate(0, 0)';
 
       const gap = 8;
       const edge = 8;
-      const width = host.offsetWidth;
-      const height = host.offsetHeight;
+      const width = ui.host.offsetWidth;
+      const height = ui.host.offsetHeight;
       const left = Math.min(
         Math.max(rect.left + (rect.width - width) / 2, edge),
         Math.max(edge, window.innerWidth - width - edge)
@@ -387,9 +442,9 @@
         ? below
         : Math.max(edge, rect.top - height - gap);
 
-      host.style.transform =
+      ui.host.style.transform =
         'translate(' + Math.round(left) + 'px,' + Math.round(top) + 'px)';
-      host.style.visibility = 'visible';
+      ui.host.style.visibility = 'visible';
     });
   }
 
@@ -399,12 +454,12 @@
     selectionFrame = 0;
     positionFrame = 0;
     state = null;
-    if (host) {
-      host.style.display = 'none';
-      host.style.visibility = 'hidden';
+    if (selectionUi) {
+      selectionUi.host.style.display = 'none';
+      selectionUi.host.style.visibility = 'hidden';
+      selectionUi.commentInput.value = '';
+      selectionUi.errorText.textContent = '';
     }
-    if (commentInput) commentInput.value = '';
-    if (errorText) errorText.textContent = '';
     if (clearSelection) {
       const selection = window.getSelection();
       if (selection) selection.removeAllRanges();
@@ -419,35 +474,50 @@
     }
   }
 
+  /**
+   * @param {'explain' | 'remove' | 'comment'} intent
+   * @param {string} [comment]
+   */
   function requestFor(intent, comment) {
     if (intent === 'explain') return 'User asked to explain/expand this';
     if (intent === 'remove') return 'User asked to remove this';
-    return 'User commented: ' + comment;
+    return 'User commented: ' + (comment ?? '');
   }
 
+  /**
+   * @param {unknown} value
+   * @returns {value is Record<string, unknown>}
+   */
   function isPlainObject(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
     const prototype = Object.getPrototypeOf(value);
     return prototype === Object.prototype || prototype === null;
   }
 
+  /**
+   * @param {unknown} value
+   * @param {Set<object>} ancestors
+   * @returns {JsonValue}
+   */
   function cloneJsonValue(value, ancestors) {
     if (value === null) return null;
 
-    const valueType = typeof value;
-    if (valueType === 'string' || valueType === 'boolean') return value;
-    if (valueType === 'number' && Number.isFinite(value)) return value;
-    if (valueType !== 'object') throw new TypeError('Unsupported JSON value');
+    if (typeof value === 'string' || typeof value === 'boolean') return value;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value !== 'object') throw new TypeError('Unsupported JSON value');
     if (ancestors.has(value)) throw new TypeError('Cyclic JSON value');
 
     ancestors.add(value);
     try {
       if (Array.isArray(value)) {
-        return value.map(function (item, index) {
+        if (Object.getOwnPropertySymbols(value).length) {
+          throw new TypeError('Symbol keys are not supported');
+        }
+        return Array.from({ length: value.length }, function (_, index) {
           if (!Object.prototype.hasOwnProperty.call(value, index)) {
             throw new TypeError('Sparse arrays are not supported');
           }
-          return cloneJsonValue(item, ancestors);
+          return cloneJsonValue(value[index], ancestors);
         });
       }
       if (!isPlainObject(value)) throw new TypeError('Non-plain JSON object');
@@ -464,6 +534,7 @@
     }
   }
 
+  /** @param {SelectionState} current */
   function selectionMetadataContext(current) {
     return {
       range: current.range.cloneRange(),
@@ -482,6 +553,26 @@
     };
   }
 
+  /**
+   * @param {unknown} metadata
+   * @returns {{ status: 'invalid' } | { status: 'valid', value: JsonValue }}
+   */
+  function validateSelectionMetadata(metadata) {
+    try {
+      if (!isPlainObject(metadata)) return { status: 'invalid' };
+      return {
+        status: 'valid',
+        value: cloneJsonValue(metadata, new Set())
+      };
+    } catch {
+      return { status: 'invalid' };
+    }
+  }
+
+  /**
+   * @param {SelectionState} current
+   * @returns {{ status: 'absent' | 'invalid' | 'exception' } | { status: 'valid', value: JsonValue }}
+   */
   function selectionMetadata(current) {
     const hook = window.canvasSelectionMetadata;
     if (hook == null) return { status: 'absent' };
@@ -495,23 +586,19 @@
       return { status: 'exception' };
     }
 
-    try {
-      if (!isPlainObject(metadata)) return { status: 'invalid' };
-      return {
-        status: 'valid',
-        value: cloneJsonValue(metadata, new Set())
-      };
-    } catch {
-      return { status: 'invalid' };
-    }
+    return validateSelectionMetadata(metadata);
   }
 
+  /** @param {string} message */
   function showError(message) {
-    ensureHost();
-    errorText.textContent = message;
+    ensureHost().errorText.textContent = message;
     position();
   }
 
+  /**
+   * @param {string} action
+   * @param {Record<string, unknown>} payload
+   */
   function send(action, payload) {
     if (
       typeof window.canvasSend !== 'function' ||
@@ -531,9 +618,14 @@
     return !(config && config.includeSurroundingContext === false);
   }
 
+  /**
+   * @param {'explain' | 'remove' | 'comment'} intent
+   * @param {string} [comment]
+   */
   function sendSelection(intent, comment) {
     if (!state) return;
 
+    /** @type {Record<string, unknown>} */
     const payload = {
       intent: intent,
       doc: documentName()
@@ -588,6 +680,13 @@
 
       if (!state || state.mode !== 'commenting') hide(false);
     });
+  }
+
+  if (!hasBrowserRuntime) {
+    globalThis.canvasSelectionContextInternals = {
+      validateSelectionMetadata: validateSelectionMetadata
+    };
+    return;
   }
 
   document.addEventListener('selectionchange', handleSelectionChange);
