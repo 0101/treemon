@@ -2,6 +2,13 @@ const MAX_MESSAGE_CHARS = 2000;
 export const MAX_TOOL_CALL_ID_CHARS = 512;
 
 /**
+ * @typedef ReportBaseContext
+ * @property {string} sessionId
+ * @property {string} worktreePath
+ * @property {string} provider
+ */
+
+/**
  * @typedef ReportContext
  * @property {string} sessionId
  * @property {string} worktreePath
@@ -21,6 +28,19 @@ function isRecord(value) {
 /** @param {unknown} value */
 function stringValue(value) {
   return typeof value === "string" ? value : null;
+}
+
+/**
+ * @param {ReportBaseContext} context
+ * @param {unknown} eventValue
+ */
+export function reportForSdkEvent(context, eventValue) {
+  if (!isRecord(eventValue)) return null;
+  const eventId = stringValue(eventValue.id)?.trim();
+  const occurredAt = stringValue(eventValue.timestamp)?.trim();
+  if (!eventId || !occurredAt) return null;
+
+  return mapSdkEvent({ ...context, eventId, occurredAt }, eventValue);
 }
 
 /** @param {unknown} text */

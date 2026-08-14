@@ -617,8 +617,6 @@ function Install-ReportingExtension {
     # fan out to several Treemon instances (side-by-side validation), else it uses TREEMON_PORT/5000.
     $src = Join-Path $PSScriptRoot "src" "Extension" "reporting"
     Install-CopilotExtension $src "treemon-reporting" "Reporting extension" @("package.json")
-    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" "treemon-reporting"
-    Copy-Item (Join-Path $PSScriptRoot "src" "Extension" "session-identity.mjs") $dest -Force
 }
 
 function Test-WorktreeRootPaths([string[]]$Roots) {

@@ -7,7 +7,6 @@
     "injection-request.mjs",
     "reporting/reporting-core.mjs",
     "send-queue.mjs",
-    "session-identity.mjs",
     "session-prompt.mjs"
   ],
   "exclude": []

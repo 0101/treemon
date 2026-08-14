@@ -1,7 +1,9 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { randomUUID } from "node:crypto";
-import { buildNonBlankMessageReport, mapSdkEvent } from "./reporting-core.mjs";
-import { sessionIdFrom } from "./session-identity.mjs";
+import {
+  buildNonBlankMessageReport,
+  reportForSdkEvent,
+} from "./reporting-core.mjs";
 
 // treemon-reporting — the passive, reporting-only extension (Phase 1 of the push status model).
 //
@@ -128,25 +130,17 @@ function postReport(report) {
   }
 }
 
-// --- Event mapping -----------------------------------------------------------------------------
-
-function eventContext(event) {
-  return {
-    sessionId,
-    worktreePath,
-    provider: PROVIDER,
-    eventId: event.id,
-    occurredAt: event.timestamp,
-  };
-}
-
 // Handle one event from either the live stream or join-time replay. The extension only filters using
 // trusted source metadata and maps SDK events to wire facts; the server owns lifecycle state.
 function handle(event) {
-  const report = mapSdkEvent(eventContext(event), event);
+  const report = reportForSdkEvent(
+    { sessionId, worktreePath, provider: PROVIDER },
+    event,
+  );
   if (!report) return;
 
   postReport(report);
+  return report;
 }
 
 // --- Heartbeat ---------------------------------------------------------------------------------
@@ -190,7 +184,10 @@ try {
 // (a fabricated id would resume nothing, and `--continue` is the correct never-reported fallback).
 // So when no real id is present we simply don't report — bailing the same clean way, and for the
 // same reason, as the joinSession failure above, rather than POSTing blanks the server will reject.
-sessionId = sessionIdFrom(session) ?? "";
+const sessionWithLegacyId =
+  /** @type {{ sessionId?: unknown, id?: unknown }} */ (session);
+const rawSessionId = sessionWithLegacyId.sessionId ?? sessionWithLegacyId.id;
+sessionId = typeof rawSessionId === "string" ? rawSessionId.trim() : "";
 if (!sessionId) {
   log("no session id (session.sessionId/session.id both absent) — reporting disabled for this session");
   process.exit(0);
@@ -202,14 +199,8 @@ if (!sessionId) {
 let liveTitleSeen = false;
 const unsubscribes = SUBSCRIBED_TYPES.map((type) =>
   session.on(type, (event) => {
-    if (
-      event.type === "session.title_changed" &&
-      !event.agentId &&
-      String(event.data?.title ?? "").trim()
-    ) {
-      liveTitleSeen = true;
-    }
-    handle(event);
+    const report = handle(event);
+    if (report?.kind === "title_reported") liveTitleSeen = true;
   }),
 );
 

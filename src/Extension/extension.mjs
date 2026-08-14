@@ -13,7 +13,6 @@ import {
   promptForCanvasMessage,
   promptForSession,
 } from "./session-prompt.mjs";
-import { sessionIdFrom } from "./session-identity.mjs";
 import { createSendQueue } from "./send-queue.mjs";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
@@ -427,8 +426,14 @@ try {
   session = await joinSession();
 }
 // The pinned SDK currently exposes `sessionId`; keep the older `id` compatibility boundary
-// centralized so a future SDK update has one explicit adapter and one focused test.
-const sessionId = sessionIdFrom(session);
+// locally so each independently installed extension remains self-contained.
+const sessionWithLegacyId =
+  /** @type {{ sessionId?: unknown, id?: unknown }} */ (session);
+const rawSessionId = sessionWithLegacyId.sessionId ?? sessionWithLegacyId.id;
+const sessionId =
+  typeof rawSessionId === "string"
+    ? rawSessionId.trim() || undefined
+    : undefined;
 extensionState.sessionId = sessionId;
 const canvasWrites = watchCanvasWrites(session, worktreePath);
 

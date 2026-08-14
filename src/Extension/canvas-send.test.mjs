@@ -10,7 +10,7 @@ function installedCanvasSend({ topLevel = false } = {}) {
   const messages = [];
   const parent = {
     postMessage(message, origin) {
-      messages.push({ message, origin });
+      messages.push({ message: structuredClone(message), origin });
     },
   };
   const window = { parent };
@@ -53,6 +53,23 @@ test("canvasSend rejects unavailable, invalid, oversized, and cyclic messages", 
   const cyclic = {};
   cyclic.self = cyclic;
   assert.equal(installed.send("comment", cyclic), false);
+  assert.deepEqual(installed.messages, []);
+  assert.equal(installed.errors.length, 3);
+});
+
+test("canvasSend catches construction, serialization-result, and structured-clone failures", () => {
+  const installed = installedCanvasSend();
+  const throwingGetter = {};
+  Object.defineProperty(throwingGetter, "value", {
+    enumerable: true,
+    get() {
+      throw new Error("getter failed");
+    },
+  });
+
+  assert.equal(installed.send("comment", { callback() {} }), false);
+  assert.equal(installed.send("comment", { toJSON: () => undefined }), false);
+  assert.equal(installed.send("comment", throwingGetter), false);
   assert.deepEqual(installed.messages, []);
   assert.equal(installed.errors.length, 3);
 });

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  MAX_CANVAS_MESSAGE_CHARS,
   promptForCanvasMessage,
   promptForSession,
 } from "./session-prompt.mjs";
@@ -61,13 +62,28 @@ test("browser messages use the same validated canvas transport", () => {
 test("browser messages reject malformed and blank actions", () => {
   assert.throws(() => promptForCanvasMessage("not-json"), /invalid JSON/);
   assert.throws(() => promptForCanvasMessage(JSON.stringify([])), /missing action/);
+  assert.throws(() => promptForCanvasMessage(JSON.stringify({})), /missing action/);
   assert.throws(
     () => promptForCanvasMessage(JSON.stringify({ action: "   " })),
-    /missing action/,
+    /action must be a nonblank string/,
   );
   assert.throws(
     () => promptForCanvasMessage(JSON.stringify({ action: 42 })),
-    /missing action/,
+    /action must be a nonblank string/,
+  );
+});
+
+test("browser messages enforce the pane's serialized UTF-16 cap", () => {
+  const prefix = '{"action":"comment","text":"';
+  const suffix = '"}';
+  const bodyOfLength = (length) =>
+    prefix + "x".repeat(length - prefix.length - suffix.length) + suffix;
+
+  assert.doesNotThrow(() =>
+    promptForCanvasMessage(bodyOfLength(MAX_CANVAS_MESSAGE_CHARS)));
+  assert.throws(
+    () => promptForCanvasMessage(bodyOfLength(MAX_CANVAS_MESSAGE_CHARS + 1)),
+    /payload too large/,
   );
 });
 

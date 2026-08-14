@@ -8,10 +8,15 @@
   const sectionPattern = /^[A-Za-z0-9_-]+$/;
   const contextLength = 160;
   const maxProcessingRects = 200;
+  const maxSelectionMetadataChars = 64000;
+  const maxSelectionMetadataDepth = 64;
   const invalidMetadataMessage =
     'Selection source context must be a plain serializable JSON object.';
   const metadataExceptionMessage =
     'Selection source context could not be created.';
+  const oversizedSelectionMessage =
+    'The selected text or comment is too large to send.';
+  class SelectionMetadataLimitError extends TypeError {}
   /**
    * @typedef SelectionState
    * @property {'actions' | 'commenting'} mode
@@ -213,9 +218,7 @@
 
       selectionUi = { host, box, commentForm, commentInput, errorText };
     }
-
     const ui = selectionUi;
-    if (!ui) throw new Error('Canvas selection UI was not created');
     if (!ui.host.isConnected) document.body.appendChild(ui.host);
     return ui;
   }
@@ -253,9 +256,7 @@
         <div class="layer" aria-hidden="true"></div>`;
       processingUi = { host, shadow };
     }
-
     const ui = processingUi;
-    if (!ui) throw new Error('Canvas selection processing UI was not created');
     if (!ui.host.isConnected) document.body.appendChild(ui.host);
     return ui;
   }
@@ -495,29 +496,70 @@
   }
 
   /**
+   * @param {{ remaining: number }} budget
+   * @param {number} size
+   */
+  function spendMetadataBudget(budget, size) {
+    budget.remaining -= size;
+    if (budget.remaining < 0) {
+      throw new SelectionMetadataLimitError('Selection source context is too large');
+    }
+  }
+
+  /**
    * @param {unknown} value
    * @param {Set<object>} ancestors
+   * @param {{ remaining: number }} budget
+   * @param {number} depth
    * @returns {JsonValue}
    */
-  function cloneJsonValue(value, ancestors) {
-    if (value === null) return null;
+  function cloneJsonValue(value, ancestors, budget, depth) {
+    if (depth > maxSelectionMetadataDepth) {
+      throw new SelectionMetadataLimitError('Selection source context is too deeply nested');
+    }
+    if (value === null) {
+      spendMetadataBudget(budget, 4);
+      return null;
+    }
 
-    if (typeof value === 'string' || typeof value === 'boolean') return value;
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string') {
+      if (value.length > budget.remaining) {
+        throw new SelectionMetadataLimitError('Selection source context is too large');
+      }
+      spendMetadataBudget(budget, JSON.stringify(value).length);
+      return value;
+    }
+    if (typeof value === 'boolean') {
+      spendMetadataBudget(budget, value ? 4 : 5);
+      return value;
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      spendMetadataBudget(budget, JSON.stringify(value).length);
+      return value;
+    }
     if (typeof value !== 'object') throw new TypeError('Unsupported JSON value');
     if (ancestors.has(value)) throw new TypeError('Cyclic JSON value');
 
     ancestors.add(value);
     try {
       if (Array.isArray(value)) {
+        const minimumSize = value.length === 0 ? 2 : value.length * 2 + 1;
+        if (minimumSize > budget.remaining) {
+          throw new SelectionMetadataLimitError('Selection source context is too large');
+        }
         if (Object.getOwnPropertySymbols(value).length) {
           throw new TypeError('Symbol keys are not supported');
         }
-        return Array.from({ length: value.length }, function (_, index) {
-          if (!Object.prototype.hasOwnProperty.call(value, index)) {
-            throw new TypeError('Sparse arrays are not supported');
-          }
-          return cloneJsonValue(value[index], ancestors);
+        const keys = Object.keys(value);
+        if (
+          keys.length !== value.length ||
+          keys.some(function (key, index) { return key !== String(index); })
+        ) {
+          throw new TypeError('Sparse arrays and named properties are not supported');
+        }
+        spendMetadataBudget(budget, 2 + Math.max(0, value.length - 1));
+        return value.map(function (item) {
+          return cloneJsonValue(item, ancestors, budget, depth + 1);
         });
       }
       if (!isPlainObject(value)) throw new TypeError('Non-plain JSON object');
@@ -525,8 +567,11 @@
         throw new TypeError('Symbol keys are not supported');
       }
 
-      return Object.keys(value).reduce(function (copy, key) {
-        copy[key] = cloneJsonValue(value[key], ancestors);
+      const keys = Object.keys(value);
+      spendMetadataBudget(budget, 2 + Math.max(0, keys.length - 1));
+      return keys.reduce(function (copy, key) {
+        spendMetadataBudget(budget, JSON.stringify(key).length + 1);
+        copy[key] = cloneJsonValue(value[key], ancestors, budget, depth + 1);
         return copy;
       }, Object.create(null));
     } finally {
@@ -555,23 +600,30 @@
 
   /**
    * @param {unknown} metadata
-   * @returns {{ status: 'invalid' } | { status: 'valid', value: JsonValue }}
+   * @returns {{ status: 'invalid' | 'too-large' } | { status: 'valid', value: JsonValue }}
    */
   function validateSelectionMetadata(metadata) {
     try {
       if (!isPlainObject(metadata)) return { status: 'invalid' };
       return {
         status: 'valid',
-        value: cloneJsonValue(metadata, new Set())
+        value: cloneJsonValue(
+          metadata,
+          new Set(),
+          { remaining: maxSelectionMetadataChars },
+          0
+        )
       };
-    } catch {
-      return { status: 'invalid' };
+    } catch (error) {
+      return {
+        status: error instanceof SelectionMetadataLimitError ? 'too-large' : 'invalid'
+      };
     }
   }
 
   /**
    * @param {SelectionState} current
-   * @returns {{ status: 'absent' | 'invalid' | 'exception' } | { status: 'valid', value: JsonValue }}
+   * @returns {{ status: 'absent' | 'invalid' | 'too-large' | 'exception' } | { status: 'valid', value: JsonValue }}
    */
   function selectionMetadata(current) {
     const hook = window.canvasSelectionMetadata;
@@ -646,6 +698,10 @@
       showError(metadataExceptionMessage);
       return;
     }
+    if (metadata.status === 'too-large') {
+      showError(oversizedSelectionMessage);
+      return;
+    }
     if (metadata.status === 'valid') payload.sourceContext = metadata.value;
 
     const result = send('canvas-selection', payload);
@@ -656,7 +712,7 @@
       showError(
         result === 'transport-unavailable'
           ? 'Canvas messaging is unavailable in this document.'
-          : 'The selected text or comment is too large to send.'
+          : oversizedSelectionMessage
       );
     }
   }

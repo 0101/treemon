@@ -50,3 +50,25 @@ test("selection metadata rejects cycles and symbol keys", () => {
   assert.deepEqual(validateSelectionMetadata(cyclic), { status: "invalid" });
   assert.deepEqual(validateSelectionMetadata(symbolKeyed), { status: "invalid" });
 });
+
+test("selection metadata rejects named array properties without silently dropping them", () => {
+  const rows = [1];
+  rows.side = "old";
+
+  assert.deepEqual(validateSelectionMetadata({ rows }), { status: "invalid" });
+});
+
+test("selection metadata rejects oversized, deeply nested, and huge sparse values early", () => {
+  const hugeSparse = [];
+  hugeSparse.length = 10_000_000;
+  hugeSparse[9_999_999] = "value";
+  const deeplyNested = Array.from({ length: 70 })
+    .reduce((value) => ({ value }), "leaf");
+
+  assert.deepEqual(
+    validateSelectionMetadata({ text: "x".repeat(64001) }),
+    { status: "too-large" },
+  );
+  assert.deepEqual(validateSelectionMetadata({ hugeSparse }), { status: "too-large" });
+  assert.deepEqual(validateSelectionMetadata(deeplyNested), { status: "too-large" });
+});

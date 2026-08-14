@@ -5,6 +5,7 @@ import {
   buildReport,
   MAX_TOOL_CALL_ID_CHARS,
   mapSdkEvent,
+  reportForSdkEvent,
 } from "./reporting-core.mjs";
 
 const context = {
@@ -280,5 +281,51 @@ test("usage mapping accepts finite numeric strings but rejects blank and structu
   assert.equal(mapSdkEvent(context, {
     type: "session.usage_info",
     data: { currentTokens: { value: 12 }, tokenLimit: 100 },
+  }), null);
+});
+
+test("the production event boundary drops malformed identities before mapping", () => {
+  const baseContext = {
+    sessionId: context.sessionId,
+    worktreePath: context.worktreePath,
+    provider: context.provider,
+  };
+
+  assert.equal(reportForSdkEvent(baseContext, null), null);
+  assert.equal(reportForSdkEvent(baseContext, {
+    type: "assistant.turn_start",
+    timestamp: context.occurredAt,
+  }), null);
+  assert.equal(reportForSdkEvent(baseContext, {
+    id: "event",
+    type: "assistant.turn_start",
+  }), null);
+  assert.deepEqual(reportForSdkEvent(baseContext, {
+    id: "event",
+    timestamp: context.occurredAt,
+    type: "assistant.turn_start",
+    data: {},
+  }), {
+    sessionId: context.sessionId,
+    worktreePath: context.worktreePath,
+    provider: context.provider,
+    eventId: "event",
+    occurredAt: context.occurredAt,
+    kind: "turn_started",
+  });
+});
+
+test("a rejected live title produces no title report", () => {
+  const baseContext = {
+    sessionId: context.sessionId,
+    worktreePath: context.worktreePath,
+    provider: context.provider,
+  };
+
+  assert.equal(reportForSdkEvent(baseContext, {
+    id: "invalid-title",
+    timestamp: context.occurredAt,
+    type: "session.title_changed",
+    data: { title: 42 },
   }), null);
 });

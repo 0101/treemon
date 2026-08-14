@@ -44,7 +44,7 @@ will display the docs.
 |---|---|
 | `GET /canvas/:filename` | Read `.agents/canvas/<filename>` from disk, inject transport shim + content-poll script before `</head>`, serve as HTML |
 | `GET /canvas/:filename/hash` | Return MD5/SHA256 hex of file content (for change detection) |
-| `POST /_message` | Parse a JSON object with a nonblank string `action`, map it to the canonical canvas prompt transport, and enqueue it through the same serialized send path as `/inject` |
+| `POST /_message` | Parse a JSON object with a nonblank string `action`, reject canonical payloads above 64,000 UTF-16 code units, and enqueue the resulting canvas prompt through the same serialized send path as `/inject` |
 
 Both `POST` sinks (`/_message` and the always-on `/inject`) are hardened against cross-origin browser
 abuse: they require `Content-Type: application/json` (so a cross-origin call becomes a preflighted

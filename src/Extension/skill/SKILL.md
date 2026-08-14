@@ -61,7 +61,7 @@ canvasSend('my-action', { payload: 'data' });
 
 `canvasSend` is the primary API. It requires a nonblank string action, builds the flat message shape, verifies that it can be JSON-serialized, and checks the serialized size against the pane's limit (`JSON.stringify(message).length`, i.e. **64000 UTF-16 code units**) before posting. A rejected message logs a `console.error` instead of failing silently. `canvasSend` returns `true` when the message was posted and `false` when transport is unavailable, the action is invalid, the payload is not serializable, or the message is too large.
 
-The message shape is flat: `canvasSend('navigate-canvas-doc', { filename })` posts `{ action: 'navigate-canvas-doc', filename }` (which switches the active tab); `canvasSend('comment', { text })` posts `{ action: 'comment', text }`. That raw `postMessage` shape is the underlying contract and still works directly if you ever need it (e.g. the helper isn't available) — but it sends without the size check:
+The message shape is flat: `canvasSend('navigate-canvas-doc', { filename })` posts `{ action: 'navigate-canvas-doc', filename }` (which switches the active tab); `canvasSend('comment', { text })` posts `{ action: 'comment', text }`. That raw `postMessage` shape is the underlying contract and still works directly if you ever need it (e.g. the helper isn't available), but it bypasses the helper's immediate validation; the receiving host still validates before forwarding:
 
 ```js
 window.parent.postMessage({ action: 'my-action', payload: 'data' }, '*');

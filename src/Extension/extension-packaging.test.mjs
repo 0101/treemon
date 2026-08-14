@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { MAX_CANVAS_MESSAGE_CHARS } from "./session-prompt.mjs";
 
 function json(relativeUrl) {
   return JSON.parse(readFileSync(new URL(relativeUrl, import.meta.url), "utf8"));
@@ -16,11 +17,21 @@ test("extension packages and static checking use one pinned Copilot SDK version"
   assert.equal(root.devDependencies["@github/copilot-sdk"], "1.0.9");
 });
 
-test("reporting installation replaces its source wrapper with the canonical session adapter", () => {
-  const installer = readFileSync(new URL("../../treemon.ps1", import.meta.url), "utf8");
+test("browser fallback and canvasSend share one payload cap", () => {
+  const canvasSend = readFileSync(new URL("./canvas-send.js", import.meta.url), "utf8");
+  const helperCap = Number(canvasSend.match(/var MAX=(\d+);/)?.[1]);
 
-  assert.match(
-    installer,
-    /Copy-Item \(Join-Path \$PSScriptRoot "src" "Extension" "session-identity\.mjs"\) \$dest -Force/,
-  );
+  assert.equal(MAX_CANVAS_MESSAGE_CHARS, helperCap);
+});
+
+test("each installed extension keeps its session-id compatibility boundary local", () => {
+  const canvas = readFileSync(new URL("./extension.mjs", import.meta.url), "utf8");
+  const reporting =
+    readFileSync(new URL("./reporting/extension.mjs", import.meta.url), "utf8");
+  const fallback =
+    /sessionWithLegacyId\.sessionId \?\? sessionWithLegacyId\.id/;
+
+  assert.match(canvas, fallback);
+  assert.match(reporting, fallback);
+  assert.doesNotMatch(reporting, /session-identity\.mjs/);
 });

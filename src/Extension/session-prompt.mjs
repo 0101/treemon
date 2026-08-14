@@ -1,4 +1,5 @@
 /** @typedef {"canvas" | "agent-prompt"} SessionPromptKind */
+export const MAX_CANVAS_MESSAGE_CHARS = 64000;
 
 /**
  * @typedef SessionPrompt
@@ -58,9 +59,17 @@ export function promptForSession(body) {
  */
 export function promptForCanvasMessage(body) {
   const message = parseJson(body);
-  if (!isRecord(message) || typeof message.action !== "string" || !message.action.trim()) {
+  if (!isRecord(message) || !Object.hasOwn(message, "action")) {
     throw new Error("missing action");
   }
+  if (typeof message.action !== "string" || !message.action.trim()) {
+    throw new Error("action must be a nonblank string");
+  }
 
-  return { kind: "canvas", prompt: `[canvas] ${JSON.stringify(message)}` };
+  const serialized = JSON.stringify(message);
+  if (serialized.length > MAX_CANVAS_MESSAGE_CHARS) {
+    throw new Error("payload too large");
+  }
+
+  return { kind: "canvas", prompt: `[canvas] ${serialized}` };
 }

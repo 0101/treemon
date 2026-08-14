@@ -68,7 +68,9 @@ SystemViews may return bounded plain-JSON metadata from `window.canvasSelectionM
 runtime nests it under `sourceContext`. Diff selections identify the file, hunk, and old/new line
 ranges. Beadspace selections identify the task. The runtime clones the metadata before sending and
 rejects non-plain objects, cycles, sparse arrays, symbol keys, non-finite numbers, functions, and
-other values that do not have a stable JSON representation.
+other values that do not have a stable JSON representation. Validation also rejects metadata whose
+canonical JSON representation exceeds 64,000 UTF-16 code units or whose nesting exceeds 64 levels,
+before allocating an unbounded clone.
 
 ## Technical Approach
 
