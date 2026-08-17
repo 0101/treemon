@@ -1,7 +1,7 @@
 ---
 autofix: false
 model: haiku
-applies-to: "**/*.fs"
+applies-to: ["src/Cli/**/*.fs", "src/Client/**/*.fs", "src/Extension/**/*.fs", "src/Server/**/*.fs", "src/Shared/**/*.fs"]
 ---
 # Immutability
 
@@ -15,7 +15,7 @@ Mutable state is the root of most bugs. Immutable data makes data flow explicit,
 - No `let mutable` bindings in ordinary code
 - Never pass collections into functions to be mutated — return new collections instead
 - Prefer immutable data structures (records, DUs, lists) over mutable ones (ResizeArray, Dictionary)
-- If mutable state is genuinely unavoidable (e.g. a throttle/`setInterval` timestamp confined to an Elmish subscription closure, MailboxProcessor internals, NUnit `[<SetUp>]`/`[<TearDown>]` lifecycle fields), use `let mutable` isolated to the narrowest possible scope **and add an inline comment justifying why an immutable solution doesn't fit**. A justified, scoped, commented `let mutable` is compliant — do not flag it.
+- If mutable state is genuinely unavoidable (e.g. a throttle/`setInterval` timestamp confined to an Elmish subscription closure or MailboxProcessor internals), use `let mutable` isolated to the narrowest possible scope **and add an inline comment justifying why an immutable solution doesn't fit**. A justified, scoped, commented `let mutable` is compliant — do not flag it.
 
 ## Use `let mutable`, never `ref`, when mutation is justified
 A `ref` cell is **not** more immutable than `let mutable` — it is the identical mutation with worse ergonomics (a heap-allocated cell plus `:=`/`.Value` noise). Never recommend or write a `ref` cell to "satisfy" this rule, and never rewrite an existing `let mutable` into a `ref`. The only question this rule asks is *"is the mutation justified and scoped?"* — never *"which mutation syntax?"*. When the answer is yes, a `let mutable` carrying a justifying comment is the correct and final form.
