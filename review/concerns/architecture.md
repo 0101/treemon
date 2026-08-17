@@ -1,6 +1,6 @@
 ---
 type: concern
-models: [gemini-3-pro-preview, gpt-5.3-codex, inherit]
+models: [inherit, opus]
 priority: standard
 ---
 # Architecture Reviewer
@@ -17,6 +17,7 @@ You have full access to the codebase. Use it to understand the system's existing
 - **Coupling and dependencies**: Does the diff introduce tight coupling between components that were previously independent? Does it create circular dependencies? Does it reach through abstraction layers (e.g., a controller directly accessing the database)?
 - **Abstraction fitness**: Are new abstractions at the right level — neither too specific (will need immediate generalization) nor too general (over-engineered for current needs)? Do existing abstractions get used correctly, or does the diff work around them?
 - **Separation of concerns**: Does business logic leak into infrastructure code (or vice versa)? Does the diff mix distinct responsibilities in a single class/module?
+- **Responsibility cohesion**: Does a changed function or module combine genuinely unrelated domains such as parsing, policy, persistence, and presentation? Sequential steps of one cohesive operation are fine; only flag a split when the existing architecture provides a clear boundary and the current grouping has a concrete consequence.
 - **API design**: Are new public APIs consistent with existing API conventions? Do they expose implementation details? Will they force breaking changes when internals evolve?
 - **Tech debt signals**: Growing parameter lists, deeply nested conditionals, god classes gaining responsibilities outside their original scope
 
