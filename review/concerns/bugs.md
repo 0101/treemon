@@ -1,6 +1,6 @@
 ---
 type: concern
-models: [gemini-3-pro-preview, gpt-5.3-codex, inherit]
+models: [inherit, opus]
 priority: high
 ---
 # Bug Finder
