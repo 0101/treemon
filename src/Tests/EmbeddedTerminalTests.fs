@@ -31,8 +31,11 @@ $interfaceIndex = [Array]::IndexOf($Remaining, '-i')
 $cwdIndex = [Array]::IndexOf($Remaining, '-w')
 $port = [int]$Remaining[$portIndex + 1]
 $cwd = $Remaining[$cwdIndex + 1]
-$shell = $Remaining[$Remaining.Length - 1]
-$record = "$PID|$port|$($Remaining[$interfaceIndex + 1])|$($Remaining -contains '-W')|$($Remaining -contains '-O')|$cwd|$shell"
+$shellIndex = $cwdIndex + 2
+$shell = $Remaining[$shellIndex]
+$shellArgs = $Remaining[($shellIndex + 1)..($Remaining.Length - 1)]
+$shellCwd = & $shell @shellArgs -NoLogo -NoProfile -Command '$pwd.Path'
+$record = "$PID|$port|$($Remaining[$interfaceIndex + 1])|$($Remaining -contains '-W')|$($Remaining -contains '-O')|$cwd|$shell|$shellCwd"
 [IO.File]::WriteAllText($env:FAKE_TTYD_RECORD, $record)
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
 $listener.Start()
@@ -116,14 +119,15 @@ type EmbeddedTerminalTests() =
         )
 
     [<Test>]
-    member _.``manager launches fixed loopback ttyd arguments and closes only its owned process``() =
+    member _.``manager launches shell in selected worktree and closes only its owned process``() =
         Tests.TestUtils.withTempDir "embedded-terminal" (fun tempDir ->
             let scriptPath = Path.Combine(tempDir, "fake-ttyd.ps1")
             let recordPath = Path.Combine(tempDir, "record.txt")
+            let worktreePath = Path.Combine(tempDir, "worktree with ' quote")
+            Directory.CreateDirectory(worktreePath) |> ignore
             File.WriteAllText(scriptPath, fakeServerScript)
             let previousRecord = Environment.GetEnvironmentVariable("FAKE_TTYD_RECORD")
             Environment.SetEnvironmentVariable("FAKE_TTYD_RECORD", recordPath)
-            let escapedScriptPath = scriptPath.Replace("'", "''")
 
             let manager =
                 EmbeddedTerminal.createWithConfig
@@ -132,19 +136,19 @@ type EmbeddedTerminalTests() =
                       PrefixArguments =
                         [ "-NoLogo"
                           "-NoProfile"
-                          "-Command"
-                          $"& '{escapedScriptPath}' @args" ]
+                          "-File"
+                          scriptPath ]
                       StartupTimeout = TimeSpan.FromSeconds 5.0
                       ProbeInterval = TimeSpan.FromMilliseconds 25.0 }
 
             try
                 let starting =
-                    EmbeddedTerminal.start manager (WorktreePath tempDir)
+                    EmbeddedTerminal.start manager (WorktreePath worktreePath)
                     |> Async.RunSynchronously
 
                 Assert.That(
                     starting,
-                    Is.EqualTo(EmbeddedTerminalState.Starting(WorktreePath tempDir))
+                    Is.EqualTo(EmbeddedTerminalState.Starting(WorktreePath worktreePath))
                 )
 
                 let running =
@@ -170,8 +174,9 @@ type EmbeddedTerminalTests() =
                     Assert.That(fields[2], Is.EqualTo "127.0.0.1")
                     Assert.That(fields[3], Is.EqualTo "True")
                     Assert.That(fields[4], Is.EqualTo "True")
-                    Assert.That(fields[5], Is.EqualTo tempDir)
-                    Assert.That(fields[6], Is.EqualTo "pwsh"))
+                    Assert.That(fields[5], Is.EqualTo worktreePath)
+                    Assert.That(fields[6], Is.EqualTo "pwsh")
+                    Assert.That(fields[7], Is.EqualTo worktreePath))
 
                 let second =
                     EmbeddedTerminal.start manager (WorktreePath(Path.Combine(tempDir, "other")))

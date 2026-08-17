@@ -154,7 +154,9 @@ let private launch (config: Config) (worktreePath: WorktreePath) (cancellationTo
                 "-O"
                 "-w"
                 path
-                config.ShellCommand ]
+                config.ShellCommand
+                "-WorkingDirectory"
+                path ]
             |> List.iter psi.ArgumentList.Add
 
             let proc = new Process(StartInfo = psi)
