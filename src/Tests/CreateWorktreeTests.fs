@@ -36,6 +36,7 @@ let private defaultModel : Model =
       Activity = ActivityState.empty
       Mascot = MascotState.empty
       TerminalPaneOpen = false
+      EmbeddedTerminal = EmbeddedTerminalState.Closed
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
