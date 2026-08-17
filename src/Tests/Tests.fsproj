@@ -14,6 +14,7 @@
     <Compile Include="TerminalSessionFixtureTests.fs" />
     <Compile Include="ProcessRunnerTests.fs" />
     <Compile Include="EmbeddedTerminalTests.fs" />
+    <Compile Include="TerminalPaneTests.fs" />
     <Compile Include="DiffCategoriesTests.fs" />
     <Compile Include="WorktreeDiffTests.fs" />
     <Compile Include="DiffEndpointTestHelpers.fs" />

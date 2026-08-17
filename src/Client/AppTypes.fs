@@ -47,6 +47,7 @@ type Model =
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
       TerminalPaneOpen: bool
+      EmbeddedTerminal: EmbeddedTerminalState
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
       OverviewAgentsStuck: bool
@@ -67,6 +68,11 @@ type Msg =
     | ToggleCollapse of repoId: RepoId
     | Tick of now: float
     | OpenTerminal of WorktreePath
+    | OpenEmbeddedTerminal of WorktreePath
+    | EmbeddedTerminalStateChanged of EmbeddedTerminalState
+    | EmbeddedTerminalRequestFailed of WorktreePath * error: string
+    | CloseEmbeddedTerminal
+    | EmbeddedTerminalClosed of EmbeddedTerminalState
     | OpenEditor of WorktreePath
     | ToggleAutoSync of WorktreePath
     | AutoSyncToggleResult of path: WorktreePath * previousEnabled: bool * Result<unit, string>

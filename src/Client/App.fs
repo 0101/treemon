@@ -82,6 +82,7 @@ let init () =
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
       TerminalPaneOpen = false
+      EmbeddedTerminal = EmbeddedTerminalState.Closed
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -90,7 +91,13 @@ let init () =
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
       OverviewHistoryRequestInFlight = None },
-    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
+    Cmd.batch [
+        fetchWorktrees ()
+        fetchSyncStatus ()
+        Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp)
+        Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes
+        Cmd.OfAsync.perform worktreeApi.Value.getEmbeddedTerminal () EmbeddedTerminalStateChanged
+    ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
     if Set.isEmpty deleted then repos
@@ -258,7 +265,9 @@ let update msg model =
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
-                TerminalPaneOpen = if isFirstLoad then response.TerminalPaneOpen else model.TerminalPaneOpen
+                TerminalPaneOpen =
+                    if isFirstLoad then TerminalPane.paneOpenForState model.EmbeddedTerminal
+                    else model.TerminalPaneOpen
                 OverviewPanelOpen = if isFirstLoad then response.OverviewPanelOpen else model.OverviewPanelOpen
                 Canvas.CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
                 Canvas.WorkspaceWidth = if isFirstLoad then response.WorkspaceWidth else model.Canvas.WorkspaceWidth
@@ -343,6 +352,45 @@ let update msg model =
 
     | OpenTerminal path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+    | OpenEmbeddedTerminal path ->
+        { model with
+            EmbeddedTerminal = TerminalPane.stateWhenOpened path model.EmbeddedTerminal
+            TerminalPaneOpen = true },
+        Cmd.batch [
+            Cmd.OfAsync.either
+                worktreeApi.Value.startEmbeddedTerminal
+                path
+                EmbeddedTerminalStateChanged
+                (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
+            Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
+        ]
+    | EmbeddedTerminalStateChanged state ->
+        { model with
+            EmbeddedTerminal = state
+            TerminalPaneOpen = TerminalPane.paneOpenForState state },
+        Cmd.none
+    | EmbeddedTerminalRequestFailed (path, error) ->
+        { model with
+            EmbeddedTerminal = EmbeddedTerminalState.Failed(path, error)
+            TerminalPaneOpen = true },
+        Cmd.none
+    | CloseEmbeddedTerminal ->
+        match model.EmbeddedTerminal with
+        | EmbeddedTerminalState.Closed -> model, Cmd.none
+        | EmbeddedTerminalState.Starting path
+        | EmbeddedTerminalState.Running(path, _)
+        | EmbeddedTerminalState.Failed(path, _) ->
+            model,
+            Cmd.OfAsync.either
+                worktreeApi.Value.closeEmbeddedTerminal
+                ()
+                EmbeddedTerminalClosed
+                (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
+    | EmbeddedTerminalClosed state ->
+        { model with
+            EmbeddedTerminal = state
+            TerminalPaneOpen = TerminalPane.paneOpenForState state },
+        Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen false (fun _ -> NoOp)
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
@@ -421,8 +469,16 @@ let update msg model =
                     OverviewHistoryRequestInFlight = Some request }
             | None -> model
 
+        let terminalCmd =
+            match model.EmbeddedTerminal with
+            | EmbeddedTerminalState.Starting _
+            | EmbeddedTerminalState.Running _ ->
+                Cmd.OfAsync.perform worktreeApi.Value.getEmbeddedTerminal () EmbeddedTerminalStateChanged
+            | EmbeddedTerminalState.Closed
+            | EmbeddedTerminalState.Failed _ -> Cmd.none
+
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
-        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd ]
+        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd; terminalCmd ]
 
     | UserActivity now -> ActivityUpdate.userActivity now model
 
@@ -1009,6 +1065,7 @@ let view model dispatch =
           ToggleRepo = fun repoId -> dispatch (ToggleCollapse repoId)
           CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
           OpenTerminal = fun wt -> dispatch (if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path)
+          OpenEmbeddedTerminal = fun wt -> dispatch (OpenEmbeddedTerminal wt.Path)
           OpenEditor = fun wt -> dispatch (OpenEditor wt.Path)
           OpenNewTab = fun wt -> dispatch (OpenNewTab wt.Path)
           ResumeSession = fun wt -> dispatch (ResumeSession wt.Path)
@@ -1069,10 +1126,7 @@ let view model dispatch =
         CanvasView.view model dispatch
 
     let terminalEl =
-        Html.div [
-            prop.className (if model.TerminalPaneOpen then "terminal-pane open" else "terminal-pane")
-            prop.hidden (not model.TerminalPaneOpen)
-        ]
+        TerminalPane.view model.EmbeddedTerminal (fun () -> dispatch CloseEmbeddedTerminal)
 
     // The workspace order is fixed so pane-local DOM state survives visibility and width changes.
     React.Fragment [

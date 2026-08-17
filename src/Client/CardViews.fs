@@ -146,6 +146,7 @@ type CardCallbacks =
       /// Primary terminal action: focuses the active session when one exists, else opens a terminal.
       /// Intent-named (not a 1:1 Msg mirror) — do not "simplify" to always dispatch OpenTerminal.
       OpenTerminal: WorktreeStatus -> unit
+      OpenEmbeddedTerminal: WorktreeStatus -> unit
       OpenEditor: WorktreeStatus -> unit
       OpenNewTab: WorktreeStatus -> unit
       ResumeSession: WorktreeStatus -> unit
@@ -381,6 +382,30 @@ let terminalButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); callbacks.OpenTerminal wt)
         prop.text ">"
+    ]
+
+let embeddedTerminalIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 16, 16)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "1.5")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.children [
+            Svg.rect [ svg.x 1.5; svg.y 2.5; svg.width 13; svg.height 11; svg.rx 1.5 ]
+            Svg.path [ svg.d "M4 6l2 2-2 2M8 10h3" ]
+        ]
+    ]
+
+let embeddedTerminalButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
+    Html.button [
+        prop.className "embedded-terminal-btn"
+        prop.title "Open embedded terminal"
+        yield! noFocusProps
+        prop.onClick (fun e -> e.stopPropagation(); callbacks.OpenEmbeddedTerminal wt)
+        prop.children [ embeddedTerminalIcon ]
     ]
 
 let editorIcon () =
@@ -697,6 +722,7 @@ let compactWorktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoN
                     ]
                     Html.span [ prop.className "commit-time"; prop.text (relativeTime System.DateTimeOffset.Now wt.LastCommitTime) ]
                     terminalButton callbacks wt
+                    embeddedTerminalButton callbacks wt
                     if wt.HasActiveSession then newTabButton callbacks wt
                     if canResumeSession wt then resumeButton callbacks wt
                     editorButton callbacks props.EditorName wt
@@ -747,6 +773,7 @@ let worktreeCard (props: CardViewProps) (callbacks: CardCallbacks) (repoName: st
                                 ]
                             ]
                             terminalButton callbacks wt
+                            embeddedTerminalButton callbacks wt
                             if wt.HasActiveSession then newTabButton callbacks wt
                             if canResumeSession wt then resumeButton callbacks wt
                             editorButton callbacks props.EditorName wt
