@@ -195,6 +195,22 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - Provisioning ensures the configured share container exists with anonymous access disabled before
   either container-scoped grant is applied; the publisher intentionally does not create containers
   at share time.
+- `scripts/deploy-canvas-share-viewer.ps1` is the idempotent operator entry point. Its only
+  deployment-name inputs are subscription, tenant, resource group, plan, identity, and app
+  registration; it reads account/container from the machine-level `canvasShare` config and resolves
+  the delegated publisher as the current Azure CLI user. The fixed B1 Linux plan and any new
+  resource group use the storage account's Azure location.
+- `-ValidateOnly` performs subscription/tenant, configuration, existing-resource, global-name, and
+  local-publish checks without changing Azure or machine configuration. An apply run reconciles
+  resources, merges the canvas rule into the account's complete lifecycle policy without removing
+  unrelated rules, deploys with `az webapp deploy` after SCM/FTP basic authentication is disabled,
+  verifies the resulting control-plane state, and writes the exact canonical `viewerBaseUrl` while
+  preserving every other machine setting.
+- Easy Auth's `clientSecretSettingName` is the
+  `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID` sentinel; the slot-sticky app setting with that name
+  contains the user-assigned identity's client ID. The registration's federated credential trusts
+  that identity's principal ID with the tenant v2 issuer and `api://AzureADTokenExchange`
+  audience. No client secret or extra login scope is created.
 - The canonical App Service, identity, Entra configuration, RBAC grants, and lifecycle policy
   remain deployed after verification. Verification removes only its document fixtures and any
   auxiliary resources created solely to prove the permission boundary.
@@ -234,6 +250,8 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Look the blob up by exact composed name, never by listing or prefix search | A share URL then reveals only its own document; no reachable code path can turn one link into an inventory of the container. |
 | Allow `unsafe-eval` only inside the contained document response | Shared canvases already support arbitrary inline JavaScript; preserving `eval`/`new Function` compatibility does not grant viewer-origin or network access because the sandbox and remaining CSP directives still deny both. |
 | Use `treemon.azurewebsites.net` rather than a custom domain or generated suffix | The Azure-provided hostname is short, TLS-enabled, requires no DNS ownership, and gives every shared document one stable origin for browser SSO. |
+| Derive storage and publisher deployment inputs from machine/Azure CLI state | The existing `canvasShare` account/container and current delegated publisher are already the publisher's source of truth. Requiring them again as script arguments would permit a viewer and publisher to be provisioned against different containers or identities. |
+| Merge the lifecycle rule instead of replacing the account policy | Azure lifecycle policies are whole-document resources. Preserving unrelated rules avoids destructive drift when the storage account has other lifecycle-managed data. |
 
 ## Key Files
 
@@ -247,6 +265,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | `src/Server/HttpSecurity.fs` | Shared Remoting CSRF guard covering `shareCanvasDoc` (unchanged) |
 | `src/Client/CanvasPane.fs`, `CanvasState.fs`, `CanvasUpdate.fs`, `index.html` | Share button, `ShareState` phase machine, clipboard write and banner routing (unchanged) |
 | `src/CanvasShareViewer/` | New App Service viewer: shell route, content route, expiry check, sandbox/CSP, Easy Auth configuration |
+| `scripts/deploy-canvas-share-viewer.ps1` | Idempotent non-production Azure provisioning, secret-free Easy Auth, Entra-authenticated ZIP deployment, validation, and machine-config update |
+| `scripts/canvas-share-lifecycle-policy.json` | Container-filtered deletion rule starting after 31 days |
+| `docs/canvas-share-viewer-deployment.md` | Local operator prerequisites, dry run, apply, and durable-resource guidance |
 
 ## Verification
 

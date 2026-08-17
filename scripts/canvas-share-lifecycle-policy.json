@@ -11,7 +11,7 @@
         },
         "actions": {
           "baseBlob": {
-            "delete": { "daysAfterModificationGreaterThan": 8 }
+            "delete": { "daysAfterModificationGreaterThan": 31 }
           }
         }
       }
