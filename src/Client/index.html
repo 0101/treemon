@@ -324,7 +324,10 @@
            item's padding so it stays aligned with the sibling columns (only the background changes);
            the extra bottom padding + align-self: stretch drop its bottom edge flush against the
            black .overview-breakdown panel rendered below it. */
-        .overview-item-selected { background: #11111b; border-color: transparent; border-radius: 10px 10px 0 0; align-self: stretch; padding: 6px 8px 12px; }
+        .overview-item-selected {
+            background: #11111b; border-color: transparent; border-radius: 10px 10px 0 0;
+            align-self: stretch; margin-inline-start: 0; padding: 6px 8px 12px; padding-inline-start: 6px;
+        }
         .overview-meta { font-size: var(--fs-base); color: #a6adc8; white-space: nowrap; }
         /* Count and label share size/weight — only colour differs. The accent class sets `color`, so
            it tints the count text while the label keeps the neutral .overview-meta colour. */
@@ -374,6 +377,10 @@
            shared scale as the band bars above (--bar-fill is the documented inline-width exception). The
            panel's accent class tints the chip dots and task bars via currentColor. */
         .overview-breakdown { position: relative; background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
+        .overview-section:has(> .overview-items > .overview-item-selected:first-child) > .overview-breakdown,
+        .overview-agents-band:has(.overview-item-selected:first-child) + .overview-band-rest > .overview-breakdown {
+            border-top-left-radius: 0;
+        }
         .overview-bd-close { position: absolute; top: 10px; right: 12px; cursor: pointer; background: none; border: none; color: #6c7086; font-size: var(--fs-lg); line-height: 1; padding: 2px 5px; border-radius: 5px; }
         .overview-bd-close:hover { color: #cdd6f4; background: #1e1e2e; }
         .overview-bd-repo { margin: 0 0 13px; }

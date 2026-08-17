@@ -428,12 +428,23 @@ type OverviewBandE2ETests() =
                     """() => {
                       const chips = Array.from(document.querySelectorAll('.overview-breakdown .overview-chip'));
                       const used = chips.map(c => parseFloat(getComputedStyle(c).getPropertyValue('--ctx-used')) || 0);
-                      return JSON.stringify({ chipCount: chips.length, maxUsed: used.length ? Math.max.apply(null, used) : 0 });
+                      const selected = document.querySelector('.overview-item-selected').getBoundingClientRect();
+                      const panelElement = document.querySelector('.overview-breakdown');
+                      const panel = panelElement.getBoundingClientRect();
+                      return JSON.stringify({
+                        chipCount: chips.length,
+                        maxUsed: used.length ? Math.max.apply(null, used) : 0,
+                        selectedLeft: selected.left,
+                        panelLeft: panel.left,
+                        panelTopLeftRadius: getComputedStyle(panelElement).borderTopLeftRadius
+                      });
                     }""")
 
             let bd = JObject.Parse(json)
             Assert.That(bd.Value<int>("chipCount"), Is.EqualTo(3), "the Investigating breakdown lists its three member worktrees")
             Assert.That(bd.Value<float>("maxUsed"), Is.GreaterThan(0.0), "a member's most-loaded session drives a non-zero --ctx-used chip fill")
+            Assert.That(bd.Value<float>("selectedLeft"), Is.EqualTo(bd.Value<float>("panelLeft")).Within(0.5), "the selected tab and detail panel must share their left edge")
+            Assert.That(bd.Value<string>("panelTopLeftRadius"), Is.EqualTo("0px"), "a first selected tab must not leave a rounded wedge in the panel seam")
         }
 
     [<Test>]
