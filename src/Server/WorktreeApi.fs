@@ -108,8 +108,8 @@ let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
 
 /// Share a canvas doc: validate the path → read the on-disk file → static-export it
 /// (`CanvasExport.buildStaticHtml` re-injects theme + no-op canvasSend) → publish to Azure Blob and
-/// mint a per-doc read-only SAS (`CanvasShare.publish`) → assemble the `CanvasShareResult` with the
-/// SAS URL and the doc's resolved title. Mirrors `archiveCanvasDocImpl`. `Title` uses
+/// record its expiry (`CanvasShare.publish`) → assemble the `CanvasShareResult` with the clean viewer
+/// URL and the doc's resolved title. Mirrors `archiveCanvasDocImpl`. `Title` uses
 /// `CanvasExport.resolveTitle` (the doc's `<title>`, falling back to a prettified filename) because
 /// `CanvasShareResult.Title` is a plain string, not an option; the title is read from the original
 /// HTML (`buildStaticHtml` injects only at `</head>`, so it never alters the doc's `<title>`).
@@ -130,9 +130,9 @@ let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<C
             return! Error $"File not found: {request.Filename}"
 
         let html = File.ReadAllText sourcePath
-        let! sasUrl = Server.CanvasShare.publish request.Filename (Server.CanvasExport.buildStaticHtml html)
+        let! viewerUrl = Server.CanvasShare.publish request.Filename (Server.CanvasExport.buildStaticHtml html)
         return
-            { Url = sasUrl
+            { Url = viewerUrl
               Title = Server.CanvasExport.resolveTitle html request.Filename }
     }
 

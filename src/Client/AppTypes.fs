@@ -112,7 +112,7 @@ type Msg =
     | OpenWorktreeDiff of scopedKey: string
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
-    // Share the focused AgentDoc: publish it (server mints a per-doc read-only SAS URL + returns the
+    // Share the focused AgentDoc: publish it (server returns a clean authenticated-viewer URL + the
     // doc title) then write a rich clipboard link. ShareCanvasDocResult carries the CanvasShareResult
     // on Ok (→ dual-format clipboard write, deferring the banner to ClipboardWriteResult) or an error
     // message on failure (→ the existing error banner). ClipboardWriteResult reports whether the async

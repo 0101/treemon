@@ -4,20 +4,13 @@ open System
 open System.IO
 open System.Text.RegularExpressions
 open NUnit.Framework
-open Azure.Storage.Blobs.Models
-open Azure.Storage.Sas
 open Server
 open Server.CanvasShare
 open Server.GlobalConfig
 open Tests.TestUtils
 
-// This suite covers only the PURE and deterministic parts of the publish backend (spec
-// docs/spec/canvas-sharing.md): blob naming, user-delegation signing, service-client reuse and the
-// config reader — plus the unconfigured gate, which fails before any credential or network use.
-// The Azure round-trip cannot be emulated (Azurite does not implement GetUserDelegationKey), so it is
-// verified against the real account instead — see the spec's "Verification" section.
-
-// ── blob naming (pure) ────────────────────────────────────────────────────────
+// Pure publisher contracts plus the fail-before-network configuration gate. The real Azure
+// round-trip is covered by the deployment verification described in docs/spec/canvas-sharing.md.
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -30,7 +23,6 @@ type BlobNamingTests() =
 
     [<Test>]
     member _.``blobName keeps the real filename so the recipient sees a meaningful title``() =
-        // Decision #5: the real filename is preserved (not hashed) after the unguessable prefix.
         Assert.That(blobName "abc" "weekly-sync.html", Does.EndWith("/weekly-sync.html"))
 
     [<Test>]
@@ -66,79 +58,127 @@ type BlobNamingTests() =
                     "every minted prefix must be distinct")
 
 
-// ── SAS grant parameters (pure) ───────────────────────────────────────────────
-
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type SasBuilderTests() =
+type UploadContractTests() =
 
-    let expiresOn = DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero)
-    let build () = buildSasBuilder "canvas-shared" "prefix/doc.html" expiresOn
-
-    [<Test>]
-    member _.``buildSasBuilder scopes the grant to a single blob (sr=b)``() =
-        // Blob-scoped is the crux of least privilege (Decision #2): doc A's link can't read doc B.
-        Assert.That(build().Resource, Is.EqualTo("b"))
+    let expiresOn =
+        DateTimeOffset(2030, 1, 2, 3, 4, 5, TimeSpan.FromHours(2.0))
 
     [<Test>]
-    member _.``buildSasBuilder grants read-only permission (sp=r)``() =
-        Assert.That(build().Permissions, Is.EqualTo("r"),
-                    "a shared link must be read-only — no write/delete/list")
-
-    [<Test>]
-    member _.``buildSasBuilder restricts the link to https (spr=https)``() =
-        Assert.That(build().Protocol, Is.EqualTo(SasProtocol.Https))
-
-    [<Test>]
-    member _.``buildSasBuilder carries the requested expiry``() =
-        Assert.That(build().ExpiresOn, Is.EqualTo(expiresOn))
-
-    [<Test>]
-    member _.``buildSasBuilder binds the container and blob name``() =
-        let b = buildSasBuilder "my-container" "abc/report.html" expiresOn
-        Assert.That(b.BlobContainerName, Is.EqualTo("my-container"))
-        Assert.That(b.BlobName, Is.EqualTo("abc/report.html"))
-
-[<TestFixture>]
-[<Category("Unit")>]
-[<Category("Fast")>]
-type UserDelegationSigningTests() =
-
-    let startsOn = DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero)
-    let expiresOn = startsOn.AddDays(7.0)
-    let delegationKey =
-        BlobsModelFactory.UserDelegationKey(
-            "object-id",
-            "tenant-id",
-            startsOn,
-            expiresOn,
-            "b",
-            "2025-11-05",
-            Convert.ToBase64String(Array.create 32 42uy))
-
-    [<Test>]
-    member _.``buildSignedBlobUrl applies the delegation identity and blob-scoped grant``() =
-        let blobUri = Uri("https://tmcanvasabc.blob.core.windows.net/canvas-shared/prefix/doc.html")
-        let signedUrl =
-            buildSignedBlobUrl
-                blobUri
-                "tmcanvasabc"
-                delegationKey
-                (buildSasBuilder "canvas-shared" "prefix/doc.html" expiresOn)
-        let signedUri = Uri signedUrl
+    member _.``upload writes only expiresOn metadata in UTC round-trip form``() =
+        let options = buildUploadOptions expiresOn
 
         Assert.Multiple(fun () ->
-            Assert.That(signedUri.GetLeftPart(UriPartial.Path), Is.EqualTo(blobUri.AbsoluteUri))
-            Assert.That(signedUri.Query, Does.Contain("skoid=object-id"))
-            Assert.That(signedUri.Query, Does.Contain("sktid=tenant-id"))
-            Assert.That(signedUri.Query, Does.Contain("sks=b"))
-            Assert.That(signedUri.Query, Does.Contain("sp=r"))
-            Assert.That(signedUri.Query, Does.Contain("spr=https"))
-            Assert.That(signedUri.Query, Does.Contain("sr=b")))
+            Assert.That(options.Metadata.Count, Is.EqualTo(1))
+            Assert.That(options.Metadata.ContainsKey(ExpiryMetadataKey), Is.True)
+            Assert.That(ExpiryMetadataKey, Is.EqualTo("expiresOn"))
+            Assert.That(
+                options.Metadata[ExpiryMetadataKey],
+                Is.EqualTo("2030-01-02T01:04:05.0000000+00:00")))
 
+    [<Test>]
+    member _.``upload declares UTF-8 HTML``() =
+        Assert.That(
+            (buildUploadOptions expiresOn).HttpHeaders.ContentType,
+            Is.EqualTo("text/html; charset=utf-8"))
 
-// ── config reader (touches TREEMON_CONFIG_DIR: non-parallel) ───────────────────
+    [<Test>]
+    member _.``publisher expiry metadata satisfies the viewer wire contract``() =
+        let metadata =
+            (buildUploadOptions expiresOn).Metadata
+            |> Seq.map (fun pair -> pair.Key, pair.Value)
+            |> Map.ofSeq
+        let justBeforeExpiry =
+            expiresOn.ToUniversalTime().AddTicks(-1L)
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                ExpiryMetadataKey,
+                Is.EqualTo(CanvasShareViewer.ShareExpiry.MetadataKey))
+            Assert.That(
+                CanvasShareViewer.ShareExpiry.isLive
+                    justBeforeExpiry
+                    metadata,
+                Is.True))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ViewerUrlTests() =
+
+    let prefix = "0123456789AbCdEfGhIjKl"
+
+    [<Test>]
+    member _.``publisher naming satisfies the viewer wire contract``() =
+        Assert.Multiple(fun () ->
+            Assert.That(
+                PrefixLength,
+                Is.EqualTo(CanvasShareViewer.SharePath.PrefixLength))
+            Assert.That(
+                CanvasShareViewer.SharePath.tryCreate
+                    (generatePrefix ())
+                    (leafName "nested/status.html")
+                |> Option.isSome,
+                Is.True))
+
+    [<Test>]
+    member _.``viewer URL uses the canonical deployed origin and clean c path``() =
+        let url =
+            buildViewerUrl
+                (Uri("https://treemon.azurewebsites.net"))
+                prefix
+                "status.html"
+
+        Assert.That(
+            url,
+            Is.EqualTo(
+                $"https://treemon.azurewebsites.net/c/{prefix}/status.html"))
+
+    [<Test>]
+    member _.``viewer URL uses the configured HTTPS host``() =
+        let url =
+            buildViewerUrl
+                (Uri("https://isolated-viewer.test:7443"))
+                prefix
+                "status.html"
+
+        Assert.That(
+            url,
+            Is.EqualTo(
+                $"https://isolated-viewer.test:7443/c/{prefix}/status.html"))
+
+    [<Test>]
+    member _.``viewer URL percent-encodes the filename as one path segment``() =
+        let url =
+            buildViewerUrl
+                (Uri("https://viewer.test"))
+                prefix
+                "nested/Q3 report #1.html"
+
+        Assert.That(
+            url,
+            Is.EqualTo(
+                "https://viewer.test/c/"
+                + prefix
+                + "/Q3%20report%20%231.html"))
+
+    [<Test>]
+    member _.``viewer URL has no query fragment or Blob credential``() =
+        let url =
+            buildViewerUrl
+                (Uri("https://viewer.test"))
+                prefix
+                "status.html"
+        let uri = Uri url
+
+        Assert.Multiple(fun () ->
+            Assert.That(uri.Query, Is.Empty)
+            Assert.That(uri.Fragment, Is.Empty)
+            Assert.That(url, Does.Not.Contain("?"))
+            Assert.That(url, Does.Not.Contain("sig="))
+            Assert.That(url, Does.Not.Contain(".blob.core.windows.net")))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -162,19 +202,25 @@ type CanvasShareConfigTests() =
             Assert.That(readCanvasShareConfig (), Is.EqualTo(defaultCanvasShareConfig)))
 
     [<Test>]
-    member _.``readCanvasShareConfig reads accountName, container and defaultExpiryDays``() =
+    member _.``readCanvasShareConfig reads every non-secret publisher setting``() =
         withTempConfigDir "canvas-share-config" (fun dir ->
-            seed dir """{ "canvasShare": { "accountName": "tmcanvasabc", "container": "shared-docs", "defaultExpiryDays": 3 } }"""
+            seed dir
+                """{ "canvasShare": { "accountName": "tmcanvasabc", "container": "shared-docs", "defaultExpiryDays": 3, "viewerBaseUrl": "https://treemon.azurewebsites.net" } }"""
             let config = readCanvasShareConfig ()
             Assert.That(config.AccountName, Is.EqualTo(Some "tmcanvasabc"))
             Assert.That(config.Container, Is.EqualTo("shared-docs"))
-            Assert.That(config.DefaultExpiryDays, Is.EqualTo(3)))
+            Assert.That(config.DefaultExpiryDays, Is.EqualTo(3))
+            Assert.That(
+                config.ViewerBaseUrl,
+                Is.EqualTo(Some(Uri("https://treemon.azurewebsites.net")))))
 
     [<Test>]
-    member _.``readCanvasShareConfig has no accountName by default — that is what unconfigured means``() =
+    member _.``account and viewer URL have no defaults``() =
         withTempConfigDir "canvas-share-config" (fun dir ->
             seed dir """{ "canvasShare": { "container": "shared-docs" } }"""
-            Assert.That(readCanvasShareConfig().AccountName, Is.EqualTo(None)))
+            let config = readCanvasShareConfig ()
+            Assert.That(config.AccountName, Is.EqualTo(None))
+            Assert.That(config.ViewerBaseUrl, Is.EqualTo(None)))
 
     [<Test>]
     member _.``readCanvasShareConfig treats a blank accountName as absent``() =
@@ -182,6 +228,36 @@ type CanvasShareConfigTests() =
             seed dir """{ "canvasShare": { "accountName": "   " } }"""
             Assert.That(readCanvasShareConfig().AccountName, Is.EqualTo(None),
                         "a whitespace-only account name must not be published to"))
+
+    [<Test>]
+    member _.``readCanvasShareConfig accepts a configurable HTTPS viewer URL``() =
+        withTempConfigDir "canvas-share-config" (fun dir ->
+            seed dir
+                """{ "canvasShare": { "viewerBaseUrl": " https://isolated-viewer.test:7443/base/ " } }"""
+            Assert.That(
+                readCanvasShareConfig().ViewerBaseUrl,
+                Is.EqualTo(Some(Uri("https://isolated-viewer.test:7443/base/")))))
+
+    [<TestCase("")>]
+    [<TestCase("   ")>]
+    [<TestCase("http://viewer.test")>]
+    [<TestCase("https:viewer.test")>]
+    [<TestCase("viewer.test")>]
+    [<TestCase("not a URL")>]
+    member _.``blank malformed or non-HTTPS viewer URL is unconfigured``(value: string) =
+        withTempConfigDir "canvas-share-config" (fun dir ->
+            seed dir
+                $"""{{ "canvasShare": {{ "viewerBaseUrl": "{value}" }} }}"""
+            Assert.That(readCanvasShareConfig().ViewerBaseUrl, Is.EqualTo(None)))
+
+    [<TestCase("https://viewer.test?credential=no")>]
+    [<TestCase("https://viewer.test/#fragment")>]
+    [<TestCase("https://credential@viewer.test")>]
+    member _.``viewer base URL rejects credential query and fragment components``(value: string) =
+        withTempConfigDir "canvas-share-config" (fun dir ->
+            seed dir
+                $"""{{ "canvasShare": {{ "viewerBaseUrl": "{value}" }} }}"""
+            Assert.That(readCanvasShareConfig().ViewerBaseUrl, Is.EqualTo(None)))
 
     [<Test>]
     member _.``readCanvasShareConfig defaults the expiry when only the container is set``() =
@@ -197,35 +273,27 @@ type CanvasShareConfigTests() =
             seed dir """{ "canvasShare": { "container": "   " } }"""
             Assert.That(readCanvasShareConfig().Container, Is.EqualTo(defaultCanvasShareConfig.Container)))
 
-    [<Test>]
-    member _.``readCanvasShareConfig ignores a non-positive expiry (would mint a dead link)``() =
+    [<TestCase(1)>]
+    [<TestCase(7)>]
+    [<TestCase(30)>]
+    member _.``readCanvasShareConfig accepts a bounded product lifetime``(days: int) =
         withTempConfigDir "canvas-share-config" (fun dir ->
-            seed dir """{ "canvasShare": { "defaultExpiryDays": 0 } }"""
+            seed dir
+                $"""{{ "canvasShare": {{ "defaultExpiryDays": {days} }} }}"""
+            Assert.That(readCanvasShareConfig().DefaultExpiryDays, Is.EqualTo(days)))
+
+    [<TestCase(0)>]
+    [<TestCase(31)>]
+    member _.``readCanvasShareConfig rejects a lifetime outside one through thirty``(days: int) =
+        withTempConfigDir "canvas-share-config" (fun dir ->
+            seed dir
+                $"""{{ "canvasShare": {{ "defaultExpiryDays": {days} }} }}"""
             Assert.That(readCanvasShareConfig().DefaultExpiryDays,
                         Is.EqualTo(defaultCanvasShareConfig.DefaultExpiryDays)))
 
     [<Test>]
-    member _.``readCanvasShareConfig ignores an expiry beyond the user-delegation-key limit``() =
-        withTempConfigDir "canvas-share-config" (fun dir ->
-            // A user delegation key lives at most 7 days; Azure refuses a longer window outright when
-            // the key is minted, so an over-long config value must fall back rather than fail at publish.
-            seed dir """{ "canvasShare": { "defaultExpiryDays": 30 } }"""
-            Assert.That(readCanvasShareConfig().DefaultExpiryDays,
-                        Is.EqualTo(defaultCanvasShareConfig.DefaultExpiryDays)))
-
-    [<Test>]
-    member _.``readCanvasShareConfig accepts the maximum bounded expiry``() =
-        withTempConfigDir "canvas-share-config" (fun dir ->
-            seed dir """{ "canvasShare": { "defaultExpiryDays": 7 } }"""
-            Assert.That(readCanvasShareConfig().DefaultExpiryDays, Is.EqualTo(maxCanvasShareExpiryDays)))
-
-    [<Test>]
-    member _.``the expiry ceiling is Azure's 7-day user-delegation-key limit``() =
-        // Pinned deliberately: raising this constant would mint links Azure refuses to sign.
-        Assert.That(maxCanvasShareExpiryDays, Is.EqualTo(7))
-
-
-// ── unconfigured / credential gate ─────────────────────────────────────────────
+    member _.``the durable product expiry ceiling is thirty days``() =
+        Assert.That(maxCanvasShareExpiryDays, Is.EqualTo(30))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -235,6 +303,9 @@ type CanvasShareConfigTests() =
 [<NonParallelizable>]
 type PublishConfigGateTests() =
 
+    let seed (dir: string) (json: string) =
+        File.WriteAllText(Path.Combine(dir, "config.json"), json)
+
     [<Test>]
     member _.``serviceClient reuses one Azure authentication pipeline per account``() =
         let first = serviceClient "tmcanvasabc"
@@ -242,10 +313,10 @@ type PublishConfigGateTests() =
         Assert.That(serviceClient "tmcanvasxyz", Is.Not.SameAs(first))
 
     [<Test>]
-    member _.``publish returns the not-configured error when no account name is set``() =
-        // Without an account name there is nothing to publish to, so publish must fail closed
-        // BEFORE acquiring a credential or touching the network.
-        withTempConfigDir "canvas-share-publish" (fun _ ->
+    member _.``publish fails before network when account name is missing``() =
+        withTempConfigDir "canvas-share-publish" (fun dir ->
+            seed dir
+                """{ "canvasShare": { "viewerBaseUrl": "https://isolated-viewer.test" } }"""
             match runAsync (publish "doc.html" "<html></html>") with
             | Error msg ->
                 Assert.That(msg, Is.EqualTo(notConfiguredMessage))
@@ -254,9 +325,19 @@ type PublishConfigGateTests() =
             | Ok url -> Assert.Fail($"expected Error when unconfigured, got Ok {url}"))
 
     [<Test>]
+    member _.``publish fails before network when viewer URL is missing``() =
+        withTempConfigDir "canvas-share-publish" (fun dir ->
+            seed dir
+                """{ "canvasShare": { "accountName": "network-must-not-be-contacted" } }"""
+            match runAsync (publish "doc.html" "<html></html>") with
+            | Error msg ->
+                Assert.That(msg, Is.EqualTo(notConfiguredMessage))
+                Assert.That(msg, Does.Contain("canvasShare.viewerBaseUrl"),
+                            "the error must tell the operator which config key to set")
+            | Ok url -> Assert.Fail($"expected Error when unconfigured, got Ok {url}"))
+
+    [<Test>]
     member _.``the not-configured message names no application-managed storage credential``() =
-        // Treemon stores no account key or connection string, so the message must not send an
-        // operator hunting for one.
         Assert.That(notConfiguredMessage, Does.Not.Contain("AZURE_STORAGE_CONNECTION_STRING"))
         Assert.That(notConfiguredMessage.ToLowerInvariant(), Does.Not.Contain("key"))
 

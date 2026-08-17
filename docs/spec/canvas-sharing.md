@@ -192,6 +192,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - The publisher keeps its existing delegated Entra/Azure CLI identity and
   `Storage Blob Data Contributor` grant. The viewer uses a managed identity with the new read-only
   grant scoped to the share container.
+- Provisioning ensures the configured share container exists with anonymous access disabled before
+  either container-scoped grant is applied; the publisher intentionally does not create containers
+  at share time.
 - The canonical App Service, identity, Entra configuration, RBAC grants, and lifecycle policy
   remain deployed after verification. Verification removes only its document fixtures and any
   auxiliary resources created solely to prove the permission boundary.

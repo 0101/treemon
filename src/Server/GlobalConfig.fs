@@ -281,31 +281,34 @@ let internal writeCanvasSize (size: CanvasSize) =
     updateGlobalConfig "canvas size" [ "canvasSize", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
 
 /// Machine-level config for the canvas Share backend (the `canvasShare` section of `config.json`):
-/// which storage account published docs go to, which PRIVATE container they land in, and the default
-/// per-doc SAS expiry. Treemon stores no storage credential: links are signed with an Entra *user
-/// delegation key* obtained through `AzureCliCredential`, so the account name is ordinary non-secret
-/// config (spec docs/spec/canvas-sharing.md, Configuration).
+/// which storage account and PRIVATE container receive published docs, their default lifetime, and
+/// the HTTPS viewer base URL used for recipient links. These are ordinary non-secret settings; the
+/// publisher authenticates to storage with `AzureCliCredential`.
 type CanvasShareConfig =
     { AccountName: string option
       Container: string
-      DefaultExpiryDays: int }
+      DefaultExpiryDays: int
+      ViewerBaseUrl: Uri option }
 
-/// Defaults for a missing `canvasShare` section or field. `AccountName` has no default — without it
-/// there is nothing to publish to, so it is the single value an operator must supply and its absence
-/// is what "not configured" means.
-let defaultCanvasShareConfig = { AccountName = None; Container = "canvas-shared"; DefaultExpiryDays = 7 }
+/// Storage has a safe container/lifetime default, but neither deployment-specific endpoint does:
+/// both the account and viewer URL must be configured by the operator. The deployed viewer uses
+/// `https://treemon.azurewebsites.net`; keeping it out of the default preserves test/deployment
+/// isolation and makes an incomplete setup fail closed.
+let defaultCanvasShareConfig =
+    { AccountName = None
+      Container = "canvas-shared"
+      DefaultExpiryDays = 7
+      ViewerBaseUrl = None }
 
-/// Upper bound on a configured `defaultExpiryDays`, set by Azure rather than by us: a user delegation
-/// key is valid for at most **7 days**, and a SAS signed with it dies when the key does regardless of
-/// the expiry written into the token. Requesting more is rejected outright when the key is minted, so
-/// a larger — or non-positive — value is treated as absent and falls back to the default.
-let internal maxCanvasShareExpiryDays = 7
+/// Durable product limit for a shared document's view-time-enforced lifetime. Lifecycle cleanup is
+/// configured beyond this boundary; values outside the range fall back to the seven-day default.
+let internal maxCanvasShareExpiryDays = 30
 
 /// Reads the `canvasShare` config section, falling back to `defaultCanvasShareConfig` for a missing
-/// section or field. A blank `accountName` or `container`, or a `defaultExpiryDays` outside
-/// `1 .. maxCanvasShareExpiryDays`, is treated as absent (a non-positive expiry would mint an
-/// already-dead link; one beyond the 7-day user-delegation-key limit would be refused by Azure at
-/// publish), so a partial or typo'd section still yields a working config rather than a broken one.
+/// section or field. Blank account/container values, a non-HTTPS/invalid `viewerBaseUrl`, or a
+/// `defaultExpiryDays` outside `1 .. maxCanvasShareExpiryDays` are treated as absent. User info,
+/// query strings, and fragments are not valid on the base URL because published links must be clean
+/// paths without embedded credentials.
 let internal readCanvasShareConfig () : CanvasShareConfig =
     withConfigDocument defaultCanvasShareConfig (fun root ->
         match root.TryGetProperty("canvasShare") with
@@ -315,6 +318,18 @@ let internal readCanvasShareConfig () : CanvasShareConfig =
                 | true, v when v.ValueKind = System.Text.Json.JsonValueKind.String && v.GetString().Trim() <> "" ->
                     Some(v.GetString().Trim())
                 | _ -> None
+            let httpsBaseUrl name =
+                trimmedString name
+                |> Option.bind (fun value ->
+                    match Uri.TryCreate(value, UriKind.Absolute) with
+                    | true, uri
+                        when uri.Scheme = Uri.UriSchemeHttps
+                             && not (String.IsNullOrWhiteSpace(uri.Host))
+                             && String.IsNullOrEmpty(uri.UserInfo)
+                             && String.IsNullOrEmpty(uri.Query)
+                             && String.IsNullOrEmpty(uri.Fragment) ->
+                        Some uri
+                    | _ -> None)
             let expiryDays =
                 match section.TryGetProperty("defaultExpiryDays") with
                 | true, e when e.ValueKind = System.Text.Json.JsonValueKind.Number ->
@@ -324,7 +339,8 @@ let internal readCanvasShareConfig () : CanvasShareConfig =
                 | _ -> defaultCanvasShareConfig.DefaultExpiryDays
             { AccountName = trimmedString "accountName"
               Container = trimmedString "container" |> Option.defaultValue defaultCanvasShareConfig.Container
-              DefaultExpiryDays = expiryDays }
+              DefaultExpiryDays = expiryDays
+              ViewerBaseUrl = httpsBaseUrl "viewerBaseUrl" }
         | _ -> defaultCanvasShareConfig)
 
 let internal readLastViewedHashes () : Map<string, Map<string, string>> =
