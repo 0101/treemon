@@ -320,10 +320,10 @@
             cursor: pointer; border: 1px solid transparent; transition: background 0.12s, border-color 0.12s;
         }
         .overview-item:not(.overview-item-selected):hover { background: #2a2a3c; }
-        /* Selected group = a black "tab" with rounded TOP corners. Its content keeps the base
-           item's padding so it stays aligned with the sibling columns (only the background changes);
-           the extra bottom padding + align-self: stretch drop its bottom edge flush against the
-           black .overview-breakdown panel rendered below it. */
+        /* Selected group = a black "tab" with rounded TOP corners. Removing the base item's -2px
+           start margin aligns the tab shell with the panel; reducing start padding by the same 2px
+           keeps its content aligned with sibling columns. Extra bottom padding + align-self: stretch
+           drop its bottom edge flush against the black .overview-breakdown panel rendered below it. */
         .overview-item-selected {
             background: #11111b; border-color: transparent; border-radius: 10px 10px 0 0;
             align-self: stretch; margin-inline-start: 0; padding: 6px 8px 12px; padding-inline-start: 6px;

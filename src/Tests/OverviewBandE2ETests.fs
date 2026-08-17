@@ -62,6 +62,28 @@ let private rgb (hex: string) =
     let v (i: int) = Convert.ToInt32(h.Substring(i, 2), 16)
     $"rgb({v 0}, {v 2}, {v 4})"
 
+let private selectedSeamProbe (page: IPage) =
+    task {
+        let! json =
+            page.EvaluateAsync<string>(
+                """() => {
+                  const selected = document.querySelector('.overview-item-selected').getBoundingClientRect();
+                  const panelElement = document.querySelector('.overview-breakdown');
+                  const panel = panelElement.getBoundingClientRect();
+                  return JSON.stringify({
+                    selectedLeft: selected.left,
+                    panelLeft: panel.left,
+                    panelTopLeftRadius: getComputedStyle(panelElement).borderTopLeftRadius
+                  });
+                }""")
+
+        return JObject.Parse(json)
+    }
+
+let private assertAlignedSeam (seam: JObject) =
+    Assert.That(seam.Value<float>("selectedLeft"), Is.EqualTo(seam.Value<float>("panelLeft")).Within(0.5), "the selected tab and detail panel must share their left edge")
+    Assert.That(seam.Value<string>("panelTopLeftRadius"), Is.EqualTo("0px"), "a first selected tab must not leave a rounded wedge in the panel seam")
+
 // Reads a big JSON snapshot of the band's structure in one round-trip.
 let private bandProbeJs =
     """
@@ -428,23 +450,29 @@ type OverviewBandE2ETests() =
                     """() => {
                       const chips = Array.from(document.querySelectorAll('.overview-breakdown .overview-chip'));
                       const used = chips.map(c => parseFloat(getComputedStyle(c).getPropertyValue('--ctx-used')) || 0);
-                      const selected = document.querySelector('.overview-item-selected').getBoundingClientRect();
-                      const panelElement = document.querySelector('.overview-breakdown');
-                      const panel = panelElement.getBoundingClientRect();
                       return JSON.stringify({
                         chipCount: chips.length,
-                        maxUsed: used.length ? Math.max.apply(null, used) : 0,
-                        selectedLeft: selected.left,
-                        panelLeft: panel.left,
-                        panelTopLeftRadius: getComputedStyle(panelElement).borderTopLeftRadius
+                        maxUsed: used.length ? Math.max.apply(null, used) : 0
                       });
                     }""")
 
             let bd = JObject.Parse(json)
             Assert.That(bd.Value<int>("chipCount"), Is.EqualTo(3), "the Investigating breakdown lists its three member worktrees")
             Assert.That(bd.Value<float>("maxUsed"), Is.GreaterThan(0.0), "a member's most-loaded session drives a non-zero --ctx-used chip fill")
-            Assert.That(bd.Value<float>("selectedLeft"), Is.EqualTo(bd.Value<float>("panelLeft")).Within(0.5), "the selected tab and detail panel must share their left edge")
-            Assert.That(bd.Value<string>("panelTopLeftRadius"), Is.EqualTo("0px"), "a first selected tab must not leave a rounded wedge in the panel seam")
+            let! seam = selectedSeamProbe this.Page
+            assertAlignedSeam seam
+        }
+
+    [<Test>]
+    member this.``Drill-down - first task tab aligns with its detail panel``() =
+        task {
+            let planned = this.Page.Locator(".overview-band-rest .overview-section .overview-item").First
+            do! Assertions.Expect(planned).ToContainTextAsync("Planned")
+            do! planned.ClickAsync()
+            do! this.Page.Locator(".overview-breakdown .overview-task-row").First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! seam = selectedSeamProbe this.Page
+            assertAlignedSeam seam
         }
 
     [<Test>]
