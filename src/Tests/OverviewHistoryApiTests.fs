@@ -21,6 +21,7 @@ let private createApi store =
         { Agent = SchedulerState.createAgent ()
           CardLog = CardEventLog.createAgent ()
           SessionAgent = SessionManager.createAgent ()
+          EmbeddedTerminal = EmbeddedTerminal.create ()
           ActivityStore = None
           SnapshotStore = Some store
           AutoSyncStore = None

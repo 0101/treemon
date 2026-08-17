@@ -9,6 +9,9 @@ open System
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: WorktreePath -> Async<unit>
+      startEmbeddedTerminal: WorktreePath -> Async<EmbeddedTerminalState>
+      getEmbeddedTerminal: unit -> Async<EmbeddedTerminalState>
+      closeEmbeddedTerminal: unit -> Async<EmbeddedTerminalState>
       openEditor: WorktreePath -> Async<unit>
       toggleAutoSync: WorktreePath -> bool -> Async<Result<unit, string>>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>

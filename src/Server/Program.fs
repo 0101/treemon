@@ -315,6 +315,10 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
+    let embeddedTerminal =
+        if config.Demo then None
+        else Some(EmbeddedTerminal.create ())
+
     let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, runtimeStoreFlushes =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
@@ -339,6 +343,7 @@ let main args =
                     { Agent = agent
                       CardLog = cardLog
                       SessionAgent = sessionAgent
+                      EmbeddedTerminal = embeddedTerminal.Value
                       ActivityStore = None
                       SnapshotStore = None
                       AutoSyncStore = None
@@ -400,6 +405,7 @@ let main args =
                         { Agent = agent
                           CardLog = cardLog
                           SessionAgent = sessionAgent
+                          EmbeddedTerminal = embeddedTerminal.Value
                           ActivityStore = Some store
                           SnapshotStore = Some activity.SnapshotStore
                           AutoSyncStore = Some autoSyncStore
@@ -495,6 +501,12 @@ let main args =
                 finally
                     host.DisposeAsync().GetAwaiter().GetResult())
     finally
+        embeddedTerminal
+        |> Option.iter (fun manager ->
+            EmbeddedTerminal.close manager
+            |> Async.RunSynchronously
+            |> ignore)
+
         activityRuntime
         |> Option.iter (fun runtime ->
             Log.log "Shutdown" "Stopping session activity"

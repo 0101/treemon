@@ -193,6 +193,13 @@ type WorkspaceWidth =
     | EqualThirds
     | WideCanvas
 
+[<RequireQualifiedAccess>]
+type EmbeddedTerminalState =
+    | Closed
+    | Starting of worktreePath: WorktreePath
+    | Running of worktreePath: WorktreePath * endpoint: string
+    | Failed of worktreePath: WorktreePath * error: string
+
 type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven
     | SystemView    // server-generated; data-driven; no owner (e.g. the beads dashboard)

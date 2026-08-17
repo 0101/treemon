@@ -61,6 +61,7 @@
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="CardEventLog.fs" />
     <Compile Include="DemoFixture.fs" />
+    <Compile Include="EmbeddedTerminal.fs" />
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="OverviewSnapshotCapture.fs" />
     <Compile Include="IdiomorphScript.fs" />

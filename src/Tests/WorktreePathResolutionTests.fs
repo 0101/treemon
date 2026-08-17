@@ -36,6 +36,7 @@ let private createApi agent roots =
         { Agent = agent
           CardLog = CardEventLog.createAgent ()
           SessionAgent = SessionManager.createAgent ()
+          EmbeddedTerminal = EmbeddedTerminal.create ()
           ActivityStore = None
           SnapshotStore = None
           AutoSyncStore = None

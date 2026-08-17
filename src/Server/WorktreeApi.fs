@@ -49,6 +49,17 @@ let readOnlyApi
     { getWorktrees = getWorktrees
       getSyncStatus = getSyncStatus
       openTerminal = fun _ -> async { return () }
+      startEmbeddedTerminal =
+        fun path ->
+            async {
+                return
+                    EmbeddedTerminalState.Failed(
+                        path,
+                        $"Embedded terminal is not available in {modeName}"
+                    )
+            }
+      getEmbeddedTerminal = fun () -> async { return EmbeddedTerminalState.Closed }
+      closeEmbeddedTerminal = fun () -> async { return EmbeddedTerminalState.Closed }
       openEditor = fun _ -> async { return () }
       toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
       deleteWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
@@ -638,6 +649,7 @@ type WorktreeApiDependencies =
     { Agent: MailboxProcessor<SchedulerState.StateMsg>
       CardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>
       SessionAgent: SessionManager.SessionAgent
+      EmbeddedTerminal: EmbeddedTerminal.Manager
       ActivityStore: SessionActivityStore.SessionActivityStore option
       SnapshotStore: OverviewSnapshotStore.OverviewSnapshotStore option
       AutoSyncStore: AutoSyncStore.Store option
@@ -650,6 +662,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
     let { Agent = agent
           CardLog = cardLog
           SessionAgent = sessionAgent
+          EmbeddedTerminal = embeddedTerminal
           ActivityStore = activityStore
           SnapshotStore = snapshotStore
           AutoSyncStore = autoSyncStore
@@ -709,10 +722,26 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
-            createWorktree = fun _ -> async { return Ok [] } }
+            createWorktree = fun _ -> async { return Ok [] }
+            startEmbeddedTerminal = fun wtPath ->
+                withValidatedPathValue
+                    wtPath
+                    "startEmbeddedTerminal"
+                    (fun error -> EmbeddedTerminalState.Failed(wtPath, error))
+                    (fun () -> EmbeddedTerminal.start embeddedTerminal wtPath)
+            getEmbeddedTerminal = fun () -> EmbeddedTerminal.get embeddedTerminal
+            closeEmbeddedTerminal = fun () -> EmbeddedTerminal.close embeddedTerminal }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
+          startEmbeddedTerminal = fun wtPath ->
+              withValidatedPathValue
+                  wtPath
+                  "startEmbeddedTerminal"
+                  (fun error -> EmbeddedTerminalState.Failed(wtPath, error))
+                  (fun () -> EmbeddedTerminal.start embeddedTerminal wtPath)
+          getEmbeddedTerminal = fun () -> EmbeddedTerminal.get embeddedTerminal
+          closeEmbeddedTerminal = fun () -> EmbeddedTerminal.close embeddedTerminal
           openEditor = openEditor validatePath
           toggleAutoSync = fun wtPath enabled ->
               let path = WorktreePath.value wtPath
