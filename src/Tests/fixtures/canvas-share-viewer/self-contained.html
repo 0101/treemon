@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Self-contained viewer fixture</title>
+  <style>
+    #execution-status { color: rgb(20, 90, 160); }
+  </style>
+</head>
+<body>
+  <div id="execution-status">ready</div>
+  <img id="embedded-image" alt="embedded pixel" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" />
+  <script>
+    document.getElementById("execution-status").dataset.inline = "ran";
+    window.eval('document.getElementById("execution-status").dataset.eval = "ran"');
+    (new Function('document.getElementById("execution-status").dataset.dynamicFunction = "ran"'))();
+  </script>
+</body>
+</html>

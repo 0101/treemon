@@ -3,12 +3,14 @@ module Tests.CanvasShareViewerTests
 open System
 open System.Collections.Generic
 open System.Globalization
+open System.IO
 open System.Net
 open System.Net.Http
 open System.Net.Http.Headers
 open System.Text
 open System.Threading
 open System.Threading.Tasks
+open System.Xml.Linq
 open CanvasShareViewer
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
@@ -18,6 +20,12 @@ open NUnit.Framework
 open Tests.TestUtils
 
 let private validPrefix = "0123456789ABCDEFGHIJKL"
+
+let private shellContentSecurityPolicy =
+    "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'"
+
+let private contentContentSecurityPolicy =
+    "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts"
 
 let private formatExpiry (value: DateTimeOffset) =
     value.ToString("o", CultureInfo.InvariantCulture)
@@ -60,9 +68,7 @@ let private withViewer
         WebApplication.CreateEmptyBuilder(
             WebApplicationOptions()
         )
-
     builder.WebHost.UseKestrel(fun options ->
-        options.AddServerHeader <- false
         options.Listen(IPAddress.Loopback, port))
     |> ignore
 
@@ -100,6 +106,52 @@ let private headerPairs (headers: HttpHeaders) =
     |> Seq.map (fun header ->
         header.Key,
         (header.Value |> Seq.sort |> List.ofSeq))
+
+let private responseHeadersWithoutDate
+    (response: HttpResponseMessage)
+    =
+    response.Headers
+    |> headerPairs
+    |> Seq.sortBy fst
+    |> List.ofSeq
+
+let private expectedPolicyHeaders contentSecurityPolicy =
+    [
+        "Cache-Control", [ "no-store" ]
+        "Content-Security-Policy",
+        [ contentSecurityPolicy ]
+        "Referrer-Policy", [ "no-referrer" ]
+        "X-Content-Type-Options", [ "nosniff" ]
+    ]
+
+let private parseHtmlDom (html: string) =
+    html.Replace(
+        "<!doctype html>",
+        "",
+        StringComparison.OrdinalIgnoreCase
+    )
+    |> XDocument.Parse
+
+let private requiredAttribute
+    name
+    (element: XElement)
+    =
+    match element.Attribute(XName.Get(name)) |> Option.ofObj with
+    | Some attribute -> attribute.Value
+    | None ->
+        Assert.Fail(
+            $"Expected <{element.Name.LocalName}> to have a {name} attribute."
+        )
+        ""
+
+let private selfContainedFixtureBytes () =
+    Path.Combine(
+        __SOURCE_DIRECTORY__,
+        "fixtures",
+        "canvas-share-viewer",
+        "self-contained.html"
+    )
+    |> File.ReadAllBytes
 
 type private ResponseSnapshot =
     { StatusCode: HttpStatusCode
@@ -435,8 +487,10 @@ type ViewerRouteTests() =
         )
 
     [<Test>]
-    member _.``shell and content independently read the exact blob``() =
-        let blobName = $"{validPrefix}/report.html"
+    member _.``shell routes only to sandboxed content and both routes re-read the blob``() =
+        let filename = "report & \"notes\".html"
+        let encodedFilename = Uri.EscapeDataString(filename)
+        let blobName = $"{validPrefix}/{filename}"
         let secretMarker = "document-body-secret-marker"
 
         let documents =
@@ -450,16 +504,30 @@ type ViewerRouteTests() =
         withViewer documents now (fun fake client baseUrl ->
             use shell =
                 client.GetAsync(
-                    $"{baseUrl}/c/{validPrefix}/report.html"
+                    $"{baseUrl}/c/{validPrefix}/{encodedFilename}"
                 )
                 |> await
 
             let shellBody =
                 shell.Content.ReadAsStringAsync() |> await
 
+            let shellDom = parseHtmlDom shellBody
+
+            let iframe =
+                shellDom.Descendants(XName.Get("iframe"))
+                |> Seq.exactlyOne
+
+            let sandboxTokens =
+                requiredAttribute "sandbox" iframe
+                |> _.Split(
+                        ' ',
+                        StringSplitOptions.RemoveEmptyEntries
+                    )
+                |> Set.ofArray
+
             use content =
                 client.GetAsync(
-                    $"{baseUrl}/c/{validPrefix}/report.html/content"
+                    $"{baseUrl}/c/{validPrefix}/{encodedFilename}/content"
                 )
                 |> await
 
@@ -479,6 +547,33 @@ type ViewerRouteTests() =
                 )
 
                 Assert.That(
+                    shellDom.Descendants(XName.Get("script")),
+                    Is.Empty,
+                    "the shell must expose no script API"
+                )
+
+                Assert.That(
+                    requiredAttribute "src" iframe,
+                    Is.EqualTo(
+                        $"/c/{validPrefix}/{encodedFilename}/content"
+                    )
+                )
+
+                Assert.That(
+                    sandboxTokens,
+                    Is.EqualTo(Set.singleton "allow-scripts"),
+                    "the iframe must omit same-origin, forms, popups, downloads, and top-navigation"
+                )
+
+                Assert.That(
+                    iframe.Attribute(XName.Get("srcdoc"))
+                    |> Option.ofObj
+                    |> Option.isNone,
+                    Is.True,
+                    "the document must be loaded only from the content route"
+                )
+
+                Assert.That(
                     content.StatusCode,
                     Is.EqualTo(HttpStatusCode.OK)
                 )
@@ -492,6 +587,138 @@ type ViewerRouteTests() =
                     fake.Requests(),
                     Is.EqualTo([ blobName; blobName ]),
                     "each route must perform its own exact read"
+                )))
+
+    [<Test>]
+    member _.``shell and content emit their exact response policies``() =
+        let blobName = $"{validPrefix}/report.html"
+
+        let documents =
+            Map [
+                blobName,
+                document
+                    "<html><body>content</body></html>"
+                    liveMetadata
+            ]
+
+        withViewer documents now (fun _ client baseUrl ->
+            use shell =
+                client.GetAsync(
+                    $"{baseUrl}/c/{validPrefix}/report.html"
+                )
+                |> await
+
+            use content =
+                client.GetAsync(
+                    $"{baseUrl}/c/{validPrefix}/report.html/content"
+                )
+                |> await
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    responseHeadersWithoutDate shell,
+                    Is.EqualTo(
+                        expectedPolicyHeaders
+                            shellContentSecurityPolicy
+                    )
+                )
+
+                Assert.That(
+                    responseHeadersWithoutDate content,
+                    Is.EqualTo(
+                        expectedPolicyHeaders
+                            contentContentSecurityPolicy
+                    )
+                )
+
+                Assert.That(
+                    shell.Content.Headers.ContentType
+                    |> Option.ofObj
+                    |> Option.map string,
+                    Is.EqualTo(
+                        Some "text/html; charset=utf-8"
+                    )
+                )
+
+                Assert.That(
+                    content.Content.Headers.ContentType
+                    |> Option.ofObj
+                    |> Option.map string,
+                    Is.EqualTo(
+                        Some "text/html; charset=utf-8"
+                    )
+                )))
+
+    [<Test>]
+    member _.``content preserves a self-contained active document``() =
+        let blobName = $"{validPrefix}/self-contained.html"
+        let fixture = selfContainedFixtureBytes ()
+
+        let documents =
+            Map [
+                blobName,
+                { Content = ReadOnlyMemory<byte>(fixture)
+                  Metadata = liveMetadata }
+            ]
+
+        withViewer documents now (fun _ client baseUrl ->
+            use response =
+                client.GetAsync(
+                    $"{baseUrl}/c/{validPrefix}/self-contained.html/content"
+                )
+                |> await
+
+            let actual =
+                response.Content.ReadAsByteArrayAsync()
+                |> await
+
+            let dom =
+                actual
+                |> Encoding.UTF8.GetString
+                |> parseHtmlDom
+
+            let style =
+                dom.Descendants(XName.Get("style"))
+                |> Seq.exactlyOne
+
+            let script =
+                dom.Descendants(XName.Get("script"))
+                |> Seq.exactlyOne
+
+            let image =
+                dom.Descendants(XName.Get("img"))
+                |> Seq.exactlyOne
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    response.StatusCode,
+                    Is.EqualTo(HttpStatusCode.OK)
+                )
+
+                Assert.That(
+                    actual,
+                    Is.EqualTo(fixture),
+                    "the exported HTML must be streamed unchanged"
+                )
+
+                Assert.That(
+                    style.Value,
+                    Does.Contain("#execution-status")
+                )
+
+                Assert.That(
+                    script.Value,
+                    Does.Contain("window.eval(")
+                )
+
+                Assert.That(
+                    script.Value,
+                    Does.Contain("new Function(")
+                )
+
+                Assert.That(
+                    requiredAttribute "src" image,
+                    Does.StartWith("data:image/")
                 )))
 
     [<Test>]
@@ -541,36 +768,49 @@ type ViewerRouteTests() =
             ]
 
         withViewer documents now (fun fake client baseUrl ->
-            let requests =
-                cases
-                |> List.collect (fun (path, _) ->
-                    [
-                        $"{baseUrl}/c/{path}"
-                        $"{baseUrl}/c/{path}/content"
-                    ])
-
             let snapshots =
-                requests
-                |> List.map (responseSnapshot client)
+                cases
+                |> List.map (fun (path, _) ->
+                    responseSnapshot
+                        client
+                        $"{baseUrl}/c/{path}",
+                    responseSnapshot
+                        client
+                        $"{baseUrl}/c/{path}/content")
 
-            let expected =
+            let expectedShell, expectedContent =
                 snapshots |> List.head
 
             Assert.Multiple(fun () ->
                 snapshots
-                |> List.iter (fun actual ->
+                |> List.iter (fun (shell, content) ->
                     Assert.That(
-                        actual,
-                        Is.EqualTo(expected)
+                        shell,
+                        Is.EqualTo(expectedShell)
                     )
 
                     Assert.That(
-                        actual.StatusCode,
+                        content,
+                        Is.EqualTo(expectedContent)
+                    )
+
+                    Assert.That(
+                        shell.StatusCode,
                         Is.EqualTo(HttpStatusCode.NotFound)
                     )
 
                     Assert.That(
-                        actual.Body,
+                        content.StatusCode,
+                        Is.EqualTo(HttpStatusCode.NotFound)
+                    )
+
+                    Assert.That(
+                        shell.Body,
+                        Is.Empty
+                    )
+
+                    Assert.That(
+                        content.Body,
                         Is.Empty
                     ))
 
