@@ -1,7 +1,7 @@
 ---
 autofix: false
 model: sonnet
-applies-to: "**/*.fs"
+applies-to: ["src/Cli/**/*.fs", "src/Client/**/*.fs", "src/Extension/**/*.fs", "src/Server/**/*.fs", "src/Shared/**/*.fs"]
 ---
 # Module Cohesion
 
