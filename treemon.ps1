@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo", "add", "remove", "install-skill")]
+    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo", "add", "remove", "install-skill", "setup-ttyd")]
     [string]$Command,
 
     [Parameter(Position = 1, ValueFromRemainingArguments)]
@@ -46,6 +46,7 @@ if (-not $Command) {
     Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
     Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (restarts prod if running)"
     Write-Host "  install-skill              Install the tm CLI skill for AI coding agents"
+    Write-Host "  setup-ttyd                 Install the pinned ttyd executable for embedded terminals"
     exit 0
 }
 
@@ -734,5 +735,8 @@ switch ($Command) {
     }
     "install-skill" {
         Install-Skill
+    }
+    "setup-ttyd" {
+        & (Join-Path $ScriptDir "scripts\setup-ttyd.ps1")
     }
 }
