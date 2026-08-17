@@ -1,6 +1,7 @@
 ---
 autofix: false
 model: inherit
+applies-to: ["src/Cli/**/*.fs", "src/Client/**/*.fs", "src/Extension/**/*.fs", "src/Server/**/*.fs", "src/Shared/**/*.fs"]
 ---
 # Simplicity Over Complexity
 
