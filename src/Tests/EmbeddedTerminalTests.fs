@@ -47,7 +47,9 @@ if (-not [IO.File]::Exists($env:FAKE_SHELL_RECORD)) {
     throw 'Timed out waiting for the fake shell to report its cwd'
 }
 $shellCwd = [IO.File]::ReadAllText($env:FAKE_SHELL_RECORD)
-$record = "$PID|$port|$($Remaining[$interfaceIndex + 1])|$($Remaining -contains '-W')|$($Remaining -contains '-O')|$cwd|$shell|$shellCwd"
+$workingDirectoryIndex = [Array]::IndexOf($shellArgs, '-WorkingDirectory')
+$childCommand = $shell + ' ' + ($shellArgs[$workingDirectoryIndex..($shellArgs.Length - 1)] -join ' ')
+$record = "$PID|$port|$($Remaining[$interfaceIndex + 1])|$($Remaining -contains '-W')|$($Remaining -contains '-O')|$cwd|$shell|$shellCwd|$($shellArgs[$workingDirectoryIndex + 1])|$([Text.Encoding]::UTF8.GetByteCount($childCommand))"
 [IO.File]::WriteAllText($env:FAKE_TTYD_RECORD, $record)
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
 $listener.Start()
@@ -226,7 +228,9 @@ type EmbeddedTerminalTests() =
                     Assert.That(fields[5], Is.EqualTo worktreePath)
                     Assert.That(fields[6], Is.EqualTo "pwsh")
                     Assert.That(shellCwds[0], Is.EqualTo profileCwd)
-                    Assert.That(shellCwds[1], Is.EqualTo worktreePath))
+                    Assert.That(shellCwds[1], Is.EqualTo worktreePath)
+                    Assert.That(fields[8], Is.EqualTo ".")
+                    Assert.That(int fields[9], Is.LessThan 256))
 
                 let second =
                     EmbeddedTerminal.start manager (WorktreePath(Path.Combine(tempDir, "other")))

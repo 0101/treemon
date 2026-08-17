@@ -138,7 +138,7 @@ let private launch (config: Config) (worktreePath: WorktreePath) (cancellationTo
             let port = reserveLoopbackPort ()
             let endpoint = $"http://127.0.0.1:{port}/"
             let encoded =
-                SessionManager.buildScript path None
+                "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE"
                 |> SessionManager.encodeCommand
 
             let psi =
@@ -149,6 +149,8 @@ let private launch (config: Config) (worktreePath: WorktreePath) (cancellationTo
                     RedirectStandardError = true,
                     CreateNoWindow = true
                 )
+
+            psi.Environment["TREEMON_TERMINAL_WORKTREE"] <- path
 
             config.PrefixArguments
             @ [ "-p"
@@ -162,7 +164,7 @@ let private launch (config: Config) (worktreePath: WorktreePath) (cancellationTo
                 config.ShellCommand ]
             @ config.ShellPrefixArguments
             @ [ "-WorkingDirectory"
-                path
+                "."
                 "-NoExit"
                 "-EncodedCommand"
                 encoded ]
