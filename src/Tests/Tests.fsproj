@@ -99,6 +99,7 @@
     <Compile Include="HttpSecurityTests.fs" />
     <Compile Include="CanvasExportTests.fs" />
     <Compile Include="CanvasShareTests.fs" />
+    <Compile Include="CanvasShareViewerTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
@@ -115,6 +116,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\CanvasShareViewer\CanvasShareViewer.fsproj" />
     <ProjectReference Include="..\Server\Server.fsproj" />
     <ProjectReference Include="..\Client\Client.fsproj" />
     <ProjectReference Include="..\Cli\Cli.fsproj" />
