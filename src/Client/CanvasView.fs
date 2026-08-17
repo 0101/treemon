@@ -83,8 +83,7 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
         | _ -> []
 
     let canvasCallbacks: CanvasPane.CanvasPaneCallbacks =
-        { SetPosition = SetCanvasPosition >> dispatch
-          SetSize = SetCanvasSize >> dispatch
+        { SetWidth = SetWorkspaceWidth >> dispatch
           SelectDoc = selectCanvasDoc
           OnOverviewClick = onOverviewClick
           OnOverviewDocClick = onOverviewDocClick
@@ -97,8 +96,8 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
 
     let canvasState: CanvasPane.CanvasPaneState =
         { IsOpen = model.Canvas.CanvasPaneOpen
-          Position = model.Canvas.CanvasPosition
-          Size = model.Canvas.CanvasSize
+          TerminalPaneOpen = model.TerminalPaneOpen
+          Width = model.Canvas.WorkspaceWidth
           SendState = model.Canvas.CanvasSendState
           DocError = model.Canvas.DocError
           ShareNotice = model.Canvas.ShareNotice

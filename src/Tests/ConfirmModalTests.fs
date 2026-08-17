@@ -69,6 +69,7 @@ let private defaultModel : Model =
       AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      TerminalPaneOpen = false
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false

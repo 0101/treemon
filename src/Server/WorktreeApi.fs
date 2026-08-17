@@ -63,10 +63,10 @@ let readOnlyApi
       launchAction = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       reportActivity = fun _ -> async { return () }
       saveCollapsedRepos = fun _ -> async { return () }
+      saveTerminalPaneOpen = fun _ -> async { return () }
       saveCanvasPaneOpen = fun _ -> async { return () }
       saveOverviewPanelOpen = fun _ -> async { return () }
-      saveCanvasPosition = fun _ -> async { return () }
-      saveCanvasSize = fun _ -> async { return () }
+      saveWorkspaceWidth = fun _ -> async { return () }
       resumeSession = fun _ -> async { return Error $"Session management is not available in {modeName}" }
       sendCanvasMessage = fun _ -> async { return CanvasMessageResult.Queued }
       archiveCanvasDoc = fun _ -> async { return Error $"Archive canvas doc is not available in {modeName}" }
@@ -494,10 +494,10 @@ let getWorktrees
               EditorName = getEditorConfig () |> snd
               WorktreeSkills = readWorktreeSkills ()
               CollapsedRepos = readCollapsedRepos ()
+              TerminalPaneOpen = readTerminalPaneOpen ()
               CanvasPaneOpen = readCanvasPaneOpen ()
               OverviewPanelOpen = readOverviewPanelOpen ()
-              CanvasPosition = readCanvasPosition ()
-              CanvasSize = readCanvasSize () }
+              WorkspaceWidth = readWorkspaceWidth () }
     }
 
 let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePath) =
@@ -705,7 +705,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
     | Some f ->
         { readOnlyApi
             "fixture mode"
-            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; WorktreeSkills = readWorktreeSkills (); CollapsedRepos = readCollapsedRepos (); CanvasPaneOpen = false; OverviewPanelOpen = false; CanvasPosition = CanvasPosition.Right; CanvasSize = CanvasSize.Ratio1To1 } })
+            (fun () -> async { return { f.Worktrees with DeployBranch = None; SystemMetrics = None; EditorName = getEditorConfig () |> snd; WorktreeSkills = readWorktreeSkills (); CollapsedRepos = readCollapsedRepos (); TerminalPaneOpen = false; CanvasPaneOpen = false; OverviewPanelOpen = false; WorkspaceWidth = WorkspaceWidth.EqualThirds } })
             (fun () -> async { return f.SyncStatus })
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
@@ -918,10 +918,10 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                   })
           reportActivity = fun level -> async { agent.Post(SchedulerState.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
+          saveTerminalPaneOpen = fun isOpen -> async { writeTerminalPaneOpen isOpen }
           saveCanvasPaneOpen = fun isOpen -> async { writeCanvasPaneOpen isOpen }
           saveOverviewPanelOpen = fun isOpen -> async { writeOverviewPanelOpen isOpen }
-          saveCanvasPosition = fun pos -> async { writeCanvasPosition pos }
-          saveCanvasSize = fun size -> async { writeCanvasSize size }
+          saveWorkspaceWidth = fun width -> async { writeWorkspaceWidth width }
           resumeSession = fun wtPath ->
               withValidatedPath wtPath "resumeSession" (fun () ->
                   async {

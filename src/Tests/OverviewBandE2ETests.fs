@@ -1004,18 +1004,18 @@ type OverviewBandE2ETests() =
             ()
         }
 
-    // Docking left/top used to reverse the two .app-layout children, which React reconciled by
-    // index — the pinned-state observers silently ended up watching the canvas pane, so neither
-    // scroll-closes-drill-down nor pinned-click-scrolls-to-top fired again.
+    // Layout changes must preserve the fixed pane DOM order so the pinned-state observers remain
+    // attached to the dashboard.
     [<Test>]
-    member this.``Docking the canvas left keeps pinned-state detection alive``() =
+    member this.``Widening the canvas keeps pinned-state detection alive``() =
         task {
             let canvasBtn =
                 this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
             do! canvasBtn.ClickAsync()
             do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            do! this.Page.Locator(".canvas-pos-btn[title='Dock left']").ClickAsync()
-            do! this.Page.Locator(".app-layout.canvas-left").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! this.Page.Locator(".canvas-width-btn[title^='Wide canvas']").ClickAsync()
+            do! this.Page.Locator(".app-layout.workspace-wide-canvas").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! this.Page.WaitForTimeoutAsync(400.0f)
 
             let! layoutJson =
                 this.Page.EvaluateAsync<string>(
@@ -1024,7 +1024,7 @@ type OverviewBandE2ETests() =
                       const dashboard = document.querySelector('.dashboard');
                       const pane = document.querySelector('.canvas-pane');
                       return JSON.stringify({
-                        firstChildIsDashboard: layout.firstElementChild === dashboard,
+                        lastChildIsDashboard: layout.lastElementChild === dashboard,
                         panePaintsLeft: pane.getBoundingClientRect().left < dashboard.getBoundingClientRect().left
                       });
                     }""")
@@ -1052,8 +1052,8 @@ type OverviewBandE2ETests() =
                     PageWaitForFunctionOptions(Timeout = 5000.0f))
 
             let layout = JObject.Parse(layoutJson)
-            Assert.That(layout.Value<bool>("firstChildIsDashboard"), Is.True, "the dashboard stays layout child #0 in every dock position")
-            Assert.That(layout.Value<bool>("panePaintsLeft"), Is.True, "canvas-left paints the pane left of the dashboard via CSS order")
+            Assert.That(layout.Value<bool>("lastChildIsDashboard"), Is.True, "the dashboard stays the last layout child at every width")
+            Assert.That(layout.Value<bool>("panePaintsLeft"), Is.True, "Canvas is the middle pane, so it paints left of the dashboard")
         }
 
     // A first attach that lands before React has committed the band must not give up silently: the

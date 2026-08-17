@@ -81,6 +81,7 @@ let init () =
       AutoSyncPending = Set.empty
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
+      TerminalPaneOpen = false
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -257,10 +258,10 @@ let update msg model =
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
+                TerminalPaneOpen = if isFirstLoad then response.TerminalPaneOpen else model.TerminalPaneOpen
                 OverviewPanelOpen = if isFirstLoad then response.OverviewPanelOpen else model.OverviewPanelOpen
                 Canvas.CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
-                Canvas.CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
-                Canvas.CanvasSize = if isFirstLoad then response.CanvasSize else model.Canvas.CanvasSize
+                Canvas.WorkspaceWidth = if isFirstLoad then response.WorkspaceWidth else model.Canvas.WorkspaceWidth
                 Canvas.PreviousCanvasHashes = currentCanvasHashes
                 Canvas.CanvasEvents = canvasEvents
                 Canvas.CanvasSendState = canvasSendState }
@@ -683,9 +684,7 @@ let update msg model =
             if expanded then saveCollapsedReposCmd repos
         ]
 
-    | SetCanvasPosition position -> CanvasUpdate.setCanvasPosition position model
-
-    | SetCanvasSize size -> CanvasUpdate.setCanvasSize size model
+    | SetWorkspaceWidth width -> CanvasUpdate.setWorkspaceWidth width model
 
     | SelectCanvasDoc (scopedKey, filename) -> CanvasUpdate.selectCanvasDoc scopedKey filename model
 
@@ -978,27 +977,22 @@ let private isEditableEventTarget (e: Browser.Types.KeyboardEvent) =
     | None -> false
 
 let view model dispatch =
-    let canvasPositionClass =
-        match model.Canvas.CanvasPosition with
-        | CanvasPosition.Left -> "canvas-left"
-        | CanvasPosition.Right -> "canvas-right"
-        | CanvasPosition.Top -> "canvas-top"
-        | CanvasPosition.Bottom -> "canvas-bottom"
-
-    let canvasSizeClass =
-        match model.Canvas.CanvasSize with
-        | CanvasSize.Ratio1To1 -> "canvas-size-1to1"
-        | CanvasSize.Ratio2To1 -> "canvas-size-2to1"
+    let workspaceWidthClass =
+        match model.Canvas.WorkspaceWidth with
+        | WorkspaceWidth.EqualThirds -> "workspace-thirds"
+        | WorkspaceWidth.WideCanvas -> "workspace-wide-canvas"
 
     let dashboardClass =
         match model.Canvas.CanvasPaneOpen with
-        | true -> $"dashboard canvas-open {canvasPositionClass}"
+        | true -> "dashboard canvas-open"
         | false -> "dashboard"
 
     let layoutClass =
-        match model.Canvas.CanvasPaneOpen with
-        | true -> $"app-layout canvas-open {canvasPositionClass} {canvasSizeClass}"
-        | false -> "app-layout"
+        [ "app-layout"
+          if model.Canvas.CanvasPaneOpen then "canvas-open"
+          if model.Canvas.CanvasPaneOpen then workspaceWidthClass
+          if not model.TerminalPaneOpen then "terminal-hidden" ]
+        |> String.concat " "
 
     let cardProps: CardViewProps =
         { EditorName = model.EditorName
@@ -1074,15 +1068,18 @@ let view model dispatch =
     let canvasEl =
         CanvasView.view model dispatch
 
-    // DOM order is fixed; the dock position is applied by CSS `order` on .app-layout's position
-    // class. Reordering these two same-typed divs instead makes React reconcile them by index, which
-    // silently re-renders each existing node with the other subtree and leaves node-bound resources
-    // (the Overview sticky observers) watching the wrong pane.
+    let terminalEl =
+        Html.div [
+            prop.className (if model.TerminalPaneOpen then "terminal-pane open" else "terminal-pane")
+            prop.hidden (not model.TerminalPaneOpen)
+        ]
+
+    // The workspace order is fixed so pane-local DOM state survives visibility and width changes.
     React.Fragment [
         viewAppHeader model dispatch
         Html.div [
             prop.className layoutClass
-            prop.children [ dashboardEl; canvasEl ]
+            prop.children [ terminalEl; canvasEl; dashboardEl ]
         ]
     ]
 

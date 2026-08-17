@@ -46,6 +46,7 @@ type Model =
       AutoSyncPending: Set<WorktreePath>
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
+      TerminalPaneOpen: bool
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
       OverviewAgentsStuck: bool
@@ -104,8 +105,7 @@ type Msg =
     // separate requests for the same window when the user cycles away and back.
     | CycleOverviewChart of now: System.DateTimeOffset
     | OverviewHistoryLoaded of request: OverviewHistoryRequest * response: OverviewHistoryResponse option
-    | SetCanvasPosition of CanvasPosition
-    | SetCanvasSize of CanvasSize
+    | SetWorkspaceWidth of WorkspaceWidth
     | SelectCanvasDoc of scopedKey: string * filename: string
     | FocusOverviewCard of scopedKey: string
     | OpenCanvasDoc of scopedKey: string * filename: string

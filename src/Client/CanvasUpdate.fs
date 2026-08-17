@@ -115,13 +115,9 @@ let toggleCanvasPane (model: Model) =
         if newState then syncVisibleDocCmd updated else Cmd.none
     ]
 
-let setCanvasPosition (position: CanvasPosition) (model: Model) =
-    { model with Canvas.CanvasPosition = position },
-    Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPosition position (fun _ -> NoOp)
-
-let setCanvasSize (size: CanvasSize) (model: Model) =
-    { model with Canvas.CanvasSize = size },
-    Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasSize size (fun _ -> NoOp)
+let setWorkspaceWidth (width: WorkspaceWidth) (model: Model) =
+    { model with Canvas.WorkspaceWidth = width },
+    Cmd.OfAsync.attempt worktreeApi.Value.saveWorkspaceWidth width (fun _ -> NoOp)
 
 let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     let targeted =

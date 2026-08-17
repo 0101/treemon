@@ -240,45 +240,35 @@ let internal readCanvasPaneOpen () : bool = readBoolProperty "canvasPaneOpen"
 let internal writeCanvasPaneOpen (isOpen: bool) =
     updateGlobalConfig "canvas pane open state" [ "canvasPaneOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
 
+let internal readTerminalPaneOpen () : bool = readBoolProperty "terminalPaneOpen"
+
+let internal writeTerminalPaneOpen (isOpen: bool) =
+    updateGlobalConfig "terminal pane open state" [ "terminalPaneOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
+
 let internal readOverviewPanelOpen () : bool = readBoolProperty "overviewPanelOpen"
 
 let internal writeOverviewPanelOpen (isOpen: bool) =
     updateGlobalConfig "overview panel open state" [ "overviewPanelOpen", System.Text.Json.Nodes.JsonValue.Create(isOpen) :> System.Text.Json.Nodes.JsonNode ]
 
-let internal readCanvasPosition () : CanvasPosition =
-    withConfigDocument CanvasPosition.Right (fun root ->
-        let found, prop = root.TryGetProperty("canvasPosition")
-        let s = if found && prop.ValueKind = System.Text.Json.JsonValueKind.String then prop.GetString() else ""
-        match found, s with
-        | true, "left" -> CanvasPosition.Left
-        | true, "right" -> CanvasPosition.Right
-        | true, "top" -> CanvasPosition.Top
-        | true, "bottom" -> CanvasPosition.Bottom
-        | _ -> CanvasPosition.Right)
+let internal readWorkspaceWidth () : WorkspaceWidth =
+    withConfigDocument WorkspaceWidth.EqualThirds (fun root ->
+        let stringProperty (name: string) =
+            match root.TryGetProperty(name) with
+            | true, prop when prop.ValueKind = System.Text.Json.JsonValueKind.String -> Some(prop.GetString())
+            | _ -> None
 
-let internal writeCanvasPosition (position: CanvasPosition) =
+        match stringProperty "workspaceWidth", stringProperty "canvasSize" with
+        | Some "wide-canvas", _ -> WorkspaceWidth.WideCanvas
+        | Some _, _ -> WorkspaceWidth.EqualThirds
+        | None, Some "2to1" -> WorkspaceWidth.WideCanvas
+        | _ -> WorkspaceWidth.EqualThirds)
+
+let internal writeWorkspaceWidth (width: WorkspaceWidth) =
     let value =
-        match position with
-        | CanvasPosition.Left -> "left"
-        | CanvasPosition.Right -> "right"
-        | CanvasPosition.Top -> "top"
-        | CanvasPosition.Bottom -> "bottom"
-    updateGlobalConfig "canvas position" [ "canvasPosition", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
-
-let internal readCanvasSize () : CanvasSize =
-    withConfigDocument CanvasSize.Ratio1To1 (fun root ->
-        let found, prop = root.TryGetProperty("canvasSize")
-        let s = if found && prop.ValueKind = System.Text.Json.JsonValueKind.String then prop.GetString() else ""
-        match found, s with
-        | true, "2to1" -> CanvasSize.Ratio2To1
-        | _ -> CanvasSize.Ratio1To1)
-
-let internal writeCanvasSize (size: CanvasSize) =
-    let value =
-        match size with
-        | CanvasSize.Ratio1To1 -> "1to1"
-        | CanvasSize.Ratio2To1 -> "2to1"
-    updateGlobalConfig "canvas size" [ "canvasSize", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
+        match width with
+        | WorkspaceWidth.EqualThirds -> "thirds"
+        | WorkspaceWidth.WideCanvas -> "wide-canvas"
+    updateGlobalConfig "workspace width" [ "workspaceWidth", System.Text.Json.Nodes.JsonValue.Create(value) :> System.Text.Json.Nodes.JsonNode ]
 
 /// Machine-level config for the canvas Share backend (the `canvasShare` section of `config.json`):
 /// which storage account published docs go to, which PRIVATE container they land in, and the default

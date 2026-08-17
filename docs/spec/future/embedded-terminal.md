@@ -30,6 +30,8 @@ The server owns process creation, readiness detection, endpoint publication, and
 
 - This is a disposable feasibility spike, not the production terminal architecture.
 - There is one terminal process total, opened explicitly for a worktree. Ordinary dashboard focus changes do not replace a running terminal.
+- The fixed workspace replaces the old Canvas docking/size preferences with one persisted width mode.
+  Existing `canvasSize: "2to1"` config migrates to the wide-center mode; Canvas position is obsolete.
 - Browser refresh and dashboard restart reattachment are out of scope.
 - Authentication beyond loopback binding and `ttyd` Origin enforcement is out of scope; the spike must not be exposed remotely.
 - Copilot launch, prompt injection, status parsing, attachments, terminal tabs/splits, elevation, and session persistence are out of scope.

@@ -185,20 +185,13 @@ type WorkMetrics =
       LinesAdded: int
       LinesRemoved: int }
 
+/// How the fixed desktop workspace (Terminal | Canvas | Dashboard) divides its width while Canvas
+/// is open. EqualThirds renders 1:1:1 with Terminal or 1:1 without it; WideCanvas renders 1:2:1
+/// with Terminal or 2:1 without it.
 [<RequireQualifiedAccess>]
-type CanvasPosition =
-    | Left
-    | Right
-    | Top
-    | Bottom
-
-/// Relative size of the canvas pane vs the dashboard when the pane is open.
-/// Ratio1To1 (default) splits the layout evenly; Ratio2To1 gives the canvas
-/// twice the dashboard's share.
-[<RequireQualifiedAccess>]
-type CanvasSize =
-    | Ratio1To1
-    | Ratio2To1
+type WorkspaceWidth =
+    | EqualThirds
+    | WideCanvas
 
 type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven
@@ -476,10 +469,10 @@ type DashboardResponse =
       /// config). Empty means only the built-in "None" option is available.
       WorktreeSkills: string list
       CollapsedRepos: Set<RepoId>
+      TerminalPaneOpen: bool
       CanvasPaneOpen: bool
       OverviewPanelOpen: bool
-      CanvasPosition: CanvasPosition
-      CanvasSize: CanvasSize }
+      WorkspaceWidth: WorkspaceWidth }
 
 type FixtureData =
     { Worktrees: DashboardResponse

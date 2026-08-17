@@ -24,10 +24,10 @@ type IWorktreeApi =
       launchAction: ActionRequest -> Async<Result<unit, string>>
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
+      saveTerminalPaneOpen: bool -> Async<unit>
       saveCanvasPaneOpen: bool -> Async<unit>
       saveOverviewPanelOpen: bool -> Async<unit>
-      saveCanvasPosition: CanvasPosition -> Async<unit>
-      saveCanvasSize: CanvasSize -> Async<unit>
+      saveWorkspaceWidth: WorkspaceWidth -> Async<unit>
       resumeSession: WorktreePath -> Async<Result<unit, string>>
       sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
       archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
