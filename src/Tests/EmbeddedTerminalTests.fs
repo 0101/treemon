@@ -34,7 +34,19 @@ $cwd = $Remaining[$cwdIndex + 1]
 $shellIndex = $cwdIndex + 2
 $shell = $Remaining[$shellIndex]
 $shellArgs = $Remaining[($shellIndex + 1)..($Remaining.Length - 1)]
-$shellCwd = & $shell @shellArgs -NoLogo -NoProfile -Command '$pwd.Path'
+$psi = [Diagnostics.ProcessStartInfo]::new($shell)
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+foreach ($arg in $shellArgs) { [void]$psi.ArgumentList.Add($arg) }
+$shellProcess = [Diagnostics.Process]::Start($psi)
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+while (-not [IO.File]::Exists($env:FAKE_SHELL_RECORD) -and [DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 25
+}
+if (-not [IO.File]::Exists($env:FAKE_SHELL_RECORD)) {
+    throw 'Timed out waiting for the fake shell to report its cwd'
+}
+$shellCwd = [IO.File]::ReadAllText($env:FAKE_SHELL_RECORD)
 $record = "$PID|$port|$($Remaining[$interfaceIndex + 1])|$($Remaining -contains '-W')|$($Remaining -contains '-O')|$cwd|$shell|$shellCwd"
 [IO.File]::WriteAllText($env:FAKE_TTYD_RECORD, $record)
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
@@ -59,7 +71,24 @@ try {
     }
 } finally {
     $listener.Stop()
+    if (-not $shellProcess.HasExited) {
+        $shellProcess.Kill($true)
+        $shellProcess.WaitForExit()
+    }
 }
+"""
+
+let private fakeShellScript =
+    """
+$Remaining = $args
+Set-Location $env:FAKE_PROFILE_CWD
+$profileCwd = $pwd.Path
+$encodedIndex = [Array]::IndexOf($Remaining, '-EncodedCommand')
+if ($encodedIndex -lt 0) { throw 'Missing -EncodedCommand' }
+$script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Remaining[$encodedIndex + 1]))
+Invoke-Expression $script
+[IO.File]::WriteAllLines($env:FAKE_SHELL_RECORD, @($profileCwd, $pwd.Path))
+while ($true) { Start-Sleep -Seconds 1 }
 """
 
 [<TestFixture>]
@@ -76,6 +105,7 @@ type EmbeddedTerminalTests() =
             EmbeddedTerminal.createWithConfig
                 { ExecutablePath = path
                   ShellCommand = "pwsh"
+                  ShellPrefixArguments = []
                   PrefixArguments = []
                   StartupTimeout = TimeSpan.FromSeconds 1.0
                   ProbeInterval = TimeSpan.FromMilliseconds 10.0 }
@@ -119,20 +149,34 @@ type EmbeddedTerminalTests() =
         )
 
     [<Test>]
-    member _.``manager launches shell in selected worktree and closes only its owned process``() =
+    member _.``manager restores selected worktree after profile and closes only its owned process``() =
         Tests.TestUtils.withTempDir "embedded-terminal" (fun tempDir ->
             let scriptPath = Path.Combine(tempDir, "fake-ttyd.ps1")
+            let shellScriptPath = Path.Combine(tempDir, "fake-shell.ps1")
             let recordPath = Path.Combine(tempDir, "record.txt")
+            let shellRecordPath = Path.Combine(tempDir, "shell-record.txt")
             let worktreePath = Path.Combine(tempDir, "worktree with ' quote")
+            let profileCwd = Path.Combine(tempDir, "profile-cwd")
             Directory.CreateDirectory(worktreePath) |> ignore
+            Directory.CreateDirectory(profileCwd) |> ignore
             File.WriteAllText(scriptPath, fakeServerScript)
+            File.WriteAllText(shellScriptPath, fakeShellScript)
             let previousRecord = Environment.GetEnvironmentVariable("FAKE_TTYD_RECORD")
+            let previousShellRecord = Environment.GetEnvironmentVariable("FAKE_SHELL_RECORD")
+            let previousProfileCwd = Environment.GetEnvironmentVariable("FAKE_PROFILE_CWD")
             Environment.SetEnvironmentVariable("FAKE_TTYD_RECORD", recordPath)
+            Environment.SetEnvironmentVariable("FAKE_SHELL_RECORD", shellRecordPath)
+            Environment.SetEnvironmentVariable("FAKE_PROFILE_CWD", profileCwd)
 
             let manager =
                 EmbeddedTerminal.createWithConfig
                     { ExecutablePath = "pwsh"
                       ShellCommand = "pwsh"
+                      ShellPrefixArguments =
+                        [ "-NoLogo"
+                          "-NoProfile"
+                          "-File"
+                          shellScriptPath ]
                       PrefixArguments =
                         [ "-NoLogo"
                           "-NoProfile"
@@ -165,6 +209,11 @@ type EmbeddedTerminalTests() =
                     | _ -> failwith "unreachable"
 
                 let fields = File.ReadAllText(recordPath).Split('|')
+                let shellCwds =
+                    fields[7].Split(
+                        [| "\r\n"; "\n" |],
+                        StringSplitOptions.RemoveEmptyEntries
+                    )
                 let pid = int fields[0]
                 let port = Uri(endpoint).Port
 
@@ -176,7 +225,8 @@ type EmbeddedTerminalTests() =
                     Assert.That(fields[4], Is.EqualTo "True")
                     Assert.That(fields[5], Is.EqualTo worktreePath)
                     Assert.That(fields[6], Is.EqualTo "pwsh")
-                    Assert.That(fields[7], Is.EqualTo worktreePath))
+                    Assert.That(shellCwds[0], Is.EqualTo profileCwd)
+                    Assert.That(shellCwds[1], Is.EqualTo worktreePath))
 
                 let second =
                     EmbeddedTerminal.start manager (WorktreePath(Path.Combine(tempDir, "other")))
@@ -189,4 +239,6 @@ type EmbeddedTerminalTests() =
                 |> ignore
             finally
                 EmbeddedTerminal.close manager |> Async.RunSynchronously |> ignore
-                Environment.SetEnvironmentVariable("FAKE_TTYD_RECORD", previousRecord))
+                Environment.SetEnvironmentVariable("FAKE_TTYD_RECORD", previousRecord)
+                Environment.SetEnvironmentVariable("FAKE_SHELL_RECORD", previousShellRecord)
+                Environment.SetEnvironmentVariable("FAKE_PROFILE_CWD", previousProfileCwd))

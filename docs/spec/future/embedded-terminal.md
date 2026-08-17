@@ -22,7 +22,7 @@ The spike does not start Copilot automatically. The user starts `copilot` in the
 
 Treemon manages one stock Windows `ttyd` child process at a time. The process binds only to `127.0.0.1` on an OS-assigned non-production port, enables writable mode and Origin checking, disables URL-controlled commands, starts a fixed `pwsh` command, and receives the selected worktree through `ttyd`'s working-directory option. A deterministic setup command installs an exact `ttyd` version into a gitignored repository tools cache rather than committing the executable.
 
-On Windows, `ttyd -w` does not reliably propagate the directory to the spawned PowerShell process, so the fixed shell command also passes the validated worktree through PowerShell's `-WorkingDirectory` argument. Both paths are separate `ProcessStartInfo.ArgumentList` entries.
+On Windows, `ttyd -w` does not reliably propagate the directory to the spawned PowerShell process, so the fixed shell command also passes the validated worktree through PowerShell's `-WorkingDirectory` argument. PowerShell then runs an encoded, single-quote-escaped `Set-Location` after normal profile startup, matching the external terminal path so a profile that changes directory cannot override the selected worktree. Every value is a separate `ProcessStartInfo.ArgumentList` entry.
 
 The client embeds the `ttyd` page in a dedicated iframe and adapts the pane shell, width model, CSS ratios, responsive behavior, and geometry tests from `Q:\code\tm-embed-chat`. Terminal state is limited to closed, starting, running, and failed; the client displays a specific inline error when setup or launch fails.
 
@@ -37,7 +37,7 @@ The server owns process creation, readiness detection, endpoint publication, and
 - Browser refresh and dashboard restart reattachment are out of scope.
 - Authentication beyond loopback binding and `ttyd` Origin enforcement is out of scope; the spike must not be exposed remotely.
 - Copilot launch, prompt injection, status parsing, attachments, terminal tabs/splits, elevation, and session persistence are out of scope.
-- The selected worktree is supplied to both `ttyd -w` and `pwsh -WorkingDirectory`; the duplicate setting is required because stock Windows `ttyd` does not reliably make its own working directory the shell's runtime current directory.
+- The selected worktree is supplied to `ttyd -w`, `pwsh -WorkingDirectory`, and a post-profile encoded `Set-Location`. The first two establish startup context; the final navigation preserves normal profile behavior while making the selected worktree authoritative.
 
 ## Related Specs
 

@@ -12,6 +12,7 @@ open Shared
 type internal Config =
     { ExecutablePath: string
       ShellCommand: string
+      ShellPrefixArguments: string list
       PrefixArguments: string list
       StartupTimeout: TimeSpan
       ProbeInterval: TimeSpan }
@@ -46,6 +47,7 @@ let private defaultConfig () =
             "ttyd.exe"
         )
       ShellCommand = "pwsh"
+      ShellPrefixArguments = []
       PrefixArguments = []
       StartupTimeout = TimeSpan.FromSeconds 10.0
       ProbeInterval = TimeSpan.FromMilliseconds 100.0 }
@@ -135,6 +137,9 @@ let private launch (config: Config) (worktreePath: WorktreePath) (cancellationTo
             let path = WorktreePath.value worktreePath
             let port = reserveLoopbackPort ()
             let endpoint = $"http://127.0.0.1:{port}/"
+            let encoded =
+                SessionManager.buildScript path None
+                |> SessionManager.encodeCommand
 
             let psi =
                 ProcessStartInfo(
@@ -154,9 +159,13 @@ let private launch (config: Config) (worktreePath: WorktreePath) (cancellationTo
                 "-O"
                 "-w"
                 path
-                config.ShellCommand
-                "-WorkingDirectory"
-                path ]
+                config.ShellCommand ]
+            @ config.ShellPrefixArguments
+            @ [ "-WorkingDirectory"
+                path
+                "-NoExit"
+                "-EncodedCommand"
+                encoded ]
             |> List.iter psi.ArgumentList.Add
 
             let proc = new Process(StartInfo = psi)
