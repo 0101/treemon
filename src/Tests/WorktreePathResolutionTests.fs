@@ -51,7 +51,7 @@ let private createApi agent roots =
 let private deleteWorktree agent worktreeRoots wtPath =
     WorktreeApi.deleteWorktreeWith
         (fun _ _ _ -> async { return Ok () })
-        (fun _ -> async { return () })
+        (fun _ -> async { return Ok () })
         (fun _ -> async { return () })
         agent
         (RefreshScheduler.buildRootPaths worktreeRoots)
@@ -218,6 +218,7 @@ type DeleteWorktreeResolutionTests() =
                     (fun _ ->
                         async {
                             calls.Add("close")
+                            return Ok ()
                         })
                     (fun _ ->
                         async {
@@ -234,6 +235,65 @@ type DeleteWorktreeResolutionTests() =
                     calls,
                     Is.EqualTo([ "close"; "remove"; "state" ])
                 )
+        }
+
+    [<Test>]
+    member _.``deleteWorktree does not mutate worktree or state when strict terminal close fails``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let calls = System.Collections.Generic.List<string>()
+            let! result =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ _ _ ->
+                        async {
+                            calls.Add("remove")
+                            return Ok ()
+                        })
+                    (fun _ ->
+                        async {
+                            calls.Add("close")
+                            return
+                                Error
+                                    "terminal cleanup was not confirmed"
+                        })
+                    (fun _ ->
+                        async {
+                            calls.Add("state")
+                        })
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (PathUtils.toWorktreePath targetPath)
+
+            let! state = getAgentState agent
+            let retained =
+                state.Repos[repoId].WorktreeList
+                |> List.exists (fun worktree ->
+                    worktree.Path = targetPath)
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Is.EqualTo(
+                            "terminal cleanup was not confirmed"
+                        )
+                    )
+                | Ok () ->
+                    Assert.Fail("Delete should have been aborted")
+
+                Assert.That(calls, Is.EqualTo([ "close" ]))
+                Assert.That(retained, Is.True))
         }
 
 
@@ -410,6 +470,7 @@ type ArchiveWorktreeResolutionTests() =
                         )
                       ShellCommand = "pwsh"
                       StartupTimeout = TimeSpan.FromSeconds 1.0
+                      ControlRequestTimeout = TimeSpan.FromSeconds 1.0
                       ProbeInterval = TimeSpan.FromMilliseconds 10.0 }
 
             try
@@ -437,4 +498,50 @@ type ArchiveWorktreeResolutionTests() =
                 EmbeddedTerminal.shutdownHost manager
                 |> Async.RunSynchronously
                 |> ignore
+        }
+
+    [<Test>]
+    member _.``archiveWorktree does not persist archive state when strict terminal close fails``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+            let target = PathUtils.toWorktreePath targetPath
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let! result =
+                WorktreeApi.updateArchivedBranchesWith
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (fun _ ->
+                        async {
+                            return
+                                Error
+                                    "terminal cleanup was not confirmed"
+                        })
+                    Set.add
+                    target
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Is.EqualTo(
+                            "terminal cleanup was not confirmed"
+                        )
+                    )
+                | Ok () ->
+                    Assert.Fail("Archive should have been aborted")
+
+                Assert.That(
+                    TreemonConfig.readArchivedBranches tempDirA,
+                    Does.Not.Contain("feature-x")
+                ))
         }

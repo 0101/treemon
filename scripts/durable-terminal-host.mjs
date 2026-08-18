@@ -4,6 +4,7 @@ import { once } from "node:events";
 import {
   appendFileSync,
   existsSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -18,7 +19,7 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 
-export const hostProtocolVersion = 1;
+export const hostProtocolVersion = 2;
 export const defaultReplayBytes = 1024 * 1024;
 export const defaultDiagnosticBytes = 1024 * 1024;
 
@@ -31,6 +32,10 @@ const maxBrowserFrameBytes = 64 * 1024;
 const pingIntervalMs = 30_000;
 const heartbeatIntervalMs = 60_000;
 const heartbeatFailureMs = 90_000;
+const gracefulProcessExitMs = 5000;
+const forcedProcessExitMs = 2000;
+const processForceCommandMs = 5000;
+const unixEpochTicks = 621355968000000000n;
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -38,6 +43,12 @@ const delay = (milliseconds) =>
 const timestamp = () => new Date().toISOString();
 
 const randomToken = (bytes = 24) => randomBytes(bytes).toString("base64url");
+
+const currentProcessStartTicks = () =>
+  (
+    unixEpochTicks +
+    BigInt(Math.round(Date.now() - process.uptime() * 1000)) * 10_000n
+  ).toString();
 
 const safeInteger = (value, fallback, maximum) =>
   Number.isInteger(value) && value > 0 && value <= maximum ? value : fallback;
@@ -162,6 +173,77 @@ function atomicWriteJson(path, value) {
   renameSync(temporaryPath, path);
 }
 
+export function manifestOwnership(value) {
+  const generation =
+    typeof value?.generation === "string" && value.generation
+      ? value.generation
+      : null;
+  const pid = Number.isInteger(value?.pid) && value.pid > 0 ? value.pid : null;
+  const processStartTicks =
+    typeof value?.processStartTicks === "string" &&
+    /^\d+$/.test(value.processStartTicks)
+      ? value.processStartTicks
+      : null;
+
+  return generation && pid && processStartTicks
+    ? { generation, pid, processStartTicks }
+    : null;
+}
+
+export function sameManifestOwner(left, right) {
+  return (
+    left?.generation === right?.generation &&
+    left?.pid === right?.pid &&
+    left?.processStartTicks === right?.processStartTicks
+  );
+}
+
+export function removeManifestIfOwned(path, owner) {
+  if (!existsSync(path)) return true;
+
+  try {
+    const current = JSON.parse(readFileSync(path, "utf8"));
+    if (!sameManifestOwner(manifestOwnership(current), owner)) return false;
+    rmSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeManifestIfUnowned(path, manifest) {
+  const owner = manifestOwnership(manifest);
+  const candidatePath = `${path}.${owner.generation}.${process.pid}.owner`;
+
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(
+      candidatePath,
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      "utf8",
+    );
+    linkSync(candidatePath, path);
+    return;
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  } finally {
+    rmSync(candidatePath, { force: true });
+  }
+
+  let currentOwner = null;
+  try {
+    currentOwner = manifestOwnership(JSON.parse(readFileSync(path, "utf8")));
+  } catch {
+    // A malformed manifest is never safe for a new host to replace.
+  }
+
+  if (!sameManifestOwner(currentOwner, owner)) {
+    throw new Error("Durable terminal host state is already owned by another generation");
+  }
+
+  atomicWriteJson(path, manifest);
+}
+
 class DiagnosticLog {
   constructor(path, maximumBytes) {
     this.path = path;
@@ -232,15 +314,6 @@ async function listenLoopback(server) {
 async function closeServer(server) {
   if (!server?.listening) return;
   await new Promise((resolveClose) => server.close(() => resolveClose()));
-}
-
-async function waitForChildExit(child, timeoutMs) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return true;
-
-  return Promise.race([
-    once(child, "exit").then(() => true),
-    delay(timeoutMs).then(() => false),
-  ]);
 }
 
 async function waitForTtyd(endpoint, child, spawnFailure, timeoutMs) {
@@ -402,16 +475,113 @@ function isPidAlive(pid) {
   }
 }
 
-class DurableTerminalHost {
+const runForceCommand = (fileName, argumentsList) =>
+  new Promise((resolveCommand) => {
+    const child = spawn(fileName, argumentsList, {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    const timeout = setTimeout(() => {
+      if (child.exitCode === null) child.kill();
+      resolveCommand();
+    }, processForceCommandMs);
+    const finish = () => {
+      clearTimeout(timeout);
+      resolveCommand();
+    };
+    child.once("error", finish);
+    child.once("exit", finish);
+  });
+
+function defaultProcessController() {
+  return {
+    isAlive: isPidAlive,
+    forceTree: async (pid) => {
+      if (!Number.isInteger(pid) || pid <= 0) return;
+
+      if (process.platform === "win32") {
+        await runForceCommand("taskkill.exe", [
+          "/PID",
+          String(pid),
+          "/T",
+          "/F",
+        ]);
+        return;
+      }
+
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch (fallbackError) {
+          if (fallbackError?.code !== "ESRCH") throw fallbackError;
+        }
+      }
+    },
+  };
+}
+
+const ownedProcessIds = (session) =>
+  [session.ttydPid, session.shellPid]
+    .filter((pid) => Number.isInteger(pid) && pid > 0)
+    .filter((pid, index, pids) => pids.indexOf(pid) === index);
+
+const remainingOwnedProcessIds = (session, processController) =>
+  ownedProcessIds(session).filter(
+    (pid) => processController.isAlive(pid) !== false,
+  );
+
+async function waitForOwnedProcessExit(
+  session,
+  processController,
+  timeoutMs,
+  wait,
+) {
+  const deadline = Date.now() + timeoutMs;
+
+  const check = async () => {
+    const remaining = remainingOwnedProcessIds(session, processController);
+    if (remaining.length === 0 || Date.now() >= deadline) return remaining;
+    await wait(Math.min(50, Math.max(1, deadline - Date.now())));
+    return check();
+  };
+
+  return check();
+}
+
+export class DurableTerminalHost {
   constructor(options) {
     this.options = options;
     this.startedAt = timestamp();
+    if (
+      options.generation &&
+      !/^[A-Za-z0-9_-]{1,128}$/.test(options.generation)
+    ) {
+      throw new Error("Durable terminal host generation is invalid");
+    }
+    this.generation = options.generation ?? randomToken(16);
+    this.processStartTicks =
+      options.processStartTicks ?? currentProcessStartTicks();
     this.controlToken = randomToken();
     this.sessions = new Map();
     this.nextOrder = 0;
     this.shuttingDown = false;
+    this.shutdownPromise = null;
+    this.inFlightStarts = new Set();
+    this.processController =
+      options.processController ?? defaultProcessController();
+    this.wait = options.wait ?? delay;
+    this.cleanupTimeouts = {
+      graceful: options.cleanupTimeouts?.graceful ?? gracefulProcessExitMs,
+      forced: options.cleanupTimeouts?.forced ?? forcedProcessExitMs,
+    };
+    this.exitProcess = options.exitProcess ?? ((code) => process.exit(code));
     this.statePath = join(options.stateDirectory, "host.json");
     this.statusPath = join(options.stateDirectory, "status.json");
+    this.lockPath = join(options.stateDirectory, "host.lock");
     this.diagnostics = new DiagnosticLog(
       join(options.stateDirectory, "diagnostics.jsonl"),
       options.diagnosticBytes,
@@ -428,6 +598,61 @@ class DurableTerminalHost {
         }
       });
     });
+  }
+
+  manifestOwner() {
+    return {
+      generation: this.generation,
+      pid: process.pid,
+      processStartTicks: this.processStartTicks,
+    };
+  }
+
+  manifest() {
+    return {
+      version: hostProtocolVersion,
+      generation: this.generation,
+      pid: process.pid,
+      processStartTicks: this.processStartTicks,
+      processStartExact: Boolean(this.options.generation),
+      controlPort: this.controlPort,
+      controlToken: this.controlToken,
+      startedAt: this.startedAt,
+    };
+  }
+
+  async acceptStartupClaim() {
+    if (!this.options.generation) return;
+
+    const deadline = Date.now() + 5000;
+    const read = async () => {
+      let claim;
+      try {
+        claim = JSON.parse(readFileSync(this.lockPath, "utf8"));
+      } catch {
+        claim = null;
+      }
+
+      if (claim?.generation && claim.generation !== this.generation) {
+        throw new Error("Durable terminal startup ownership changed before host launch");
+      }
+      if (
+        claim.hostPid === process.pid &&
+        typeof claim.hostProcessStartTicks === "string" &&
+        /^\d+$/.test(claim.hostProcessStartTicks)
+      ) {
+        this.processStartTicks = claim.hostProcessStartTicks;
+        return;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("Durable terminal startup process identity was not published");
+      }
+
+      await this.wait(10);
+      return read();
+    };
+
+    return read();
   }
 
   record(kind, session, details = {}) {
@@ -467,7 +692,10 @@ class DurableTerminalHost {
   persistStatus() {
     atomicWriteJson(this.statusPath, {
       version: hostProtocolVersion,
+      generation: this.generation,
       hostPid: process.pid,
+      processStartTicks: this.processStartTicks,
+      processStartExact: Boolean(this.options.generation),
       controlPort: this.controlPort,
       startedAt: this.startedAt,
       observedAt: timestamp(),
@@ -479,25 +707,36 @@ class DurableTerminalHost {
 
   async start() {
     mkdirSync(this.options.stateDirectory, { recursive: true });
-    this.controlPort = await listenLoopback(this.controlServer);
-    atomicWriteJson(this.statePath, {
-      version: hostProtocolVersion,
-      pid: process.pid,
-      controlPort: this.controlPort,
-      controlToken: this.controlToken,
-      startedAt: this.startedAt,
-    });
-    this.persistStatus();
-    this.record("host-started", null, { controlPort: this.controlPort });
+    try {
+      this.controlPort = await listenLoopback(this.controlServer);
+      await this.acceptStartupClaim();
+      writeManifestIfUnowned(this.statePath, this.manifest());
+      this.persistStatus();
+      this.record("host-started", null, {
+        controlPort: this.controlPort,
+        generation: this.generation,
+      });
+      this.startTimers();
+    } catch (error) {
+      await closeServer(this.controlServer);
+      throw error;
+    }
 
+    process.once("SIGINT", () => void this.shutdown("sigint"));
+    process.once("SIGTERM", () => void this.shutdown("sigterm"));
+  }
+
+  startTimers() {
     this.pingTimer = setInterval(() => this.pingSessions(), pingIntervalMs);
     this.heartbeatTimer = setInterval(
       () => this.recordHeartbeats(),
       heartbeatIntervalMs,
     );
+  }
 
-    process.once("SIGINT", () => void this.shutdown("sigint"));
-    process.once("SIGTERM", () => void this.shutdown("sigterm"));
+  stopTimers() {
+    clearInterval(this.pingTimer);
+    clearInterval(this.heartbeatTimer);
   }
 
   controlAuthorized(request) {
@@ -516,7 +755,10 @@ class DurableTerminalHost {
     if (request.method === "GET" && url.pathname === "/health") {
       sendJson(response, 200, {
         version: hostProtocolVersion,
+        generation: this.generation,
         pid: process.pid,
+        processStartTicks: this.processStartTicks,
+        processStartExact: Boolean(this.options.generation),
         startedAt: this.startedAt,
       });
       return;
@@ -528,13 +770,16 @@ class DurableTerminalHost {
     }
 
     if (request.method === "POST" && url.pathname === "/sessions") {
+      if (this.rejectMutationDuringShutdown(response)) return;
       const body = await readJsonBody(request);
-      await this.startSession(body.worktreePath);
+      if (this.rejectMutationDuringShutdown(response)) return;
+      await this.trackStart(body.worktreePath);
       sendJson(response, 200, { sessions: this.publicSessions() });
       return;
     }
 
     if (request.method === "DELETE" && url.pathname.startsWith("/sessions/")) {
+      if (this.rejectMutationDuringShutdown(response)) return;
       const sessionId = decodeURIComponent(url.pathname.slice("/sessions/".length));
       const session = this.sessions.get(sessionId);
       if (session) await this.closeSession(session, "explicit-close");
@@ -543,7 +788,9 @@ class DurableTerminalHost {
     }
 
     if (request.method === "POST" && url.pathname === "/events") {
+      if (this.rejectMutationDuringShutdown(response)) return;
       const body = await readJsonBody(request);
+      if (this.rejectMutationDuringShutdown(response)) return;
       if (body.kind !== "treemon-connected") {
         sendJson(response, 400, { error: "Unsupported event kind" });
         return;
@@ -561,12 +808,39 @@ class DurableTerminalHost {
     }
 
     if (request.method === "POST" && url.pathname === "/shutdown") {
-      sendJson(response, 202, { stopping: true, pid: process.pid });
-      setImmediate(() => void this.shutdown("control-request"));
+      try {
+        await this.beginShutdown("control-request");
+        response.once("finish", () =>
+          void this.finalizeShutdown("control-request"),
+        );
+        sendJson(response, 200, { stopping: true, pid: process.pid });
+      } catch (error) {
+        this.resumeAfterFailedShutdown();
+        sendJson(response, 500, { error: error.message });
+      }
       return;
     }
 
     sendJson(response, 404, { error: "Not found" });
+  }
+
+  rejectMutationDuringShutdown(response) {
+    if (!this.shuttingDown) return false;
+    sendJson(response, 503, {
+      error: "Durable terminal host is shutting down",
+    });
+    return true;
+  }
+
+  async trackStart(worktreePath) {
+    const operation = this.startSession(worktreePath);
+    this.inFlightStarts.add(operation);
+
+    try {
+      return await operation;
+    } finally {
+      this.inFlightStarts.delete(operation);
+    }
   }
 
   newSession(worktreePath, order) {
@@ -629,7 +903,17 @@ class DurableTerminalHost {
       this.record("session-start-failed", session, {
         errorType: sanitizeMetadataText(error?.name || "Error", 80),
       });
-      await this.stopSessionResources(session);
+      try {
+        await this.stopSessionResources(session);
+      } catch (cleanupError) {
+        session.error = `Terminal startup failed and owned process cleanup did not complete: ${sanitizeMetadataText(cleanupError.message, 240)}`;
+        this.record("session-start-cleanup-failed", session, {
+          remainingPids: remainingOwnedProcessIds(
+            session,
+            this.processController,
+          ),
+        });
+      }
       session.closing = false;
       this.persistStatus();
     }
@@ -734,6 +1018,7 @@ class DurableTerminalHost {
 
     session.ttydProcess = spawn(this.options.ttydPath, ttydArguments, {
       windowsHide: true,
+      detached: process.platform !== "win32",
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
@@ -902,8 +1187,10 @@ class DurableTerminalHost {
   }
 
   attachBrowser(session, socket) {
-    if (session.attachment?.socket?.readyState === WebSocket.OPEN) {
-      session.attachment.socket.close(1000, "Replaced by a new attachment");
+    const previous = session.attachment;
+    session.attachment = null;
+    if (previous?.socket?.readyState === WebSocket.OPEN) {
+      previous.socket.close(1000, "Replaced by a new attachment");
     }
 
     const attachment = {
@@ -917,6 +1204,7 @@ class DurableTerminalHost {
     this.record("browser-attached", session, { browserAttachments: 1 });
 
     socket.on("message", (data) => {
+      if (session.attachment !== attachment) return;
       try {
         this.handleBrowserFrame(session, attachment, Buffer.from(data));
       } catch (error) {
@@ -927,15 +1215,17 @@ class DurableTerminalHost {
       }
     });
     socket.on("close", (code, reason) => {
-      if (session.attachment === attachment) session.attachment = null;
+      if (session.attachment !== attachment) return;
+      session.attachment = null;
       this.persistStatus();
       this.record("browser-detached", session, {
-        browserAttachments: session.attachment ? 1 : 0,
+        browserAttachments: 0,
         closeCode: code,
         closeReason: sanitizeMetadataText(reason.toString()),
       });
     });
     socket.on("error", (error) => {
+      if (session.attachment !== attachment) return;
       this.record("browser-error", session, {
         errorType: sanitizeMetadataText(error?.name || "Error", 80),
       });
@@ -943,6 +1233,8 @@ class DurableTerminalHost {
   }
 
   handleBrowserFrame(session, attachment, frame) {
+    if (session.attachment !== attachment) return;
+
     if (!attachment.initialized) {
       session.terminalSize = parseInitialHandshake(frame);
       [session.titleFrame, session.preferencesFrame]
@@ -985,6 +1277,8 @@ class DurableTerminalHost {
   }
 
   resumeBrowser(session, attachment) {
+    if (session.attachment !== attachment) return;
+
     const available = replayFramesFrom(session.replay, attachment.nextSequence);
     const oldestSequence = session.replay.frames[0]?.sequence;
 
@@ -1016,7 +1310,9 @@ class DurableTerminalHost {
     session.failureRecorded = true;
     session.state = "failed";
     session.error = error;
-    session.attachment?.socket?.close(1011, "Terminal session interrupted");
+    const attachment = session.attachment;
+    session.attachment = null;
+    attachment?.socket?.close(1011, "Terminal session interrupted");
     session.browserWebSockets?.close();
     await closeServer(session.publicServer);
     this.persistStatus();
@@ -1028,21 +1324,52 @@ class DurableTerminalHost {
 
   async closeSession(session, reason) {
     if (!this.sessions.has(session.id)) return;
+    if (session.closePromise) return session.closePromise;
+
+    const operation = this.closeSessionOnce(session, reason);
+    session.closePromise = operation;
+
+    try {
+      return await operation;
+    } finally {
+      session.closePromise = null;
+    }
+  }
+
+  async closeSessionOnce(session, reason) {
     session.closing = true;
     session.state = "closing";
+    session.error = null;
     this.persistStatus();
     this.record("session-close-requested", session, { reason });
-    await this.stopSessionResources(session);
-    this.sessions.delete(session.id);
-    this.persistStatus();
-    this.record("session-closed", session, {
-      ttydAlive: isPidAlive(session.ttydPid),
-      shellAlive: isPidAlive(session.shellPid),
-    });
+
+    try {
+      await this.stopSessionResources(session);
+      this.sessions.delete(session.id);
+      this.persistStatus();
+      this.record("session-closed", session, {
+        ttydAlive: this.processController.isAlive(session.ttydPid),
+        shellAlive: this.processController.isAlive(session.shellPid),
+      });
+    } catch (error) {
+      session.closing = false;
+      session.state = "failed";
+      session.error = `Terminal cleanup did not complete: ${sanitizeMetadataText(error.message, 240)}`;
+      this.persistStatus();
+      this.record("session-close-failed", session, {
+        remainingPids: remainingOwnedProcessIds(
+          session,
+          this.processController,
+        ),
+      });
+      throw new Error(session.error);
+    }
   }
 
   async stopSessionResources(session) {
-    session.attachment?.socket?.close(1000, "Terminal session closed");
+    const attachment = session.attachment;
+    session.attachment = null;
+    attachment?.socket?.close(1000, "Terminal session closed");
 
     if (
       session.upstream &&
@@ -1056,14 +1383,34 @@ class DurableTerminalHost {
       if (!closed) session.upstream.terminate();
     }
 
-    const ttydExited = await waitForChildExit(session.ttydProcess, 5000);
-    if (!ttydExited && session.ttydProcess?.pid) {
-      session.ttydProcess.kill();
-      await waitForChildExit(session.ttydProcess, 2000);
+    let remaining = await waitForOwnedProcessExit(
+      session,
+      this.processController,
+      this.cleanupTimeouts.graceful,
+      this.wait,
+    );
+
+    for (const pid of remaining) {
+      if (this.processController.isAlive(pid) !== false) {
+        await this.processController.forceTree(pid);
+      }
     }
 
+    remaining = await waitForOwnedProcessExit(
+      session,
+      this.processController,
+      this.cleanupTimeouts.forced,
+      this.wait,
+    );
     await closeServer(session.publicServer);
     session.browserWebSockets?.close();
+
+    if (remaining.length > 0) {
+      throw new Error(
+        `Owned terminal processes remain: ${remaining.join(", ")}`,
+      );
+    }
+
     if (session.pidFile) rmSync(session.pidFile, { force: true });
   }
 
@@ -1111,23 +1458,65 @@ class DurableTerminalHost {
     this.persistStatus();
   }
 
-  async shutdown(reason) {
-    if (this.shuttingDown) return;
-    this.shuttingDown = true;
-    clearInterval(this.pingTimer);
-    clearInterval(this.heartbeatTimer);
-    this.record("host-stopping", null, { reason });
+  beginShutdown(reason) {
+    if (this.shutdownPromise) return this.shutdownPromise;
 
-    await Promise.all(
-      [...this.sessions.values()].map((session) =>
-        this.closeSession(session, "host-shutdown"),
-      ),
-    );
+    this.shuttingDown = true;
+    this.stopTimers();
+    this.record("host-stopping", null, { reason });
+    this.shutdownPromise = (async () => {
+      await Promise.allSettled([...this.inFlightStarts]);
+      const results = await Promise.allSettled(
+        [...this.sessions.values()].map((session) =>
+          this.closeSession(session, "host-shutdown"),
+        ),
+      );
+      const failures = results.filter((result) => result.status === "rejected");
+
+      if (failures.length > 0) {
+        this.record("host-stop-failed", null, {
+          failedSessions: failures.length,
+        });
+        this.persistStatus();
+        throw new Error(
+          `Durable terminal host could not close ${failures.length} session(s)`,
+        );
+      }
+    })();
+    return this.shutdownPromise;
+  }
+
+  resumeAfterFailedShutdown() {
+    if (!this.shuttingDown) return;
+    this.shuttingDown = false;
+    this.shutdownPromise = null;
+    this.startTimers();
+  }
+
+  async finalizeShutdown(reason) {
     await closeServer(this.controlServer);
     this.record("host-stopped", null, { reason });
     this.persistStatus();
-    rmSync(this.statePath, { force: true });
-    process.exit(0);
+    const removed = removeManifestIfOwned(
+      this.statePath,
+      this.manifestOwner(),
+    );
+    if (!removed) {
+      this.record("host-manifest-ownership-changed", null, { reason });
+    }
+    this.exitProcess(0);
+  }
+
+  async shutdown(reason) {
+    try {
+      await this.beginShutdown(reason);
+      await this.finalizeShutdown(reason);
+    } catch (error) {
+      this.resumeAfterFailedShutdown();
+      this.record("host-shutdown-error", null, {
+        errorType: sanitizeMetadataText(error?.name || "Error", 80),
+      });
+    }
   }
 }
 
@@ -1153,6 +1542,8 @@ function parseArguments(argumentsList) {
     stateDirectory,
     ttydPath,
     shellCommand,
+    generation:
+      typeof values.generation === "string" ? values.generation : undefined,
     replayBytes: safeInteger(
       Number.parseInt(values["replay-bytes"], 10),
       defaultReplayBytes,

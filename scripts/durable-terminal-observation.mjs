@@ -76,7 +76,7 @@ async function control(hostState, path, method = "GET", body) {
         ...(body ? { "content-type": "application/json" } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(method === "POST" ? 30_000 : 10_000),
     },
   );
   const text = await response.text();
@@ -148,7 +148,9 @@ async function start() {
       startedAt: startedAt.toISOString(),
       dueAt: new Date(startedAt.getTime() + durationMs).toISOString(),
       lastCheckedAt: new Date().toISOString(),
+      hostGeneration: hostState.generation,
       hostPid: hostState.pid,
+      hostProcessStartTicks: hostState.processStartTicks,
       controlPort: hostState.controlPort,
       terminalUrl: new URL(session.endpoint).origin,
       terminalSessionId: session.id,
@@ -191,12 +193,17 @@ async function evaluate() {
   const observation = readJson(observationPath);
   const checkedAt = new Date();
   const hostAlive = processIsAlive(observation.hostPid);
+  let hostIdentityMatches = false;
   let session = null;
   let controlError = null;
 
   if (hostAlive && existsSync(hostStatePath)) {
     try {
       const hostState = readJson(hostStatePath);
+      hostIdentityMatches =
+        hostState.generation === observation.hostGeneration &&
+        hostState.pid === observation.hostPid &&
+        hostState.processStartTicks === observation.hostProcessStartTicks;
       const response = await control(hostState, "/sessions");
       session =
         response.sessions.find(
@@ -224,6 +231,8 @@ async function evaluate() {
       ? "Durable host process exited"
       : controlError
         ? `Durable host control failed: ${controlError}`
+        : !hostIdentityMatches
+          ? "Durable host generation or process identity changed"
         : !session
           ? "Terminal session is no longer registered"
           : session.lifecycle !== "running"
@@ -256,6 +265,7 @@ async function evaluate() {
     elapsedMs,
     remainingMs: Math.max(0, durationMs - elapsedMs),
     hostAlive,
+    hostIdentityMatches,
     ttydAlive: processIsAlive(observation.ttydPid),
     powershellAlive: processIsAlive(observation.powershellPid),
     browserAttachments: session?.browserAttachments ?? null,

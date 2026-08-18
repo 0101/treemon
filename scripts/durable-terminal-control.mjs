@@ -25,7 +25,7 @@ async function request(state, path, method = "GET") {
   return fetch(`http://127.0.0.1:${state.controlPort}${path}`, {
     method,
     headers: { authorization: `Bearer ${state.controlToken}` },
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(method === "POST" ? 30_000 : 5000),
   });
 }
 
@@ -45,7 +45,13 @@ async function status(state) {
   }));
 
   process.stdout.write(
-    `${JSON.stringify({ hostPid: state.pid, controlPort: state.controlPort, sessions }, null, 2)}\n`,
+    `${JSON.stringify({
+      generation: state.generation,
+      hostPid: state.pid,
+      processStartTicks: state.processStartTicks,
+      controlPort: state.controlPort,
+      sessions,
+    }, null, 2)}\n`,
   );
 }
 
@@ -53,7 +59,7 @@ async function stop(state, stateDirectory) {
   const response = await request(state, "/shutdown", "POST");
   if (!response.ok) throw new Error(`Host stop failed with HTTP ${response.status}`);
 
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + 40_000;
   const statePath = resolve(stateDirectory, "host.json");
 
   while (Date.now() < deadline && existsSync(statePath)) {
@@ -61,7 +67,7 @@ async function stop(state, stateDirectory) {
   }
 
   if (existsSync(statePath)) {
-    throw new Error(`Host PID ${state.pid} did not stop within 10 seconds`);
+    throw new Error(`Host PID ${state.pid} did not stop within 40 seconds`);
   }
 
   process.stdout.write(`Stopped durable terminal host PID ${state.pid}\n`);

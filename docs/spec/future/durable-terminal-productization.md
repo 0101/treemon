@@ -28,6 +28,11 @@ The current implementation is deliberately checkout-scoped:
 - reconnect uses a bounded raw-byte ring plus resize rather than serialized terminal state;
 - one session-lifetime attachment capability is returned in the iframe endpoint;
 - the shared UI lifecycle is only `Starting | Running | Failed`;
+- checkout-local startup is serialized by a state-directory lock and each live host manifest has a
+  unique runtime generation plus exact PID/start identity, but discovery is still confined to one
+  checkout rather than a machine-global artifact generation;
+- explicit close already retains a failed session until its tracked ttyd/PowerShell process tree is
+  verified gone, and delete/archive fail closed on any non-authoritative outcome;
 - deployment preserves a running host but does not upgrade or drain host generations;
 - operations are standalone Node scripts rather than `tm` commands.
 
@@ -78,7 +83,7 @@ A breaking control protocol starts a new generation. The server retains the smal
 client surface required to list and explicitly close older live sessions until they drain; it does
 not reinterpret an unknown protocol as an empty registry.
 
-The first productized deployment adopts a running checkout-local protocol-v1 host as a
+The first productized deployment adopts a running checkout-local protocol-v2 host as a
 **legacy-draining generation**. It lists and controls that host but sends every new terminal to the
 machine-global current generation. Once the legacy host has no sessions, it exits and its
 checkout-local state is removed. This is a bounded one-time migration, not a permanent scan of
@@ -178,9 +183,10 @@ versioned DTOs for health, list, start, grant attachment, close, drain, and shut
 and response has a byte limit and closed validation; worktree paths are canonicalized and checked
 against Treemon's known worktrees before session creation.
 
-The machine-global registry is a set of atomic generation manifests. Starting a host uses an
-exclusive lock file plus health probing to prevent duplicate hosts. PID reuse is rejected by
-matching process start time and generation identity, not PID alone.
+The machine-global registry is a set of atomic artifact-generation manifests. Extend the current
+state-directory protocol—an OS-held exclusive startup lock, unique runtime generation, and exact
+PID/start identity—across installed artifact generations rather than replacing it with PID-only
+discovery.
 
 Treemon treats the host's full session snapshot as authoritative. A control failure preserves the
 last known tabs as failed/interrupted evidence instead of returning an empty snapshot. Start, close,
@@ -226,8 +232,11 @@ smallest Windows Job Object boundary around ttyd; do not replace the proven prox
 without that evidence.
 
 Track host, ttyd, and PowerShell identity from owned startup metadata. Never discover or kill by
-process name. Cleanup escalation targets only recorded owned PIDs and verifies the tree is gone
-before removing the session.
+process name. The checkout-local host already closes the upstream, waits, force-terminates only
+recorded PID trees, verifies every tracked PID is gone, and retains failures in the registry.
+Productization must preserve that contract while adding real-process host/ttyd crash fault
+injection; add a Windows Job Object only if those isolated tests demonstrate an orphan the
+PID-scoped boundary cannot clean.
 
 ### Copilot binding and recovery
 

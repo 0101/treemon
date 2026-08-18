@@ -551,7 +551,7 @@ let private openTerminal
 
 let internal deleteWorktreeWith
     (removeGitWorktree: string -> string -> string option -> Async<Result<unit, string>>)
-    (closeEmbeddedTerminal: WorktreePath -> Async<unit>)
+    (closeEmbeddedTerminal: WorktreePath -> Async<Result<unit, string>>)
     (removeWorktreeState: string -> Async<unit>)
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
@@ -592,28 +592,31 @@ let private deleteWorktree
 
     deleteWorktreeWith
         GitWorktree.removeWorktree
-        (fun path -> EmbeddedTerminal.close embeddedTerminal path |> Async.Ignore)
+        (fun path ->
+            EmbeddedTerminal.closeStrict embeddedTerminal path
+            |> AsyncResult.ignore)
         removeWorktreeState
         agent
         rootPaths
         wtPath
 
-let private updateArchivedBranches
+let internal updateArchivedBranchesWith
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
-    (beforeUpdate: WorktreePath -> Async<unit>)
+    (beforeUpdate: WorktreePath -> Async<Result<unit, string>>)
     (setOp: string -> Set<string> -> Set<string>)
     (wtPath: WorktreePath)
     =
     let path = WorktreePath.value wtPath
-    async {
+    asyncResult {
         let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
         match tryResolveWorktreeContext rootPaths state path with
-        | None ->
-            return Error $"No worktree found at path '{path}'"
+        | None -> return! Error $"No worktree found at path '{path}'"
         | Some { Branch = None; Worktree = wt } ->
-            return Error $"Worktree at '{wt.Path}' has no branch (detached HEAD)"
+            return!
+                Error
+                    $"Worktree at '{wt.Path}' has no branch (detached HEAD)"
         | Some ({ Branch = Some branch } as ctx) ->
             let liveBranches =
                 state.Repos
@@ -633,7 +636,6 @@ let private updateArchivedBranches
                 |> Set.intersect liveBranches
                 |> Set.toList)
             agent.Post(SchedulerState.StateMsg.ExpediteRefresh ctx.RepoId)
-            return Ok ()
     }
 
 /// What one repository's declared diff categories do to its tracked files. Only a `Configured`
@@ -846,16 +848,18 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
               withValidatedPath wtPath "killSession" (fun () ->
                   SessionManager.killSession sessionAgent wtPath)
           archiveWorktree =
-              updateArchivedBranches
+              updateArchivedBranchesWith
                   agent
                   rootPaths
-                  (fun path -> EmbeddedTerminal.close embeddedTerminal path |> Async.Ignore)
+                  (fun path ->
+                      EmbeddedTerminal.closeStrict embeddedTerminal path
+                      |> AsyncResult.ignore)
                   Set.add
           unarchiveWorktree =
-              updateArchivedBranches
+              updateArchivedBranchesWith
                   agent
                   rootPaths
-                  (fun _ -> async.Return ())
+                  (fun _ -> async.Return(Ok()))
                   Set.remove
           getBranches = fun repoIdStr ->
               async {

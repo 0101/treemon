@@ -65,7 +65,7 @@ async function control(path, method = "GET", body) {
         ...(body ? { "content-type": "application/json" } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(method === "POST" ? 30_000 : 10_000),
     },
   );
   const text = await response.text();

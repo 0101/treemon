@@ -18,8 +18,11 @@ Opening an embedded terminal creates its tab or activates the existing tab for t
 Starting and running tabs are reused; opening a failed tab creates a replacement session in the
 same tab position. Each tab is labelled with its worktree display name and shows starting, running,
 or failed state independently. Closing a tab terminates only its durable session and owned process
-tree, then selects a deterministic neighbour; closing the final tab hides the terminal pane.
-Deleting or archiving a worktree through Treemon closes its terminal before changing the worktree.
+tree, then selects a deterministic neighbour. A cleanup failure leaves the tab failed and retryable
+instead of pretending it closed. Closing the final tab hides the terminal pane. Deleting or
+archiving a worktree through Treemon changes no worktree state until the host authoritatively lists
+the target session as absent; discovery, transport, parsing, and process-cleanup failures abort the
+worktree operation with an actionable error.
 
 The pane header has a Hide action matching the chat pane. Hiding collapses the terminal pane without
 closing tabs, stopping processes, disconnecting iframes, or changing the active tab. Opening any
@@ -43,7 +46,9 @@ Treemon starts the durable host lazily on the first terminal request. A normal T
 not stop the host or its sessions. On restart, Treemon reads the host's authenticated loopback
 control state and reconstructs the same terminal snapshot, including the existing browser
 endpoints. A failed or unsupported host response is surfaced on the affected terminal tab rather
-than treated as a healthy session.
+than treated as a healthy session. If a previously observed host dies, the last snapshot remains
+visible as host-interrupted failed tabs until the user closes or restarts them; absence of a never-
+started host remains an empty pane.
 
 The workspace renders `Terminal | Canvas | Dashboard` in fixed order, with equal-thirds and
 wide-center layouts. The terminal pane has a single horizontally scrolling tab strip with roving
@@ -72,11 +77,22 @@ The host sends ttyd's initial JSON size handshake itself. A browser's replacemen
 a resize frame rather than a second ttyd connection, so it cannot create a replacement PowerShell.
 Browser PAUSE/RESUME is handled at the attachment boundary: the host continues draining ttyd while
 the browser is paused and catches the browser up from retained frames on resume.
+Attachment takeover revokes the old attachment before its socket is closed. Every input, resize,
+pause, resume, close, and error handler checks that it still owns the session attachment, so queued
+frames and late close/error events from the replaced browser cannot reach ttyd or clear the new
+attachment.
 
 ttyd runs with writable mode, Origin checking, and single-client/exit-on-disconnect behavior. The
 durable host is that sole client. Explicit session close closes the upstream socket; ttyd then
-terminates its ConPTY child and exits. The host waits for both processes and uses a PID-specific
-fallback only if ttyd does not exit after its socket closes.
+terminates its ConPTY child and exits. The host waits for every tracked ttyd and PowerShell PID,
+then escalates only those recorded process trees with a PID-specific force operation. It verifies
+all tracked PIDs are gone before removing the session. A failed cleanup remains in the registry as
+a failed session and causes close or host shutdown to fail explicitly.
+
+The control listener becomes mutation-unavailable as soon as host shutdown begins. New starts,
+closes, and diagnostic mutations receive HTTP 503; starts already in flight settle before the host
+snapshots and closes every session. The host removes its manifest and exits only after all cleanup
+succeeds. Cleanup failure retains both the registry and manifest for retry.
 
 PowerShell writes its PID to a per-session metadata file during the fixed bootstrap command. The
 bootstrap uses short environment variable names to stay below ttyd 1.7.7's 256-byte Windows child
@@ -88,15 +104,30 @@ binding.
 `Server.EmbeddedTerminal` is an authenticated control client, not a process registry. It:
 
 - discovers `.agents/durable-terminal/host.json`;
-- validates the host protocol, PID, and dynamic non-production control port;
-- starts the Node host when no healthy host exists;
+- validates control protocol 2, runtime generation, exact PID start identity, and dynamic
+  non-production control port;
+- serializes host creation across Treemon processes with an OS-held exclusive
+  `.agents/durable-terminal/host.lock`, then starts the Node host when no healthy host exists;
 - lists, starts, and closes sessions through the loopback control API;
 - records each Treemon process reconnect in the host diagnostics;
 - keeps the last known snapshot only to surface host failures explicitly.
 
+The lock file is durable but the exclusive handle is not: a crashed starter releases ownership
+automatically. The owning Treemon publishes the spawned host's exact PID/start identity into the
+lock claim; the host copies it into its uniquely generated manifest and health response. Stale
+manifests are reclaimed only while holding the lock and only when the on-disk generation and
+PID/start identity still match. The host likewise deletes its manifest only when it still owns that
+exact identity, so a late old host cannot erase a replacement.
+
 The client/server wire type remains `Starting | Running endpoint | Failed error`; durable-host
 session IDs and process IDs stay internal to the control boundary. Start and close operations
 return the same authoritative full snapshot shape used by polling.
+
+Control requests use a 30-second deadline, exceeding the host's bounded ttyd, upstream, and shell
+startup windows. A transport timeout or malformed start/close response is still ambiguous, so the
+client immediately lists the authoritative registry and reconciles by canonical worktree key.
+Retrying a start therefore reuses the disclosed starting/running session rather than spawning a
+duplicate.
 
 ### Client terminal tabs
 
@@ -144,6 +175,12 @@ prompts, environment contents, worktree paths, or attachment/control capabilitie
   input semantics.
 - **No host shutdown on Treemon shutdown** — only explicit terminal close, worktree lifecycle,
   host shutdown, process exit, or host failure ends a session.
+- **Authoritative close before worktree mutation** — delete and archive proceed only after a
+  registry snapshot confirms absence; failed cleanup remains visible and retryable.
+- **State-directory lock plus runtime generation** — concurrent checkout-local Treemon starters
+  converge on one host without treating a PID alone as ownership.
+- **Reconcile ambiguous mutations** — bounded timeouts are necessary, but a canonical-key registry
+  read is what prevents an undisclosed or duplicate session after a lost response.
 - **No host-crash recovery claim** — losing the durable host closes ttyd's sole WebSocket and ends
   the process; diagnostics report interruption instead of pretending to reattach.
 - **Metadata-only observation** — durability evidence is retained without creating a terminal

@@ -180,7 +180,7 @@ async function control(path, method = "GET") {
     {
       method,
       headers: { authorization: `Bearer ${hostState.controlToken}` },
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(method === "POST" ? 30_000 : 10_000),
     },
   );
   const text = await response.text();
