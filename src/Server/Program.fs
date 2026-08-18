@@ -501,12 +501,6 @@ let main args =
                 finally
                     host.DisposeAsync().GetAwaiter().GetResult())
     finally
-        embeddedTerminal
-        |> Option.iter (fun manager ->
-            EmbeddedTerminal.closeAll manager
-            |> Async.RunSynchronously
-            |> ignore)
-
         activityRuntime
         |> Option.iter (fun runtime ->
             Log.log "Shutdown" "Stopping session activity"

@@ -3,601 +3,621 @@ module Server.EmbeddedTerminal
 open System
 open System.Diagnostics
 open System.IO
-open System.Net
 open System.Net.Http
-open System.Net.Sockets
-open System.Threading
+open System.Net.Http.Headers
+open System.Text
+open System.Text.Json
+open FsToolkit.ErrorHandling
 open Shared
 
 type internal Config =
-    { ExecutablePath: string
+    { NodeExecutable: string
+      HostScriptPath: string
+      HostStateDirectory: string
+      TtydExecutablePath: string
       ShellCommand: string
-      ShellPrefixArguments: string list
-      PrefixArguments: string list
       StartupTimeout: TimeSpan
       ProbeInterval: TimeSpan }
 
-type private OwnedProcess =
-    { Process: Process
-      Stdout: Threading.Tasks.Task<string>
-      Stderr: Threading.Tasks.Task<string> }
+type private HostConnection =
+    { Pid: int
+      ControlPort: int
+      ControlToken: string
+      StartedAt: string }
 
-type private EntryResource =
-    | Launching of CancellationTokenSource
-    | Live of OwnedProcess
-    | Inactive
+type private HostSession =
+    { Id: string
+      Tab: EmbeddedTerminalTab }
 
-type private RegistryEntry =
-    { Public: EmbeddedTerminalTab
-      Generation: int64
-      Order: int64
-      Resource: EntryResource }
-
-type private PendingLaunchClose =
-    { Cancellation: CancellationTokenSource
-      Reply: AsyncReplyChannel<EmbeddedTerminalSnapshot> option }
-
-type private RegistryState =
-    { Entries: Map<string, RegistryEntry>
-      PendingLaunchCloses: Map<int64, PendingLaunchClose>
-      PendingStops: int
-      NextGeneration: int64
-      NextOrder: int64
-      ShuttingDown: bool
-      ShutdownReplies: AsyncReplyChannel<unit> list }
+type private ManagerState =
+    { LastSnapshot: EmbeddedTerminalSnapshot
+      AnnouncedHostPid: int option }
 
 type private Message =
     | Start of WorktreePath * AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
-    | LaunchCompleted of key: string * generation: int64 * Result<string * OwnedProcess, string>
-    | ProcessExited of key: string * generation: int64 * exitCode: int * stderr: string
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | Close of WorktreePath * AsyncReplyChannel<EmbeddedTerminalSnapshot>
-    | CleanupCompleted of AsyncReplyChannel<EmbeddedTerminalSnapshot> option
-    | CloseAll of AsyncReplyChannel<unit>
+    | ShutdownHost of AsyncReplyChannel<Result<unit, string>>
 
 type Manager = private Manager of MailboxProcessor<Message>
 
+let private httpClient =
+    new HttpClient(Timeout = TimeSpan.FromSeconds 10.0)
+
 let private defaultConfig () =
-    { ExecutablePath =
-        Path.Combine(
-            Directory.GetCurrentDirectory(),
-            ".tools",
-            "ttyd",
-            "1.7.7",
-            "ttyd.exe"
-        )
+    let root = Directory.GetCurrentDirectory()
+    let stateDirectory =
+        Environment.GetEnvironmentVariable("TREEMON_TERMINAL_STATE_DIR")
+        |> Option.ofObj
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        |> Option.defaultValue (Path.Combine(root, ".agents", "durable-terminal"))
+
+    { NodeExecutable = "node"
+      HostScriptPath = Path.Combine(root, "scripts", "durable-terminal-host.mjs")
+      HostStateDirectory = stateDirectory
+      TtydExecutablePath =
+        Path.Combine(root, ".tools", "ttyd", "1.7.7", "ttyd.exe")
       ShellCommand = "pwsh"
-      ShellPrefixArguments = []
-      PrefixArguments = []
       StartupTimeout = TimeSpan.FromSeconds 10.0
       ProbeInterval = TimeSpan.FromMilliseconds 100.0 }
-
-let private reserveLoopbackPort () =
-    use listener = new TcpListener(IPAddress.Loopback, 0)
-    listener.Start()
-    (listener.LocalEndpoint :?> IPEndPoint).Port
-
-let private stopOwnedProcess (owned: OwnedProcess) =
-    async {
-        try
-            try
-                if not owned.Process.HasExited then
-                    owned.Process.Kill(entireProcessTree = true)
-
-                    use timeout = new CancellationTokenSource(TimeSpan.FromSeconds 5.0)
-
-                    try
-                        do!
-                            owned.Process.WaitForExitAsync(timeout.Token)
-                            |> Async.AwaitTask
-                    with :? OperationCanceledException ->
-                        Log.log "EmbeddedTerminal" $"Timed out waiting for owned PID {owned.Process.Id} to exit"
-            with ex ->
-                Log.log "EmbeddedTerminal" $"Failed to stop owned PID {owned.Process.Id}: {ex.Message}"
-        finally
-            owned.Process.Dispose()
-    }
-
-let private tryReadOutput (output: Threading.Tasks.Task<string>) =
-    if output.IsCompletedSuccessfully then output.Result.Trim()
-    else ""
-
-let private startupFailure (owned: OwnedProcess) message =
-    async {
-        let stderr = tryReadOutput owned.Stderr
-        let detail = if String.IsNullOrWhiteSpace stderr then message else $"{message}: {stderr}"
-        do! stopOwnedProcess owned
-        return Error detail
-    }
-
-let private probeUntilReady
-    (config: Config)
-    (endpoint: string)
-    (owned: OwnedProcess)
-    (cancellationToken: CancellationToken)
-    =
-    async {
-        use client = new HttpClient(Timeout = TimeSpan.FromSeconds 1.0)
-        let deadline = DateTime.UtcNow + config.StartupTimeout
-
-        let rec probe () =
-            async {
-                try
-                    cancellationToken.ThrowIfCancellationRequested()
-
-                    if owned.Process.HasExited then
-                        return! startupFailure owned $"ttyd exited with code {owned.Process.ExitCode}"
-                    elif DateTime.UtcNow >= deadline then
-                        return! startupFailure owned "Timed out waiting for ttyd to become ready"
-                    else
-                        use! response =
-                            client.GetAsync(endpoint, cancellationToken)
-                            |> Async.AwaitTask
-
-                        if int response.StatusCode < 500 then
-                            return Ok(endpoint, owned)
-                        else
-                            do! Async.Sleep config.ProbeInterval
-                            return! probe ()
-                with
-                | :? OperationCanceledException when cancellationToken.IsCancellationRequested ->
-                    do! stopOwnedProcess owned
-                    return Error "Terminal startup was cancelled"
-                | _ ->
-                    do! Async.Sleep config.ProbeInterval
-                    return! probe ()
-            }
-
-        return! probe ()
-    }
-
-let private launch (config: Config) (worktreePath: WorktreePath) (cancellationToken: CancellationToken) =
-    async {
-        try
-            let path = WorktreePath.value worktreePath
-            let port = reserveLoopbackPort ()
-            let endpoint = $"http://127.0.0.1:{port}/"
-            let encoded =
-                "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE"
-                |> SessionManager.encodeCommand
-
-            let psi =
-                ProcessStartInfo(
-                    FileName = config.ExecutablePath,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                )
-
-            psi.Environment["TREEMON_TERMINAL_WORKTREE"] <- path
-
-            config.PrefixArguments
-            @ [ "-p"
-                string port
-                "-i"
-                "127.0.0.1"
-                "-W"
-                "-O"
-                "-t"
-                "fontSize=16"
-                "-w"
-                path
-                config.ShellCommand ]
-            @ config.ShellPrefixArguments
-            @ [ "-WorkingDirectory"
-                "."
-                "-NoExit"
-                "-EncodedCommand"
-                encoded ]
-            |> List.iter psi.ArgumentList.Add
-
-            let proc = new Process(StartInfo = psi)
-
-            if not (proc.Start()) then
-                proc.Dispose()
-                return Error "ttyd did not start"
-            else
-                let owned =
-                    { Process = proc
-                      Stdout = proc.StandardOutput.ReadToEndAsync()
-                      Stderr = proc.StandardError.ReadToEndAsync() }
-
-                Log.log "EmbeddedTerminal" $"Started owned ttyd PID {proc.Id} for '{path}'"
-                return! probeUntilReady config endpoint owned cancellationToken
-        with
-        | :? OperationCanceledException ->
-            return Error "Terminal startup was cancelled"
-        | ex ->
-            return Error $"Failed to start ttyd: {ex.Message}"
-    }
-
-let private executableIsMissing (path: string) =
-    let explicitlyPathed =
-        Path.IsPathRooted path
-        || path.Contains(Path.DirectorySeparatorChar)
-        || path.Contains(Path.AltDirectorySeparatorChar)
-
-    explicitlyPathed && not (File.Exists path)
-
-let private snapshot state =
-    { Tabs =
-        state.Entries
-        |> Map.values
-        |> Seq.sortBy _.Order
-        |> Seq.map _.Public
-        |> Seq.toList }
 
 let private canonicalWorktreePath =
     WorktreePath.value >> PathUtils.toWorktreePath
 
-let private registryKey = WorktreePath.value
+let private isPath path (tab: EmbeddedTerminalTab) =
+    Shared.PathUtils.pathEquals
+        (WorktreePath.value path)
+        (WorktreePath.value tab.Worktree)
 
-let internal createWithConfig (config: Config) =
+let private withoutPath path snapshot =
+    { Tabs = snapshot.Tabs |> List.filter (isPath path >> not) }
+
+let private withFailure path error snapshot =
+    match snapshot.Tabs |> List.tryFind (isPath path) with
+    | Some _ ->
+        { Tabs =
+            snapshot.Tabs
+            |> List.map (fun tab ->
+                if isPath path tab then
+                    { tab with
+                        Lifecycle = EmbeddedTerminalLifecycle.Failed error }
+                else
+                    tab) }
+    | None ->
+        { Tabs =
+            snapshot.Tabs
+            @ [ { Worktree = path
+                  Lifecycle = EmbeddedTerminalLifecycle.Failed error } ] }
+
+let private withHostFailure error snapshot =
+    { Tabs =
+        snapshot.Tabs
+        |> List.map (fun tab ->
+            { tab with
+                Lifecycle =
+                    EmbeddedTerminalLifecycle.Failed(
+                        $"Durable terminal host unavailable: {error}"
+                    ) }) }
+
+let private tryProperty (name: string) (element: JsonElement) =
+    element.EnumerateObject()
+    |> Seq.tryFind _.NameEquals(name)
+    |> Option.map _.Value
+
+let private requiredString name element =
+    match tryProperty name element with
+    | Some value when value.ValueKind = JsonValueKind.String ->
+        value.GetString()
+        |> Option.ofObj
+        |> Result.requireSome $"Missing '{name}'"
+    | _ -> Error $"Missing '{name}'"
+
+let private optionalString name element =
+    match tryProperty name element with
+    | Some value when value.ValueKind = JsonValueKind.String ->
+        value.GetString() |> Option.ofObj
+    | _ -> None
+
+let private requiredInt name element =
+    match tryProperty name element with
+    | Some value ->
+        match value.TryGetInt32() with
+        | true, result -> Ok result
+        | false, _ -> Error $"Invalid '{name}'"
+    | None -> Error $"Missing '{name}'"
+
+let private parseHostConnection (text: string) =
+    try
+        use document = JsonDocument.Parse(text)
+        let root = document.RootElement
+
+        result {
+            let! version = requiredInt "version" root
+            let! pid = requiredInt "pid" root
+            let! controlPort = requiredInt "controlPort" root
+            let! controlToken = requiredString "controlToken" root
+            let! startedAt = requiredString "startedAt" root
+
+            if version <> 1 then
+                return! Error $"Unsupported durable terminal host protocol version {version}"
+
+            if pid <= 0 then
+                return! Error "Invalid durable terminal host PID"
+
+            if controlPort <= 0 || controlPort > 65535 || controlPort = 5000 then
+                return! Error "Invalid durable terminal host control port"
+
+            if String.IsNullOrWhiteSpace controlToken then
+                return! Error "Invalid durable terminal host control token"
+
+            return
+                { Pid = pid
+                  ControlPort = controlPort
+                  ControlToken = controlToken
+                  StartedAt = startedAt }
+        }
+    with
+    | :? JsonException as ex ->
+        Error $"Invalid durable terminal host state: {ex.Message}"
+    | ex ->
+        Error $"Could not read durable terminal host state: {ex.Message}"
+
+let private lifecycleFor element =
+    result {
+        let! lifecycle = requiredString "lifecycle" element
+
+        match lifecycle with
+        | "starting" -> return EmbeddedTerminalLifecycle.Starting
+        | "running" ->
+            let! endpoint = requiredString "endpoint" element
+            return EmbeddedTerminalLifecycle.Running endpoint
+        | "failed" ->
+            return
+                EmbeddedTerminalLifecycle.Failed(
+                    optionalString "error" element
+                    |> Option.defaultValue "Durable terminal session failed"
+                )
+        | "closing" ->
+            return
+                EmbeddedTerminalLifecycle.Failed(
+                    "Durable terminal session is closing"
+                )
+        | unsupported ->
+            return
+                EmbeddedTerminalLifecycle.Failed(
+                    $"Durable terminal host returned unsupported lifecycle '{unsupported}'"
+                )
+    }
+
+let private parseHostSessions (text: string) =
+    try
+        use document = JsonDocument.Parse(text)
+        let root = document.RootElement
+
+        match tryProperty "sessions" root with
+        | Some sessions when sessions.ValueKind = JsonValueKind.Array ->
+            sessions.EnumerateArray()
+            |> Seq.map (fun session ->
+                result {
+                    let! id = requiredString "id" session
+                    let! path = requiredString "worktreePath" session
+                    let! lifecycle = lifecycleFor session
+
+                    return
+                        { Id = id
+                          Tab =
+                            { Worktree = PathUtils.toWorktreePath path
+                              Lifecycle = lifecycle } }
+                })
+            |> Seq.toList
+            |> List.sequenceResultM
+        | _ -> Error "Durable terminal host response omitted 'sessions'"
+    with
+    | :? JsonException as ex ->
+        Error $"Invalid durable terminal host response: {ex.Message}"
+    | ex ->
+        Error $"Could not read durable terminal host response: {ex.Message}"
+
+let private snapshot sessions =
+    { Tabs = sessions |> List.map _.Tab }
+
+let private statePath config =
+    Path.Combine(config.HostStateDirectory, "host.json")
+
+let private readHostConnection config =
+    let path = statePath config
+
+    if not (File.Exists path) then
+        Ok None
+    else
+        try
+            File.ReadAllText path
+            |> parseHostConnection
+            |> Result.map Some
+        with ex ->
+            Error $"Could not read durable terminal host state: {ex.Message}"
+
+let private processIsAlive pid =
+    try
+        use proc = Process.GetProcessById pid
+        not proc.HasExited
+    with
+    | :? ArgumentException -> false
+    | :? InvalidOperationException -> false
+
+let private hostUri connection path =
+    Uri($"http://127.0.0.1:{connection.ControlPort}{path}")
+
+let private request
+    (connection: HostConnection)
+    method
+    path
+    (body: string option)
+    =
+    async {
+        try
+            use request = new HttpRequestMessage(method, hostUri connection path)
+            request.Headers.Authorization <-
+                AuthenticationHeaderValue("Bearer", connection.ControlToken)
+
+            body
+            |> Option.iter (fun json ->
+                request.Content <-
+                    new StringContent(json, Encoding.UTF8, "application/json"))
+
+            use! response =
+                httpClient.SendAsync request
+                |> Async.AwaitTask
+
+            let contentLength =
+                response.Content.Headers.ContentLength
+                |> Option.ofNullable
+
+            match contentLength with
+            | Some length when length > 1024L * 1024L ->
+                return Error "Durable terminal host response exceeded 1 MiB"
+            | _ ->
+                let! content =
+                    response.Content.ReadAsStringAsync()
+                    |> Async.AwaitTask
+
+                if response.IsSuccessStatusCode then
+                    return Ok content
+                else
+                    return
+                        Error
+                            $"Durable terminal host returned HTTP {int response.StatusCode}: {content.Trim()}"
+        with ex ->
+            return Error $"Durable terminal host request failed: {ex.Message}"
+    }
+
+let private probe connection =
+    asyncResult {
+        let! response = request connection HttpMethod.Get "/health" None
+
+        use document = JsonDocument.Parse(response)
+        let root = document.RootElement
+        let! version = requiredInt "version" root
+        let! pid = requiredInt "pid" root
+
+        if version <> 1 || pid <> connection.Pid then
+            return!
+                Error
+                    "Durable terminal host state does not match the running control endpoint"
+    }
+
+let private removeStaleState config =
+    try
+        File.Delete(statePath config)
+        Ok ()
+    with ex ->
+        Error $"Could not remove stale durable terminal host state: {ex.Message}"
+
+let private connectExisting config =
+    async {
+        match readHostConnection config with
+        | Error error -> return Error error
+        | Ok None -> return Ok None
+        | Ok (Some connection) ->
+            match! probe connection with
+            | Ok () -> return Ok(Some connection)
+            | Error error when not (processIsAlive connection.Pid) ->
+                return removeStaleState config |> Result.map (fun () -> None)
+            | Error error ->
+                return
+                    Error
+                        $"Durable terminal host PID {connection.Pid} is alive but unhealthy: {error}"
+    }
+
+let private startHostProcess config =
+    try
+        Directory.CreateDirectory config.HostStateDirectory |> ignore
+
+        let psi =
+            ProcessStartInfo(
+                FileName = config.NodeExecutable,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Directory.GetCurrentDirectory()
+            )
+
+        [ config.HostScriptPath
+          "--state-dir"
+          config.HostStateDirectory
+          "--ttyd"
+          config.TtydExecutablePath
+          "--shell"
+          config.ShellCommand ]
+        |> List.iter psi.ArgumentList.Add
+
+        use proc = new Process(StartInfo = psi)
+
+        if proc.Start() then
+            Ok proc.Id
+        else
+            Error "Node did not start the durable terminal host"
+    with ex ->
+        Error $"Failed to start the durable terminal host: {ex.Message}"
+
+let private waitForHost config startedPid =
+    let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
+
+    let rec wait () =
+        async {
+            match! connectExisting config with
+            | Ok (Some connection) -> return Ok connection
+            | Error error when DateTimeOffset.UtcNow >= deadline ->
+                return
+                    Error
+                        $"Timed out waiting for durable terminal host PID {startedPid}: {error}"
+            | Ok None when DateTimeOffset.UtcNow >= deadline ->
+                return
+                    Error
+                        $"Timed out waiting for durable terminal host PID {startedPid}"
+            | Error _
+            | Ok None ->
+                if not (processIsAlive startedPid) then
+                    return
+                        Error
+                            $"Durable terminal host PID {startedPid} exited during startup"
+                else
+                    do! Async.Sleep config.ProbeInterval
+                    return! wait ()
+        }
+
+    wait ()
+
+let private ensureHost config =
+    async {
+        if not (File.Exists config.HostScriptPath) then
+            return
+                Error
+                    $"Durable terminal host script is missing at '{config.HostScriptPath}'"
+        elif not (File.Exists config.TtydExecutablePath) then
+            return
+                Error
+                    $"ttyd is not installed at '{config.TtydExecutablePath}'. Run '.\\treemon.ps1 setup-ttyd'."
+        else
+            match! connectExisting config with
+            | Error error -> return Error error
+            | Ok (Some connection) -> return Ok connection
+            | Ok None ->
+                match startHostProcess config with
+                | Error error -> return Error error
+                | Ok startedPid -> return! waitForHost config startedPid
+    }
+
+let private getHostSessions connection =
+    asyncResult {
+        let! content = request connection HttpMethod.Get "/sessions" None
+        return! parseHostSessions content
+    }
+
+let private announce connection instanceId =
+    let body =
+        JsonSerializer.Serialize(
+            {| kind = "treemon-connected"
+               treemonPid = Environment.ProcessId
+               instanceId = instanceId |}
+        )
+
+    request connection HttpMethod.Post "/events" (Some body)
+    |> AsyncResult.ignore
+
+let private announceIfNeeded state connection instanceId =
+    async {
+        if state.AnnouncedHostPid = Some connection.Pid then
+            return state
+        else
+            match! announce connection instanceId with
+            | Ok () ->
+                return { state with AnnouncedHostPid = Some connection.Pid }
+            | Error error ->
+                Log.log
+                    "EmbeddedTerminal"
+                    $"Failed to record Treemon reconnect with durable host PID {connection.Pid}: {error}"
+
+                return state
+    }
+
+let private startTerminal config instanceId state worktreePath =
+    async {
+        match! ensureHost config with
+        | Error error ->
+            let current = withFailure worktreePath error state.LastSnapshot
+            return Ok current, { state with LastSnapshot = current }
+        | Ok connection ->
+            let! announced = announceIfNeeded state connection instanceId
+            let body =
+                JsonSerializer.Serialize(
+                    {| worktreePath = WorktreePath.value worktreePath |}
+                )
+
+            match! request connection HttpMethod.Post "/sessions" (Some body) with
+            | Error error -> return Error error, announced
+            | Ok content ->
+                match parseHostSessions content with
+                | Error error -> return Error error, announced
+                | Ok sessions ->
+                    let current = snapshot sessions
+                    return Ok current, { announced with LastSnapshot = current }
+    }
+
+let private getTerminals instanceId state config =
+    async {
+        match! connectExisting config with
+        | Ok None ->
+            let current = EmbeddedTerminalSnapshot.empty
+            return current, { state with LastSnapshot = current; AnnouncedHostPid = None }
+        | Error error ->
+            Log.log "EmbeddedTerminal" error
+            let current = withHostFailure error state.LastSnapshot
+            return current, { state with LastSnapshot = current }
+        | Ok (Some connection) ->
+            let! announced = announceIfNeeded state connection instanceId
+
+            match! getHostSessions connection with
+            | Error error ->
+                Log.log "EmbeddedTerminal" error
+                let current = withHostFailure error announced.LastSnapshot
+                return current, { announced with LastSnapshot = current }
+            | Ok sessions ->
+                let current = snapshot sessions
+                return current, { announced with LastSnapshot = current }
+    }
+
+let private closeTerminal instanceId state config worktreePath =
+    async {
+        match! connectExisting config with
+        | Ok None ->
+            let current = withoutPath worktreePath state.LastSnapshot
+            return current, { state with LastSnapshot = current; AnnouncedHostPid = None }
+        | Error error ->
+            Log.log "EmbeddedTerminal" error
+            let current = withHostFailure error state.LastSnapshot
+            return current, { state with LastSnapshot = current }
+        | Ok (Some connection) ->
+            let! announced = announceIfNeeded state connection instanceId
+
+            match! getHostSessions connection with
+            | Error error ->
+                Log.log "EmbeddedTerminal" error
+                let current = withHostFailure error announced.LastSnapshot
+                return current, { announced with LastSnapshot = current }
+            | Ok sessions ->
+                match sessions |> List.tryFind (fun session -> isPath worktreePath session.Tab) with
+                | None ->
+                    let current = snapshot sessions
+                    return current, { announced with LastSnapshot = current }
+                | Some session ->
+                    let path = $"/sessions/{Uri.EscapeDataString session.Id}"
+
+                    match! request connection HttpMethod.Delete path None with
+                    | Error error ->
+                        Log.log "EmbeddedTerminal" error
+                        let current = withHostFailure error announced.LastSnapshot
+                        return current, { announced with LastSnapshot = current }
+                    | Ok content ->
+                        match parseHostSessions content with
+                        | Error error ->
+                            Log.log "EmbeddedTerminal" error
+                            let current = withHostFailure error announced.LastSnapshot
+                            return current, { announced with LastSnapshot = current }
+                        | Ok remaining ->
+                            let current = snapshot remaining
+                            return current, { announced with LastSnapshot = current }
+    }
+
+let private waitForHostExit config pid =
+    let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
+
+    let rec wait () =
+        async {
+            if not (processIsAlive pid) && not (File.Exists(statePath config)) then
+                return Ok ()
+            elif DateTimeOffset.UtcNow >= deadline then
+                return Error $"Timed out waiting for durable terminal host PID {pid} to stop"
+            else
+                do! Async.Sleep config.ProbeInterval
+                return! wait ()
+        }
+
+    wait ()
+
+let private shutdown config =
+    async {
+        match! connectExisting config with
+        | Error error -> return Error error
+        | Ok None -> return Ok ()
+        | Ok (Some connection) ->
+            match!
+                request connection HttpMethod.Post "/shutdown" None
+                |> AsyncResult.ignore
+            with
+            | Error error -> return Error error
+            | Ok () -> return! waitForHostExit config connection.Pid
+    }
+
+let internal createWithConfig config =
+    let instanceId = Guid.NewGuid().ToString("N")
+
     let agent =
         MailboxProcessor.Start(fun inbox ->
-            let startCleanup owned reply =
-                Async.Start(
-                    async {
-                        do! stopOwnedProcess owned
-                        inbox.Post(CleanupCompleted reply)
-                    }
-                )
-
-            let watchProcess key generation (owned: OwnedProcess) =
-                Async.Start(
-                    async {
-                        try
-                            do! owned.Process.WaitForExitAsync() |> Async.AwaitTask
-                            let stderr = tryReadOutput owned.Stderr
-                            inbox.Post(ProcessExited(key, generation, owned.Process.ExitCode, stderr))
-                        with :? ObjectDisposedException ->
-                            ()
-                    }
-                )
-
-            let finishShutdown state =
-                if
-                    state.ShuttingDown
-                    && Map.isEmpty state.Entries
-                    && Map.isEmpty state.PendingLaunchCloses
-                    && state.PendingStops = 0
-                then
-                    state.ShutdownReplies
-                    |> List.iter (fun reply -> reply.Reply ())
-
-                    { state with ShutdownReplies = [] }
-                else
-                    state
-
-            let discardLaunchResult state result =
-                match result with
-                | Ok(_, owned) ->
-                    startCleanup owned None
-                    { state with PendingStops = state.PendingStops + 1 }
-                | Error _ -> state
-
             let rec loop state =
                 async {
                     let! message = inbox.Receive()
 
-                    try
-                        match message with
-                        | Get reply ->
-                            reply.Reply(snapshot state)
-                            return! loop state
-                        | Start(worktreePath, reply) when state.ShuttingDown ->
-                            reply.Reply(Error "Embedded terminal manager is shutting down")
-                            return! loop state
-                        | Start(worktreePath, reply) ->
-                            let key = registryKey worktreePath
-                            let existing = state.Entries |> Map.tryFind key
+                    match message with
+                    | Start(worktreePath, reply) ->
+                        let canonical = canonicalWorktreePath worktreePath
+                        let! result, next =
+                            startTerminal config instanceId state canonical
 
-                            match existing |> Option.map _.Resource with
-                            | Some (Launching _)
-                            | Some (Live _) ->
-                                reply.Reply(Ok(snapshot state))
-                                return! loop state
-                            | Some Inactive
-                            | None ->
-                                let generation = state.NextGeneration + 1L
-                                let order, nextOrder =
-                                    match existing with
-                                    | Some entry -> entry.Order, state.NextOrder
-                                    | None -> state.NextOrder, state.NextOrder + 1L
+                        reply.Reply result
+                        return! loop next
+                    | Get reply ->
+                        let! current, next = getTerminals instanceId state config
+                        reply.Reply current
+                        return! loop next
+                    | Close(worktreePath, reply) ->
+                        let canonical = canonicalWorktreePath worktreePath
+                        let! current, next =
+                            closeTerminal instanceId state config canonical
 
-                                if executableIsMissing config.ExecutablePath then
-                                    let entry =
-                                        { Public =
-                                            { Worktree = worktreePath
-                                              Lifecycle =
-                                                EmbeddedTerminalLifecycle.Failed(
-                                                    $"ttyd is not installed at '{config.ExecutablePath}'. Run '.\\treemon.ps1 setup-ttyd'."
-                                                ) }
-                                          Generation = generation
-                                          Order = order
-                                          Resource = Inactive }
+                        reply.Reply current
+                        return! loop next
+                    | ShutdownHost reply ->
+                        let! result = shutdown config
+                        reply.Reply result
 
-                                    let next =
-                                        { state with
-                                            Entries = state.Entries |> Map.add key entry
-                                            NextGeneration = generation
-                                            NextOrder = nextOrder }
-
-                                    reply.Reply(Ok(snapshot next))
-                                    return! loop next
-                                else
-                                    let cancellation = new CancellationTokenSource()
-                                    let entry =
-                                        { Public =
-                                            { Worktree = worktreePath
-                                              Lifecycle = EmbeddedTerminalLifecycle.Starting }
-                                          Generation = generation
-                                          Order = order
-                                          Resource = Launching cancellation }
-
-                                    let next =
-                                        { state with
-                                            Entries = state.Entries |> Map.add key entry
-                                            NextGeneration = generation
-                                            NextOrder = nextOrder }
-
-                                    reply.Reply(Ok(snapshot next))
-
-                                    Async.Start(
-                                        async {
-                                            let! result = launch config worktreePath cancellation.Token
-                                            inbox.Post(LaunchCompleted(key, generation, result))
-                                        }
-                                    )
-
-                                    return! loop next
-                        | LaunchCompleted(key, generation, result) ->
-                            match state.PendingLaunchCloses |> Map.tryFind generation with
-                            | Some pending ->
-                                pending.Cancellation.Dispose()
-
-                                let next =
-                                    { state with
-                                        PendingLaunchCloses =
-                                            state.PendingLaunchCloses
-                                            |> Map.remove generation }
-
-                                match result with
-                                | Ok(_, owned) ->
-                                    startCleanup owned pending.Reply
-
-                                    return!
-                                        loop (
-                                            finishShutdown
-                                                { next with
-                                                    PendingStops = next.PendingStops + 1 }
-                                        )
-                                | Error _ ->
-                                    pending.Reply
-                                    |> Option.iter (fun reply -> reply.Reply(snapshot next))
-
-                                    return! loop (finishShutdown next)
-                            | None ->
-                                match state.Entries |> Map.tryFind key with
-                                | Some entry when entry.Generation = generation ->
-                                    match entry.Resource with
-                                    | Launching cancellation ->
-                                        cancellation.Dispose()
-
-                                        match result with
-                                        | Ok(endpoint, owned) ->
-                                            watchProcess key generation owned
-
-                                            let running =
-                                                { entry with
-                                                    Public.Lifecycle =
-                                                        EmbeddedTerminalLifecycle.Running endpoint
-                                                    Resource = Live owned }
-
-                                            return!
-                                                loop
-                                                    { state with
-                                                        Entries =
-                                                            state.Entries
-                                                            |> Map.add key running }
-                                        | Error error ->
-                                            let failed =
-                                                { entry with
-                                                    Public.Lifecycle =
-                                                        EmbeddedTerminalLifecycle.Failed error
-                                                    Resource = Inactive }
-
-                                            return!
-                                                loop
-                                                    { state with
-                                                        Entries =
-                                                            state.Entries
-                                                            |> Map.add key failed }
-                                    | Live _
-                                    | Inactive ->
-                                        return!
-                                            loop (
-                                                result
-                                                |> discardLaunchResult state
-                                                |> finishShutdown
-                                            )
-                                | None
-                                | Some _ ->
-                                    return!
-                                        loop (
-                                            result
-                                            |> discardLaunchResult state
-                                            |> finishShutdown
-                                        )
-                        | ProcessExited(key, generation, exitCode, stderr) ->
-                            match state.Entries |> Map.tryFind key with
-                            | Some entry when entry.Generation = generation ->
-                                match entry.Resource with
-                                | Live owned ->
-                                    owned.Process.Dispose()
-                                    let baseError = $"ttyd exited with code {exitCode}"
-                                    let error =
-                                        if String.IsNullOrWhiteSpace stderr then baseError
-                                        else $"{baseError}: {stderr.Trim()}"
-
-                                    let failed =
-                                        { entry with
-                                            Public.Lifecycle =
-                                                EmbeddedTerminalLifecycle.Failed error
-                                            Resource = Inactive }
-
-                                    return!
-                                        loop
-                                            { state with
-                                                Entries =
-                                                    state.Entries
-                                                    |> Map.add key failed }
-                                | Launching _
-                                | Inactive ->
-                                    return! loop state
-                            | None
-                            | Some _ ->
-                                return! loop state
-                        | Close(worktreePath, reply) ->
-                            let key = registryKey worktreePath
-
-                            match state.Entries |> Map.tryFind key with
-                            | None ->
-                                reply.Reply(snapshot state)
-                                return! loop state
-                            | Some entry ->
-                                let next =
-                                    { state with
-                                        Entries = state.Entries |> Map.remove key }
-
-                                match entry.Resource with
-                                | Inactive ->
-                                    reply.Reply(snapshot next)
-                                    return! loop (finishShutdown next)
-                                | Live owned ->
-                                    startCleanup owned (Some reply)
-
-                                    return!
-                                        loop (
-                                            finishShutdown
-                                                { next with
-                                                    PendingStops = next.PendingStops + 1 }
-                                        )
-                                | Launching cancellation ->
-                                    cancellation.Cancel()
-
-                                    let pending =
-                                        { Cancellation = cancellation
-                                          Reply = Some reply }
-
-                                    return!
-                                        loop
-                                            { next with
-                                                PendingLaunchCloses =
-                                                    next.PendingLaunchCloses
-                                                    |> Map.add entry.Generation pending }
-                        | CleanupCompleted reply ->
-                            let next =
-                                { state with
-                                    PendingStops = max 0 (state.PendingStops - 1) }
-
-                            reply
-                            |> Option.iter (fun channel -> channel.Reply(snapshot next))
-
-                            return! loop (finishShutdown next)
-                        | CloseAll reply ->
-                            let entries = state.Entries |> Map.values |> Seq.toList
-
-                            let launching =
-                                entries
-                                |> List.choose (fun entry ->
-                                    match entry.Resource with
-                                    | Launching cancellation ->
-                                        Some(entry.Generation, cancellation)
-                                    | Live _
-                                    | Inactive ->
-                                        None)
-
-                            launching
-                            |> List.iter (fun (_, cancellation) -> cancellation.Cancel())
-
-                            let pendingLaunchCloses =
-                                launching
-                                |> List.fold
-                                    (fun pending (generation, cancellation) ->
-                                        pending
-                                        |> Map.add
-                                            generation
-                                            { Cancellation = cancellation
-                                              Reply = None })
-                                    state.PendingLaunchCloses
-
-                            let running =
-                                entries
-                                |> List.choose (fun entry ->
-                                    match entry.Resource with
-                                    | Live owned -> Some owned
-                                    | Launching _
-                                    | Inactive ->
-                                        None)
-
-                            running
-                            |> List.iter (fun owned -> startCleanup owned None)
-
-                            let next =
-                                { state with
-                                    Entries = Map.empty
-                                    PendingLaunchCloses = pendingLaunchCloses
-                                    PendingStops = state.PendingStops + running.Length
-                                    ShuttingDown = true
-                                    ShutdownReplies = reply :: state.ShutdownReplies }
-                                |> finishShutdown
-
-                            return! loop next
-                    with ex ->
-                        Log.log "EmbeddedTerminal" $"Registry message failed: {ex.Message}"
-
-                        match message with
-                        | Start(_, reply) ->
-                            reply.Reply(Error $"Embedded terminal registry failed: {ex.Message}")
-                        | Get reply ->
-                            reply.Reply(snapshot state)
-                        | Close(_, reply) ->
-                            reply.Reply(snapshot state)
-                        | CloseAll reply ->
-                            reply.Reply ()
-                        | LaunchCompleted _
-                        | ProcessExited _
-                        | CleanupCompleted _ ->
-                            ()
-
-                        return! loop state
+                        return!
+                            loop
+                                { LastSnapshot = EmbeddedTerminalSnapshot.empty
+                                  AnnouncedHostPid = None }
                 }
 
             loop
-                { Entries = Map.empty
-                  PendingLaunchCloses = Map.empty
-                  PendingStops = 0
-                  NextGeneration = 0L
-                  NextOrder = 0L
-                  ShuttingDown = false
-                  ShutdownReplies = [] })
+                { LastSnapshot = EmbeddedTerminalSnapshot.empty
+                  AnnouncedHostPid = None })
 
     Manager agent
 
 let create () = createWithConfig (defaultConfig ())
 
 let start (Manager agent) worktreePath =
-    let canonical = canonicalWorktreePath worktreePath
-    agent.PostAndAsyncReply((fun reply -> Start(canonical, reply)), timeout = 30_000)
+    agent.PostAndAsyncReply(
+        (fun reply -> Start(worktreePath, reply)),
+        timeout = 30_000
+    )
 
 let get (Manager agent) =
     agent.PostAndAsyncReply(Get, timeout = 30_000)
 
 let close (Manager agent) worktreePath =
-    let canonical = canonicalWorktreePath worktreePath
-    agent.PostAndAsyncReply((fun reply -> Close(canonical, reply)), timeout = 30_000)
+    agent.PostAndAsyncReply(
+        (fun reply -> Close(worktreePath, reply)),
+        timeout = 30_000
+    )
 
-let closeAll (Manager agent) =
-    agent.PostAndAsyncReply(CloseAll, timeout = 30_000)
+let internal shutdownHost (Manager agent) =
+    agent.PostAndAsyncReply(ShutdownHost, timeout = 30_000)
