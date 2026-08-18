@@ -6,8 +6,9 @@ import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
 import {
+  captureSpawnedProcessIdentity,
+  cleanupOwnedProcessTree,
   defaultProcessController,
-  sameProcessIdentity,
   terminateRetainedChild,
 } from "./durable-terminal-host.mjs";
 
@@ -46,21 +47,28 @@ async function waitForUrl(url) {
 }
 
 export async function waitForIdentity(
-  pid,
+  child,
   processController,
   { timeoutMs = 5000, wait = delay, now = () => Date.now() } = {},
 ) {
-  const deadline = now() + timeoutMs;
-  const capture = async () => {
-    const identity = await processController.inspect(pid);
-    if (identity) return identity;
-    if (now() >= deadline) {
-      throw new Error(`Timed out capturing process identity for PID ${pid}`);
-    }
-    await wait(25);
-    return capture();
+  let spawnError = null;
+  const observeSpawnError = (error) => {
+    spawnError = error;
   };
-  return capture();
+  child.once?.("error", observeSpawnError);
+  try {
+    return await captureSpawnedProcessIdentity(
+      child,
+      (pid, remainingMs) =>
+        processController.inspect(pid, remainingMs),
+      wait,
+      timeoutMs,
+      () => spawnError,
+      now,
+    );
+  } finally {
+    child.removeListener?.("error", observeSpawnError);
+  }
 }
 
 export async function cleanupOwnedTree(
@@ -68,58 +76,11 @@ export async function cleanupOwnedTree(
   processController,
   { timeoutMs = 5000, wait = delay, now = () => Date.now() } = {},
 ) {
-  const tracked = new Map([
-    [`${rootIdentity.pid}:${rootIdentity.startIdentity}`, rootIdentity],
-  ]);
-
-  const discover = async () => {
-    const before = tracked.size;
-    const pending = [...tracked.values()];
-    for (const parent of pending) {
-      const actual = await processController.inspect(parent.pid);
-      if (!sameProcessIdentity(actual, parent)) continue;
-      const children = await processController.children(parent.pid);
-      for (const candidate of children) {
-        const verified = await processController.inspect(candidate.pid);
-        if (sameProcessIdentity(candidate, verified)) {
-          tracked.set(
-            `${candidate.pid}:${candidate.startIdentity}`,
-            candidate,
-          );
-        }
-      }
-    }
-    if (tracked.size > before) await discover();
-  };
-
-  const deadline = now() + timeoutMs;
-  const stop = async () => {
-    await discover();
-    const remaining = (
-      await Promise.all(
-        [...tracked.values()].map(async (identity) => ({
-          identity,
-          actual: await processController.inspect(identity.pid),
-        })),
-      )
-    )
-      .filter(({ identity, actual }) =>
-        sameProcessIdentity(identity, actual),
-      )
-      .map(({ identity }) => identity);
-    if (remaining.length === 0) return;
-    if (now() >= deadline) {
-      throw new Error("ttyd verification cleanup left an owned process running");
-    }
-
-    for (const identity of remaining) {
-      await processController.terminate(identity);
-    }
-    await wait(50);
-    return stop();
-  };
-
-  await stop();
+  await cleanupOwnedProcessTree(rootIdentity, processController, {
+    timeoutMs,
+    wait,
+    now,
+  });
 }
 
 export async function cleanupRuntimeResources(
@@ -180,14 +141,13 @@ export async function runTtydRuntimeVerification() {
     assert(port !== 5000, "Runtime check selected production port 5000");
 
     const script = "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE";
-    const encoded = Buffer.from(script, "utf16le").toString("base64");
     const shellArgs = [
       "pwsh",
       "-WorkingDirectory",
       ".",
       "-NoExit",
-      "-EncodedCommand",
-      encoded,
+      "-Command",
+      script,
     ];
     assert(
       Buffer.byteLength(shellArgs.join(" "), "utf8") < 256,
@@ -213,7 +173,7 @@ export async function runTtydRuntimeVerification() {
         env: { ...process.env, TREEMON_TERMINAL_WORKTREE: fixture },
       },
     );
-    childIdentity = await waitForIdentity(child.pid, processController);
+    childIdentity = await waitForIdentity(child, processController);
 
     let output = "";
     child.stdout.on("data", (data) => (output += data.toString()));

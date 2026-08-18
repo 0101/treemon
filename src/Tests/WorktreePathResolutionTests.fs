@@ -73,7 +73,8 @@ let private createApi agent roots =
               ShellCommand = "pwsh"
               StartupTimeout = TimeSpan.FromSeconds 5.0
               ControlRequestTimeout = TimeSpan.FromSeconds 5.0
-              ProbeInterval = TimeSpan.FromMilliseconds 25.0 }
+              ProbeInterval = TimeSpan.FromMilliseconds 25.0
+              ReservationRenewalInterval = TimeSpan.FromSeconds 30.0 }
 
     createApiWithTerminal agent roots manager, manager
 
@@ -583,7 +584,8 @@ type ArchiveWorktreeResolutionTests() =
                       ShellCommand = "pwsh"
                       StartupTimeout = TimeSpan.FromSeconds 1.0
                       ControlRequestTimeout = TimeSpan.FromSeconds 1.0
-                      ProbeInterval = TimeSpan.FromMilliseconds 10.0 }
+                      ProbeInterval = TimeSpan.FromMilliseconds 10.0
+                      ReservationRenewalInterval = TimeSpan.FromSeconds 30.0 }
 
             try
                 match! EmbeddedTerminal.start manager target with

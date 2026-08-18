@@ -30,7 +30,9 @@ error. With no live host, or while draining protocol 1, the same per-key OS lock
 a protocol-2 host; its lease is active before the mutation begins. Unrelated keys use different
 locks. The manager returns the acquired lease before the Git/config mutation begins, so the
 singleton control mailbox remains available for Start/Get/Close on unrelated keys while the
-mutation is blocked; renewal, mutation, and explicit release run outside it. Discovery,
+mutation is blocked. The acquired OS-lock handle transfers with the lease and remains held through
+renewal, mutation, cancellation-shielded explicit release, and final disposal; those steps run
+outside the mailbox. Discovery,
 reservation, transport, parsing, and process-cleanup failures abort the worktree operation with an
 actionable error. Public tab close is non-reserving and never grants permission to mutate a
 worktree. Closing a key already absent from the public snapshot is an unchanged success, including
@@ -101,14 +103,18 @@ attachment.
 ttyd runs with writable mode, Origin checking, and single-client/exit-on-disconnect behavior. The
 durable host is that sole client. Explicit session close closes the upstream socket; ttyd then
 terminates its ConPTY child and exits. The host captures ttyd's exact process-creation identity
-immediately after spawn, discovers descendants only through parent-filtered queries rooted in
-already-owned identities, and records
-each descendant's creation identity before a root can disappear. Cleanup snapshots descendants
+immediately after spawn. On Windows, each descendant query opens and retains the expected parent's
+`Process` handle, verifies its creation time, and captures exact child creation identities while
+that non-reusable parent identity remains retained. A changed or exited parent is a distinct
+non-owned result and contributes no children; recursion always supplies the complete expected
+parent identity rather than a bare PID. Cleanup snapshots descendants
 before closing the upstream, retains captured processes after reparenting, and iterates discovery
-and identity-bound termination to convergence. Termination never accepts a PID alone. On Windows a
-plainly-invoked checked-in helper retains one `System.Diagnostics.Process` handle, verifies its
-exact UTC start ticks, calls `Kill(entireProcessTree = true)` through that same object, and waits;
-an identity mismatch is a safe no-op. A spawned root whose identity cannot be captured is stopped
+and identity-bound termination to convergence under one forced-cleanup deadline. Every discovery,
+identity inspection, and termination helper receives only the remaining budget; expiry is an
+explicit failure that retains the session for retry. Termination never accepts a PID alone. The
+plainly-invoked checked-in Windows helper also verifies exact UTC start ticks, calls
+`Kill(entireProcessTree = true)` through the retained object, and waits; an identity mismatch is a
+safe no-op. A spawned root whose identity cannot be captured is stopped
 only through its retained Node `ChildProcess` handle. Linux discovery uses `/proc` identities but
 returns an explicit unsupported cleanup error where no stable termination handle is available. A
 reused PID is treated as the owned process having exited and is never signalled; a surviving
@@ -127,10 +133,11 @@ heartbeat publication. Different keys have independent queues.
 
 Delete/archive reservations are per-key five-minute leases. Acquisition is itself serialized,
 publishes the lease before terminal cleanup, and releases it if cleanup fails. Treemon renews the
-lease while the worktree mutation runs and always attempts explicit release afterward. An abandoned
-lease expires. A matching per-key OS lock covers current Treemon callers before a host exists and
-during legacy drain until the replacement host grants its lease; neither mechanism blocks another
-key.
+lease while the worktree mutation runs and always attempts explicit release afterward, including
+after caller cancellation, operation failure, or renewal failure. Release runs without caller
+cancellation, and the matching per-key OS lock is disposed only after that attempt. The lock covers
+current Treemon callers before a host exists, during legacy drain, and throughout the mutation;
+neither mechanism blocks another key. An abandoned host lease expires.
 
 The control listener becomes mutation-unavailable as soon as host shutdown begins. New starts,
 closes, and diagnostic mutations receive HTTP 503; starts already in flight settle before the host
@@ -243,12 +250,14 @@ shutdown is sent and no wait is performed against the replacement.
   host shutdown, process exit, or host failure ends a session.
 - **Per-key lease around worktree mutation** — delete and archive proceed only while a renewable
   host reservation rejects starts for the same canonical worktree; acquisition includes
-  authoritative close, and release is attempted on every result path.
+  authoritative close, and the matching OS lock stays held until cancellation-shielded release is
+  attempted on every result path.
 - **State-directory lock plus runtime generation** — concurrent checkout-local Treemon starters
   converge on one host without treating a PID alone as ownership.
-- **Stable identity handles over PID signals** — parent-filtered discovery captures exact descendant
-  identities, including later-reparented processes, while Windows termination verifies creation
-  time and kills through one retained `Process` object; a reused PID is never signalled.
+- **Stable identity handles over PID signals** — the Windows helper retains and verifies the exact
+  parent while its parent-filtered query captures child identities, including later-reparented
+  processes; termination verifies creation time and kills through one retained `Process` object, so
+  a reused PID is never signalled.
 - **One-version drain compatibility** — protocol 1 is list/close/reuse compatible for existing
   sessions only and is removed after its persisted/live population has drained.
 - **Reconcile ambiguous mutations** — bounded timeouts are necessary, but a canonical-key registry
@@ -272,7 +281,7 @@ shutdown is sent and no wait is performed against the replacement.
 | File | Purpose |
 |---|---|
 | `scripts/durable-terminal-host.mjs` | Durable ttyd WebSocket owner, browser proxy, replay, lifecycle, and diagnostics |
-| `scripts/terminate-owned-process.ps1` | Windows identity-bound process-tree termination through one retained `Process` object |
+| `scripts/terminate-owned-process.ps1` | Windows exact-process inspection, parent-handle-bound child discovery, and identity-bound tree termination |
 | `scripts/durable-terminal-control.mjs` | Authenticated status and graceful PID-scoped host shutdown |
 | `scripts/durable-terminal-observation.mjs` | Detached 24-hour heartbeat/liveness observation and final status evaluation |
 | `scripts/verify-durable-terminal-runtime.mjs` | Isolated real-ttyd reconnect and explicit-cleanup verification |

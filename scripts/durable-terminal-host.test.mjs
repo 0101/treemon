@@ -14,6 +14,7 @@ import { test } from "node:test";
 import {
   appendReplayFrame,
   captureSpawnedProcessIdentity,
+  cleanupOwnedProcessTree,
   DurableTerminalHost,
   emptyReplayBuffer,
   manifestOwnership,
@@ -128,6 +129,7 @@ const withTestHost = async (processController, action) => {
   const stateDirectory = testStateDirectory();
   mkdirSync(stateDirectory, { recursive: true });
   const exits = [];
+  let now = 0;
   const host = new DurableTerminalHost({
     stateDirectory,
     ttydPath: resolve("unused-ttyd.exe"),
@@ -135,8 +137,11 @@ const withTestHost = async (processController, action) => {
     replayBytes: 1024,
     diagnosticBytes: 1024,
     processController,
-    cleanupTimeouts: { graceful: 0, forced: 0 },
-    wait: async () => {},
+    cleanupTimeouts: { graceful: 0, forced: 1 },
+    wait: async (milliseconds) => {
+      now += milliseconds;
+    },
+    now: () => now,
     exitProcess: (code) => exits.push(code),
   });
   host.persistStatus = () => {};
@@ -175,10 +180,14 @@ const fakeProcessController = (
     terminated,
     controller: {
       inspect: async (pid) => processes.get(pid) ?? null,
-      children: async (pid) =>
-        [...processes.values()].filter(
-          (identity) => identity.parentPid === pid,
-        ),
+      children: async (parent) => {
+        const actual = processes.get(parent.pid);
+        return sameProcessIdentity(actual, parent)
+          ? [...processes.values()].filter(
+              (identity) => identity.parentPid === parent.pid,
+            )
+          : null;
+      },
       terminate: async (identity) => {
         if (beforeTerminate) beforeTerminate(identity, processes);
         const actual = processes.get(identity.pid);
@@ -298,7 +307,9 @@ test("close discovers and force-cleans only exact owned descendants", async () =
 
 test("cleanup timeout reports failure while owned processes remain", async () => {
   const root = processIdentity(301);
-  const { controller } = fakeProcessController([root], () => {});
+  const { controller } = fakeProcessController([root], () => {
+    throw new Error("Timed out in fake identity-bound termination");
+  });
 
   await withTestHost(controller, async (host) => {
     const session = ownedSession("timeout", 301, null, [root]);
@@ -306,7 +317,7 @@ test("cleanup timeout reports failure while owned processes remain", async () =>
 
     await assert.rejects(
       host.closeSession(session, "test"),
-      /Owned terminal processes remain: 301/,
+      /forced cleanup timed out/,
     );
     assert.equal(session.state, "failed");
     assert.match(session.error, /cleanup did not complete/i);
@@ -320,6 +331,7 @@ test("failed cleanup retains a retryable registry entry", async () => {
     [root],
     (pid, processes) => {
       if (canForce) processes.delete(pid);
+      else throw new Error("Timed out in fake identity-bound termination");
     },
   );
 
@@ -455,9 +467,9 @@ test("a captured descendant remains owned after reparenting", async () => {
   ]);
   let firstChildQuery = true;
   const discoverChildren = controller.children;
-  controller.children = async (pid) => {
-    const children = await discoverChildren(pid);
-    if (pid === root.pid && firstChildQuery) {
+  controller.children = async (parent, timeoutMs) => {
+    const children = await discoverChildren(parent, timeoutMs);
+    if (parent.pid === root.pid && firstChildQuery) {
       firstChildQuery = false;
       processes.delete(root.pid);
       processes.set(child.pid, { ...child, parentPid: 0 });
@@ -476,6 +488,131 @@ test("a captured descendant remains owned after reparenting", async () => {
   });
 });
 
+test("replacement children are never claimed after a parent identity changes", async () => {
+  const root = processIdentity(715);
+  const originalParent = processIdentity(716, 715);
+  const replacementParent = processIdentity(716, 900, "replacement");
+  const replacementChild = processIdentity(717, 716, "replacement");
+  const { controller, processes, terminated } = fakeProcessController([
+    root,
+    originalParent,
+  ]);
+  const discoverChildren = controller.children;
+  let replaced = false;
+  controller.children = async (parent, timeoutMs) => {
+    const children = await discoverChildren(parent, timeoutMs);
+    if (!replaced && sameProcessIdentity(parent, root)) {
+      replaced = true;
+      processes.set(replacementParent.pid, replacementParent);
+      processes.set(replacementChild.pid, replacementChild);
+    }
+    return children;
+  };
+
+  await withTestHost(controller, async (host) => {
+    const session = ownedSession("parent-reuse", 715, null, [root]);
+    host.sessions.set(session.id, session);
+
+    await host.closeSession(session, "test");
+
+    assert.deepEqual(terminated, [715]);
+    assert.equal(processes.get(716), replacementParent);
+    assert.equal(processes.get(717), replacementChild);
+    assert.equal(host.sessions.has(session.id), false);
+  });
+});
+
+test("forced cleanup gives every slow operation only the remaining deadline", async () => {
+  const root = processIdentity(730);
+  const firstChild = processIdentity(731, 730);
+  const secondChild = processIdentity(732, 730);
+  const processes = new Map(
+    [root, firstChild, secondChild].map((identity) => [
+      identity.pid,
+      identity,
+    ]),
+  );
+  const budgets = [];
+  const terminated = [];
+  let now = 0;
+  const consume = (timeoutMs, durationMs) => {
+    budgets.push(timeoutMs);
+    now += Math.min(timeoutMs, durationMs);
+  };
+  const controller = {
+    children: async (parent, timeoutMs) => {
+      consume(timeoutMs, 2);
+      const actual = processes.get(parent.pid);
+      return sameProcessIdentity(actual, parent)
+        ? [...processes.values()].filter(
+            (identity) => identity.parentPid === parent.pid,
+          )
+        : null;
+    },
+    inspect: async (pid, timeoutMs) => {
+      consume(timeoutMs, 4);
+      return processes.get(pid) ?? null;
+    },
+    terminate: async (identity, timeoutMs) => {
+      consume(timeoutMs, 6);
+      terminated.push(identity.pid);
+      processes.delete(identity.pid);
+      return true;
+    },
+  };
+
+  await assert.rejects(
+    cleanupOwnedProcessTree(root, controller, {
+      timeoutMs: 20,
+      now: () => now,
+      wait: async (milliseconds) => {
+        now += milliseconds;
+      },
+    }),
+    /forced cleanup timed out/,
+  );
+
+  assert.equal(now, 20);
+  assert.deepEqual(terminated, [730]);
+  assert.deepEqual(budgets, [20, 18, 16, 14, 8, 4]);
+  assert.ok(budgets.every((budget) => budget <= 20));
+});
+
+test("a stalled cleanup cannot block another key or unbound shutdown", async () => {
+  const root = processIdentity(740);
+  const controller = {
+    children: async (parent) =>
+      parent.pid === root.pid
+        ? new Promise(() => {})
+        : [],
+    inspect: async () => null,
+    terminate: async () => true,
+  };
+
+  await withTestHost(controller, async (host) => {
+    const stalled = ownedSession("stalled-cleanup", 740, null, [root]);
+    const unrelated = ownedSession("unrelated-cleanup", null, null, []);
+    host.sessions.set(stalled.id, stalled);
+    host.sessions.set(unrelated.id, unrelated);
+
+    const stalledClose = host.closeSession(stalled, "test");
+    await host.closeSession(unrelated, "test");
+    await assert.rejects(stalledClose, /forced cleanup timed out/);
+
+    assert.equal(host.sessions.has(unrelated.id), false);
+    assert.equal(host.sessions.get(stalled.id), stalled);
+
+    const startedAt = Date.now();
+    await assert.rejects(
+      host.beginShutdown("bounded-timeout"),
+      /could not close 1 session/,
+    );
+    assert.ok(Date.now() - startedAt < 250);
+    assert.equal(host.sessions.get(stalled.id), stalled);
+    host.resumeAfterFailedShutdown();
+  });
+});
+
 test("cleanup retains the session when a captured descendant survives force", async () => {
   const root = processIdentity(721);
   const child = processIdentity(722, 721);
@@ -483,7 +620,10 @@ test("cleanup retains the session when a captured descendant survives force", as
   const { controller, processes, terminated } = fakeProcessController(
     [root, child, unrelated],
     (pid, current) => {
-      if (pid !== child.pid) current.delete(pid);
+      if (pid === child.pid) {
+        throw new Error("Timed out in fake identity-bound termination");
+      }
+      current.delete(pid);
     },
   );
 
@@ -493,7 +633,7 @@ test("cleanup retains the session when a captured descendant survives force", as
 
     await assert.rejects(
       host.closeSession(session, "test"),
-      /Owned terminal processes remain: 722/,
+      /forced cleanup timed out/,
     );
 
     assert.deepEqual(terminated, [721, 722]);
@@ -1095,7 +1235,9 @@ test("shutdown rejects a start whose body was still arriving at quiescence", asy
 
 test("shutdown reports cleanup failure and retains the failed session", async () => {
   const root = processIdentity(901);
-  const { controller, processes } = fakeProcessController([root], () => {});
+  const { controller, processes } = fakeProcessController([root], () => {
+    throw new Error("Timed out in fake identity-bound termination");
+  });
 
   await withTestHost(controller, async (host, exits) => {
     await host.start();

@@ -5,7 +5,10 @@ open System.Diagnostics
 open System.IO
 open System.Net.Http
 open System.Net.Http.Headers
+open System.Security.Cryptography
+open System.Text
 open System.Text.Json
+open System.Threading
 open System.Threading.Tasks
 open NUnit.Framework
 open Shared
@@ -75,6 +78,32 @@ let private waitUntil description predicate =
 
     wait ()
 
+let private worktreeLockPath stateDirectory worktree =
+    let key =
+        worktree
+        |> WorktreePath.value
+        |> Server.PathUtils.normalizePath
+        |> Encoding.UTF8.GetBytes
+        |> SHA256.HashData
+        |> Convert.ToHexString
+        |> _.ToLowerInvariant()
+
+    Path.Combine(stateDirectory, "worktree-locks", $"{key}.lock")
+
+let private canAcquireWorktreeLock stateDirectory worktree =
+    try
+        use _ =
+            new FileStream(
+                worktreeLockPath stateDirectory worktree,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None
+            )
+
+        true
+    with :? IOException ->
+        false
+
 let private fakeHostScript =
     """
 import { randomBytes } from "node:crypto";
@@ -102,6 +131,12 @@ let reservations = [];
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+
+const waitForFile = async (path) => {
+  if (existsSync(path)) return;
+  await delay(5);
+  return waitForFile(path);
+};
 
 const behavior = () =>
   existsSync(behaviorPath)
@@ -245,13 +280,22 @@ const server = createServer(async (request, response) => {
   } else if (request.method === "POST" && url.pathname.startsWith("/reservations/") && url.pathname.endsWith("/renew")) {
     const id = decodeURIComponent(url.pathname.slice("/reservations/".length, -"/renew".length));
     const reservation = reservations.find((candidate) => candidate.id === id);
-    send(response, reservation ? 200 : 409, reservation ? { reservation } : { error: "expired" });
+    const current = behavior();
+    appendFileSync(join(stateDirectory, "reservation-renewals.txt"), `${id}\n`);
+    if (current.renewTransportFailure) {
+      request.socket.destroy();
+    } else {
+      const status = current.renewStatus ?? (reservation ? 200 : 409);
+      send(response, status, status < 400 ? { reservation } : { error: "expired" });
+    }
   } else if (request.method === "DELETE" && url.pathname.startsWith("/reservations/")) {
     const id = decodeURIComponent(url.pathname.slice("/reservations/".length));
     const found = reservations.some((reservation) => reservation.id === id);
     reservations = reservations.filter((reservation) => reservation.id !== id);
     appendFileSync(join(stateDirectory, "reservation-releases.txt"), `${id}\n`);
-    send(response, behavior().releaseStatus ?? 200, { released: found });
+    const current = behavior();
+    if (current.releaseGatePath) await waitForFile(current.releaseGatePath);
+    send(response, current.releaseStatus ?? 200, { released: found });
   } else if (request.method === "POST" && url.pathname === "/events") {
     const body = await readBody(request);
     const events = existsSync(eventPath)
@@ -337,7 +381,8 @@ let private config stateDirectory hostScript ttydPath : EmbeddedTerminal.Config 
       ShellCommand = "pwsh"
       StartupTimeout = TimeSpan.FromSeconds 5.0
       ControlRequestTimeout = TimeSpan.FromSeconds 5.0
-      ProbeInterval = TimeSpan.FromMilliseconds 25.0 }
+      ProbeInterval = TimeSpan.FromMilliseconds 25.0
+      ReservationRenewalInterval = TimeSpan.FromSeconds 30.0 }
 
 let private readHostPid stateDirectory =
     use document =
@@ -644,7 +689,7 @@ type EmbeddedTerminalTests() =
 
     [<Test>]
     member _.``blocked reserved mutation leaves unrelated manager operations responsive``() =
-        withFakeHost (fun tempDir _ _ manager ->
+        withFakeHost (fun tempDir stateDirectory _ manager ->
             let reservedPath = Path.Combine(tempDir, "reserved")
             let closingPath = Path.Combine(tempDir, "closing")
             let startingPath = Path.Combine(tempDir, "starting")
@@ -684,6 +729,13 @@ type EmbeddedTerminalTests() =
             mutationEntered.Task.GetAwaiter().GetResult()
 
             try
+                Assert.That(
+                    canAcquireWorktreeLock
+                        stateDirectory
+                        reservedWorktree,
+                    Is.False
+                )
+
                 let started =
                     start manager startingWorktree
 
@@ -719,7 +771,293 @@ type EmbeddedTerminalTests() =
 
             match reservation.GetAwaiter().GetResult() with
             | Error error -> Assert.Fail(error)
-            | Ok () -> ())
+            | Ok () ->
+                Assert.That(
+                    canAcquireWorktreeLock
+                        stateDirectory
+                        reservedWorktree,
+                    Is.True
+                ))
+
+    [<Test>]
+    member _.``worktree lock remains held through reservation release``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath = Path.Combine(tempDir, "worktree")
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            start manager worktree |> ignore
+            let releaseGate = Path.Combine(tempDir, "release-gate")
+
+            writeBehavior
+                stateDirectory
+                (JsonSerializer.Serialize(
+                    {| releaseGatePath = releaseGate |}
+                ))
+
+            let reserved =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () -> async.Return(Ok()))
+                |> Async.StartAsTask
+
+            waitUntil
+                "delayed reservation release"
+                (fun () ->
+                    Path.Combine(
+                        stateDirectory,
+                        "reservation-releases.txt"
+                    )
+                    |> File.Exists)
+
+            try
+                Assert.Multiple(fun () ->
+                    Assert.That(reserved.IsCompleted, Is.False)
+                    Assert.That(
+                        canAcquireWorktreeLock stateDirectory worktree,
+                        Is.False
+                    ))
+            finally
+                File.WriteAllText(releaseGate, "")
+
+            match reserved.GetAwaiter().GetResult() with
+            | Error error -> Assert.Fail(error)
+            | Ok () ->
+                Assert.That(
+                    canAcquireWorktreeLock stateDirectory worktree,
+                    Is.True
+                ))
+
+    [<Test>]
+    member _.``renewal failure keeps the worktree lock until release finishes``() =
+        withFakeHostConfig
+            (fun hostConfig ->
+                { hostConfig with
+                    ReservationRenewalInterval =
+                        TimeSpan.FromMilliseconds 10.0 })
+            (fun tempDir stateDirectory _ manager ->
+                let worktreePath = Path.Combine(tempDir, "worktree")
+                Directory.CreateDirectory worktreePath |> ignore
+                let worktree = canonical worktreePath
+                start manager worktree |> ignore
+                writeBehavior
+                    stateDirectory
+                    """{"renewStatus":500}"""
+
+                let mutationEntered =
+                    TaskCompletionSource<unit>(
+                        TaskCreationOptions.RunContinuationsAsynchronously
+                    )
+
+                let releaseMutation =
+                    TaskCompletionSource<unit>(
+                        TaskCreationOptions.RunContinuationsAsynchronously
+                    )
+
+                let reserved =
+                    EmbeddedTerminal.withReservedCleanup
+                        manager
+                        worktree
+                        (fun () ->
+                            async {
+                                mutationEntered.SetResult(())
+                                do!
+                                    releaseMutation.Task
+                                    |> Async.AwaitTask
+
+                                return Ok ()
+                            })
+                    |> Async.StartAsTask
+
+                mutationEntered.Task.GetAwaiter().GetResult()
+
+                try
+                    waitUntil
+                        "reservation renewal failure"
+                        (fun () ->
+                            Path.Combine(
+                                stateDirectory,
+                                "reservation-renewals.txt"
+                            )
+                            |> File.Exists)
+
+                    Assert.That(
+                        canAcquireWorktreeLock
+                            stateDirectory
+                            worktree,
+                        Is.False
+                    )
+                finally
+                    releaseMutation.TrySetResult(()) |> ignore
+
+                let result = reserved.GetAwaiter().GetResult()
+
+                Assert.Multiple(fun () ->
+                    match result with
+                    | Ok () ->
+                        Assert.Fail("Renewal failure should be surfaced")
+                    | Error error ->
+                        Assert.That(
+                            error,
+                            Does.Contain("renewal failed").IgnoreCase
+                        )
+
+                    Assert.That(
+                        File.ReadAllLines(
+                            Path.Combine(
+                                stateDirectory,
+                                "reservation-releases.txt"
+                            )
+                        ).Length,
+                        Is.EqualTo(1)
+                    )
+
+                    Assert.That(
+                        canAcquireWorktreeLock
+                            stateDirectory
+                            worktree,
+                        Is.True
+                    )))
+
+    [<Test>]
+    member _.``caller cancellation still releases reservation and worktree lock``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath = Path.Combine(tempDir, "worktree")
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            start manager worktree |> ignore
+
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            use cancellation = new CancellationTokenSource()
+
+            let reserved =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () ->
+                        async {
+                            mutationEntered.SetResult(())
+                            let! token = Async.CancellationToken
+                            do!
+                                Task.Delay(Timeout.Infinite, token)
+                                |> Async.AwaitTask
+
+                            return Ok ()
+                        })
+                |> fun workflow ->
+                    Async.StartAsTask(
+                        workflow,
+                        cancellationToken = cancellation.Token
+                    )
+
+            try
+                mutationEntered.Task.GetAwaiter().GetResult()
+                Assert.That(
+                    canAcquireWorktreeLock stateDirectory worktree,
+                    Is.False
+                )
+            finally
+                cancellation.Cancel()
+
+            try
+                reserved.GetAwaiter().GetResult() |> ignore
+                Assert.Fail("Reserved mutation should be cancelled")
+            with :? OperationCanceledException ->
+                ()
+
+            waitUntil
+                "cancellation-safe reservation release"
+                (fun () ->
+                    (Path.Combine(
+                        stateDirectory,
+                        "reservation-releases.txt"
+                     )
+                     |> File.Exists)
+                    && canAcquireWorktreeLock
+                        stateDirectory
+                        worktree)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    File.ReadAllLines(
+                        Path.Combine(
+                            stateDirectory,
+                            "reservation-releases.txt"
+                        )
+                    ).Length,
+                    Is.EqualTo(1)
+                )
+
+                Assert.That(
+                    canAcquireWorktreeLock stateDirectory worktree,
+                    Is.True
+                )))
+
+    [<TestCase("error", "primary mutation failure")>]
+    [<TestCase("exception", "boom")>]
+    member _.``operation failures preserve the primary error and release failure``(
+        outcome,
+        expectedPrimary
+    ) =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath = Path.Combine(tempDir, "worktree")
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            start manager worktree |> ignore
+            writeBehavior
+                stateDirectory
+                """{"releaseStatus":500}"""
+
+            let operation () : Async<Result<unit, string>> =
+                match outcome with
+                | "error" ->
+                    async.Return(Error "primary mutation failure")
+                | "exception" ->
+                    async {
+                        return
+                            raise (
+                                InvalidOperationException "boom"
+                            )
+                    }
+                | unexpected ->
+                    failwith $"Unexpected outcome '{unexpected}'"
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    operation
+                |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok () ->
+                    Assert.Fail("Mutation failure should be surfaced")
+                | Error error ->
+                    Assert.That(error, Does.Contain(expectedPrimary))
+                    Assert.That(
+                        error,
+                        Does.Contain("release failed").IgnoreCase
+                    )
+
+                Assert.That(
+                    File.ReadAllLines(
+                        Path.Combine(
+                            stateDirectory,
+                            "reservation-releases.txt"
+                        )
+                    ).Length,
+                    Is.EqualTo(1)
+                )
+
+                Assert.That(
+                    canAcquireWorktreeLock stateDirectory worktree,
+                    Is.True
+                )))
 
     [<Test>]
     member _.``tab close keeps a failed tab when host removal is not authoritative``() =

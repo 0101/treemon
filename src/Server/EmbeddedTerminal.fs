@@ -21,7 +21,8 @@ type internal Config =
       ShellCommand: string
       StartupTimeout: TimeSpan
       ControlRequestTimeout: TimeSpan
-      ProbeInterval: TimeSpan }
+      ProbeInterval: TimeSpan
+      ReservationRenewalInterval: TimeSpan }
 
 type private HostIdentity =
     { Generation: string
@@ -46,11 +47,19 @@ type private Reservation =
     { Id: string
       Sessions: HostSession list }
 
-type private CleanupReservation =
+type private CleanupLease =
     { Renew:
         CancellationToken ->
             Async<Result<unit, string>>
       Release: unit -> Async<Result<unit, string>> }
+
+type private CleanupReservation =
+    { Lease: CleanupLease
+      WorktreeLock: IDisposable }
+
+type private ReservedOperationOutcome =
+    | ReservedResult of Result<unit, string>
+    | ReservedCancelled of OperationCanceledException
 
 type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
@@ -92,7 +101,8 @@ let private defaultConfig () =
       ShellCommand = "pwsh"
       StartupTimeout = TimeSpan.FromSeconds 30.0
       ControlRequestTimeout = TimeSpan.FromSeconds 30.0
-      ProbeInterval = TimeSpan.FromMilliseconds 100.0 }
+      ProbeInterval = TimeSpan.FromMilliseconds 100.0
+      ReservationRenewalInterval = TimeSpan.FromSeconds 30.0 }
 
 let private canonicalWorktreePath =
     WorktreePath.value >> PathUtils.toWorktreePath
@@ -1513,7 +1523,7 @@ let private renewReservation
             try
                 do!
                     Task.Delay(
-                        TimeSpan.FromSeconds 30.0,
+                        config.ReservationRenewalInterval,
                         cancellation
                     )
                     |> Async.AwaitTask
@@ -1551,43 +1561,109 @@ let private releaseReservation
 let private runReservedOperation
     reservation
     operation
+    callerCancellation
     =
-    async {
-        use renewalCancellation = new CancellationTokenSource()
-        let! renewal =
-            reservation.Renew renewalCancellation.Token
-            |> Async.StartChild
+    task {
+        try
+            use renewalCancellation =
+                new CancellationTokenSource()
 
-        let! operationResult =
-            async {
-                try
-                    return! operation ()
-                with ex ->
-                    return
-                        Error
-                            $"Worktree mutation failed unexpectedly: {ex.Message}"
-            }
+            let renewal =
+                task {
+                    try
+                        return!
+                            reservation.Lease.Renew
+                                renewalCancellation.Token
+                            |> fun workflow ->
+                                Async.StartAsTask(
+                                    workflow,
+                                    cancellationToken = CancellationToken.None
+                                )
+                    with ex ->
+                        return
+                            Error
+                                $"Durable terminal cleanup reservation renewal failed unexpectedly: {ex.Message}"
+                }
 
-        renewalCancellation.Cancel()
-        let! renewalResult = renewal
-        let! releaseResult = reservation.Release ()
+            let! operationOutcome =
+                task {
+                    try
+                        let! result =
+                            operation ()
+                            |> fun workflow ->
+                                Async.StartAsTask(
+                                    workflow,
+                                    cancellationToken = callerCancellation
+                                )
 
-        return
-            match operationResult, renewalResult, releaseResult with
-            | Ok (), Ok (), Ok () -> Ok ()
-            | Error error, Ok (), Ok () -> Error error
-            | Ok (), Error error, Ok () -> Error error
-            | Ok (), Ok (), Error error ->
-                Error
-                    $"Worktree mutation completed, but terminal cleanup reservation release failed: {error}"
-            | Error operationError, _, Error releaseError ->
-                Error
-                    $"{operationError}; terminal cleanup reservation release also failed: {releaseError}"
-            | Error operationError, Error renewalError, Ok () ->
-                Error $"{operationError}; {renewalError}"
-            | Ok (), Error renewalError, Error releaseError ->
-                Error
-                    $"{renewalError}; terminal cleanup reservation release also failed: {releaseError}"
+                        return ReservedResult result
+                    with
+                    | :? OperationCanceledException as cancellation
+                        when callerCancellation.IsCancellationRequested ->
+                        return ReservedCancelled cancellation
+                    | ex ->
+                        return
+                            ReservedResult(
+                                Error
+                                    $"Worktree mutation failed unexpectedly: {ex.Message}"
+                            )
+                }
+
+            renewalCancellation.Cancel()
+            let! renewalResult = renewal
+
+            let! releaseResult =
+                task {
+                    try
+                        return!
+                            reservation.Lease.Release ()
+                            |> fun workflow ->
+                                Async.StartAsTask(
+                                    workflow,
+                                    cancellationToken = CancellationToken.None
+                                )
+                    with ex ->
+                        return
+                            Error
+                                $"Durable terminal cleanup reservation release failed unexpectedly: {ex.Message}"
+                }
+
+            let cleanupFailures =
+                [ match renewalResult with
+                  | Ok () -> ()
+                  | Error error -> yield error
+
+                  match releaseResult with
+                  | Ok () -> ()
+                  | Error error ->
+                      yield
+                          $"Terminal cleanup reservation release failed: {error}" ]
+
+            let resultWithCleanupFailures result =
+                let cleanupError =
+                    String.concat "; " cleanupFailures
+
+                match result, cleanupFailures with
+                | Ok (), [] -> Ok ()
+                | Error error, [] -> Error error
+                | Ok (), _ -> Error cleanupError
+                | Error error, _ ->
+                    Error $"{error}; {cleanupError}"
+
+            return
+                match operationOutcome, cleanupFailures with
+                | ReservedResult result, _ ->
+                    resultWithCleanupFailures result
+                    |> ReservedResult
+                | ReservedCancelled cancellation, [] ->
+                    ReservedCancelled cancellation
+                | ReservedCancelled _, failures ->
+                    let cleanupError = String.concat "; " failures
+                    Error
+                        $"Worktree mutation was cancelled; {cleanupError}"
+                    |> ReservedResult
+        finally
+            reservation.WorktreeLock.Dispose()
     }
 
 let private reserveOnCurrentHost
@@ -1924,19 +2000,35 @@ let internal createWithConfig config =
                             reply.Reply(Error error)
                             return! loop state
                         | Ok worktreeLock ->
-                            let! result, next =
-                                async {
-                                    use worktreeLock = worktreeLock
-                                    return!
-                                        reserveTerminalCleanup
-                                            config
-                                            instanceId
-                                            state
-                                            canonical
-                                }
+                            try
+                                let! result, next =
+                                    reserveTerminalCleanup
+                                        config
+                                        instanceId
+                                        state
+                                        canonical
 
-                            reply.Reply result
-                            return! loop next
+                                match result with
+                                | Ok lease ->
+                                    reply.Reply(
+                                        Ok
+                                            { Lease = lease
+                                              WorktreeLock =
+                                                worktreeLock }
+                                    )
+                                | Error error ->
+                                    worktreeLock.Dispose()
+                                    reply.Reply(Error error)
+
+                                return! loop next
+                            with ex ->
+                                worktreeLock.Dispose()
+                                reply.Reply(
+                                    Error
+                                        $"Could not reserve terminal cleanup unexpectedly: {ex.Message}"
+                                )
+
+                                return! loop state
                     | ShutdownHost reply ->
                         let! result = shutdown config
                         reply.Reply result
@@ -1995,19 +2087,39 @@ let internal withReservedCleanup
     operation
     =
     async {
-        match!
-            agent.PostAndAsyncReply(
-                (fun reply ->
-                    ReserveCleanup(worktreePath, reply)),
-                timeout = 120_000
-            )
-        with
-        | Error error -> return Error error
-        | Ok reservation ->
-            return!
-                runReservedOperation
-                    reservation
-                    operation
+        let! callerCancellation = Async.CancellationToken
+
+        let bracket =
+            task {
+                let! reservation =
+                    agent.PostAndAsyncReply(
+                        (fun reply ->
+                            ReserveCleanup(worktreePath, reply))
+                    )
+                    |> fun workflow ->
+                        Async.StartAsTask(
+                            workflow,
+                            cancellationToken = CancellationToken.None
+                        )
+
+                match reservation with
+                | Error error ->
+                    return ReservedResult(Error error)
+                | Ok acquired ->
+                    return!
+                        runReservedOperation
+                            acquired
+                            operation
+                            callerCancellation
+            }
+
+        let! outcome = bracket |> Async.AwaitTask
+
+        return
+            match outcome with
+            | ReservedResult result -> result
+            | ReservedCancelled cancellation ->
+                raise cancellation
     }
 
 let internal shutdownHost (Manager agent) =

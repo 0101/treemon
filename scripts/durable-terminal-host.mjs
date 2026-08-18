@@ -38,7 +38,7 @@ const processForceCommandMs = 5000;
 const reservationLeaseMs = 5 * 60_000;
 const maximumOwnedProcesses = 1024;
 const unixEpochTicks = 621355968000000000n;
-const processTerminationHelperPath = join(
+const processIdentityHelperPath = join(
   import.meta.dirname,
   "terminate-owned-process.ps1",
 );
@@ -537,8 +537,19 @@ const runBoundedProcess = (
     child.stdout.on("data", collect(stdout));
     child.stderr.on("data", collect(stderr));
     const timeout = setTimeout(() => {
-      if (child.exitCode === null) child.kill();
-      finish(null, new Error(`Timed out running ${description} with ${fileName}`));
+      if (child.exitCode === null && !child.kill() && child.exitCode === null) {
+        finish(
+          null,
+          new Error(
+            `Timed out running ${description} and could not stop ${fileName}`,
+          ),
+        );
+      } else {
+        finish(
+          null,
+          new Error(`Timed out running ${description} with ${fileName}`),
+        );
+      }
     }, timeoutMs);
     child.once("error", (error) => finish(null, error));
     child.once("exit", (code) => {
@@ -554,44 +565,8 @@ const runBoundedProcess = (
     });
   });
 
-const windowsProcessQuery = async (filter) => {
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    `$items = @(Get-CimInstance Win32_Process -Filter '${filter}')`,
-    "$items | ForEach-Object {",
-    "  $process = $null",
-    "  try {",
-    "    $process = [System.Diagnostics.Process]::GetProcessById([int]$_.ProcessId)",
-    "    $processHandle = $process.SafeHandle",
-    "    $exactStart = $process.StartTime.ToUniversalTime().Ticks",
-    "    $reportedStart = $_.CreationDate.ToUniversalTime().Ticks",
-    "    if ([Math]::Abs($exactStart - $reportedStart) -le 9) {",
-    "      '{0}|{1}|{2}' -f $_.ProcessId, $_.ParentProcessId, $exactStart",
-    "    }",
-    "  } catch [System.ArgumentException] {",
-    "  } catch [System.InvalidOperationException] {",
-    "  } finally {",
-    "    if ($null -ne $process) { $process.Dispose() }",
-    "  }",
-    "}",
-  ].join("; ");
-  const result = await runBoundedProcess(
-    "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      script,
-    ],
-    "process ownership query",
-  );
-  if (result.code !== 0) {
-    throw new Error(
-      `Process ownership query failed with code ${result.code}: ${sanitizeMetadataText(result.stderr, 240)}`,
-    );
-  }
-
-  return result.stdout
+const parseWindowsProcessIdentities = (output) =>
+  output
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => {
@@ -599,7 +574,7 @@ const windowsProcessQuery = async (filter) => {
       const pid = Number.parseInt(pidText, 10);
       const parentPid = Number.parseInt(parentText, 10);
       if (!validPid(pid) || !Number.isInteger(parentPid) || !/^\d+$/.test(startText)) {
-        throw new Error("Process ownership query returned an invalid identity");
+        throw new Error("Process ownership helper returned an invalid identity");
       }
       return {
         pid,
@@ -607,41 +582,75 @@ const windowsProcessQuery = async (filter) => {
         startIdentity: `windows:${startText}`,
       };
     });
-};
 
-const terminateWindowsProcess = async (identity) => {
+const runWindowsProcessIdentityHelper = async (
+  operation,
+  identity,
+  timeoutMs = processForceCommandMs,
+) => {
+  const boundedTimeoutMs = Math.max(1, Math.floor(timeoutMs));
   const startIdentity = /^windows:(\d+)$/.exec(
     identity?.startIdentity ?? "",
   )?.[1];
-  if (!validPid(identity?.pid) || !startIdentity) {
+  if (!validPid(identity?.pid) || (operation !== "Inspect" && !startIdentity)) {
     throw new Error(
-      "Windows process termination requires an exact creation identity",
+      `${operation} requires an exact Windows process creation identity`,
     );
   }
 
+  const argumentsList = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-File",
+    processIdentityHelperPath,
+    "-Operation",
+    operation,
+    "-ProcessId",
+    String(identity.pid),
+    "-TimeoutMilliseconds",
+    String(boundedTimeoutMs),
+    ...(startIdentity
+      ? ["-StartTimeUtcTicks", startIdentity]
+      : []),
+  ];
   const result = await runBoundedProcess(
     "pwsh",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-File",
-      processTerminationHelperPath,
-      "-ProcessId",
-      String(identity.pid),
-      "-StartTimeUtcTicks",
-      startIdentity,
-      "-TimeoutMilliseconds",
-      String(processForceCommandMs),
-    ],
-    "identity-bound process termination",
-    processForceCommandMs + 1000,
+    argumentsList,
+    `identity-bound process ${operation.toLowerCase()}`,
+    boundedTimeoutMs,
   );
-  if (result.code === 0) return true;
-  if (result.code === 3) return false;
-  throw new Error(
-    `Identity-bound process termination failed with code ${result.code}: ${sanitizeMetadataText(result.stderr, 240)}`,
-  );
+  if (result.code === 3) return null;
+  if (result.code !== 0) {
+    throw new Error(
+      `Identity-bound process ${operation.toLowerCase()} failed with code ${result.code}: ${sanitizeMetadataText(result.stderr, 240)}`,
+    );
+  }
+
+  return parseWindowsProcessIdentities(result.stdout);
 };
+
+const inspectWindowsProcess = async (pid, timeoutMs) => {
+  const identities = await runWindowsProcessIdentityHelper(
+    "Inspect",
+    { pid },
+    timeoutMs,
+  );
+  if (identities === null) return null;
+  if (identities.length !== 1 || identities[0].pid !== pid) {
+    throw new Error("Process ownership helper returned an unexpected identity");
+  }
+  return identities[0];
+};
+
+const childrenOfWindowsProcess = (identity, timeoutMs) =>
+  runWindowsProcessIdentityHelper("Children", identity, timeoutMs);
+
+const terminateWindowsProcess = async (identity, timeoutMs) =>
+  (await runWindowsProcessIdentityHelper(
+    "Terminate",
+    identity,
+    timeoutMs,
+  )) !== null;
 
 const linuxProcessIdentity = (pid) => {
   try {
@@ -677,9 +686,9 @@ export function sameProcessIdentity(left, right) {
 export function defaultProcessController() {
   const inspect =
     process.platform === "win32"
-      ? async (pid) =>
+      ? async (pid, timeoutMs = processForceCommandMs) =>
           validPid(pid)
-            ? (await windowsProcessQuery(`ProcessId = ${pid}`))[0] ?? null
+            ? inspectWindowsProcess(pid, timeoutMs)
             : null
       : process.platform === "linux"
         ? async (pid) => (validPid(pid) ? linuxProcessIdentity(pid) : null)
@@ -690,15 +699,20 @@ export function defaultProcessController() {
           };
   const children =
     process.platform === "win32"
-      ? async (pid) =>
-          validPid(pid)
-            ? windowsProcessQuery(`ParentProcessId = ${pid}`)
-            : []
+      ? async (identity, timeoutMs = processForceCommandMs) =>
+          validPid(identity?.pid)
+            ? childrenOfWindowsProcess(identity, timeoutMs)
+            : null
       : process.platform === "linux"
-        ? async (pid) => {
-            if (!validPid(pid)) return [];
+        ? async (identity) => {
+            if (!validPid(identity?.pid)) return null;
+            const before = linuxProcessIdentity(identity.pid);
+            if (!sameProcessIdentity(before, identity)) return null;
             try {
-              return readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8")
+              const children = readFileSync(
+                `/proc/${identity.pid}/task/${identity.pid}/children`,
+                "utf8",
+              )
                 .trim()
                 .split(/\s+/)
                 .filter(Boolean)
@@ -706,9 +720,11 @@ export function defaultProcessController() {
                 .filter(validPid)
                 .map(linuxProcessIdentity)
                 .filter(Boolean)
-                .filter((identity) => identity.parentPid === pid);
+                .filter((candidate) => candidate.parentPid === identity.pid);
+              const after = linuxProcessIdentity(identity.pid);
+              return sameProcessIdentity(after, identity) ? children : null;
             } catch (error) {
-              if (error?.code === "ENOENT" || error?.code === "ESRCH") return [];
+              if (error?.code === "ENOENT" || error?.code === "ESRCH") return null;
               throw error;
             }
           }
@@ -741,10 +757,11 @@ export async function captureSpawnedProcessIdentity(
   wait = delay,
   timeoutMs = 2000,
   spawnFailure = () => null,
+  now = () => Date.now(),
 ) {
   const pid = child?.pid;
   if (!validPid(pid)) throw new Error("Spawned process did not report a PID");
-  const deadline = Date.now() + timeoutMs;
+  const deadline = now() + timeoutMs;
 
   const capture = async () => {
     const failure = spawnFailure();
@@ -753,17 +770,21 @@ export async function captureSpawnedProcessIdentity(
       throw new Error(`Spawned process ${pid} exited during identity capture`);
     }
 
-    const identity = await inspect(pid);
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) {
+      throw new Error("Could not capture spawned process creation identity");
+    }
+    const identity = await inspect(pid, remainingMs);
     const failureAfterInspection = spawnFailure();
     if (failureAfterInspection) throw failureAfterInspection;
     if (spawnedProcessExited(child)) {
       throw new Error(`Spawned process ${pid} exited during identity capture`);
     }
     if (identity?.pid === pid) return identity;
-    if (Date.now() >= deadline) {
+    if (now() >= deadline) {
       throw new Error("Could not capture spawned process creation identity");
     }
-    await wait(25);
+    await wait(Math.min(25, Math.max(1, deadline - now())));
     return capture();
   };
 
@@ -797,36 +818,113 @@ const ownedProcesses = (session) =>
 const trackedOwnedProcessIds = (session) =>
   [...ownedProcesses(session).values()].map(({ identity }) => identity.pid);
 
-const trackOwnedProcess = (session, identity, depth) => {
-  session.ownedProcesses ??= new Map();
+const trackOwnedProcessIn = (processes, identity, depth) => {
   const key = processIdentityKey(identity);
-  if (session.ownedProcesses.has(key)) return false;
-  if (session.ownedProcesses.size >= maximumOwnedProcesses) {
+  if (processes.has(key)) return false;
+  if (processes.size >= maximumOwnedProcesses) {
     throw new Error("Owned terminal process set exceeded its safety bound");
   }
-  session.ownedProcesses.set(key, { identity, depth });
+  processes.set(key, { identity, depth });
   return true;
 };
 
-async function discoverOwnedDescendants(session, processController) {
+const trackOwnedProcess = (session, identity, depth) => {
+  session.ownedProcesses ??= new Map();
+  return trackOwnedProcessIn(session.ownedProcesses, identity, depth);
+};
+
+class CleanupDeadlineError extends Error {}
+
+const remainingCleanupTime = (deadline, now) =>
+  Math.max(0, Math.floor(deadline - now()));
+
+const beforeCleanupDeadline = async (
+  deadline,
+  now,
+  description,
+  operation,
+) => {
+  const remainingMs = remainingCleanupTime(deadline, now);
+  if (remainingMs <= 0) {
+    throw new CleanupDeadlineError(
+      `Durable terminal cleanup timed out before ${description}`,
+    );
+  }
+
+  try {
+    const result = await new Promise((resolveOperation, rejectOperation) => {
+      const timeout = setTimeout(
+        () =>
+          rejectOperation(
+            new CleanupDeadlineError(
+              `Durable terminal cleanup timed out during ${description}`,
+            ),
+          ),
+        remainingMs,
+      );
+      Promise.resolve()
+        .then(() => operation(remainingMs))
+        .then(
+          (value) => {
+            clearTimeout(timeout);
+            resolveOperation(value);
+          },
+          (error) => {
+            clearTimeout(timeout);
+            rejectOperation(error);
+          },
+        );
+    });
+    if (now() > deadline) {
+      throw new CleanupDeadlineError(
+        `Durable terminal cleanup timed out during ${description}`,
+      );
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof CleanupDeadlineError) throw error;
+    if (now() >= deadline) {
+      throw new CleanupDeadlineError(
+        `Durable terminal cleanup timed out during ${description}`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+};
+
+async function discoverOwnedDescendants(
+  processes,
+  processController,
+  deadline,
+  now,
+) {
   const discover = async (pending, visited) => {
     const [tracked, ...remaining] = pending;
     if (!tracked) return;
     const key = processIdentityKey(tracked.identity);
     if (visited.has(key)) return discover(remaining, visited);
 
-    const actual = await processController.inspect(tracked.identity.pid);
-    if (!sameProcessIdentity(actual, tracked.identity)) {
+    const children = await beforeCleanupDeadline(
+      deadline,
+      now,
+      `discovering descendants of PID ${tracked.identity.pid}`,
+      (remainingMs) =>
+        processController.children(tracked.identity, remainingMs),
+    );
+    if (children === null) {
+      processes.delete(key);
       return discover(remaining, new Set([...visited, key]));
     }
 
-    const children = await processController.children(tracked.identity.pid);
     const captured = [];
     for (const candidate of children) {
-      const verified = await processController.inspect(candidate.pid);
       if (
-        sameProcessIdentity(candidate, verified) &&
-        trackOwnedProcess(session, candidate, tracked.depth + 1)
+        validPid(candidate?.pid) &&
+        candidate.parentPid === tracked.identity.pid &&
+        typeof candidate.startIdentity === "string" &&
+        candidate.startIdentity.length > 0 &&
+        trackOwnedProcessIn(processes, candidate, tracked.depth + 1)
       ) {
         captured.push({ identity: candidate, depth: tracked.depth + 1 });
       }
@@ -838,21 +936,34 @@ async function discoverOwnedDescendants(session, processController) {
     );
   };
 
-  await discover([...ownedProcesses(session).values()], new Set());
+  await discover([...processes.values()], new Set());
 }
 
-async function remainingOwnedProcesses(session, processController) {
-  const inspected = await Promise.all(
-    [...ownedProcesses(session).values()].map(async (tracked) => ({
-      tracked,
-      actual: await processController.inspect(tracked.identity.pid),
-    })),
-  );
-  return inspected
-    .filter(({ tracked, actual }) =>
-      sameProcessIdentity(tracked.identity, actual),
-    )
-    .map(({ tracked }) => tracked);
+async function remainingOwnedProcesses(
+  processes,
+  processController,
+  deadline,
+  now,
+) {
+  const inspect = async (pending, remaining) => {
+    const [tracked, ...rest] = pending;
+    if (!tracked) return remaining;
+    const actual = await beforeCleanupDeadline(
+      deadline,
+      now,
+      `inspecting PID ${tracked.identity.pid}`,
+      (remainingMs) =>
+        processController.inspect(tracked.identity.pid, remainingMs),
+    );
+    if (sameProcessIdentity(tracked.identity, actual)) {
+      return inspect(rest, [...remaining, tracked]);
+    }
+
+    processes.delete(processIdentityKey(tracked.identity));
+    return inspect(rest, remaining);
+  };
+
+  return inspect([...processes.values()], []);
 }
 
 async function waitForOwnedProcessExit(
@@ -860,15 +971,35 @@ async function waitForOwnedProcessExit(
   processController,
   timeoutMs,
   wait,
+  now,
 ) {
-  const deadline = Date.now() + timeoutMs;
+  const processes = ownedProcesses(session);
+  const deadline = now() + timeoutMs;
 
   const check = async () => {
-    await discoverOwnedDescendants(session, processController);
-    const remaining = await remainingOwnedProcesses(session, processController);
-    if (remaining.length === 0 || Date.now() >= deadline) return remaining;
-    await wait(Math.min(50, Math.max(1, deadline - Date.now())));
-    return check();
+    try {
+      await discoverOwnedDescendants(
+        processes,
+        processController,
+        deadline,
+        now,
+      );
+      const remaining = await remainingOwnedProcesses(
+        processes,
+        processController,
+        deadline,
+        now,
+      );
+      const remainingMs = remainingCleanupTime(deadline, now);
+      if (remaining.length === 0 || remainingMs === 0) return remaining;
+      await wait(Math.min(50, remainingMs));
+      return check();
+    } catch (error) {
+      if (error instanceof CleanupDeadlineError) {
+        return [...processes.values()];
+      }
+      throw error;
+    }
   };
 
   return check();
@@ -879,30 +1010,104 @@ async function forceOwnedProcessExit(
   processController,
   timeoutMs,
   wait,
+  now,
 ) {
-  const deadline = Date.now() + timeoutMs;
+  const processes = ownedProcesses(session);
+  const deadline = now() + timeoutMs;
+  const timeout = (cause) =>
+    new Error("Durable terminal forced cleanup timed out", { cause });
 
-  const force = async (attempted) => {
-    await discoverOwnedDescendants(session, processController);
-    const remaining = await remainingOwnedProcesses(session, processController);
-    if (remaining.length === 0 || (attempted && Date.now() >= deadline)) {
-      return remaining;
-    }
-
-    for (const tracked of remaining.sort(
-      (left, right) => left.depth - right.depth,
-    )) {
-      await discoverOwnedDescendants(session, processController);
-      await processController.terminate(tracked.identity);
-    }
-
-    if (Date.now() < deadline) {
-      await wait(Math.min(50, Math.max(1, deadline - Date.now())));
-    }
-    return force(true);
+  const terminateTracked = async (pending, description) => {
+    const [tracked, ...remaining] = pending;
+    if (!tracked) return;
+    await beforeCleanupDeadline(
+      deadline,
+      now,
+      `${description} PID ${tracked.identity.pid}`,
+      (remainingMs) =>
+        processController.terminate(tracked.identity, remainingMs),
+    );
+    processes.delete(processIdentityKey(tracked.identity));
+    return terminateTracked(remaining, description);
   };
 
-  return force(false);
+  const force = async () => {
+    await discoverOwnedDescendants(
+      processes,
+      processController,
+      deadline,
+      now,
+    );
+    if (processes.size === 0) return [];
+
+    const minimumDepth = Math.min(
+      ...[...processes.values()].map(({ depth }) => depth),
+    );
+    const boundaries = [...processes.values()]
+      .filter(({ depth }) => depth === minimumDepth)
+      .sort((left, right) => left.depth - right.depth);
+    await terminateTracked(
+      boundaries,
+      "terminating process tree rooted at",
+    );
+
+    const survivors = await remainingOwnedProcesses(
+      processes,
+      processController,
+      deadline,
+      now,
+    );
+    if (survivors.length === 0) return [];
+    await terminateTracked(
+      survivors.sort((left, right) => left.depth - right.depth),
+      "terminating surviving",
+    );
+
+    if (processes.size === 0) return [];
+    const remainingMs = remainingCleanupTime(deadline, now);
+    if (remainingMs === 0) throw timeout();
+    await wait(Math.min(50, remainingMs));
+    return force();
+  };
+
+  try {
+    return await force();
+  } catch (error) {
+    if (
+      error instanceof CleanupDeadlineError ||
+      /timed out/i.test(error?.message ?? "")
+    ) {
+      throw timeout(error);
+    }
+    throw error;
+  }
+}
+
+export async function cleanupOwnedProcessTree(
+  rootIdentity,
+  processController,
+  {
+    timeoutMs = processForceCommandMs,
+    wait = delay,
+    now = () => Date.now(),
+  } = {},
+) {
+  const session = {
+    ownedProcesses: new Map([
+      [
+        processIdentityKey(rootIdentity),
+        { identity: rootIdentity, depth: 0 },
+      ],
+    ]),
+  };
+
+  await forceOwnedProcessExit(
+    session,
+    processController,
+    timeoutMs,
+    wait,
+    now,
+  );
 }
 
 export class DurableTerminalHost {
@@ -1580,8 +1785,8 @@ export class DurableTerminalHost {
       "-WorkingDirectory",
       ".",
       "-NoExit",
-      "-EncodedCommand",
-      Buffer.from(shellScript, "utf16le").toString("base64"),
+      "-Command",
+      shellScript,
     ];
     if (Buffer.byteLength(shellArguments.join(" "), "utf8") >= 256) {
       throw new Error("ttyd child command exceeds the Windows command buffer");
@@ -1634,10 +1839,12 @@ export class DurableTerminalHost {
     try {
       ttydIdentity = await captureSpawnedProcessIdentity(
         session.ttydProcess,
-        (pid) => this.processController.inspect(pid),
+        (pid, timeoutMs) =>
+          this.processController.inspect(pid, timeoutMs),
         this.wait,
         2000,
         () => spawnFailure.error,
+        this.now,
       );
     } catch (error) {
       if (
@@ -2010,8 +2217,6 @@ export class DurableTerminalHost {
   }
 
   async stopSessionResources(session) {
-    await discoverOwnedDescendants(session, this.processController);
-
     const attachment = session.attachment;
     session.attachment = null;
     attachment?.socket?.close(1000, "Terminal session closed");
@@ -2047,6 +2252,7 @@ export class DurableTerminalHost {
       this.processController,
       this.cleanupTimeouts.graceful,
       this.wait,
+      this.now,
     );
 
     remaining = await forceOwnedProcessExit(
@@ -2054,6 +2260,7 @@ export class DurableTerminalHost {
       this.processController,
       this.cleanupTimeouts.forced,
       this.wait,
+      this.now,
     );
     const unverifiedRemaining = session.unverifiedSpawnedPids ?? [];
     await closeServer(session.publicServer);
