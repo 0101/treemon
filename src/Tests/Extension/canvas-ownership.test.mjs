@@ -6,7 +6,7 @@ import {
   canvasFilenamesForTool,
   isValidCanvasFilename,
   watchCanvasWrites,
-} from "./canvas-ownership.mjs";
+} from "../../Extension/canvas-ownership.mjs";
 
 function patch(lines) {
   return lines.join(EOL);
