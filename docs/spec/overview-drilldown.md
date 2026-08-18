@@ -114,9 +114,9 @@ type AgentGroup = { Kind: AgentGroupKind; Count: int; Members: GroupMember list 
   `Members |> List.sumBy _.Contribution`. For agents, one worktree can appear in several groups and
   contributes the number of its sessions matching that group. Members preserve repo and group order.
 - Archived worktrees are removed before any grouping. Task-bucket membership then follows the
-  per-bucket predicates exactly (for example, `Underway` counts `Beads.InProgress + Planning.Queued`
+  per-bucket predicates exactly (for example, `Underway` counts `Planning.InProgress + Planning.Queued`
   only where `isActive`; `Planned` folds `Loose`; `Unattended` is inactive worktrees' Underway work;
-  `Done` and `ToLand` split `Beads.Closed` on whether the worktree still has work left).
+  `Done` and `ToLand` split `Planning.Closed` on whether the worktree still has non-feature work left).
   A worktree is a member iff its contribution to that bucket is greater than zero.
 
 ### 2. State + messages (`src/Client/AppTypes.fs`, `src/Client/App.fs`)

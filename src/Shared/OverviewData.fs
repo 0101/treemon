@@ -9,10 +9,10 @@ module OverviewData
 //     only where the worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser); on an
 //     inactive worktree that same work is likely stale beads status and folds into the muted
 //     Unattended catch-all instead, so Unattended is exactly Underway's inactive mirror. Closed
-//     tasks split by whether their worktree still has work left: Done while it does, To land once
-//     it does not (nothing open, in-progress or blocked remains — the agent is finished and a human
-//     has to land it). Blocked sums across all (non-archived) worktrees. Every bucket except Planned
-//     is feature-inclusive, since BeadsSummary counts every beads issue type.
+//     tasks split by whether their worktree still has task work left: Done while it does, To land
+//     once it does not. Blocked sums across all non-archived worktrees. Every bucket uses the
+//     feature-free Planning projection, so feature containers never inflate task counts or keep an
+//     otherwise-complete worktree out of To land.
 //   - Agents: red-dot WORKING agents (CodingTool = Working) grouped by the skill each is running,
 //     classified through the shared Shared.Activity.classify, PLUS a distinct Waiting group for
 //     agents parked on the user (CodingTool = WaitingForUser, yellow dot), PLUS a distinct Idle
@@ -34,7 +34,7 @@ open Shared
 /// colliding with the BeadsSummary field labels and other DU cases (same reason
 /// CurrentActivity is qualified). The case list order below is the band's canonical left-to-right
 /// display order. Done and ToLand are the two halves of a worktree's closed tasks — mutually
-/// exclusive, so together they always sum to Σ Beads.Closed.
+/// exclusive, so together they always sum to Σ Planning.Closed.
 [<RequireQualifiedAccess>]
 type TaskBucketKind =
     | Planned
@@ -201,17 +201,15 @@ let aggregate (repos: RepoWorktrees list) : Overview =
           Sessions = sessions
           Contribution = contribution }
 
-    // A worktree's contribution to one task bucket. Underway is all started work — beads in_progress
-    // issues plus open tasks under an in_progress feature — and only counts when the worktree has an
+    // A worktree's contribution to one task bucket. Underway is all started task work — in-progress
+    // non-feature issues plus open tasks under an in-progress feature — and only counts when it has an
     // ACTIVE agent (CodingTool = Working or WaitingForUser); on an inactive worktree (Idle/NoSession)
     // it is likely stale beads status nobody is working, so it folds into the muted Unattended
-    // catch-all instead, making Unattended exactly Underway's inactive mirror. Beads.InProgress counts
-    // every issue type, so an in_progress FEATURE counts as started work alongside its own queued
-    // children — the same feature-inclusive basis Blocked, Done and To land use (Planned is the lone
-    // feature-free bucket, since its classifier excludes containers). Closed tasks split on whether
-    // the worktree has finished: while work remains they are Done, and once nothing open, in-progress
-    // or blocked is left they become To land — the agent is finished and a human has to land it
-    // (open/merge the PR). Archived worktrees never reach here (dropped when building
+    // catch-all instead, making Unattended exactly Underway's inactive mirror. Every task bucket uses
+    // the feature-free Planning projection, so feature containers never inflate the displayed work.
+    // Closed tasks split on whether the worktree has finished: while work remains they are Done, and
+    // once nothing open, in-progress or blocked is left they become To land — the agent is finished
+    // and a human has to land it (open/merge the PR). Archived worktrees never reach here (dropped when building
     // taggedWorktrees), so every bucket sums only non-archived worktrees. Planned folds Loose in
     // (Loose -> Planned, decision #6). This single per-worktree predicate is the one source of truth:
     // the bucket Count sums it and Members keep every worktree whose contribution is > 0 — they can
@@ -219,20 +217,23 @@ let aggregate (repos: RepoWorktrees list) : Overview =
     let isActive w =
         w.CodingTool = CodingToolStatus.Working || w.CodingTool = CodingToolStatus.WaitingForUser
 
-    // A worktree with no open, in-progress or blocked beads issues of ANY type (features included,
-    // since BeadsSummary counts every issue type) has closed out its whole plan: there is nothing
-    // left for an agent to pick up, so its closed tasks are waiting on a human.
+    // A worktree with no open, in-progress or blocked non-feature issues has no task work left for an
+    // agent to pick up, so its closed tasks are waiting on a human. Feature containers do not gate it.
     let isFinished w =
-        w.Beads.Open = 0 && w.Beads.InProgress = 0 && w.Beads.Blocked = 0
+        w.Planning.Planned = 0
+        && w.Planning.Queued = 0
+        && w.Planning.Loose = 0
+        && w.Planning.InProgress = 0
+        && w.Planning.Blocked = 0
 
     let contributionFor kind (w: WorktreeStatus) =
         match kind with
         | TaskBucketKind.Planned    -> w.Planning.Planned + w.Planning.Loose
-        | TaskBucketKind.Underway   -> if isActive w then w.Planning.Queued + w.Beads.InProgress else 0
-        | TaskBucketKind.Blocked    -> w.Beads.Blocked
-        | TaskBucketKind.Done       -> if isFinished w then 0 else w.Beads.Closed
-        | TaskBucketKind.ToLand     -> if isFinished w then w.Beads.Closed else 0
-        | TaskBucketKind.Unattended -> if isActive w then 0 else w.Planning.Queued + w.Beads.InProgress
+        | TaskBucketKind.Underway   -> if isActive w then w.Planning.Queued + w.Planning.InProgress else 0
+        | TaskBucketKind.Blocked    -> w.Planning.Blocked
+        | TaskBucketKind.Done       -> if isFinished w then 0 else w.Planning.Closed
+        | TaskBucketKind.ToLand     -> if isFinished w then w.Planning.Closed else 0
+        | TaskBucketKind.Unattended -> if isActive w then 0 else w.Planning.Queued + w.Planning.InProgress
 
     // Members of one task bucket, in repo/worktree order: every worktree whose contribution is > 0.
     let taskMembersFor kind =

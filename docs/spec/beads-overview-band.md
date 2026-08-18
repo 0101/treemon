@@ -84,22 +84,22 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 | Bucket | Definition |
 |---|---|
 | **Planned** | Open tasks under an **open** feature (planning done, awaiting go-ahead) **plus** loose open tasks (no/closed/blocked parent). |
-| **Underway** | All work an agent has started: issues with status `in_progress` (`Beads.InProgress`) **plus** open tasks under an **in_progress** feature (`Planning.Queued`, execution underway, next-up) — counted only **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree it folds into **Unattended**. Feature-inclusive, like Blocked/Done/To land: an `in_progress` feature counts as started work alongside its own queued children. |
-| **Blocked** | Issues with status `blocked` (`Beads.Blocked`) — an **explicitly declared** status, never inferred. A task merely waiting on an unmet dependency is still `open` and counts as **Planned** (or **Underway**), because `blocks` edges are deliberately ignored (see decision (e)). |
-| **Done** | Σ closed **issues** (any type) on **non-archived** worktrees that still have work left (`Beads.Closed` where `not IsArchived` and the worktree is **not finished**). Naturally bounded — a worktree's `.beads/beads.db` is not committed, so its closed issues drop out when the worktree is merged/deleted. |
-| **To land** | Σ closed **issues** on **non-archived**, **finished** worktrees — those with `Beads.Open = 0 && Beads.InProgress = 0 && Beads.Blocked = 0`. The agent has closed out the whole plan (features included, since `BeadsSummary` counts every issue type), so the worktree is waiting on a human to open or merge its PR. Independent of agent state: a finished worktree lands here whether or not a session is live. |
+| **Underway** | All task work an agent has started: non-feature issues with status `in_progress` (`Planning.InProgress`) **plus** open tasks under an **in_progress** feature (`Planning.Queued`, execution underway, next-up) — counted only **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree it folds into **Unattended**. Feature containers never count as task units. |
+| **Blocked** | Non-feature issues with status `blocked` (`Planning.Blocked`) — an **explicitly declared** status, never inferred. A task merely waiting on an unmet dependency is still `open` and counts as **Planned** (or **Underway**), because `blocks` edges are deliberately ignored (see decision (e)). |
+| **Done** | Σ closed non-feature issues on **non-archived** worktrees that still have task work left (`Planning.Closed` where `not IsArchived` and the worktree is **not finished**). Naturally bounded — a worktree's `.beads/beads.db` is not committed, so its closed tasks drop out when the worktree is merged/deleted. |
+| **To land** | Σ closed non-feature issues on **non-archived**, **finished** worktrees — those with no planned, queued, loose, in-progress, or blocked non-feature issue. Feature containers do not keep an otherwise-complete worktree out of this bucket. Independent of agent state: a finished worktree lands here whether or not a session is live. |
 | **Unattended** | **Underway** work whose worktree has **no active agent** (`CodingTool` = `Idle` or `NoSession`) — likely stale beads status nobody is working. A single muted catch-all, trailing To land. |
 
 **Done** and **To land** are the two halves of a worktree's closed tasks: mutually exclusive per
-worktree, so they always sum to Σ `Beads.Closed`. **Underway** and **Unattended** are likewise the
-active/inactive halves of Σ (`Planning.Queued` + `Beads.InProgress`). Both bucket the same underlying
+worktree, so they always sum to Σ `Planning.Closed`. **Underway** and **Unattended** are likewise the
+active/inactive halves of Σ (`Planning.Queued` + `Planning.InProgress`). Both bucket the same underlying
 work; only the placement differs.
 
 The **Planned/Queued/Loose** split derives from the **parent-child dependency graph + feature
 status**: for each open task, find its parent feature (parent-child edge) and read that feature's
 status — `open` → Planned, `in_progress` → Queued, none/`closed`/`blocked` → Loose. Loose is a
 distinct server-side bucket for fidelity but folds into **Planned** for display (decision #6);
-Queued folds into **Underway** alongside `Beads.InProgress`.
+Queued folds into **Underway** alongside `Planning.InProgress`.
 
 ### Live agent activity
 
@@ -215,8 +215,8 @@ activity is **derived** from the skill via the pure Shared classifier (no separa
 
 ### Domain changes (`src/Shared/Types.fs`)
 
-- `BeadsPlanning { Planned; Queued; Loose }` (+ `zero`), new field
-  `Planning: BeadsPlanning` on `WorktreeStatus`.
+- `BeadsPlanning { Planned; Queued; Loose; InProgress; Blocked; Closed }` (+ `zero`) is carried by
+  `WorktreeStatus.Planning`.
 - `CurrentActivity` DU (`Investigating | Planning | Executing | Reviewing | PR | Working`) +
   `Activity.classify : string -> CurrentActivity`; Waiting is an overview activity group derived
   from `CodingToolStatus.WaitingForUser`, not from skill classification.
@@ -233,7 +233,7 @@ the solution compiling (no compat shims, per house rules).
 
 - Aggregate with the shared `src/Shared/OverviewData.fs`
   (`OverviewData.aggregate : RepoWorktrees list -> Overview`) folds every **non-archived** worktree →
-  task buckets (Planned = Σ Planned+Loose; Underway = Σ Queued+InProgress but only when the worktree
+  task buckets (all feature-free: Planned = Σ Planned+Loose; Underway = Σ Queued+InProgress but only when the worktree
   has `CodingTool` = `Working` or `WaitingForUser`, with inactive Underway work folded into
   Unattended; Blocked; Closed split into Done and To land by whether the worktree still has open,
   in-progress or blocked work) + agent groups (each open `WorktreeStatus.Sessions` entry is classified
@@ -315,8 +315,9 @@ call site; running skill and persisted per-session context usage from the existi
   (single source, no new spawn).
 - (c) **No keyboard shortcut** — the band is toggled by its `ctrl-btn` only (Canvas's `C` is
   deliberately not mirrored; deferred).
-- (d) **`FeaturesOpen` / `FeaturesWip` are dropped** — the band never displays feature counts, so
-  `BeadsPlanning` carries only `{ Planned; Queued; Loose }` (no computed-but-dead fields). The
+- (d) **Feature containers are excluded from every task bucket** — the band displays task work, so
+  `BeadsPlanning` carries `{ Planned; Queued; Loose; InProgress; Blocked; Closed }` for non-feature
+  issues while `BeadsSummary` remains the feature-inclusive card summary. The
   classifier still reads each task's parent-feature status to bucket it accurately; it just emits no
   standalone feature counts. The **Planned-vs-Queued** count must be exact — it is the feature's
   core signal.

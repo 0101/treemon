@@ -4,11 +4,10 @@ open NUnit.Framework
 open Shared
 open Server.BeadsStatus
 
-/// Tests for the pure planning classifier (Server.BeadsStatus.Planning.classify).
-/// It partitions OPEN, non-feature issues into Planned/Queued/Loose by the status of their
-/// direct parent-child parent feature (one hop). ParentId is populated from a parent-child edge
-/// ONLY (never a blocks edge) — that contract is enforced by the JSONL parser, so here a
-/// blocks-only relationship is represented by ParentId = None.
+/// Tests for the pure feature-free task projection (Server.BeadsStatus.Planning.classify).
+/// It partitions open, non-feature issues into Planned/Queued/Loose by their direct parent feature
+/// and counts non-feature in-progress, blocked, and closed issues. ParentId is populated from a
+/// parent-child edge only; a blocks-only relationship is represented by ParentId = None.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -99,8 +98,7 @@ type PlanningClassifierTests() =
         Assert.That(result.Queued, Is.EqualTo(0))
 
     [<Test>]
-    member _.``Only open issues are partitioned``() =
-        // in_progress / blocked / closed tasks belong to the status summary, not the split.
+    member _.``Open issues are partitioned while other task statuses are counted directly``() =
         let result =
             Planning.classify
                 [ feature "feat-1" "open"
@@ -111,6 +109,29 @@ type PlanningClassifierTests() =
         Assert.That(result.Planned, Is.EqualTo(1))
         Assert.That(result.Queued, Is.EqualTo(0))
         Assert.That(result.Loose, Is.EqualTo(0))
+        Assert.That(result.InProgress, Is.EqualTo(1))
+        Assert.That(result.Blocked, Is.EqualTo(1))
+        Assert.That(result.Closed, Is.EqualTo(1))
+
+    [<Test>]
+    member _.``Feature statuses are excluded from every task count``() =
+        let result =
+            Planning.classify
+                [ feature "open-feature" "open"
+                  feature "wip-feature" "in_progress"
+                  feature "blocked-feature" "blocked"
+                  feature "closed-feature" "closed"
+                  task "open-task" "open" None
+                  task "wip-task" "in_progress" None
+                  task "blocked-task" "blocked" None
+                  task "closed-task" "closed" None ]
+
+        Assert.That(result.Planned, Is.EqualTo(0))
+        Assert.That(result.Queued, Is.EqualTo(0))
+        Assert.That(result.Loose, Is.EqualTo(1))
+        Assert.That(result.InProgress, Is.EqualTo(1))
+        Assert.That(result.Blocked, Is.EqualTo(1))
+        Assert.That(result.Closed, Is.EqualTo(1))
 
     [<Test>]
     member _.``An open feature is a container, not a bucketed task``() =
