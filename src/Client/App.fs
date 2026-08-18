@@ -82,7 +82,8 @@ let init () =
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
       TerminalPaneOpen = false
-      EmbeddedTerminal = EmbeddedTerminalState.Closed
+      EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+      ActiveEmbeddedTerminal = None
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -96,7 +97,10 @@ let init () =
         fetchSyncStatus ()
         Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp)
         Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes
-        Cmd.OfAsync.perform worktreeApi.Value.getEmbeddedTerminal () EmbeddedTerminalStateChanged
+        Cmd.OfAsync.perform
+            worktreeApi.Value.getEmbeddedTerminals
+            ()
+            EmbeddedTerminalSnapshotChanged
     ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -266,7 +270,7 @@ let update msg model =
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
                 TerminalPaneOpen =
-                    if isFirstLoad then TerminalPane.paneOpenForState model.EmbeddedTerminal
+                    if isFirstLoad then TerminalPane.paneOpenForSnapshot model.EmbeddedTerminals
                     else model.TerminalPaneOpen
                 OverviewPanelOpen = if isFirstLoad then response.OverviewPanelOpen else model.OverviewPanelOpen
                 Canvas.CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
@@ -354,43 +358,72 @@ let update msg model =
         model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
     | OpenEmbeddedTerminal path ->
         { model with
-            EmbeddedTerminal = TerminalPane.stateWhenOpened path model.EmbeddedTerminal
+            EmbeddedTerminals =
+                TerminalPane.snapshotWhenOpened path model.EmbeddedTerminals
+            ActiveEmbeddedTerminal = Some path
             TerminalPaneOpen = true },
         Cmd.batch [
             Cmd.OfAsync.either
                 worktreeApi.Value.startEmbeddedTerminal
                 path
-                EmbeddedTerminalStateChanged
+                (fun result -> EmbeddedTerminalStarted(path, result))
                 (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
             Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
         ]
-    | EmbeddedTerminalStateChanged state ->
+    | EmbeddedTerminalSnapshotChanged snapshot ->
         { model with
-            EmbeddedTerminal = state
-            TerminalPaneOpen = TerminalPane.paneOpenForState state },
+            EmbeddedTerminals = snapshot
+            ActiveEmbeddedTerminal =
+                TerminalPane.activePath model.ActiveEmbeddedTerminal snapshot
+            TerminalPaneOpen = TerminalPane.paneOpenForSnapshot snapshot },
         Cmd.none
+    | EmbeddedTerminalStarted(path, result) ->
+        match result with
+        | Ok snapshot ->
+            { model with
+                EmbeddedTerminals = snapshot
+                ActiveEmbeddedTerminal =
+                    TerminalPane.activePath (Some path) snapshot
+                TerminalPaneOpen = TerminalPane.paneOpenForSnapshot snapshot },
+            Cmd.none
+        | Error error ->
+            { model with
+                EmbeddedTerminals =
+                    TerminalPane.snapshotWithFailure path error model.EmbeddedTerminals
+                ActiveEmbeddedTerminal = Some path
+                TerminalPaneOpen = true },
+            Cmd.none
     | EmbeddedTerminalRequestFailed (path, error) ->
         { model with
-            EmbeddedTerminal = EmbeddedTerminalState.Failed(path, error)
+            EmbeddedTerminals =
+                TerminalPane.snapshotWithFailure path error model.EmbeddedTerminals
+            ActiveEmbeddedTerminal = Some path
             TerminalPaneOpen = true },
         Cmd.none
     | CloseEmbeddedTerminal ->
-        match model.EmbeddedTerminal with
-        | EmbeddedTerminalState.Closed -> model, Cmd.none
-        | EmbeddedTerminalState.Starting path
-        | EmbeddedTerminalState.Running(path, _)
-        | EmbeddedTerminalState.Failed(path, _) ->
+        match model.ActiveEmbeddedTerminal with
+        | None -> model, Cmd.none
+        | Some path ->
+            let before = model.EmbeddedTerminals
+
             model,
             Cmd.OfAsync.either
                 worktreeApi.Value.closeEmbeddedTerminal
-                ()
-                EmbeddedTerminalClosed
+                path
+                (fun snapshot -> EmbeddedTerminalClosed(path, before, snapshot))
                 (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
-    | EmbeddedTerminalClosed state ->
+    | EmbeddedTerminalClosed(path, before, snapshot) ->
+        let paneOpen = TerminalPane.paneOpenForSnapshot snapshot
+
         { model with
-            EmbeddedTerminal = state
-            TerminalPaneOpen = TerminalPane.paneOpenForState state },
-        Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen false (fun _ -> NoOp)
+            EmbeddedTerminals = snapshot
+            ActiveEmbeddedTerminal =
+                TerminalPane.nextActiveAfterClose
+                    path
+                    before
+                    snapshot
+            TerminalPaneOpen = paneOpen },
+        Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen paneOpen (fun _ -> NoOp)
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
@@ -470,12 +503,13 @@ let update msg model =
             | None -> model
 
         let terminalCmd =
-            match model.EmbeddedTerminal with
-            | EmbeddedTerminalState.Starting _
-            | EmbeddedTerminalState.Running _ ->
-                Cmd.OfAsync.perform worktreeApi.Value.getEmbeddedTerminal () EmbeddedTerminalStateChanged
-            | EmbeddedTerminalState.Closed
-            | EmbeddedTerminalState.Failed _ -> Cmd.none
+            if TerminalPane.hasLiveTabs model.EmbeddedTerminals then
+                Cmd.OfAsync.perform
+                    worktreeApi.Value.getEmbeddedTerminals
+                    ()
+                    EmbeddedTerminalSnapshotChanged
+            else
+                Cmd.none
 
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd; terminalCmd ]
@@ -1126,7 +1160,11 @@ let view model dispatch =
         CanvasView.view model dispatch
 
     let terminalEl =
-        TerminalPane.view model.EmbeddedTerminal (fun () -> dispatch CloseEmbeddedTerminal)
+        TerminalPane.view
+            (TerminalPane.activeTab
+                model.ActiveEmbeddedTerminal
+                model.EmbeddedTerminals)
+            (fun () -> dispatch CloseEmbeddedTerminal)
 
     // The workspace order is fixed so pane-local DOM state survives visibility and width changes.
     React.Fragment [

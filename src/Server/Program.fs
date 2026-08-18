@@ -503,7 +503,7 @@ let main args =
     finally
         embeddedTerminal
         |> Option.iter (fun manager ->
-            EmbeddedTerminal.close manager
+            EmbeddedTerminal.closeAll manager
             |> Async.RunSynchronously
             |> ignore)
 

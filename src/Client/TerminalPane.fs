@@ -4,19 +4,73 @@ open System
 open Feliz
 open Shared
 
-let stateWhenOpened path state =
-    match state with
-    | EmbeddedTerminalState.Starting _
-    | EmbeddedTerminalState.Running _ -> state
-    | EmbeddedTerminalState.Closed
-    | EmbeddedTerminalState.Failed _ -> EmbeddedTerminalState.Starting path
+let private isPath path (tab: EmbeddedTerminalTab) =
+    Shared.PathUtils.pathEquals
+        (WorktreePath.value path)
+        (WorktreePath.value tab.Worktree)
 
-let paneOpenForState state =
-    match state with
-    | EmbeddedTerminalState.Closed -> false
-    | EmbeddedTerminalState.Starting _
-    | EmbeddedTerminalState.Running _
-    | EmbeddedTerminalState.Failed _ -> true
+let tryFindTab path snapshot =
+    snapshot.Tabs |> List.tryFind (isPath path)
+
+let private upsert lifecycle path snapshot =
+    match tryFindTab path snapshot with
+    | Some _ ->
+        { Tabs =
+            snapshot.Tabs
+            |> List.map (fun tab ->
+                if isPath path tab then
+                    { tab with Lifecycle = lifecycle }
+                else
+                    tab) }
+    | None ->
+        { Tabs =
+            snapshot.Tabs
+            @ [ { Worktree = path
+                  Lifecycle = lifecycle } ] }
+
+let snapshotWhenOpened path snapshot =
+    match tryFindTab path snapshot |> Option.map _.Lifecycle with
+    | Some EmbeddedTerminalLifecycle.Starting
+    | Some (EmbeddedTerminalLifecycle.Running _) ->
+        snapshot
+    | Some (EmbeddedTerminalLifecycle.Failed _)
+    | None ->
+        upsert EmbeddedTerminalLifecycle.Starting path snapshot
+
+let snapshotWithFailure path error snapshot =
+    upsert (EmbeddedTerminalLifecycle.Failed error) path snapshot
+
+let activePath current snapshot =
+    current
+    |> Option.filter (fun path -> tryFindTab path snapshot |> Option.isSome)
+    |> Option.orElseWith (fun () -> snapshot.Tabs |> List.tryHead |> Option.map _.Worktree)
+
+let activeTab current snapshot =
+    current |> Option.bind (fun path -> tryFindTab path snapshot)
+
+let nextActiveAfterClose closed before snapshot =
+    let closedIndex =
+        before.Tabs
+        |> List.tryFindIndex (isPath closed)
+        |> Option.defaultValue 0
+
+    snapshot.Tabs
+    |> List.tryItem closedIndex
+    |> Option.orElseWith (fun () -> snapshot.Tabs |> List.tryLast)
+    |> Option.map _.Worktree
+
+let paneOpenForSnapshot snapshot =
+    snapshot.Tabs |> List.isEmpty |> not
+
+let hasLiveTabs snapshot =
+    snapshot.Tabs
+    |> List.exists (fun tab ->
+        match tab.Lifecycle with
+        | EmbeddedTerminalLifecycle.Starting
+        | EmbeddedTerminalLifecycle.Running _ ->
+            true
+        | EmbeddedTerminalLifecycle.Failed _ ->
+            false)
 
 let safeEndpoint (endpoint: string) =
     let prefix = "http://127.0.0.1:"
@@ -42,7 +96,7 @@ let private closeButton close =
         prop.text "×"
     ]
 
-let view state close =
+let view tab close =
     let paneContent path body =
         Html.div [
             prop.className "terminal-pane-shell"
@@ -61,13 +115,13 @@ let view state close =
             ]
         ]
 
-    match state with
-    | EmbeddedTerminalState.Closed ->
+    match tab with
+    | None ->
         Html.div [
             prop.className "terminal-pane"
             prop.hidden true
         ]
-    | EmbeddedTerminalState.Starting path ->
+    | Some { Worktree = path; Lifecycle = EmbeddedTerminalLifecycle.Starting } ->
         Html.div [
             prop.className "terminal-pane open"
             prop.children [
@@ -78,7 +132,9 @@ let view state close =
                     ])
             ]
         ]
-    | EmbeddedTerminalState.Running(path, endpoint) ->
+    | Some
+        { Worktree = path
+          Lifecycle = EmbeddedTerminalLifecycle.Running endpoint } ->
         Html.div [
             prop.className "terminal-pane open"
             prop.children [
@@ -99,7 +155,9 @@ let view state close =
                         ])
             ]
         ]
-    | EmbeddedTerminalState.Failed(path, error) ->
+    | Some
+        { Worktree = path
+          Lifecycle = EmbeddedTerminalLifecycle.Failed error } ->
         Html.div [
             prop.className "terminal-pane open"
             prop.children [

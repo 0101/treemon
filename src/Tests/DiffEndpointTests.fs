@@ -2206,6 +2206,7 @@ type DiffIdentityLifecycleHttpTests() =
                 let result =
                     WorktreeApi.deleteWorktreeWith
                         (fun _ _ _ -> async.Return(Ok()))
+                        (fun _ -> async.Return())
                         WorktreeDiffApi.removeWorktree
                         deleteAgent
                         (RefreshScheduler.buildRootPaths [ repoRoot ])

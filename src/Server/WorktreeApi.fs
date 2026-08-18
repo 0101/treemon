@@ -50,16 +50,9 @@ let readOnlyApi
       getSyncStatus = getSyncStatus
       openTerminal = fun _ -> async { return () }
       startEmbeddedTerminal =
-        fun path ->
-            async {
-                return
-                    EmbeddedTerminalState.Failed(
-                        path,
-                        $"Embedded terminal is not available in {modeName}"
-                    )
-            }
-      getEmbeddedTerminal = fun () -> async { return EmbeddedTerminalState.Closed }
-      closeEmbeddedTerminal = fun () -> async { return EmbeddedTerminalState.Closed }
+        fun _ -> async { return Error $"Embedded terminal is not available in {modeName}" }
+      getEmbeddedTerminals = fun () -> async { return EmbeddedTerminalSnapshot.empty }
+      closeEmbeddedTerminal = fun _ -> async { return EmbeddedTerminalSnapshot.empty }
       openEditor = fun _ -> async { return () }
       toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
       deleteWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }
@@ -558,6 +551,7 @@ let private openTerminal
 
 let internal deleteWorktreeWith
     (removeGitWorktree: string -> string -> string option -> Async<Result<unit, string>>)
+    (closeEmbeddedTerminal: WorktreePath -> Async<unit>)
     (removeWorktreeState: string -> Async<unit>)
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
@@ -572,12 +566,23 @@ let internal deleteWorktreeWith
         | Some ctx when Directory.Exists(Path.Combine(ctx.Worktree.Path, ".git")) ->
             return! Error "Cannot delete the main worktree"
         | Some ctx ->
+            do!
+                ctx.Worktree.Path
+                |> PathUtils.toWorktreePath
+                |> closeEmbeddedTerminal
+
             do! removeGitWorktree ctx.RepoRoot ctx.Worktree.Path ctx.Worktree.Branch
             agent.Post(SchedulerState.StateMsg.RemoveWorktree(ctx.RepoId, ctx.Worktree.Path))
             do! removeWorktreeState ctx.Worktree.Path
     }
 
-let private deleteWorktree agent (clearAcceptedSync: string -> unit) rootPaths wtPath =
+let private deleteWorktree
+    agent
+    embeddedTerminal
+    (clearAcceptedSync: string -> unit)
+    rootPaths
+    wtPath
+    =
     let removeWorktreeState path =
         async {
             do! CanvasDocOwnership.removeWorktree path
@@ -587,6 +592,7 @@ let private deleteWorktree agent (clearAcceptedSync: string -> unit) rootPaths w
 
     deleteWorktreeWith
         GitWorktree.removeWorktree
+        (fun path -> EmbeddedTerminal.close embeddedTerminal path |> Async.Ignore)
         removeWorktreeState
         agent
         rootPaths
@@ -595,6 +601,7 @@ let private deleteWorktree agent (clearAcceptedSync: string -> unit) rootPaths w
 let private updateArchivedBranches
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
+    (beforeUpdate: WorktreePath -> Async<unit>)
     (setOp: string -> Set<string> -> Set<string>)
     (wtPath: WorktreePath)
     =
@@ -613,6 +620,11 @@ let private updateArchivedBranches
                 |> Map.tryFind ctx.RepoId
                 |> Option.map (fun repo -> repo.WorktreeList |> List.choose _.Branch |> Set.ofList)
                 |> Option.defaultValue Set.empty
+
+            do!
+                ctx.Worktree.Path
+                |> PathUtils.toWorktreePath
+                |> beforeUpdate
 
             TreemonConfig.modifyArchivedBranches ctx.RepoRoot (fun existing ->
                 existing
@@ -724,24 +736,22 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
             createWorktree = fun _ -> async { return Ok [] }
             startEmbeddedTerminal = fun wtPath ->
-                withValidatedPathValue
+                withValidatedPath
                     wtPath
                     "startEmbeddedTerminal"
-                    (fun error -> EmbeddedTerminalState.Failed(wtPath, error))
                     (fun () -> EmbeddedTerminal.start embeddedTerminal wtPath)
-            getEmbeddedTerminal = fun () -> EmbeddedTerminal.get embeddedTerminal
-            closeEmbeddedTerminal = fun () -> EmbeddedTerminal.close embeddedTerminal }
+            getEmbeddedTerminals = fun () -> EmbeddedTerminal.get embeddedTerminal
+            closeEmbeddedTerminal = fun wtPath -> EmbeddedTerminal.close embeddedTerminal wtPath }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
           startEmbeddedTerminal = fun wtPath ->
-              withValidatedPathValue
+              withValidatedPath
                   wtPath
                   "startEmbeddedTerminal"
-                  (fun error -> EmbeddedTerminalState.Failed(wtPath, error))
                   (fun () -> EmbeddedTerminal.start embeddedTerminal wtPath)
-          getEmbeddedTerminal = fun () -> EmbeddedTerminal.get embeddedTerminal
-          closeEmbeddedTerminal = fun () -> EmbeddedTerminal.close embeddedTerminal
+          getEmbeddedTerminals = fun () -> EmbeddedTerminal.get embeddedTerminal
+          closeEmbeddedTerminal = fun wtPath -> EmbeddedTerminal.close embeddedTerminal wtPath
           openEditor = openEditor validatePath
           toggleAutoSync = fun wtPath enabled ->
               let path = WorktreePath.value wtPath
@@ -820,7 +830,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                           | _ -> None)
                       |> Map.ofList
               }
-          deleteWorktree = deleteWorktree agent clearAcceptedRecord rootPaths
+          deleteWorktree = deleteWorktree agent embeddedTerminal clearAcceptedRecord rootPaths
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
                   async {
@@ -835,8 +845,18 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
           killSession = fun wtPath ->
               withValidatedPath wtPath "killSession" (fun () ->
                   SessionManager.killSession sessionAgent wtPath)
-          archiveWorktree = updateArchivedBranches agent rootPaths Set.add
-          unarchiveWorktree = updateArchivedBranches agent rootPaths Set.remove
+          archiveWorktree =
+              updateArchivedBranches
+                  agent
+                  rootPaths
+                  (fun path -> EmbeddedTerminal.close embeddedTerminal path |> Async.Ignore)
+                  Set.add
+          unarchiveWorktree =
+              updateArchivedBranches
+                  agent
+                  rootPaths
+                  (fun _ -> async.Return ())
+                  Set.remove
           getBranches = fun repoIdStr ->
               async {
                   let repoId = PathUtils.toRepoId repoIdStr

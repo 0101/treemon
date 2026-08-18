@@ -194,11 +194,20 @@ type WorkspaceWidth =
     | WideCanvas
 
 [<RequireQualifiedAccess>]
-type EmbeddedTerminalState =
-    | Closed
-    | Starting of worktreePath: WorktreePath
-    | Running of worktreePath: WorktreePath * endpoint: string
-    | Failed of worktreePath: WorktreePath * error: string
+type EmbeddedTerminalLifecycle =
+    | Starting
+    | Running of endpoint: string
+    | Failed of error: string
+
+type EmbeddedTerminalTab =
+    { Worktree: WorktreePath
+      Lifecycle: EmbeddedTerminalLifecycle }
+
+type EmbeddedTerminalSnapshot =
+    { Tabs: EmbeddedTerminalTab list }
+
+module EmbeddedTerminalSnapshot =
+    let empty = { Tabs = [] }
 
 type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven

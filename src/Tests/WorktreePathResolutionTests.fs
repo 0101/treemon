@@ -31,12 +31,12 @@ let private populateAgent (agent: MailboxProcessor<StateMsg>) (repos: (RepoId * 
         do! getAgentState agent |> Async.Ignore
     }
 
-let private createApi agent roots =
+let private createApiWithTerminal agent roots embeddedTerminal =
     WorktreeApi.worktreeApi
         { Agent = agent
           CardLog = CardEventLog.createAgent ()
           SessionAgent = SessionManager.createAgent ()
-          EmbeddedTerminal = EmbeddedTerminal.create ()
+          EmbeddedTerminal = embeddedTerminal
           ActivityStore = None
           SnapshotStore = None
           AutoSyncStore = None
@@ -45,9 +45,13 @@ let private createApi agent roots =
           AppVersion = "1.0"
           DeployBranch = None }
 
+let private createApi agent roots =
+    createApiWithTerminal agent roots (EmbeddedTerminal.create ())
+
 let private deleteWorktree agent worktreeRoots wtPath =
     WorktreeApi.deleteWorktreeWith
         (fun _ _ _ -> async { return Ok () })
+        (fun _ -> async { return () })
         (fun _ -> async { return () })
         agent
         (RefreshScheduler.buildRootPaths worktreeRoots)
@@ -186,6 +190,50 @@ type DeleteWorktreeResolutionTests() =
                 Assert.That(msg, Does.Contain("No worktree found"), "Should report worktree not found")
             | Ok () ->
                 Assert.Fail("Should have returned error for unknown path")
+        }
+
+    [<Test>]
+    member _.``deleteWorktree closes its embedded terminal before removing files``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let calls = System.Collections.Generic.List<string>()
+
+            let! result =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ _ _ ->
+                        async {
+                            calls.Add("remove")
+                            return Ok ()
+                        })
+                    (fun _ ->
+                        async {
+                            calls.Add("close")
+                        })
+                    (fun _ ->
+                        async {
+                            calls.Add("state")
+                        })
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (PathUtils.toWorktreePath targetPath)
+
+            match result with
+            | Error error -> Assert.Fail(error)
+            | Ok () ->
+                Assert.That(
+                    calls,
+                    Is.EqualTo([ "close"; "remove"; "state" ])
+                )
         }
 
 
@@ -330,4 +378,58 @@ type ArchiveWorktreeResolutionTests() =
                 Assert.That(msg, Does.Contain("detached HEAD"), "Should mention detached HEAD")
             | Ok () ->
                 Assert.Fail("Should have returned error for detached HEAD worktree")
+        }
+
+    [<Test>]
+    member _.``archiveWorktree removes its embedded terminal before archiving``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+            let target = PathUtils.toWorktreePath targetPath
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let manager =
+                EmbeddedTerminal.createWithConfig
+                    { ExecutablePath =
+                        Path.Combine(
+                            tempDirA,
+                            $"missing-ttyd-{Guid.NewGuid():N}.exe"
+                        )
+                      ShellCommand = "pwsh"
+                      ShellPrefixArguments = []
+                      PrefixArguments = []
+                      StartupTimeout = TimeSpan.FromSeconds 1.0
+                      ProbeInterval = TimeSpan.FromMilliseconds 10.0 }
+
+            try
+                match! EmbeddedTerminal.start manager target with
+                | Error error -> Assert.Fail(error)
+                | Ok snapshot ->
+                    Assert.That(snapshot.Tabs.Length, Is.EqualTo(1))
+
+                let api =
+                    createApiWithTerminal agent [ tempDirA ] manager
+
+                match! api.archiveWorktree target with
+                | Error error -> Assert.Fail(error)
+                | Ok () ->
+                    let! snapshot = EmbeddedTerminal.get manager
+                    Assert.That(
+                        snapshot,
+                        Is.EqualTo EmbeddedTerminalSnapshot.empty
+                    )
+                    Assert.That(
+                        TreemonConfig.readArchivedBranches tempDirA,
+                        Does.Contain("feature-x")
+                    )
+            finally
+                EmbeddedTerminal.closeAll manager
+                |> Async.RunSynchronously
         }

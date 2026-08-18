@@ -47,7 +47,8 @@ type Model =
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
       TerminalPaneOpen: bool
-      EmbeddedTerminal: EmbeddedTerminalState
+      EmbeddedTerminals: EmbeddedTerminalSnapshot
+      ActiveEmbeddedTerminal: WorktreePath option
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
       OverviewAgentsStuck: bool
@@ -69,10 +70,14 @@ type Msg =
     | Tick of now: float
     | OpenTerminal of WorktreePath
     | OpenEmbeddedTerminal of WorktreePath
-    | EmbeddedTerminalStateChanged of EmbeddedTerminalState
+    | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
+    | EmbeddedTerminalStarted of WorktreePath * Result<EmbeddedTerminalSnapshot, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | CloseEmbeddedTerminal
-    | EmbeddedTerminalClosed of EmbeddedTerminalState
+    | EmbeddedTerminalClosed of
+        WorktreePath *
+        before: EmbeddedTerminalSnapshot *
+        after: EmbeddedTerminalSnapshot
     | OpenEditor of WorktreePath
     | ToggleAutoSync of WorktreePath
     | AutoSyncToggleResult of path: WorktreePath * previousEnabled: bool * Result<unit, string>
