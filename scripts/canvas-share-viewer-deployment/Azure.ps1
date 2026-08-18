@@ -32,6 +32,48 @@ function Assert-RegistrationIsDedicated {
     }
 }
 
+function Get-AzureResourcePropertyValue {
+    param(
+        [Parameter(Mandatory)][object] $Resource,
+        [Parameter(Mandatory)][string] $Name
+    )
+
+    $directProperty = $Resource.PSObject.Properties[$Name]
+    if ($null -ne $directProperty) {
+        return $directProperty.Value
+    }
+
+    $propertiesProperty = $Resource.PSObject.Properties['properties']
+    if ($null -eq $propertiesProperty -or $null -eq $propertiesProperty.Value) {
+        return $null
+    }
+
+    $nestedProperty = $propertiesProperty.Value.PSObject.Properties[$Name]
+    if ($null -ne $nestedProperty) {
+        return $nestedProperty.Value
+    }
+
+    $null
+}
+
+function Get-WebAppPlanResourceId {
+    param([Parameter(Mandatory)][pscustomobject] $WebApp)
+
+    $planResourceId =
+        [string] (Get-AzureResourcePropertyValue `
+            -Resource $WebApp `
+            -Name 'appServicePlanId')
+
+    if ([string]::IsNullOrWhiteSpace($planResourceId)) {
+        $planResourceId =
+            [string] (Get-AzureResourcePropertyValue `
+                -Resource $WebApp `
+                -Name 'serverFarmId')
+    }
+
+    $planResourceId
+}
+
 function Get-ExistingResources {
     param([Parameter(Mandatory)][string] $SubscriptionId)
 
@@ -101,7 +143,10 @@ function Assert-ExistingResourceSafety {
         throw "Resource group '$ResourceGroup' is tagged as production. This automation is non-production only."
     }
 
-    if ($null -ne $Existing.Plan -and -not [bool] $Existing.Plan.reserved) {
+    if ($null -ne $Existing.Plan -and
+        -not [bool] (Get-AzureResourcePropertyValue `
+            -Resource $Existing.Plan `
+            -Name 'reserved')) {
         throw "Existing App Service plan '$Plan' is not a Linux plan."
     }
 
@@ -119,7 +164,7 @@ function Assert-ExistingResourceSafety {
         }
 
         if (-not [string]::Equals(
-                [string] $Existing.WebApp.serverFarmId,
+                (Get-WebAppPlanResourceId -WebApp $Existing.WebApp),
                 [string] $Existing.Plan.id,
                 [StringComparison]::OrdinalIgnoreCase)) {
             throw "Existing app '$appName' does not use plan '$Plan'."
@@ -372,7 +417,8 @@ function Ensure-WebApp {
         [AllowNull()][pscustomobject] $ExistingWebApp,
         [Parameter(Mandatory)][pscustomobject] $PlanResource,
         [Parameter(Mandatory)][pscustomobject] $ManagedIdentity,
-        [Parameter(Mandatory)][string] $SubscriptionId
+        [Parameter(Mandatory)][string] $SubscriptionId,
+        [Parameter(Mandatory)][string] $WorkingDirectory
     )
 
     if ($null -eq $ExistingWebApp) {
@@ -406,11 +452,16 @@ function Ensure-WebApp {
         '--https-only', 'true',
         '--subscription', $SubscriptionId)
 
+    $siteConfigurationPath = Join-Path $WorkingDirectory 'webapp-site-config.json'
+    Write-JsonFile `
+        -Value ([ordered]@{ linuxFxVersion = 'DOTNETCORE|10.0' }) `
+        -Path $siteConfigurationPath
+
     Invoke-AzNone -Arguments @(
         'webapp', 'config', 'set',
         '--name', $appName,
         '--resource-group', $ResourceGroup,
-        '--linux-fx-version', 'DOTNETCORE|10.0',
+        '--generic-configurations', "@$siteConfigurationPath",
         '--startup-file', 'dotnet CanvasShareViewer.dll',
         '--ftps-state', 'Disabled',
         '--http20-enabled', 'true',
@@ -424,7 +475,7 @@ function Ensure-WebApp {
         '--subscription', $SubscriptionId)
 
     if (-not [string]::Equals(
-        [string] $webApp.serverFarmId,
+        (Get-WebAppPlanResourceId -WebApp $webApp),
         [string] $PlanResource.id,
         [StringComparison]::OrdinalIgnoreCase)) {
         throw "App '$appName' is not attached to plan '$Plan'."
@@ -433,30 +484,122 @@ function Ensure-WebApp {
     $webApp
 }
 
+function Test-ServiceManagementReferenceRequired {
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord] $ErrorRecord)
+
+    $ErrorRecord.Exception.Message -match '(?i)ServiceManagementReference field is required'
+}
+
+function Get-OwnedServiceManagementReference {
+    $ownedApplications = @(
+        Invoke-AzJson -Arguments @('ad', 'app', 'list', '--show-mine')
+    )
+    $references = @(
+        $ownedApplications
+        | ForEach-Object {
+            [string] (Get-AzureResourcePropertyValue `
+                -Resource $_ `
+                -Name 'serviceManagementReference')
+        }
+        | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        | Sort-Object -Unique
+    )
+
+    if ($references.Count -ne 1) {
+        throw "The tenant requires serviceManagementReference for app registration changes, but the current Azure CLI user owns $($references.Count) distinct reference values. Exactly one is required for an unambiguous secret-free deployment."
+    }
+
+    [string] $references[0]
+}
+
+function New-ViewerAppRegistration {
+    param([AllowEmptyString()][string] $ServiceManagementReference)
+
+    $referenceArguments =
+        if ([string]::IsNullOrWhiteSpace($ServiceManagementReference)) {
+            @()
+        } else {
+            @('--service-management-reference', $ServiceManagementReference)
+        }
+
+    Invoke-AzJson -Arguments (@(
+        'ad', 'app', 'create',
+        '--display-name', $Registration,
+        '--sign-in-audience', 'AzureADMyOrg',
+        '--web-redirect-uris', $callbackUrl
+    ) + $referenceArguments)
+}
+
+function Update-ViewerAppRegistration {
+    param(
+        [Parameter(Mandatory)][string] $AppId,
+        [AllowEmptyString()][string] $ServiceManagementReference
+    )
+
+    $referenceArguments =
+        if ([string]::IsNullOrWhiteSpace($ServiceManagementReference)) {
+            @()
+        } else {
+            @('--service-management-reference', $ServiceManagementReference)
+        }
+
+    Invoke-AzNone -Arguments (@(
+        'ad', 'app', 'update',
+        '--id', $AppId,
+        '--sign-in-audience', 'AzureADMyOrg',
+        '--web-redirect-uris', $callbackUrl,
+        '--enable-access-token-issuance', 'false',
+        '--enable-id-token-issuance', 'false'
+    ) + $referenceArguments)
+}
+
 function Ensure-AppRegistration {
     param([AllowNull()][pscustomobject] $ExistingRegistration)
 
+    $serviceManagementReference = ''
     $appRegistration =
         if ($null -eq $ExistingRegistration) {
             Write-Step "Creating single-tenant Entra app registration '$Registration'"
-            Invoke-AzJson -Arguments @(
-                'ad', 'app', 'create',
-                '--display-name', $Registration,
-                '--sign-in-audience', 'AzureADMyOrg',
-                '--web-redirect-uris', $callbackUrl)
+
+            try {
+                New-ViewerAppRegistration -ServiceManagementReference ''
+            } catch {
+                if (-not (Test-ServiceManagementReferenceRequired -ErrorRecord $_)) {
+                    throw
+                }
+
+                $serviceManagementReference = Get-OwnedServiceManagementReference
+                New-ViewerAppRegistration `
+                    -ServiceManagementReference $serviceManagementReference
+            }
         } else {
             $ExistingRegistration
         }
 
     Assert-RegistrationIsDedicated -AppRegistration $appRegistration
 
-    Invoke-AzNone -Arguments @(
-        'ad', 'app', 'update',
-        '--id', [string] $appRegistration.appId,
-        '--sign-in-audience', 'AzureADMyOrg',
-        '--web-redirect-uris', $callbackUrl,
-        '--enable-access-token-issuance', 'false',
-        '--enable-id-token-issuance', 'false')
+    if ([string]::IsNullOrWhiteSpace($serviceManagementReference)) {
+        $serviceManagementReference =
+            [string] (Get-AzureResourcePropertyValue `
+                -Resource $appRegistration `
+                -Name 'serviceManagementReference')
+    }
+
+    try {
+        Update-ViewerAppRegistration `
+            -AppId ([string] $appRegistration.appId) `
+            -ServiceManagementReference $serviceManagementReference
+    } catch {
+        if (-not [string]::IsNullOrWhiteSpace($serviceManagementReference) -or
+            -not (Test-ServiceManagementReferenceRequired -ErrorRecord $_)) {
+            throw
+        }
+
+        $serviceManagementReference = Get-OwnedServiceManagementReference
+        Update-ViewerAppRegistration `
+            -AppId ([string] $appRegistration.appId) `
+            -ServiceManagementReference $serviceManagementReference
+    }
 
     $servicePrincipals = @(
         Invoke-AzJson -Arguments @(

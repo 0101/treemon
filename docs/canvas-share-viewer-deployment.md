@@ -27,6 +27,11 @@ domain.
   allow creation or ownership of the dedicated app registration and its federated credential.
   The operator must also be able to list the viewer identity's role assignments throughout the
   subscription and inherited parent scopes and read their role definitions.
+- If the tenant enforces `serviceManagementReference` on app-registration changes, the signed-in
+  Azure CLI user must own applications that expose exactly one distinct non-empty reference value.
+  The script discovers that value only after Entra returns the specific required-field error; it
+  never invents, prints, or asks for a service reference, and fails when publisher-owned state is
+  absent or ambiguous.
 - An existing storage account configured in the machine-level Treemon config. The container may be
   omitted to use `canvas-shared`; the deployment creates it through the ARM control plane when
   needed:
@@ -92,7 +97,9 @@ The script is idempotent and is intended to be run a second time with the same v
    assignments discovered anywhere in the subscription or inherited from a parent scope.
 3. Creates or reuses one uniquely named, secret-free, current-tenant `AzureADMyOrg` app
    registration and service principal. The registration accepts only the canonical App Service
-   callback.
+   callback. On a restricted tenant's specific `serviceManagementReference` error, creation or
+   update retries with the one unambiguous reference already carried by applications the delegated
+   publisher owns.
 4. Adds a federated credential whose subject is the managed identity principal. Easy Auth uses the
    slot-sticky `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID` setting and its
    `clientSecretSettingName` sentinel, so no client secret is created.
@@ -102,9 +109,10 @@ The script is idempotent and is intended to be run a second time with the same v
 6. Merges `expire-shared-canvas-docs` into the storage account's complete lifecycle policy while
    preserving unrelated rules. Deletion starts only after more than 31 days, beyond the 30-day
    maximum share lifetime.
-7. Disables FTP and SCM basic publishing credentials, builds a ZIP locally, and deploys it with
-   `az webapp deploy`. Azure CLI therefore uses Microsoft Entra authentication rather than a
-   deployment credential.
+7. Supplies the pipe-bearing Linux runtime through Azure CLI's JSON-file configuration input,
+   avoiding command reinterpretation by the Windows `az.cmd` launcher. It then disables FTP and SCM
+   basic publishing credentials, builds a ZIP locally, and deploys it with `az webapp deploy`.
+   Azure CLI therefore uses Microsoft Entra authentication rather than a deployment credential.
 8. Verifies the resulting control-plane configuration and then atomically sets:
 
    ```json

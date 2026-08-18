@@ -108,7 +108,8 @@ try {
         -ExistingWebApp $existingResources.WebApp `
         -PlanResource $planResource `
         -ManagedIdentity $managedIdentity `
-        -SubscriptionId $azureContext.SubscriptionId
+        -SubscriptionId $azureContext.SubscriptionId `
+        -WorkingDirectory $workingDirectory
     $appRegistration = Ensure-AppRegistration `
         -ExistingRegistration $existingResources.Registration
 

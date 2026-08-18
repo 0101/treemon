@@ -300,7 +300,8 @@ function New-ViewerPackage {
         --configuration Release `
         --output $publishDirectory `
         --nologo `
-        --verbosity minimal
+        --verbosity minimal |
+        Out-Host
 
     if ($LASTEXITCODE -ne 0) {
         throw 'CanvasShareViewer publish failed.'

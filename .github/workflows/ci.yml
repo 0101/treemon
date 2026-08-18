@@ -40,7 +40,9 @@ jobs:
 
       - name: Test canvas share deployment
         shell: pwsh
-        run: ./scripts/canvas-share-viewer-deployment/ViewerBlobAccess.Tests.ps1
+        run: |
+          ./scripts/canvas-share-viewer-deployment/ViewerBlobAccess.Tests.ps1
+          ./scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1
 
       - name: Test .NET
         run: dotnet test src/Tests/Tests.fsproj --filter "Category!=Local" --no-build --verbosity normal

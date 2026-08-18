@@ -252,6 +252,13 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   registration; it reads account/container from the machine-level `canvasShare` config and resolves
   the delegated publisher as the current Azure CLI user. The fixed B1 Linux plan and any new
   resource group use the storage account's Azure location.
+- Azure CLI resource reads accept both flattened command output and fields nested under
+  `properties`, including the current `appServicePlanId` web-app field. The pipe-bearing Linux
+  runtime value is supplied through the CLI's JSON-file configuration path rather than as an
+  `az.cmd` argument. If Entra alone rejects an app-registration create or update because
+  `serviceManagementReference` is required, provisioning retries with the one distinct non-empty
+  reference on applications owned by the delegated publisher; zero or multiple values fail closed
+  rather than inventing or ambiguously selecting an organizational service reference.
 - `-ValidateOnly` performs subscription/tenant, configuration, existing-resource, viewer-identity
   RBAC, global-name, and local-publish checks without changing Azure or machine configuration. An
   apply run reconciles resources, merges the canvas rule into the account's complete lifecycle
@@ -317,6 +324,8 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Allow `unsafe-eval` only inside the contained document response | Shared canvases already support arbitrary inline JavaScript; preserving `eval`/`new Function` compatibility does not grant viewer-origin or network access because the sandbox and remaining CSP directives still deny both. |
 | Use `treemon.azurewebsites.net` rather than a custom domain or generated suffix | The Azure-provided hostname is short, TLS-enabled, requires no DNS ownership, and gives every shared document one stable origin for browser SSO. |
 | Derive storage and publisher deployment inputs from machine/Azure CLI state | The existing `canvasShare` account/container and current delegated publisher are already the publisher's source of truth. Requiring them again as script arguments would permit a viewer and publisher to be provisioned against different containers or identities. |
+| Reuse one unambiguous publisher-owned `serviceManagementReference` only when Entra requires it | Restricted tenants reject registration mutations without their organizational service reference, while an arbitrary GUID can be invalid or misrepresent ownership. Conditional discovery keeps the normal path unchanged, adds no secret or deployment-name input, and fails closed when publisher-owned state cannot identify one value. |
+| Pass the Linux runtime through Azure CLI's JSON-file configuration input | The runtime contains `|`, which the Windows `az.cmd` launcher can reinterpret as a command pipe even when PowerShell supplied it as one argument. A file preserves the exact value without platform-specific quoting or reliance on Azure CLI installation internals. |
 | Treat only a container-scoped RBAC assignment (or a descendant scope) as proof of viewer containment | Fully interpreting arbitrary Azure RBAC conditions would reproduce the authorization engine and could silently accept a broader grant. A conditioned assignment at an account, resource-group, subscription, or parent scope therefore fails closed; the operator must remove it or use a dedicated identity. |
 | Merge the lifecycle rule instead of replacing the account policy | Azure lifecycle policies are whole-document resources. Preserving unrelated rules avoids destructive drift when the storage account has other lifecycle-managed data. |
 | Share with the whole tenant instead of requiring enterprise-application assignment | Sharing is link-driven and ad hoc; a maintained assignment list would lock out the colleagues and guests a link is handed to, while the unguessable path, tenant sign-in, and expiry already bound exposure. |
@@ -338,6 +347,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | `src/Client/CanvasPane.fs`, `CanvasState.fs`, `CanvasUpdate.fs`, `index.html` | Share button, `ShareState` phase machine, clipboard write and banner routing (unchanged) |
 | `src/CanvasShareViewer/` | New App Service viewer: shell route, content route, expiry check, sandbox/CSP, Easy Auth configuration |
 | `scripts/deploy-canvas-share-viewer.ps1` | Idempotent non-production Azure provisioning, secret-free Easy Auth, Entra-authenticated ZIP deployment, validation, and machine-config update |
+| `scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1` | Windows/Azure CLI shape, packaging-output, clean/existing reconciliation, and restricted-tenant registration regressions |
 | `scripts/canvas-share-viewer-deployment/ViewerBlobAccess.ps1` | Fail-closed audit of the viewer identity's effective Blob-read data-plane assignments |
 | `scripts/canvas-share-lifecycle-policy.json` | Container-filtered deletion rule starting after 31 days |
 | `docs/canvas-share-viewer-deployment.md` | Local operator prerequisites, dry run, apply, and durable-resource guidance |
