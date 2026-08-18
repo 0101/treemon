@@ -127,6 +127,9 @@ prompts, environment contents, worktree paths, or attachment/control capabilitie
 
 ## Related Specs
 
+- [Durable terminal productization](future/durable-terminal-productization.md) defines packaging,
+  machine-global discovery, host generations, reconnect state, and release work required after the
+  proxy feasibility prototype.
 - [Canvas pane](canvas-pane.md) defines the workspace iframe and layout patterns.
 - [Native session management](native-session-management.md) remains authoritative for the external
   Windows Terminal fallback.
