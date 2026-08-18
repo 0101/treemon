@@ -310,13 +310,20 @@ type CanvasShareConfigTests() =
                         "a whitespace-only account name must not be published to"))
 
     [<Test>]
-    member _.``readCanvasShareConfig accepts a configurable HTTPS viewer URL``() =
+    member _.``readCanvasShareConfig rejects a viewer URL with a non-root path``() =
         withTempConfigDir "canvas-share-config" (fun dir ->
             seed dir
                 """{ "canvasShare": { "viewerBaseUrl": " https://isolated-viewer.test:7443/base/ " } }"""
+            Assert.That(readCanvasShareConfig().ViewerBaseUrl, Is.EqualTo(None)))
+
+    [<Test>]
+    member _.``readCanvasShareConfig accepts a configurable HTTPS viewer origin``() =
+        withTempConfigDir "canvas-share-config" (fun dir ->
+            seed dir
+                """{ "canvasShare": { "viewerBaseUrl": " https://isolated-viewer.test:7443/ " } }"""
             Assert.That(
                 readCanvasShareConfig().ViewerBaseUrl,
-                Is.EqualTo(Some(Uri("https://isolated-viewer.test:7443/base/")))))
+                Is.EqualTo(Some(Uri("https://isolated-viewer.test:7443/")))))
 
     [<TestCase("")>]
     [<TestCase("   ")>]

@@ -97,8 +97,10 @@
   tenant/client/resource identifier or secret, ships as a value in the repository's defaults.
   `accountName` and `viewerBaseUrl` have no default, so their absence means the feature is
   unconfigured; the canonical deployed value of `viewerBaseUrl` is
-  `https://treemon.azurewebsites.net`. An unconfigured Share action still fails with a clear
-  `Result.Error` before any network call.
+  `https://treemon.azurewebsites.net`. The URL must be an HTTPS origin whose parsed path is exactly
+  `/`, with no user info, query, or fragment; path-based viewer URLs are rejected because the
+  deployed viewer serves `/c/...` only at the origin root. An unconfigured Share action still
+  fails with a clear `Result.Error` before any network call.
 - `defaultExpiryDays` remains 7 and `maxCanvasShareExpiryDays` is 30. The share container's Blob
   lifecycle policy deletes only after 31 days or more, so cleanup never removes a document the
   viewer would still have served.

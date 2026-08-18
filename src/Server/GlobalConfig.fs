@@ -307,8 +307,8 @@ let internal maxCanvasShareExpiryDays = 30
 /// Reads the `canvasShare` config section, falling back to `defaultCanvasShareConfig` for a missing
 /// section or field. Blank account/container values, a non-HTTPS/invalid `viewerBaseUrl`, or a
 /// `defaultExpiryDays` outside `1 .. maxCanvasShareExpiryDays` are treated as absent. User info,
-/// query strings, and fragments are not valid on the base URL because published links must be clean
-/// paths without embedded credentials.
+/// non-root paths, query strings, and fragments are not valid on the base URL because published
+/// links must use the viewer's root-mounted routes without embedded credentials.
 let internal readCanvasShareConfig () : CanvasShareConfig =
     withConfigDocument defaultCanvasShareConfig (fun root ->
         match root.TryGetProperty("canvasShare") with
@@ -326,6 +326,7 @@ let internal readCanvasShareConfig () : CanvasShareConfig =
                         when uri.Scheme = Uri.UriSchemeHttps
                              && not (String.IsNullOrWhiteSpace(uri.Host))
                              && String.IsNullOrEmpty(uri.UserInfo)
+                             && uri.AbsolutePath = "/"
                              && String.IsNullOrEmpty(uri.Query)
                              && String.IsNullOrEmpty(uri.Fragment) ->
                         Some uri
