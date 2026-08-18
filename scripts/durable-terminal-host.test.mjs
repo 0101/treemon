@@ -153,7 +153,44 @@ const withTestHost = async (processController, action) => {
   }
 };
 
-const ownedSession = (id, ttydPid, shellPid) => ({
+const processIdentity = (pid, parentPid = 0, generation = "original") => ({
+  pid,
+  parentPid,
+  startIdentity: `test:${pid}:${generation}`,
+});
+
+const fakeProcessController = (initialProcesses, terminateProcess) => {
+  const processes = new Map(
+    initialProcesses.map((identity) => [identity.pid, identity]),
+  );
+  const terminated = [];
+  return {
+    processes,
+    terminated,
+    controller: {
+      inspect: async (pid) => processes.get(pid) ?? null,
+      children: async (pid) =>
+        [...processes.values()].filter(
+          (identity) => identity.parentPid === pid,
+        ),
+      terminate: async (pid) => {
+        terminated.push(pid);
+        if (terminateProcess) terminateProcess(pid, processes);
+        else processes.delete(pid);
+      },
+    },
+  };
+};
+
+const ownedSession = (
+  id,
+  ttydPid,
+  shellPid,
+  tracked = [
+    ...(ttydPid ? [processIdentity(ttydPid)] : []),
+    ...(shellPid ? [processIdentity(shellPid, ttydPid ?? 0)] : []),
+  ],
+) => ({
   id,
   capability: `cap-${id}`,
   worktreePath: resolve(".agents", id),
@@ -164,16 +201,18 @@ const ownedSession = (id, ttydPid, shellPid) => ({
   replay: emptyReplayBuffer(),
   attachment: null,
   closing: false,
+  ownedProcesses: new Map(
+    tracked.map((identity, depth) => [
+      `${identity.pid}:${identity.startIdentity}`,
+      { identity, depth },
+    ]),
+  ),
   ttydPid,
   shellPid,
 });
 
 test("graceful close removes the registry entry without forcing a process", async () => {
-  const forced = [];
-  const controller = {
-    isAlive: () => false,
-    forceTree: async (pid) => forced.push(pid),
-  };
+  const { controller, terminated } = fakeProcessController([]);
 
   await withTestHost(controller, async (host) => {
     const session = ownedSession("graceful", 101, 102);
@@ -182,44 +221,38 @@ test("graceful close removes the registry entry without forcing a process", asyn
     await host.closeSession(session, "test");
 
     assert.equal(host.sessions.has(session.id), false);
-    assert.deepEqual(forced, []);
+    assert.deepEqual(terminated, []);
   });
 });
 
-test("close force-cleans only the tracked owned process tree", async () => {
-  const alive = new Set([201, 202, 999]);
-  const forced = [];
-  const controller = {
-    isAlive: (pid) => alive.has(pid),
-    forceTree: async (pid) => {
-      forced.push(pid);
-      if (pid === 201) {
-        alive.delete(201);
-        alive.delete(202);
-      }
-    },
-  };
+test("close discovers and force-cleans only exact owned descendants", async () => {
+  const root = processIdentity(201);
+  const child = processIdentity(202, 201);
+  const unrelated = processIdentity(999);
+  const { controller, processes, terminated } = fakeProcessController([
+    root,
+    child,
+    unrelated,
+  ]);
 
   await withTestHost(controller, async (host) => {
-    const session = ownedSession("forced", 201, 202);
+    const session = ownedSession("forced", 201, 202, [root]);
     host.sessions.set(session.id, session);
 
     await host.closeSession(session, "test");
 
-    assert.deepEqual(forced, [201]);
-    assert.equal(alive.has(999), true);
+    assert.deepEqual(terminated, [201, 202]);
+    assert.equal(processes.has(999), true);
     assert.equal(host.sessions.has(session.id), false);
   });
 });
 
 test("cleanup timeout reports failure while owned processes remain", async () => {
-  const controller = {
-    isAlive: (pid) => pid === 301,
-    forceTree: async () => {},
-  };
+  const root = processIdentity(301);
+  const { controller } = fakeProcessController([root], () => {});
 
   await withTestHost(controller, async (host) => {
-    const session = ownedSession("timeout", 301, 302);
+    const session = ownedSession("timeout", 301, null, [root]);
     host.sessions.set(session.id, session);
 
     await assert.rejects(
@@ -232,17 +265,17 @@ test("cleanup timeout reports failure while owned processes remain", async () =>
 });
 
 test("failed cleanup retains a retryable registry entry", async () => {
-  const alive = new Set([401]);
+  const root = processIdentity(401);
   let canForce = false;
-  const controller = {
-    isAlive: (pid) => alive.has(pid),
-    forceTree: async (pid) => {
-      if (canForce) alive.delete(pid);
+  const { controller } = fakeProcessController(
+    [root],
+    (pid, processes) => {
+      if (canForce) processes.delete(pid);
     },
-  };
+  );
 
   await withTestHost(controller, async (host) => {
-    const session = ownedSession("retry", 401, null);
+    const session = ownedSession("retry", 401, null, [root]);
     host.sessions.set(session.id, session);
 
     await assert.rejects(host.closeSession(session, "first"));
@@ -255,31 +288,127 @@ test("failed cleanup retains a retryable registry entry", async () => {
 });
 
 test("closing one session never signals another session's tracked PIDs", async () => {
-  const alive = new Set([501, 502, 601, 602]);
-  const forced = [];
-  const controller = {
-    isAlive: (pid) => alive.has(pid),
-    forceTree: async (pid) => {
-      forced.push(pid);
-      if (pid === 501) {
-        alive.delete(501);
-        alive.delete(502);
-      }
-    },
-  };
+  const closingRoot = processIdentity(501);
+  const closingChild = processIdentity(502, 501);
+  const retainedRoot = processIdentity(601);
+  const retainedChild = processIdentity(602, 601);
+  const { controller, processes, terminated } = fakeProcessController([
+    closingRoot,
+    closingChild,
+    retainedRoot,
+    retainedChild,
+  ]);
 
   await withTestHost(controller, async (host) => {
-    const closing = ownedSession("closing", 501, 502);
-    const retained = ownedSession("retained", 601, 602);
+    const closing = ownedSession("closing", 501, 502, [closingRoot]);
+    const retained = ownedSession("retained", 601, 602, [retainedRoot]);
     host.sessions.set(closing.id, closing);
     host.sessions.set(retained.id, retained);
 
     await host.closeSession(closing, "test");
 
-    assert.deepEqual(forced, [501]);
+    assert.deepEqual(terminated, [501, 502]);
     assert.equal(host.sessions.has(retained.id), true);
-    assert.equal(alive.has(601), true);
-    assert.equal(alive.has(602), true);
+    assert.equal(processes.has(601), true);
+    assert.equal(processes.has(602), true);
+  });
+});
+
+test("PID reuse is treated as owned-process exit and never terminated", async () => {
+  const original = processIdentity(701);
+  const replacement = processIdentity(701, 0, "replacement");
+  const { controller, processes, terminated } = fakeProcessController([
+    replacement,
+  ]);
+
+  await withTestHost(controller, async (host) => {
+    const session = ownedSession("pid-reuse", 701, null, [original]);
+    host.sessions.set(session.id, session);
+
+    await host.closeSession(session, "test");
+
+    assert.deepEqual(terminated, []);
+    assert.equal(processes.get(701), replacement);
+    assert.equal(host.sessions.has(session.id), false);
+  });
+});
+
+test("an unverified spawned PID is retained and never terminated", async () => {
+  const unverified = processIdentity(705);
+  const { controller, terminated } = fakeProcessController([unverified]);
+
+  await withTestHost(controller, async (host) => {
+    const session = {
+      ...ownedSession("unverified", 705, null, []),
+      unverifiedSpawnedPids: [705],
+      ttydProcess: { exitCode: null },
+    };
+    host.sessions.set(session.id, session);
+
+    await assert.rejects(
+      host.closeSession(session, "test"),
+      /Owned terminal processes remain: 705/,
+    );
+
+    assert.deepEqual(terminated, []);
+    assert.equal(host.sessions.get(session.id), session);
+  });
+});
+
+test("a captured descendant remains owned after reparenting", async () => {
+  const root = processIdentity(711);
+  const child = processIdentity(712, 711);
+  const { controller, processes, terminated } = fakeProcessController([
+    root,
+    child,
+  ]);
+  let firstChildQuery = true;
+  const discoverChildren = controller.children;
+  controller.children = async (pid) => {
+    const children = await discoverChildren(pid);
+    if (pid === root.pid && firstChildQuery) {
+      firstChildQuery = false;
+      processes.delete(root.pid);
+      processes.set(child.pid, { ...child, parentPid: 0 });
+    }
+    return children;
+  };
+
+  await withTestHost(controller, async (host) => {
+    const session = ownedSession("reparented", 711, 712, [root]);
+    host.sessions.set(session.id, session);
+
+    await host.closeSession(session, "test");
+
+    assert.deepEqual(terminated, [712]);
+    assert.equal(host.sessions.has(session.id), false);
+  });
+});
+
+test("cleanup retains the session when a captured descendant survives force", async () => {
+  const root = processIdentity(721);
+  const child = processIdentity(722, 721);
+  const unrelated = processIdentity(799);
+  const { controller, processes, terminated } = fakeProcessController(
+    [root, child, unrelated],
+    (pid, current) => {
+      if (pid !== child.pid) current.delete(pid);
+    },
+  );
+
+  await withTestHost(controller, async (host) => {
+    const session = ownedSession("surviving-child", 721, 722, [root]);
+    host.sessions.set(session.id, session);
+
+    await assert.rejects(
+      host.closeSession(session, "test"),
+      /Owned terminal processes remain: 722/,
+    );
+
+    assert.deepEqual(terminated, [721, 722]);
+    assert.equal(processes.has(799), true);
+    assert.equal(host.sessions.get(session.id), session);
+    assert.equal(session.state, "failed");
   });
 });
 
@@ -369,7 +498,7 @@ class FakeBrowserSocket extends EventEmitter {
 }
 
 test("browser takeover revokes old handlers before closing the old socket", async () => {
-  const controller = { isAlive: () => false, forceTree: async () => {} };
+  const { controller } = fakeProcessController([]);
 
   await withTestHost(controller, async (host) => {
     const upstreamFrames = [];
@@ -422,8 +551,188 @@ const waitForCondition = async (predicate) => {
   return waitForCondition(predicate);
 };
 
+test("close waits for the serialized start before removing its session", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    let releaseStart;
+    const startGate = new Promise((resolveStart) => {
+      releaseStart = resolveStart;
+    });
+    host.startSessionProxy = async () => startGate;
+    host.stopSessionResources = async () => {};
+    const path = resolve(".agents");
+
+    const starting = host.startSession(path);
+    await waitForCondition(() => host.sessions.size === 1);
+    const session = [...host.sessions.values()][0];
+    const closing = host.closeSession(session, "race-test");
+    await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+
+    assert.equal(host.sessions.get(session.id), session);
+    assert.equal(session.state, "starting");
+
+    releaseStart();
+    await starting;
+    await closing;
+    assert.equal(host.sessions.size, 0);
+  });
+});
+
+test("concurrent failed-session retries create one replacement", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    const path = resolve(".agents");
+    const failed = {
+      ...ownedSession("failed-retry", null, null),
+      worktreePath: path,
+      key: process.platform === "win32" ? path.toLowerCase() : path,
+      state: "failed",
+    };
+    host.sessions.set(failed.id, failed);
+    let releaseCleanup;
+    const cleanupGate = new Promise((resolveCleanup) => {
+      releaseCleanup = resolveCleanup;
+    });
+    host.stopSessionResources = async (session) => {
+      if (session === failed) await cleanupGate;
+    };
+    let starts = 0;
+    host.startSessionProxy = async () => {
+      starts += 1;
+    };
+
+    const first = host.startSession(path);
+    const second = host.startSession(path);
+    await waitForCondition(() => failed.state === "closing");
+    releaseCleanup();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    assert.equal(starts, 1);
+    assert.equal(firstResult, secondResult);
+    assert.equal(host.sessions.size, 1);
+    assert.equal(firstResult.state, "running");
+  });
+});
+
+test("reservation rejects same-key starts until explicit release", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    const path = resolve(".agents");
+    host.startSessionProxy = async () => {};
+    const reservation = await host.reserveWorktree(path);
+
+    await assert.rejects(
+      host.startSession(path),
+      /blocked while the worktree is being deleted or archived/,
+    );
+    assert.equal(await host.releaseReservation(reservation.id), true);
+    const session = await host.startSession(path);
+    assert.equal(session.state, "running");
+  });
+});
+
+test("caller reservation identity is validated and retained", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    await assert.rejects(
+      host.reserveWorktree(resolve(".agents"), "short"),
+      /reservation ID is invalid/,
+    );
+
+    const reservation = await host.reserveWorktree(
+      resolve(".agents"),
+      "known-reservation-id",
+    );
+    assert.equal(reservation.id, "known-reservation-id");
+    await host.releaseReservation(reservation.id);
+  });
+});
+
+test("failed reservation cleanup releases the key for retry", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    const path = resolve(".agents");
+    const failed = {
+      ...ownedSession("reservation-failure", null, null),
+      worktreePath: path,
+      key: process.platform === "win32" ? path.toLowerCase() : path,
+      state: "failed",
+    };
+    host.sessions.set(failed.id, failed);
+    let failCleanup = true;
+    host.stopSessionResources = async () => {
+      if (failCleanup) throw new Error("cleanup failed");
+    };
+
+    await assert.rejects(host.reserveWorktree(path), /cleanup failed/);
+    assert.equal(host.reservations.size, 0);
+
+    failCleanup = false;
+    const reservation = await host.reserveWorktree(path);
+    assert.equal(host.reservations.size, 1);
+    assert.equal(await host.releaseReservation(reservation.id), true);
+  });
+});
+
+test("a reserved key never blocks an unrelated key", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    const firstPath = resolve(".agents");
+    const secondPath = resolve("scripts");
+    host.startSessionProxy = async () => {};
+    const reservation = await host.reserveWorktree(firstPath);
+
+    const second = await host.startSession(secondPath);
+
+    assert.equal(second.worktreePath, secondPath);
+    assert.equal(second.state, "running");
+    await host.releaseReservation(reservation.id);
+  });
+});
+
+test("an abandoned reservation expires before the key can start again", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    let now = 1_000;
+    host.now = () => now;
+    host.reservationLeaseMs = 50;
+    host.startSessionProxy = async () => {};
+    const path = resolve(".agents");
+    await host.reserveWorktree(path);
+
+    now += 51;
+    const session = await host.startSession(path);
+
+    assert.equal(session.state, "running");
+    assert.equal(host.reservations.size, 0);
+  });
+});
+
+test("host shutdown refuses an active worktree reservation", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    const reservation = await host.reserveWorktree(resolve(".agents"));
+
+    assert.throws(
+      () => host.beginShutdown("reserved"),
+      /active worktree mutation reservations/,
+    );
+    assert.equal(host.shuttingDown, false);
+
+    await host.releaseReservation(reservation.id);
+  });
+});
+
 test("shutdown rejects new starts and cleans every in-flight start", async () => {
-  const controller = { isAlive: () => false, forceTree: async () => {} };
+  const { controller } = fakeProcessController([]);
 
   await withTestHost(controller, async (host, exits) => {
     let releaseStart;
@@ -476,7 +785,7 @@ test("shutdown rejects new starts and cleans every in-flight start", async () =>
 });
 
 test("shutdown rejects a start whose body was still arriving at quiescence", async () => {
-  const controller = { isAlive: () => false, forceTree: async () => {} };
+  const { controller } = fakeProcessController([]);
 
   await withTestHost(controller, async (host, exits) => {
     await host.start();
@@ -543,15 +852,12 @@ test("shutdown rejects a start whose body was still arriving at quiescence", asy
 });
 
 test("shutdown reports cleanup failure and retains the failed session", async () => {
-  const alive = new Set([901]);
-  const controller = {
-    isAlive: (pid) => alive.has(pid),
-    forceTree: async () => {},
-  };
+  const root = processIdentity(901);
+  const { controller, processes } = fakeProcessController([root], () => {});
 
   await withTestHost(controller, async (host, exits) => {
     await host.start();
-    const session = ownedSession("shutdown-failure", 901, null);
+    const session = ownedSession("shutdown-failure", 901, null, [root]);
     host.sessions.set(session.id, session);
     const response = await fetch(
       `http://127.0.0.1:${host.controlPort}/shutdown`,
@@ -570,7 +876,7 @@ test("shutdown reports cleanup failure and retains the failed session", async ()
     assert.equal(host.shuttingDown, false);
     assert.equal(existsSync(host.statePath), true);
 
-    alive.clear();
+    processes.clear();
     await host.shutdown("test-cleanup");
     assert.deepEqual(exits, [0]);
   });

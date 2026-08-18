@@ -35,6 +35,8 @@ const heartbeatFailureMs = 90_000;
 const gracefulProcessExitMs = 5000;
 const forcedProcessExitMs = 2000;
 const processForceCommandMs = 5000;
+const reservationLeaseMs = 5 * 60_000;
+const maximumOwnedProcesses = 1024;
 const unixEpochTicks = 621355968000000000n;
 
 const delay = (milliseconds) =>
@@ -201,12 +203,30 @@ export function sameManifestOwner(left, right) {
 export function removeManifestIfOwned(path, owner) {
   if (!existsSync(path)) return true;
 
+  const claimedPath = `${path}.${owner.generation}.${process.pid}.${randomToken(6)}.reclaim`;
   try {
-    const current = JSON.parse(readFileSync(path, "utf8"));
-    if (!sameManifestOwner(manifestOwnership(current), owner)) return false;
-    rmSync(path);
+    renameSync(path, claimedPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    return false;
+  }
+
+  try {
+    const current = JSON.parse(readFileSync(claimedPath, "utf8"));
+    if (!sameManifestOwner(manifestOwnership(current), owner)) {
+      if (!existsSync(path)) renameSync(claimedPath, path);
+      return false;
+    }
+    rmSync(claimedPath);
     return true;
   } catch {
+    if (existsSync(claimedPath) && !existsSync(path)) {
+      try {
+        renameSync(claimedPath, path);
+      } catch {
+        return false;
+      }
+    }
     return false;
   }
 }
@@ -464,8 +484,17 @@ function sendJson(response, statusCode, value) {
   response.end(body);
 }
 
+class ControlError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
+
+const validPid = (pid) => Number.isInteger(pid) && pid > 0;
+
 function isPidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (!validPid(pid)) return null;
 
   try {
     process.kill(pid, 0);
@@ -475,64 +504,238 @@ function isPidAlive(pid) {
   }
 }
 
-const runForceCommand = (fileName, argumentsList) =>
-  new Promise((resolveCommand) => {
+const runProcessQuery = (fileName, argumentsList) =>
+  new Promise((resolveCommand, rejectCommand) => {
     const child = spawn(fileName, argumentsList, {
       windowsHide: true,
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
     });
+    const stdout = [];
+    const stderr = [];
+    let outputBytes = 0;
+    let settled = false;
+    const finish = (result, error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) rejectCommand(error);
+      else resolveCommand(result);
+    };
+    const collect = (target) => (chunk) => {
+      outputBytes += chunk.length;
+      if (outputBytes <= maxControlBodyBytes) target.push(chunk);
+    };
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
     const timeout = setTimeout(() => {
       if (child.exitCode === null) child.kill();
-      resolveCommand();
+      finish(null, new Error(`Timed out querying process ownership with ${fileName}`));
     }, processForceCommandMs);
-    const finish = () => {
-      clearTimeout(timeout);
-      resolveCommand();
-    };
-    child.once("error", finish);
-    child.once("exit", finish);
+    child.once("error", (error) => finish(null, error));
+    child.once("exit", (code) => {
+      if (outputBytes > maxControlBodyBytes) {
+        finish(null, new Error("Process ownership query exceeded the output limit"));
+      } else if (code === 0) {
+        finish(Buffer.concat(stdout).toString("utf8"));
+      } else {
+        finish(
+          null,
+          new Error(
+            `Process ownership query failed with code ${code}: ${sanitizeMetadataText(Buffer.concat(stderr).toString("utf8"), 240)}`,
+          ),
+        );
+      }
+    });
   });
 
-function defaultProcessController() {
-  return {
-    isAlive: isPidAlive,
-    forceTree: async (pid) => {
-      if (!Number.isInteger(pid) || pid <= 0) return;
+const windowsProcessQuery = async (filter) => {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$items = @(Get-CimInstance Win32_Process -Filter '${filter}')`,
+    "$items | ForEach-Object {",
+    "  '{0}|{1}|{2}' -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate.ToUniversalTime().Ticks",
+    "}",
+  ].join("; ");
+  const output = await runProcessQuery("powershell.exe", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    script,
+  ]);
 
-      if (process.platform === "win32") {
-        await runForceCommand("taskkill.exe", [
-          "/PID",
-          String(pid),
-          "/T",
-          "/F",
-        ]);
-        return;
+  return output
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const [pidText, parentText, startText] = line.trim().split("|");
+      const pid = Number.parseInt(pidText, 10);
+      const parentPid = Number.parseInt(parentText, 10);
+      if (!validPid(pid) || !Number.isInteger(parentPid) || !/^\d+$/.test(startText)) {
+        throw new Error("Process ownership query returned an invalid identity");
       }
+      return {
+        pid,
+        parentPid,
+        startIdentity: `windows:${startText}`,
+      };
+    });
+};
 
+const linuxProcessIdentity = (pid) => {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const commandEnd = stat.lastIndexOf(")");
+    if (commandEnd < 0) throw new Error("Linux process stat omitted its command");
+    const fields = stat.slice(commandEnd + 2).trim().split(/\s+/);
+    const parentPid = Number.parseInt(fields[1], 10);
+    const startTime = fields[19];
+    if (!Number.isInteger(parentPid) || !/^\d+$/.test(startTime)) {
+      throw new Error("Linux process stat returned an invalid identity");
+    }
+    return {
+      pid,
+      parentPid,
+      startIdentity: `linux:${startTime}`,
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ESRCH") return null;
+    throw error;
+  }
+};
+
+export function sameProcessIdentity(left, right) {
+  return Boolean(
+    left &&
+    right &&
+    left?.pid === right?.pid &&
+    left?.startIdentity === right?.startIdentity
+  );
+}
+
+export function defaultProcessController() {
+  const inspect =
+    process.platform === "win32"
+      ? async (pid) =>
+          validPid(pid)
+            ? (await windowsProcessQuery(`ProcessId = ${pid}`))[0] ?? null
+            : null
+      : process.platform === "linux"
+        ? async (pid) => (validPid(pid) ? linuxProcessIdentity(pid) : null)
+        : async () => {
+            throw new Error(
+              `Durable terminal ownership inspection is unsupported on ${process.platform}`,
+            );
+          };
+  const children =
+    process.platform === "win32"
+      ? async (pid) =>
+          validPid(pid)
+            ? windowsProcessQuery(`ParentProcessId = ${pid}`)
+            : []
+      : process.platform === "linux"
+        ? async (pid) => {
+            if (!validPid(pid)) return [];
+            try {
+              return readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8")
+                .trim()
+                .split(/\s+/)
+                .filter(Boolean)
+                .map((value) => Number.parseInt(value, 10))
+                .filter(validPid)
+                .map(linuxProcessIdentity)
+                .filter(Boolean)
+                .filter((identity) => identity.parentPid === pid);
+            } catch (error) {
+              if (error?.code === "ENOENT" || error?.code === "ESRCH") return [];
+              throw error;
+            }
+          }
+        : async () => {
+            throw new Error(
+              `Durable terminal descendant discovery is unsupported on ${process.platform}`,
+            );
+          };
+
+  return {
+    inspect,
+    children,
+    terminate: async (pid) => {
+      if (!validPid(pid)) return;
       try {
-        process.kill(-pid, "SIGKILL");
+        process.kill(pid, "SIGKILL");
       } catch (error) {
         if (error?.code !== "ESRCH") throw error;
-
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch (fallbackError) {
-          if (fallbackError?.code !== "ESRCH") throw fallbackError;
-        }
       }
     },
   };
 }
 
-const ownedProcessIds = (session) =>
-  [session.ttydPid, session.shellPid]
-    .filter((pid) => Number.isInteger(pid) && pid > 0)
-    .filter((pid, index, pids) => pids.indexOf(pid) === index);
+const processIdentityKey = (identity) =>
+  `${identity.pid}:${identity.startIdentity}`;
 
-const remainingOwnedProcessIds = (session, processController) =>
-  ownedProcessIds(session).filter(
-    (pid) => processController.isAlive(pid) !== false,
+const ownedProcesses = (session) =>
+  session.ownedProcesses ?? new Map();
+
+const trackedOwnedProcessIds = (session) =>
+  [...ownedProcesses(session).values()].map(({ identity }) => identity.pid);
+
+const trackOwnedProcess = (session, identity, depth) => {
+  session.ownedProcesses ??= new Map();
+  const key = processIdentityKey(identity);
+  if (session.ownedProcesses.has(key)) return false;
+  if (session.ownedProcesses.size >= maximumOwnedProcesses) {
+    throw new Error("Owned terminal process set exceeded its safety bound");
+  }
+  session.ownedProcesses.set(key, { identity, depth });
+  return true;
+};
+
+async function discoverOwnedDescendants(session, processController) {
+  const discover = async (pending, visited) => {
+    const [tracked, ...remaining] = pending;
+    if (!tracked) return;
+    const key = processIdentityKey(tracked.identity);
+    if (visited.has(key)) return discover(remaining, visited);
+
+    const actual = await processController.inspect(tracked.identity.pid);
+    if (!sameProcessIdentity(actual, tracked.identity)) {
+      return discover(remaining, new Set([...visited, key]));
+    }
+
+    const children = await processController.children(tracked.identity.pid);
+    const captured = [];
+    for (const candidate of children) {
+      const verified = await processController.inspect(candidate.pid);
+      if (
+        sameProcessIdentity(candidate, verified) &&
+        trackOwnedProcess(session, candidate, tracked.depth + 1)
+      ) {
+        captured.push({ identity: candidate, depth: tracked.depth + 1 });
+      }
+    }
+
+    return discover(
+      [...remaining, ...captured],
+      new Set([...visited, key]),
+    );
+  };
+
+  await discover([...ownedProcesses(session).values()], new Set());
+}
+
+async function remainingOwnedProcesses(session, processController) {
+  const inspected = await Promise.all(
+    [...ownedProcesses(session).values()].map(async (tracked) => ({
+      tracked,
+      actual: await processController.inspect(tracked.identity.pid),
+    })),
   );
+  return inspected
+    .filter(({ tracked, actual }) =>
+      sameProcessIdentity(tracked.identity, actual),
+    )
+    .map(({ tracked }) => tracked);
+}
 
 async function waitForOwnedProcessExit(
   session,
@@ -543,13 +746,48 @@ async function waitForOwnedProcessExit(
   const deadline = Date.now() + timeoutMs;
 
   const check = async () => {
-    const remaining = remainingOwnedProcessIds(session, processController);
+    await discoverOwnedDescendants(session, processController);
+    const remaining = await remainingOwnedProcesses(session, processController);
     if (remaining.length === 0 || Date.now() >= deadline) return remaining;
     await wait(Math.min(50, Math.max(1, deadline - Date.now())));
     return check();
   };
 
   return check();
+}
+
+async function forceOwnedProcessExit(
+  session,
+  processController,
+  timeoutMs,
+  wait,
+) {
+  const deadline = Date.now() + timeoutMs;
+
+  const force = async (attempted) => {
+    await discoverOwnedDescendants(session, processController);
+    const remaining = await remainingOwnedProcesses(session, processController);
+    if (remaining.length === 0 || (attempted && Date.now() >= deadline)) {
+      return remaining;
+    }
+
+    for (const tracked of remaining.sort(
+      (left, right) => left.depth - right.depth,
+    )) {
+      await discoverOwnedDescendants(session, processController);
+      const actual = await processController.inspect(tracked.identity.pid);
+      if (sameProcessIdentity(actual, tracked.identity)) {
+        await processController.terminate(tracked.identity.pid);
+      }
+    }
+
+    if (Date.now() < deadline) {
+      await wait(Math.min(50, Math.max(1, deadline - Date.now())));
+    }
+    return force(true);
+  };
+
+  return force(false);
 }
 
 export class DurableTerminalHost {
@@ -571,9 +809,14 @@ export class DurableTerminalHost {
     this.shuttingDown = false;
     this.shutdownPromise = null;
     this.inFlightStarts = new Set();
+    this.keyOperations = new Map();
+    this.reservations = new Map();
     this.processController =
       options.processController ?? defaultProcessController();
     this.wait = options.wait ?? delay;
+    this.now = options.now ?? (() => Date.now());
+    this.reservationLeaseMs =
+      options.reservationLeaseMs ?? reservationLeaseMs;
     this.cleanupTimeouts = {
       graceful: options.cleanupTimeouts?.graceful ?? gracefulProcessExitMs,
       forced: options.cleanupTimeouts?.forced ?? forcedProcessExitMs,
@@ -592,7 +835,9 @@ export class DurableTerminalHost {
           errorType: sanitizeMetadataText(error?.name || "Error", 80),
         });
         if (!response.headersSent) {
-          sendJson(response, 500, { error: error.message });
+          sendJson(response, error?.statusCode ?? 500, {
+            error: error.message,
+          });
         } else {
           response.end();
         }
@@ -787,6 +1032,44 @@ export class DurableTerminalHost {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/reservations") {
+      if (this.rejectMutationDuringShutdown(response)) return;
+      const body = await readJsonBody(request);
+      if (this.rejectMutationDuringShutdown(response)) return;
+      const reservation = await this.reserveWorktree(
+        body.worktreePath,
+        body.reservationId,
+      );
+      sendJson(response, 201, {
+        reservation,
+        sessions: this.publicSessions(),
+      });
+      return;
+    }
+
+    if (url.pathname.startsWith("/reservations/")) {
+      if (this.rejectMutationDuringShutdown(response)) return;
+      const suffix = url.pathname.slice("/reservations/".length);
+      const renewSuffix = "/renew";
+      const renewing =
+        request.method === "POST" && suffix.endsWith(renewSuffix);
+      const reservationId = decodeURIComponent(
+        renewing ? suffix.slice(0, -renewSuffix.length) : suffix,
+      );
+
+      if (renewing) {
+        const reservation = await this.renewReservation(reservationId);
+        sendJson(response, 200, { reservation });
+        return;
+      }
+
+      if (request.method === "DELETE") {
+        const released = await this.releaseReservation(reservationId);
+        sendJson(response, 200, { released });
+        return;
+      }
+    }
+
     if (request.method === "POST" && url.pathname === "/events") {
       if (this.rejectMutationDuringShutdown(response)) return;
       const body = await readJsonBody(request);
@@ -816,7 +1099,9 @@ export class DurableTerminalHost {
         sendJson(response, 200, { stopping: true, pid: process.pid });
       } catch (error) {
         this.resumeAfterFailedShutdown();
-        sendJson(response, 500, { error: error.message });
+        sendJson(response, error?.statusCode ?? 500, {
+          error: error.message,
+        });
       }
       return;
     }
@@ -843,6 +1128,119 @@ export class DurableTerminalHost {
     }
   }
 
+  async withKeyTransition(key, transition) {
+    const previous = this.keyOperations.get(key) ?? Promise.resolve();
+    const operation = previous.catch(() => {}).then(transition);
+    this.keyOperations.set(key, operation);
+
+    try {
+      return await operation;
+    } finally {
+      if (this.keyOperations.get(key) === operation) {
+        this.keyOperations.delete(key);
+      }
+    }
+  }
+
+  activeReservation(key) {
+    const reservation = this.reservations.get(key);
+    if (!reservation) return null;
+    if (reservation.acquiring) return reservation;
+    if (reservation.expiresAtMs > this.now()) return reservation;
+    this.reservations.delete(key);
+    this.record("worktree-reservation-expired", null);
+    return null;
+  }
+
+  publicReservation(reservation) {
+    return {
+      id: reservation.id,
+      worktreePath: reservation.worktreePath,
+      expiresAt: new Date(reservation.expiresAtMs).toISOString(),
+    };
+  }
+
+  reservationById(id) {
+    return [...this.reservations.values()].find(
+      (reservation) => reservation.id === id,
+    );
+  }
+
+  async reserveWorktree(rawPath, requestedId) {
+    const worktreePath = canonicalWorktreePath(rawPath);
+    const key = worktreeKey(worktreePath);
+    if (
+      requestedId !== undefined &&
+      !/^[A-Za-z0-9_-]{16,128}$/.test(requestedId)
+    ) {
+      throw new ControlError(400, "Terminal cleanup reservation ID is invalid");
+    }
+
+    return this.withKeyTransition(key, async () => {
+      if (this.activeReservation(key)) {
+        throw new ControlError(
+          409,
+          "A terminal cleanup reservation already owns this worktree",
+        );
+      }
+
+      const reservation = {
+        id: requestedId ?? randomToken(24),
+        key,
+        worktreePath,
+        acquiring: true,
+        expiresAtMs: this.now() + this.reservationLeaseMs,
+      };
+      this.reservations.set(key, reservation);
+      this.record("worktree-reservation-acquired", null);
+
+      try {
+        const existing = this.sessionForKey(key);
+        if (existing) {
+          await this.closeSessionOnce(existing, "worktree-reservation");
+        }
+        reservation.expiresAtMs =
+          this.now() + this.reservationLeaseMs;
+        reservation.acquiring = false;
+        return this.publicReservation(reservation);
+      } catch (error) {
+        if (this.reservations.get(key) === reservation) {
+          this.reservations.delete(key);
+        }
+        this.record("worktree-reservation-failed", null);
+        throw error;
+      }
+    });
+  }
+
+  async renewReservation(id) {
+    const found = this.reservationById(id);
+    if (!found) {
+      throw new ControlError(409, "Terminal cleanup reservation is no longer active");
+    }
+
+    return this.withKeyTransition(found.key, async () => {
+      const active = this.activeReservation(found.key);
+      if (active !== found) {
+        throw new ControlError(409, "Terminal cleanup reservation is no longer active");
+      }
+      found.expiresAtMs = this.now() + this.reservationLeaseMs;
+      return this.publicReservation(found);
+    });
+  }
+
+  async releaseReservation(id) {
+    const found = this.reservationById(id);
+    if (!found) return false;
+
+    return this.withKeyTransition(found.key, async () => {
+      if (this.reservations.get(found.key) !== found) return false;
+      this.reservations.delete(found.key);
+      this.record("worktree-reservation-released", null);
+      return true;
+    });
+  }
+
   newSession(worktreePath, order) {
     return {
       id: randomToken(16),
@@ -860,6 +1258,8 @@ export class DurableTerminalHost {
       terminalSize: { columns: defaultColumns, rows: defaultRows },
       closing: false,
       failureRecorded: false,
+      ownedProcesses: new Map(),
+      unverifiedSpawnedPids: [],
       shellPid: null,
       ttydPid: null,
       upstreamOpenedAt: null,
@@ -873,12 +1273,42 @@ export class DurableTerminalHost {
   async startSession(rawPath) {
     const worktreePath = canonicalWorktreePath(rawPath);
     const key = worktreeKey(worktreePath);
-    const existing = [...this.sessions.values()].find((session) => session.key === key);
+    return this.withKeyTransition(key, () =>
+      this.startSessionSerialized(worktreePath, key),
+    );
+  }
 
+  sessionForKey(key) {
+    return [...this.sessions.values()].find((session) => session.key === key);
+  }
+
+  async startSessionSerialized(worktreePath, key) {
+    if (this.activeReservation(key)) {
+      throw new ControlError(
+        409,
+        "Terminal start is blocked while the worktree is being deleted or archived",
+      );
+    }
+
+    const existing = this.sessionForKey(key);
     if (existing?.state === "starting" || existing?.state === "running") return existing;
 
     const order = existing?.order ?? this.nextOrder++;
-    if (existing) await this.closeSession(existing, "failed-restart");
+    if (existing) {
+      await this.closeSessionOnce(existing, "failed-restart");
+      const replacement = this.sessionForKey(key);
+      if (replacement) {
+        if (
+          replacement !== existing &&
+          (replacement.state === "starting" || replacement.state === "running")
+        ) {
+          return replacement;
+        }
+        throw new Error(
+          "Terminal session ownership changed while its failed generation was closing",
+        );
+      }
+    }
 
     const session = this.newSession(worktreePath, order);
     this.sessions.set(session.id, session);
@@ -908,10 +1338,8 @@ export class DurableTerminalHost {
       } catch (cleanupError) {
         session.error = `Terminal startup failed and owned process cleanup did not complete: ${sanitizeMetadataText(cleanupError.message, 240)}`;
         this.record("session-start-cleanup-failed", session, {
-          remainingPids: remainingOwnedProcessIds(
-            session,
-            this.processController,
-          ),
+          trackedPids: trackedOwnedProcessIds(session),
+          unverifiedPids: session.unverifiedSpawnedPids,
         });
       }
       session.closing = false;
@@ -1042,6 +1470,37 @@ export class DurableTerminalHost {
         void this.interruptSession(session, `ttyd exited with code ${code ?? "unknown"}`);
       }
     });
+    const identityDeadline = Date.now() + 2000;
+    const captureTtydIdentity = async () => {
+      if (spawnFailure.error) throw spawnFailure.error;
+      let identity;
+      try {
+        identity =
+          await this.processController.inspect(session.ttydPid);
+      } catch (error) {
+        if (
+          validPid(session.ttydPid) &&
+          session.ttydProcess.exitCode === null
+        ) {
+          session.unverifiedSpawnedPids = [session.ttydPid];
+        }
+        throw error;
+      }
+      if (identity) return identity;
+      if (session.ttydProcess.exitCode !== null) {
+        throw new Error(
+          `ttyd exited with code ${session.ttydProcess.exitCode}`,
+        );
+      }
+      if (Date.now() >= identityDeadline) {
+        session.unverifiedSpawnedPids = [session.ttydPid];
+        throw new Error("Could not capture ttyd process creation identity");
+      }
+      await this.wait(25);
+      return captureTtydIdentity();
+    };
+    const ttydIdentity = await captureTtydIdentity();
+    trackOwnedProcess(session, ttydIdentity, 0);
 
     [session.ttydProcess.stdout, session.ttydProcess.stderr].forEach((stream) => {
       const lines = createInterface({ input: stream });
@@ -1093,7 +1552,13 @@ export class DurableTerminalHost {
 
       if (existsSync(session.pidFile)) {
         const pid = Number.parseInt(readFileSync(session.pidFile, "utf8").trim(), 10);
-        if (Number.isInteger(pid) && pid > 0) return pid;
+        if (validPid(pid)) {
+          await discoverOwnedDescendants(session, this.processController);
+          const owned = [...ownedProcesses(session).values()].find(
+            ({ identity }) => identity.pid === pid,
+          );
+          if (owned) return pid;
+        }
       }
 
       if (Date.now() >= deadline) {
@@ -1323,20 +1788,14 @@ export class DurableTerminalHost {
   }
 
   async closeSession(session, reason) {
-    if (!this.sessions.has(session.id)) return;
-    if (session.closePromise) return session.closePromise;
-
-    const operation = this.closeSessionOnce(session, reason);
-    session.closePromise = operation;
-
-    try {
-      return await operation;
-    } finally {
-      session.closePromise = null;
-    }
+    return this.withKeyTransition(session.key, async () => {
+      if (this.sessions.get(session.id) !== session) return;
+      return this.closeSessionOnce(session, reason);
+    });
   }
 
   async closeSessionOnce(session, reason) {
+    if (this.sessions.get(session.id) !== session) return;
     session.closing = true;
     session.state = "closing";
     session.error = null;
@@ -1348,8 +1807,8 @@ export class DurableTerminalHost {
       this.sessions.delete(session.id);
       this.persistStatus();
       this.record("session-closed", session, {
-        ttydAlive: this.processController.isAlive(session.ttydPid),
-        shellAlive: this.processController.isAlive(session.shellPid),
+        ttydOwnedAlive: false,
+        shellOwnedAlive: false,
       });
     } catch (error) {
       session.closing = false;
@@ -1357,16 +1816,16 @@ export class DurableTerminalHost {
       session.error = `Terminal cleanup did not complete: ${sanitizeMetadataText(error.message, 240)}`;
       this.persistStatus();
       this.record("session-close-failed", session, {
-        remainingPids: remainingOwnedProcessIds(
-          session,
-          this.processController,
-        ),
+        trackedPids: trackedOwnedProcessIds(session),
+        unverifiedPids: session.unverifiedSpawnedPids,
       });
       throw new Error(session.error);
     }
   }
 
   async stopSessionResources(session) {
+    await discoverOwnedDescendants(session, this.processController);
+
     const attachment = session.attachment;
     session.attachment = null;
     attachment?.socket?.close(1000, "Terminal session closed");
@@ -1390,24 +1849,37 @@ export class DurableTerminalHost {
       this.wait,
     );
 
-    for (const pid of remaining) {
-      if (this.processController.isAlive(pid) !== false) {
-        await this.processController.forceTree(pid);
-      }
-    }
-
-    remaining = await waitForOwnedProcessExit(
+    remaining = await forceOwnedProcessExit(
       session,
       this.processController,
       this.cleanupTimeouts.forced,
       this.wait,
     );
+    const unverifiedRemaining = await Promise.all(
+      (session.unverifiedSpawnedPids ?? []).map(async (pid) => ({
+        pid,
+        actual: await this.processController.inspect(pid),
+      })),
+    ).then((processes) =>
+      processes.filter(
+        ({ pid, actual }) =>
+          actual &&
+          !(
+            pid === session.ttydPid &&
+            session.ttydProcess?.exitCode !== null
+          ),
+      ),
+    );
     await closeServer(session.publicServer);
     session.browserWebSockets?.close();
 
-    if (remaining.length > 0) {
+    if (remaining.length > 0 || unverifiedRemaining.length > 0) {
+      const remainingPids = [
+        ...remaining.map(({ identity }) => identity.pid),
+        ...unverifiedRemaining.map(({ pid }) => pid),
+      ];
       throw new Error(
-        `Owned terminal processes remain: ${remaining.join(", ")}`,
+        `Owned terminal processes remain: ${remainingPids.join(", ")}`,
       );
     }
 
@@ -1461,11 +1933,31 @@ export class DurableTerminalHost {
   beginShutdown(reason) {
     if (this.shutdownPromise) return this.shutdownPromise;
 
+    const activeReservations = [...this.reservations.keys()].filter((key) =>
+      this.activeReservation(key),
+    );
+    if (activeReservations.length > 0) {
+      throw new ControlError(
+        409,
+        "Durable terminal host has active worktree mutation reservations",
+      );
+    }
+
     this.shuttingDown = true;
     this.stopTimers();
     this.record("host-stopping", null, { reason });
     this.shutdownPromise = (async () => {
       await Promise.allSettled([...this.inFlightStarts]);
+      await Promise.allSettled([...this.keyOperations.values()]);
+      const reservationsAfterQuiescence = [
+        ...this.reservations.keys(),
+      ].filter((key) => this.activeReservation(key));
+      if (reservationsAfterQuiescence.length > 0) {
+        throw new ControlError(
+          409,
+          "Durable terminal host has active worktree mutation reservations",
+        );
+      }
       const results = await Promise.allSettled(
         [...this.sessions.values()].map((session) =>
           this.closeSession(session, "host-shutdown"),
@@ -1536,7 +2028,6 @@ function parseArguments(argumentsList) {
 
   if (!values["state-dir"]) throw new Error("--state-dir is required");
   if (!values.ttyd) throw new Error("--ttyd is required");
-  if (!existsSync(ttydPath)) throw new Error(`ttyd is not installed at '${ttydPath}'`);
 
   return {
     stateDirectory,

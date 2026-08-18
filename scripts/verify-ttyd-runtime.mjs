@@ -1,16 +1,22 @@
 import { chromium } from "playwright";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import {
+  defaultProcessController,
+  sameProcessIdentity,
+} from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
 const ttyd = join(repo, ".tools", "ttyd", "1.7.7", "ttyd.exe");
 const fixture = join(tmpdir(), `treemon-ttyd-runtime-'${Date.now()}`);
 const marker = "TREEMON_TTYD_RUNTIME_OK";
 let child;
+let childIdentity;
 let browser;
+const processController = defaultProcessController();
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -35,6 +41,74 @@ async function waitForUrl(url) {
       if (response.status < 500) return;
     } catch {}
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+
+  async function waitForIdentity(pid) {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const identity = await processController.inspect(pid);
+      if (identity) return identity;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    throw new Error(`Timed out capturing process identity for PID ${pid}`);
+  }
+
+  async function cleanupOwnedTree(rootIdentity) {
+    const tracked = new Map([
+      [`${rootIdentity.pid}:${rootIdentity.startIdentity}`, rootIdentity],
+    ]);
+
+    const discover = async () => {
+      const before = tracked.size;
+      const pending = [...tracked.values()];
+      for (const parent of pending) {
+        const actual = await processController.inspect(parent.pid);
+        if (!sameProcessIdentity(actual, parent)) continue;
+        const children = await processController.children(parent.pid);
+        for (const candidate of children) {
+          const verified = await processController.inspect(candidate.pid);
+          if (sameProcessIdentity(candidate, verified)) {
+            tracked.set(
+              `${candidate.pid}:${candidate.startIdentity}`,
+              candidate,
+            );
+          }
+        }
+      }
+      if (tracked.size > before) await discover();
+    };
+
+    await discover();
+    if (browser) await browser.close();
+    browser = null;
+
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      await discover();
+      const remaining = (
+        await Promise.all(
+          [...tracked.values()].map(async (identity) => ({
+            identity,
+            actual: await processController.inspect(identity.pid),
+          })),
+        )
+      )
+        .filter(({ identity, actual }) =>
+          sameProcessIdentity(identity, actual),
+        )
+        .map(({ identity }) => identity);
+      if (remaining.length === 0) return;
+
+      for (const identity of remaining) {
+        const actual = await processController.inspect(identity.pid);
+        if (sameProcessIdentity(actual, identity)) {
+          await processController.terminate(identity.pid);
+        }
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    }
+
+    throw new Error("ttyd verification cleanup left an owned process running");
   }
   throw new Error(`Timed out waiting for ${url}`);
 }
@@ -87,6 +161,7 @@ try {
       env: { ...process.env, TREEMON_TERMINAL_WORKTREE: fixture },
     },
   );
+  childIdentity = await waitForIdentity(child.pid);
 
   let output = "";
   child.stdout.on("data", (data) => (output += data.toString()));
@@ -129,14 +204,7 @@ try {
   assert(child.exitCode === null, `ttyd exited early with ${child.exitCode}: ${output}`);
   console.log(`PASS: stock ttyd ${child.pid} accepted input in ${fixture}`);
 } finally {
-  if (browser) await browser.close();
-  if (child?.exitCode === null) {
-    try {
-      execFileSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-    } catch {}
-  }
+  if (childIdentity) await cleanupOwnedTree(childIdentity);
+  else if (browser) await browser.close();
   rmSync(fixture, { recursive: true, force: true });
 }

@@ -50,6 +50,7 @@ let snapshotWhenOpened path snapshot =
     | Some (EmbeddedTerminalLifecycle.Running _) ->
         snapshot
     | Some (EmbeddedTerminalLifecycle.Failed _)
+    | Some (EmbeddedTerminalLifecycle.Interrupted _)
     | None ->
         upsert EmbeddedTerminalLifecycle.Starting path snapshot
 
@@ -120,7 +121,8 @@ let hasLiveTabs snapshot =
     |> List.exists (fun tab ->
         match tab.Lifecycle with
         | EmbeddedTerminalLifecycle.Starting
-        | EmbeddedTerminalLifecycle.Running _ ->
+        | EmbeddedTerminalLifecycle.Running _
+        | EmbeddedTerminalLifecycle.Interrupted _ ->
             true
         | EmbeddedTerminalLifecycle.Failed _ ->
             false)
@@ -146,6 +148,8 @@ let private lifecyclePresentation lifecycle =
     | EmbeddedTerminalLifecycle.Starting -> "starting", "Starting", "…"
     | EmbeddedTerminalLifecycle.Running _ -> "running", "Running", "●"
     | EmbeddedTerminalLifecycle.Failed _ -> "failed", "Failed", "!"
+    | EmbeddedTerminalLifecycle.Interrupted _ ->
+        "failed", "Interrupted", "!"
 
 let private terminalTab (callbacks: TerminalPaneCallbacks) activeWorktree (tab: EmbeddedTerminalTab) =
     let path = tab.Worktree
@@ -285,7 +289,10 @@ let private activeStatus state callbacks =
         Html.none
     | Some
         { Worktree = path
-          Lifecycle = EmbeddedTerminalLifecycle.Failed error }, _ ->
+          Lifecycle = EmbeddedTerminalLifecycle.Failed error }, _
+    | Some
+        { Worktree = path
+          Lifecycle = EmbeddedTerminalLifecycle.Interrupted error }, _ ->
         Html.div [
             prop.className "terminal-pane-error terminal-pane-message"
             prop.children [
@@ -338,7 +345,8 @@ let private runningIframes state =
                     prop.custom ("scrolling", "no")
                 ])
         | EmbeddedTerminalLifecycle.Starting
-        | EmbeddedTerminalLifecycle.Failed _ ->
+        | EmbeddedTerminalLifecycle.Failed _
+        | EmbeddedTerminalLifecycle.Interrupted _ ->
             None)
 
 let view state callbacks =

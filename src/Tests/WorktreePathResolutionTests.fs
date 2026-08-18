@@ -15,9 +15,11 @@ let private worktreePath root name =
     Path.Combine(Path.GetFullPath root, name) |> normPath
 
 let private makeWorktree path branch : WorktreeInfo =
+    Directory.CreateDirectory path |> ignore
     { Path = normPath path; Head = "abc123"; Branch = Some branch }
 
 let private makeDetachedWorktree path : WorktreeInfo =
+    Directory.CreateDirectory path |> ignore
     { Path = normPath path; Head = "abc123"; Branch = None }
 
 let private getAgentState (agent: MailboxProcessor<StateMsg>) =
@@ -46,12 +48,39 @@ let private createApiWithTerminal agent roots embeddedTerminal =
           DeployBranch = None }
 
 let private createApi agent roots =
-    createApiWithTerminal agent roots (EmbeddedTerminal.create ())
+    let stateDirectory =
+        Path.Combine(
+            roots |> List.head,
+            $".terminal-test-{Guid.NewGuid():N}"
+        )
+
+    let manager =
+        EmbeddedTerminal.createWithConfig
+            { NodeExecutable = "node"
+              HostScriptPath =
+                Path.GetFullPath(
+                    Path.Combine(
+                        __SOURCE_DIRECTORY__,
+                        "..",
+                        "..",
+                        "scripts",
+                        "durable-terminal-host.mjs"
+                    )
+                )
+              HostStateDirectory = stateDirectory
+              TtydExecutablePath =
+                Path.Combine(stateDirectory, "missing-ttyd.exe")
+              ShellCommand = "pwsh"
+              StartupTimeout = TimeSpan.FromSeconds 5.0
+              ControlRequestTimeout = TimeSpan.FromSeconds 5.0
+              ProbeInterval = TimeSpan.FromMilliseconds 25.0 }
+
+    createApiWithTerminal agent roots manager, manager
 
 let private deleteWorktree agent worktreeRoots wtPath =
     WorktreeApi.deleteWorktreeWith
         (fun _ _ _ -> async { return Ok () })
-        (fun _ -> async { return Ok () })
+        (fun _ operation -> operation ())
         (fun _ -> async { return () })
         agent
         (RefreshScheduler.buildRootPaths worktreeRoots)
@@ -215,10 +244,12 @@ type DeleteWorktreeResolutionTests() =
                             calls.Add("remove")
                             return Ok ()
                         })
-                    (fun _ ->
+                    (fun _ operation ->
                         async {
-                            calls.Add("close")
-                            return Ok ()
+                            calls.Add("reserve")
+                            let! result = operation ()
+                            calls.Add("release")
+                            return result
                         })
                     (fun _ ->
                         async {
@@ -233,7 +264,12 @@ type DeleteWorktreeResolutionTests() =
             | Ok () ->
                 Assert.That(
                     calls,
-                    Is.EqualTo([ "close"; "remove"; "state" ])
+                    Is.EqualTo(
+                        [ "reserve"
+                          "remove"
+                          "state"
+                          "release" ]
+                    )
                 )
         }
 
@@ -259,9 +295,9 @@ type DeleteWorktreeResolutionTests() =
                             calls.Add("remove")
                             return Ok ()
                         })
-                    (fun _ ->
+                    (fun _ _ ->
                         async {
-                            calls.Add("close")
+                            calls.Add("reserve")
                             return
                                 Error
                                     "terminal cleanup was not confirmed"
@@ -292,8 +328,57 @@ type DeleteWorktreeResolutionTests() =
                 | Ok () ->
                     Assert.Fail("Delete should have been aborted")
 
-                Assert.That(calls, Is.EqualTo([ "close" ]))
+                Assert.That(calls, Is.EqualTo([ "reserve" ]))
                 Assert.That(retained, Is.True))
+        }
+
+    [<Test>]
+    member _.``deleteWorktree releases its reservation when Git removal fails``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let calls = System.Collections.Generic.List<string>()
+            let! result =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ _ _ ->
+                        async {
+                            calls.Add("remove")
+                            return Error "Git removal failed"
+                        })
+                    (fun _ operation ->
+                        async {
+                            calls.Add("reserve")
+                            let! result = operation ()
+                            calls.Add("release")
+                            return result
+                        })
+                    (fun _ ->
+                        async {
+                            calls.Add("state")
+                        })
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (PathUtils.toWorktreePath targetPath)
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error ->
+                    Assert.That(error, Is.EqualTo("Git removal failed"))
+                | Ok () -> Assert.Fail("Delete should have failed")
+
+                Assert.That(
+                    calls,
+                    Is.EqualTo([ "reserve"; "remove"; "release" ])
+                ))
         }
 
 
@@ -305,16 +390,25 @@ type ArchiveWorktreeResolutionTests() =
     // NUnit setup assigns fresh directories for each test.
     let mutable tempDirA = ""
     let mutable tempDirB = ""
+    // NUnit fixture teardown must retain managers whose independently-lived hosts need explicit cleanup.
+    let mutable terminalManagers: EmbeddedTerminal.Manager list = []
 
     [<SetUp>]
     member _.Setup() =
         tempDirA <- Path.Combine(Path.GetTempPath(), $"treemon-test-a-{Guid.NewGuid()}")
         tempDirB <- Path.Combine(Path.GetTempPath(), $"treemon-test-b-{Guid.NewGuid()}")
+        terminalManagers <- []
         Directory.CreateDirectory(tempDirA) |> ignore
         Directory.CreateDirectory(tempDirB) |> ignore
 
     [<TearDown>]
     member _.TearDown() =
+        terminalManagers
+        |> List.iter (fun manager ->
+            EmbeddedTerminal.shutdownHost manager
+            |> Async.RunSynchronously
+            |> ignore)
+
         if Directory.Exists(tempDirA) then Directory.Delete(tempDirA, recursive = true)
         if Directory.Exists(tempDirB) then Directory.Delete(tempDirB, recursive = true)
 
@@ -334,7 +428,10 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = createApi agent [ tempDirA; tempDirB ]
+            let api, manager =
+                createApi agent [ tempDirA; tempDirB ]
+
+            terminalManagers <- manager :: terminalManagers
 
             let! result =
                 api.archiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "feature-x"))
@@ -366,7 +463,10 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = createApi agent [ tempDirA; tempDirB ]
+            let api, manager =
+                createApi agent [ tempDirA; tempDirB ]
+
+            terminalManagers <- manager :: terminalManagers
 
             let! result =
                 api.archiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirB "main"))
@@ -401,7 +501,10 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = createApi agent [ tempDirA; tempDirB ]
+            let api, manager =
+                createApi agent [ tempDirA; tempDirB ]
+
+            terminalManagers <- manager :: terminalManagers
 
             let! result =
                 api.unarchiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "feature-x"))
@@ -428,7 +531,8 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA ]
 
-            let api = createApi agent [ tempDirA ]
+            let api, manager = createApi agent [ tempDirA ]
+            terminalManagers <- manager :: terminalManagers
 
             let! result =
                 api.archiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "detached"))
@@ -456,8 +560,16 @@ type ArchiveWorktreeResolutionTests() =
                         makeWorktree targetPath "feature-x" ] ]
 
             let manager =
-                let hostScriptPath = Path.Combine(tempDirA, "fake-host.mjs")
-                File.WriteAllText(hostScriptPath, "")
+                let hostScriptPath =
+                    Path.GetFullPath(
+                        Path.Combine(
+                            __SOURCE_DIRECTORY__,
+                            "..",
+                            "..",
+                            "scripts",
+                            "durable-terminal-host.mjs"
+                        )
+                    )
 
                 EmbeddedTerminal.createWithConfig
                     { NodeExecutable = "node"
@@ -519,7 +631,7 @@ type ArchiveWorktreeResolutionTests() =
                 WorktreeApi.updateArchivedBranchesWith
                     agent
                     (RefreshScheduler.buildRootPaths [ tempDirA ])
-                    (fun _ ->
+                    (fun _ _ ->
                         async {
                             return
                                 Error

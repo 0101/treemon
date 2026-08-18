@@ -10,6 +10,10 @@ import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
+import {
+  defaultProcessController,
+  sameProcessIdentity,
+} from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
 const ttyd = join(repo, ".tools", "ttyd", "1.7.7", "ttyd.exe");
@@ -39,12 +43,17 @@ let apiPort;
 let canvasPort;
 let vitePort;
 let server;
+let serverIdentity;
 let restartedServer;
+let restartedServerIdentity;
 let vite;
+let viteIdentity;
 let browser;
 let page;
 let hostState;
+let hostIdentity;
 let terminalSession;
+const processController = defaultProcessController();
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -158,13 +167,20 @@ function startVite() {
   );
 }
 
-async function stopProcess(child, description) {
+async function stopProcess(child, identity, description) {
   if (!child || child.exitCode !== null) return;
   const pid = child.pid;
-  child.kill();
+  const actual = await processController.inspect(pid);
+  if (!sameProcessIdentity(actual, identity)) return;
+  await processController.terminate(pid);
   await waitFor(
     `${description} PID ${pid} to exit`,
-    () => child.exitCode !== null || !processIsAlive(pid),
+    async () =>
+      child.exitCode !== null ||
+      !sameProcessIdentity(
+        await processController.inspect(pid),
+        identity,
+      ),
     15_000,
   );
 }
@@ -242,20 +258,30 @@ async function proveTerminal(marker, expectedPid) {
 }
 
 async function shutdownHost() {
-  if (!hostState || !processIsAlive(hostState.pid)) return;
+  if (!hostState) return;
+  const actual = await processController.inspect(hostState.pid);
+  if (!sameProcessIdentity(actual, hostIdentity)) return;
 
   try {
     await control("/shutdown", "POST");
     await waitFor(
       `durable host PID ${hostState.pid} to exit`,
-      () => !processIsAlive(hostState.pid),
+      async () =>
+        !sameProcessIdentity(
+          await processController.inspect(hostState.pid),
+          hostIdentity,
+        ),
       15_000,
     );
   } catch {
     process.stderr.write(
       `Graceful durable host shutdown failed; stopping recorded host PID ${hostState.pid}.\n`,
     );
-    process.kill(hostState.pid);
+    const revalidated =
+      await processController.inspect(hostState.pid);
+    if (sameProcessIdentity(revalidated, hostIdentity)) {
+      await processController.terminate(hostState.pid);
+    }
   }
 }
 
@@ -293,8 +319,16 @@ try {
   );
 
   server = startServer();
+  serverIdentity = await waitFor(
+    "first Treemon server process identity",
+    () => processController.inspect(server.pid),
+  );
   await waitForHttp(`http://localhost:${apiPort}/`);
   vite = startVite();
+  viteIdentity = await waitFor(
+    "Vite process identity",
+    () => processController.inspect(vite.pid),
+  );
   await waitForHttp(`http://localhost:${vitePort}/`);
 
   browser = await chromium.launch({ headless: true });
@@ -304,6 +338,8 @@ try {
   await page.click('button[title="Open embedded terminal"]');
 
   hostState = await waitFor("durable host state", () => readHostState());
+  hostIdentity = await processController.inspect(hostState.pid);
+  assert(hostIdentity, "Could not capture the durable host identity");
   terminalSession = await waitFor(
     "durable ttyd and PowerShell identities",
     async () => {
@@ -327,12 +363,16 @@ try {
   );
   const afterBrowserReload = await currentTerminalSession();
 
-  await stopProcess(server, "first Treemon server");
+  await stopProcess(server, serverIdentity, "first Treemon server");
   assert(processIsAlive(hostState.pid), "Durable host exited with the first Treemon server");
   assert(processIsAlive(terminalSession.ttydPid), "ttyd exited with the first Treemon server");
   assert(processIsAlive(terminalSession.shellPid), "PowerShell exited with the first Treemon server");
 
   restartedServer = startServer();
+  restartedServerIdentity = await waitFor(
+    "restarted Treemon server process identity",
+    () => processController.inspect(restartedServer.pid),
+  );
   await waitForHttp(`http://localhost:${apiPort}/`);
   await page.reload();
   const restartedTerminalUrl = await proveTerminal(
@@ -409,7 +449,10 @@ try {
   if (
     terminalSession &&
     hostState &&
-    processIsAlive(hostState.pid)
+    sameProcessIdentity(
+      await processController.inspect(hostState.pid),
+      hostIdentity,
+    )
   ) {
     try {
       await control(`/sessions/${encodeURIComponent(terminalSession.id)}`, "DELETE");
@@ -419,9 +462,13 @@ try {
   }
 
   if (browser) await browser.close();
-  await stopProcess(server, "first Treemon server");
-  await stopProcess(restartedServer, "restarted Treemon server");
-  await stopProcess(vite, "Vite");
+  await stopProcess(server, serverIdentity, "first Treemon server");
+  await stopProcess(
+    restartedServer,
+    restartedServerIdentity,
+    "restarted Treemon server",
+  );
+  await stopProcess(vite, viteIdentity, "Vite");
   await shutdownHost();
   cleanupRuntimeFiles();
   rmSync(fixture, { recursive: true, force: true });

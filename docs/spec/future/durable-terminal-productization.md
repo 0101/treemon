@@ -27,12 +27,16 @@ The current implementation is deliberately checkout-scoped:
 - host discovery lives in the checkout's `.agents/durable-terminal/`;
 - reconnect uses a bounded raw-byte ring plus resize rather than serialized terminal state;
 - one session-lifetime attachment capability is returned in the iframe endpoint;
-- the shared UI lifecycle is only `Starting | Running | Failed`;
+- the shared UI lifecycle is `Starting | Running | Failed | Interrupted`, with interrupted tabs
+  retained and independently dismissible/restartable across host replacement;
 - checkout-local startup is serialized by a state-directory lock and each live host manifest has a
   unique runtime generation plus exact PID/start identity, but discovery is still confined to one
   checkout rather than a machine-global artifact generation;
-- explicit close already retains a failed session until its tracked ttyd/PowerShell process tree is
-  verified gone, and delete/archive fail closed on any non-authoritative outcome;
+- explicit close already retains a failed session until every exact-identity ttyd descendant is
+  verified gone, and delete/archive hold a renewable per-worktree host reservation from
+  authoritative cleanup through mutation;
+- the immediately preceding protocol-1 manifest remains listable, closable, and reusable for
+  existing keys in a bounded drain-only compatibility path;
 - deployment preserves a running host but does not upgrade or drain host generations;
 - operations are standalone Node scripts rather than `tm` commands.
 
@@ -81,7 +85,10 @@ A deployment follows these rules:
 
 A breaking control protocol starts a new generation. The server retains the smallest versioned
 client surface required to list and explicitly close older live sessions until they drain; it does
-not reinterpret an unknown protocol as an empty registry.
+not reinterpret an unknown protocol as an empty registry. The checkout-local implementation's
+protocol-1 parser is the concrete bounded precedent: it supports only the immediately prior schema,
+starts no new legacy keys, and is removable once no supported persisted or live protocol-1
+manifest can remain.
 
 The first productized deployment adopts a running checkout-local protocol-v2 host as a
 **legacy-draining generation**. It lists and controls that host but sends every new terminal to the
@@ -232,11 +239,12 @@ smallest Windows Job Object boundary around ttyd; do not replace the proven prox
 without that evidence.
 
 Track host, ttyd, and PowerShell identity from owned startup metadata. Never discover or kill by
-process name. The checkout-local host already closes the upstream, waits, force-terminates only
-recorded PID trees, verifies every tracked PID is gone, and retains failures in the registry.
-Productization must preserve that contract while adding real-process host/ttyd crash fault
-injection; add a Windows Job Object only if those isolated tests demonstrate an orphan the
-PID-scoped boundary cannot clean.
+process name. The checkout-local host captures exact creation identity, discovers descendants only
+from known parents, snapshots them before roots disappear, retains reparented descendants, and
+revalidates every explicit PID immediately before termination. PID reuse is never signalled, and a
+surviving or unverified owned process retains the failed session. Productization must preserve that
+contract while adding real-process host/ttyd crash fault injection; add a Windows Job Object only
+if those isolated tests demonstrate an orphan the identity-scoped boundary cannot clean.
 
 ### Copilot binding and recovery
 

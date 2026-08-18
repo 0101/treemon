@@ -5,9 +5,11 @@ open System.Diagnostics
 open System.IO
 open System.Net.Http
 open System.Net.Http.Headers
+open System.Security.Cryptography
 open System.Text
 open System.Text.Json
 open System.Threading
+open System.Threading.Tasks
 open FsToolkit.ErrorHandling
 open Shared
 
@@ -27,7 +29,8 @@ type private HostIdentity =
       ProcessStartTicks: int64 }
 
 type private HostConnection =
-    { Generation: string
+    { Version: int
+      Generation: string
       Pid: int
       ProcessStartTicks: int64
       ProcessStartExact: bool
@@ -38,6 +41,10 @@ type private HostConnection =
 type private HostSession =
     { Id: string
       Tab: EmbeddedTerminalTab }
+
+type private Reservation =
+    { Id: string
+      Sessions: HostSession list }
 
 type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
@@ -51,6 +58,10 @@ type private Message =
     | CloseStrict of
         WorktreePath *
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
+    | WithReservedCleanup of
+        WorktreePath *
+        (unit -> Async<Result<unit, string>>) *
+        AsyncReplyChannel<Result<unit, string>>
     | ShutdownHost of AsyncReplyChannel<Result<unit, string>>
 
 type Manager = private Manager of MailboxProcessor<Message>
@@ -86,8 +97,40 @@ let private isPath path (tab: EmbeddedTerminalTab) =
         (WorktreePath.value path)
         (WorktreePath.value tab.Worktree)
 
+let private isInterrupted tab =
+    match tab.Lifecycle with
+    | EmbeddedTerminalLifecycle.Interrupted _ -> true
+    | _ -> false
+
 let private withoutPath path snapshot =
     { Tabs = snapshot.Tabs |> List.filter (isPath path >> not) }
+
+let private mergeSnapshot previous current =
+    let replacementFor tab =
+        current.Tabs |> List.tryFind (isPath tab.Worktree)
+
+    let retained =
+        previous.Tabs
+        |> List.choose (fun tab ->
+            match replacementFor tab, tab.Lifecycle with
+            | Some replacement, _ -> Some replacement
+            | None, EmbeddedTerminalLifecycle.Interrupted _ -> Some tab
+            | None, _ -> None)
+
+    let appended =
+        current.Tabs
+        |> List.filter (fun tab ->
+            retained
+            |> List.exists (isPath tab.Worktree)
+            |> not)
+
+    { Tabs =
+        retained @ appended
+        |> List.fold (fun tabs tab ->
+            if tabs |> List.exists (isPath tab.Worktree) then
+                tabs
+            else
+                tabs @ [ tab ]) [] }
 
 let private withFailure path error snapshot =
     match snapshot.Tabs |> List.tryFind (isPath path) with
@@ -112,7 +155,7 @@ let private withHostFailure error snapshot =
         |> List.map (fun tab ->
             { tab with
                 Lifecycle =
-                    EmbeddedTerminalLifecycle.Failed(
+                    EmbeddedTerminalLifecycle.Interrupted(
                         $"Durable terminal host unavailable: {error}"
                     ) }) }
 
@@ -166,18 +209,38 @@ let private parseHostConnection (text: string) =
         result {
             let! version = requiredInt "version" root
 
-            if version <> hostProtocolVersion then
+            if version <> 1 && version <> hostProtocolVersion then
                 return! Error $"Unsupported durable terminal host protocol version {version}"
 
-            let! generation = requiredString "generation" root
             let! pid = requiredInt "pid" root
-            let! processStartTicks =
-                requiredInt64String "processStartTicks" root
-            let! processStartExact =
-                requiredBool "processStartExact" root
             let! controlPort = requiredInt "controlPort" root
             let! controlToken = requiredString "controlToken" root
             let! startedAt = requiredString "startedAt" root
+            let! generation, processStartTicks, processStartExact =
+                if version = hostProtocolVersion then
+                    result {
+                        let! generation = requiredString "generation" root
+                        let! processStartTicks =
+                            requiredInt64String "processStartTicks" root
+                        let! processStartExact =
+                            requiredBool "processStartExact" root
+
+                        return
+                            generation,
+                            processStartTicks,
+                            processStartExact
+                    }
+                else
+                    match DateTimeOffset.TryParse startedAt with
+                    | true, started when started.UtcTicks > 0L ->
+                        Ok(
+                            $"legacy-v1-{pid}-{started.UtcTicks}",
+                            started.UtcTicks,
+                            false
+                        )
+                    | _ ->
+                        Error
+                            "Invalid protocol-1 durable terminal host start identity"
 
             if pid <= 0 then
                 return! Error "Invalid durable terminal host PID"
@@ -192,7 +255,8 @@ let private parseHostConnection (text: string) =
                 return! Error "Invalid durable terminal host control token"
 
             return
-                { Generation = generation
+                { Version = version
+                  Generation = generation
                   Pid = pid
                   ProcessStartTicks = processStartTicks
                   ProcessStartExact = processStartExact
@@ -262,6 +326,34 @@ let private parseHostSessions (text: string) =
     | ex ->
         Error $"Could not read durable terminal host response: {ex.Message}"
 
+let private parseReservation (text: string) =
+    try
+        use document = JsonDocument.Parse(text)
+        let root = document.RootElement
+
+        result {
+            let! reservation =
+                match tryProperty "reservation" root with
+                | Some value
+                    when value.ValueKind
+                         = JsonValueKind.Object ->
+                    Ok value
+                | _ ->
+                    Error
+                        "Durable terminal host response omitted 'reservation'"
+
+            let! id = requiredString "id" reservation
+            let! sessions = parseHostSessions text
+            return { Id = id; Sessions = sessions }
+        }
+    with
+    | :? JsonException as ex ->
+        Error
+            $"Invalid durable terminal reservation response: {ex.Message}"
+    | ex ->
+        Error
+            $"Could not read durable terminal reservation response: {ex.Message}"
+
 let private snapshot sessions =
     { Tabs = sessions |> List.map _.Tab }
 
@@ -325,8 +417,7 @@ let private processIdentityMatches connection =
             elif difference <= TimeSpan.FromSeconds(2.0).Ticks then
                 Ok true
             else
-                Error
-                    $"Durable terminal host PID {connection.Pid} has an unverifiable estimated start identity"
+                Ok false
     with
     | :? ArgumentException -> Ok false
     | :? InvalidOperationException -> Ok false
@@ -400,29 +491,36 @@ let private parseHealth connection (text: string) =
         result {
             let! version = requiredInt "version" root
 
-            if version <> hostProtocolVersion then
+            if version <> connection.Version then
                 return!
                     Error
-                        $"Unsupported durable terminal host protocol version {version}"
+                        $"Durable terminal host manifest protocol {connection.Version} does not match health protocol {version}"
 
-            let! generation = requiredString "generation" root
             let! pid = requiredInt "pid" root
-            let! processStartTicks =
-                requiredInt64String "processStartTicks" root
-            let! processStartExact =
-                requiredBool "processStartExact" root
             let! startedAt = requiredString "startedAt" root
 
-            if
-                generation <> connection.Generation
-                || pid <> connection.Pid
-                || processStartTicks <> connection.ProcessStartTicks
-                || processStartExact <> connection.ProcessStartExact
-                || startedAt <> connection.StartedAt
-            then
+            if pid <> connection.Pid || startedAt <> connection.StartedAt then
                 return!
                     Error
                         "Durable terminal host state does not match the running control endpoint"
+
+            if version = hostProtocolVersion then
+                let! generation = requiredString "generation" root
+                let! processStartTicks =
+                    requiredInt64String "processStartTicks" root
+                let! processStartExact =
+                    requiredBool "processStartExact" root
+
+                if
+                    generation <> connection.Generation
+                    || processStartTicks
+                       <> connection.ProcessStartTicks
+                    || processStartExact
+                       <> connection.ProcessStartExact
+                then
+                    return!
+                        Error
+                            "Durable terminal host state does not match the running control endpoint"
         }
     with
     | :? JsonException as ex ->
@@ -483,25 +581,124 @@ let private sameConnectionOwner
     (left: HostConnection)
     (right: HostConnection)
     =
-    sameHostIdentity (hostIdentity left) (hostIdentity right)
+    if left.Version = 1 || right.Version = 1 then
+        left.Version = right.Version
+        && left.Pid = right.Pid
+        && left.ProcessStartTicks = right.ProcessStartTicks
+        && left.ControlPort = right.ControlPort
+        && left.ControlToken = right.ControlToken
+        && left.StartedAt = right.StartedAt
+    else
+        sameHostIdentity (hostIdentity left) (hostIdentity right)
 
-let private removeStaleState config expected =
-    match readHostConnection config with
-    | Ok None -> Ok ()
-    | Ok (Some current) when sameConnectionOwner current expected ->
+let private removeManifestIfConnectionOwned path expected =
+    let claimedPath =
+        $"{path}.{Environment.ProcessId}.{Guid.NewGuid():N}.reclaim"
+
+    let restoreClaim () =
         try
-            File.Delete(statePath config)
-            Ok ()
+            if File.Exists claimedPath && not (File.Exists path) then
+                File.Move(claimedPath, path)
+
+            Ok false
         with ex ->
             Error
-                $"Could not remove stale durable terminal host state: {ex.Message}"
-    | Ok (Some _) ->
-        Error
-            "Durable terminal host ownership changed while stale state was being reclaimed"
+                $"Could not restore unclaimed durable terminal host state: {ex.Message}"
+
+    let claim () =
+        try
+            if File.Exists path then
+                File.Move(path, claimedPath)
+                Ok true
+            else
+                Ok false
+        with
+        | :? FileNotFoundException -> Ok false
+        | ex ->
+            Error
+                $"Could not claim durable terminal host state for removal: {ex.Message}"
+
+    match claim () with
     | Error error -> Error error
+    | Ok false -> Ok true
+    | Ok true ->
+        let current =
+            try
+                File.ReadAllText claimedPath
+                |> parseHostConnection
+            with ex ->
+                Error
+                    $"Could not read claimed durable terminal host state: {ex.Message}"
+
+        match current with
+        | Error error ->
+            restoreClaim ()
+            |> Result.bind (fun _ -> Error error)
+        | Ok current
+            when sameConnectionOwner current expected |> not ->
+            restoreClaim ()
+        | Ok _ ->
+            try
+                File.Delete claimedPath
+                Ok true
+            with ex ->
+                restoreClaim ()
+                |> Result.bind (fun _ ->
+                    Error
+                        $"Could not remove claimed durable terminal host state: {ex.Message}")
+
+let internal removeManifestIfOwned path expectedText =
+    parseHostConnection expectedText
+    |> Result.bind (removeManifestIfConnectionOwned path)
+
+let private removeStaleState config expected =
+    removeManifestIfConnectionOwned
+        (statePath config)
+        expected
+    |> Result.bind (function
+        | true -> Ok ()
+        | false ->
+            Error
+                "Durable terminal host ownership changed while stale state was being reclaimed")
 
 let private startupLockPath config =
     Path.Combine(config.HostStateDirectory, "host.lock")
+
+let private worktreeLockPath config worktreePath =
+    let key =
+        worktreePath
+        |> WorktreePath.value
+        |> PathUtils.normalizePath
+        |> Encoding.UTF8.GetBytes
+        |> SHA256.HashData
+        |> Convert.ToHexString
+        |> _.ToLowerInvariant()
+
+    Path.Combine(
+        config.HostStateDirectory,
+        "worktree-locks",
+        $"{key}.lock"
+    )
+
+let private tryAcquireWorktreeLock config worktreePath =
+    try
+        let path = worktreeLockPath config worktreePath
+        Directory.CreateDirectory(Path.GetDirectoryName path)
+        |> ignore
+
+        new FileStream(
+            path,
+            FileMode.OpenOrCreate,
+            FileAccess.ReadWrite,
+            FileShare.None
+        )
+        |> Some
+        |> Ok
+    with
+    | :? IOException -> Ok None
+    | ex ->
+        Error
+            $"Could not acquire terminal worktree ownership: {ex.Message}"
 
 let private tryAcquireStartupLock config =
     try
@@ -621,13 +818,13 @@ let private waitForHost config deadline startedPid =
 
     wait ()
 
-let private ensureHost config =
+let private ensureHostWithTtydRequirement requireTtyd config =
     async {
         if not (File.Exists config.HostScriptPath) then
             return
                 Error
                     $"Durable terminal host script is missing at '{config.HostScriptPath}'"
-        elif not (File.Exists config.TtydExecutablePath) then
+        elif requireTtyd && not (File.Exists config.TtydExecutablePath) then
             return
                 Error
                     $"ttyd is not installed at '{config.TtydExecutablePath}'. Run '.\\treemon.ps1 setup-ttyd'."
@@ -708,6 +905,12 @@ let private ensureHost config =
             return! acquireOrDiscover ()
     }
 
+let private ensureHost =
+    ensureHostWithTtydRequirement true
+
+let private ensureControlHost =
+    ensureHostWithTtydRequirement false
+
 let private getHostSessions config connection =
     asyncResult {
         let! content =
@@ -761,11 +964,6 @@ let private startTerminal config instanceId state worktreePath =
             let! announced =
                 announceIfNeeded config state connection instanceId
 
-            let body =
-                JsonSerializer.Serialize(
-                    {| worktreePath = WorktreePath.value worktreePath |}
-                )
-
             let reconcile failure =
                 async {
                     match! getHostSessions config connection with
@@ -773,12 +971,20 @@ let private startTerminal config instanceId state worktreePath =
                         when sessions
                              |> List.exists (fun session ->
                                  isPath worktreePath session.Tab) ->
-                        let current = snapshot sessions
+                        let current =
+                            sessions
+                            |> snapshot
+                            |> mergeSnapshot announced.LastSnapshot
+
                         return
                             Ok current,
                             { announced with LastSnapshot = current }
                     | Ok sessions ->
-                        let current = snapshot sessions
+                        let current =
+                            sessions
+                            |> snapshot
+                            |> mergeSnapshot announced.LastSnapshot
+
                         return
                             Error
                                 $"{failure}; reconciliation found no session for '{WorktreePath.value worktreePath}'",
@@ -798,21 +1004,60 @@ let private startTerminal config instanceId state worktreePath =
                             { announced with LastSnapshot = current }
                 }
 
-            match!
-                request
-                    config
-                    connection
-                    HttpMethod.Post
-                    "/sessions"
-                    (Some body)
-            with
-            | Error error -> return! reconcile error
-            | Ok content ->
-                match parseHostSessions content with
+            if connection.Version = 1 then
+                match! getHostSessions config connection with
                 | Error error -> return! reconcile error
+                | Ok sessions
+                    when sessions
+                         |> List.exists (fun session ->
+                             isPath worktreePath session.Tab) ->
+                    let current =
+                        sessions
+                        |> snapshot
+                        |> mergeSnapshot announced.LastSnapshot
+
+                    return
+                        Ok current,
+                        { announced with LastSnapshot = current }
                 | Ok sessions ->
-                    let current = snapshot sessions
-                    return Ok current, { announced with LastSnapshot = current }
+                    let error =
+                        "The protocol-1 durable terminal host is in drain-only compatibility mode; close its remaining tabs before starting a new terminal"
+
+                    let current =
+                        sessions
+                        |> snapshot
+                        |> mergeSnapshot announced.LastSnapshot
+                        |> withFailure worktreePath error
+
+                    return Error error, { announced with LastSnapshot = current }
+            else
+                let body =
+                    JsonSerializer.Serialize(
+                        {| worktreePath =
+                            WorktreePath.value worktreePath |}
+                    )
+
+                match!
+                    request
+                        config
+                        connection
+                        HttpMethod.Post
+                        "/sessions"
+                        (Some body)
+                with
+                | Error error -> return! reconcile error
+                | Ok content ->
+                    match parseHostSessions content with
+                    | Error error -> return! reconcile error
+                    | Ok sessions ->
+                        let current =
+                            sessions
+                            |> snapshot
+                            |> mergeSnapshot announced.LastSnapshot
+
+                        return
+                            Ok current,
+                            { announced with LastSnapshot = current }
     }
 
 let private reclaimDeadHost config connection =
@@ -831,12 +1076,18 @@ let private hostFailure error state =
 let private getTerminals instanceId state config =
     async {
         match! discoverHost config with
-        | Ok MissingHost when state.KnownHost.IsNone ->
+        | Ok MissingHost
+            when state.KnownHost.IsNone
+                 && (state.LastSnapshot.Tabs
+                     |> List.exists isInterrupted
+                     |> not) ->
             return
                 EmbeddedTerminalSnapshot.empty,
                 { state with
                     LastSnapshot = EmbeddedTerminalSnapshot.empty
                     AnnouncedHost = None }
+        | Ok MissingHost when state.KnownHost.IsNone ->
+            return state.LastSnapshot, state
         | Ok MissingHost ->
             let error =
                 "Previously known durable terminal host metadata disappeared; terminal processes may have been interrupted"
@@ -861,9 +1112,49 @@ let private getTerminals instanceId state config =
                 Log.log "EmbeddedTerminal" error
                 return hostFailure error announced
             | Ok sessions ->
-                let current = snapshot sessions
+                let current =
+                    sessions
+                    |> snapshot
+                    |> mergeSnapshot announced.LastSnapshot
+
                 return current, { announced with LastSnapshot = current }
     }
+
+let private waitForLegacyHostExit config connection =
+    let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
+
+    let rec wait () =
+        async {
+            match processIdentityMatches connection with
+            | Ok false ->
+                match reclaimDeadHost config connection with
+                | Ok true -> return Ok ()
+                | Ok false ->
+                    match readHostConnection config with
+                    | Ok None -> return Ok ()
+                    | Ok (Some current)
+                        when sameConnectionOwner current connection
+                             |> not ->
+                        return Ok ()
+                    | _ when DateTimeOffset.UtcNow >= deadline ->
+                        return
+                            Error
+                                "Timed out reclaiming protocol-1 durable terminal metadata"
+                    | _ ->
+                        do! Async.Sleep config.ProbeInterval
+                        return! wait ()
+                | Error error -> return Error error
+            | Ok true when DateTimeOffset.UtcNow < deadline ->
+                do! Async.Sleep config.ProbeInterval
+                return! wait ()
+            | Ok true ->
+                return
+                    Error
+                        $"Timed out waiting for protocol-1 durable terminal host PID {connection.Pid} to drain"
+            | Error error -> return Error error
+        }
+
+    wait ()
 
 let private closeTerminalStrict instanceId state config worktreePath =
     async {
@@ -874,8 +1165,49 @@ let private closeTerminalStrict instanceId state config worktreePath =
             Error error, { failureState with LastSnapshot = current }
 
         let confirmedClosed sessions confirmedState =
-            let current = snapshot sessions
+            let current =
+                sessions
+                |> snapshot
+                |> mergeSnapshot confirmedState.LastSnapshot
+                |> withoutPath worktreePath
+
             Ok current, { confirmedState with LastSnapshot = current }
+
+        let finishConfirmed connection sessions confirmedState =
+            async {
+                if connection.Version <> 1 || not (List.isEmpty sessions) then
+                    return confirmedClosed sessions confirmedState
+                else
+                    match!
+                        request
+                            config
+                            connection
+                            HttpMethod.Post
+                            "/shutdown"
+                            None
+                    with
+                    | Error error ->
+                        return
+                            closeFailure
+                                $"Protocol-1 terminal closed, but its empty host did not drain: {error}"
+                                confirmedState.LastSnapshot
+                                confirmedState
+                    | Ok _ ->
+                        match! waitForLegacyHostExit config connection with
+                        | Ok () ->
+                            return
+                                confirmedClosed
+                                    sessions
+                                    { confirmedState with
+                                        AnnouncedHost = None
+                                        KnownHost = None }
+                        | Error error ->
+                            return
+                                closeFailure
+                                    error
+                                    confirmedState.LastSnapshot
+                                    confirmedState
+            }
 
         let reconcileClose connection failure reconcileState =
             async {
@@ -885,7 +1217,11 @@ let private closeTerminalStrict instanceId state config worktreePath =
                          |> List.exists (fun session ->
                              isPath worktreePath session.Tab)
                          |> not ->
-                    return confirmedClosed sessions reconcileState
+                    return!
+                        finishConfirmed
+                            connection
+                            sessions
+                            reconcileState
                 | Ok sessions ->
                     let error =
                         $"{failure}; the durable host still reports the terminal session"
@@ -893,7 +1229,9 @@ let private closeTerminalStrict instanceId state config worktreePath =
                     return
                         closeFailure
                             error
-                            (snapshot sessions)
+                            (sessions
+                             |> snapshot
+                             |> mergeSnapshot reconcileState.LastSnapshot)
                             reconcileState
                 | Error reconcileError ->
                     let error =
@@ -953,7 +1291,11 @@ let private closeTerminalStrict instanceId state config worktreePath =
             | Ok sessions ->
                 match sessions |> List.tryFind (fun session -> isPath worktreePath session.Tab) with
                 | None ->
-                    return confirmedClosed sessions announced
+                    return!
+                        finishConfirmed
+                            connection
+                            sessions
+                            announced
                 | Some session ->
                     let path = $"/sessions/{Uri.EscapeDataString session.Id}"
 
@@ -993,10 +1335,365 @@ let private closeTerminalStrict instanceId state config worktreePath =
                                 return
                                     closeFailure
                                         error
-                                        (snapshot remaining)
+                                        (remaining
+                                         |> snapshot
+                                         |> mergeSnapshot announced.LastSnapshot)
                                         announced
                             else
-                                return confirmedClosed remaining announced
+                                return!
+                                    finishConfirmed
+                                        connection
+                                        remaining
+                                        announced
+    }
+
+let private closeTerminal instanceId state config worktreePath =
+    let interrupted =
+        state.LastSnapshot.Tabs
+        |> List.tryFind (isPath worktreePath)
+        |> Option.exists isInterrupted
+
+    let dismiss snapshot nextState =
+        let current =
+            snapshot |> withoutPath worktreePath
+
+        current, { nextState with LastSnapshot = current }
+
+    async {
+        if not interrupted then
+            let! result, next =
+                closeTerminalStrict
+                    instanceId
+                    state
+                    config
+                    worktreePath
+
+            return Result.defaultValue next.LastSnapshot result, next
+        else
+            match! discoverHost config with
+            | Ok (HealthyHost connection) ->
+                let! announced =
+                    announceIfNeeded config state connection instanceId
+
+                match! getHostSessions config connection with
+                | Ok sessions
+                    when sessions
+                         |> List.exists (fun session ->
+                             isPath worktreePath session.Tab) ->
+                    let! result, next =
+                        closeTerminalStrict
+                            instanceId
+                            announced
+                            config
+                            worktreePath
+
+                    return
+                        Result.defaultValue next.LastSnapshot result,
+                        next
+                | Ok sessions ->
+                    return
+                        dismiss
+                            (sessions
+                             |> snapshot
+                             |> mergeSnapshot announced.LastSnapshot)
+                            announced
+                | Error error ->
+                    Log.log "EmbeddedTerminal" error
+                    return dismiss announced.LastSnapshot announced
+            | Ok (DeadHost(connection, _)) ->
+                match reclaimDeadHost config connection with
+                | Ok _ -> ()
+                | Error error ->
+                    Log.log "EmbeddedTerminal" error
+
+                return dismiss state.LastSnapshot state
+            | Ok MissingHost ->
+                return dismiss state.LastSnapshot state
+            | Error error ->
+                Log.log "EmbeddedTerminal" error
+                return dismiss state.LastSnapshot state
+    }
+
+let private renewReservation
+    config
+    connection
+    (reservationId: string)
+    (cancellation: CancellationToken)
+    =
+    let path =
+        $"/reservations/{Uri.EscapeDataString reservationId}/renew"
+
+    let rec renew () =
+        async {
+            try
+                do!
+                    Task.Delay(
+                        TimeSpan.FromSeconds 30.0,
+                        cancellation
+                    )
+                    |> Async.AwaitTask
+
+                match!
+                    request
+                        config
+                        connection
+                        HttpMethod.Post
+                        path
+                        None
+                with
+                | Ok _ -> return! renew ()
+                | Error error ->
+                    return
+                        Error
+                            $"Durable terminal cleanup reservation renewal failed: {error}"
+            with :? OperationCanceledException ->
+                return Ok ()
+        }
+
+    renew ()
+
+let private releaseReservation
+    config
+    connection
+    (reservationId: string)
+    =
+    let path =
+        $"/reservations/{Uri.EscapeDataString reservationId}"
+
+    request config connection HttpMethod.Delete path None
+    |> AsyncResult.ignore
+
+let private runReservedOperation
+    config
+    connection
+    reservationId
+    operation
+    =
+    async {
+        use renewalCancellation = new CancellationTokenSource()
+        let! renewal =
+            renewReservation
+                config
+                connection
+                reservationId
+                renewalCancellation.Token
+            |> Async.StartChild
+
+        let! operationResult =
+            async {
+                try
+                    return! operation ()
+                with ex ->
+                    return
+                        Error
+                            $"Worktree mutation failed unexpectedly: {ex.Message}"
+            }
+
+        renewalCancellation.Cancel()
+        let! renewalResult = renewal
+        let! releaseResult =
+            releaseReservation config connection reservationId
+
+        return
+            match operationResult, renewalResult, releaseResult with
+            | Ok (), Ok (), Ok () -> Ok ()
+            | Error error, Ok (), Ok () -> Error error
+            | Ok (), Error error, Ok () -> Error error
+            | Ok (), Ok (), Error error ->
+                Error
+                    $"Worktree mutation completed, but terminal cleanup reservation release failed: {error}"
+            | Error operationError, _, Error releaseError ->
+                Error
+                    $"{operationError}; terminal cleanup reservation release also failed: {releaseError}"
+            | Error operationError, Error renewalError, Ok () ->
+                Error $"{operationError}; {renewalError}"
+            | Ok (), Error renewalError, Error releaseError ->
+                Error
+                    $"{renewalError}; terminal cleanup reservation release also failed: {releaseError}"
+    }
+
+let private reserveOnCurrentHost
+    config
+    instanceId
+    state
+    connection
+    worktreePath
+    operation
+    =
+    async {
+        let! announced =
+            announceIfNeeded config state connection instanceId
+
+        let reservationId =
+            Guid.NewGuid().ToString("N")
+
+        let body =
+            JsonSerializer.Serialize(
+                {| worktreePath = WorktreePath.value worktreePath
+                   reservationId = reservationId |}
+            )
+
+        let reservationFailure error =
+            async {
+                let! release =
+                    releaseReservation
+                        config
+                        connection
+                        reservationId
+
+                let actionable =
+                    match release with
+                    | Ok () ->
+                        $"Could not reserve authoritative terminal cleanup: {error}"
+                    | Error releaseError ->
+                        $"Could not reserve authoritative terminal cleanup: {error}; reservation release also failed: {releaseError}"
+
+                let current =
+                    withFailure
+                        worktreePath
+                        actionable
+                        announced.LastSnapshot
+
+                return
+                    Error actionable,
+                    { announced with LastSnapshot = current }
+            }
+
+        match!
+            request
+                config
+                connection
+                HttpMethod.Post
+                "/reservations"
+                (Some body)
+        with
+        | Error error -> return! reservationFailure error
+        | Ok content ->
+            match parseReservation content with
+            | Error error -> return! reservationFailure error
+            | Ok reservation
+                when reservation.Id <> reservationId ->
+                return!
+                    reservationFailure
+                        "Durable terminal host returned a different reservation identity"
+            | Ok reservation ->
+                let current =
+                    reservation.Sessions
+                    |> snapshot
+                    |> mergeSnapshot announced.LastSnapshot
+                    |> withoutPath worktreePath
+
+                let next =
+                    { announced with LastSnapshot = current }
+
+                let! result =
+                    runReservedOperation
+                        config
+                        connection
+                        reservation.Id
+                        operation
+
+                return result, next
+    }
+
+let private acquireWorktreeLock config worktreePath =
+    let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
+
+    let rec acquire () =
+        async {
+            match tryAcquireWorktreeLock config worktreePath with
+            | Ok (Some worktreeLock) -> return Ok worktreeLock
+            | Error error -> return Error error
+            | Ok None when DateTimeOffset.UtcNow >= deadline ->
+                return
+                    Error
+                        "Timed out waiting for terminal worktree ownership"
+            | Ok None ->
+                do! Async.Sleep config.ProbeInterval
+                return! acquire ()
+        }
+
+    acquire ()
+
+let private reserveTerminalCleanup
+    config
+    instanceId
+    state
+    worktreePath
+    operation
+    =
+    let reserveCurrent currentState =
+        async {
+            match! ensureControlHost config with
+            | Error error -> return Error error, currentState
+            | Ok connection
+                when connection.Version
+                     = hostProtocolVersion ->
+                return!
+                    reserveOnCurrentHost
+                        config
+                        instanceId
+                        currentState
+                        connection
+                        worktreePath
+                        operation
+            | Ok _ ->
+                return
+                    Error
+                        "Protocol-1 durable terminal host did not finish draining",
+                    currentState
+        }
+
+    async {
+        match! discoverHost config with
+        | Ok (HealthyHost connection)
+            when connection.Version = hostProtocolVersion ->
+            return!
+                reserveOnCurrentHost
+                    config
+                    instanceId
+                    state
+                    connection
+                    worktreePath
+                    operation
+        | Error error ->
+            let actionable =
+                $"Cannot reserve terminal cleanup because host discovery failed: {error}"
+
+            return Error actionable, state
+        | Ok (HealthyHost connection) ->
+            match!
+                request
+                    config
+                    connection
+                    HttpMethod.Post
+                    "/shutdown"
+                    None
+            with
+            | Error error ->
+                return
+                    Error
+                        $"Could not drain protocol-1 durable terminal host: {error}",
+                    state
+            | Ok _ ->
+                match! waitForLegacyHostExit config connection with
+                | Error error -> return Error error, state
+                | Ok () ->
+                    let interrupted =
+                        state.LastSnapshot
+                        |> withHostFailure
+                            "the protocol-1 host was drained during its bounded compatibility window"
+                        |> withoutPath worktreePath
+
+                    return!
+                        reserveCurrent
+                            { state with
+                                LastSnapshot = interrupted
+                                AnnouncedHost = None
+                                KnownHost = None }
+        | Ok (DeadHost _)
+        | Ok MissingHost ->
+            return! reserveCurrent state
     }
 
 let private waitForHostExit config connection =
@@ -1072,27 +1769,47 @@ let internal createWithConfig config =
                     match message with
                     | Start(worktreePath, reply) ->
                         let canonical = canonicalWorktreePath worktreePath
-                        let! result, next =
-                            startTerminal config instanceId state canonical
+                        match! acquireWorktreeLock config canonical with
+                        | Error error ->
+                            let current =
+                                withFailure
+                                    canonical
+                                    error
+                                    state.LastSnapshot
 
-                        reply.Reply result
-                        return! loop next
+                            reply.Reply(Error error)
+                            return!
+                                loop
+                                    { state with
+                                        LastSnapshot = current }
+                        | Ok worktreeLock ->
+                            let! result, next =
+                                async {
+                                    use worktreeLock = worktreeLock
+                                    return!
+                                        startTerminal
+                                            config
+                                            instanceId
+                                            state
+                                            canonical
+                                }
+
+                            reply.Reply result
+                            return! loop next
                     | Get reply ->
                         let! current, next = getTerminals instanceId state config
                         reply.Reply current
                         return! loop next
                     | Close(worktreePath, reply) ->
                         let canonical = canonicalWorktreePath worktreePath
-                        let! result, next =
-                            closeTerminalStrict
+                        let! current, next =
+                            closeTerminal
                                 instanceId
                                 state
                                 config
                                 canonical
 
-                        result
-                        |> Result.defaultValue next.LastSnapshot
-                        |> reply.Reply
+                        reply.Reply current
                         return! loop next
                     | CloseStrict(worktreePath, reply) ->
                         let canonical = canonicalWorktreePath worktreePath
@@ -1105,6 +1822,33 @@ let internal createWithConfig config =
 
                         reply.Reply result
                         return! loop next
+                    | WithReservedCleanup(
+                        worktreePath,
+                        operation,
+                        reply
+                      ) ->
+                        let canonical =
+                            canonicalWorktreePath worktreePath
+
+                        match! acquireWorktreeLock config canonical with
+                        | Error error ->
+                            reply.Reply(Error error)
+                            return! loop state
+                        | Ok worktreeLock ->
+                            let! result, next =
+                                async {
+                                    use worktreeLock = worktreeLock
+                                    return!
+                                        reserveTerminalCleanup
+                                            config
+                                            instanceId
+                                            state
+                                            canonical
+                                            operation
+                                }
+
+                            reply.Reply result
+                            return! loop next
                     | ShutdownHost reply ->
                         let! result = shutdown config
                         reply.Reply result
@@ -1155,6 +1899,21 @@ let internal closeStrict (Manager agent) worktreePath =
     agent.PostAndAsyncReply(
         (fun reply -> CloseStrict(worktreePath, reply)),
         timeout = 60_000
+    )
+
+let internal withReservedCleanup
+    (Manager agent)
+    worktreePath
+    operation
+    =
+    agent.PostAndAsyncReply(
+        (fun reply ->
+            WithReservedCleanup(
+                worktreePath,
+                operation,
+                reply
+            )),
+        timeout = 300_000
     )
 
 let internal shutdownHost (Manager agent) =

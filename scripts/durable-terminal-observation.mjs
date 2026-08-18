@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -8,6 +9,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+  defaultProcessController,
+  sameProcessIdentity,
+} from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
 const hostScript = join(repo, "scripts", "durable-terminal-host.mjs");
@@ -17,23 +23,16 @@ const worktree = join(stateDirectory, "worktree");
 const hostStatePath = join(stateDirectory, "host.json");
 const observationPath = join(stateDirectory, "observation.json");
 const diagnosticsPath = join(stateDirectory, "diagnostics.jsonl");
+const lockPath = join(stateDirectory, "host.lock");
 const durationMs = 24 * 60 * 60 * 1000;
 const staleHeartbeatMs = 2 * 60 * 1000;
+const processController = defaultProcessController();
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    if (error.code === "ESRCH") return false;
-    throw error;
-  }
-}
+const processIsAlive = async (pid) =>
+  Boolean(await processController.inspect(pid));
 
 async function waitFor(description, predicate, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
@@ -66,6 +65,84 @@ function publicObservation(observation) {
   return safeObservation;
 }
 
+export function hostStateMatchesObservation(observation, hostState) {
+  return (
+    hostState?.version === observation.hostProtocolVersion &&
+    hostState?.generation === observation.hostGeneration &&
+    hostState?.pid === observation.hostPid &&
+    hostState?.processStartTicks === observation.hostProcessStartTicks &&
+    hostState?.processStartExact === observation.hostProcessStartExact &&
+    hostState?.controlPort === observation.controlPort &&
+    hostState?.controlToken === observation.controlToken &&
+    hostState?.startedAt === observation.hostStartedAt
+  );
+}
+
+export async function observedHostOwnership(
+  observation,
+  hostState,
+  inspectProcess,
+) {
+  if (!hostStateMatchesObservation(observation, hostState)) {
+    return {
+      owned: false,
+      reason:
+        "Current host manifest generation, process identity, or credentials differ from the observation",
+    };
+  }
+
+  const actualIdentity = await inspectProcess(observation.hostPid);
+  if (
+    !sameProcessIdentity(
+      actualIdentity,
+      observation.hostProcessIdentity,
+    )
+  ) {
+    return {
+      owned: false,
+      reason:
+        "Recorded host PID no longer has the observation's process creation identity",
+    };
+  }
+
+  return { owned: true, actualIdentity };
+}
+
+export async function stopObservedHost(
+  observation,
+  hostState,
+  dependencies,
+) {
+  const ownership = await observedHostOwnership(
+    observation,
+    hostState,
+    dependencies.inspectProcess,
+  );
+  if (!ownership.owned) {
+    return {
+      shutdownSent: false,
+      stopped: false,
+      ownershipChanged: true,
+      reason: ownership.reason,
+    };
+  }
+
+  await dependencies.sendShutdown(hostState);
+  await dependencies.waitForExit(async () => {
+    const actual = await dependencies.inspectProcess(observation.hostPid);
+    return !sameProcessIdentity(
+      actual,
+      observation.hostProcessIdentity,
+    );
+  });
+  return {
+    shutdownSent: true,
+    stopped: true,
+    ownershipChanged: false,
+    reason: null,
+  };
+}
+
 async function control(hostState, path, method = "GET", body) {
   const response = await fetch(
     `http://127.0.0.1:${hostState.controlPort}${path}`,
@@ -92,12 +169,22 @@ async function start() {
       `Observation already exists at '${observationPath}'. Inspect or stop it instead of replacing its evidence.`,
     );
   }
+  if (existsSync(hostStatePath)) {
+    throw new Error(
+      `Durable host state already exists at '${hostStatePath}'. Inspect it before starting an observation.`,
+    );
+  }
   if (!existsSync(ttyd)) {
     throw new Error(`Missing ${ttyd}. Run '.\\treemon.ps1 setup-ttyd'.`);
   }
 
   mkdirSync(worktree, { recursive: true });
   const startedAt = new Date();
+  const generation = randomBytes(16).toString("hex");
+  atomicWrite(lockPath, {
+    generation,
+    ownerPid: process.pid,
+  });
   const host = spawn(
     process.execPath,
     [
@@ -108,6 +195,8 @@ async function start() {
       ttyd,
       "--shell",
       "pwsh",
+      "--generation",
+      generation,
     ],
     {
       cwd: repo,
@@ -120,7 +209,26 @@ async function start() {
   host.unref();
 
   let hostState;
+  let spawnedHostIdentity;
   try {
+    spawnedHostIdentity = await waitFor(
+      "spawned durable host process identity",
+      () => processController.inspect(spawnedHostPid),
+    );
+    const windowsStartTicks =
+      /^windows:(\d+)$/.exec(spawnedHostIdentity.startIdentity)?.[1];
+    const claimStartTicks =
+      windowsStartTicks ??
+      (
+        621355968000000000n +
+        BigInt(Date.now()) * 10_000n
+      ).toString();
+    atomicWrite(lockPath, {
+      generation,
+      ownerPid: process.pid,
+      hostPid: spawnedHostPid,
+      hostProcessStartTicks: claimStartTicks,
+    });
     hostState = await waitFor("durable host state", () => {
       if (!existsSync(hostStatePath)) return null;
       return readJson(hostStatePath);
@@ -148,10 +256,15 @@ async function start() {
       startedAt: startedAt.toISOString(),
       dueAt: new Date(startedAt.getTime() + durationMs).toISOString(),
       lastCheckedAt: new Date().toISOString(),
+      hostProtocolVersion: hostState.version,
       hostGeneration: hostState.generation,
       hostPid: hostState.pid,
       hostProcessStartTicks: hostState.processStartTicks,
+      hostProcessStartExact: hostState.processStartExact,
+      hostProcessIdentity: spawnedHostIdentity,
+      hostStartedAt: hostState.startedAt,
       controlPort: hostState.controlPort,
+      controlToken: hostState.controlToken,
       terminalUrl: new URL(session.endpoint).origin,
       terminalSessionId: session.id,
       ttydPid: session.ttydPid,
@@ -167,14 +280,32 @@ async function start() {
     atomicWrite(observationPath, observation);
     process.stdout.write(`${JSON.stringify(publicObservation(observation), null, 2)}\n`);
   } catch (error) {
-    if (hostState && processIsAlive(hostState.pid)) {
+    const actualIdentity = spawnedHostIdentity
+      ? await processController.inspect(spawnedHostPid)
+      : null;
+    const stillSpawnedHost = sameProcessIdentity(
+      actualIdentity,
+      spawnedHostIdentity,
+    );
+    const hostStateIsSpawned =
+      hostState?.generation === generation &&
+      hostState?.pid === spawnedHostPid;
+    if (hostStateIsSpawned && stillSpawnedHost) {
       try {
         await control(hostState, "/shutdown", "POST");
       } catch {
-        process.kill(hostState.pid);
+        const revalidated =
+          await processController.inspect(spawnedHostPid);
+        if (sameProcessIdentity(revalidated, spawnedHostIdentity)) {
+          await processController.terminate(spawnedHostPid);
+        }
       }
-    } else if (processIsAlive(spawnedHostPid)) {
-      process.kill(spawnedHostPid);
+    } else if (stillSpawnedHost) {
+      const revalidated =
+        await processController.inspect(spawnedHostPid);
+      if (sameProcessIdentity(revalidated, spawnedHostIdentity)) {
+        await processController.terminate(spawnedHostPid);
+      }
     }
     throw error;
   }
@@ -192,7 +323,12 @@ function diagnosticEvents() {
 async function evaluate() {
   const observation = readJson(observationPath);
   const checkedAt = new Date();
-  const hostAlive = processIsAlive(observation.hostPid);
+  const actualHostIdentity =
+    await processController.inspect(observation.hostPid);
+  const hostAlive = sameProcessIdentity(
+    actualHostIdentity,
+    observation.hostProcessIdentity,
+  );
   let hostIdentityMatches = false;
   let session = null;
   let controlError = null;
@@ -200,15 +336,17 @@ async function evaluate() {
   if (hostAlive && existsSync(hostStatePath)) {
     try {
       const hostState = readJson(hostStatePath);
-      hostIdentityMatches =
-        hostState.generation === observation.hostGeneration &&
-        hostState.pid === observation.hostPid &&
-        hostState.processStartTicks === observation.hostProcessStartTicks;
-      const response = await control(hostState, "/sessions");
-      session =
-        response.sessions.find(
-          (candidate) => candidate.id === observation.terminalSessionId,
-        ) ?? null;
+      hostIdentityMatches = hostStateMatchesObservation(
+        observation,
+        hostState,
+      );
+      if (hostIdentityMatches) {
+        const response = await control(hostState, "/sessions");
+        session =
+          response.sessions.find(
+            (candidate) => candidate.id === observation.terminalSessionId,
+          ) ?? null;
+      }
     } catch (error) {
       controlError = error.message;
     }
@@ -241,9 +379,9 @@ async function evaluate() {
               ? "ttyd PID changed"
               : session.shellPid !== observation.powershellPid
                 ? "PowerShell PID changed"
-                : !processIsAlive(observation.ttydPid)
+                : !(await processIsAlive(observation.ttydPid))
                   ? "ttyd process exited"
-                  : !processIsAlive(observation.powershellPid)
+                  : !(await processIsAlive(observation.powershellPid))
                     ? "PowerShell process exited"
                     : diagnosticsBytes > observation.diagnosticLimitBytes
                       ? "Diagnostic record exceeded its configured bound"
@@ -266,8 +404,8 @@ async function evaluate() {
     remainingMs: Math.max(0, durationMs - elapsedMs),
     hostAlive,
     hostIdentityMatches,
-    ttydAlive: processIsAlive(observation.ttydPid),
-    powershellAlive: processIsAlive(observation.powershellPid),
+    ttydAlive: await processIsAlive(observation.ttydPid),
+    powershellAlive: await processIsAlive(observation.powershellPid),
     browserAttachments: session?.browserAttachments ?? null,
     lastPongAt: session?.lastPongAt ?? observation.lastPongAt,
     heartbeatAgeMs,
@@ -295,15 +433,34 @@ async function stop() {
   }
 
   let observation = await evaluate();
-  if (processIsAlive(observation.hostPid) && existsSync(hostStatePath)) {
-    const hostState = readJson(hostStatePath);
-    await control(hostState, "/shutdown", "POST");
-    await waitFor(
-      `durable host PID ${observation.hostPid} to exit`,
-      () => !processIsAlive(observation.hostPid),
-      15_000,
-    );
-  }
+  const stopResult = existsSync(hostStatePath)
+    ? await stopObservedHost(
+        observation,
+        readJson(hostStatePath),
+        {
+          inspectProcess: (pid) => processController.inspect(pid),
+          sendShutdown: (hostState) =>
+            control(hostState, "/shutdown", "POST"),
+          waitForExit: (predicate) =>
+            waitFor(
+              `recorded durable host PID ${observation.hostPid} to exit`,
+              predicate,
+              15_000,
+            ),
+        },
+      )
+    : {
+        shutdownSent: false,
+        stopped: false,
+        ownershipChanged: true,
+        reason: "Current host manifest is absent",
+      };
+  const actualHostIdentity =
+    await processController.inspect(observation.hostPid);
+  const observedHostAlive = sameProcessIdentity(
+    actualHostIdentity,
+    observation.hostProcessIdentity,
+  );
 
   observation = {
     ...observation,
@@ -311,23 +468,32 @@ async function stop() {
       observation.status === "passed" || observation.status === "failed"
         ? observation.status
         : "stopped",
-    hostAlive: false,
-    ttydAlive: processIsAlive(observation.ttydPid),
-    powershellAlive: processIsAlive(observation.powershellPid),
+    hostAlive: observedHostAlive,
+    ttydAlive: await processIsAlive(observation.ttydPid),
+    powershellAlive: await processIsAlive(observation.powershellPid),
+    stopShutdownSent: stopResult.shutdownSent,
+    stopOwnershipChanged: stopResult.ownershipChanged,
+    stopSkippedReason: stopResult.reason,
     stoppedAt: new Date().toISOString(),
   };
   atomicWrite(observationPath, observation);
   process.stdout.write(`${JSON.stringify(publicObservation(observation), null, 2)}\n`);
 }
 
-const command = process.argv[2] ?? "status";
-
-try {
+export async function runObservationCommand(command = "status") {
   if (command === "start") await start();
   else if (command === "status") await status();
   else if (command === "stop") await stop();
   else throw new Error(`Unsupported observation command '${command}'`);
-} catch (error) {
-  process.stderr.write(`${error.message}\n`);
-  process.exitCode = 1;
+}
+
+const invokedDirectly =
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (invokedDirectly) {
+  runObservationCommand(process.argv[2] ?? "status").catch((error) => {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  });
 }

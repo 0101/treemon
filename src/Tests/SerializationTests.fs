@@ -102,7 +102,11 @@ type WrapperTypeSerializationTests() =
                             "http://127.0.0.1:61234/" }
                   { Worktree = WorktreePath @"Q:\code\failed"
                     Lifecycle =
-                        EmbeddedTerminalLifecycle.Failed "ttyd exited" } ] }
+                        EmbeddedTerminalLifecycle.Failed "ttyd exited" }
+                  { Worktree = WorktreePath @"Q:\code\interrupted"
+                    Lifecycle =
+                        EmbeddedTerminalLifecycle.Interrupted
+                            "host exited" } ] }
 
         Assert.That(
             roundTrip<EmbeddedTerminalSnapshot> original,

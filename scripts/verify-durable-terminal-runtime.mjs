@@ -9,6 +9,10 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
+import {
+  defaultProcessController,
+  sameProcessIdentity,
+} from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
 const hostScript = join(repo, "scripts", "durable-terminal-host.mjs");
@@ -21,8 +25,10 @@ const firstMarker = `TREEMON_RECONNECT_A_${Date.now()}`;
 const secondMarker = `TREEMON_RECONNECT_B_${Date.now()}`;
 let host;
 let hostState;
+let hostIdentity;
 let session;
 let browser;
+const processController = defaultProcessController();
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -121,16 +127,26 @@ async function attachAndRun(marker, expectedPid) {
 
 async function stopHost() {
   if (!hostState) return;
+  const owned = await processController.inspect(hostState.pid);
+  if (!sameProcessIdentity(owned, hostIdentity)) return;
 
   try {
     await control("/shutdown", "POST");
   } catch {
-    if (host?.exitCode === null) host.kill();
+    const actual = await processController.inspect(host?.pid);
+    if (sameProcessIdentity(actual, hostIdentity)) {
+      await processController.terminate(host.pid);
+    }
   }
 
   await waitFor(
     "durable host to exit",
-    () => host?.exitCode !== null || !processIsAlive(hostState.pid),
+    async () =>
+      host?.exitCode !== null ||
+      !sameProcessIdentity(
+        await processController.inspect(hostState.pid),
+        hostIdentity,
+      ),
     10_000,
   );
 }
@@ -162,6 +178,8 @@ try {
     return JSON.parse(readFileSync(statePath, "utf8"));
   });
   assert(hostState.pid === host.pid, "Host state did not identify the spawned host");
+  hostIdentity = await processController.inspect(host.pid);
+  assert(hostIdentity, "Could not capture the spawned host process identity");
   assert(hostState.controlPort !== 5000, "Host selected production port 5000");
 
   const started = await control("/sessions", "POST", { worktreePath: worktree });
@@ -231,7 +249,14 @@ try {
 } finally {
   if (browser) await browser.close();
 
-  if (session && hostState && processIsAlive(hostState.pid)) {
+  const finalHostIdentity = hostState
+    ? await processController.inspect(hostState.pid)
+    : null;
+  if (
+    session &&
+    hostState &&
+    sameProcessIdentity(finalHostIdentity, hostIdentity)
+  ) {
     try {
       await control(`/sessions/${encodeURIComponent(session.id)}`, "DELETE");
     } catch (error) {
@@ -239,6 +264,14 @@ try {
     }
   }
 
-  if (hostState && processIsAlive(hostState.pid)) await stopHost();
+  if (
+    hostState &&
+    sameProcessIdentity(
+      await processController.inspect(hostState.pid),
+      hostIdentity,
+    )
+  ) {
+    await stopHost();
+  }
   rmSync(fixture, { recursive: true, force: true });
 }

@@ -246,9 +246,15 @@ let waitForUrl (url: string) (timeoutMs: int) : Task =
 /// space-joined worktree-root list; each fixture keeps its own port / orphan-kill / fixture policy
 /// but shares this launch command.
 let startServerProcess (serverProjectPath: string) (repoRoot: string) (rootArgs: string) (port: int) (canvasPort: int) (fixturePath: string) : Process =
+#if DEBUG
+    let configuration = "Debug"
+#else
+    let configuration = "Release"
+#endif
+
     startProcess
         "dotnet"
-        $"""run --project "{serverProjectPath}" -- {rootArgs} --port {port} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" """
+        $"""run --no-build --configuration {configuration} --project "{serverProjectPath}" -- {rootArgs} --port {port} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" """
         repoRoot
         []
         false

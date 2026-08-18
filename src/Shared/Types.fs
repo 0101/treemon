@@ -198,6 +198,7 @@ type EmbeddedTerminalLifecycle =
     | Starting
     | Running of endpoint: string
     | Failed of error: string
+    | Interrupted of error: string
 
 type EmbeddedTerminalTab =
     { Worktree: WorktreePath

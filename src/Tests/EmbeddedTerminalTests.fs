@@ -6,6 +6,7 @@ open System.IO
 open System.Net.Http
 open System.Net.Http.Headers
 open System.Text.Json
+open System.Threading.Tasks
 open NUnit.Framework
 open Shared
 open Server
@@ -44,6 +45,13 @@ let private start manager path =
     | Error error ->
         Assert.Fail(error)
         EmbeddedTerminalSnapshot.empty
+
+let private interruptedErrorFor path snapshot =
+    match snapshot |> tryFindTab path |> Option.map _.Lifecycle with
+    | Some (EmbeddedTerminalLifecycle.Interrupted error) -> error
+    | lifecycle ->
+        Assert.Fail($"Expected interrupted terminal for '{WorktreePath.value path}', got {lifecycle}")
+        ""
 
 let private processIsAlive pid =
     try
@@ -89,6 +97,7 @@ let processStartTicks = (
 ).toString();
 let sessions = [];
 let nextOrder = 0;
+let reservations = [];
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -97,6 +106,27 @@ const behavior = () =>
   existsSync(behaviorPath)
     ? JSON.parse(readFileSync(behaviorPath, "utf8"))
     : {};
+
+const manifestVersion = behavior().protocolVersion ?? 2;
+
+function appendSession(worktreePath) {
+  const key = process.platform === "win32" ? worktreePath.toLowerCase() : worktreePath;
+  if (sessions.some((session) => session.key === key)) return;
+  sessions = [
+    ...sessions,
+    {
+      id: randomBytes(8).toString("hex"),
+      key,
+      worktreePath,
+      lifecycle: "running",
+      endpoint: `http://127.0.0.1:${42000 + nextOrder}/?cap=fake`,
+      error: null,
+      order: nextOrder++,
+    },
+  ];
+}
+
+(behavior().initialWorktreePaths ?? []).forEach(appendSession);
 
 const startupClaim = async () => {
   const claim = JSON.parse(readFileSync(lockPath, "utf8"));
@@ -145,14 +175,18 @@ const server = createServer(async (request, response) => {
 
   if (request.method === "GET" && url.pathname === "/health") {
     const current = behavior();
-    send(response, current.healthStatus ?? 200, {
-      version: 2,
-      generation,
-      pid: process.pid,
-      processStartTicks,
-      processStartExact: true,
-      startedAt,
-    });
+    const identity =
+      manifestVersion === 1
+        ? { version: 1, pid: process.pid, startedAt }
+        : {
+            version: 2,
+            generation,
+            pid: process.pid,
+            processStartTicks,
+            processStartExact: true,
+            startedAt,
+          };
+    send(response, current.healthStatus ?? 200, identity);
   } else if (request.method === "GET" && url.pathname === "/sessions") {
     const current = behavior();
     if (current.listTransportFailure) {
@@ -166,20 +200,7 @@ const server = createServer(async (request, response) => {
     const body = await readBody(request);
     const key = process.platform === "win32" ? body.worktreePath.toLowerCase() : body.worktreePath;
     const existing = sessions.find((session) => session.key === key);
-    if (!existing) {
-      sessions = [
-        ...sessions,
-        {
-          id: randomBytes(8).toString("hex"),
-          key,
-          worktreePath: body.worktreePath,
-          lifecycle: "running",
-          endpoint: `http://127.0.0.1:${42000 + nextOrder}/?cap=fake`,
-          error: null,
-          order: nextOrder++,
-        },
-      ];
-    }
+    if (!existing) appendSession(body.worktreePath);
     const current = behavior();
     if (current.startDelayMs) await delay(current.startDelayMs);
     if (current.startTransportFailure) {
@@ -200,6 +221,36 @@ const server = createServer(async (request, response) => {
     } else {
       send(response, current.deleteStatus ?? 200, { sessions });
     }
+  } else if (request.method === "POST" && url.pathname === "/reservations") {
+    if (manifestVersion === 1) {
+      send(response, 404, { error: "Not found" });
+      return;
+    }
+    const body = await readBody(request);
+    const key = process.platform === "win32" ? body.worktreePath.toLowerCase() : body.worktreePath;
+    sessions = sessions.filter((session) => session.key !== key);
+    const reservation = {
+      id: body.reservationId ?? randomBytes(16).toString("hex"),
+      worktreePath: body.worktreePath,
+      expiresAt: new Date(Date.now() + 300000).toISOString(),
+    };
+    reservations = [...reservations, reservation];
+    const current = behavior();
+    if (current.reserveMalformedResponse) {
+      response.end("{");
+    } else {
+      send(response, current.reserveStatus ?? 201, { reservation, sessions });
+    }
+  } else if (request.method === "POST" && url.pathname.startsWith("/reservations/") && url.pathname.endsWith("/renew")) {
+    const id = decodeURIComponent(url.pathname.slice("/reservations/".length, -"/renew".length));
+    const reservation = reservations.find((candidate) => candidate.id === id);
+    send(response, reservation ? 200 : 409, reservation ? { reservation } : { error: "expired" });
+  } else if (request.method === "DELETE" && url.pathname.startsWith("/reservations/")) {
+    const id = decodeURIComponent(url.pathname.slice("/reservations/".length));
+    const found = reservations.some((reservation) => reservation.id === id);
+    reservations = reservations.filter((reservation) => reservation.id !== id);
+    appendFileSync(join(stateDirectory, "reservation-releases.txt"), `${id}\n`);
+    send(response, behavior().releaseStatus ?? 200, { released: found });
   } else if (request.method === "POST" && url.pathname === "/events") {
     const body = await readBody(request);
     const events = existsSync(eventPath)
@@ -210,9 +261,21 @@ const server = createServer(async (request, response) => {
   } else if (request.method === "POST" && url.pathname === "/shutdown") {
     send(response, 200, { stopping: true });
     setImmediate(() => server.close(() => {
+      const currentBehavior = behavior();
+      if (manifestVersion === 1 && currentBehavior.upgradeAfterDrain) {
+        writeJson(behaviorPath, {
+          ...currentBehavior,
+          protocolVersion: 2,
+          initialWorktreePaths: [],
+        });
+      }
       if (existsSync(statePath)) {
         const current = JSON.parse(readFileSync(statePath, "utf8"));
-        if (current.generation === generation && current.processStartTicks === processStartTicks) {
+        const owned =
+          manifestVersion === 1
+            ? current.version === 1 && current.pid === process.pid && current.startedAt === startedAt
+            : current.generation === generation && current.processStartTicks === processStartTicks;
+        if (owned) {
           rmSync(statePath, { force: true });
         }
       }
@@ -233,16 +296,26 @@ server.listen(0, "127.0.0.1", async () => {
   processStartTicks = claim.hostProcessStartTicks;
   if (existsSync(statePath)) process.exit(3);
   appendFileSync(launchesPath, `${process.pid}\n`);
-  writeJson(statePath, {
-    version: 2,
-    generation,
-    pid: process.pid,
-    processStartTicks,
-    processStartExact: true,
-    controlPort: port,
-    controlToken: token,
-    startedAt,
-  });
+  const manifest =
+    manifestVersion === 1
+      ? {
+          version: 1,
+          pid: process.pid,
+          controlPort: port,
+          controlToken: token,
+          startedAt,
+        }
+      : {
+          version: 2,
+          generation,
+          pid: process.pid,
+          processStartTicks,
+          processStartExact: true,
+          controlPort: port,
+          controlToken: token,
+          startedAt,
+        };
+  writeJson(statePath, manifest);
 });
 """
 
@@ -271,6 +344,14 @@ let private readHostGeneration stateDirectory =
         |> JsonDocument.Parse
 
     document.RootElement.GetProperty("generation").GetString()
+
+let private readHostVersion stateDirectory =
+    use document =
+        Path.Combine(stateDirectory, "host.json")
+        |> File.ReadAllText
+        |> JsonDocument.Parse
+
+    document.RootElement.GetProperty("version").GetInt32()
 
 let private writeBehavior stateDirectory (json: string) =
     Directory.CreateDirectory stateDirectory |> ignore
@@ -477,6 +558,159 @@ type EmbeddedTerminalTests() =
                 ))
 
     [<Test>]
+    member _.``reserved cleanup releases the key when mutation fails``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath = Path.Combine(tempDir, "worktree")
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            start manager worktree |> ignore
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () ->
+                        async {
+                            return Error "mutation failed"
+                        })
+                |> run
+
+            let restarted = start manager worktree
+            let releases =
+                Path.Combine(
+                    stateDirectory,
+                    "reservation-releases.txt"
+                )
+                |> File.ReadAllLines
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error ->
+                    Assert.That(error, Is.EqualTo("mutation failed"))
+                | Ok () -> Assert.Fail("Mutation should have failed")
+
+                Assert.That(releases.Length, Is.EqualTo(1))
+                Assert.That(endpointFor worktree restarted, Is.Not.Empty)))
+
+    [<Test>]
+    member _.``malformed reservation response still releases the known lease``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath = Path.Combine(tempDir, "worktree")
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            start manager worktree |> ignore
+            writeBehavior
+                stateDirectory
+                """{"reserveMalformedResponse":true}"""
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () -> async.Return(Ok()))
+                |> run
+
+            writeBehavior stateDirectory "{}"
+            let restarted = start manager worktree
+            let releases =
+                Path.Combine(
+                    stateDirectory,
+                    "reservation-releases.txt"
+                )
+                |> File.ReadAllLines
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("reservation response")
+                    )
+                | Ok () ->
+                    Assert.Fail("Malformed reservation should fail")
+
+                Assert.That(releases.Length, Is.EqualTo(1))
+                Assert.That(endpointFor worktree restarted, Is.Not.Empty)))
+
+    [<Test>]
+    member _.``reserved mutation blocks its key while unrelated starts continue``() =
+        withFakeHost (fun tempDir _ hostConfig manager ->
+            let reservedPath = Path.Combine(tempDir, "reserved")
+            let unrelatedPath = Path.Combine(tempDir, "unrelated")
+            [ reservedPath; unrelatedPath ]
+            |> List.iter (Directory.CreateDirectory >> ignore)
+            let reservedWorktree = canonical reservedPath
+            let unrelatedWorktree = canonical unrelatedPath
+            start manager reservedWorktree |> ignore
+
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let releaseMutation =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let reservation =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    reservedWorktree
+                    (fun () ->
+                        async {
+                            mutationEntered.SetResult(())
+                            do!
+                                releaseMutation.Task
+                                |> Async.AwaitTask
+
+                            return Ok ()
+                        })
+                |> Async.StartAsTask
+
+            mutationEntered.Task.GetAwaiter().GetResult()
+            let sameKeyManager =
+                EmbeddedTerminal.createWithConfig hostConfig
+            let unrelatedManager =
+                EmbeddedTerminal.createWithConfig hostConfig
+            let blockedStart =
+                EmbeddedTerminal.start
+                    sameKeyManager
+                    reservedWorktree
+                |> Async.StartAsTask
+
+            try
+                let unrelated =
+                    EmbeddedTerminal.start
+                        unrelatedManager
+                        unrelatedWorktree
+                    |> run
+
+                Assert.Multiple(fun () ->
+                    Assert.That(blockedStart.IsCompleted, Is.False)
+                    Assert.That(
+                        endpointFor unrelatedWorktree
+                            (unrelated
+                             |> Result.defaultValue
+                                 EmbeddedTerminalSnapshot.empty),
+                        Is.Not.Empty
+                    ))
+            finally
+                releaseMutation.TrySetResult(()) |> ignore
+
+            match reservation.GetAwaiter().GetResult() with
+            | Error error -> Assert.Fail(error)
+            | Ok () -> ()
+
+            match blockedStart.GetAwaiter().GetResult() with
+            | Error error -> Assert.Fail(error)
+            | Ok snapshot ->
+                Assert.That(
+                    endpointFor reservedWorktree snapshot,
+                    Is.Not.Empty
+                ))
+
+    [<Test>]
     member _.``tab close keeps a failed tab when host removal is not authoritative``() =
         withFakeHost (fun tempDir stateDirectory _ manager ->
             let worktreePath = Path.Combine(tempDir, "worktree")
@@ -589,42 +823,159 @@ type EmbeddedTerminalTests() =
                 )))
 
     [<Test>]
-    member _.``unsupported manifest is preserved instead of being reclaimed without ownership``() =
+    member _.``live protocol-one host remains discoverable reusable and closable``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath = Path.Combine(tempDir, "legacy-worktree")
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            writeBehavior
+                stateDirectory
+                (JsonSerializer.Serialize(
+                    {| version = 1
+                       protocolVersion = 1
+                       initialWorktreePaths = [| worktreePath |] |}
+                ))
+
+            let discovered = start manager worktree
+            let endpoint = endpointFor worktree discovered
+            let reused = start manager worktree
+            let version = readHostVersion stateDirectory
+            let closed = EmbeddedTerminal.close manager worktree |> run
+
+            Assert.Multiple(fun () ->
+                Assert.That(version, Is.EqualTo(1))
+                Assert.That(endpointFor worktree reused, Is.EqualTo endpoint)
+                Assert.That(closed, Is.EqualTo EmbeddedTerminalSnapshot.empty)
+                Assert.That(
+                    File.Exists(
+                        Path.Combine(stateDirectory, "host.json")
+                    ),
+                    Is.False
+                )))
+
+    [<Test>]
+    member _.``dead protocol-one state is reclaimed after process identity mismatch``() =
         withFakeHost (fun tempDir stateDirectory _ manager ->
             Directory.CreateDirectory stateDirectory |> ignore
-            let statePath =
-                Path.Combine(stateDirectory, "host.json")
-
-            let legacyState =
+            let stale =
                 JsonSerializer.Serialize(
                     {| version = 1
                        pid = Environment.ProcessId
                        controlPort = 41234
                        controlToken = "legacy"
-                       startedAt = DateTimeOffset.UnixEpoch.ToString("O") |}
+                       startedAt =
+                        DateTimeOffset.UnixEpoch.ToString("O") |}
                 )
 
-            File.WriteAllText(statePath, legacyState)
+            File.WriteAllText(
+                Path.Combine(stateDirectory, "host.json"),
+                stale
+            )
+
             let worktreePath = Path.Combine(tempDir, "worktree")
             Directory.CreateDirectory worktreePath |> ignore
-            let worktree = canonical worktreePath
-            let failed = start manager worktree
+            let started = start manager (canonical worktreePath)
 
             Assert.Multiple(fun () ->
+                Assert.That(started.Tabs.Length, Is.EqualTo(1))
+                Assert.That(readHostVersion stateDirectory, Is.EqualTo(2))))
+
+    [<Test>]
+    member _.``legacy cleanup compare does not delete a replacement manifest``() =
+        Tests.TestUtils.withTempDir
+            "legacy-terminal-replacement"
+            (fun tempDir ->
+                let statePath = Path.Combine(tempDir, "host.json")
+                let legacy =
+                    JsonSerializer.Serialize(
+                        {| version = 1
+                           pid = 701
+                           controlPort = 41234
+                           controlToken = "legacy"
+                           startedAt =
+                            DateTimeOffset.UnixEpoch.AddSeconds(1.0).ToString("O") |}
+                    )
+
+                let replacement =
+                    JsonSerializer.Serialize(
+                        {| version = 2
+                           generation = "replacement"
+                           pid = 701
+                           processStartTicks = "200"
+                           processStartExact = true
+                           controlPort = 41235
+                           controlToken = "replacement-token"
+                           startedAt =
+                            DateTimeOffset.UnixEpoch.AddSeconds(2.0).ToString("O") |}
+                    )
+
+                File.WriteAllText(statePath, replacement)
+                let removed =
+                    EmbeddedTerminal.removeManifestIfOwned
+                        statePath
+                        legacy
+
+                Assert.Multiple(fun () ->
+                    match removed with
+                    | Ok value -> Assert.That(value, Is.False)
+                    | Error error -> Assert.Fail(error)
+
+                    Assert.That(
+                        File.ReadAllText statePath,
+                        Is.EqualTo replacement
+                    )))
+
+    [<Test>]
+    member _.``strict legacy cleanup drains the host while mutation is reserved``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let paths =
+                [ "legacy-a"; "legacy-b" ]
+                |> List.map (fun name ->
+                    let path = Path.Combine(tempDir, name)
+                    Directory.CreateDirectory path |> ignore
+                    path)
+
+            writeBehavior
+                stateDirectory
+                (JsonSerializer.Serialize(
+                    {| protocolVersion = 1
+                       upgradeAfterDrain = true
+                       initialWorktreePaths = paths |> List.toArray |}
+                ))
+
+            let first = canonical paths[0]
+            let second = canonical paths[1]
+            let discovered = start manager first
+            Assert.That(discovered.Tabs.Length, Is.EqualTo(2))
+            let legacyPid = readHostPid stateDirectory
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    first
+                    (fun () ->
+                        async {
+                            Assert.That(
+                                processIsAlive legacyPid,
+                                Is.False
+                            )
+
+                            return Ok ()
+                        })
+                |> run
+
+            let after = EmbeddedTerminal.get manager |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok () -> ()
+                | Error error -> Assert.Fail(error)
+
                 Assert.That(
-                    errorFor worktree failed,
-                    Does.Contain("protocol version 1")
+                    interruptedErrorFor second after,
+                    Does.Contain("protocol-1").IgnoreCase
                 )
-                Assert.That(
-                    File.ReadAllText(statePath),
-                    Is.EqualTo(legacyState)
-                )
-                Assert.That(
-                    File.Exists(
-                        Path.Combine(stateDirectory, "launches.txt")
-                    ),
-                    Is.False
-                )))
+                Assert.That(tryFindTab first after, Is.EqualTo(None))))
 
     [<Test>]
     member _.``dead known host remains visible as interrupted and failed key recovers``() =
@@ -641,7 +992,7 @@ type EmbeddedTerminalTests() =
 
             let interrupted = EmbeddedTerminal.get manager |> run
             Assert.That(
-                errorFor worktree interrupted,
+                interruptedErrorFor worktree interrupted,
                 Does.Contain("unavailable").IgnoreCase
             )
 
@@ -654,4 +1005,66 @@ type EmbeddedTerminalTests() =
                 Assert.That(
                     readHostPid stateDirectory,
                     Is.Not.EqualTo(deadPid)
+                )))
+
+    [<Test>]
+    member _.``interrupted tabs dismiss restart and poll independently``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let paths =
+                [ "alpha"; "bravo"; "charlie" ]
+                |> List.map (fun name ->
+                    let path = Path.Combine(tempDir, name)
+                    Directory.CreateDirectory path |> ignore
+                    canonical path)
+
+            paths |> List.iter (start manager >> ignore)
+            let deadPid = readHostPid stateDirectory
+            crashFakeHost stateDirectory
+            waitUntil "fixture host to exit" (fun () ->
+                processIsAlive deadPid |> not)
+
+            let interrupted = EmbeddedTerminal.get manager |> run
+            let dismissed =
+                EmbeddedTerminal.close manager paths[1] |> run
+            let restarted = start manager paths[0]
+            let polled = EmbeddedTerminal.get manager |> run
+            let afterLastDismiss =
+                EmbeddedTerminal.close manager paths[2] |> run
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    interrupted.Tabs
+                    |> List.filter (fun tab ->
+                        match tab.Lifecycle with
+                        | EmbeddedTerminalLifecycle.Interrupted _ ->
+                            true
+                        | _ -> false)
+                    |> List.length,
+                    Is.EqualTo(3)
+                )
+                Assert.That(
+                    tryFindTab paths[1] dismissed,
+                    Is.EqualTo(None)
+                )
+                Assert.That(endpointFor paths[0] restarted, Is.Not.Empty)
+                Assert.That(
+                    interruptedErrorFor paths[2] restarted,
+                    Does.Contain("unavailable").IgnoreCase
+                )
+                Assert.That(
+                    polled.Tabs |> List.map _.Worktree,
+                    Is.EqualTo([ paths[0]; paths[2] ])
+                )
+                Assert.That(
+                    polled.Tabs
+                    |> List.distinctBy (fun tab ->
+                        WorktreePath.value tab.Worktree
+                        |> PathUtils.normalizePath)
+                    |> List.length,
+                    Is.EqualTo(polled.Tabs.Length)
+                )
+                Assert.That(
+                    afterLastDismiss.Tabs
+                    |> List.map _.Worktree,
+                    Is.EqualTo([ paths[0] ])
                 )))

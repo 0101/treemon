@@ -61,6 +61,35 @@ type TerminalPaneStateTests() =
         )
 
     [<Test>]
+    member _.``Interrupted terminal retry keeps its tab position``() =
+        let other = tab second EmbeddedTerminalLifecycle.Starting
+        let interrupted =
+            tab
+                first
+                (EmbeddedTerminalLifecycle.Interrupted
+                    "host exited")
+
+        Assert.That(
+            snapshotWhenOpened first { Tabs = [ interrupted; other ] },
+            Is.EqualTo(
+                { Tabs =
+                    [ tab first EmbeddedTerminalLifecycle.Starting
+                      other ] }
+            )
+        )
+
+    [<Test>]
+    member _.``Interrupted tabs keep polling enabled for host recovery``() =
+        let interrupted =
+            { Tabs =
+                [ tab
+                      first
+                      (EmbeddedTerminalLifecycle.Interrupted
+                          "host exited") ] }
+
+        Assert.That(hasLiveTabs interrupted, Is.True)
+
+    [<Test>]
     member _.``Close selects the same-index neighbour from the captured tab order``() =
         let running path =
             tab
