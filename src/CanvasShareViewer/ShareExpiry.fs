@@ -29,6 +29,14 @@ module internal ShareExpiry =
 
     let isLive now metadata =
         metadata
-        |> Map.tryFind MetadataKey
+        |> Map.tryPick (fun key value ->
+            if String.Equals(
+                key,
+                MetadataKey,
+                StringComparison.OrdinalIgnoreCase
+            ) then
+                Some value
+            else
+                None)
         |> Option.bind tryParseUtcRoundTrip
         |> Option.exists (fun expiresOn -> expiresOn > now)

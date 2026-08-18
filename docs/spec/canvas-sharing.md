@@ -175,7 +175,7 @@ only things they must agree on. They are pinned here rather than discovered per 
 
 | Item | Value |
 |---|---|
-| Expiry metadata | Blob metadata key `expiresOn`, value ISO-8601 UTC round-trip (`DateTimeOffset` `"o"`). A value that is absent or unparseable is malformed, not "never expires". |
+| Expiry metadata | Blob metadata key `expiresOn`, matched case-insensitively per Azure Blob metadata semantics, with an ISO-8601 UTC round-trip (`DateTimeOffset` `"o"`) value. A value that is absent or unparseable is malformed, not "never expires". |
 | Opaque prefix segment | Exactly `CanvasShare.PrefixLength` (22) base62 characters (`[0-9A-Za-z]`). |
 | Filename segment | One path segment ending `.html`; no `/`, `\`, or `..`. This is the publisher's `leafName` output; URL composers percent-encode it as one URI path segment while Blob lookup uses the decoded filename. |
 | Not-found response | HTTP 404 with one fixed, content-free body, byte-identical for malformed, missing, and expired shares: identical status, headers, body, and response-emitting order. Elapsed time is not equalized -- a malformed path may be rejected before any storage access. |

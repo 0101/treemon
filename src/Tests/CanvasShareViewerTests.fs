@@ -449,6 +449,36 @@ type ShareExpiryTests() =
             ))
 
     [<Test>]
+    member _.``ExpiresOn metadata is live through share lookup``() =
+        let now = expiresOn.AddTicks(-1L)
+        let mixedCaseMetadata =
+            Map [ "ExpiresOn", formatExpiry expiresOn ]
+        let blobName = $"{validPrefix}/report.html"
+        let stored = document "shared document" mixedCaseMetadata
+        let fake =
+            fakeBlobReader (Map [ blobName, stored ])
+
+        let result =
+            ShareLookup.resolve
+                fake.Reader
+                (fun () -> now)
+                validPrefix
+                "report.html"
+                CancellationToken.None
+            |> await
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                ShareExpiry.isLive now mixedCaseMetadata,
+                Is.True
+            )
+
+            Assert.That(
+                result,
+                Is.EqualTo(Available stored)
+            ))
+
+    [<Test>]
     member _.``missing expiry metadata is malformed``() =
         Assert.That(
             ShareExpiry.isLive
