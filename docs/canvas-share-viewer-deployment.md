@@ -13,7 +13,7 @@ domain.
 
 ## Prerequisites
 
-- PowerShell 7.4 or later, Azure CLI 2.48.1 or later, and .NET SDK 10 or later.
+- PowerShell 7.4 or later, Azure CLI 2.72.0 or later, and .NET SDK 10 or later.
 - Azure CLI signed in as the delegated publisher user, with the requested personal development
   subscription selected:
 
@@ -25,6 +25,8 @@ domain.
 - Azure permissions to create resources, update the storage account, assign roles at the Blob
   container scope, and disable App Service basic publishing credentials. Entra permissions must
   allow creation or ownership of the dedicated app registration and its federated credential.
+  The operator must also be able to list the viewer identity's role assignments throughout the
+  subscription and inherited parent scopes and read their role definitions.
 - An existing storage account configured in the machine-level Treemon config. The container may be
   omitted to use `canvas-shared`; the deployment creates it through the ARM control plane when
   needed:
@@ -60,8 +62,10 @@ Run the read-only validation first:
 
 Validation checks the selected subscription and tenant, the storage configuration, any existing
 resources, global availability of `treemon` when the app does not yet exist, the lifecycle-policy
-invariant, and a local Release publish of the viewer. It performs no Azure mutation and does not
-write machine configuration.
+invariant, and a local Release publish of the viewer. If the requested managed identity already
+exists, validation also resolves its direct and inherited role assignments and fails when any
+effective Blob-read data action is scoped outside the configured share container. Group-derived
+assignments are included. It performs no Azure mutation and does not write machine configuration.
 
 ## Provision and deploy
 
@@ -83,7 +87,9 @@ The script is idempotent and is intended to be run a second time with the same v
    user-assigned managed identity, and the fixed-name App Service.
 2. Disables account-level Blob public access, creates the configured private container, and grants
    the viewer `Storage Blob Data Reader` and the current publisher
-   `Storage Blob Data Contributor`, both at that container's exact ARM scope.
+   `Storage Blob Data Contributor`, both at that container's exact ARM scope. Before mutating an
+   existing deployment and again during final verification, it rejects broader viewer Blob-read
+   assignments discovered anywhere in the subscription or inherited from a parent scope.
 3. Creates or reuses one uniquely named, secret-free, current-tenant `AzureADMyOrg` app
    registration and service principal. The registration accepts only the canonical App Service
    callback.
@@ -123,6 +129,11 @@ access tokens, create deployment credentials, or read a publishing profile.
 Federated credentials and Blob role assignments can take several minutes to propagate. A first
 sign-in or Blob read that fails immediately after provisioning should be retried after propagation;
 do not replace the managed-identity federation with a client secret.
+
+If the containment check reports an assignment ID, role, and scope, remove that assignment or
+select a truly dedicated viewer identity. The script deliberately does not delete it because it
+may authorize another workload. Conditions on broader assignments are not accepted as proof of
+container-only access.
 
 By default, every identity in the current workforce tenant can authenticate. If a smaller audience
 is required, enable enterprise-application assignment and assign the intended users or groups in

@@ -197,6 +197,13 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - The publisher keeps its existing delegated Entra/Azure CLI identity and
   `Storage Blob Data Contributor` grant. The viewer uses a managed identity with the new read-only
   grant scoped to the share container.
+- When the requested viewer identity already exists, provisioning audits its Blob-read RBAC before
+  any Azure mutation and repeats the audit as part of deployed-state verification. The audit
+  enumerates direct and group-derived assignments throughout the subscription plus assignments
+  inherited from parent scopes, resolves each role definition's effective
+  `dataActions`/`notDataActions`, and fails on a Blob-read grant unless its assignment scope is the
+  configured share container or a descendant. It reports but never deletes an offending
+  assignment, because that grant may belong to another workload.
 - Provisioning ensures the configured share container exists with anonymous access disabled before
   either container-scoped grant is applied; the publisher intentionally does not create containers
   at share time.
@@ -205,12 +212,12 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   registration; it reads account/container from the machine-level `canvasShare` config and resolves
   the delegated publisher as the current Azure CLI user. The fixed B1 Linux plan and any new
   resource group use the storage account's Azure location.
-- `-ValidateOnly` performs subscription/tenant, configuration, existing-resource, global-name, and
-  local-publish checks without changing Azure or machine configuration. An apply run reconciles
-  resources, merges the canvas rule into the account's complete lifecycle policy without removing
-  unrelated rules, deploys with `az webapp deploy` after SCM/FTP basic authentication is disabled,
-  verifies the resulting control-plane state, and writes the exact canonical `viewerBaseUrl` while
-  preserving every other machine setting.
+- `-ValidateOnly` performs subscription/tenant, configuration, existing-resource, viewer-identity
+  RBAC, global-name, and local-publish checks without changing Azure or machine configuration. An
+  apply run reconciles resources, merges the canvas rule into the account's complete lifecycle
+  policy without removing unrelated rules, deploys with `az webapp deploy` after SCM/FTP basic
+  authentication is disabled, verifies the resulting control-plane state, and writes the exact
+  canonical `viewerBaseUrl` while preserving every other machine setting.
 - Easy Auth's `clientSecretSettingName` is the
   `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID` sentinel; the slot-sticky app setting with that name
   contains the user-assigned identity's client ID. The registration's federated credential trusts
@@ -258,6 +265,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Allow `unsafe-eval` only inside the contained document response | Shared canvases already support arbitrary inline JavaScript; preserving `eval`/`new Function` compatibility does not grant viewer-origin or network access because the sandbox and remaining CSP directives still deny both. |
 | Use `treemon.azurewebsites.net` rather than a custom domain or generated suffix | The Azure-provided hostname is short, TLS-enabled, requires no DNS ownership, and gives every shared document one stable origin for browser SSO. |
 | Derive storage and publisher deployment inputs from machine/Azure CLI state | The existing `canvasShare` account/container and current delegated publisher are already the publisher's source of truth. Requiring them again as script arguments would permit a viewer and publisher to be provisioned against different containers or identities. |
+| Treat only a container-scoped RBAC assignment (or a descendant scope) as proof of viewer containment | Fully interpreting arbitrary Azure RBAC conditions would reproduce the authorization engine and could silently accept a broader grant. A conditioned assignment at an account, resource-group, subscription, or parent scope therefore fails closed; the operator must remove it or use a dedicated identity. |
 | Merge the lifecycle rule instead of replacing the account policy | Azure lifecycle policies are whole-document resources. Preserving unrelated rules avoids destructive drift when the storage account has other lifecycle-managed data. |
 | Share with the whole tenant instead of requiring enterprise-application assignment | Sharing is link-driven and ad hoc; a maintained assignment list would lock out the colleagues and guests a link is handed to, while the unguessable path, tenant sign-in, and expiry already bound exposure. |
 | Guarantee an identical not-found response but not identical timing | Status, headers, body, and emission order are what an authenticated recipient can compare reliably; equalizing elapsed time would need a threat model, a maximum blob size, and padding, which is disproportionate to the leaked fact that a path once existed. |
@@ -277,6 +285,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | `src/Client/CanvasPane.fs`, `CanvasState.fs`, `CanvasUpdate.fs`, `index.html` | Share button, `ShareState` phase machine, clipboard write and banner routing (unchanged) |
 | `src/CanvasShareViewer/` | New App Service viewer: shell route, content route, expiry check, sandbox/CSP, Easy Auth configuration |
 | `scripts/deploy-canvas-share-viewer.ps1` | Idempotent non-production Azure provisioning, secret-free Easy Auth, Entra-authenticated ZIP deployment, validation, and machine-config update |
+| `scripts/canvas-share-viewer-deployment/ViewerBlobAccess.ps1` | Fail-closed audit of the viewer identity's effective Blob-read data-plane assignments |
 | `scripts/canvas-share-lifecycle-policy.json` | Container-filtered deletion rule starting after 31 days |
 | `docs/canvas-share-viewer-deployment.md` | Local operator prerequisites, dry run, apply, and durable-resource guidance |
 
@@ -288,8 +297,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - Entra redirect/allow/deny: an anonymous request redirects to sign-in; any identity the tenant
   authenticates -- member or B2B guest -- views the document; an identity outside the tenant is
   denied.
-- The viewer's managed identity can read the share container via Blob storage and nothing beyond
-  it.
+- The control-plane RBAC audit finds no effective Blob data-plane read assignment outside the share
+  container, and the live second-container probe under the deployed viewer identity still returns
+  403 as defense in depth.
 - A document is denied immediately once its metadata expiry has passed, before any lifecycle
   deletion runs.
 - The content route enforces the same checks as the shell: an expired or malformed share is denied

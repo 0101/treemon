@@ -228,6 +228,15 @@ function Ensure-ResourceGroup {
         '--subscription', $SubscriptionId)
 }
 
+function Get-ShareContainerScope {
+    param(
+        [Parameter(Mandatory)][pscustomobject] $StorageAccount,
+        [Parameter(Mandatory)][string] $Container
+    )
+
+    "$($StorageAccount.id)/blobServices/default/containers/$Container"
+}
+
 function Ensure-PrivateContainer {
     param(
         [Parameter(Mandatory)][pscustomobject] $StorageAccount,
@@ -264,7 +273,9 @@ function Ensure-PrivateContainer {
             '--subscription', $SubscriptionId)
     }
 
-    "$($StorageAccount.id)/blobServices/default/containers/$Container"
+    Get-ShareContainerScope `
+        -StorageAccount $StorageAccount `
+        -Container $Container
 }
 
 function Ensure-AppServicePlan {
@@ -802,6 +813,11 @@ function Assert-DeployedState {
     )
 
     Write-Step 'Verifying deployed control-plane configuration'
+    Assert-ViewerBlobAccessIsContainerOnly `
+        -PrincipalObjectId ([string] $ManagedIdentity.principalId) `
+        -ContainerScope $ContainerScope `
+        -SubscriptionId $SubscriptionId
+
     $webApp = Invoke-AzJson -Arguments @(
         'webapp', 'show',
         '--name', $appName,

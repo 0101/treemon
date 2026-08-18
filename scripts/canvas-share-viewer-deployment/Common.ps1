@@ -229,8 +229,8 @@ function Assert-Prerequisites {
     $azVersions = Invoke-AzJson -Arguments @('version')
     $azVersion = [version] $azVersions.'azure-cli'
 
-    if ($azVersion -lt [version] '2.48.1') {
-        throw "Azure CLI 2.48.1 or later is required for Microsoft Entra-authenticated App Service deployment. Found $azVersion."
+    if ($azVersion -lt [version] '2.72.0') {
+        throw "Azure CLI 2.72.0 or later is required for viewer RBAC inspection and Microsoft Entra-authenticated App Service deployment. Found $azVersion."
     }
 
     $dotnetVersionText = (& dotnet --version).Trim()

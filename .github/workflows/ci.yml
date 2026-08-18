@@ -38,5 +38,9 @@ jobs:
       - name: Test extensions
         run: npm run test:extension
 
+      - name: Test canvas share deployment
+        shell: pwsh
+        run: ./scripts/canvas-share-viewer-deployment/ViewerBlobAccess.Tests.ps1
+
       - name: Test .NET
         run: dotnet test src/Tests/Tests.fsproj --filter "Category!=Local" --no-build --verbosity normal

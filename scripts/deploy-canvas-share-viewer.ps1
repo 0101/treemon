@@ -46,6 +46,7 @@ $lifecyclePolicyPath = Join-Path $PSScriptRoot 'canvas-share-lifecycle-policy.js
 $deploymentSupportDirectory = Join-Path $PSScriptRoot 'canvas-share-viewer-deployment'
 
 . (Join-Path $deploymentSupportDirectory 'Common.ps1')
+. (Join-Path $deploymentSupportDirectory 'ViewerBlobAccess.ps1')
 . (Join-Path $deploymentSupportDirectory 'Azure.ps1')
 
 Write-Step 'Validating local tools and repository inputs'
@@ -58,10 +59,21 @@ $azureContext = Get-AzureContext
 $storageAccount = Get-StorageAccount `
     -AccountName $treemonConfig.AccountName `
     -SubscriptionId $azureContext.SubscriptionId
+$containerScope = Get-ShareContainerScope `
+    -StorageAccount $storageAccount `
+    -Container $treemonConfig.Container
 $existingResources = Get-ExistingResources -SubscriptionId $azureContext.SubscriptionId
 Assert-ExistingResourceSafety `
     -Existing $existingResources `
     -SubscriptionId $azureContext.SubscriptionId
+
+if ($null -ne $existingResources.Identity) {
+    Write-Step 'Verifying the existing viewer identity has container-only Blob access'
+    Assert-ViewerBlobAccessIsContainerOnly `
+        -PrincipalObjectId ([string] $existingResources.Identity.principalId) `
+        -ContainerScope $containerScope `
+        -SubscriptionId $azureContext.SubscriptionId
+}
 
 $workingDirectory = Join-Path ([IO.Path]::GetTempPath()) "treemon-viewer-$PID-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $workingDirectory | Out-Null
