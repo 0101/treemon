@@ -396,15 +396,19 @@ type ArchiveWorktreeResolutionTests() =
                         makeWorktree targetPath "feature-x" ] ]
 
             let manager =
+                let hostScriptPath = Path.Combine(tempDirA, "fake-host.mjs")
+                File.WriteAllText(hostScriptPath, "")
+
                 EmbeddedTerminal.createWithConfig
-                    { ExecutablePath =
+                    { NodeExecutable = "node"
+                      HostScriptPath = hostScriptPath
+                      HostStateDirectory = Path.Combine(tempDirA, "terminal-host")
+                      TtydExecutablePath =
                         Path.Combine(
                             tempDirA,
                             $"missing-ttyd-{Guid.NewGuid():N}.exe"
                         )
                       ShellCommand = "pwsh"
-                      ShellPrefixArguments = []
-                      PrefixArguments = []
                       StartupTimeout = TimeSpan.FromSeconds 1.0
                       ProbeInterval = TimeSpan.FromMilliseconds 10.0 }
 
@@ -430,6 +434,7 @@ type ArchiveWorktreeResolutionTests() =
                         Does.Contain("feature-x")
                     )
             finally
-                EmbeddedTerminal.closeAll manager
+                EmbeddedTerminal.shutdownHost manager
                 |> Async.RunSynchronously
+                |> ignore
         }
