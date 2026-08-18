@@ -4,12 +4,20 @@ open System
 open System.Text
 open System.Text.Encodings.Web
 open System.Threading.Tasks
+open Azure
+open Azure.Identity
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Logging
 
 module internal ViewerApplication =
+
+    type private DependencyFailureDetails =
+        { ExceptionType: string
+          AzureStatus: string
+          AzureErrorCode: string }
 
     [<Literal>]
     let ShellRoute = "/c/{prefix}/{filename}"
@@ -24,6 +32,10 @@ module internal ViewerApplication =
     [<Literal>]
     let private ContentContentSecurityPolicy =
         "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts"
+
+    [<Literal>]
+    let private DependencyFailureContentSecurityPolicy =
+        "default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'"
 
     let private routeSegment name (context: HttpContext) =
         context.Request.RouteValues[name]
@@ -43,6 +55,73 @@ module internal ViewerApplication =
             "no-referrer"
         context.Response.Headers["Cache-Control"] <-
             "no-store"
+
+    let rec private tryAzureFailureDetails
+        (error: exn)
+        =
+        match error with
+        | :? RequestFailedException as failure ->
+            Some(
+                failure.Status,
+                failure.ErrorCode |> Option.ofObj
+            )
+        | _ ->
+            error.InnerException
+            |> Option.ofObj
+            |> Option.bind tryAzureFailureDetails
+
+    let private (|DependencyFailure|_|)
+        (error: exn)
+        =
+        match error with
+        | :? RequestFailedException
+        | :? AuthenticationFailedException
+        | :? CredentialUnavailableException ->
+            let status, errorCode =
+                error
+                |> tryAzureFailureDetails
+                |> Option.map (fun (status, errorCode) ->
+                    Some(string status), errorCode)
+                |> Option.defaultValue (None, None)
+
+            Some
+                { ExceptionType = error.GetType().Name
+                  AzureStatus =
+                    status
+                    |> Option.defaultValue "unavailable"
+                  AzureErrorCode =
+                    errorCode
+                    |> Option.defaultValue "unavailable" }
+        | _ ->
+            None
+
+    let private handleDependencyFailures
+        (logger: ILogger)
+        (context: HttpContext)
+        (next: RequestDelegate)
+        : Task =
+        task {
+            try
+                do! next.Invoke(context)
+            with
+            | DependencyFailure failure ->
+                logger.LogError(
+                    "Viewer dependency failure: ExceptionType={ExceptionType}; AzureStatus={AzureStatus}; AzureErrorCode={AzureErrorCode}",
+                    [|
+                        box failure.ExceptionType
+                        box failure.AzureStatus
+                        box failure.AzureErrorCode
+                    |]
+                )
+
+                context.Response.Clear()
+                context.Response.StatusCode <-
+                    StatusCodes.Status503ServiceUnavailable
+                applyResponsePolicy
+                    DependencyFailureContentSecurityPolicy
+                    context
+                context.Response.ContentLength <- 0L
+        }
 
     let private shellBytes (context: HttpContext) =
         let prefix =
@@ -134,6 +213,9 @@ module internal ViewerApplication =
         builder.Services.AddRouting() |> ignore
 
         let app = builder.Build()
+        app.Use(fun context next ->
+            handleDependencyFailures app.Logger context next)
+        |> ignore
         app.UseRouting() |> ignore
 
         app.MapGet(

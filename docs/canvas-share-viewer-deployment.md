@@ -97,7 +97,8 @@ The script is idempotent and is intended to be run a second time with the same v
    slot-sticky `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID` setting and its
    `clientSecretSettingName` sentinel, so no client secret is created.
 5. Requires Easy Auth before requests reach the viewer, uses the tenant's v2 issuer, requests no
-   extra login scopes, requires HTTPS, and disables the token store.
+   extra login scopes, requires HTTPS, disables the token store, and pins both the .NET host and
+   ASP.NET Core environments to `Production`.
 6. Merges `expire-shared-canvas-docs` into the storage account's complete lifecycle policy while
    preserving unrelated rules. Deletion starts only after more than 31 days, beyond the 30-day
    maximum share lifetime.
@@ -127,8 +128,9 @@ access tokens, create deployment credentials, or read a publishing profile.
 ## After deployment
 
 Federated credentials and Blob role assignments can take several minutes to propagate. A first
-sign-in or Blob read that fails immediately after provisioning should be retried after propagation;
-do not replace the managed-identity federation with a client secret.
+sign-in or Blob read that fails immediately after provisioning may return the viewer's empty 503
+response and should be retried after propagation; do not replace the managed-identity federation
+with a client secret.
 
 If the containment check reports an assignment ID, role, and scope, remove that assignment or
 select a truly dedicated viewer identity. The script deliberately does not delete it because it

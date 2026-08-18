@@ -697,6 +697,8 @@ function Ensure-AppSettings {
         '--settings',
         "CanvasShareViewer__StorageAccountName=$StorageAccountName",
         "CanvasShareViewer__ShareContainer=$Container",
+        'DOTNET_ENVIRONMENT=Production',
+        'ASPNETCORE_ENVIRONMENT=Production',
         "AZURE_CLIENT_ID=$($ManagedIdentity.clientId)",
         "WEBSITE_AUTH_AAD_ALLOWED_TENANTS=$TenantId",
         '--subscription', $SubscriptionId)
@@ -877,6 +879,8 @@ function Assert-DeployedState {
     $expectedSettings = [ordered]@{
         CanvasShareViewer__StorageAccountName = [string] $StorageAccount.name
         CanvasShareViewer__ShareContainer = $Container
+        DOTNET_ENVIRONMENT = 'Production'
+        ASPNETCORE_ENVIRONMENT = 'Production'
         AZURE_CLIENT_ID = [string] $ManagedIdentity.clientId
         WEBSITE_AUTH_AAD_ALLOWED_TENANTS = $TenantId
         $managedIdentityAssertionSetting = [string] $ManagedIdentity.clientId

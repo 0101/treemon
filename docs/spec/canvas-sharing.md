@@ -63,6 +63,10 @@
 - Missing, malformed, and expired share paths return the same generic not-found response. Easy
   Auth handles unauthenticated identities before application code runs and never reveals whether
   the requested share exists.
+- A `BlobNotFound` 404 is the only dependency outcome treated as a missing share. Container or
+  account failures, storage throttling, authorization, service, and managed-credential failures
+  return one fixed, empty 503 with restrictive response headers in every runtime environment, so
+  an outage is retryable without exposing framework diagnostics.
 - The audience is tenant-wide: any identity the tenant issuer authenticates -- a current-tenant
   user or an invited B2B guest -- may view a share whose link it holds. Enterprise-application
   assignment is deliberately not required, so possession of the link plus a tenant sign-in is the
@@ -141,6 +145,10 @@
   resolve to not-found before any storage access, so untrusted dot segments never reach Blob URI
   construction. Every not-found path then emits the identical response through the same
   application-level ordering; only elapsed time may differ.
+- An exception boundary registered before routing handles non-404 Azure Storage failures and
+  `DefaultAzureCredential` failures independently of the ASP.NET Core environment. It logs only
+  the exception type and available Azure status/error code, clears the route response, and emits
+  the fixed dependency-failure response; it never converts an outage to not-found.
 - The shell's iframe uses `sandbox="allow-scripts"` only -- it omits `allow-same-origin`,
   `allow-forms`, `allow-popups`, and `allow-top-navigation`, so the embedded document's script can
   run but cannot read the viewer's cookies or storage, submit forms, open popups, or navigate the
@@ -178,6 +186,7 @@ Response headers, by route:
 |---|---|
 | Shell | `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` |
 | Content | `Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` |
+| Dependency failure (either route) | HTTP 503 with an empty body and `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` |
 
 `script-src`/`style-src` allow inline because a self-contained canvas doc *is* inline script and
 style. `unsafe-eval` preserves existing support for documents that use `eval` or `new Function`;
@@ -218,6 +227,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   policy without removing unrelated rules, deploys with `az webapp deploy` after SCM/FTP basic
   authentication is disabled, verifies the resulting control-plane state, and writes the exact
   canonical `viewerBaseUrl` while preserving every other machine setting.
+- Deployment sets and deployed-state validation asserts both `DOTNET_ENVIRONMENT=Production` and
+  `ASPNETCORE_ENVIRONMENT=Production`; the application-level dependency exception boundary remains
+  active even if either platform setting later drifts.
 - Easy Auth's `clientSecretSettingName` is the
   `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID` sentinel; the slot-sticky app setting with that name
   contains the user-assigned identity's client ID. The registration's federated credential trusts
@@ -245,6 +257,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   headers, and body -- to an authenticated caller; only response latency may differ, which is an
   accepted residual signal rather than a guarantee. Easy Auth rejects identities the tenant does
   not authenticate without revealing path existence.
+- Storage and credential outages are intentionally distinguishable from a missing share by their
+  fixed empty 503, but are not distinguishable by route or runtime environment and expose no
+  exception message, stack, request path, or document content.
 - The Remoting CSRF guard continues to protect the publish call itself: a forged cross-origin
   `shareCanvasDoc` request from the operator's browser is rejected before any Azure I/O, the same as
   every other `IWorktreeApi` state-changing endpoint.
@@ -269,6 +284,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Merge the lifecycle rule instead of replacing the account policy | Azure lifecycle policies are whole-document resources. Preserving unrelated rules avoids destructive drift when the storage account has other lifecycle-managed data. |
 | Share with the whole tenant instead of requiring enterprise-application assignment | Sharing is link-driven and ad hoc; a maintained assignment list would lock out the colleagues and guests a link is handed to, while the unguessable path, tenant sign-in, and expiry already bound exposure. |
 | Guarantee an identical not-found response but not identical timing | Status, headers, body, and emission order are what an authenticated recipient can compare reliably; equalizing elapsed time would need a threat model, a maximum blob size, and padding, which is disproportionate to the leaked fact that a path once existed. |
+| Return a fixed 503 rather than 404 for storage or credential failures | Dependency outages are operational and retryable, not evidence that a share is missing; preserving that distinction avoids hiding failures while an environment-independent boundary prevents diagnostic disclosure. |
 | Let the deployment script write `~/.treemon/config.json` directly instead of through the running server | Provisioning must work with no Treemon instance running, and a server RPC or shared cross-process lock would add permanent coupling for a rare operator step; the script re-reads, replaces atomically, and preserves every other setting, and the operator runs it while Treemon is not writing config. |
 | Keep the publisher/viewer wire contract as pinned constants on both sides | The protocol is a handful of literals across two independently deployed apps, where a shared module would add coupling without preventing version skew; fixed-fixture compatibility tests catch drift at build time instead. |
 
@@ -304,6 +320,8 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   deletion runs.
 - The content route enforces the same checks as the shell: an expired or malformed share is denied
   on the content route too, and a document opened directly at the content URL is still sandboxed.
+- Throwing storage and credential readers produce the same empty policy-headered 503 on shell and
+  content routes in both Production and Development, with no framework diagnostic response.
 - Deleting or clearing a document's backing blob denies its link immediately (revocation).
 - A hostile fixture attempting cookie/storage access, same-origin fetches, form submission,
   popups, top navigation, and network exfiltration all fail inside the sandboxed iframe and CSP,

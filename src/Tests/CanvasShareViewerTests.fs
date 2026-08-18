@@ -1,6 +1,7 @@
 module Tests.CanvasShareViewerTests
 
 open System
+open System.Collections.Concurrent
 open System.Collections.Generic
 open System.Globalization
 open System.IO
@@ -11,11 +12,14 @@ open System.Text
 open System.Threading
 open System.Threading.Tasks
 open System.Xml.Linq
+open Azure
+open Azure.Identity
 open CanvasShareViewer
 open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Hosting
 open Microsoft.AspNetCore.Routing
 open Microsoft.Extensions.Configuration
+open Microsoft.Extensions.Logging
 open NUnit.Framework
 open Tests.TestUtils
 
@@ -26,6 +30,9 @@ let private shellContentSecurityPolicy =
 
 let private contentContentSecurityPolicy =
     "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts"
+
+let private dependencyFailureContentSecurityPolicy =
+    "default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'"
 
 let private formatExpiry (value: DateTimeOffset) =
     value.ToString("o", CultureInfo.InvariantCulture)
@@ -43,6 +50,53 @@ let private document
 type private FakeBlobReader =
     { Reader: BlobReader
       Requests: unit -> string list }
+
+type private CapturedLog =
+    { Level: LogLevel
+      Message: string
+      Exception: exn option }
+
+let private nullLogScope =
+    { new IDisposable with
+        member _.Dispose() = () }
+
+type private CapturingLogger
+    (logs: ConcurrentQueue<CapturedLog>)
+    =
+    interface ILogger with
+        member _.BeginScope<'TState>
+            (_state: 'TState)
+            =
+            nullLogScope
+
+        member _.IsEnabled(_level) =
+            true
+
+        member _.Log<'TState>(
+            level,
+            _eventId,
+            state: 'TState,
+            error,
+            formatter
+        ) =
+            logs.Enqueue(
+                { Level = level
+                  Message = formatter.Invoke(state, error)
+                  Exception = error |> Option.ofObj }
+            )
+
+type private CapturingLoggerProvider() =
+    // The concurrent queue is confined to this test logger's framework callback boundary.
+    let logs = ConcurrentQueue<CapturedLog>()
+
+    member _.Entries() =
+        logs.ToArray() |> List.ofArray
+
+    interface ILoggerProvider with
+        member _.CreateLogger(_categoryName) =
+            CapturingLogger(logs)
+
+        member _.Dispose() = ()
 
 let private fakeBlobReader documents =
     // Mutation is confined to this fake's request observer; production storage state is immutable.
@@ -90,6 +144,53 @@ let private withViewer
             .GetAwaiter()
             .GetResult()
 
+let private withThrowingViewer
+    environmentName
+    (createError: unit -> exn)
+    now
+    (action:
+        CapturingLoggerProvider ->
+        HttpClient ->
+        string ->
+        unit)
+    =
+    let port = getFreeTcpPort ()
+    let options =
+        WebApplicationOptions(
+            EnvironmentName = environmentName
+        )
+    let builder = WebApplication.CreateBuilder(options)
+    builder.Logging.ClearProviders() |> ignore
+    let logs = new CapturingLoggerProvider()
+    builder.Logging.AddProvider(logs) |> ignore
+    builder.WebHost.UseKestrel(fun options ->
+        options.Listen(IPAddress.Loopback, port))
+    |> ignore
+
+    let reader =
+        { ReadExact =
+            fun _ _ ->
+                createError ()
+                |> Task.FromException<BlobDocument option> }
+
+    use app =
+        ViewerApplication.create
+            builder
+            reader
+            (fun () -> now)
+
+    app.StartAsync(CancellationToken.None)
+        .GetAwaiter()
+        .GetResult()
+
+    try
+        use client = new HttpClient()
+        action logs client $"http://127.0.0.1:{port}"
+    finally
+        app.StopAsync(CancellationToken.None)
+            .GetAwaiter()
+            .GetResult()
+
 let private await (work: Task<'value>) =
     work.GetAwaiter().GetResult()
 
@@ -123,6 +224,12 @@ let private expectedPolicyHeaders contentSecurityPolicy =
         "Referrer-Policy", [ "no-referrer" ]
         "X-Content-Type-Options", [ "nosniff" ]
     ]
+
+let private expectedDependencyFailureHeaders =
+    ("Content-Length", [ "0" ])
+    :: expectedPolicyHeaders
+        dependencyFailureContentSecurityPolicy
+    |> List.sortBy fst
 
 let private parseHtmlDom (html: string) =
     html.Replace(
@@ -184,6 +291,32 @@ let private configuration values =
     |> ConfigurationBuilder()
         .AddInMemoryCollection
     |> _.Build()
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type BlobStorageFailureTests() =
+
+    [<TestCase(404, "BlobNotFound", true)>]
+    [<TestCase(404, "ContainerNotFound", false)>]
+    [<TestCase(403, "AuthorizationPermissionMismatch", false)>]
+    member _.``only a missing-blob response becomes not-found``(
+        status: int,
+        errorCode: string,
+        expected: bool
+    ) =
+        let failure =
+            RequestFailedException(
+                status,
+                "sensitive Azure diagnostics",
+                errorCode,
+                null
+            )
+
+        Assert.That(
+            BlobStorage.isMissingBlobFailure failure,
+            Is.EqualTo(expected)
+        )
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -443,6 +576,77 @@ type ViewerRouteTests() =
             now.AddHours(1.0) |> formatExpiry
         ]
 
+    let assertDependencyFailure
+        environmentName
+        createError
+        expectedLogMessage
+        =
+        withThrowingViewer
+            environmentName
+            createError
+            now
+            (fun logs client baseUrl ->
+                let snapshots =
+                    [
+                        $"{baseUrl}/c/{validPrefix}/report.html"
+                        $"{baseUrl}/c/{validPrefix}/report.html/content"
+                    ]
+                    |> List.map (responseSnapshot client)
+
+                let expected = snapshots |> List.head
+                let errorLogs =
+                    logs.Entries()
+                    |> List.filter (fun entry ->
+                        entry.Level = LogLevel.Error)
+
+                Assert.Multiple(fun () ->
+                    snapshots
+                    |> List.iter (fun snapshot ->
+                        Assert.That(
+                            snapshot.StatusCode,
+                            Is.EqualTo(
+                                HttpStatusCode.ServiceUnavailable
+                            )
+                        )
+
+                        Assert.That(
+                            snapshot.Headers,
+                            Is.EqualTo(
+                                expectedDependencyFailureHeaders
+                            )
+                        )
+
+                        Assert.That(
+                            snapshot.Body,
+                            Is.Empty,
+                            "dependency failures must not expose diagnostics"
+                        )
+
+                        Assert.That(
+                            snapshot,
+                            Is.EqualTo(expected),
+                            "shell and content routes must emit one fixed dependency-failure response"
+                        ))
+
+                    Assert.That(
+                        errorLogs |> List.length,
+                        Is.EqualTo(2),
+                        "each failed route must emit one safe dependency log"
+                    )
+
+                    errorLogs
+                    |> List.iter (fun entry ->
+                        Assert.That(
+                            entry.Message,
+                            Is.EqualTo(expectedLogMessage)
+                        )
+
+                        Assert.That(
+                            entry.Exception,
+                            Is.EqualTo(None: exn option),
+                            "the logger must not receive the exception object or its diagnostics"
+                        ))))
+
     [<Test>]
     member _.``viewer maps exactly the two GET routes``() =
         let fake = fakeBlobReader Map.empty
@@ -648,6 +852,51 @@ type ViewerRouteTests() =
                         Some "text/html; charset=utf-8"
                     )
                 )))
+
+    [<TestCase("Production")>]
+    [<TestCase("Development")>]
+    member _.``storage failures return a fixed empty 503 in every environment``(environmentName: string) =
+        assertDependencyFailure
+            environmentName
+            (fun () ->
+                RequestFailedException(
+                    429,
+                    "sensitive storage diagnostics",
+                    "ServerBusy",
+                    InvalidOperationException(
+                        "sensitive inner diagnostics"
+                    )
+                ))
+            "Viewer dependency failure: ExceptionType=RequestFailedException; AzureStatus=429; AzureErrorCode=ServerBusy"
+
+    [<TestCase("Production")>]
+    [<TestCase("Development")>]
+    member _.``credential failures return a fixed empty 503 in every environment``(environmentName: string) =
+        [
+            (fun () ->
+                    AuthenticationFailedException(
+                        "sensitive authentication diagnostics",
+                        RequestFailedException(
+                            403,
+                            "sensitive Azure diagnostics",
+                            "AuthenticationFailed",
+                            null
+                        )
+                    )
+                    :> exn),
+            "Viewer dependency failure: ExceptionType=AuthenticationFailedException; AzureStatus=403; AzureErrorCode=AuthenticationFailed"
+            (fun () ->
+                    CredentialUnavailableException(
+                        "sensitive credential diagnostics"
+                    )
+                    :> exn),
+            "Viewer dependency failure: ExceptionType=CredentialUnavailableException; AzureStatus=unavailable; AzureErrorCode=unavailable"
+        ]
+        |> List.iter (fun (createError, expectedLogMessage) ->
+            assertDependencyFailure
+                environmentName
+                createError
+                expectedLogMessage)
 
     [<Test>]
     member _.``content preserves a self-contained active document``() =

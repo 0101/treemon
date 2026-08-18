@@ -7,6 +7,7 @@ open System.Threading.Tasks
 open Azure
 open Azure.Core
 open Azure.Storage.Blobs
+open Azure.Storage.Blobs.Models
 
 type internal BlobDocument =
     { Content: ReadOnlyMemory<byte>
@@ -19,6 +20,16 @@ type internal BlobReader =
         Task<BlobDocument option> }
 
 module internal BlobStorage =
+
+    let internal isMissingBlobFailure
+        (failure: RequestFailedException)
+        =
+        failure.Status = 404
+        && String.Equals(
+            failure.ErrorCode,
+            BlobErrorCode.BlobNotFound.ToString(),
+            StringComparison.Ordinal
+        )
 
     let private metadataMap
         (values: IDictionary<string, string>)
@@ -61,7 +72,7 @@ module internal BlobStorage =
                                     |> metadataMap }
                     with
                     | :? RequestFailedException as ex when
-                        ex.Status = 404
+                        isMissingBlobFailure ex
                         ->
                         return None
                 } }
