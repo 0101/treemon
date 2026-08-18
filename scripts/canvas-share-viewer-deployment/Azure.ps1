@@ -56,6 +56,46 @@ function Get-AzureResourcePropertyValue {
     $null
 }
 
+function Assert-AppRegistrationAuthenticationFlow {
+    param([Parameter(Mandatory)][pscustomobject] $AppRegistration)
+
+    Assert-RegistrationIsDedicated -AppRegistration $AppRegistration
+
+    $redirectUris = @($AppRegistration.web.redirectUris)
+    $implicitGrantSettingsProperty =
+        $AppRegistration.web.PSObject.Properties['implicitGrantSettings']
+    $implicitGrantSettings =
+        if ($null -eq $implicitGrantSettingsProperty) {
+            $null
+        } else {
+            $implicitGrantSettingsProperty.Value
+        }
+    $idTokenIssuanceEnabled =
+        if ($null -eq $implicitGrantSettings) {
+            $false
+        } else {
+            [bool] (Get-AzureResourcePropertyValue `
+                -Resource $implicitGrantSettings `
+                -Name 'enableIdTokenIssuance')
+        }
+    $accessTokenIssuanceEnabled =
+        if ($null -eq $implicitGrantSettings) {
+            $false
+        } else {
+            [bool] (Get-AzureResourcePropertyValue `
+                -Resource $implicitGrantSettings `
+                -Name 'enableAccessTokenIssuance')
+        }
+
+    if ([string] $AppRegistration.signInAudience -cne 'AzureADMyOrg' -or
+        $redirectUris.Count -ne 1 -or
+        [string] $redirectUris[0] -cne $callbackUrl -or
+        -not $idTokenIssuanceEnabled -or
+        $accessTokenIssuanceEnabled) {
+        throw "Entra app registration '$Registration' is not configured for Easy Auth's single-tenant code/id_token callback."
+    }
+}
+
 function Get-WebAppPlanResourceId {
     param([Parameter(Mandatory)][pscustomobject] $WebApp)
 
@@ -549,7 +589,7 @@ function Update-ViewerAppRegistration {
         '--sign-in-audience', 'AzureADMyOrg',
         '--web-redirect-uris', $callbackUrl,
         '--enable-access-token-issuance', 'false',
-        '--enable-id-token-issuance', 'false'
+        '--enable-id-token-issuance', 'true'
     ) + $referenceArguments)
 }
 
@@ -1038,6 +1078,12 @@ function Assert-DeployedState {
     if ($settings | Where-Object name -CEQ 'MICROSOFT_PROVIDER_AUTHENTICATION_SECRET') {
         throw 'An Easy Auth client-secret setting is present.'
     }
+
+    $currentAppRegistration = Invoke-AzJson -Arguments @(
+        'ad', 'app', 'show',
+        '--id', [string] $AppRegistration.appId)
+    Assert-AppRegistrationAuthenticationFlow `
+        -AppRegistration $currentAppRegistration
 
     $authSettings = Invoke-AzJson -Arguments @(
         'rest',

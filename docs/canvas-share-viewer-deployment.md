@@ -99,7 +99,8 @@ The script is idempotent and is intended to be run a second time with the same v
    registration and service principal. The registration accepts only the canonical App Service
    callback. On a restricted tenant's specific `serviceManagementReference` error, creation or
    update retries with the one unambiguous reference already carried by applications the delegated
-   publisher owns.
+   publisher owns. It enables ID-token issuance for Easy Auth's `code id_token` form-post callback
+   while leaving browser access-token issuance disabled.
 4. Adds a federated credential whose subject is the managed identity principal. Easy Auth uses the
    slot-sticky `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID` setting and its
    `clientSecretSettingName` sentinel, so no client secret is created.

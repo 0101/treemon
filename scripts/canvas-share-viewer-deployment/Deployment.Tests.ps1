@@ -114,10 +114,15 @@ $script:registrationResult =
     [pscustomobject]@{
         appId = '99999999-8888-7777-6666-555555555555'
         displayName = $Registration
+        signInAudience = 'AzureADMyOrg'
         passwordCredentials = @()
         serviceManagementReference = $script:serviceManagementReference
         web = [pscustomobject]@{
             redirectUris = @($callbackUrl)
+            implicitGrantSettings = [pscustomobject]@{
+                enableAccessTokenIssuance = $false
+                enableIdTokenIssuance = $true
+            }
         }
     }
 
@@ -315,7 +320,76 @@ Invoke-TestCase 'restricted-tenant registration creation converges on existing s
             -Actual ([string] $call.Arguments[$referenceIndex + 1]) `
             -Expected $script:serviceManagementReference `
             -Because 'registration mutations must use the one unambiguous owned reference'
+
+        $accessTokenIndex =
+            [Array]::IndexOf($call.Arguments, '--enable-access-token-issuance')
+        Assert-True `
+            -Condition ($accessTokenIndex -ge 0) `
+            -Because 'registration updates must set browser access-token issuance explicitly'
+        Assert-Equal `
+            -Actual ([string] $call.Arguments[$accessTokenIndex + 1]) `
+            -Expected 'false' `
+            -Because 'Easy Auth does not need browser-issued access tokens'
+
+        $idTokenIndex =
+            [Array]::IndexOf($call.Arguments, '--enable-id-token-issuance')
+        Assert-True `
+            -Condition ($idTokenIndex -ge 0) `
+            -Because 'registration updates must set ID-token issuance explicitly'
+        Assert-Equal `
+            -Actual ([string] $call.Arguments[$idTokenIndex + 1]) `
+            -Expected 'true' `
+            -Because 'Easy Auth requests code and id_token at its form-post callback'
     }
+}
+
+Invoke-TestCase 'deployed registration requires ID tokens without browser access tokens' {
+    Assert-AppRegistrationAuthenticationFlow `
+        -AppRegistration $script:registrationResult
+
+    $invalidRegistration =
+        [pscustomobject]@{
+            appId = $script:registrationResult.appId
+            displayName = $Registration
+            passwordCredentials = @()
+            signInAudience = 'AzureADMyOrg'
+            web = [pscustomobject]@{
+                redirectUris = @($callbackUrl)
+                implicitGrantSettings = [pscustomobject]@{
+                    enableAccessTokenIssuance = $false
+                    enableIdTokenIssuance = $false
+                }
+            }
+        }
+    $rejectedMissingIdToken = $false
+
+    try {
+        Assert-AppRegistrationAuthenticationFlow `
+            -AppRegistration $invalidRegistration
+    } catch {
+        $rejectedMissingIdToken =
+            $_.Exception.Message -match 'code/id_token callback'
+    }
+
+    Assert-True `
+        -Condition $rejectedMissingIdToken `
+        -Because 'deployed-state verification must reject a registration that breaks the Easy Auth callback'
+
+    $invalidRegistration.web.implicitGrantSettings.enableIdTokenIssuance = $true
+    $invalidRegistration.web.implicitGrantSettings.enableAccessTokenIssuance = $true
+    $rejectedBrowserAccessToken = $false
+
+    try {
+        Assert-AppRegistrationAuthenticationFlow `
+            -AppRegistration $invalidRegistration
+    } catch {
+        $rejectedBrowserAccessToken =
+            $_.Exception.Message -match 'code/id_token callback'
+    }
+
+    Assert-True `
+        -Condition $rejectedBrowserAccessToken `
+        -Because 'deployed-state verification must keep browser access-token issuance disabled'
 }
 
 Write-Host 'Canvas share deployment regression tests passed.'

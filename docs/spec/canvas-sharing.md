@@ -149,6 +149,9 @@
   application code. Assignment is not required on the enterprise application: every identity the
   tenant authenticates, including B2B guests, passes the gate. The registration authenticates to
   Easy Auth via a managed-identity federated credential rather than a long-lived client secret.
+  The registration enables ID-token issuance because Easy Auth's browser callback requests
+  `response_type=code id_token` with `response_mode=form_post`; browser access-token issuance
+  remains disabled.
 - Two routes divide responsibility: a shell route (`/c/<opaque-prefix>/<filename>`) validates the
   request and expiry through an exact Blob properties lookup and renders a minimal HTML page
   without downloading the document body; a content route
@@ -272,7 +275,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID` sentinel; the slot-sticky app setting with that name
   contains the user-assigned identity's client ID. The registration's federated credential trusts
   that identity's principal ID with the tenant v2 issuer and `api://AzureADTokenExchange`
-  audience. No client secret or extra login scope is created.
+  audience. Provisioning and deployed-state validation require ID-token issuance for Easy Auth's
+  hybrid callback while keeping browser access-token issuance disabled. No client secret or extra
+  login scope is created.
 - The canonical App Service, identity, Entra configuration, RBAC grants, and lifecycle policy
   remain deployed after verification. Verification removes only its document fixtures and any
   auxiliary resources created solely to prove the permission boundary.
@@ -313,6 +318,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Sandbox the content iframe without `allow-same-origin` | Granting it would hand the embedded document the viewer's authenticated origin (cookies, Easy Auth session) even though it also has script execution. |
 | Enforce expiry in the viewer at request time rather than relying on Blob lifecycle deletion | Lifecycle deletion runs on a daily-ish schedule and is a backstop; relying on it alone would leave documents readable past their promised expiry. |
 | Prefer a managed-identity federated credential over an Easy Auth client secret | Avoids minting, storing, or rotating a long-lived secret for the viewer's app registration. |
+| Enable registration ID-token issuance but not browser access-token issuance | App Service Easy Auth uses an OIDC hybrid `code id_token` form-post callback and rejects sign-in when the registration cannot issue that ID token; it redeems the code server-side through managed-identity federation, so browser access-token issuance remains unnecessary. |
 | Store expiry as blob metadata rather than a separate data store | Keeps the expiry attached to the artifact it governs, with no second store to keep in sync; it travels and disappears with the blob. |
 | Re-check segments and expiry on the content route instead of trusting the shell | The recipient holds the URL, so the content route is directly reachable; a shell-only check would leave an expired share readable by editing the path. |
 | Use a properties-only Blob lookup for the shell and reserve the body read for the content route | The shell needs only existence and expiry metadata, so downloading and discarding the complete document there would double the transferred document bytes without strengthening validation. |
@@ -347,7 +353,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | `src/Client/CanvasPane.fs`, `CanvasState.fs`, `CanvasUpdate.fs`, `index.html` | Share button, `ShareState` phase machine, clipboard write and banner routing (unchanged) |
 | `src/CanvasShareViewer/` | New App Service viewer: shell route, content route, expiry check, sandbox/CSP, Easy Auth configuration |
 | `scripts/deploy-canvas-share-viewer.ps1` | Idempotent non-production Azure provisioning, secret-free Easy Auth, Entra-authenticated ZIP deployment, validation, and machine-config update |
-| `scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1` | Windows/Azure CLI shape, packaging-output, clean/existing reconciliation, and restricted-tenant registration regressions |
+| `scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1` | Windows/Azure CLI shape, packaging-output, reconciliation, restricted-tenant registration, and Easy Auth callback regressions |
 | `scripts/canvas-share-viewer-deployment/ViewerBlobAccess.ps1` | Fail-closed audit of the viewer identity's effective Blob-read data-plane assignments |
 | `scripts/canvas-share-lifecycle-policy.json` | Container-filtered deletion rule starting after 31 days |
 | `docs/canvas-share-viewer-deployment.md` | Local operator prerequisites, dry run, apply, and durable-resource guidance |
