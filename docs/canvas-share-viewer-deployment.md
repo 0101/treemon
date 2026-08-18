@@ -110,6 +110,10 @@ The script is idempotent and is intended to be run a second time with the same v
 
    Existing `canvasShare` fields and unrelated machine-level settings are preserved.
 
+   Run the apply step while no Treemon instance is writing machine configuration -- the script
+   reads, updates, and atomically replaces `config.json` itself rather than going through a
+   running server, so a settings change made in the UI at the same moment could be overwritten.
+
 The automation does not invoke Treemon server lifecycle commands and does not bind any local
 Treemon port. Temporary build and JSON files are deleted on exit. It does not request or print
 access tokens, create deployment credentials, or read a publishing profile.

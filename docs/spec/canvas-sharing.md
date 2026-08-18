@@ -6,8 +6,9 @@
   plain browser after signing in with Microsoft Entra. No SAS, account key, or other bearer
   credential is ever generated or returned to the recipient.
 - Real authorization, not just secrecy: the URL's opaque segment narrows which document a
-  signed-in identity can reach, but Entra sign-in (and any enterprise-app assignment) is what
-  actually gates access. A leaked link alone is not sufficient to view the document.
+  signed-in identity can reach, but Entra sign-in is what actually gates access. A link leaked
+  outside the tenant is not sufficient to view the document; inside the tenant, the audience is
+  every authenticated member and B2B guest holding it.
 - A bounded, view-time-enforced lifetime: a document stops being viewable at its configured expiry
   even if the underlying blob has not yet been swept up by storage lifecycle cleanup.
 - Contained interactivity: the recipient still sees the document's live HTML/JS rather than a
@@ -60,8 +61,12 @@
   wrote as blob metadata, and renders the document only when the blob exists, the metadata is
   well-formed, and the expiry has not passed.
 - Missing, malformed, and expired share paths return the same generic not-found response. Easy
-  Auth handles unauthenticated or unassigned identities before application code runs and never
-  reveals whether the requested share exists.
+  Auth handles unauthenticated identities before application code runs and never reveals whether
+  the requested share exists.
+- The audience is tenant-wide: any identity the tenant issuer authenticates -- a current-tenant
+  user or an invited B2B guest -- may view a share whose link it holds. Enterprise-application
+  assignment is deliberately not required, so possession of the link plus a tenant sign-in is the
+  access boundary; identities outside the tenant are denied.
 - The rendered page is a minimal shell that embeds the document itself from a separate content
   route inside a sandboxed iframe (see Technical Approach); the shell carries no document content
   and no privileged API of its own.
@@ -120,9 +125,9 @@
   internet-facing component this feature adds.
 - Easy Auth is configured for the workforce, current-tenant, single-tenant Entra registration with
   authentication required at the platform level, so an unauthenticated request never reaches
-  application code. A narrower enterprise-application assignment (specific users or groups) can
-  constrain the audience below "whole tenant" where needed. The registration authenticates to Easy
-  Auth via a managed-identity federated credential rather than a long-lived client secret.
+  application code. Assignment is not required on the enterprise application: every identity the
+  tenant authenticates, including B2B guests, passes the gate. The registration authenticates to
+  Easy Auth via a managed-identity federated credential rather than a long-lived client secret.
 - Two routes divide responsibility: a shell route (`/c/<opaque-prefix>/<filename>`) validates the
   request and expiry and renders a minimal HTML page; a content route
   (`/c/<opaque-prefix>/<filename>/content`) streams the document bytes and is the only thing the
@@ -131,11 +136,11 @@
 - Each route re-validates the segments and re-checks expiry against blob metadata on its own; the
   content route never trusts that the shell already checked. Otherwise the content route would be
   an unguarded bypass for an expired or malformed share whose URL the recipient still holds.
-- A matched route performs one exact read before it collapses path validity, Blob existence, and
-  expiry into the single not-found outcome: a valid path reads its exact `<prefix>/<filename>`,
-  while malformed segments read one fixed, non-servable probe name so untrusted dot segments never
-  reach Blob URI construction. This keeps malformed, missing, and expired requests on the same
-  application-level ordering.
+- A matched route collapses path validity, Blob existence, and expiry into the single not-found
+  outcome: a valid path performs one exact read of `<prefix>/<filename>`, while malformed segments
+  resolve to not-found before any storage access, so untrusted dot segments never reach Blob URI
+  construction. Every not-found path then emits the identical response through the same
+  application-level ordering; only elapsed time may differ.
 - The shell's iframe uses `sandbox="allow-scripts"` only -- it omits `allow-same-origin`,
   `allow-forms`, `allow-popups`, and `allow-top-navigation`, so the embedded document's script can
   run but cannot read the viewer's cookies or storage, submit forms, open popups, or navigate the
@@ -165,7 +170,7 @@ only things they must agree on. They are pinned here rather than discovered per 
 | Expiry metadata | Blob metadata key `expiresOn`, value ISO-8601 UTC round-trip (`DateTimeOffset` `"o"`). A value that is absent or unparseable is malformed, not "never expires". |
 | Opaque prefix segment | Exactly `CanvasShare.PrefixLength` (22) base62 characters (`[0-9A-Za-z]`). |
 | Filename segment | One path segment ending `.html`; no `/`, `\`, or `..`. This is the publisher's `leafName` output; URL composers percent-encode it as one URI path segment while Blob lookup uses the decoded filename. |
-| Not-found response | HTTP 404 with one fixed, content-free body, byte-identical for malformed, missing, and expired shares -- no header, status, or timing distinguishes them. |
+| Not-found response | HTTP 404 with one fixed, content-free body, byte-identical for malformed, missing, and expired shares: identical status, headers, body, and response-emitting order. Elapsed time is not equalized -- a malformed path may be rejected before any storage access. |
 
 Response headers, by route:
 
@@ -229,8 +234,10 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - The content route's CSP and security headers apply regardless of authentication state, so even
   script that does execute inside the sandbox cannot reach the network or leak referrer
   information.
-- Missing, malformed, and expired share paths are indistinguishable to an authenticated caller.
-  Easy Auth rejects unauthenticated or unassigned identities without revealing path existence.
+- Missing, malformed, and expired share paths return an indistinguishable response -- same status,
+  headers, and body -- to an authenticated caller; only response latency may differ, which is an
+  accepted residual signal rather than a guarantee. Easy Auth rejects identities the tenant does
+  not authenticate without revealing path existence.
 - The Remoting CSRF guard continues to protect the publish call itself: a forged cross-origin
   `shareCanvasDoc` request from the operator's browser is rejected before any Azure I/O, the same as
   every other `IWorktreeApi` state-changing endpoint.
@@ -252,6 +259,10 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Use `treemon.azurewebsites.net` rather than a custom domain or generated suffix | The Azure-provided hostname is short, TLS-enabled, requires no DNS ownership, and gives every shared document one stable origin for browser SSO. |
 | Derive storage and publisher deployment inputs from machine/Azure CLI state | The existing `canvasShare` account/container and current delegated publisher are already the publisher's source of truth. Requiring them again as script arguments would permit a viewer and publisher to be provisioned against different containers or identities. |
 | Merge the lifecycle rule instead of replacing the account policy | Azure lifecycle policies are whole-document resources. Preserving unrelated rules avoids destructive drift when the storage account has other lifecycle-managed data. |
+| Share with the whole tenant instead of requiring enterprise-application assignment | Sharing is link-driven and ad hoc; a maintained assignment list would lock out the colleagues and guests a link is handed to, while the unguessable path, tenant sign-in, and expiry already bound exposure. |
+| Guarantee an identical not-found response but not identical timing | Status, headers, body, and emission order are what an authenticated recipient can compare reliably; equalizing elapsed time would need a threat model, a maximum blob size, and padding, which is disproportionate to the leaked fact that a path once existed. |
+| Let the deployment script write `~/.treemon/config.json` directly instead of through the running server | Provisioning must work with no Treemon instance running, and a server RPC or shared cross-process lock would add permanent coupling for a rare operator step; the script re-reads, replaces atomically, and preserves every other setting, and the operator runs it while Treemon is not writing config. |
+| Keep the publisher/viewer wire contract as pinned constants on both sides | The protocol is a handful of literals across two independently deployed apps, where a shared module would add coupling without preventing version skew; fixed-fixture compatibility tests catch drift at build time instead. |
 
 ## Key Files
 
@@ -274,8 +285,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - The copied URL is clean: no SAS, signature, or other query-string token of any kind.
 - The deployed viewer and every returned share URL use
   `https://treemon.azurewebsites.net`; provisioning never substitutes a suffixed hostname.
-- Entra redirect/allow/deny: an anonymous request redirects to sign-in; an allowed tenant identity
-  views the document; an unassigned or external identity is denied.
+- Entra redirect/allow/deny: an anonymous request redirects to sign-in; any identity the tenant
+  authenticates -- member or B2B guest -- views the document; an identity outside the tenant is
+  denied.
 - The viewer's managed identity can read the share container via Blob storage and nothing beyond
   it.
 - A document is denied immediately once its metadata expiry has passed, before any lifecycle
