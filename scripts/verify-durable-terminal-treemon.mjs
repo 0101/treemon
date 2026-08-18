@@ -13,6 +13,7 @@ import { chromium } from "playwright";
 import {
   defaultProcessController,
   sameProcessIdentity,
+  terminateRetainedChild,
 } from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
@@ -170,9 +171,8 @@ function startVite() {
 async function stopProcess(child, identity, description) {
   if (!child || child.exitCode !== null) return;
   const pid = child.pid;
-  const actual = await processController.inspect(pid);
-  if (!sameProcessIdentity(actual, identity)) return;
-  await processController.terminate(pid);
+  if (identity) await processController.terminate(identity);
+  else await terminateRetainedChild(child);
   await waitFor(
     `${description} PID ${pid} to exit`,
     async () =>
@@ -277,11 +277,7 @@ async function shutdownHost() {
     process.stderr.write(
       `Graceful durable host shutdown failed; stopping recorded host PID ${hostState.pid}.\n`,
     );
-    const revalidated =
-      await processController.inspect(hostState.pid);
-    if (sameProcessIdentity(revalidated, hostIdentity)) {
-      await processController.terminate(hostState.pid);
-    }
+    await processController.terminate(hostIdentity);
   }
 }
 

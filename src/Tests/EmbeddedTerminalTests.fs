@@ -10,6 +10,7 @@ open System.Threading.Tasks
 open NUnit.Framework
 open Shared
 open Server
+open Server.GitWorktree
 
 let private run workflow =
     workflow |> Async.RunSynchronously
@@ -262,14 +263,23 @@ const server = createServer(async (request, response) => {
     send(response, 200, { stopping: true });
     setImmediate(() => server.close(() => {
       const currentBehavior = behavior();
-      if (manifestVersion === 1 && currentBehavior.upgradeAfterDrain) {
+      const replacementManifestPath =
+        manifestVersion === 1
+          ? currentBehavior.replacementManifestPath
+          : null;
+      if (replacementManifestPath) {
+        writeJson(
+          statePath,
+          JSON.parse(readFileSync(replacementManifestPath, "utf8")),
+        );
+      } else if (manifestVersion === 1 && currentBehavior.upgradeAfterDrain) {
         writeJson(behaviorPath, {
           ...currentBehavior,
           protocolVersion: 2,
           initialWorktreePaths: [],
         });
       }
-      if (existsSync(statePath)) {
+      if (!replacementManifestPath && existsSync(statePath)) {
         const current = JSON.parse(readFileSync(statePath, "utf8"));
         const owned =
           manifestVersion === 1
@@ -633,15 +643,18 @@ type EmbeddedTerminalTests() =
                 Assert.That(endpointFor worktree restarted, Is.Not.Empty)))
 
     [<Test>]
-    member _.``reserved mutation blocks its key while unrelated starts continue``() =
-        withFakeHost (fun tempDir _ hostConfig manager ->
+    member _.``blocked reserved mutation leaves unrelated manager operations responsive``() =
+        withFakeHost (fun tempDir _ _ manager ->
             let reservedPath = Path.Combine(tempDir, "reserved")
-            let unrelatedPath = Path.Combine(tempDir, "unrelated")
-            [ reservedPath; unrelatedPath ]
+            let closingPath = Path.Combine(tempDir, "closing")
+            let startingPath = Path.Combine(tempDir, "starting")
+            [ reservedPath; closingPath; startingPath ]
             |> List.iter (Directory.CreateDirectory >> ignore)
             let reservedWorktree = canonical reservedPath
-            let unrelatedWorktree = canonical unrelatedPath
+            let closingWorktree = canonical closingPath
+            let startingWorktree = canonical startingPath
             start manager reservedWorktree |> ignore
+            start manager closingWorktree |> ignore
 
             let mutationEntered =
                 TaskCompletionSource<unit>(
@@ -669,30 +682,36 @@ type EmbeddedTerminalTests() =
                 |> Async.StartAsTask
 
             mutationEntered.Task.GetAwaiter().GetResult()
-            let sameKeyManager =
-                EmbeddedTerminal.createWithConfig hostConfig
-            let unrelatedManager =
-                EmbeddedTerminal.createWithConfig hostConfig
-            let blockedStart =
-                EmbeddedTerminal.start
-                    sameKeyManager
-                    reservedWorktree
-                |> Async.StartAsTask
 
             try
-                let unrelated =
-                    EmbeddedTerminal.start
-                        unrelatedManager
-                        unrelatedWorktree
+                let started =
+                    start manager startingWorktree
+
+                let current =
+                    EmbeddedTerminal.get manager |> run
+
+                let afterClose =
+                    EmbeddedTerminal.close
+                        manager
+                        closingWorktree
                     |> run
 
                 Assert.Multiple(fun () ->
-                    Assert.That(blockedStart.IsCompleted, Is.False)
+                    Assert.That(reservation.IsCompleted, Is.False)
                     Assert.That(
-                        endpointFor unrelatedWorktree
-                            (unrelated
-                             |> Result.defaultValue
-                                 EmbeddedTerminalSnapshot.empty),
+                        endpointFor startingWorktree started,
+                        Is.Not.Empty
+                    )
+                    Assert.That(
+                        endpointFor startingWorktree current,
+                        Is.Not.Empty
+                    )
+                    Assert.That(
+                        tryFindTab closingWorktree afterClose,
+                        Is.EqualTo(None)
+                    )
+                    Assert.That(
+                        endpointFor startingWorktree afterClose,
                         Is.Not.Empty
                     ))
             finally
@@ -700,15 +719,7 @@ type EmbeddedTerminalTests() =
 
             match reservation.GetAwaiter().GetResult() with
             | Error error -> Assert.Fail(error)
-            | Ok () -> ()
-
-            match blockedStart.GetAwaiter().GetResult() with
-            | Error error -> Assert.Fail(error)
-            | Ok snapshot ->
-                Assert.That(
-                    endpointFor reservedWorktree snapshot,
-                    Is.Not.Empty
-                ))
+            | Ok () -> ())
 
     [<Test>]
     member _.``tab close keeps a failed tab when host removal is not authoritative``() =
@@ -977,6 +988,166 @@ type EmbeddedTerminalTests() =
                 )
                 Assert.That(tryFindTab first after, Is.EqualTo(None))))
 
+    [<TestCase("delete")>]
+    [<TestCase("archive")>]
+    member _.``valid replacement wins legacy drain before strict worktree mutation``(
+        mutation
+    ) =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let mainPath = Path.Combine(tempDir, "main")
+            let targetPath = Path.Combine(tempDir, "target")
+            let otherPath = Path.Combine(tempDir, "other")
+            [ mainPath; targetPath; otherPath ]
+            |> List.iter (Directory.CreateDirectory >> ignore)
+
+            let target = canonical targetPath
+            let other = canonical otherPath
+            let replacementStateDirectory =
+                Path.Combine(tempDir, "replacement-state")
+
+            let replacementManager =
+                EmbeddedTerminal.createWithConfig
+                    { hostConfig with
+                        HostStateDirectory =
+                            replacementStateDirectory }
+
+            try
+                start replacementManager target |> ignore
+                let replacementStatePath =
+                    Path.Combine(
+                        replacementStateDirectory,
+                        "host.json"
+                    )
+
+                let replacementManifest =
+                    File.ReadAllText replacementStatePath
+
+                let replacementGeneration =
+                    readHostGeneration replacementStateDirectory
+
+                writeBehavior
+                    stateDirectory
+                    (JsonSerializer.Serialize(
+                        {| protocolVersion = 1
+                           initialWorktreePaths =
+                            [| targetPath; otherPath |]
+                           replacementManifestPath =
+                            replacementStatePath |}
+                    ))
+
+                start manager target |> ignore
+
+                let agent = SchedulerState.createAgent ()
+                let repoId =
+                    PathUtils.toRepoId (Path.GetFullPath tempDir)
+
+                let worktrees: WorktreeInfo list =
+                    [ { Path = mainPath
+                        Head = "main-head"
+                        Branch = Some "main" }
+                      { Path = targetPath
+                        Head = "target-head"
+                        Branch = Some "feature" } ]
+
+                agent.Post(
+                    SchedulerState.StateMsg.UpdateWorktreeList(
+                        repoId,
+                        worktrees
+                    )
+                )
+
+                agent.PostAndAsyncReply(
+                    SchedulerState.StateMsg.GetState
+                )
+                |> run
+                |> ignore
+
+                let rootPaths =
+                    Map.ofList [ repoId, tempDir ]
+
+                let result =
+                    match mutation with
+                    | "delete" ->
+                        WorktreeApi.deleteWorktreeWith
+                            (fun _ _ _ -> async.Return(Ok()))
+                            (EmbeddedTerminal.withReservedCleanup manager)
+                            (fun _ -> async.Return())
+                            agent
+                            rootPaths
+                            target
+                        |> run
+                    | "archive" ->
+                        WorktreeApi.updateArchivedBranchesWith
+                            agent
+                            rootPaths
+                            (EmbeddedTerminal.withReservedCleanup manager)
+                            Set.add
+                            target
+                        |> run
+                    | unexpected ->
+                        failwith
+                            $"Unexpected mutation '{unexpected}'"
+
+                let state =
+                    agent.PostAndAsyncReply(
+                        SchedulerState.StateMsg.GetState
+                    )
+                    |> run
+
+                let mutationObserved =
+                    match mutation with
+                    | "delete" ->
+                        state.Repos[repoId].WorktreeList
+                        |> List.exists (fun worktree ->
+                            Shared.PathUtils.pathEquals
+                                worktree.Path
+                                targetPath)
+                        |> not
+                    | _ ->
+                        TreemonConfig.readArchivedBranches tempDir
+                        |> List.contains "feature"
+
+                let after = EmbeddedTerminal.get manager |> run
+                let replacementAfter =
+                    EmbeddedTerminal.get replacementManager |> run
+
+                Assert.Multiple(fun () ->
+                    match result with
+                    | Ok () -> ()
+                    | Error error -> Assert.Fail(error)
+
+                    Assert.That(mutationObserved, Is.True)
+                    Assert.That(
+                        readHostGeneration stateDirectory,
+                        Is.EqualTo replacementGeneration
+                    )
+                    Assert.That(
+                        File.ReadAllText(
+                            Path.Combine(stateDirectory, "host.json")
+                        ),
+                        Is.EqualTo replacementManifest
+                    )
+                    Assert.That(
+                        File.Exists replacementStatePath,
+                        Is.True
+                    )
+                    Assert.That(
+                        tryFindTab target after,
+                        Is.EqualTo(None)
+                    )
+                    Assert.That(
+                        interruptedErrorFor other after,
+                        Does.Contain("protocol-1").IgnoreCase
+                    )
+                    Assert.That(
+                        tryFindTab target replacementAfter,
+                        Is.EqualTo(None)
+                    ))
+            finally
+                EmbeddedTerminal.shutdownHost replacementManager
+                |> run
+                |> ignore)
+
     [<Test>]
     member _.``dead known host remains visible as interrupted and failed key recovers``() =
         withFakeHost (fun tempDir stateDirectory _ manager ->
@@ -1067,4 +1238,53 @@ type EmbeddedTerminalTests() =
                     afterLastDismiss.Tabs
                     |> List.map _.Worktree,
                     Is.EqualTo([ paths[0] ])
+                )))
+
+    [<Test>]
+    member _.``duplicate interrupted closes stay dismissed without changing other tabs``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let paths =
+                [ "alpha"; "bravo"; "charlie" ]
+                |> List.map (fun name ->
+                    let path = Path.Combine(tempDir, name)
+                    Directory.CreateDirectory path |> ignore
+                    canonical path)
+
+            paths |> List.iter (start manager >> ignore)
+            let deadPid = readHostPid stateDirectory
+            crashFakeHost stateDirectory
+            waitUntil "fixture host to exit" (fun () ->
+                processIsAlive deadPid |> not)
+
+            EmbeddedTerminal.get manager |> run |> ignore
+            let afterFirst =
+                EmbeddedTerminal.close manager paths[1] |> run
+            let afterDuplicate =
+                EmbeddedTerminal.close manager paths[1] |> run
+            let afterOther =
+                EmbeddedTerminal.close manager paths[0] |> run
+            let afterOtherDuplicate =
+                EmbeddedTerminal.close manager paths[0] |> run
+
+            Assert.Multiple(fun () ->
+                Assert.That(afterDuplicate, Is.EqualTo afterFirst)
+                Assert.That(
+                    afterOtherDuplicate,
+                    Is.EqualTo afterOther
+                )
+                Assert.That(
+                    afterOther.Tabs |> List.map _.Worktree,
+                    Is.EqualTo([ paths[2] ])
+                )
+                Assert.That(
+                    interruptedErrorFor paths[2] afterOther,
+                    Does.Contain("unavailable").IgnoreCase
+                )
+                Assert.That(
+                    tryFindTab paths[0] afterOther,
+                    Is.EqualTo(None)
+                )
+                Assert.That(
+                    tryFindTab paths[1] afterOther,
+                    Is.EqualTo(None)
                 )))

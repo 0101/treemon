@@ -8,6 +8,7 @@
     "test:reporting": "node --test src/Extension/reporting/*.test.mjs",
     "test:durable-terminal-host": "node --test scripts/durable-terminal-host.test.mjs",
     "test:durable-terminal-observation": "node --test scripts/durable-terminal-observation.test.mjs",
+    "test:ttyd-runtime-unit": "node --test scripts/verify-ttyd-runtime.test.mjs",
     "test:durable-terminal-runtime": "node scripts/verify-durable-terminal-runtime.mjs",
     "test:durable-terminal-treemon": "node scripts/verify-durable-terminal-treemon.mjs",
     "test:ttyd-runtime": "node scripts/verify-ttyd-runtime.mjs",

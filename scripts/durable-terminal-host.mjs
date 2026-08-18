@@ -38,6 +38,10 @@ const processForceCommandMs = 5000;
 const reservationLeaseMs = 5 * 60_000;
 const maximumOwnedProcesses = 1024;
 const unixEpochTicks = 621355968000000000n;
+const processTerminationHelperPath = join(
+  import.meta.dirname,
+  "terminate-owned-process.ps1",
+);
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -504,7 +508,12 @@ function isPidAlive(pid) {
   }
 }
 
-const runProcessQuery = (fileName, argumentsList) =>
+const runBoundedProcess = (
+  fileName,
+  argumentsList,
+  description,
+  timeoutMs = processForceCommandMs,
+) =>
   new Promise((resolveCommand, rejectCommand) => {
     const child = spawn(fileName, argumentsList, {
       windowsHide: true,
@@ -529,21 +538,18 @@ const runProcessQuery = (fileName, argumentsList) =>
     child.stderr.on("data", collect(stderr));
     const timeout = setTimeout(() => {
       if (child.exitCode === null) child.kill();
-      finish(null, new Error(`Timed out querying process ownership with ${fileName}`));
-    }, processForceCommandMs);
+      finish(null, new Error(`Timed out running ${description} with ${fileName}`));
+    }, timeoutMs);
     child.once("error", (error) => finish(null, error));
     child.once("exit", (code) => {
       if (outputBytes > maxControlBodyBytes) {
-        finish(null, new Error("Process ownership query exceeded the output limit"));
-      } else if (code === 0) {
-        finish(Buffer.concat(stdout).toString("utf8"));
+        finish(null, new Error(`${description} exceeded the output limit`));
       } else {
-        finish(
-          null,
-          new Error(
-            `Process ownership query failed with code ${code}: ${sanitizeMetadataText(Buffer.concat(stderr).toString("utf8"), 240)}`,
-          ),
-        );
+        finish({
+          code,
+          stdout: Buffer.concat(stdout).toString("utf8"),
+          stderr: Buffer.concat(stderr).toString("utf8"),
+        });
       }
     });
   });
@@ -553,17 +559,39 @@ const windowsProcessQuery = async (filter) => {
     "$ErrorActionPreference = 'Stop'",
     `$items = @(Get-CimInstance Win32_Process -Filter '${filter}')`,
     "$items | ForEach-Object {",
-    "  '{0}|{1}|{2}' -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate.ToUniversalTime().Ticks",
+    "  $process = $null",
+    "  try {",
+    "    $process = [System.Diagnostics.Process]::GetProcessById([int]$_.ProcessId)",
+    "    $processHandle = $process.SafeHandle",
+    "    $exactStart = $process.StartTime.ToUniversalTime().Ticks",
+    "    $reportedStart = $_.CreationDate.ToUniversalTime().Ticks",
+    "    if ([Math]::Abs($exactStart - $reportedStart) -le 9) {",
+    "      '{0}|{1}|{2}' -f $_.ProcessId, $_.ParentProcessId, $exactStart",
+    "    }",
+    "  } catch [System.ArgumentException] {",
+    "  } catch [System.InvalidOperationException] {",
+    "  } finally {",
+    "    if ($null -ne $process) { $process.Dispose() }",
+    "  }",
     "}",
   ].join("; ");
-  const output = await runProcessQuery("powershell.exe", [
-    "-NoProfile",
-    "-NonInteractive",
-    "-Command",
-    script,
-  ]);
+  const result = await runBoundedProcess(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      script,
+    ],
+    "process ownership query",
+  );
+  if (result.code !== 0) {
+    throw new Error(
+      `Process ownership query failed with code ${result.code}: ${sanitizeMetadataText(result.stderr, 240)}`,
+    );
+  }
 
-  return output
+  return result.stdout
     .split(/\r?\n/)
     .filter(Boolean)
     .map((line) => {
@@ -579,6 +607,40 @@ const windowsProcessQuery = async (filter) => {
         startIdentity: `windows:${startText}`,
       };
     });
+};
+
+const terminateWindowsProcess = async (identity) => {
+  const startIdentity = /^windows:(\d+)$/.exec(
+    identity?.startIdentity ?? "",
+  )?.[1];
+  if (!validPid(identity?.pid) || !startIdentity) {
+    throw new Error(
+      "Windows process termination requires an exact creation identity",
+    );
+  }
+
+  const result = await runBoundedProcess(
+    "pwsh",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      processTerminationHelperPath,
+      "-ProcessId",
+      String(identity.pid),
+      "-StartTimeUtcTicks",
+      startIdentity,
+      "-TimeoutMilliseconds",
+      String(processForceCommandMs),
+    ],
+    "identity-bound process termination",
+    processForceCommandMs + 1000,
+  );
+  if (result.code === 0) return true;
+  if (result.code === 3) return false;
+  throw new Error(
+    `Identity-bound process termination failed with code ${result.code}: ${sanitizeMetadataText(result.stderr, 240)}`,
+  );
 };
 
 const linuxProcessIdentity = (pid) => {
@@ -659,15 +721,71 @@ export function defaultProcessController() {
   return {
     inspect,
     children,
-    terminate: async (pid) => {
-      if (!validPid(pid)) return;
-      try {
-        process.kill(pid, "SIGKILL");
-      } catch (error) {
-        if (error?.code !== "ESRCH") throw error;
-      }
-    },
+    terminate:
+      process.platform === "win32"
+        ? terminateWindowsProcess
+        : async () => {
+            throw new Error(
+              `Identity-bound process termination is unsupported on ${process.platform}`,
+            );
+          },
   };
+}
+
+const spawnedProcessExited = (child) =>
+  child?.exitCode !== null || child?.signalCode != null;
+
+export async function captureSpawnedProcessIdentity(
+  child,
+  inspect,
+  wait = delay,
+  timeoutMs = 2000,
+  spawnFailure = () => null,
+) {
+  const pid = child?.pid;
+  if (!validPid(pid)) throw new Error("Spawned process did not report a PID");
+  const deadline = Date.now() + timeoutMs;
+
+  const capture = async () => {
+    const failure = spawnFailure();
+    if (failure) throw failure;
+    if (spawnedProcessExited(child)) {
+      throw new Error(`Spawned process ${pid} exited during identity capture`);
+    }
+
+    const identity = await inspect(pid);
+    const failureAfterInspection = spawnFailure();
+    if (failureAfterInspection) throw failureAfterInspection;
+    if (spawnedProcessExited(child)) {
+      throw new Error(`Spawned process ${pid} exited during identity capture`);
+    }
+    if (identity?.pid === pid) return identity;
+    if (Date.now() >= deadline) {
+      throw new Error("Could not capture spawned process creation identity");
+    }
+    await wait(25);
+    return capture();
+  };
+
+  return capture();
+}
+
+export async function terminateRetainedChild(
+  child,
+  timeoutMs = processForceCommandMs,
+) {
+  if (!child || spawnedProcessExited(child)) return;
+  const exited = once(child, "exit").then(() => true);
+  if (!child.kill("SIGKILL") && !spawnedProcessExited(child)) {
+    throw new Error("Retained child process handle could not be terminated");
+  }
+  const completed = await Promise.race([
+    exited,
+    delay(timeoutMs).then(() => false),
+  ]);
+  if (!completed && !spawnedProcessExited(child)) {
+    throw new Error("Timed out waiting for retained child process to exit");
+  }
 }
 
 const processIdentityKey = (identity) =>
@@ -775,10 +893,7 @@ async function forceOwnedProcessExit(
       (left, right) => left.depth - right.depth,
     )) {
       await discoverOwnedDescendants(session, processController);
-      const actual = await processController.inspect(tracked.identity.pid);
-      if (sameProcessIdentity(actual, tracked.identity)) {
-        await processController.terminate(tracked.identity.pid);
-      }
+      await processController.terminate(tracked.identity);
     }
 
     if (Date.now() < deadline) {
@@ -1258,6 +1373,7 @@ export class DurableTerminalHost {
       terminalSize: { columns: defaultColumns, rows: defaultRows },
       closing: false,
       failureRecorded: false,
+      resourcesStopped: false,
       ownedProcesses: new Map(),
       unverifiedSpawnedPids: [],
       shellPid: null,
@@ -1317,6 +1433,8 @@ export class DurableTerminalHost {
 
     try {
       await this.startSessionProxy(session);
+      const readinessError = this.startupReadinessError(session);
+      if (readinessError) throw new Error(readinessError);
       session.state = "running";
       session.error = null;
       this.persistStatus();
@@ -1327,32 +1445,74 @@ export class DurableTerminalHost {
         ttydPort: session.ttydPort,
       });
     } catch (error) {
+      if (!session.failureRecorded) {
+        session.failureRecorded = true;
+        session.error = this.startFailureMessage(error);
+      }
       session.state = "failed";
-      session.error = this.startFailureMessage(error);
-      session.closing = true;
       this.record("session-start-failed", session, {
         errorType: sanitizeMetadataText(error?.name || "Error", 80),
       });
-      try {
-        await this.stopSessionResources(session);
-      } catch (cleanupError) {
+      const cleanupError = await this.stopFailedSessionResources(session);
+      if (cleanupError) {
         session.error = `Terminal startup failed and owned process cleanup did not complete: ${sanitizeMetadataText(cleanupError.message, 240)}`;
         this.record("session-start-cleanup-failed", session, {
           trackedPids: trackedOwnedProcessIds(session),
           unverifiedPids: session.unverifiedSpawnedPids,
         });
       }
-      session.closing = false;
       this.persistStatus();
     }
 
     return session;
   }
 
+  startupReadinessError(session) {
+    if (
+      this.sessions.get(session.id) !== session ||
+      this.sessionForKey(session.key) !== session
+    ) {
+      return "Terminal session ownership changed during startup";
+    }
+    if (session.failureRecorded) {
+      return session.error ?? "Terminal startup was interrupted";
+    }
+    if (!session.ttydProcess || spawnedProcessExited(session.ttydProcess)) {
+      return "ttyd exited before terminal startup completed";
+    }
+    if (!validPid(session.shellPid)) {
+      return "PowerShell process identity was not ready";
+    }
+    if (
+      session.upstream?.readyState !== WebSocket.OPEN ||
+      session.upstreamClosedAt
+    ) {
+      return "ttyd WebSocket was not open when terminal startup completed";
+    }
+    if (!session.publicServer?.listening) {
+      return "Terminal public server stopped listening during startup";
+    }
+    return null;
+  }
+
   startFailureMessage(error) {
+    const message = String(error?.message ?? "");
     if (error?.code === "ENOENT") return "ttyd could not be started";
-    if (String(error?.message).includes("Timed out")) return error.message;
-    if (String(error?.message).includes("ttyd exited with code")) return error.message;
+    if (
+      message.includes("Timed out") ||
+      message.includes("ttyd exited with code") ||
+      message.includes("exited during identity capture") ||
+      message.includes("startup was interrupted") ||
+      [
+        "Terminal session ownership changed during startup",
+        "ttyd exited before terminal startup completed",
+        "PowerShell process identity was not ready",
+        "ttyd WebSocket was not open when terminal startup completed",
+        "Terminal public server stopped listening during startup",
+      ].includes(message)
+    ) {
+      return sanitizeMetadataText(message, 240);
+    }
     return "The durable terminal host could not start ttyd";
   }
 
@@ -1470,36 +1630,24 @@ export class DurableTerminalHost {
         void this.interruptSession(session, `ttyd exited with code ${code ?? "unknown"}`);
       }
     });
-    const identityDeadline = Date.now() + 2000;
-    const captureTtydIdentity = async () => {
-      if (spawnFailure.error) throw spawnFailure.error;
-      let identity;
-      try {
-        identity =
-          await this.processController.inspect(session.ttydPid);
-      } catch (error) {
-        if (
-          validPid(session.ttydPid) &&
-          session.ttydProcess.exitCode === null
-        ) {
-          session.unverifiedSpawnedPids = [session.ttydPid];
-        }
-        throw error;
-      }
-      if (identity) return identity;
-      if (session.ttydProcess.exitCode !== null) {
-        throw new Error(
-          `ttyd exited with code ${session.ttydProcess.exitCode}`,
-        );
-      }
-      if (Date.now() >= identityDeadline) {
+    let ttydIdentity;
+    try {
+      ttydIdentity = await captureSpawnedProcessIdentity(
+        session.ttydProcess,
+        (pid) => this.processController.inspect(pid),
+        this.wait,
+        2000,
+        () => spawnFailure.error,
+      );
+    } catch (error) {
+      if (
+        validPid(session.ttydPid) &&
+        !spawnedProcessExited(session.ttydProcess)
+      ) {
         session.unverifiedSpawnedPids = [session.ttydPid];
-        throw new Error("Could not capture ttyd process creation identity");
       }
-      await this.wait(25);
-      return captureTtydIdentity();
-    };
-    const ttydIdentity = await captureTtydIdentity();
+      throw error;
+    }
     trackOwnedProcess(session, ttydIdentity, 0);
 
     [session.ttydProcess.stdout, session.ttydProcess.stderr].forEach((stream) => {
@@ -1601,6 +1749,12 @@ export class DurableTerminalHost {
       this.record("upstream-error", session, {
         errorType: sanitizeMetadataText(error?.name || "Error", 80),
       });
+      if (!session.closing) {
+        void this.interruptSession(
+          session,
+          `ttyd WebSocket failed: ${sanitizeMetadataText(error?.message || "unknown error", 160)}`,
+        );
+      }
     });
   }
 
@@ -1770,8 +1924,14 @@ export class DurableTerminalHost {
     session.upstream.send(frame, { binary: true });
   }
 
-  async interruptSession(session, error) {
-    if (session.closing || session.failureRecorded) return;
+  interruptSession(session, error) {
+    if (
+      session.closing ||
+      session.failureRecorded ||
+      this.sessions.get(session.id) !== session
+    ) {
+      return Promise.resolve();
+    }
     session.failureRecorded = true;
     session.state = "failed";
     session.error = error;
@@ -1779,12 +1939,38 @@ export class DurableTerminalHost {
     session.attachment = null;
     attachment?.socket?.close(1011, "Terminal session interrupted");
     session.browserWebSockets?.close();
-    await closeServer(session.publicServer);
     this.persistStatus();
     this.record("session-interrupted", session, {
       ttydAlive: isPidAlive(session.ttydPid),
       shellAlive: isPidAlive(session.shellPid),
     });
+
+    return this.withKeyTransition(session.key, async () => {
+      if (this.sessions.get(session.id) !== session) return;
+      const cleanupError = await this.stopFailedSessionResources(session);
+      if (cleanupError) {
+        session.error = `Terminal interruption cleanup did not complete: ${sanitizeMetadataText(cleanupError.message, 240)}`;
+        this.record("session-interrupt-cleanup-failed", session, {
+          trackedPids: trackedOwnedProcessIds(session),
+          unverifiedPids: session.unverifiedSpawnedPids,
+        });
+        this.persistStatus();
+      }
+    });
+  }
+
+  async stopFailedSessionResources(session) {
+    if (session.resourcesStopped) return null;
+    session.closing = true;
+    try {
+      await this.stopSessionResources(session);
+      session.resourcesStopped = true;
+      return null;
+    } catch (error) {
+      return error;
+    } finally {
+      session.closing = false;
+    }
   }
 
   async closeSession(session, reason) {
@@ -1842,6 +2028,20 @@ export class DurableTerminalHost {
       if (!closed) session.upstream.terminate();
     }
 
+    if (
+      session.unverifiedSpawnedPids?.includes(session.ttydPid) &&
+      session.ttydProcess
+    ) {
+      await terminateRetainedChild(
+        session.ttydProcess,
+        this.cleanupTimeouts.forced,
+      );
+      session.unverifiedSpawnedPids =
+        session.unverifiedSpawnedPids.filter(
+          (pid) => pid !== session.ttydPid,
+        );
+    }
+
     let remaining = await waitForOwnedProcessExit(
       session,
       this.processController,
@@ -1855,28 +2055,14 @@ export class DurableTerminalHost {
       this.cleanupTimeouts.forced,
       this.wait,
     );
-    const unverifiedRemaining = await Promise.all(
-      (session.unverifiedSpawnedPids ?? []).map(async (pid) => ({
-        pid,
-        actual: await this.processController.inspect(pid),
-      })),
-    ).then((processes) =>
-      processes.filter(
-        ({ pid, actual }) =>
-          actual &&
-          !(
-            pid === session.ttydPid &&
-            session.ttydProcess?.exitCode !== null
-          ),
-      ),
-    );
+    const unverifiedRemaining = session.unverifiedSpawnedPids ?? [];
     await closeServer(session.publicServer);
     session.browserWebSockets?.close();
 
     if (remaining.length > 0 || unverifiedRemaining.length > 0) {
       const remainingPids = [
         ...remaining.map(({ identity }) => identity.pid),
-        ...unverifiedRemaining.map(({ pid }) => pid),
+        ...unverifiedRemaining,
       ];
       throw new Error(
         `Owned terminal processes remain: ${remainingPids.join(", ")}`,
@@ -1914,7 +2100,12 @@ export class DurableTerminalHost {
     const now = Date.now();
 
     this.sessions.forEach((session) => {
-      if (session.state !== "running") return;
+      if (
+        session.state !== "running" ||
+        session.upstream?.readyState !== WebSocket.OPEN
+      ) {
+        return;
+      }
       const openedAt = Date.parse(session.upstreamOpenedAt);
       const lastPongAt = Date.parse(session.lastPongAt);
       this.record("heartbeat", session, {

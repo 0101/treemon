@@ -28,9 +28,14 @@ protocol-2 host then grants a lease that rejects starts for that worktree, autho
 terminal, remains renewed through the worktree mutation, and is explicitly released on success or
 error. With no live host, or while draining protocol 1, the same per-key OS lock bridges startup of
 a protocol-2 host; its lease is active before the mutation begins. Unrelated keys use different
-locks. Discovery, reservation, transport, parsing, and process-cleanup failures abort the worktree
-operation with an actionable error. Public tab close is
-non-reserving and never grants permission to mutate a worktree.
+locks. The manager returns the acquired lease before the Git/config mutation begins, so the
+singleton control mailbox remains available for Start/Get/Close on unrelated keys while the
+mutation is blocked; renewal, mutation, and explicit release run outside it. Discovery,
+reservation, transport, parsing, and process-cleanup failures abort the worktree operation with an
+actionable error. Public tab close is non-reserving and never grants permission to mutate a
+worktree. Closing a key already absent from the public snapshot is an unchanged success, including
+after an interrupted tab was dismissed; strict delete/archive cleanup retains its authoritative
+failure semantics.
 
 The pane header has a Hide action matching the chat pane. Hiding collapses the terminal pane without
 closing tabs, stopping processes, disconnecting iframes, or changing the active tab. Opening any
@@ -99,17 +104,26 @@ terminates its ConPTY child and exits. The host captures ttyd's exact process-cr
 immediately after spawn, discovers descendants only through parent-filtered queries rooted in
 already-owned identities, and records
 each descendant's creation identity before a root can disappear. Cleanup snapshots descendants
-before closing the upstream, retains captured processes after reparenting, and iterates discovery,
-identity revalidation, and explicit-PID termination to convergence. A reused PID is treated as the
-owned process having exited and is never signalled; an unverified spawned PID or surviving captured
-descendant keeps the session failed and registered. Windows uses targeted `Win32_Process` queries;
-Linux uses the corresponding `/proc` parent/creation identities. No process-name scan or tree-wide
-kill command participates.
+before closing the upstream, retains captured processes after reparenting, and iterates discovery
+and identity-bound termination to convergence. Termination never accepts a PID alone. On Windows a
+plainly-invoked checked-in helper retains one `System.Diagnostics.Process` handle, verifies its
+exact UTC start ticks, calls `Kill(entireProcessTree = true)` through that same object, and waits;
+an identity mismatch is a safe no-op. A spawned root whose identity cannot be captured is stopped
+only through its retained Node `ChildProcess` handle. Linux discovery uses `/proc` identities but
+returns an explicit unsupported cleanup error where no stable termination handle is available. A
+reused PID is treated as the owned process having exited and is never signalled; a surviving
+captured descendant keeps the session failed and registered. No process-name scan or
+inspect-then-PID signal participates.
 
 Start, close, failed-session replacement, and reservation transitions are serialized by canonical
 worktree key. A close queued behind a live start waits for it and then closes the exact published
 session. Concurrent failed-session retries recheck registry ownership after cleanup, so only one
-replacement can be created. Different keys have independent queues.
+replacement can be created. Upstream close/error and child-exit handlers synchronously revoke
+startup before queuing cleanup on that key. Immediately before publishing Running, the host
+rechecks registry ownership, recorded failure, the retained child, upstream readiness, shell
+identity, and the public listener without yielding; failed validation performs authoritative
+startup cleanup and leaves the session failed for retry. Closed upstreams are excluded from
+heartbeat publication. Different keys have independent queues.
 
 Delete/archive reservations are per-key five-minute leases. Acquisition is itself serialized,
 publishes the lease before terminal cleanup, and releases it if cleanup fails. Treemon renews the
@@ -157,9 +171,12 @@ down the whole legacy host while
 holding canonical-key ownership until a protocol-2 lease spans the mutation. A dead legacy manifest
 is reclaimed only after its PID/start evidence proves the recorded process is gone, and
 compare-before-delete includes its
-endpoint credential so legacy cleanup cannot remove a replacement. This parser and drain path can
-be removed once supported installations can no longer contain a live or persisted protocol-1
-`host.json`; it is not a general old-protocol compatibility layer.
+endpoint credential so legacy cleanup cannot remove a replacement. Ownership change is distinct
+from I/O failure: when another Treemon installs a healthy protocol-2 manifest while the legacy host
+exits, retirement succeeds and strict close/reservation continues against that replacement without
+deleting it. This parser and drain path can be removed once supported installations can no longer
+contain a live or persisted protocol-1 `host.json`; it is not a general old-protocol compatibility
+layer.
 
 The client/server wire type is
 `Starting | Running endpoint | Failed error | Interrupted error`; durable-host session IDs and
@@ -229,9 +246,9 @@ shutdown is sent and no wait is performed against the replacement.
   authoritative close, and release is attempted on every result path.
 - **State-directory lock plus runtime generation** — concurrent checkout-local Treemon starters
   converge on one host without treating a PID alone as ownership.
-- **Exact descendant identities over tree kill** — parent-filtered discovery captures owned
-  descendants, including later-reparented processes, while creation-identity revalidation prevents
-  signalling a reused PID.
+- **Stable identity handles over PID signals** — parent-filtered discovery captures exact descendant
+  identities, including later-reparented processes, while Windows termination verifies creation
+  time and kills through one retained `Process` object; a reused PID is never signalled.
 - **One-version drain compatibility** — protocol 1 is list/close/reuse compatible for existing
   sessions only and is removed after its persisted/live population has drained.
 - **Reconcile ambiguous mutations** — bounded timeouts are necessary, but a canonical-key registry
@@ -255,16 +272,19 @@ shutdown is sent and no wait is performed against the replacement.
 | File | Purpose |
 |---|---|
 | `scripts/durable-terminal-host.mjs` | Durable ttyd WebSocket owner, browser proxy, replay, lifecycle, and diagnostics |
+| `scripts/terminate-owned-process.ps1` | Windows identity-bound process-tree termination through one retained `Process` object |
 | `scripts/durable-terminal-control.mjs` | Authenticated status and graceful PID-scoped host shutdown |
 | `scripts/durable-terminal-observation.mjs` | Detached 24-hour heartbeat/liveness observation and final status evaluation |
 | `scripts/verify-durable-terminal-runtime.mjs` | Isolated real-ttyd reconnect and explicit-cleanup verification |
 | `scripts/verify-durable-terminal-treemon.mjs` | Browser reload and two-process Treemon restart demonstration |
+| `scripts/verify-ttyd-runtime.mjs` | Import-safe stock-ttyd verifier with identity-bound cleanup and retained-child fallback |
 | `src/Server/EmbeddedTerminal.fs` | Durable-host discovery and control client |
 | `src/Server/Program.fs` | Creates the control client without closing durable sessions on shutdown |
 | `src/Client/TerminalPane.fs` | Accessible multi-tab iframe pane pointed at durable proxy endpoints |
 | `src/Tests/EmbeddedTerminalTests.fs` | Host discovery, Treemon restart, selective close, and API validation tests |
 | `scripts/durable-terminal-host.test.mjs` | Protocol, replay-bound, and metadata-projection tests |
 | `scripts/durable-terminal-observation.test.mjs` | Observation replacement, credential, and PID-reuse ownership tests |
+| `scripts/verify-ttyd-runtime.test.mjs` | Verifier helper visibility and identity-capture cleanup fallback tests |
 
 ## Related Specs
 

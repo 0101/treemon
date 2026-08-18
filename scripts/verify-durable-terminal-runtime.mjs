@@ -12,6 +12,7 @@ import { chromium } from "playwright";
 import {
   defaultProcessController,
   sameProcessIdentity,
+  terminateRetainedChild,
 } from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
@@ -126,17 +127,18 @@ async function attachAndRun(marker, expectedPid) {
 }
 
 async function stopHost() {
-  if (!hostState) return;
+  if (!host) return;
+  if (!hostState || !hostIdentity) {
+    await terminateRetainedChild(host);
+    return;
+  }
   const owned = await processController.inspect(hostState.pid);
   if (!sameProcessIdentity(owned, hostIdentity)) return;
 
   try {
     await control("/shutdown", "POST");
   } catch {
-    const actual = await processController.inspect(host?.pid);
-    if (sameProcessIdentity(actual, hostIdentity)) {
-      await processController.terminate(host.pid);
-    }
+    await processController.terminate(hostIdentity);
   }
 
   await waitFor(
@@ -264,14 +266,6 @@ try {
     }
   }
 
-  if (
-    hostState &&
-    sameProcessIdentity(
-      await processController.inspect(hostState.pid),
-      hostIdentity,
-    )
-  ) {
-    await stopHost();
-  }
+  await stopHost();
   rmSync(fixture, { recursive: true, force: true });
 }

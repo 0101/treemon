@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import {
   appendReplayFrame,
+  captureSpawnedProcessIdentity,
   DurableTerminalHost,
   emptyReplayBuffer,
   manifestOwnership,
@@ -23,6 +24,7 @@ import {
   replayFramesFrom,
   resizeFrame,
   sameManifestOwner,
+  sameProcessIdentity,
   sanitizeMetadataText,
   sessionCookieName,
   terminalSize,
@@ -159,7 +161,11 @@ const processIdentity = (pid, parentPid = 0, generation = "original") => ({
   startIdentity: `test:${pid}:${generation}`,
 });
 
-const fakeProcessController = (initialProcesses, terminateProcess) => {
+const fakeProcessController = (
+  initialProcesses,
+  terminateProcess,
+  beforeTerminate,
+) => {
   const processes = new Map(
     initialProcesses.map((identity) => [identity.pid, identity]),
   );
@@ -173,14 +179,57 @@ const fakeProcessController = (initialProcesses, terminateProcess) => {
         [...processes.values()].filter(
           (identity) => identity.parentPid === pid,
         ),
-      terminate: async (pid) => {
-        terminated.push(pid);
-        if (terminateProcess) terminateProcess(pid, processes);
-        else processes.delete(pid);
+      terminate: async (identity) => {
+        if (beforeTerminate) beforeTerminate(identity, processes);
+        const actual = processes.get(identity.pid);
+        if (!sameProcessIdentity(actual, identity)) return false;
+        terminated.push(identity.pid);
+        if (terminateProcess) terminateProcess(identity.pid, processes);
+        else processes.delete(identity.pid);
+        return true;
       },
     },
   };
 };
+
+const markStartupReady = (session) => {
+  session.ttydProcess = {
+    pid: 1,
+    exitCode: null,
+    signalCode: null,
+  };
+  session.ttydPid = 1;
+  session.shellPid = 2;
+  session.publicServer = { listening: true };
+  session.upstream = { readyState: 1 };
+};
+
+class FakeRetainedChild extends EventEmitter {
+  constructor(pid) {
+    super();
+    this.pid = pid;
+    this.exitCode = null;
+    this.signalCode = null;
+    this.killed = false;
+  }
+
+  kill() {
+    this.killed = true;
+    this.signalCode = "SIGKILL";
+    queueMicrotask(() => {
+      this.exitCode = 1;
+      this.emit("exit", 1, "SIGKILL");
+    });
+    return true;
+  }
+}
+
+class FakeStartupUpstream extends EventEmitter {
+  constructor() {
+    super();
+    this.readyState = 1;
+  }
+}
 
 const ownedSession = (
   id,
@@ -333,26 +382,68 @@ test("PID reuse is treated as owned-process exit and never terminated", async ()
   });
 });
 
-test("an unverified spawned PID is retained and never terminated", async () => {
+test("an unverified spawned root is stopped only through its retained child handle", async () => {
   const unverified = processIdentity(705);
-  const { controller, terminated } = fakeProcessController([unverified]);
+  const { controller, processes, terminated } = fakeProcessController([unverified]);
 
   await withTestHost(controller, async (host) => {
+    const retainedChild = new FakeRetainedChild(705);
     const session = {
       ...ownedSession("unverified", 705, null, []),
       unverifiedSpawnedPids: [705],
-      ttydProcess: { exitCode: null },
+      ttydProcess: retainedChild,
     };
     host.sessions.set(session.id, session);
 
-    await assert.rejects(
-      host.closeSession(session, "test"),
-      /Owned terminal processes remain: 705/,
-    );
+    await host.closeSession(session, "test");
 
     assert.deepEqual(terminated, []);
-    assert.equal(host.sessions.get(session.id), session);
+    assert.equal(retainedChild.killed, true);
+    assert.equal(processes.get(705), unverified);
+    assert.equal(host.sessions.has(session.id), false);
   });
+});
+
+test("identity replacement between observation and atomic termination is never signaled", async () => {
+  const original = processIdentity(706);
+  const replacement = processIdentity(706, 0, "replacement");
+  const { controller, processes, terminated } = fakeProcessController(
+    [original],
+    undefined,
+    (_, current) => current.set(replacement.pid, replacement),
+  );
+
+  await withTestHost(controller, async (host) => {
+    const session = ownedSession("identity-race", 706, null, [original]);
+    host.sessions.set(session.id, session);
+
+    await host.closeSession(session, "test");
+
+    assert.deepEqual(terminated, []);
+    assert.equal(processes.get(706), replacement);
+    assert.equal(host.sessions.has(session.id), false);
+  });
+});
+
+test("spawn identity capture rejects a root that exits during inspection", async () => {
+  const child = {
+    pid: 707,
+    exitCode: null,
+    signalCode: null,
+  };
+  const identity = processIdentity(707);
+
+  await assert.rejects(
+    captureSpawnedProcessIdentity(
+      child,
+      async () => {
+        child.exitCode = 1;
+        return identity;
+      },
+      async () => {},
+    ),
+    /exited during identity capture/,
+  );
 });
 
 test("a captured descendant remains owned after reparenting", async () => {
@@ -551,6 +642,153 @@ const waitForCondition = async (predicate) => {
   return waitForCondition(predicate);
 };
 
+test("upstream close and error at every startup stage revoke running publication", async () => {
+  const stages = [
+    "public-listen",
+    "child-spawn",
+    "identity-capture",
+    "ttyd-ready",
+    "upstream-open",
+    "shell-identity",
+  ];
+
+  for (const eventName of ["close", "error"]) {
+    for (const stage of stages) {
+      const { controller } = fakeProcessController([]);
+      await withTestHost(controller, async (host) => {
+        const records = [];
+        let cleanups = 0;
+        host.record = (kind) => records.push(kind);
+        host.stopSessionResources = async () => {
+          cleanups += 1;
+        };
+        host.startSessionProxy = async (session) => {
+          markStartupReady(session);
+          session.upstream = new FakeStartupUpstream();
+          host.configureUpstream(session);
+          for (const currentStage of stages) {
+            if (currentStage === stage) {
+              if (eventName === "close") {
+                session.upstream.readyState = 3;
+                session.upstream.emit("close", 1006, Buffer.from(stage));
+              } else {
+                session.upstream.emit("error", new Error(stage));
+              }
+            }
+            await Promise.resolve();
+          }
+        };
+
+        const session = await host.startSession(resolve(".agents"));
+        await waitForCondition(() => host.keyOperations.size === 0);
+
+        assert.equal(session.state, "failed");
+        assert.equal(session.failureRecorded, true);
+        assert.equal(session.resourcesStopped, true);
+        assert.equal(cleanups, 1);
+        assert.equal(records.includes("session-running"), false);
+      });
+    }
+  }
+});
+
+test("start racing synchronous interruption remains failed without deadlock", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    let releaseStart;
+    const startGate = new Promise((resolveStart) => {
+      releaseStart = resolveStart;
+    });
+    let cleanups = 0;
+    host.stopSessionResources = async () => {
+      cleanups += 1;
+    };
+    host.startSessionProxy = async (session) => {
+      markStartupReady(session);
+      await startGate;
+    };
+
+    const starting = host.startSession(resolve(".agents"));
+    await waitForCondition(() => host.sessions.size === 1);
+    const session = [...host.sessions.values()][0];
+    const interrupted = host.interruptSession(session, "startup was interrupted");
+
+    assert.equal(session.state, "failed");
+    assert.equal(session.failureRecorded, true);
+    releaseStart();
+
+    const result = await starting;
+    await interrupted;
+    assert.equal(result, session);
+    assert.equal(result.state, "failed");
+    assert.equal(result.resourcesStopped, true);
+    assert.equal(cleanups, 1);
+  });
+});
+
+test("startup readiness failures clean resources and never publish running", async () => {
+  const cases = [
+    ["failed child", (session) => (session.ttydProcess.exitCode = 1)],
+    ["closed upstream", (session) => (session.upstream.readyState = 3)],
+    ["closed public server", (session) => (session.publicServer.listening = false)],
+    ["missing shell identity", (session) => (session.shellPid = null)],
+    [
+      "changed key owner",
+      (session, host) => {
+        host.sessions.delete(session.id);
+        host.sessions.set("replacement", {
+          ...session,
+          id: "replacement",
+        });
+      },
+    ],
+  ];
+
+  for (const [name, invalidate] of cases) {
+    const { controller } = fakeProcessController([]);
+    await withTestHost(controller, async (host) => {
+      const records = [];
+      let cleanups = 0;
+      host.record = (kind) => records.push(kind);
+      host.stopSessionResources = async () => {
+        cleanups += 1;
+      };
+      host.startSessionProxy = async (session) => {
+        markStartupReady(session);
+        invalidate(session, host);
+      };
+
+      const session = await host.startSession(resolve(".agents"));
+
+      assert.equal(session.state, "failed");
+      assert.equal(session.failureRecorded, true);
+      assert.equal(session.resourcesStopped, true);
+      assert.equal(cleanups, 1);
+      assert.equal(records.includes("session-running"), false);
+    });
+  }
+});
+
+test("diagnostic heartbeat omits a running session whose upstream closed", async () => {
+  const { controller } = fakeProcessController([]);
+
+  await withTestHost(controller, async (host) => {
+    const kinds = [];
+    host.record = (kind) => kinds.push(kind);
+    const closed = ownedSession("closed-upstream", null, null);
+    closed.upstream = { readyState: 3 };
+    const open = ownedSession("open-upstream", null, null);
+    open.upstream = { readyState: 1 };
+    host.sessions.set(closed.id, closed);
+    host.sessions.set(open.id, open);
+
+    host.recordHeartbeats();
+
+    assert.deepEqual(kinds, ["heartbeat"]);
+  });
+});
+
 test("close waits for the serialized start before removing its session", async () => {
   const { controller } = fakeProcessController([]);
 
@@ -559,7 +797,10 @@ test("close waits for the serialized start before removing its session", async (
     const startGate = new Promise((resolveStart) => {
       releaseStart = resolveStart;
     });
-    host.startSessionProxy = async () => startGate;
+    host.startSessionProxy = async (session) => {
+      markStartupReady(session);
+      await startGate;
+    };
     host.stopSessionResources = async () => {};
     const path = resolve(".agents");
 
@@ -599,8 +840,9 @@ test("concurrent failed-session retries create one replacement", async () => {
       if (session === failed) await cleanupGate;
     };
     let starts = 0;
-    host.startSessionProxy = async () => {
+    host.startSessionProxy = async (session) => {
       starts += 1;
+      markStartupReady(session);
     };
 
     const first = host.startSession(path);
@@ -621,7 +863,7 @@ test("reservation rejects same-key starts until explicit release", async () => {
 
   await withTestHost(controller, async (host) => {
     const path = resolve(".agents");
-    host.startSessionProxy = async () => {};
+    host.startSessionProxy = async (session) => markStartupReady(session);
     const reservation = await host.reserveWorktree(path);
 
     await assert.rejects(
@@ -685,7 +927,7 @@ test("a reserved key never blocks an unrelated key", async () => {
   await withTestHost(controller, async (host) => {
     const firstPath = resolve(".agents");
     const secondPath = resolve("scripts");
-    host.startSessionProxy = async () => {};
+    host.startSessionProxy = async (session) => markStartupReady(session);
     const reservation = await host.reserveWorktree(firstPath);
 
     const second = await host.startSession(secondPath);
@@ -703,7 +945,7 @@ test("an abandoned reservation expires before the key can start again", async ()
     let now = 1_000;
     host.now = () => now;
     host.reservationLeaseMs = 50;
-    host.startSessionProxy = async () => {};
+    host.startSessionProxy = async (session) => markStartupReady(session);
     const path = resolve(".agents");
     await host.reserveWorktree(path);
 

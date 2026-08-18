@@ -46,6 +46,12 @@ type private Reservation =
     { Id: string
       Sessions: HostSession list }
 
+type private CleanupReservation =
+    { Renew:
+        CancellationToken ->
+            Async<Result<unit, string>>
+      Release: unit -> Async<Result<unit, string>> }
+
 type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
       AnnouncedHost: HostIdentity option
@@ -58,10 +64,9 @@ type private Message =
     | CloseStrict of
         WorktreePath *
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
-    | WithReservedCleanup of
+    | ReserveCleanup of
         WorktreePath *
-        (unit -> Async<Result<unit, string>>) *
-        AsyncReplyChannel<Result<unit, string>>
+        AsyncReplyChannel<Result<CleanupReservation, string>>
     | ShutdownHost of AsyncReplyChannel<Result<unit, string>>
 
 type Manager = private Manager of MailboxProcessor<Message>
@@ -541,6 +546,15 @@ type private HostDiscovery =
     | HealthyHost of HostConnection
     | DeadHost of HostConnection * reason: string
 
+type private ManifestReclaim =
+    | Reclaimed
+    | ReclaimDeferred
+    | OwnershipChanged
+
+type private LegacyRetirement =
+    | LegacyRetired
+    | LegacyReplaced of HostConnection
+
 let private discoverHost config =
     async {
         match readHostConnection config with
@@ -655,11 +669,9 @@ let private removeStaleState config expected =
     removeManifestIfConnectionOwned
         (statePath config)
         expected
-    |> Result.bind (function
-        | true -> Ok ()
-        | false ->
-            Error
-                "Durable terminal host ownership changed while stale state was being reclaimed")
+    |> Result.map (function
+        | true -> Reclaimed
+        | false -> OwnershipChanged)
 
 let private startupLockPath config =
     Path.Combine(config.HostStateDirectory, "host.lock")
@@ -895,7 +907,20 @@ let private ensureHostWithTtydRequirement requireTtyd config =
                                 | DeadHost(connection, _) ->
                                     match removeStaleState config connection with
                                     | Error error -> return Error error
-                                    | Ok () -> return! startNewHost ()
+                                    | Ok Reclaimed -> return! startNewHost ()
+                                    | Ok OwnershipChanged ->
+                                        match! discoverHost config with
+                                        | Ok (HealthyHost replacement) ->
+                                            return Ok replacement
+                                        | Ok _ ->
+                                            return
+                                                Error
+                                                    "Durable terminal host ownership changed to an unavailable replacement"
+                                        | Error error -> return Error error
+                                    | Ok ReclaimDeferred ->
+                                        return
+                                            Error
+                                                "Durable terminal host reclamation was unexpectedly deferred"
                                 | MissingHost ->
                                     return! startNewHost ()
                                 | HealthyHost connection ->
@@ -1063,11 +1088,10 @@ let private startTerminal config instanceId state worktreePath =
 let private reclaimDeadHost config connection =
     match tryAcquireStartupLock config with
     | Error error -> Error error
-    | Ok None -> Ok false
+    | Ok None -> Ok ReclaimDeferred
     | Ok (Some startupLock) ->
         use startupLock = startupLock
         removeStaleState config connection
-        |> Result.map (fun () -> true)
 
 let private hostFailure error state =
     let current = withHostFailure error state.LastSnapshot
@@ -1123,40 +1147,83 @@ let private getTerminals instanceId state config =
 let private waitForLegacyHostExit config connection =
     let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
 
-    let rec wait () =
+    let waitAgain continueWaiting timeoutError =
+        async {
+            if DateTimeOffset.UtcNow >= deadline then
+                return Error timeoutError
+            else
+                do! Async.Sleep config.ProbeInterval
+                return! continueWaiting ()
+        }
+
+    let rec validateReplacement () =
+        async {
+            match! discoverHost config with
+            | Ok MissingHost -> return Ok LegacyRetired
+            | Ok (HealthyHost current)
+                when sameConnectionOwner current connection ->
+                return!
+                    waitAgain
+                        validateReplacement
+                        "Timed out waiting for protocol-1 durable terminal ownership to change"
+            | Ok (HealthyHost current)
+                when current.Version = hostProtocolVersion ->
+                return Ok(LegacyReplaced current)
+            | Ok (HealthyHost _) ->
+                return
+                    Error
+                        "Protocol-1 durable terminal ownership changed to another legacy host"
+            | Ok (DeadHost(current, _))
+                when sameConnectionOwner current connection ->
+                return! wait ()
+            | Ok (DeadHost _) ->
+                return!
+                    waitAgain
+                        validateReplacement
+                        "Timed out waiting for replacement durable terminal host to become healthy"
+            | Error error when DateTimeOffset.UtcNow >= deadline ->
+                return Error error
+            | Error _ ->
+                do! Async.Sleep config.ProbeInterval
+                return! validateReplacement ()
+        }
+
+    and wait () =
         async {
             match processIdentityMatches connection with
             | Ok false ->
                 match reclaimDeadHost config connection with
-                | Ok true -> return Ok ()
-                | Ok false ->
+                | Ok Reclaimed -> return Ok LegacyRetired
+                | Ok OwnershipChanged ->
+                    return! validateReplacement ()
+                | Ok ReclaimDeferred ->
                     match readHostConnection config with
-                    | Ok None -> return Ok ()
+                    | Ok None -> return Ok LegacyRetired
                     | Ok (Some current)
                         when sameConnectionOwner current connection
                              |> not ->
-                        return Ok ()
-                    | _ when DateTimeOffset.UtcNow >= deadline ->
+                        return! validateReplacement ()
+                    | Ok _
+                        when DateTimeOffset.UtcNow >= deadline ->
                         return
                             Error
                                 "Timed out reclaiming protocol-1 durable terminal metadata"
-                    | _ ->
+                    | Ok _ ->
                         do! Async.Sleep config.ProbeInterval
                         return! wait ()
+                    | Error error -> return Error error
                 | Error error -> return Error error
-            | Ok true when DateTimeOffset.UtcNow < deadline ->
-                do! Async.Sleep config.ProbeInterval
-                return! wait ()
             | Ok true ->
-                return
-                    Error
+                return!
+                    waitAgain
+                        wait
                         $"Timed out waiting for protocol-1 durable terminal host PID {connection.Pid} to drain"
             | Error error -> return Error error
         }
 
     wait ()
 
-let private closeTerminalStrict instanceId state config worktreePath =
+let rec private closeTerminalStrict instanceId state config worktreePath =
     async {
         let closeFailure error failureSnapshot failureState =
             let current =
@@ -1194,13 +1261,29 @@ let private closeTerminalStrict instanceId state config worktreePath =
                                 confirmedState
                     | Ok _ ->
                         match! waitForLegacyHostExit config connection with
-                        | Ok () ->
+                        | Ok LegacyRetired ->
                             return
                                 confirmedClosed
                                     sessions
                                     { confirmedState with
                                         AnnouncedHost = None
                                         KnownHost = None }
+                        | Ok (LegacyReplaced _) ->
+                            let current =
+                                sessions
+                                |> snapshot
+                                |> mergeSnapshot confirmedState.LastSnapshot
+                                |> withoutPath worktreePath
+
+                            return!
+                                closeTerminalStrict
+                                    instanceId
+                                    { confirmedState with
+                                        LastSnapshot = current
+                                        AnnouncedHost = None
+                                        KnownHost = None }
+                                    config
+                                    worktreePath
                         | Error error ->
                             return
                                 closeFailure
@@ -1348,10 +1431,9 @@ let private closeTerminalStrict instanceId state config worktreePath =
     }
 
 let private closeTerminal instanceId state config worktreePath =
-    let interrupted =
+    let currentTab =
         state.LastSnapshot.Tabs
         |> List.tryFind (isPath worktreePath)
-        |> Option.exists isInterrupted
 
     let dismiss snapshot nextState =
         let current =
@@ -1360,7 +1442,10 @@ let private closeTerminal instanceId state config worktreePath =
         current, { nextState with LastSnapshot = current }
 
     async {
-        if not interrupted then
+        match currentTab with
+        | None ->
+            return state.LastSnapshot, state
+        | Some tab when not (isInterrupted tab) ->
             let! result, next =
                 closeTerminalStrict
                     instanceId
@@ -1369,7 +1454,7 @@ let private closeTerminal instanceId state config worktreePath =
                     worktreePath
 
             return Result.defaultValue next.LastSnapshot result, next
-        else
+        | Some _ ->
             match! discoverHost config with
             | Ok (HealthyHost connection) ->
                 let! announced =
@@ -1464,19 +1549,13 @@ let private releaseReservation
     |> AsyncResult.ignore
 
 let private runReservedOperation
-    config
-    connection
-    reservationId
+    reservation
     operation
     =
     async {
         use renewalCancellation = new CancellationTokenSource()
         let! renewal =
-            renewReservation
-                config
-                connection
-                reservationId
-                renewalCancellation.Token
+            reservation.Renew renewalCancellation.Token
             |> Async.StartChild
 
         let! operationResult =
@@ -1491,8 +1570,7 @@ let private runReservedOperation
 
         renewalCancellation.Cancel()
         let! renewalResult = renewal
-        let! releaseResult =
-            releaseReservation config connection reservationId
+        let! releaseResult = reservation.Release ()
 
         return
             match operationResult, renewalResult, releaseResult with
@@ -1518,7 +1596,6 @@ let private reserveOnCurrentHost
     state
     connection
     worktreePath
-    operation
     =
     async {
         let! announced =
@@ -1586,14 +1663,20 @@ let private reserveOnCurrentHost
                 let next =
                     { announced with LastSnapshot = current }
 
-                let! result =
-                    runReservedOperation
-                        config
-                        connection
-                        reservation.Id
-                        operation
-
-                return result, next
+                return
+                    Ok
+                        { Renew =
+                            renewReservation
+                                config
+                                connection
+                                reservation.Id
+                          Release =
+                            fun () ->
+                                releaseReservation
+                                    config
+                                    connection
+                                    reservation.Id },
+                    next
     }
 
 let private acquireWorktreeLock config worktreePath =
@@ -1620,7 +1703,6 @@ let private reserveTerminalCleanup
     instanceId
     state
     worktreePath
-    operation
     =
     let reserveCurrent currentState =
         async {
@@ -1636,7 +1718,6 @@ let private reserveTerminalCleanup
                         currentState
                         connection
                         worktreePath
-                        operation
             | Ok _ ->
                 return
                     Error
@@ -1655,7 +1736,6 @@ let private reserveTerminalCleanup
                     state
                     connection
                     worktreePath
-                    operation
         | Error error ->
             let actionable =
                 $"Cannot reserve terminal cleanup because host discovery failed: {error}"
@@ -1678,19 +1758,30 @@ let private reserveTerminalCleanup
             | Ok _ ->
                 match! waitForLegacyHostExit config connection with
                 | Error error -> return Error error, state
-                | Ok () ->
+                | Ok retirement ->
                     let interrupted =
                         state.LastSnapshot
                         |> withHostFailure
                             "the protocol-1 host was drained during its bounded compatibility window"
                         |> withoutPath worktreePath
 
-                    return!
-                        reserveCurrent
-                            { state with
-                                LastSnapshot = interrupted
-                                AnnouncedHost = None
-                                KnownHost = None }
+                    let retiredState =
+                        { state with
+                            LastSnapshot = interrupted
+                            AnnouncedHost = None
+                            KnownHost = None }
+
+                    match retirement with
+                    | LegacyRetired ->
+                        return! reserveCurrent retiredState
+                    | LegacyReplaced replacement ->
+                        return!
+                            reserveOnCurrentHost
+                                config
+                                instanceId
+                                retiredState
+                                replacement
+                                worktreePath
         | Ok (DeadHost _)
         | Ok MissingHost ->
             return! reserveCurrent state
@@ -1704,8 +1795,10 @@ let private waitForHostExit config connection =
             match processIdentityMatches connection with
             | Ok false ->
                 match reclaimDeadHost config connection with
-                | Ok true -> return Ok ()
-                | Ok false ->
+                | Ok Reclaimed
+                | Ok OwnershipChanged ->
+                    return Ok ()
+                | Ok ReclaimDeferred ->
                     match readHostConnection config with
                     | Ok None -> return Ok ()
                     | Ok (Some current)
@@ -1822,11 +1915,7 @@ let internal createWithConfig config =
 
                         reply.Reply result
                         return! loop next
-                    | WithReservedCleanup(
-                        worktreePath,
-                        operation,
-                        reply
-                      ) ->
+                    | ReserveCleanup(worktreePath, reply) ->
                         let canonical =
                             canonicalWorktreePath worktreePath
 
@@ -1844,7 +1933,6 @@ let internal createWithConfig config =
                                             instanceId
                                             state
                                             canonical
-                                            operation
                                 }
 
                             reply.Reply result
@@ -1906,15 +1994,21 @@ let internal withReservedCleanup
     worktreePath
     operation
     =
-    agent.PostAndAsyncReply(
-        (fun reply ->
-            WithReservedCleanup(
-                worktreePath,
-                operation,
-                reply
-            )),
-        timeout = 300_000
-    )
+    async {
+        match!
+            agent.PostAndAsyncReply(
+                (fun reply ->
+                    ReserveCleanup(worktreePath, reply)),
+                timeout = 120_000
+            )
+        with
+        | Error error -> return Error error
+        | Ok reservation ->
+            return!
+                runReservedOperation
+                    reservation
+                    operation
+    }
 
 let internal shutdownHost (Manager agent) =
     agent.PostAndAsyncReply(ShutdownHost, timeout = 60_000)

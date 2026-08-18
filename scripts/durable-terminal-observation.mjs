@@ -13,6 +13,7 @@ import { pathToFileURL } from "node:url";
 import {
   defaultProcessController,
   sameProcessIdentity,
+  terminateRetainedChild,
 } from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
@@ -280,6 +281,10 @@ async function start() {
     atomicWrite(observationPath, observation);
     process.stdout.write(`${JSON.stringify(publicObservation(observation), null, 2)}\n`);
   } catch (error) {
+    if (!spawnedHostIdentity) {
+      await terminateRetainedChild(host);
+      throw error;
+    }
     const actualIdentity = spawnedHostIdentity
       ? await processController.inspect(spawnedHostPid)
       : null;
@@ -294,18 +299,10 @@ async function start() {
       try {
         await control(hostState, "/shutdown", "POST");
       } catch {
-        const revalidated =
-          await processController.inspect(spawnedHostPid);
-        if (sameProcessIdentity(revalidated, spawnedHostIdentity)) {
-          await processController.terminate(spawnedHostPid);
-        }
+        await processController.terminate(spawnedHostIdentity);
       }
     } else if (stillSpawnedHost) {
-      const revalidated =
-        await processController.inspect(spawnedHostPid);
-      if (sameProcessIdentity(revalidated, spawnedHostIdentity)) {
-        await processController.terminate(spawnedHostPid);
-      }
+      await processController.terminate(spawnedHostIdentity);
     }
     throw error;
   }
