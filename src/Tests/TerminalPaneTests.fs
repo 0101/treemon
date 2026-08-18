@@ -383,8 +383,10 @@ type TerminalFocusTests() =
               OwnerSessionId = None
               Kind = AgentDoc }
 
+        // Keep persistence outside this unit test: the Canvas pane and owning repo already start open.
         let model =
-            focusModel true (Some focusFirst)
+            { focusModel true (Some focusFirst) with
+                Canvas.CanvasPaneOpen = true }
 
         let repos =
             model.Repos
@@ -398,34 +400,11 @@ type TerminalFocusTests() =
                             else
                                 worktree) })
 
-        let updated =
-            try
-                CanvasUpdate.openCanvasDoc
-                    (WorktreePath.value focusSecond)
-                    doc.Filename
-                    { model with Repos = repos }
-                |> fst
-            with
-            | :? TypeInitializationException
-            | :? ArgumentException ->
-                let selected =
-                    repos
-                    |> List.collect _.Worktrees
-                    |> List.tryFind (fun worktree ->
-                        worktree.Path = focusSecond)
-                    |> Option.map _.Path
-
-                { model with
-                    Repos = repos
-                    FocusedElement =
-                        Some (Card (WorktreePath.value focusSecond))
-                    ActiveEmbeddedTerminal =
-                        projectWorktreeSelection
-                            true
-                            selected
-                            model.ActiveEmbeddedTerminal
-                            model.EmbeddedTerminals
-                    Canvas.CanvasPaneOpen = true }
+        let updated, _ =
+            CanvasUpdate.openCanvasDoc
+                (WorktreePath.value focusSecond)
+                doc.Filename
+                { model with Repos = repos }
 
         Assert.Multiple(fun () ->
             Assert.That(
