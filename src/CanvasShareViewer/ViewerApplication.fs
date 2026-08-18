@@ -27,7 +27,7 @@ module internal ViewerApplication =
 
     [<Literal>]
     let private ShellContentSecurityPolicy =
-        "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'"
+        "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 
     [<Literal>]
     let private ContentContentSecurityPolicy =

@@ -26,7 +26,7 @@ open Tests.TestUtils
 let private validPrefix = "0123456789ABCDEFGHIJKL"
 
 let private shellContentSecurityPolicy =
-    "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'"
+    "default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 
 let private contentContentSecurityPolicy =
     "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts"
