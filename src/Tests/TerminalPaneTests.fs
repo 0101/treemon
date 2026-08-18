@@ -54,24 +54,24 @@ type TerminalPaneStateTests() =
                     [ tab first EmbeddedTerminalLifecycle.Starting
                       other ] }
             )
+        )
 
     [<Test>]
     member _.``Close selects the same-index neighbour from the captured tab order``() =
-            let running path =
-                tab
-                    path
-                    (EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61234/")
+        let running path =
+            tab
+                path
+                (EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61234/")
 
-            let before =
-                { Tabs = [ running first; running second; running third ] }
+        let before =
+            { Tabs = [ running first; running second; running third ] }
 
-            let after =
-                { Tabs = [ running first; running third ] }
+        let after =
+            { Tabs = [ running first; running third ] }
 
-            Assert.That(
-                nextActiveAfterClose second before after,
-                Is.EqualTo(Some third)
-            )
+        Assert.That(
+            nextActiveAfterClose second before after,
+            Is.EqualTo(Some third)
         )
 
     [<TestCase("http://127.0.0.1:61234/", true)>]
