@@ -145,7 +145,7 @@ module internal ViewerApplication =
 
     let private writeShell
         (context: HttpContext)
-        (_document: BlobDocument)
+        (_metadata: Map<string, string>)
         : Task =
         task {
             let content = shellBytes context
@@ -173,10 +173,9 @@ module internal ViewerApplication =
         }
 
     let private handle
-        (reader: BlobReader)
-        (clock: unit -> DateTimeOffset)
+        resolve
         contentSecurityPolicy
-        (render: HttpContext -> BlobDocument -> Task)
+        (render: HttpContext -> 'stored -> Task)
         (context: HttpContext)
         : Task =
         task {
@@ -186,9 +185,7 @@ module internal ViewerApplication =
             let filename = routeSegment "filename" context
 
             let! result =
-                ShareLookup.resolve
-                    reader
-                    clock
+                resolve
                     prefix
                     filename
                     context.RequestAborted
@@ -222,8 +219,7 @@ module internal ViewerApplication =
             ContentRoute,
             RequestDelegate(
                 handle
-                    reader
-                    clock
+                    (ShareLookup.resolveDocument reader clock)
                     ContentContentSecurityPolicy
                     writeContent
             )
@@ -234,8 +230,7 @@ module internal ViewerApplication =
             ShellRoute,
             RequestDelegate(
                 handle
-                    reader
-                    clock
+                    (ShareLookup.resolveProperties reader clock)
                     ShellContentSecurityPolicy
                     writeShell
             )

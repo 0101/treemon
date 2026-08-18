@@ -4,44 +4,68 @@ open System
 open System.Threading
 open System.Threading.Tasks
 
-type internal ShareLookupResult =
-    | Available of BlobDocument
+type internal ShareLookupResult<'stored> =
+    | Available of 'stored
     | NotFound
 
 module internal ShareLookup =
 
-    [<Literal>]
-    let InvalidPathProbeBlobName = "_invalid-path-probe"
-
-    let resolve
-        (reader: BlobReader)
+    let private resolve
+        read
+        metadata
         (clock: unit -> DateTimeOffset)
         prefix
         filename
         (cancellationToken: CancellationToken)
-        : Task<ShareLookupResult> =
+        : Task<ShareLookupResult<'stored>> =
         task {
-            let path = SharePath.tryCreate prefix filename
+            match SharePath.tryCreate prefix filename with
+            | None ->
+                return NotFound
+            | Some path ->
+                let! stored =
+                    read
+                        (SharePath.blobName path)
+                        cancellationToken
 
-            let exactBlobName =
-                path
-                |> Option.map SharePath.blobName
-                |> Option.defaultValue InvalidPathProbeBlobName
-
-            let! stored =
-                reader.ReadExact exactBlobName cancellationToken
-
-            let metadata =
-                stored
-                |> Option.map _.Metadata
-                |> Option.defaultValue Map.empty
-
-            let live = ShareExpiry.isLive (clock ()) metadata
-
-            return
-                match path, stored, live with
-                | Some _, Some document, true ->
-                    Available document
-                | _ ->
-                    NotFound
+                return
+                    match stored with
+                    | Some value
+                        when ShareExpiry.isLive
+                            (clock ())
+                            (metadata value)
+                            ->
+                        Available value
+                    | _ ->
+                        NotFound
         }
+
+    let resolveProperties
+        (reader: BlobReader)
+        clock
+        prefix
+        filename
+        cancellationToken
+        =
+        resolve
+            reader.ReadPropertiesExact
+            id
+            clock
+            prefix
+            filename
+            cancellationToken
+
+    let resolveDocument
+        (reader: BlobReader)
+        clock
+        prefix
+        filename
+        cancellationToken
+        =
+        resolve
+            reader.ReadExact
+            _.Metadata
+            clock
+            prefix
+            filename
+            cancellationToken

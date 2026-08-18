@@ -138,18 +138,20 @@
   tenant authenticates, including B2B guests, passes the gate. The registration authenticates to
   Easy Auth via a managed-identity federated credential rather than a long-lived client secret.
 - Two routes divide responsibility: a shell route (`/c/<opaque-prefix>/<filename>`) validates the
-  request and expiry and renders a minimal HTML page; a content route
-  (`/c/<opaque-prefix>/<filename>/content`) streams the document bytes and is the only thing the
-  shell's iframe loads. Keeping them separate lets the content response carry a much stricter
-  policy than the shell needs.
+  request and expiry through an exact Blob properties lookup and renders a minimal HTML page
+  without downloading the document body; a content route
+  (`/c/<opaque-prefix>/<filename>/content`) performs the only body-bearing lookup and is the only
+  thing the shell's iframe loads. Keeping them separate lets the content response carry a much
+  stricter policy than the shell needs.
 - Each route re-validates the segments and re-checks expiry against blob metadata on its own; the
   content route never trusts that the shell already checked. Otherwise the content route would be
   an unguarded bypass for an expired or malformed share whose URL the recipient still holds.
 - A matched route collapses path validity, Blob existence, and expiry into the single not-found
-  outcome: a valid path performs one exact read of `<prefix>/<filename>`, while malformed segments
-  resolve to not-found before any storage access, so untrusted dot segments never reach Blob URI
-  construction. Every not-found path then emits the identical response through the same
-  application-level ordering; only elapsed time may differ.
+  outcome: a valid shell path performs one exact `GetPropertiesAsync` call and a valid content path
+  performs one exact body read of `<prefix>/<filename>`, while malformed segments resolve to
+  not-found before any storage access, so untrusted dot segments never reach Blob URI construction.
+  Every not-found path then emits the identical response through the same application-level
+  ordering; only elapsed time may differ.
 - An exception boundary registered before routing handles non-404 Azure Storage failures and
   `DefaultAzureCredential` failures independently of the ASP.NET Core environment. It logs only
   the exception type and available Azure status/error code, clears the route response, and emits
@@ -280,6 +282,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Prefer a managed-identity federated credential over an Easy Auth client secret | Avoids minting, storing, or rotating a long-lived secret for the viewer's app registration. |
 | Store expiry as blob metadata rather than a separate data store | Keeps the expiry attached to the artifact it governs, with no second store to keep in sync; it travels and disappears with the blob. |
 | Re-check segments and expiry on the content route instead of trusting the shell | The recipient holds the URL, so the content route is directly reachable; a shell-only check would leave an expired share readable by editing the path. |
+| Use a properties-only Blob lookup for the shell and reserve the body read for the content route | The shell needs only existence and expiry metadata, so downloading and discarding the complete document there would double the transferred document bytes without strengthening validation. |
 | Accept case-insensitive `.html` suffixes and consecutive dots in one filename segment | Windows can surface documents such as `Status.HTML`, and `release..notes.html` is not traversal once `/` and `\` are forbidden. Preserving the original casing keeps the generated URL and exact Blob lookup aligned, while rejecting invalid names before publish prevents successful uploads with dead viewer links. |
 | Put `sandbox allow-scripts` in the content route's CSP as well as on the iframe | The iframe attribute only covers the embedded case; the CSP directive also covers a signed-in recipient opening the content URL at top level, where the document would otherwise run on the viewer's authenticated origin. |
 | Look the blob up by exact composed name, never by listing or prefix search | A share URL then reveals only its own document; no reachable code path can turn one link into an inventory of the container. |
@@ -326,6 +329,8 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   deletion runs.
 - The content route enforces the same checks as the shell: an expired or malformed share is denied
   on the content route too, and a document opened directly at the content URL is still sandboxed.
+- A normal shell-plus-content page load performs one properties-only exact Blob lookup and one
+  body-bearing exact read; the shell never downloads or buffers the document body.
 - Throwing storage and credential readers produce the same empty policy-headered 503 on shell and
   content routes in both Production and Development, with no framework diagnostic response.
 - Deleting or clearing a document's backing blob denies its link immediately (revocation).

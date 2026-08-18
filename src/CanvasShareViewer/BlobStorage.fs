@@ -14,7 +14,11 @@ type internal BlobDocument =
       Metadata: Map<string, string> }
 
 type internal BlobReader =
-    { ReadExact:
+    { ReadPropertiesExact:
+        string ->
+        CancellationToken ->
+        Task<Map<string, string> option>
+      ReadExact:
         string ->
         CancellationToken ->
         Task<BlobDocument option> }
@@ -38,6 +42,20 @@ module internal BlobStorage =
         |> Seq.map (fun pair -> pair.Key, pair.Value)
         |> Map.ofSeq
 
+    let private tryReadExact
+        (read: unit -> Task<'value>)
+        : Task<'value option> =
+        task {
+            try
+                let! value = read ()
+                return Some value
+            with
+            | :? RequestFailedException as ex when
+                isMissingBlobFailure ex
+                ->
+                return None
+        }
+
     let azure
         (configuration: ViewerConfiguration)
         (credential: TokenCredential)
@@ -53,26 +71,41 @@ module internal BlobStorage =
         let containerClient =
             serviceClient.GetBlobContainerClient(configuration.ShareContainer)
 
-        { ReadExact =
+        { ReadPropertiesExact =
             fun blobName cancellationToken ->
-                task {
-                    try
-                        let! response =
-                            containerClient
-                                .GetBlobClient(blobName)
-                                .DownloadContentAsync(cancellationToken)
+                tryReadExact
+                    (fun () ->
+                        task {
+                            let! response =
+                                containerClient
+                                    .GetBlobClient(blobName)
+                                    .GetPropertiesAsync(
+                                        cancellationToken =
+                                            cancellationToken
+                                    )
 
-                        let download = response.Value
+                            return
+                                response.Value.Metadata
+                                |> metadataMap
+                        })
+          ReadExact =
+            fun blobName cancellationToken ->
+                tryReadExact
+                    (fun () ->
+                        task {
+                            let! response =
+                                containerClient
+                                    .GetBlobClient(blobName)
+                                    .DownloadContentAsync(
+                                        cancellationToken
+                                    )
 
-                        return
-                            Some
-                                { Content = download.Content.ToMemory()
+                            let download = response.Value
+
+                            return
+                                { Content =
+                                    download.Content.ToMemory()
                                   Metadata =
                                     download.Details.Metadata
                                     |> metadataMap }
-                    with
-                    | :? RequestFailedException as ex when
-                        isMissingBlobFailure ex
-                        ->
-                        return None
-                } }
+                        }) }

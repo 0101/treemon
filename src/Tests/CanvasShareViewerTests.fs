@@ -47,9 +47,13 @@ let private document
         |> ReadOnlyMemory<byte>
       Metadata = metadata }
 
+type private BlobLookup =
+    | PropertiesLookup of string
+    | ContentRead of string
+
 type private FakeBlobReader =
     { Reader: BlobReader
-      Requests: unit -> string list }
+      Requests: unit -> BlobLookup list }
 
 type private CapturedLog =
     { Level: LogLevel
@@ -103,9 +107,21 @@ let private fakeBlobReader documents =
     let mutable requestsRev = []
 
     { Reader =
-        { ReadExact =
+        { ReadPropertiesExact =
             fun blobName _ ->
-                requestsRev <- blobName :: requestsRev
+                requestsRev <-
+                    PropertiesLookup blobName
+                    :: requestsRev
+
+                documents
+                |> Map.tryFind blobName
+                |> Option.map _.Metadata
+                |> Task.FromResult
+          ReadExact =
+            fun blobName _ ->
+                requestsRev <-
+                    ContentRead blobName :: requestsRev
+
                 documents
                 |> Map.tryFind blobName
                 |> Task.FromResult }
@@ -168,7 +184,11 @@ let private withThrowingViewer
     |> ignore
 
     let reader =
-        { ReadExact =
+        { ReadPropertiesExact =
+            fun _ _ ->
+                createError ()
+                |> Task.FromException<Map<string, string> option>
+          ReadExact =
             fun _ _ ->
                 createError ()
                 |> Task.FromException<BlobDocument option> }
@@ -453,7 +473,7 @@ type ShareExpiryTests() =
             ))
 
     [<Test>]
-    member _.``ExpiresOn metadata is live through share lookup``() =
+    member _.``ExpiresOn metadata is live through both share lookups``() =
         let now = expiresOn.AddTicks(-1L)
         let mixedCaseMetadata =
             Map [ "ExpiresOn", formatExpiry expiresOn ]
@@ -462,8 +482,17 @@ type ShareExpiryTests() =
         let fake =
             fakeBlobReader (Map [ blobName, stored ])
 
-        let result =
-            ShareLookup.resolve
+        let propertiesResult =
+            ShareLookup.resolveProperties
+                fake.Reader
+                (fun () -> now)
+                validPrefix
+                "report.html"
+                CancellationToken.None
+            |> await
+
+        let documentResult =
+            ShareLookup.resolveDocument
                 fake.Reader
                 (fun () -> now)
                 validPrefix
@@ -478,8 +507,25 @@ type ShareExpiryTests() =
             )
 
             Assert.That(
-                result,
+                propertiesResult,
+                Is.EqualTo(
+                    Available mixedCaseMetadata
+                )
+            )
+
+            Assert.That(
+                documentResult,
                 Is.EqualTo(Available stored)
+            )
+
+            Assert.That(
+                fake.Requests(),
+                Is.EqualTo(
+                    [
+                        PropertiesLookup blobName
+                        ContentRead blobName
+                    ]
+                )
             ))
 
     [<Test>]
@@ -725,7 +771,7 @@ type ViewerRouteTests() =
         )
 
     [<Test>]
-    member _.``shell routes only to sandboxed content and both routes re-read the blob``() =
+    member _.``shell uses properties while sandboxed content reads the body``() =
         let filename = "report & \"notes\".html"
         let encodedFilename = Uri.EscapeDataString(filename)
         let blobName = $"{validPrefix}/{filename}"
@@ -823,8 +869,13 @@ type ViewerRouteTests() =
 
                 Assert.That(
                     fake.Requests(),
-                    Is.EqualTo([ blobName; blobName ]),
-                    "each route must perform its own exact read"
+                    Is.EqualTo(
+                        [
+                            PropertiesLookup blobName
+                            ContentRead blobName
+                        ]
+                    ),
+                    "the shell must read only properties and the content route must perform the only body read"
                 )))
 
     [<Test>]
@@ -934,8 +985,13 @@ type ViewerRouteTests() =
 
                 Assert.That(
                     fake.Requests(),
-                    Is.EqualTo([ blobName; blobName ]),
-                    "both routes must preserve exact filename casing for Blob lookup"
+                    Is.EqualTo(
+                        [
+                            PropertiesLookup blobName
+                            ContentRead blobName
+                        ]
+                    ),
+                    "both lookup kinds must preserve exact filename casing"
                 )))
 
     [<TestCase("Production")>]
@@ -1057,6 +1113,7 @@ type ViewerRouteTests() =
 
     [<Test>]
     member _.``all not-found outcomes are indistinguishable on both routes``() =
+        let missingName = $"{validPrefix}/missing.html"
         let expiredName = $"{validPrefix}/expired.html"
         let missingExpiryName =
             $"{validPrefix}/missing-expiry.html"
@@ -1065,8 +1122,6 @@ type ViewerRouteTests() =
 
         let documents =
             Map [
-                ShareLookup.InvalidPathProbeBlobName,
-                document "reserved probe" liveMetadata
                 expiredName,
                 document
                     "expired"
@@ -1087,18 +1142,28 @@ type ViewerRouteTests() =
 
         let cases =
             [
-                "short/report.html",
-                ShareLookup.InvalidPathProbeBlobName
-                $"{validPrefix}/report.txt",
-                ShareLookup.InvalidPathProbeBlobName
-                $"{validPrefix}/missing.html",
-                $"{validPrefix}/missing.html"
-                $"{validPrefix}/expired.html",
-                expiredName
-                $"{validPrefix}/missing-expiry.html",
-                missingExpiryName
-                $"{validPrefix}/bad-expiry.html",
-                badExpiryName
+                "short/report.html", []
+                $"{validPrefix}/report.txt", []
+                missingName,
+                [
+                    PropertiesLookup missingName
+                    ContentRead missingName
+                ]
+                expiredName,
+                [
+                    PropertiesLookup expiredName
+                    ContentRead expiredName
+                ]
+                missingExpiryName,
+                [
+                    PropertiesLookup missingExpiryName
+                    ContentRead missingExpiryName
+                ]
+                badExpiryName,
+                [
+                    PropertiesLookup badExpiryName
+                    ContentRead badExpiryName
+                ]
             ]
 
         withViewer documents now (fun fake client baseUrl ->
@@ -1152,10 +1217,9 @@ type ViewerRouteTests() =
                     fake.Requests(),
                     Is.EqualTo(
                         cases
-                        |> List.collect (fun (_, blobName) ->
-                            [ blobName; blobName ])
+                        |> List.collect snd
                     ),
-                    "malformed, missing, and expired requests must follow the same exact-read ordering on each route"
+                    "malformed paths must skip storage while each valid path performs one properties lookup and one body read"
                 )))
 
     [<Test>]
