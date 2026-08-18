@@ -78,6 +78,59 @@ let private waitUntil description predicate =
 
     wait ()
 
+let private awaitWithin
+    description
+    (operation: Task<'value>)
+    =
+    try
+        operation.WaitAsync(TimeSpan.FromSeconds 2.0).GetAwaiter().GetResult()
+    with :? TimeoutException ->
+        Assert.Fail($"Timed out waiting for {description}")
+        Unchecked.defaultof<'value>
+
+type private ControlledLockAcquisition =
+    { Acquire:
+        WorktreePath ->
+            Async<Result<IDisposable, string>>
+      Entered: Task<unit>
+      Release: unit -> unit
+      Disposed: Task<unit> }
+
+let private controlledLockAcquisition () =
+    let entered =
+        TaskCompletionSource<unit>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        )
+
+    let release =
+        TaskCompletionSource<unit>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        )
+
+    let disposed =
+        TaskCompletionSource<unit>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        )
+
+    { Acquire =
+        fun _ ->
+            async {
+                entered.TrySetResult(()) |> ignore
+                do! release.Task |> Async.AwaitTask
+
+                return
+                    Ok
+                        ({ new IDisposable with
+                            member _.Dispose() =
+                                disposed.TrySetResult(())
+                                |> ignore } : IDisposable)
+            }
+      Entered = entered.Task
+      Release =
+        fun () ->
+            release.TrySetResult(()) |> ignore
+      Disposed = disposed.Task }
+
 let private worktreeLockPath stateDirectory worktree =
     let key =
         worktree
@@ -688,7 +741,7 @@ type EmbeddedTerminalTests() =
                 Assert.That(endpointFor worktree restarted, Is.Not.Empty)))
 
     [<Test>]
-    member _.``blocked reserved mutation leaves unrelated manager operations responsive``() =
+    member _.``same-key lock waiter leaves unrelated manager operations responsive``() =
         withFakeHost (fun tempDir stateDirectory _ manager ->
             let reservedPath = Path.Combine(tempDir, "reserved")
             let closingPath = Path.Combine(tempDir, "closing")
@@ -728,7 +781,7 @@ type EmbeddedTerminalTests() =
 
             mutationEntered.Task.GetAwaiter().GetResult()
 
-            try
+            let exerciseBlockedWaiter () =
                 Assert.That(
                     canAcquireWorktreeLock
                         stateDirectory
@@ -736,48 +789,248 @@ type EmbeddedTerminalTests() =
                     Is.False
                 )
 
-                let started =
-                    start manager startingWorktree
+                let firstSameKey =
+                    EmbeddedTerminal.start
+                        manager
+                        reservedWorktree
+                    |> Async.StartAsTask
+
+                let secondSameKey =
+                    EmbeddedTerminal.start
+                        manager
+                        reservedWorktree
+                    |> Async.StartAsTask
+
+                waitUntil
+                    "one same-key request to report the active waiter"
+                    (fun () ->
+                        firstSameKey.IsCompleted
+                        || secondSameKey.IsCompleted)
+
+                let busy, sameKeyWaiter =
+                    if firstSameKey.IsCompleted then
+                        firstSameKey, secondSameKey
+                    else
+                        secondSameKey, firstSameKey
+
+                match
+                    awaitWithin
+                        "same-key busy result"
+                        busy
+                with
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("already waiting").IgnoreCase
+                    )
+                | Ok snapshot ->
+                    Assert.Fail(
+                        $"Second same-key start should be busy, got {snapshot}"
+                    )
 
                 let current =
-                    EmbeddedTerminal.get manager |> run
+                    EmbeddedTerminal.get manager
+                    |> Async.StartAsTask
 
-                let afterClose =
+                let started =
+                    EmbeddedTerminal.start
+                        manager
+                        startingWorktree
+                    |> Async.StartAsTask
+
+                let closed =
                     EmbeddedTerminal.close
                         manager
                         closingWorktree
-                    |> run
+                    |> Async.StartAsTask
+
+                awaitWithin
+                    "unrelated terminal snapshot"
+                    current
+                |> ignore
+
+                let startedSnapshot =
+                    match
+                        awaitWithin
+                            "unrelated terminal start"
+                            started
+                    with
+                    | Ok snapshot -> snapshot
+                    | Error error ->
+                        Assert.Fail(error)
+                        EmbeddedTerminalSnapshot.empty
+
+                let afterClose =
+                    awaitWithin
+                        "unrelated terminal close"
+                        closed
 
                 Assert.Multiple(fun () ->
                     Assert.That(reservation.IsCompleted, Is.False)
+                    Assert.That(sameKeyWaiter.IsCompleted, Is.False)
                     Assert.That(
-                        endpointFor startingWorktree started,
-                        Is.Not.Empty
-                    )
-                    Assert.That(
-                        endpointFor startingWorktree current,
+                        endpointFor
+                            startingWorktree
+                            startedSnapshot,
                         Is.Not.Empty
                     )
                     Assert.That(
                         tryFindTab closingWorktree afterClose,
                         Is.EqualTo(None)
-                    )
-                    Assert.That(
-                        endpointFor startingWorktree afterClose,
-                        Is.Not.Empty
                     ))
-            finally
-                releaseMutation.TrySetResult(()) |> ignore
+
+                sameKeyWaiter
+
+            let sameKeyWaiter =
+                try
+                    exerciseBlockedWaiter ()
+                finally
+                    releaseMutation.TrySetResult(()) |> ignore
 
             match reservation.GetAwaiter().GetResult() with
             | Error error -> Assert.Fail(error)
             | Ok () ->
+                let restarted =
+                    sameKeyWaiter.GetAwaiter().GetResult()
+
+                match restarted with
+                | Error error -> Assert.Fail(error)
+                | Ok snapshot ->
+                    Assert.That(
+                        endpointFor reservedWorktree snapshot,
+                        Is.Not.Empty
+                    )
+
                 Assert.That(
                     canAcquireWorktreeLock
                         stateDirectory
                         reservedWorktree,
                     Is.True
                 ))
+
+    [<Test>]
+    member _.``cancelled start disposes its stale lock acquisition``() =
+        Tests.TestUtils.withTempDir "cancelled-terminal-start" (fun tempDir ->
+            let worktree = canonical tempDir
+            let controlled = controlledLockAcquisition ()
+
+            let manager =
+                EmbeddedTerminal.createWithLockAcquisition
+                    (config
+                        (Path.Combine(tempDir, "state"))
+                        (Path.Combine(tempDir, "host.mjs"))
+                        (Path.Combine(tempDir, "ttyd.exe")))
+                    controlled.Acquire
+
+            use cancellation =
+                new CancellationTokenSource()
+
+            let started =
+                EmbeddedTerminal.start manager worktree
+                |> fun workflow ->
+                    Async.StartAsTask(
+                        workflow,
+                        cancellationToken = cancellation.Token
+                    )
+
+            awaitWithin
+                "cancelled start lock acquisition"
+                controlled.Entered
+            |> ignore
+
+            cancellation.Cancel()
+
+            try
+                awaitWithin "cancelled terminal start" started
+                |> ignore
+
+                Assert.Fail("Terminal start should be cancelled")
+            with :? OperationCanceledException ->
+                ()
+
+            controlled.Release()
+
+            awaitWithin
+                "stale start lock disposal"
+                controlled.Disposed
+            |> ignore
+
+            Assert.That(
+                EmbeddedTerminal.get manager |> run,
+                Is.EqualTo EmbeddedTerminalSnapshot.empty
+            ))
+
+    [<Test>]
+    member _.``cancelled cleanup reservation disposes its stale lock acquisition``() =
+        Tests.TestUtils.withTempDir "cancelled-terminal-reservation" (fun tempDir ->
+            let worktree = canonical tempDir
+            let controlled = controlledLockAcquisition ()
+
+            let manager =
+                EmbeddedTerminal.createWithLockAcquisition
+                    (config
+                        (Path.Combine(tempDir, "state"))
+                        (Path.Combine(tempDir, "host.mjs"))
+                        (Path.Combine(tempDir, "ttyd.exe")))
+                    controlled.Acquire
+
+            let operationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            use cancellation =
+                new CancellationTokenSource()
+
+            let reserved =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () ->
+                        async {
+                            operationEntered.TrySetResult(())
+                            |> ignore
+
+                            return Ok ()
+                        })
+                |> fun workflow ->
+                    Async.StartAsTask(
+                        workflow,
+                        cancellationToken = cancellation.Token
+                    )
+
+            awaitWithin
+                "cancelled reservation lock acquisition"
+                controlled.Entered
+            |> ignore
+
+            cancellation.Cancel()
+
+            try
+                awaitWithin
+                    "cancelled cleanup reservation"
+                    reserved
+                |> ignore
+
+                Assert.Fail(
+                    "Cleanup reservation should be cancelled"
+                )
+            with :? OperationCanceledException ->
+                ()
+
+            controlled.Release()
+
+            awaitWithin
+                "stale reservation lock disposal"
+                controlled.Disposed
+            |> ignore
+
+            Assert.Multiple(fun () ->
+                Assert.That(operationEntered.Task.IsCompleted, Is.False)
+                Assert.That(
+                    EmbeddedTerminal.get manager |> run,
+                    Is.EqualTo EmbeddedTerminalSnapshot.empty
+                )))
 
     [<Test>]
     member _.``worktree lock remains held through reservation release``() =

@@ -835,16 +835,22 @@ const trackOwnedProcess = (session, identity, depth) => {
 
 class CleanupDeadlineError extends Error {}
 
-const remainingCleanupTime = (deadline, now) =>
+const boundedBudget = (timeoutMs, now) => ({
+  deadline: now() + Math.max(0, timeoutMs),
+  now,
+});
+
+const budgetUntil = (deadline, now) => ({ deadline, now });
+
+const remainingCleanupTime = ({ deadline, now }) =>
   Math.max(0, Math.floor(deadline - now()));
 
 const beforeCleanupDeadline = async (
-  deadline,
-  now,
+  budget,
   description,
   operation,
 ) => {
-  const remainingMs = remainingCleanupTime(deadline, now);
+  const remainingMs = remainingCleanupTime(budget);
   if (remainingMs <= 0) {
     throw new CleanupDeadlineError(
       `Durable terminal cleanup timed out before ${description}`,
@@ -875,7 +881,7 @@ const beforeCleanupDeadline = async (
           },
         );
     });
-    if (now() > deadline) {
+    if (budget.now() > budget.deadline) {
       throw new CleanupDeadlineError(
         `Durable terminal cleanup timed out during ${description}`,
       );
@@ -883,7 +889,7 @@ const beforeCleanupDeadline = async (
     return result;
   } catch (error) {
     if (error instanceof CleanupDeadlineError) throw error;
-    if (now() >= deadline) {
+    if (budget.now() >= budget.deadline) {
       throw new CleanupDeadlineError(
         `Durable terminal cleanup timed out during ${description}`,
         { cause: error },
@@ -896,8 +902,7 @@ const beforeCleanupDeadline = async (
 async function discoverOwnedDescendants(
   processes,
   processController,
-  deadline,
-  now,
+  budget,
 ) {
   const discover = async (pending, visited) => {
     const [tracked, ...remaining] = pending;
@@ -906,8 +911,7 @@ async function discoverOwnedDescendants(
     if (visited.has(key)) return discover(remaining, visited);
 
     const children = await beforeCleanupDeadline(
-      deadline,
-      now,
+      budget,
       `discovering descendants of PID ${tracked.identity.pid}`,
       (remainingMs) =>
         processController.children(tracked.identity, remainingMs),
@@ -939,18 +943,27 @@ async function discoverOwnedDescendants(
   await discover([...processes.values()], new Set());
 }
 
+const discoverSessionOwnedDescendants = (
+  session,
+  processController,
+  budget,
+) =>
+  discoverOwnedDescendants(
+    ownedProcesses(session),
+    processController,
+    budget,
+  );
+
 async function remainingOwnedProcesses(
   processes,
   processController,
-  deadline,
-  now,
+  budget,
 ) {
   const inspect = async (pending, remaining) => {
     const [tracked, ...rest] = pending;
     if (!tracked) return remaining;
     const actual = await beforeCleanupDeadline(
-      deadline,
-      now,
+      budget,
       `inspecting PID ${tracked.identity.pid}`,
       (remainingMs) =>
         processController.inspect(tracked.identity.pid, remainingMs),
@@ -969,28 +982,36 @@ async function remainingOwnedProcesses(
 async function waitForOwnedProcessExit(
   session,
   processController,
-  timeoutMs,
+  cleanupBudget,
+  gracefulTimeoutMs,
   wait,
-  now,
 ) {
   const processes = ownedProcesses(session);
-  const deadline = now() + timeoutMs;
+  const gracefulBudget = budgetUntil(
+    Math.min(
+      cleanupBudget.deadline,
+      cleanupBudget.now() + gracefulTimeoutMs,
+    ),
+    cleanupBudget.now,
+  );
+
+  if (remainingCleanupTime(gracefulBudget) === 0) {
+    return [...processes.values()];
+  }
 
   const check = async () => {
     try {
-      await discoverOwnedDescendants(
-        processes,
+      await discoverSessionOwnedDescendants(
+        session,
         processController,
-        deadline,
-        now,
+        gracefulBudget,
       );
       const remaining = await remainingOwnedProcesses(
         processes,
         processController,
-        deadline,
-        now,
+        gracefulBudget,
       );
-      const remainingMs = remainingCleanupTime(deadline, now);
+      const remainingMs = remainingCleanupTime(gracefulBudget);
       if (remaining.length === 0 || remainingMs === 0) return remaining;
       await wait(Math.min(50, remainingMs));
       return check();
@@ -1008,12 +1029,10 @@ async function waitForOwnedProcessExit(
 async function forceOwnedProcessExit(
   session,
   processController,
-  timeoutMs,
+  budget,
   wait,
-  now,
 ) {
   const processes = ownedProcesses(session);
-  const deadline = now() + timeoutMs;
   const timeout = (cause) =>
     new Error("Durable terminal forced cleanup timed out", { cause });
 
@@ -1021,8 +1040,7 @@ async function forceOwnedProcessExit(
     const [tracked, ...remaining] = pending;
     if (!tracked) return;
     await beforeCleanupDeadline(
-      deadline,
-      now,
+      budget,
       `${description} PID ${tracked.identity.pid}`,
       (remainingMs) =>
         processController.terminate(tracked.identity, remainingMs),
@@ -1030,13 +1048,11 @@ async function forceOwnedProcessExit(
     processes.delete(processIdentityKey(tracked.identity));
     return terminateTracked(remaining, description);
   };
-
   const force = async () => {
-    await discoverOwnedDescendants(
-      processes,
+    await discoverSessionOwnedDescendants(
+      session,
       processController,
-      deadline,
-      now,
+      budget,
     );
     if (processes.size === 0) return [];
 
@@ -1054,8 +1070,7 @@ async function forceOwnedProcessExit(
     const survivors = await remainingOwnedProcesses(
       processes,
       processController,
-      deadline,
-      now,
+      budget,
     );
     if (survivors.length === 0) return [];
     await terminateTracked(
@@ -1064,7 +1079,7 @@ async function forceOwnedProcessExit(
     );
 
     if (processes.size === 0) return [];
-    const remainingMs = remainingCleanupTime(deadline, now);
+    const remainingMs = remainingCleanupTime(budget);
     if (remainingMs === 0) throw timeout();
     await wait(Math.min(50, remainingMs));
     return force();
@@ -1101,12 +1116,12 @@ export async function cleanupOwnedProcessTree(
     ]),
   };
 
+  const budget = boundedBudget(timeoutMs, now);
   await forceOwnedProcessExit(
     session,
     processController,
-    timeoutMs,
+    budget,
     wait,
-    now,
   );
 }
 
@@ -1898,7 +1913,7 @@ export class DurableTerminalHost {
   }
 
   async waitForShellPid(session) {
-    const deadline = Date.now() + 5000;
+    const budget = boundedBudget(5000, this.now);
 
     const read = async () => {
       if (session.ttydProcess.exitCode !== null) {
@@ -1908,7 +1923,21 @@ export class DurableTerminalHost {
       if (existsSync(session.pidFile)) {
         const pid = Number.parseInt(readFileSync(session.pidFile, "utf8").trim(), 10);
         if (validPid(pid)) {
-          await discoverOwnedDescendants(session, this.processController);
+          try {
+            await discoverSessionOwnedDescendants(
+              session,
+              this.processController,
+              budget,
+            );
+          } catch (error) {
+            if (error instanceof CleanupDeadlineError) {
+              throw new Error(
+                "Timed out waiting for PowerShell process identity",
+                { cause: error },
+              );
+            }
+            throw error;
+          }
           const owned = [...ownedProcesses(session).values()].find(
             ({ identity }) => identity.pid === pid,
           );
@@ -1916,11 +1945,12 @@ export class DurableTerminalHost {
         }
       }
 
-      if (Date.now() >= deadline) {
+      const remainingMs = remainingCleanupTime(budget);
+      if (remainingMs === 0) {
         throw new Error("Timed out waiting for PowerShell process identity");
       }
 
-      await delay(50);
+      await this.wait(Math.min(50, remainingMs));
       return read();
     };
 
@@ -2217,6 +2247,37 @@ export class DurableTerminalHost {
   }
 
   async stopSessionResources(session) {
+    const upstreamCloseAllowance =
+      session.upstream &&
+      session.upstream.readyState !== WebSocket.CLOSED
+        ? 2000
+        : 0;
+    const cleanupBudget = boundedBudget(
+      upstreamCloseAllowance +
+        this.cleanupTimeouts.graceful +
+        this.cleanupTimeouts.forced,
+      this.now,
+    );
+
+    try {
+      await discoverSessionOwnedDescendants(
+        session,
+        this.processController,
+        cleanupBudget,
+      );
+    } catch (error) {
+      if (error instanceof CleanupDeadlineError) {
+        throw new Error(
+          "Initial terminal descendant ownership capture timed out",
+          { cause: error },
+        );
+      }
+      throw new Error(
+        `Initial terminal descendant ownership capture failed: ${error.message}`,
+        { cause: error },
+      );
+    }
+
     const attachment = session.attachment;
     session.attachment = null;
     attachment?.socket?.close(1000, "Terminal session closed");
@@ -2225,21 +2286,32 @@ export class DurableTerminalHost {
       session.upstream &&
       session.upstream.readyState !== WebSocket.CLOSED
     ) {
-      session.upstream.close(1000, "Terminal session closed");
-      const closed = await Promise.race([
-        once(session.upstream, "close").then(() => true),
-        delay(2000).then(() => false),
-      ]);
-      if (!closed) session.upstream.terminate();
+      await beforeCleanupDeadline(
+        cleanupBudget,
+        "closing terminal upstream",
+        async (remainingMs) => {
+          session.upstream.close(1000, "Terminal session closed");
+          const closed = await Promise.race([
+            once(session.upstream, "close").then(() => true),
+            this.wait(Math.min(2000, remainingMs)).then(() => false),
+          ]);
+          if (!closed) session.upstream.terminate();
+        },
+      );
     }
 
     if (
       session.unverifiedSpawnedPids?.includes(session.ttydPid) &&
       session.ttydProcess
     ) {
-      await terminateRetainedChild(
-        session.ttydProcess,
-        this.cleanupTimeouts.forced,
+      await beforeCleanupDeadline(
+        cleanupBudget,
+        `terminating retained process PID ${session.ttydPid}`,
+        (remainingMs) =>
+          terminateRetainedChild(
+            session.ttydProcess,
+            remainingMs,
+          ),
       );
       session.unverifiedSpawnedPids =
         session.unverifiedSpawnedPids.filter(
@@ -2250,17 +2322,16 @@ export class DurableTerminalHost {
     let remaining = await waitForOwnedProcessExit(
       session,
       this.processController,
+      cleanupBudget,
       this.cleanupTimeouts.graceful,
       this.wait,
-      this.now,
     );
 
     remaining = await forceOwnedProcessExit(
       session,
       this.processController,
-      this.cleanupTimeouts.forced,
+      cleanupBudget,
       this.wait,
-      this.now,
     );
     const unverifiedRemaining = session.unverifiedSpawnedPids ?? [];
     await closeServer(session.publicServer);

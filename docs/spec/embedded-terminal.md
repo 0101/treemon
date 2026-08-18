@@ -32,7 +32,10 @@ locks. The manager returns the acquired lease before the Git/config mutation beg
 singleton control mailbox remains available for Start/Get/Close on unrelated keys while the
 mutation is blocked. The acquired OS-lock handle transfers with the lease and remains held through
 renewal, mutation, cancellation-shielded explicit release, and final disposal; those steps run
-outside the mailbox. Discovery,
+outside the mailbox. OS-lock acquisition also runs outside the singleton mailbox. Each pending
+acquisition has a request token and cancellation registration; a second lock-acquiring request for
+that canonical key receives a busy error, unrelated keys continue immediately, and stale
+completions dispose any acquired handle without starting or reserving a terminal. Discovery,
 reservation, transport, parsing, and process-cleanup failures abort the worktree operation with an
 actionable error. Public tab close is non-reserving and never grants permission to mutate a
 worktree. Closing a key already absent from the public snapshot is an unchanged success, including
@@ -109,7 +112,8 @@ that non-reusable parent identity remains retained. A changed or exited parent i
 non-owned result and contributes no children; recursion always supplies the complete expected
 parent identity rather than a bare PID. Cleanup snapshots descendants
 before closing the upstream, retains captured processes after reparenting, and iterates discovery
-and identity-bound termination to convergence under one forced-cleanup deadline. Every discovery,
+and identity-bound termination to convergence under one end-to-end cleanup deadline spanning the
+initial snapshot, upstream close, graceful wait, rediscovery, and forced termination. Every discovery,
 identity inspection, and termination helper receives only the remaining budget; expiry is an
 explicit failure that retains the session for retry. Termination never accepts a PID alone. The
 plainly-invoked checked-in Windows helper also verifies exact UTC start ticks, calls

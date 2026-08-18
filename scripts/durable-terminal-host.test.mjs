@@ -458,6 +458,29 @@ test("spawn identity capture rejects a root that exits during inspection", async
   );
 });
 
+test("startup discovers the shell PID through the bounded session ownership path", async () => {
+  const root = processIdentity(708);
+  const shell = processIdentity(709, 708);
+  const { controller } = fakeProcessController([root, shell]);
+
+  await withTestHost(controller, async (host) => {
+    const session = {
+      ...ownedSession("shell-discovery", 708, null, [root]),
+      ttydProcess: { exitCode: null },
+      pidFile: resolve(host.options.stateDirectory, "shell.pid"),
+    };
+    writeFileSync(session.pidFile, `${shell.pid}\n`);
+
+    const discovered = await host.waitForShellPid(session);
+
+    assert.equal(discovered, shell.pid);
+    assert.deepEqual(
+      [...session.ownedProcesses.values()].map(({ identity }) => identity),
+      [root, shell],
+    );
+  });
+});
+
 test("a captured descendant remains owned after reparenting", async () => {
   const root = processIdentity(711);
   const child = processIdentity(712, 711);
@@ -484,6 +507,45 @@ test("a captured descendant remains owned after reparenting", async () => {
     await host.closeSession(session, "test");
 
     assert.deepEqual(terminated, [712]);
+    assert.equal(host.sessions.has(session.id), false);
+  });
+});
+
+test("cleanup captures a descendant before upstream close reparents it", async () => {
+  const root = processIdentity(713);
+  const child = processIdentity(714, 713);
+  const { controller, processes, terminated } = fakeProcessController([
+    root,
+    child,
+  ]);
+
+  await withTestHost(controller, async (host) => {
+    const session = ownedSession("upstream-reparent", 713, 714, [root]);
+    let capturedBeforeClose = false;
+    let registeredBeforeClose = false;
+    const upstream = new EventEmitter();
+    upstream.readyState = 1;
+    upstream.close = () => {
+      capturedBeforeClose = [...session.ownedProcesses.values()].some(
+        ({ identity }) => sameProcessIdentity(identity, child),
+      );
+      registeredBeforeClose = host.sessions.get(session.id) === session;
+      processes.delete(root.pid);
+      processes.set(child.pid, { ...child, parentPid: 0 });
+      queueMicrotask(() => {
+        upstream.readyState = 3;
+        upstream.emit("close");
+      });
+    };
+    upstream.terminate = () => {};
+    session.upstream = upstream;
+    host.sessions.set(session.id, session);
+
+    await host.closeSession(session, "test");
+
+    assert.equal(capturedBeforeClose, true);
+    assert.equal(registeredBeforeClose, true);
+    assert.deepEqual(terminated, [child.pid]);
     assert.equal(host.sessions.has(session.id), false);
   });
 });
@@ -578,6 +640,37 @@ test("forced cleanup gives every slow operation only the remaining deadline", as
   assert.ok(budgets.every((budget) => budget <= 20));
 });
 
+test("initial descendant capture timeout retains the session and its resources", async () => {
+  const root = processIdentity(739);
+  const controller = {
+    children: async () => new Promise(() => {}),
+    inspect: async () => root,
+    terminate: async () => true,
+  };
+
+  await withTestHost(controller, async (host) => {
+    let attachmentCloses = 0;
+    const attachment = {
+      socket: { close: () => (attachmentCloses += 1) },
+    };
+    const session = {
+      ...ownedSession("capture-timeout", 739, null, [root]),
+      attachment,
+    };
+    host.sessions.set(session.id, session);
+
+    await assert.rejects(
+      host.closeSession(session, "test"),
+      /initial terminal descendant ownership capture timed out/i,
+    );
+
+    assert.equal(host.sessions.get(session.id), session);
+    assert.equal(session.attachment, attachment);
+    assert.equal(attachmentCloses, 0);
+    assert.equal(session.state, "failed");
+  });
+});
+
 test("a stalled cleanup cannot block another key or unbound shutdown", async () => {
   const root = processIdentity(740);
   const controller = {
@@ -597,7 +690,7 @@ test("a stalled cleanup cannot block another key or unbound shutdown", async () 
 
     const stalledClose = host.closeSession(stalled, "test");
     await host.closeSession(unrelated, "test");
-    await assert.rejects(stalledClose, /forced cleanup timed out/);
+    await assert.rejects(stalledClose, /initial .* capture timed out/i);
 
     assert.equal(host.sessions.has(unrelated.id), false);
     assert.equal(host.sessions.get(stalled.id), stalled);

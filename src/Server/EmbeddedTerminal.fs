@@ -57,6 +57,21 @@ type private CleanupReservation =
     { Lease: CleanupLease
       WorktreeLock: IDisposable }
 
+type private LockAcquisitionToken =
+    | LockAcquisitionToken of Guid
+
+type private PendingLockRequest =
+    | PendingStart of
+        AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
+    | PendingCleanup of
+        AsyncReplyChannel<Result<CleanupReservation, string>>
+
+type private PendingLockAcquisition =
+    { WorktreePath: WorktreePath
+      Cancellation: CancellationToken
+      Registration: CancellationTokenRegistration
+      Request: PendingLockRequest }
+
 type private ReservedOperationOutcome =
     | ReservedResult of Result<unit, string>
     | ReservedCancelled of OperationCanceledException
@@ -64,18 +79,30 @@ type private ReservedOperationOutcome =
 type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
       AnnouncedHost: HostIdentity option
-      KnownHost: HostIdentity option }
+      KnownHost: HostIdentity option
+      PendingLocks:
+        Map<LockAcquisitionToken, PendingLockAcquisition> }
 
 type private Message =
-    | Start of WorktreePath * AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
+    | Start of
+        LockAcquisitionToken *
+        CancellationToken *
+        WorktreePath *
+        AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | Close of WorktreePath * AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | CloseStrict of
         WorktreePath *
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | ReserveCleanup of
+        LockAcquisitionToken *
+        CancellationToken *
         WorktreePath *
         AsyncReplyChannel<Result<CleanupReservation, string>>
+    | LockAcquired of
+        LockAcquisitionToken *
+        Result<IDisposable, string>
+    | CancelLockAcquisition of LockAcquisitionToken
     | ShutdownHost of AsyncReplyChannel<Result<unit, string>>
 
 type Manager = private Manager of MailboxProcessor<Message>
@@ -1755,13 +1782,17 @@ let private reserveOnCurrentHost
                     next
     }
 
-let private acquireWorktreeLock config worktreePath =
+let private acquireWorktreeLock
+    config
+    worktreePath
+    : Async<Result<IDisposable, string>> =
     let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
 
     let rec acquire () =
         async {
             match tryAcquireWorktreeLock config worktreePath with
-            | Ok (Some worktreeLock) -> return Ok worktreeLock
+            | Ok (Some worktreeLock) ->
+                return Ok(worktreeLock :> IDisposable)
             | Error error -> return Error error
             | Ok None when DateTimeOffset.UtcNow >= deadline ->
                 return
@@ -1926,51 +1957,138 @@ let private shutdown config =
             | Ok () -> return! waitForHostExit config connection
     }
 
-let internal createWithConfig config =
+let private lockAcquisitionCancelled =
+    "Terminal worktree ownership request was cancelled or timed out"
+
+let private lockAcquisitionBusy =
+    "Another terminal operation is already waiting for this worktree ownership"
+
+let private replyLockFailure error request =
+    match request with
+    | PendingStart reply -> reply.Reply(Error error)
+    | PendingCleanup reply -> reply.Reply(Error error)
+
+let private disposeLockResult
+    (result: Result<IDisposable, string>)
+    =
+    match result with
+    | Ok worktreeLock -> worktreeLock.Dispose()
+    | Error _ -> ()
+
+let private pendingForPath
+    (worktreePath: WorktreePath)
+    (state: ManagerState)
+    =
+    state.PendingLocks
+    |> Map.exists (fun _ pending ->
+        Shared.PathUtils.pathEquals
+            (WorktreePath.value worktreePath)
+            (WorktreePath.value pending.WorktreePath))
+
+let internal createWithLockAcquisition
+    config
+    (acquireLock:
+        WorktreePath -> Async<Result<IDisposable, string>>)
+    =
     let instanceId = Guid.NewGuid().ToString("N")
 
     let agent =
         MailboxProcessor.Start(fun inbox ->
+            let launchLockAcquisition token worktreePath =
+                async {
+                    let! result =
+                        async {
+                            try
+                                return! acquireLock worktreePath
+                            with ex ->
+                                return
+                                    Error
+                                        $"Could not acquire terminal worktree ownership unexpectedly: {ex.Message}"
+                        }
+
+                    inbox.Post(LockAcquired(token, result))
+                }
+                |> fun acquisition ->
+                    Async.Start(
+                        acquisition,
+                        cancellationToken = CancellationToken.None
+                    )
+
+            let beginLockAcquisition
+                (token: LockAcquisitionToken)
+                (cancellation: CancellationToken)
+                (worktreePath: WorktreePath)
+                (request: PendingLockRequest)
+                (state: ManagerState)
+                =
+                if pendingForPath worktreePath state then
+                    replyLockFailure lockAcquisitionBusy request
+                    state
+                elif cancellation.IsCancellationRequested then
+                    replyLockFailure
+                        lockAcquisitionCancelled
+                        request
+
+                    state
+                else
+                    let registration =
+                        cancellation.Register(fun () ->
+                            inbox.Post(CancelLockAcquisition token))
+
+                    let pending =
+                        { WorktreePath = worktreePath
+                          Cancellation = cancellation
+                          Registration = registration
+                          Request = request }
+
+                    launchLockAcquisition token worktreePath
+
+                    { state with
+                        PendingLocks =
+                            state.PendingLocks
+                            |> Map.add token pending }
+
+            let cancelPendingLocks error state =
+                state.PendingLocks
+                |> Map.iter (fun _ pending ->
+                    pending.Registration.Dispose()
+                    replyLockFailure error pending.Request)
+
+                { state with PendingLocks = Map.empty }
+
             let rec loop state =
                 async {
                     let! message = inbox.Receive()
 
                     match message with
-                    | Start(worktreePath, reply) ->
-                        let canonical = canonicalWorktreePath worktreePath
-                        match! acquireWorktreeLock config canonical with
-                        | Error error ->
-                            let current =
-                                withFailure
-                                    canonical
-                                    error
-                                    state.LastSnapshot
+                    | Start(
+                        token,
+                        cancellation,
+                        worktreePath,
+                        reply
+                      ) ->
+                        let canonical =
+                            canonicalWorktreePath worktreePath
 
-                            reply.Reply(Error error)
-                            return!
-                                loop
-                                    { state with
-                                        LastSnapshot = current }
-                        | Ok worktreeLock ->
-                            let! result, next =
-                                async {
-                                    use worktreeLock = worktreeLock
-                                    return!
-                                        startTerminal
-                                            config
-                                            instanceId
-                                            state
-                                            canonical
-                                }
+                        let next =
+                            beginLockAcquisition
+                                token
+                                cancellation
+                                canonical
+                                (PendingStart reply)
+                                state
 
-                            reply.Reply result
-                            return! loop next
+                        return! loop next
                     | Get reply ->
-                        let! current, next = getTerminals instanceId state config
+                        let! current, next =
+                            getTerminals instanceId state config
+
                         reply.Reply current
                         return! loop next
                     | Close(worktreePath, reply) ->
-                        let canonical = canonicalWorktreePath worktreePath
+                        let canonical =
+                            canonicalWorktreePath worktreePath
+
                         let! current, next =
                             closeTerminal
                                 instanceId
@@ -1981,7 +2099,9 @@ let internal createWithConfig config =
                         reply.Reply current
                         return! loop next
                     | CloseStrict(worktreePath, reply) ->
-                        let canonical = canonicalWorktreePath worktreePath
+                        let canonical =
+                            canonicalWorktreePath worktreePath
+
                         let! result, next =
                             closeTerminalStrict
                                 instanceId
@@ -1991,45 +2111,131 @@ let internal createWithConfig config =
 
                         reply.Reply result
                         return! loop next
-                    | ReserveCleanup(worktreePath, reply) ->
+                    | ReserveCleanup(
+                        token,
+                        cancellation,
+                        worktreePath,
+                        reply
+                      ) ->
                         let canonical =
                             canonicalWorktreePath worktreePath
 
-                        match! acquireWorktreeLock config canonical with
-                        | Error error ->
-                            reply.Reply(Error error)
-                            return! loop state
-                        | Ok worktreeLock ->
-                            try
-                                let! result, next =
-                                    reserveTerminalCleanup
-                                        config
-                                        instanceId
-                                        state
-                                        canonical
+                        let next =
+                            beginLockAcquisition
+                                token
+                                cancellation
+                                canonical
+                                (PendingCleanup reply)
+                                state
 
-                                match result with
-                                | Ok lease ->
-                                    reply.Reply(
-                                        Ok
-                                            { Lease = lease
-                                              WorktreeLock =
-                                                worktreeLock }
-                                    )
-                                | Error error ->
-                                    worktreeLock.Dispose()
+                        return! loop next
+                    | CancelLockAcquisition token ->
+                        match state.PendingLocks |> Map.tryFind token with
+                        | None -> return! loop state
+                        | Some pending ->
+                            pending.Registration.Dispose()
+                            replyLockFailure
+                                lockAcquisitionCancelled
+                                pending.Request
+
+                            return!
+                                loop
+                                    { state with
+                                        PendingLocks =
+                                            state.PendingLocks
+                                            |> Map.remove token }
+                    | LockAcquired(token, acquisition) ->
+                        match state.PendingLocks |> Map.tryFind token with
+                        | None ->
+                            disposeLockResult acquisition
+                            return! loop state
+                        | Some pending ->
+                            pending.Registration.Dispose()
+                            let acquiredState =
+                                { state with
+                                    PendingLocks =
+                                        state.PendingLocks
+                                        |> Map.remove token }
+
+                            if
+                                pending.Cancellation.IsCancellationRequested
+                            then
+                                disposeLockResult acquisition
+                                replyLockFailure
+                                    lockAcquisitionCancelled
+                                    pending.Request
+
+                                return! loop acquiredState
+                            else
+                                match acquisition, pending.Request with
+                                | Error error, PendingStart reply ->
+                                    let current =
+                                        withFailure
+                                            pending.WorktreePath
+                                            error
+                                            acquiredState.LastSnapshot
+
                                     reply.Reply(Error error)
 
-                                return! loop next
-                            with ex ->
-                                worktreeLock.Dispose()
-                                reply.Reply(
-                                    Error
-                                        $"Could not reserve terminal cleanup unexpectedly: {ex.Message}"
-                                )
+                                    return!
+                                        loop
+                                            { acquiredState with
+                                                LastSnapshot = current }
+                                | Error error, PendingCleanup reply ->
+                                    reply.Reply(Error error)
+                                    return! loop acquiredState
+                                | Ok worktreeLock, PendingStart reply ->
+                                    let! result, next =
+                                        async {
+                                            use worktreeLock =
+                                                worktreeLock
 
-                                return! loop state
+                                            return!
+                                                startTerminal
+                                                    config
+                                                    instanceId
+                                                    acquiredState
+                                                    pending.WorktreePath
+                                        }
+
+                                    reply.Reply result
+                                    return! loop next
+                                | Ok worktreeLock, PendingCleanup reply ->
+                                    try
+                                        let! result, next =
+                                            reserveTerminalCleanup
+                                                config
+                                                instanceId
+                                                acquiredState
+                                                pending.WorktreePath
+
+                                        match result with
+                                        | Ok lease ->
+                                            reply.Reply(
+                                                Ok
+                                                    { Lease = lease
+                                                      WorktreeLock =
+                                                        worktreeLock }
+                                            )
+                                        | Error error ->
+                                            worktreeLock.Dispose()
+                                            reply.Reply(Error error)
+
+                                        return! loop next
+                                    with ex ->
+                                        worktreeLock.Dispose()
+                                        reply.Reply(
+                                            Error
+                                                $"Could not reserve terminal cleanup unexpectedly: {ex.Message}"
+                                        )
+
+                                        return! loop acquiredState
                     | ShutdownHost reply ->
+                        let shutdownState =
+                            cancelPendingLocks
+                                "Durable terminal host shutdown cancelled pending worktree ownership"
+                                state
+
                         let! result = shutdown config
                         reply.Reply result
 
@@ -2039,14 +2245,16 @@ let internal createWithConfig config =
                                 { LastSnapshot =
                                     EmbeddedTerminalSnapshot.empty
                                   AnnouncedHost = None
-                                  KnownHost = None }
+                                  KnownHost = None
+                                  PendingLocks = Map.empty }
                             | Error error ->
                                 let current =
                                     withHostFailure
                                         error
-                                        state.LastSnapshot
+                                        shutdownState.LastSnapshot
 
-                                { state with LastSnapshot = current }
+                                { shutdownState with
+                                    LastSnapshot = current }
 
                         return! loop next
                 }
@@ -2054,17 +2262,52 @@ let internal createWithConfig config =
             loop
                 { LastSnapshot = EmbeddedTerminalSnapshot.empty
                   AnnouncedHost = None
-                  KnownHost = None })
+                  KnownHost = None
+                  PendingLocks = Map.empty })
 
     Manager agent
+
+let internal createWithConfig config =
+    createWithLockAcquisition
+        config
+        (acquireWorktreeLock config)
 
 let create () = createWithConfig (defaultConfig ())
 
 let start (Manager agent) worktreePath =
-    agent.PostAndAsyncReply(
-        (fun reply -> Start(worktreePath, reply)),
-        timeout = 60_000
-    )
+    async {
+        let! callerCancellation = Async.CancellationToken
+        use timeoutCancellation =
+            new CancellationTokenSource(60_000)
+
+        use requestCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                callerCancellation,
+                timeoutCancellation.Token
+            )
+
+        let token =
+            Guid.NewGuid() |> LockAcquisitionToken
+
+        let! result =
+            agent.PostAndAsyncReply(fun reply ->
+                Start(
+                    token,
+                    requestCancellation.Token,
+                    worktreePath,
+                    reply
+                ))
+
+        if callerCancellation.IsCancellationRequested then
+            return
+                raise (
+                    OperationCanceledException(
+                        callerCancellation
+                    )
+                )
+
+        return result
+    }
 
 let get (Manager agent) =
     agent.PostAndAsyncReply(Get, timeout = 60_000)
@@ -2088,13 +2331,20 @@ let internal withReservedCleanup
     =
     async {
         let! callerCancellation = Async.CancellationToken
+        let token =
+            Guid.NewGuid() |> LockAcquisitionToken
 
         let bracket =
             task {
                 let! reservation =
                     agent.PostAndAsyncReply(
                         (fun reply ->
-                            ReserveCleanup(worktreePath, reply))
+                            ReserveCleanup(
+                                token,
+                                callerCancellation,
+                                worktreePath,
+                                reply
+                            ))
                     )
                     |> fun workflow ->
                         Async.StartAsTask(
@@ -2103,6 +2353,14 @@ let internal withReservedCleanup
                         )
 
                 match reservation with
+                | Error _
+                    when callerCancellation.IsCancellationRequested ->
+                    return
+                        ReservedCancelled(
+                            OperationCanceledException(
+                                callerCancellation
+                            )
+                        )
                 | Error error ->
                     return ReservedResult(Error error)
                 | Ok acquired ->
