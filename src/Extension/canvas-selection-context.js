@@ -14,6 +14,8 @@
     'Selection source context must be a plain serializable JSON object.';
   const metadataExceptionMessage =
     'Selection source context could not be created.';
+  const metadataLimitMessage =
+    'Selection source context is too large or deeply nested.';
   const oversizedSelectionMessage =
     'The selected text or comment is too large to send.';
   class SelectionMetadataLimitError extends TypeError {}
@@ -699,7 +701,7 @@
       return;
     }
     if (metadata.status === 'too-large') {
-      showError(oversizedSelectionMessage);
+      showError(metadataLimitMessage);
       return;
     }
     if (metadata.status === 'valid') payload.sourceContext = metadata.value;

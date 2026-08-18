@@ -43,11 +43,9 @@ export function reportForSdkEvent(context, eventValue) {
   return mapSdkEvent({ ...context, eventId, occurredAt }, eventValue);
 }
 
-/** @param {unknown} text */
+/** @param {string} text */
 function cap(text) {
-  const value = stringValue(text);
-  if (value === null) return null;
-  return value.length > MAX_MESSAGE_CHARS ? value.slice(0, MAX_MESSAGE_CHARS) : value;
+  return text.length > MAX_MESSAGE_CHARS ? text.slice(0, MAX_MESSAGE_CHARS) : text;
 }
 
 /**
@@ -83,9 +81,8 @@ function buildMessageReport(context, kind, text) {
  * @param {unknown} text
  */
 export function buildNonBlankMessageReport(context, kind, text) {
-  const value = cap(text);
-  if (value === null) return null;
-  return value.trim() ? buildMessageReport(context, kind, value) : null;
+  const value = stringValue(text);
+  return value?.trim() ? buildMessageReport(context, kind, cap(value)) : null;
 }
 
 /** @param {Record<string, unknown>} data */

@@ -232,6 +232,15 @@ test("blank metadata summary emits no title report", () => {
   assert.equal(buildNonBlankMessageReport(context, "title_bootstrap", undefined), null);
 });
 
+test("message blankness is checked before the stored text is capped", () => {
+  const whitespacePrefix = " ".repeat(2000);
+  const report =
+    buildNonBlankMessageReport(context, "title_bootstrap", `${whitespacePrefix}Title`);
+
+  assert.ok(report);
+  assert.equal(report.message.text, whitespacePrefix);
+});
+
 test("live and bootstrap messages share the canonical report shape", () => {
   assert.deepEqual(buildNonBlankMessageReport(context, "title_reported", "Live title"), {
     sessionId: "session-1",
