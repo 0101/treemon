@@ -1,6 +1,7 @@
 module TerminalPane
 
 open System
+open Browser.Types
 open Feliz
 open Shared
 
@@ -195,6 +196,38 @@ let private terminalTab (callbacks: TerminalPaneCallbacks) activeWorktree (tab: 
         ]
     ]
 
+let private tryNextTabIndex key current count =
+    match key with
+    | "Home" -> Some 0
+    | "End" -> Some (count - 1)
+    | "ArrowRight" -> Some ((current + 1) % count)
+    | "ArrowLeft" -> Some ((current - 1 + count) % count)
+    | _ -> None
+
+let private navigateTabs (e: KeyboardEvent) =
+    match e.key with
+    | "ArrowLeft"
+    | "ArrowRight"
+    | "Home"
+    | "End" ->
+        e.preventDefault ()
+        let tabList = e.currentTarget :?> Element
+        let target = e.target :?> Element
+        let tabs =
+            tabList.querySelectorAll(":scope > [role=\"tab\"]")
+
+        target.closest("[role=\"tab\"]")
+        |> Option.bind (fun current ->
+            [ 0 .. tabs.length - 1 ]
+            |> List.tryFind (fun index -> tabs[index].isSameNode current))
+        |> Option.bind (fun current ->
+            tryNextTabIndex e.key current tabs.length)
+        |> Option.iter (fun next ->
+            let tab = tabs[next] :?> HTMLElement
+            tab.focus ()
+            tab.click ())
+    | _ -> ()
+
 let private header state callbacks =
     Html.div [
         prop.className "terminal-pane-header"
@@ -203,25 +236,7 @@ let private header state callbacks =
                 prop.className "terminal-tabs"
                 prop.role "tablist"
                 prop.ariaLabel "Worktree terminals"
-                prop.onKeyDown (fun e ->
-                    if e.key = "ArrowLeft"
-                       || e.key = "ArrowRight"
-                       || e.key = "Home"
-                       || e.key = "End" then
-                        e.preventDefault ()
-                        Fable.Core.JsInterop.emitJsExpr
-                            (e.currentTarget, e.target, e.key)
-                            """(function(list,target,key){
-                                const tabs = Array.from(list.querySelectorAll(':scope > [role="tab"]'));
-                                const current = tabs.indexOf(target.closest('[role="tab"]'));
-                                if (tabs.length === 0 || current < 0) return;
-                                const next = key === 'Home' ? 0
-                                    : key === 'End' ? tabs.length - 1
-                                    : key === 'ArrowRight' ? (current + 1) % tabs.length
-                                    : (current - 1 + tabs.length) % tabs.length;
-                                tabs[next].focus();
-                                tabs[next].click();
-                            })($0,$1,$2)""")
+                prop.onKeyDown navigateTabs
                 prop.children (
                     state.Snapshot.Tabs
                     |> List.map (terminalTab callbacks state.ActiveWorktree))
