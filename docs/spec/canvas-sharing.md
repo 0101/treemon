@@ -78,6 +78,16 @@
 - The rendered page is a minimal shell that embeds the document itself from a separate content
   route inside a sandboxed iframe (see Technical Approach); the shell carries no document content
   and no privileged API of its own.
+- The content route returns active HTML only for a fail-closed browser navigation whose Fetch
+  Metadata identifies a same-origin iframe (`Sec-Fetch-Site: same-origin`,
+  `Sec-Fetch-Mode: navigate`, and `Sec-Fetch-Dest: iframe`, each as one header value). A direct or
+  top-level navigation, a cross-site iframe, or a request with partial, duplicated, or missing
+  metadata receives the normal non-executable shell after its own path/expiry check. That shell's
+  sandboxed iframe then supplies the expected tuple in a Fetch-Metadata-capable browser, so a
+  recipient who opens `/content` directly still sees the document without ever executing it in the
+  top-level response. A browser or intermediary that omits Fetch Metadata from the iframe request
+  fails closed and does not render the active document; there is no headerless compatibility
+  bypass.
 
 ### Clipboard
 
@@ -149,11 +159,12 @@
   content route never trusts that the shell already checked. Otherwise the content route would be
   an unguarded bypass for an expired or malformed share whose URL the recipient still holds.
 - A matched route collapses path validity, Blob existence, and expiry into the single not-found
-  outcome: a valid shell path performs one exact `GetPropertiesAsync` call and a valid content path
-  performs one exact body read of `<prefix>/<filename>`, while malformed segments resolve to
-  not-found before any storage access, so untrusted dot segments never reach Blob URI construction.
-  Every not-found path then emits the identical response through the same application-level
-  ordering; only elapsed time may differ.
+  outcome. A valid shell path and a content request rejected by the Fetch Metadata gate each
+  perform one exact `GetPropertiesAsync` call; an accepted same-origin iframe content request
+  performs one exact body read of `<prefix>/<filename>`. Malformed segments resolve to not-found
+  before any storage access, so untrusted dot segments never reach Blob URI construction. Every
+  not-found path within its selected shell/content response policy emits the identical response
+  through the same application-level ordering; only elapsed time may differ.
 - An exception boundary registered before routing handles non-404 Azure Storage failures and
   `DefaultAzureCredential` failures independently of the ASP.NET Core environment. It logs only
   the exception type and available Azure status/error code, clears the route response, and emits
@@ -162,12 +173,22 @@
   `allow-forms`, `allow-popups`, and `allow-top-navigation`, so the embedded document's script can
   run but cannot read the viewer's cookies or storage, submit forms, open popups, or navigate the
   parent frame.
+- The shell's `frame-src 'self'` is also part of containment: the sandbox permits the child to
+  navigate its own browsing context, while the ancestor's CSP blocks that self-navigation from
+  reaching an external origin. Chromium may replace the child with its local CSP error document
+  after such an attempt; no external request is sent.
+- The content endpoint checks Fetch Metadata before choosing a storage lookup or response policy.
+  Only a request with the single-value same-origin/navigate/iframe tuple reaches the body-bearing
+  lookup and active-content response. Every other request fails closed to the shell policy and
+  properties-only lookup. A normal shell load therefore remains one properties lookup followed by
+  one iframe body read in supported browsers, while a direct `/content` load becomes that same
+  contained two-request sequence instead of executing the document at top level.
 - The content route's response carries a restrictive Content-Security-Policy that blocks outbound
   network/fetch/form targets, plus `X-Content-Type-Options: nosniff` and a strict
-  `Referrer-Policy`, so script that does run cannot exfiltrate over the network or leak the
-  referrer. Its CSP includes a `sandbox allow-scripts` directive, so the document stays sandboxed
-  even when an authenticated recipient opens the content URL directly at top level rather than
-  through the shell's iframe.
+  `Referrer-Policy`, so script that does run in the iframe cannot exfiltrate over those channels or
+  leak the referrer. Its CSP also includes `sandbox allow-scripts` as defense in depth for the
+  iframe's opaque-origin sandbox; top-level containment relies on the fail-closed Fetch Metadata
+  gate because a sandboxed top-level document can still navigate its own browsing context.
 - The viewer's managed identity is granted read-only (`Storage Blob Data Reader`) access scoped to
   the share container only -- it can read published blobs and their metadata, and nothing else.
 - Expiry is enforced synchronously on every request against the metadata the publisher wrote. The
@@ -193,13 +214,14 @@ Response headers, by route:
 
 | Route | Headers |
 |---|---|
-| Shell | `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` |
-| Content | `Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` |
+| Shell, including a rejected `/content` navigation | `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` |
+| Active content (accepted same-origin iframe navigation only) | `Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; sandbox allow-scripts`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` |
 | Dependency failure (either route) | HTTP 503 with an empty body and `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` |
 
 `script-src`/`style-src` allow inline because a self-contained canvas doc *is* inline script and
 style. `unsafe-eval` preserves existing support for documents that use `eval` or `new Function`;
-the opaque-origin sandbox and network-denying directives remain the security boundary.
+the Fetch Metadata gate, opaque-origin iframe sandbox, and network-denying directives remain the
+security boundary.
 `img-src data:`/`font-src data:`/`media-src data:` keep embedded assets working while denying the
 remote-URL fetch that would otherwise be a working exfiltration channel.
 
@@ -259,9 +281,11 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - The embedded document is contained by iframe sandboxing (script execution allowed; same-origin,
   forms, popups, and top-navigation denied) and a restrictive content CSP. This replaces the
   previous posture of serving canvas exports as unsandboxed, top-level active HTML.
-- The content route's CSP and security headers apply regardless of authentication state, so even
-  script that does execute inside the sandbox cannot reach the network or leak referrer
-  information.
+- The active-content CSP and security headers apply only after the content route accepts a
+  same-origin iframe navigation. Direct, top-level, cross-site, and metadata-missing requests get
+  the unframeable shell instead, preventing active script from using top-level self-navigation as a
+  network channel. Script that executes in the accepted sandbox still cannot read the viewer
+  origin, fetch over the network, or leak referrer information.
 - Missing, malformed, and expired share paths return an indistinguishable response -- same status,
   headers, and body -- to an authenticated caller; only response latency may differ, which is an
   accepted residual signal rather than a guarantee. Easy Auth rejects identities the tenant does
@@ -286,7 +310,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Re-check segments and expiry on the content route instead of trusting the shell | The recipient holds the URL, so the content route is directly reachable; a shell-only check would leave an expired share readable by editing the path. |
 | Use a properties-only Blob lookup for the shell and reserve the body read for the content route | The shell needs only existence and expiry metadata, so downloading and discarding the complete document there would double the transferred document bytes without strengthening validation. |
 | Accept case-insensitive `.html` suffixes and consecutive dots in one filename segment | Windows can surface documents such as `Status.HTML`, and `release..notes.html` is not traversal once `/` and `\` are forbidden. Preserving the original casing keeps the generated URL and exact Blob lookup aligned, while rejecting invalid names before publish prevents successful uploads with dead viewer links. |
-| Put `sandbox allow-scripts` in the content route's CSP as well as on the iframe | The iframe attribute only covers the embedded case; the CSP directive also covers a signed-in recipient opening the content URL at top level, where the document would otherwise run on the viewer's authenticated origin. |
+| Gate active content on exact same-origin iframe Fetch Metadata and serve the shell on mismatch | A CSP-sandboxed top-level document has an opaque origin but can still navigate its own browsing context. Browser-controlled Fetch Metadata distinguishes the intended sandboxed iframe navigation; failing closed to the normal shell keeps direct and metadata-missing loads contained without adding a second document-body read. |
+| Keep `sandbox allow-scripts` in the active-content CSP as well as on the iframe | The response policy reinforces the iframe's opaque-origin, script-enabled boundary. It remains defense in depth rather than the top-level navigation boundary, which is enforced by the Fetch Metadata gate. |
+| Keep `frame-src 'self'` on the shell | A sandboxed child cannot navigate its parent without permission but can navigate itself. The ancestor policy blocks an external self-navigation before the probe receives a request. |
 | Look the blob up by exact composed name, never by listing or prefix search | A share URL then reveals only its own document; no reachable code path can turn one link into an inventory of the container. |
 | Allow `unsafe-eval` only inside the contained document response | Shared canvases already support arbitrary inline JavaScript; preserving `eval`/`new Function` compatibility does not grant viewer-origin or network access because the sandbox and remaining CSP directives still deny both. |
 | Use `treemon.azurewebsites.net` rather than a custom domain or generated suffix | The Azure-provided hostname is short, TLS-enabled, requires no DNS ownership, and gives every shared document one stable origin for browser SSO. |
@@ -330,15 +356,18 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - A document is denied immediately once its metadata expiry has passed, before any lifecycle
   deletion runs.
 - The content route enforces the same checks as the shell: an expired or malformed share is denied
-  on the content route too, and a document opened directly at the content URL is still sandboxed.
+  on the content route too. A document opened directly at the content URL receives the normal
+  shell, runs only in its `sandbox="allow-scripts"` iframe, cannot navigate the top-level page, and
+  sends no request to an external probe.
 - A normal shell-plus-content page load performs one properties-only exact Blob lookup and one
   body-bearing exact read; the shell never downloads or buffers the document body.
 - Throwing storage and credential readers produce the same empty policy-headered 503 on shell and
   content routes in both Production and Development, with no framework diagnostic response.
 - Deleting or clearing a document's backing blob denies its link immediately (revocation).
 - A hostile fixture attempting cookie/storage access, same-origin fetches, form submission,
-  popups, top navigation, and network exfiltration all fail inside the sandboxed iframe and CSP,
-  while intended self-contained document scripting still works.
+  popups, parent/top navigation, frame self-navigation (`location`, `location.replace`, and
+  `_self`), and network exfiltration all fail inside the sandboxed iframe and CSP, while intended
+  self-contained document scripting still works.
 - Existing share UI/clipboard behavior -- AgentDoc-only button gating, `ShareState` lock and
   spinner, and clipboard-outcome banner routing -- continues to pass unchanged.
 - The actual secret detector is run against a clean viewer URL and does not flag it.

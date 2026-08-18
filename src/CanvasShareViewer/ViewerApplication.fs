@@ -56,6 +56,31 @@ module internal ViewerApplication =
         context.Response.Headers["Cache-Control"] <-
             "no-store"
 
+    let private requestHeaderEquals
+        (name: string)
+        (expected: string)
+        (context: HttpContext)
+        =
+        let values = context.Request.Headers[name]
+
+        values.Count = 1
+        && String.Equals(
+            values[0],
+            expected,
+            StringComparison.OrdinalIgnoreCase
+        )
+
+    let private isSameOriginIframeNavigation
+        (context: HttpContext)
+        =
+        [
+            "Sec-Fetch-Site", "same-origin"
+            "Sec-Fetch-Mode", "navigate"
+            "Sec-Fetch-Dest", "iframe"
+        ]
+        |> List.forall (fun (name, expected) ->
+            requestHeaderEquals name expected context)
+
     let rec private tryAzureFailureDetails
         (error: exn)
         =
@@ -199,6 +224,24 @@ module internal ViewerApplication =
                 context.Response.ContentLength <- 0L
         }
 
+    let private handleContent
+        reader
+        clock
+        (context: HttpContext)
+        =
+        if isSameOriginIframeNavigation context then
+            handle
+                (ShareLookup.resolveDocument reader clock)
+                ContentContentSecurityPolicy
+                writeContent
+                context
+        else
+            handle
+                (ShareLookup.resolveProperties reader clock)
+                ShellContentSecurityPolicy
+                writeShell
+                context
+
     let create
         (builder: WebApplicationBuilder)
         (reader: BlobReader)
@@ -218,10 +261,9 @@ module internal ViewerApplication =
         app.MapGet(
             ContentRoute,
             RequestDelegate(
-                handle
-                    (ShareLookup.resolveDocument reader clock)
-                    ContentContentSecurityPolicy
-                    writeContent
+                handleContent
+                    reader
+                    clock
             )
         )
         |> ignore

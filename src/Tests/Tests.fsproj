@@ -100,6 +100,8 @@
     <Compile Include="CanvasExportTests.fs" />
     <Compile Include="CanvasShareTests.fs" />
     <Compile Include="CanvasShareViewerTests.fs" />
+    <Compile Include="CanvasShareViewerContainmentTestHelpers.fs" />
+    <Compile Include="CanvasShareViewerContainmentTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 

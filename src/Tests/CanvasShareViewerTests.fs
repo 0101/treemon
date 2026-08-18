@@ -214,6 +214,42 @@ let private withThrowingViewer
 let private await (work: Task<'value>) =
     work.GetAwaiter().GetResult()
 
+let private iframeNavigationHeaders =
+    [
+        "Sec-Fetch-Site", "same-origin"
+        "Sec-Fetch-Mode", "navigate"
+        "Sec-Fetch-Dest", "iframe"
+    ]
+
+let private sendGetWithHeaders
+    (headers: (string * string) list)
+    (client: HttpClient)
+    (url: string)
+    =
+    task {
+        use request =
+            new HttpRequestMessage(HttpMethod.Get, url)
+
+        headers
+        |> List.iter (fun (name, value) ->
+            request.Headers.TryAddWithoutValidation(
+                name,
+                value
+            )
+            |> ignore)
+
+        return! client.SendAsync(request)
+    }
+
+let private getIframeContent
+    (client: HttpClient)
+    (url: string)
+    =
+    sendGetWithHeaders
+        iframeNavigationHeaders
+        client
+        url
+
 let private headerPairs (headers: HttpHeaders) =
     headers
     |> Seq.filter (fun header ->
@@ -285,15 +321,17 @@ type private ResponseSnapshot =
       Headers: (string * string list) list
       Body: byte array }
 
-let private responseSnapshot
+let private responseSnapshotWithHeaders
+    requestHeaders
     (client: HttpClient)
     (url: string)
     : ResponseSnapshot
     =
     use response: HttpResponseMessage =
-        client.GetAsync(url) |> await
+        sendGetWithHeaders requestHeaders client url
+        |> await
 
-    let headers =
+    let responseHeaders =
         Seq.append
             (headerPairs response.Headers)
             (headerPairs response.Content.Headers)
@@ -301,8 +339,23 @@ let private responseSnapshot
         |> List.ofSeq
 
     { StatusCode = response.StatusCode
-      Headers = headers
+      Headers = responseHeaders
       Body = response.Content.ReadAsByteArrayAsync() |> await }
+
+let private responseSnapshot
+    (client: HttpClient)
+    (url: string)
+    =
+    responseSnapshotWithHeaders [] client url
+
+let private iframeContentSnapshot
+    (client: HttpClient)
+    (url: string)
+    =
+    responseSnapshotWithHeaders
+        iframeNavigationHeaders
+        client
+        url
 
 let private configuration values =
     values
@@ -668,10 +721,20 @@ type ViewerRouteTests() =
             (fun logs client baseUrl ->
                 let snapshots =
                     [
-                        $"{baseUrl}/c/{validPrefix}/report.html"
-                        $"{baseUrl}/c/{validPrefix}/report.html/content"
+                        (
+                            [],
+                            $"{baseUrl}/c/{validPrefix}/report.html"
+                        )
+                        (
+                            iframeNavigationHeaders,
+                            $"{baseUrl}/c/{validPrefix}/report.html/content"
+                        )
                     ]
-                    |> List.map (responseSnapshot client)
+                    |> List.map (fun (headers, url) ->
+                        responseSnapshotWithHeaders
+                            headers
+                            client
+                            url)
 
                 let expected = snapshots |> List.head
                 let errorLogs =
@@ -810,9 +873,9 @@ type ViewerRouteTests() =
                 |> Set.ofArray
 
             use content =
-                client.GetAsync(
+                getIframeContent
+                    client
                     $"{baseUrl}/c/{validPrefix}/{encodedFilename}/content"
-                )
                 |> await
 
             let contentBody =
@@ -879,6 +942,105 @@ type ViewerRouteTests() =
                 )))
 
     [<Test>]
+    member _.``content route fails closed to the shell without exact iframe Fetch Metadata``() =
+        let blobName = $"{validPrefix}/report.html"
+        let secretMarker = "active-document-secret-marker"
+
+        let documents =
+            Map [
+                blobName,
+                document
+                    $"<html><body>{secretMarker}</body></html>"
+                    liveMetadata
+            ]
+
+        let rejectedMetadata =
+            [
+                "missing", []
+                "top-level",
+                [
+                    "Sec-Fetch-Site", "none"
+                    "Sec-Fetch-Mode", "navigate"
+                    "Sec-Fetch-Dest", "document"
+                ]
+                "partial",
+                [
+                    "Sec-Fetch-Site", "same-origin"
+                    "Sec-Fetch-Mode", "navigate"
+                ]
+                "duplicated",
+                [
+                    "Sec-Fetch-Site", "same-origin"
+                    "Sec-Fetch-Site", "same-origin"
+                    "Sec-Fetch-Mode", "navigate"
+                    "Sec-Fetch-Dest", "iframe"
+                ]
+                "cross-site iframe",
+                [
+                    "Sec-Fetch-Site", "cross-site"
+                    "Sec-Fetch-Mode", "navigate"
+                    "Sec-Fetch-Dest", "iframe"
+                ]
+            ]
+
+        withViewer documents now (fun fake client baseUrl ->
+            let shellUrl =
+                $"{baseUrl}/c/{validPrefix}/report.html"
+
+            let contentUrl = $"{shellUrl}/content"
+            let shell = responseSnapshot client shellUrl
+
+            let fallbacks =
+                rejectedMetadata
+                |> List.map (fun (label, headers) ->
+                    label,
+                    responseSnapshotWithHeaders
+                        headers
+                        client
+                        contentUrl)
+
+            let active =
+                iframeContentSnapshot client contentUrl
+
+            Assert.Multiple(fun () ->
+                fallbacks
+                |> List.iter (fun (label, fallback) ->
+                    Assert.That(
+                        fallback,
+                        Is.EqualTo(shell),
+                        $"{label} content navigation must receive the normal non-executable shell"
+                    )
+
+                    Assert.That(
+                        fallback.Body
+                        |> Encoding.UTF8.GetString,
+                        Does.Not.Contain(secretMarker)
+                    ))
+
+                Assert.That(
+                    active.StatusCode,
+                    Is.EqualTo(HttpStatusCode.OK)
+                )
+
+                Assert.That(
+                    active.Body
+                    |> Encoding.UTF8.GetString,
+                    Does.Contain(secretMarker),
+                    "only the exact same-origin iframe navigation may receive active HTML"
+                )
+
+                Assert.That(
+                    fake.Requests(),
+                    Is.EqualTo(
+                        (List.replicate
+                            (rejectedMetadata.Length + 1)
+                            (PropertiesLookup blobName))
+                        @ [ ContentRead blobName ]
+                    ),
+                    "every fallback must validate expiry independently without reading the body"
+                )))
+
+    [<Test>]
     member _.``shell and content emit their exact response policies``() =
         let blobName = $"{validPrefix}/report.html"
 
@@ -898,9 +1060,9 @@ type ViewerRouteTests() =
                 |> await
 
             use content =
-                client.GetAsync(
+                getIframeContent
+                    client
                     $"{baseUrl}/c/{validPrefix}/report.html/content"
-                )
                 |> await
 
             Assert.Multiple(fun () ->
@@ -959,9 +1121,9 @@ type ViewerRouteTests() =
                 |> await
 
             use content =
-                client.GetAsync(
+                getIframeContent
+                    client
                     $"{baseUrl}/c/{validPrefix}/{encodedFilename}/content"
-                )
                 |> await
 
             Assert.Multiple(fun () ->
@@ -1053,9 +1215,9 @@ type ViewerRouteTests() =
 
         withViewer documents now (fun _ client baseUrl ->
             use response =
-                client.GetAsync(
+                getIframeContent
+                    client
                     $"{baseUrl}/c/{validPrefix}/self-contained.html/content"
-                )
                 |> await
 
             let actual =
@@ -1148,21 +1310,25 @@ type ViewerRouteTests() =
                 [
                     PropertiesLookup missingName
                     ContentRead missingName
+                    PropertiesLookup missingName
                 ]
                 expiredName,
                 [
                     PropertiesLookup expiredName
                     ContentRead expiredName
+                    PropertiesLookup expiredName
                 ]
                 missingExpiryName,
                 [
                     PropertiesLookup missingExpiryName
                     ContentRead missingExpiryName
+                    PropertiesLookup missingExpiryName
                 ]
                 badExpiryName,
                 [
                     PropertiesLookup badExpiryName
                     ContentRead badExpiryName
+                    PropertiesLookup badExpiryName
                 ]
             ]
 
@@ -1173,16 +1339,19 @@ type ViewerRouteTests() =
                     responseSnapshot
                         client
                         $"{baseUrl}/c/{path}",
+                    iframeContentSnapshot
+                        client
+                        $"{baseUrl}/c/{path}/content",
                     responseSnapshot
                         client
                         $"{baseUrl}/c/{path}/content")
 
-            let expectedShell, expectedContent =
+            let expectedShell, expectedContent, _ =
                 snapshots |> List.head
 
             Assert.Multiple(fun () ->
                 snapshots
-                |> List.iter (fun (shell, content) ->
+                |> List.iter (fun (shell, content, fallback) ->
                     Assert.That(
                         shell,
                         Is.EqualTo(expectedShell)
@@ -1191,6 +1360,12 @@ type ViewerRouteTests() =
                     Assert.That(
                         content,
                         Is.EqualTo(expectedContent)
+                    )
+
+                    Assert.That(
+                        fallback,
+                        Is.EqualTo(expectedShell),
+                        "rejected content requests must preserve the shell not-found response"
                     )
 
                     Assert.That(
@@ -1204,12 +1379,22 @@ type ViewerRouteTests() =
                     )
 
                     Assert.That(
+                        fallback.StatusCode,
+                        Is.EqualTo(HttpStatusCode.NotFound)
+                    )
+
+                    Assert.That(
                         shell.Body,
                         Is.Empty
                     )
 
                     Assert.That(
                         content.Body,
+                        Is.Empty
+                    )
+
+                    Assert.That(
+                        fallback.Body,
                         Is.Empty
                     ))
 
@@ -1219,7 +1404,7 @@ type ViewerRouteTests() =
                         cases
                         |> List.collect snd
                     ),
-                    "malformed paths must skip storage while each valid path performs one properties lookup and one body read"
+                    "malformed paths must skip storage while each valid path performs both independent properties checks and one body read"
                 )))
 
     [<Test>]

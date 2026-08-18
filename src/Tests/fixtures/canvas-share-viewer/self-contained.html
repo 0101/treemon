@@ -10,10 +10,19 @@
 <body>
   <div id="execution-status">ready</div>
   <img id="embedded-image" alt="embedded pixel" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" />
+  <details id="native-disclosure">
+    <summary>Show native disclosure</summary>
+    <p>Disclosure content</p>
+  </details>
   <script>
-    document.getElementById("execution-status").dataset.inline = "ran";
+    const status = document.getElementById("execution-status");
+    status.dataset.inline = "ran";
     window.eval('document.getElementById("execution-status").dataset.eval = "ran"');
     (new Function('document.getElementById("execution-status").dataset.dynamicFunction = "ran"'))();
+    status.dataset.canvasSend =
+      window.canvasSend("verification-probe", { source: "self-contained" })
+        ? "delivered"
+        : "inert";
   </script>
 </body>
 </html>
