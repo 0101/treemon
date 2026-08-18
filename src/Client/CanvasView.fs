@@ -96,7 +96,10 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
 
     let canvasState: CanvasPane.CanvasPaneState =
         { IsOpen = model.Canvas.CanvasPaneOpen
-          TerminalPaneOpen = model.TerminalPaneOpen
+          TerminalPaneOpen =
+            TerminalPane.isOpen
+                model.TerminalPaneOpen
+                model.EmbeddedTerminals
           Width = model.Canvas.WorkspaceWidth
           SendState = model.Canvas.CanvasSendState
           DocError = model.Canvas.DocError

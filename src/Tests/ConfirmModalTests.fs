@@ -72,6 +72,7 @@ let private defaultModel : Model =
       TerminalPaneOpen = false
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
       ActiveEmbeddedTerminal = None
+      ClosingEmbeddedTerminals = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false

@@ -132,8 +132,10 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         model
         targeted
 
-/// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus selects a
-/// worktree card, that card's active doc is retargeted to its most recently
+/// The single chokepoint for setting `FocusedElement`. While the terminal pane is visible, every
+/// card selection also projects to that worktree's existing terminal tab (or clears the active tab
+/// for the pane's explicit start state); a hidden pane keeps its selection unchanged. When
+/// `retarget` is set and focus selects a worktree card, that card's active doc is retargeted to its most recently
 /// published *unviewed* AgentDoc (the "select the worktree shows THAT doc" path) — a no-op when the
 /// card was already focused or nothing is unviewed, except that a sticky worktree diff is replaced
 /// by another available doc because Diff is explicit-only. An open pane reveals and synchronizes
@@ -141,9 +143,24 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
 /// `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
 let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
     let previousFocus = model.FocusedElement
+    let activeTerminal =
+        match newFocus with
+        | Some (Card scopedKey) ->
+            let selectedWorktree =
+                findWorktree scopedKey model
+                |> Option.map _.Path
+
+            TerminalPane.projectWorktreeSelection
+                (TerminalPane.isOpen model.TerminalPaneOpen model.EmbeddedTerminals)
+                selectedWorktree
+                model.ActiveEmbeddedTerminal
+                model.EmbeddedTerminals
+        | _ ->
+            model.ActiveEmbeddedTerminal
     let focused =
         { model with
             FocusedElement = newFocus
+            ActiveEmbeddedTerminal = activeTerminal
             Canvas.TargetWorktree = None }
     match retarget, newFocus with
     | true, Some (Card scopedKey) ->
@@ -169,17 +186,33 @@ let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : 
 let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     let openPane = not model.Canvas.CanvasPaneOpen
     let repos, expanded = expandRepoOwning scopedKey model.Repos
+    let focused =
+        let withRepos =
+            { model with Repos = repos }
+        let activeTerminal =
+            findWorktree scopedKey withRepos
+            |> Option.map _.Path
+            |> fun selected ->
+                TerminalPane.projectWorktreeSelection
+                    (TerminalPane.isOpen
+                        withRepos.TerminalPaneOpen
+                        withRepos.EmbeddedTerminals)
+                    selected
+                    withRepos.ActiveEmbeddedTerminal
+                    withRepos.EmbeddedTerminals
+
+        { withRepos with
+            FocusedElement = Some (Card scopedKey)
+            ActiveEmbeddedTerminal = activeTerminal
+            Canvas.CanvasPaneOpen = true
+            Canvas.TargetWorktree = None }
     let opened, revealCmd =
         revealCanvasDoc
             Visible
             scopedKey
             filename
             model
-            { model with
-                Repos = repos
-                FocusedElement = Some (Card scopedKey)
-                Canvas.CanvasPaneOpen = true
-                Canvas.TargetWorktree = None }
+            focused
     opened,
     Cmd.batch [
         if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)

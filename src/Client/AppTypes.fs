@@ -49,6 +49,7 @@ type Model =
       TerminalPaneOpen: bool
       EmbeddedTerminals: EmbeddedTerminalSnapshot
       ActiveEmbeddedTerminal: WorktreePath option
+      ClosingEmbeddedTerminals: Map<WorktreePath, EmbeddedTerminalSnapshot>
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
       OverviewAgentsStuck: bool
@@ -73,7 +74,10 @@ type Msg =
     | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
     | EmbeddedTerminalStarted of WorktreePath * Result<EmbeddedTerminalSnapshot, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
-    | CloseEmbeddedTerminal
+    | SelectEmbeddedTerminal of WorktreePath
+    | CloseEmbeddedTerminal of WorktreePath
+    | EmbeddedTerminalCloseFailed of WorktreePath
+    | HideTerminalPane
     | EmbeddedTerminalClosed of
         WorktreePath *
         before: EmbeddedTerminalSnapshot *

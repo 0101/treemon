@@ -53,8 +53,11 @@ The client stores the terminal snapshot and active worktree separately. Opening 
 worktree, and worktree selection projects to an existing tab only while the pane is visible.
 Switching tabs is a pure client transition, and polling refreshes lifecycle state without changing
 selection when the active tab still exists. The tab strip reuses the accessible,
-horizontally scrolling chat-tab pattern. Each running tab keeps its iframe mounted but only the active
-iframe is visible, so switching does not reconnect or discard browser terminal state.
+horizontally scrolling chat-tab pattern, including roving keyboard focus and Left/Right/Home/End tab
+navigation. Each running tab keeps its iframe mounted but only the active iframe is visible, so
+switching does not reconnect or discard browser terminal state. The iframe uses browser chrome
+suppression for its outer document scrollbar; xterm's inner viewport remains independently
+scrollable.
 
 Each `ttyd` process binds only to `127.0.0.1` on an OS-assigned port, enables writable mode and
 Origin checking, and starts a fixed PowerShell command. The validated worktree is passed through

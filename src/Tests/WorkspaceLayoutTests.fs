@@ -1,8 +1,12 @@
 module Tests.WorkspaceLayoutTests
 
+open System
+open System.Threading.Tasks
 open NUnit.Framework
+open Newtonsoft.Json
 open Microsoft.Playwright
 open Microsoft.Playwright.NUnit
+open Shared
 open Tests.CanvasTestHelpers
 
 [<TestFixture>]
@@ -151,4 +155,526 @@ type WorkspaceLayoutTests() =
                     "() => document.querySelectorAll('.app-layout.canvas-left, .app-layout.canvas-right, .app-layout.canvas-top, .app-layout.canvas-bottom').length")
             Assert.That(dockButtons, Is.EqualTo(0))
             Assert.That(dockClasses, Is.EqualTo(0))
+        }
+
+let private terminalConverter =
+    Fable.Remoting.Json.FableJsonConverter()
+
+let private firstTerminalPath =
+    WorktreePath "Q:/code/TestProject/feature-active"
+
+let private secondTerminalPath =
+    WorktreePath "Q:/code/TestProject/feature-recent"
+
+let private failedTerminalPath =
+    WorktreePath "Q:/code/TestProject/feature-idle"
+
+let private startableTerminalPath =
+    WorktreePath "Q:/code/TestProject/feature-multidoc"
+
+let private runningTerminal path port =
+    { Worktree = path
+      Lifecycle =
+        EmbeddedTerminalLifecycle.Running
+            $"http://127.0.0.1:{port}/" }
+
+let private initialTerminalSnapshot =
+    { Tabs =
+        [ runningTerminal firstTerminalPath 61234
+          runningTerminal secondTerminalPath 61235
+          { Worktree = failedTerminalPath
+            Lifecycle =
+                EmbeddedTerminalLifecycle.Failed
+                    "ttyd exited with code 1" }
+          { Worktree = WorktreePath "Q:/code/TestProject/feature-stale"
+            Lifecycle =
+                EmbeddedTerminalLifecycle.Running
+                    "https://example.com/unsafe-terminal" } ] }
+
+let private terminalDocument (marker: string) =
+    """<!doctype html>
+<html>
+<head>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    .xterm-viewport { width: 100%; height: 80px; overflow-y: auto; }
+    .scrollback { height: 600px; }
+  </style>
+</head>
+<body>
+  <div data-terminal-marker="__MARKER__" class="xterm-viewport"><div class="scrollback"></div></div>
+</body>
+</html>"""
+        .Replace("__MARKER__", marker, StringComparison.Ordinal)
+
+[<TestFixture>]
+[<Category("E2E")>]
+[<Category("Terminal")>]
+type TerminalPaneDomTests() =
+    inherit PageTest()
+
+    // Route handlers model the server registry across requests, so this mutation is confined to
+    // the Playwright fixture boundary and reset before every test.
+    let mutable registry = initialTerminalSnapshot
+    let mutable startCalls = 0
+    let mutable closeCalls = 0
+
+    let serialize value =
+        JsonConvert.SerializeObject(value, terminalConverter)
+
+    let selectedTab (page: IPage) =
+        page.Locator(".terminal-tab.selected")
+
+    let framesStillMounted (page: IPage) =
+        page.EvaluateAsync<bool>(
+            """() => {
+                const current = Array.from(document.querySelectorAll('.terminal-iframe'));
+                return current.length === window.__terminalFrames.length
+                    && current.every((frame, index) =>
+                        frame === window.__terminalFrames[index] && frame.isConnected);
+            }""")
+
+    let rememberFrames (page: IPage) =
+        task {
+            let! _ =
+                page.EvaluateAsync(
+                    "() => { window.__terminalFrames = Array.from(document.querySelectorAll('.terminal-iframe')); }")
+            return ()
+        }
+
+    let tabFor (page: IPage) label =
+        page.Locator(
+            ".terminal-tab",
+            PageLocatorOptions(
+                Has = page.Locator(
+                    ".terminal-tab-label",
+                    PageLocatorOptions(HasText = label))))
+
+    let cardFor (page: IPage) branch =
+        page.Locator(
+            ".wt-card",
+            PageLocatorOptions(
+                Has = page.Locator(
+                    ".branch-name",
+                    PageLocatorOptions(HasText = branch))))
+
+    override this.ContextOptions() =
+        let options = base.ContextOptions()
+        options.IgnoreHTTPSErrors <- true
+        options
+
+    [<SetUp>]
+    member this.RouteTerminalRegistry() =
+        task {
+            registry <- initialTerminalSnapshot
+            startCalls <- 0
+            closeCalls <- 0
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getWorktrees",
+                    Func<IRoute, Task>(fun route ->
+                        task {
+                            let! upstream = route.FetchAsync()
+                            let! json = upstream.TextAsync()
+                            let response =
+                                JsonConvert.DeserializeObject<DashboardResponse>(
+                                    json,
+                                    terminalConverter)
+                            let opened =
+                                { response with
+                                    TerminalPaneOpen = true }
+                            do!
+                                route.FulfillAsync(
+                                    RouteFulfillOptions(
+                                        ContentType = "application/json",
+                                        Body = serialize opened))
+                        }))
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/getEmbeddedTerminals",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = serialize registry)))
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/startEmbeddedTerminal",
+                    fun route ->
+                        startCalls <- startCalls + 1
+                        let startsNewTab =
+                            route.Request.PostData
+                            |> Option.ofObj
+                            |> Option.exists _.Contains(
+                                WorktreePath.displayName startableTerminalPath,
+                                StringComparison.Ordinal)
+                        if startsNewTab
+                           && (registry.Tabs
+                               |> List.exists (fun tab ->
+                                   tab.Worktree = startableTerminalPath)
+                               |> not) then
+                            registry <-
+                                { Tabs =
+                                    registry.Tabs
+                                    @ [ runningTerminal startableTerminalPath 61236 ] }
+
+                        let result: Result<EmbeddedTerminalSnapshot, string> =
+                            Ok registry
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = serialize result)))
+
+            do!
+                this.Page.RouteAsync(
+                    "**/IWorktreeApi/closeEmbeddedTerminal",
+                    fun route ->
+                        closeCalls <- closeCalls + 1
+                        registry <-
+                            match closeCalls with
+                            | 1 ->
+                                { Tabs =
+                                    registry.Tabs
+                                    |> List.filter (fun tab ->
+                                        tab.Worktree <> firstTerminalPath) }
+                            | 2 ->
+                                { Tabs =
+                                    registry.Tabs
+                                    |> List.filter (fun tab ->
+                                        tab.Worktree <> secondTerminalPath) }
+                            | 3 ->
+                                { Tabs =
+                                    registry.Tabs
+                                    |> List.filter (fun tab ->
+                                        tab.Worktree <> failedTerminalPath) }
+                            | _ ->
+                                EmbeddedTerminalSnapshot.empty
+
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = serialize registry)))
+
+            for port, marker in
+                [ 61234, "first"
+                  61235, "second"
+                  61236, "started" ] do
+                do!
+                    this.Page.RouteAsync(
+                        $"http://127.0.0.1:{port}/**",
+                        fun route ->
+                            route.FulfillAsync(
+                                RouteFulfillOptions(
+                                    ContentType = "text/html; charset=utf-8",
+                                    Body = terminalDocument marker)))
+
+            let! _ = this.Page.GotoAsync(ServerFixture.viteUrl)
+            do!
+                this.Page
+                    .Locator(".wt-card .branch-name")
+                    .First
+                    .WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+            do!
+                this.Page
+                    .Locator(".terminal-pane.open")
+                    .WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+        }
+
+    [<Test>]
+    member this.``Terminal strip exposes accessible state and stable workspace geometry``() =
+        task {
+            let pane = this.Page.Locator(".terminal-pane")
+            let tabs = this.Page.Locator(".terminal-tab")
+            let labels = this.Page.Locator(".terminal-tab-label")
+            let tabList = this.Page.GetByRole(AriaRole.Tablist)
+            let iframes = this.Page.Locator(".terminal-iframe")
+
+            let! paneRole = pane.GetAttributeAsync("role")
+            let! tabListLabel = tabList.GetAttributeAsync("aria-label")
+            let! tabCount = tabs.CountAsync()
+            let! tabLabels = labels.AllTextContentsAsync()
+            let selected = selectedTab this.Page
+            let! selectedLabel =
+                selected.Locator(".terminal-tab-label").TextContentAsync()
+            let! selectedAria = selected.GetAttributeAsync("aria-selected")
+            let! iframeCount = iframes.CountAsync()
+            let! activeIframeCount =
+                this.Page.Locator(".terminal-iframe-active").CountAsync()
+            let! scrollingValues =
+                iframes.EvaluateAllAsync<string[]>(
+                    "frames => frames.map(frame => frame.getAttribute('scrolling'))")
+            let! geometry =
+                this.Page.EvaluateAsync<float[]>(
+                    """() => {
+                        const pane = document.querySelector('.terminal-pane').getBoundingClientRect();
+                        const layout = document.querySelector('.app-layout').getBoundingClientRect();
+                        const head = document.querySelector('.terminal-pane-header').getBoundingClientRect();
+                        const tabTops = Array.from(document.querySelectorAll('.terminal-tab'))
+                            .map(tab => tab.getBoundingClientRect().top);
+                        return [pane.width / layout.width, head.height, ...tabTops];
+                    }""")
+
+            Assert.Multiple(fun () ->
+                Assert.That(paneRole, Is.EqualTo("region"))
+                Assert.That(tabListLabel, Is.EqualTo("Worktree terminals"))
+                Assert.That(tabCount, Is.EqualTo(4))
+                Assert.That(
+                    tabLabels,
+                    Is.EqualTo(
+                        [| "feature-active"
+                           "feature-recent"
+                           "feature-idle"
+                           "feature-stale" |]))
+                Assert.That(selectedLabel, Is.EqualTo("feature-active"))
+                Assert.That(selectedAria, Is.EqualTo("true"))
+                Assert.That(iframeCount, Is.EqualTo(2))
+                Assert.That(activeIframeCount, Is.EqualTo(1))
+                Assert.That(scrollingValues, Is.All.EqualTo("no"))
+                Assert.That(geometry[0], Is.EqualTo(0.5).Within(0.03))
+                Assert.That(geometry[1], Is.InRange(34.0, 48.0))
+                Assert.That(geometry[2], Is.EqualTo(geometry[3]).Within(1.0))
+                Assert.That(geometry[3], Is.EqualTo(geometry[4]).Within(1.0))
+                Assert.That(geometry[4], Is.EqualTo(geometry[5]).Within(1.0)))
+        }
+
+    [<Test>]
+    member this.``Tab and card selection keep every running iframe mounted``() =
+        task {
+            do! rememberFrames this.Page
+
+            let second = tabFor this.Page "feature-recent"
+            do! second.ClickAsync()
+            do!
+                second.WaitForAsync(
+                    LocatorWaitForOptions(Timeout = 5000.0f))
+            let! secondSelected =
+                second.GetAttributeAsync("aria-selected")
+            let! mountedAfterClick = framesStillMounted this.Page
+
+            let first = tabFor this.Page "feature-active"
+            do! second.FocusAsync()
+            do! second.PressAsync("ArrowLeft")
+            let! firstSelected =
+                first.GetAttributeAsync("aria-selected")
+            let! focusedLabel =
+                this.Page.EvaluateAsync<string>(
+                    "() => document.activeElement.querySelector('.terminal-tab-label').textContent")
+            let! mountedAfterKeyboard = framesStillMounted this.Page
+
+            do! focusCanvasCard this.Page "feature-recent"
+            let! selectedFromCard =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+
+            do! focusCanvasCard this.Page "feature-multidoc"
+            let! selectedCount = (selectedTab this.Page).CountAsync()
+            let emptyState = this.Page.Locator(".terminal-pane-empty")
+            let! emptyText = emptyState.TextContentAsync()
+            let! mountedInEmptyState = framesStillMounted this.Page
+
+            do!
+                emptyState
+                    .GetByRole(AriaRole.Button, LocatorGetByRoleOptions(Name = "Start terminal"))
+                    .ClickAsync()
+            do!
+                (tabFor this.Page "feature-multidoc")
+                    .WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! startedSelected =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+            let! startedFrameCount =
+                this.Page.Locator(".terminal-iframe").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(secondSelected, Is.EqualTo("true"))
+                Assert.That(mountedAfterClick, Is.True)
+                Assert.That(firstSelected, Is.EqualTo("true"))
+                Assert.That(focusedLabel, Is.EqualTo("feature-active"))
+                Assert.That(mountedAfterKeyboard, Is.True)
+                Assert.That(selectedFromCard, Is.EqualTo("feature-recent"))
+                Assert.That(selectedCount, Is.EqualTo(0))
+                Assert.That(emptyText, Does.Contain("feature-multidoc"))
+                Assert.That(mountedInEmptyState, Is.True)
+                Assert.That(startCalls, Is.EqualTo(1))
+                Assert.That(startedSelected, Is.EqualTo("feature-multidoc"))
+                Assert.That(startedFrameCount, Is.EqualTo(3)))
+        }
+
+    [<Test>]
+    member this.``Failed tabs show their own error without disconnecting live terminals``() =
+        task {
+            do! rememberFrames this.Page
+            do! (tabFor this.Page "feature-idle").ClickAsync()
+
+            let! error =
+                this.Page
+                    .Locator(".terminal-pane-error")
+                    .TextContentAsync()
+            let! activeFrameCount =
+                this.Page.Locator(".terminal-iframe-active").CountAsync()
+            let! mounted = framesStillMounted this.Page
+
+            Assert.Multiple(fun () ->
+                Assert.That(error, Does.Contain("ttyd exited with code 1"))
+                Assert.That(activeFrameCount, Is.EqualTo(0))
+                Assert.That(mounted, Is.True))
+        }
+
+    [<Test>]
+    member this.``Unsafe running endpoint renders an error instead of an iframe``() =
+        task {
+            do! (tabFor this.Page "feature-stale").ClickAsync()
+
+            let! error =
+                this.Page
+                    .Locator(".terminal-pane-error")
+                    .TextContentAsync()
+            let! unsafeIframeCount =
+                this.Page
+                    .Locator(
+                        "[data-terminal-worktree=\"Q:/code/TestProject/feature-stale\"]")
+                    .CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(error, Does.Contain("unsafe endpoint"))
+                Assert.That(unsafeIframeCount, Is.EqualTo(0)))
+        }
+
+    [<Test>]
+    member this.``Hide preserves selection and iframe nodes until explicit reopen``() =
+        task {
+            do! rememberFrames this.Page
+            do!
+                this.Page
+                    .GetByRole(
+                        AriaRole.Button,
+                        PageGetByRoleOptions(Name = "Hide terminal pane"))
+                    .ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelector('.terminal-pane').hidden")
+
+            let! hiddenFrameCount =
+                this.Page.Locator(".terminal-iframe").CountAsync()
+            let! mountedWhileHidden = framesStillMounted this.Page
+
+            do! focusCanvasCard this.Page "feature-recent"
+            let! selectedWhileHidden =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+
+            do!
+                (cardFor this.Page "feature-recent")
+                    .Locator(".embedded-terminal-btn")
+                    .ClickAsync()
+            do!
+                this.Page
+                    .Locator(".terminal-pane.open")
+                    .WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! selectedAfterReopen =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+            let! mountedAfterReopen = framesStillMounted this.Page
+
+            Assert.Multiple(fun () ->
+                Assert.That(hiddenFrameCount, Is.EqualTo(2))
+                Assert.That(mountedWhileHidden, Is.True)
+                Assert.That(selectedWhileHidden, Is.EqualTo("feature-active"))
+                Assert.That(startCalls, Is.EqualTo(1))
+                Assert.That(selectedAfterReopen, Is.EqualTo("feature-recent"))
+                Assert.That(mountedAfterReopen, Is.True))
+        }
+
+    [<Test>]
+    member this.``Closing tabs selects a neighbour and the final close hides the pane``() =
+        task {
+            let! _ =
+                this.Page.EvaluateAsync(
+                    """() => {
+                        window.__secondTerminalFrame =
+                            document.querySelector('[data-terminal-worktree="Q:/code/TestProject/feature-recent"]');
+                    }""")
+
+            do!
+                (tabFor this.Page "feature-active")
+                    .Locator(".terminal-tab-close")
+                    .ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelectorAll('.terminal-tab').length === 3")
+            let! neighbour =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+            let! secondPreserved =
+                this.Page.EvaluateAsync<bool>(
+                    """() => {
+                        const current = document.querySelector(
+                            '[data-terminal-worktree="Q:/code/TestProject/feature-recent"]');
+                        return current === window.__secondTerminalFrame && current.isConnected;
+                    }""")
+
+            do!
+                (tabFor this.Page "feature-recent")
+                    .Locator(".terminal-tab-close")
+                    .ClickAsync()
+            do!
+                (tabFor this.Page "feature-idle")
+                    .Locator(".terminal-tab-close")
+                    .ClickAsync()
+            do!
+                (tabFor this.Page "feature-stale")
+                    .Locator(".terminal-tab-close")
+                    .ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelector('.terminal-pane').hidden")
+            let! remainingTabs =
+                this.Page.Locator(".terminal-tab").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(closeCalls, Is.EqualTo(4))
+                Assert.That(neighbour, Is.EqualTo("feature-recent"))
+                Assert.That(secondPreserved, Is.True)
+                Assert.That(remainingTabs, Is.EqualTo(0)))
+        }
+
+    [<Test>]
+    member this.``Iframe chrome suppression leaves xterm scrollback scrollable``() =
+        task {
+            let iframe =
+                this.Page.Locator(
+                    "[data-terminal-worktree=\"Q:/code/TestProject/feature-active\"]")
+            let! scrolling = iframe.GetAttributeAsync("scrolling")
+            let frame =
+                this.Page.Frames
+                |> Seq.find (fun candidate ->
+                    candidate.Url.StartsWith(
+                        "http://127.0.0.1:61234/",
+                        StringComparison.Ordinal))
+            let viewport = frame.Locator(".xterm-viewport")
+            do!
+                viewport.WaitForAsync(
+                    LocatorWaitForOptions(Timeout = 5000.0f))
+            let! before =
+                viewport.EvaluateAsync<int[]>(
+                    "element => [element.clientHeight, element.scrollHeight, element.scrollTop]")
+            let! _ =
+                viewport.EvaluateAsync(
+                    "element => { element.scrollTop = 120; }")
+            let! after =
+                viewport.EvaluateAsync<int>(
+                    "element => element.scrollTop")
+
+            Assert.Multiple(fun () ->
+                Assert.That(scrolling, Is.EqualTo("no"))
+                Assert.That(before[1], Is.GreaterThan(before[0]))
+                Assert.That(after, Is.GreaterThan(0)))
         }
