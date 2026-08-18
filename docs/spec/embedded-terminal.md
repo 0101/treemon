@@ -80,6 +80,12 @@ restores it after profiles run. Arguments use `ProcessStartInfo.ArgumentList`.
 - The terminal remains loopback-only and is not a remote shell service.
 - Stock ttyd 1.7.7 has a 256-byte Windows child-command buffer, so child arguments remain
   path-independent and the worktree travels through the environment.
+- End-to-end production-safety checks attribute activity through fixture commands, requests,
+  process ancestry, connections/listeners, and termination targets. Unrelated global port-owner or
+  Copilot-process churn is recorded for context but does not fail the fixture; ancestry and cleanup
+  evidence includes process creation time so PID reuse cannot attach an unrelated process. The
+  isolated server also exports its API port through `TREEMON_PORT` and `TREEMON_PORTS`, preventing
+  inherited shell profiles or extensions from falling back to production port 5000.
 
 ## Related Specs
 
