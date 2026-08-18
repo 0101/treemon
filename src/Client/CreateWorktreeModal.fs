@@ -59,7 +59,11 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
     match msg, modal with
     | OpenCreateWorktree (rid, skills), _ ->
         { Modal = LoadingBranches (rid, skills); RestoredFocus = None; RefreshWorktrees = false },
-        Cmd.OfAsync.either api.Value.getBranches (RepoId.value rid) (Ok >> BranchesLoaded) (Error >> BranchesLoaded)
+        Cmd.OfAsync.either
+            (fun repoId -> api.Value.getBranches repoId)
+            (RepoId.value rid)
+            (Ok >> BranchesLoaded)
+            (Error >> BranchesLoaded)
 
     | BranchesLoaded (Ok branches), LoadingBranches (rid, skills) ->
         let baseBranch = branches |> List.tryHead |> Option.defaultValue ""
@@ -90,7 +94,7 @@ let update (api: Lazy<IWorktreeApi>) (msg: Msg) (modal: ModalState) : UpdateResu
               Prompt = (let t = form.Prompt.Trim() in if t = "" then None else Some t)
               Skill = form.Skill }
         { Modal = Creating form.RepoId; RestoredFocus = None; RefreshWorktrees = false },
-        Cmd.OfAsync.perform api.Value.createWorktree request CreateWorktreeCompleted
+        Cmd.OfAsync.perform (fun request -> api.Value.createWorktree request) request CreateWorktreeCompleted
     | SubmitCreateWorktree, _ -> just modal
 
     | CreateWorktreeCompleted (Ok warnings), Creating rid when not (List.isEmpty warnings) ->

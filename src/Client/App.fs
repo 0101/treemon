@@ -16,7 +16,11 @@ open AppTypes
 open OverviewPresentation
 
 let fetchWorktrees () =
-    Cmd.OfAsync.either worktreeApi.Value.getWorktrees () (fun r -> DataLoaded (r, System.DateTimeOffset.Now)) DataFailed
+    Cmd.OfAsync.either
+        (fun () -> worktreeApi.Value.getWorktrees ())
+        ()
+        (fun r -> DataLoaded (r, System.DateTimeOffset.Now))
+        DataFailed
 
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
@@ -599,15 +603,23 @@ let update msg model =
             model, focusDashboard
         | ConfirmModal.Delete path ->
             removeWorktreeByPath path model,
-            Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
+            Cmd.OfAsync.perform (fun path -> worktreeApi.Value.deleteWorktree path) path DeleteCompleted
         | ConfirmModal.DeleteAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.Value.killSession path (function
+            model,
+            Cmd.OfAsync.perform
+                (fun path -> worktreeApi.Value.killSession path)
+                path
+                (function
                 | Ok () -> SessionKilledForDelete path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
         | ConfirmModal.Archive path ->
             model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
         | ConfirmModal.ArchiveAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.Value.killSession path (function
+            model,
+            Cmd.OfAsync.perform
+                (fun path -> worktreeApi.Value.killSession path)
+                path
+                (function
                 | Ok () -> SessionKilledForArchive path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
@@ -619,7 +631,7 @@ let update msg model =
 
     | SessionKilledForDelete path ->
         removeWorktreeByPath path model,
-        Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
+        Cmd.OfAsync.perform (fun path -> worktreeApi.Value.deleteWorktree path) path DeleteCompleted
 
     | SessionKilledForArchive path ->
         model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
