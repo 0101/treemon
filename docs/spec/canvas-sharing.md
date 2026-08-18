@@ -27,6 +27,10 @@
   expiry, and returns a clean viewer URL; the client then writes the rich clipboard payload and
   shows a success banner (`Shared -- link copied`). A failure at any stage reuses the existing
   dismissible error banner.
+- Before reading the source file or contacting Azure, the publisher requires a non-empty filename
+  segment with no path separator and an `.html` suffix matched case-insensitively. The original
+  filename casing is preserved for the exact Blob name and recipient URL; harmless consecutive
+  dots within the segment are accepted.
 - The button shows progress and refuses re-entry while a share is in flight: `CanvasState.ShareState`
   records the scoped worktree/doc and the `Publishing` or `WritingClipboard` phase, every Share
   button is disabled while that state is non-idle, only the matching scoped doc shows the spinner,
@@ -112,10 +116,11 @@
   share's expiry as blob metadata and returns a `CanvasShareResult` built from `viewerBaseUrl` plus
   the blob's existing unguessable-prefix-plus-filename naming (`<opaque-prefix>/<filename>`); it
   never mints or returns a SAS.
-- `WorktreeApi.shareCanvasDocImpl` keeps its existing pipeline (validate path, read file, export,
-  publish) behind the same `withValidatedPath` guard that every other write method uses (mirroring
-  `archiveCanvasDoc`), and the demo-mode stub keeps returning `Error "... not available in demo
-  mode"`.
+- `WorktreeApi.shareCanvasDocImpl` applies `CanvasShare.validateFilename` before path validation or
+  file access, then keeps the existing read, export, and publish pipeline behind the same
+  `withValidatedPath` guard that every other write method uses (mirroring `archiveCanvasDoc`).
+  `CanvasShare.publish` repeats that same validation at the upload boundary before configuration or
+  Azure work, and the demo-mode stub keeps returning `Error "... not available in demo mode"`.
 - `ShareCanvasDocRequest` and `CanvasShareResult` keep their existing shape (`WorktreePath`/
   `Filename` in, `Url`/`Title` out); only the value and format of `Url` changes.
 - The Treemon server itself is unchanged: it stays bound to loopback and is never exposed to the
@@ -177,7 +182,7 @@ only things they must agree on. They are pinned here rather than discovered per 
 |---|---|
 | Expiry metadata | Blob metadata key `expiresOn`, matched case-insensitively per Azure Blob metadata semantics, with an ISO-8601 UTC round-trip (`DateTimeOffset` `"o"`) value. A value that is absent or unparseable is malformed, not "never expires". |
 | Opaque prefix segment | Exactly `CanvasShare.PrefixLength` (22) base62 characters (`[0-9A-Za-z]`). |
-| Filename segment | One path segment ending `.html`; no `/`, `\`, or `..`. This is the publisher's `leafName` output; URL composers percent-encode it as one URI path segment while Blob lookup uses the decoded filename. |
+| Filename segment | One non-empty path segment ending `.html`, compared with `StringComparison.OrdinalIgnoreCase`; no `/` or `\`. Internal consecutive dots are allowed because they cannot traverse without a separator. The publisher preserves the original filename casing, URL composers percent-encode it as one segment, and Blob lookup uses that decoded casing exactly. |
 | Not-found response | HTTP 404 with one fixed, content-free body, byte-identical for malformed, missing, and expired shares: identical status, headers, body, and response-emitting order. Elapsed time is not equalized -- a malformed path may be rejected before any storage access. |
 
 Response headers, by route:
@@ -275,6 +280,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Prefer a managed-identity federated credential over an Easy Auth client secret | Avoids minting, storing, or rotating a long-lived secret for the viewer's app registration. |
 | Store expiry as blob metadata rather than a separate data store | Keeps the expiry attached to the artifact it governs, with no second store to keep in sync; it travels and disappears with the blob. |
 | Re-check segments and expiry on the content route instead of trusting the shell | The recipient holds the URL, so the content route is directly reachable; a shell-only check would leave an expired share readable by editing the path. |
+| Accept case-insensitive `.html` suffixes and consecutive dots in one filename segment | Windows can surface documents such as `Status.HTML`, and `release..notes.html` is not traversal once `/` and `\` are forbidden. Preserving the original casing keeps the generated URL and exact Blob lookup aligned, while rejecting invalid names before publish prevents successful uploads with dead viewer links. |
 | Put `sandbox allow-scripts` in the content route's CSP as well as on the iframe | The iframe attribute only covers the embedded case; the CSP directive also covers a signed-in recipient opening the content URL at top level, where the document would otherwise run on the viewer's authenticated origin. |
 | Look the blob up by exact composed name, never by listing or prefix search | A share URL then reveals only its own document; no reachable code path can turn one link into an inventory of the container. |
 | Allow `unsafe-eval` only inside the contained document response | Shared canvases already support arbitrary inline JavaScript; preserving `eval`/`new Function` compatibility does not grant viewer-origin or network access because the sandbox and remaining CSP directives still deny both. |
@@ -294,8 +300,8 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 |---|---|
 | `src/Shared/Types.fs` | `ShareCanvasDocRequest`, `CanvasShareResult`, `IWorktreeApi.shareCanvasDoc` (shape unchanged) |
 | `src/Server/CanvasExport.fs` | Static export transform: base theme + no-op `canvasSend`; `extractTitle` / `resolveTitle` (unchanged) |
-| `src/Server/CanvasShare.fs` | Blob upload, expiry metadata, and clean viewer-URL construction; no SAS |
-| `src/Server/WorktreeApi.fs` | `shareCanvasDocImpl` + `withValidatedPath` wiring + demo-mode stub (unchanged) |
+| `src/Server/CanvasShare.fs` | Publisher filename validation, Blob upload, expiry metadata, and clean viewer-URL construction; no SAS |
+| `src/Server/WorktreeApi.fs` | Pre-I/O share filename/path gates, `shareCanvasDocImpl`, `withValidatedPath` wiring, and demo-mode stub |
 | `src/Server/GlobalConfig.fs` | `canvasShare` config: `accountName`, `container`, `defaultExpiryDays`, `viewerBaseUrl` |
 | `src/Server/HttpSecurity.fs` | Shared Remoting CSRF guard covering `shareCanvasDoc` (unchanged) |
 | `src/Client/CanvasPane.fs`, `CanvasState.fs`, `CanvasUpdate.fs`, `index.html` | Share button, `ShareState` phase machine, clipboard write and banner routing (unchanged) |

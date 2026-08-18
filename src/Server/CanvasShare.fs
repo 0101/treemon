@@ -38,23 +38,34 @@ let internal PrefixLength = 22
 [<Literal>]
 let internal ExpiryMetadataKey = "expiresOn"
 
+/// Fixed validation error for filenames that cannot be redeemed by the viewer. Kept free of the
+/// caller-supplied value so malformed paths are not reflected into logs or client diagnostics.
+[<Literal>]
+let internal InvalidFilenameMessage =
+    "Invalid filename: shared canvas docs must use one filename segment ending in .html."
+
+/// The publisher half of the filename wire contract. Extension matching is case-insensitive, but
+/// the filename itself is never normalized: its original casing must survive the URL and exact Blob
+/// lookup. Once both path separators are forbidden, consecutive dots inside the segment are inert.
+let internal validateFilename (filename: string) : Result<unit, string> =
+    let valid =
+        not (String.IsNullOrEmpty(filename))
+        && filename.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
+        && not (filename.Contains('/'))
+        && not (filename.Contains('\\'))
+
+    if valid then Ok() else Error InvalidFilenameMessage
+
 /// A fresh high-entropy base62 prefix from the cryptographic RNG. `GetString` samples the alphabet
 /// uniformly (no modulo bias). Impure (RNG) but shape-testable: right length, alphabet-only, and
 /// distinct across calls.
 let internal generatePrefix () : string =
     System.Security.Cryptography.RandomNumberGenerator.GetString(base62Alphabet.AsSpan(), PrefixLength)
 
-/// The leaf of a filename — defends the blob name against a caller passing a doc path rather than a
-/// bare name. The live caller validates first, but publishing must never silently create nested
-/// blobs from `..`/subdirs. Pure.
-let internal leafName (filename: string) : string =
-    filename.Replace('\\', '/').Split('/') |> Array.last
-
-/// The blob name a published doc lands at: `<random-prefix>/<filename-leaf>`. The random prefix gives
-/// uniqueness + unguessability; the real filename gives the recipient a meaningful page/tab title.
-/// Pure given the prefix, so the naming shape is unit-testable.
+/// The blob name a published doc lands at: `<random-prefix>/<filename>`. `publish` admits only one
+/// validated filename segment, so this preserves that segment exactly for the viewer's lookup.
 let internal blobName (prefix: string) (filename: string) : string =
-    $"{prefix}/{leafName filename}"
+    $"{prefix}/{filename}"
 
 /// Builds the upload contract shared with the viewer: UTF-8 HTML plus an exact `expiresOn`
 /// metadata value in UTC round-trip form.
@@ -68,9 +79,10 @@ let internal buildUploadOptions (expiresOn: DateTimeOffset) =
     BlobUploadOptions(HttpHeaders = headers, Metadata = metadata)
 
 /// Constructs a recipient URL without consulting the Blob URI. The filename is encoded as one path
-/// segment, and validated config guarantees the base has no query or fragment to carry through.
+/// segment without changing its casing, and validated config guarantees the base has no query or
+/// fragment to carry through.
 let internal buildViewerUrl (viewerBaseUrl: Uri) (prefix: string) (filename: string) =
-    let encodedFilename = filename |> leafName |> Uri.EscapeDataString
+    let encodedFilename = Uri.EscapeDataString filename
     $"{viewerBaseUrl.AbsoluteUri.TrimEnd('/')}/c/{prefix}/{encodedFilename}"
 
 let private credential = lazy (AzureCliCredential())
@@ -104,10 +116,12 @@ let internal signInRequiredMessage =
 ///
 /// Uploads `html` to the configured pre-provisioned private container at
 /// `<random-prefix>/<filename>`, with UTF-8 HTML headers and the exact expiry metadata the viewer
-/// enforces. Returns `Error` (never throws) when either endpoint is unconfigured, the host has no
-/// usable delegated identity, or storage fails. Returned errors and logs contain no recipient URL.
+/// enforces. Filename validation runs before configuration or Azure work. Returns `Error` (never
+/// throws) when the filename is invalid, either endpoint is unconfigured, the host has no usable
+/// delegated identity, or storage fails. Returned errors and logs contain no recipient URL.
 let publish (filename: string) (html: string) : Async<Result<string, string>> =
     asyncResult {
+        do! validateFilename filename
         let config = readCanvasShareConfig ()
         let! accountName = config.AccountName |> Result.requireSome notConfiguredMessage
         let! viewerBaseUrl = config.ViewerBaseUrl |> Result.requireSome notConfiguredMessage

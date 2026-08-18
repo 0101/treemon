@@ -7,10 +7,84 @@ open NUnit.Framework
 open Server
 open Server.CanvasShare
 open Server.GlobalConfig
+open Shared
 open Tests.TestUtils
 
 // Pure publisher contracts plus the fail-before-network configuration gate. The real Azure
 // round-trip is covered by the deployment verification described in docs/spec/canvas-sharing.md.
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type ShareFilenameContractTests() =
+
+    let validPrefix = "0123456789AbCdEfGhIjKl"
+
+    [<TestCase("status.html")>]
+    [<TestCase("Status.HTML")>]
+    [<TestCase("release..notes.html")>]
+    member _.``publisher and viewer accept the same valid filename``(filename: string) =
+        Assert.Multiple(fun () ->
+            Assert.That(
+                validateFilename filename |> Result.isOk,
+                Is.True,
+                "publisher")
+            Assert.That(
+                CanvasShareViewer.SharePath.tryCreate
+                    validPrefix
+                    filename
+                |> Option.isSome,
+                Is.True,
+                "viewer")
+            Assert.That(
+                blobName validPrefix filename,
+                Is.EqualTo($"{validPrefix}/{filename}"),
+                "exact Blob name"))
+
+    [<TestCase("")>]
+    [<TestCase("notes.txt")>]
+    [<TestCase("folder/notes.html")>]
+    [<TestCase(@"folder\notes.html")>]
+    [<TestCase("../notes.html")>]
+    member _.``publisher and viewer reject the same invalid filename``(filename: string) =
+        let publisherError =
+            match validateFilename filename with
+            | Error error -> error
+            | Ok() ->
+                Assert.Fail($"Publisher accepted invalid filename '{filename}'.")
+                ""
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                publisherError,
+                Is.EqualTo(InvalidFilenameMessage),
+                "publisher")
+            Assert.That(
+                CanvasShareViewer.SharePath.tryCreate
+                    validPrefix
+                    filename
+                |> Option.isNone,
+                Is.True,
+                "viewer"))
+
+    [<TestCase("notes.txt")>]
+    [<TestCase("folder/notes.html")>]
+    [<TestCase(@"folder\notes.html")>]
+    [<TestCase("../notes.html")>]
+    member _.``share API rejects invalid filename before file or upload work``(filename: string) =
+        withTempDir "canvas-share-filename" (fun worktreePath ->
+            let request =
+                { WorktreePath = WorktreePath worktreePath
+                  Filename = filename }
+
+            match WorktreeApi.shareCanvasDocImpl request |> runAsync with
+            | Error error ->
+                Assert.That(
+                    error,
+                    Is.EqualTo(InvalidFilenameMessage))
+            | Ok result ->
+                Assert.Fail(
+                    $"Expected invalid filename Error before publishing, got Ok {result}"))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -26,20 +100,10 @@ type BlobNamingTests() =
         Assert.That(blobName "abc" "weekly-sync.html", Does.EndWith("/weekly-sync.html"))
 
     [<Test>]
-    member _.``blobName uses only the leaf so a nested path cannot create nested blobs``() =
-        Assert.That(blobName "P" "sub/dir/x.html", Is.EqualTo("P/x.html"))
-
-    [<Test>]
-    member _.``leafName strips a forward-slash directory``() =
-        Assert.That(leafName "a/b/c.html", Is.EqualTo("c.html"))
-
-    [<Test>]
-    member _.``leafName strips a backslash directory``() =
-        Assert.That(leafName @"a\b\c.html", Is.EqualTo("c.html"))
-
-    [<Test>]
-    member _.``leafName leaves a bare filename untouched``() =
-        Assert.That(leafName "build-status.html", Is.EqualTo("build-status.html"))
+    member _.``blobName preserves filename casing and consecutive dots``() =
+        Assert.That(
+            blobName "P" "Release..Notes.HTML",
+            Is.EqualTo("P/Release..Notes.HTML"))
 
     [<Test>]
     member _.``generatePrefix is PrefixLength base62 characters``() =
@@ -110,8 +174,10 @@ type ViewerUrlTests() =
 
     let prefix = "0123456789AbCdEfGhIjKl"
 
-    [<Test>]
-    member _.``publisher naming satisfies the viewer wire contract``() =
+    [<TestCase("status.html")>]
+    [<TestCase("Status.HTML")>]
+    [<TestCase("release..notes.html")>]
+    member _.``publisher naming satisfies the viewer wire contract``(filename: string) =
         Assert.Multiple(fun () ->
             Assert.That(
                 PrefixLength,
@@ -119,7 +185,7 @@ type ViewerUrlTests() =
             Assert.That(
                 CanvasShareViewer.SharePath.tryCreate
                     (generatePrefix ())
-                    (leafName "nested/status.html")
+                    filename
                 |> Option.isSome,
                 Is.True))
 
@@ -155,7 +221,7 @@ type ViewerUrlTests() =
             buildViewerUrl
                 (Uri("https://viewer.test"))
                 prefix
-                "nested/Q3 report #1.html"
+                "Q3 report #1.html"
 
         Assert.That(
             url,
@@ -163,6 +229,20 @@ type ViewerUrlTests() =
                 "https://viewer.test/c/"
                 + prefix
                 + "/Q3%20report%20%231.html"))
+
+    [<TestCase("Status.HTML")>]
+    [<TestCase("release..notes.html")>]
+    member _.``viewer URL preserves the exact compatible filename``(filename: string) =
+        let url =
+            buildViewerUrl
+                (Uri("https://viewer.test"))
+                prefix
+                filename
+
+        Assert.That(
+            url,
+            Is.EqualTo(
+                $"https://viewer.test/c/{prefix}/{filename}"))
 
     [<Test>]
     member _.``viewer URL has no query fragment or Blob credential``() =
@@ -305,6 +385,19 @@ type PublishConfigGateTests() =
 
     let seed (dir: string) (json: string) =
         File.WriteAllText(Path.Combine(dir, "config.json"), json)
+
+    [<TestCase("notes.txt")>]
+    [<TestCase("folder/notes.html")>]
+    [<TestCase(@"folder\notes.html")>]
+    [<TestCase("../notes.html")>]
+    member _.``publish rejects an invalid filename before configuration or Azure``(filename: string) =
+        withTempConfigDir "canvas-share-publish" (fun _ ->
+            match runAsync (publish filename "<html></html>") with
+            | Error msg ->
+                Assert.That(msg, Is.EqualTo(InvalidFilenameMessage))
+            | Ok url ->
+                Assert.Fail(
+                    $"expected invalid filename Error before publishing, got Ok {url}"))
 
     [<Test>]
     member _.``serviceClient reuses one Azure authentication pipeline per account``() =

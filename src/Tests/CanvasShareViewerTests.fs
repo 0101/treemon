@@ -379,7 +379,6 @@ type SharePathValidationTests() =
     [<TestCase("../report.html")>]
     [<TestCase("folder/report.html")>]
     [<TestCase(@"folder\report.html")>]
-    [<TestCase("report..html")>]
     member _.``filename rejects traversal``(filename: string) =
         Assert.That(
             SharePath.tryCreate validPrefix filename
@@ -387,16 +386,21 @@ type SharePathValidationTests() =
             Is.True
         )
 
-    [<Test>]
-    member _.``filename must end with lowercase html``() =
+    [<TestCase("Status.HTML")>]
+    [<TestCase("release..notes.html")>]
+    member _.``filename accepts case-insensitive html suffix and consecutive dots``(filename: string) =
         Assert.That(
-            SharePath.tryCreate validPrefix "report.txt"
-            |> Option.isNone,
-            Is.True
+            SharePath.tryCreate validPrefix filename
+            |> Option.map SharePath.blobName,
+            Is.EqualTo(Some $"{validPrefix}/{filename}")
         )
 
+    [<TestCase("")>]
+    [<TestCase("report.txt")>]
+    [<TestCase("report.html.txt")>]
+    member _.``filename must end with html``(filename: string) =
         Assert.That(
-            SharePath.tryCreate validPrefix "report.HTML"
+            SharePath.tryCreate validPrefix filename
             |> Option.isNone,
             Is.True
         )
@@ -883,6 +887,57 @@ type ViewerRouteTests() =
                     )
                 )))
 
+    [<TestCase("Status.HTML")>]
+    [<TestCase("release..notes.html")>]
+    member _.``publisher-compatible filename works on shell and content routes``(filename: string) =
+        let encodedFilename = Uri.EscapeDataString(filename)
+        let blobName = $"{validPrefix}/{filename}"
+        let body = $"content for {filename}"
+
+        let documents =
+            Map [
+                blobName,
+                document body liveMetadata
+            ]
+
+        withViewer documents now (fun fake client baseUrl ->
+            use shell =
+                client.GetAsync(
+                    $"{baseUrl}/c/{validPrefix}/{encodedFilename}"
+                )
+                |> await
+
+            use content =
+                client.GetAsync(
+                    $"{baseUrl}/c/{validPrefix}/{encodedFilename}/content"
+                )
+                |> await
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    shell.StatusCode,
+                    Is.EqualTo(HttpStatusCode.OK),
+                    "shell route"
+                )
+
+                Assert.That(
+                    content.StatusCode,
+                    Is.EqualTo(HttpStatusCode.OK),
+                    "content route"
+                )
+
+                Assert.That(
+                    content.Content.ReadAsStringAsync()
+                    |> await,
+                    Is.EqualTo(body)
+                )
+
+                Assert.That(
+                    fake.Requests(),
+                    Is.EqualTo([ blobName; blobName ]),
+                    "both routes must preserve exact filename casing for Blob lookup"
+                )))
+
     [<TestCase("Production")>]
     [<TestCase("Development")>]
     member _.``storage failures return a fixed empty 503 in every environment``(environmentName: string) =
@@ -1034,7 +1089,7 @@ type ViewerRouteTests() =
             [
                 "short/report.html",
                 ShareLookup.InvalidPathProbeBlobName
-                $"{validPrefix}/report..html",
+                $"{validPrefix}/report.txt",
                 ShareLookup.InvalidPathProbeBlobName
                 $"{validPrefix}/missing.html",
                 $"{validPrefix}/missing.html"

@@ -106,16 +106,18 @@ let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
         File.Move(sourcePath, destPath, overwrite = true)
     }
 
-/// Share a canvas doc: validate the path → read the on-disk file → static-export it
-/// (`CanvasExport.buildStaticHtml` re-injects theme + no-op canvasSend) → publish to Azure Blob and
-/// record its expiry (`CanvasShare.publish`) → assemble the `CanvasShareResult` with the clean viewer
-/// URL and the doc's resolved title. Mirrors `archiveCanvasDocImpl`. `Title` uses
+/// Share a canvas doc: validate the viewer-compatible filename and path → read the on-disk file →
+/// static-export it (`CanvasExport.buildStaticHtml` re-injects theme + no-op canvasSend) → publish
+/// to Azure Blob and record its expiry (`CanvasShare.publish`) → assemble the `CanvasShareResult`
+/// with the clean viewer URL and the doc's resolved title. Mirrors `archiveCanvasDocImpl`. `Title` uses
 /// `CanvasExport.resolveTitle` (the doc's `<title>`, falling back to a prettified filename) because
 /// `CanvasShareResult.Title` is a plain string, not an option; the title is read from the original
 /// HTML (`buildStaticHtml` injects only at `</head>`, so it never alters the doc's `<title>`).
-let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<CanvasShareResult, string>> =
+let internal shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<CanvasShareResult, string>> =
     let path = WorktreePath.value request.WorktreePath
     asyncResult {
+        do! Server.CanvasShare.validateFilename request.Filename
+
         let! sourcePath =
             Server.PathUtils.validateCanvasPath path request.Filename
             |> Result.mapError (fun _ -> "Invalid filename: path escapes canvas directory")

@@ -24,10 +24,9 @@ module internal SharePath =
 
         let validFilename =
             not (String.IsNullOrEmpty(filename))
-            && filename.EndsWith(".html", StringComparison.Ordinal)
+            && filename.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
             && not (filename.Contains('/'))
             && not (filename.Contains('\\'))
-            && not (filename.Contains("..", StringComparison.Ordinal))
 
         if validPrefix && validFilename then
             Some
