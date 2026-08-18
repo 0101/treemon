@@ -25,6 +25,12 @@ let fetchOverviewHistory request =
     let loaded response = OverviewHistoryLoaded(request, Some response)
     Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory request.Window loaded (fun _ -> OverviewHistoryLoaded(request, None))
 
+let private saveLastViewedHashesCmd hashes =
+    Cmd.OfAsync.attempt
+        (fun hashes -> worktreeApi.Value.saveLastViewedHashes hashes)
+        hashes
+        (fun _ -> NoOp)
+
 // The in-band history chart is refreshed no more often than this while open. Snapshot capture itself
 // advances on a 30-second grid, so more frequent request attempts cannot reveal newer history.
 let overviewHistoryRefreshInterval = System.TimeSpan.FromSeconds 30.0
@@ -313,7 +319,7 @@ let update msg model =
                     else Cmd.none
                 let seedSaveCmd =
                     if updatedModel.Canvas.LastViewedHashes <> model.Canvas.LastViewedHashes then
-                        Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedModel.Canvas.LastViewedHashes (fun _ -> NoOp)
+                        saveLastViewedHashesCmd updatedModel.Canvas.LastViewedHashes
                     else Cmd.none
                 let autoExpandSaveCmd =
                     if autoExpanded then saveCollapsedReposCmd updatedModel.Repos else Cmd.none
@@ -875,31 +881,12 @@ let update msg model =
     | DismissCanvasDocError -> CanvasUpdate.dismissCanvasDocError model
 
     | MarkDocViewed (scopedKey, filename) ->
-        let worktree = findWorktree scopedKey model
-        let currentHash =
-            worktree
-            |> Option.bind (fun wt ->
-                wt.CanvasDocs
-                |> List.tryFind (fun d -> d.Filename = filename)
-                |> Option.map _.ContentHash)
-        match worktree, currentHash with
-        | Some _, Some hash ->
-            let recordedHash =
-                model.Canvas.LastViewedHashes
-                |> Map.tryFind scopedKey
-                |> Option.bind (Map.tryFind filename)
-            if recordedHash = Some hash then
-                model, Cmd.none
-            else
-                let innerMap =
-                    model.Canvas.LastViewedHashes
-                    |> Map.tryFind scopedKey
-                    |> Option.defaultValue Map.empty
-                    |> Map.add filename hash
-                let updatedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap
-                { model with Canvas.LastViewedHashes = updatedHashes },
-                Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
-        | _ -> model, Cmd.none
+        let updatedHashes = markDocViewed model.Repos model.Canvas.LastViewedHashes scopedKey filename
+        if updatedHashes = model.Canvas.LastViewedHashes then
+            model, Cmd.none
+        else
+            { model with Canvas.LastViewedHashes = updatedHashes },
+            saveLastViewedHashesCmd updatedHashes
 
     | LoadLastViewedHashes hashes ->
         // Merge (don't overwrite) — this races the first `DataLoaded` seeding in `init`, so a plain

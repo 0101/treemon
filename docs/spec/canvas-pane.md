@@ -254,7 +254,7 @@ changed rows already use).
 | `src/Client/CanvasView.fs` | Canvas pane view wiring extracted from `App.fs`'s `view`: `focusedWorktreeCanvasDoc` plus the block that builds `CanvasPaneState` + `CanvasPaneCallbacks` and renders `CanvasPane.view`. Compiled after `CanvasUpdate.fs`, before `App.fs`. |
 | `src/Client/CanvasPane.fs` | Pane layout, overview, tab bar, liveness dot, iframe, banners, and message listener |
 | `src/Client/Navigation.fs` | `CanvasSendState` DU |
-| `src/Client/CanvasAwareness.fs` | Pure helpers for doc awareness: seeding viewed hashes, unviewed detection (`unviewedDocsByScopedKey`, `mostRecentUnviewedDoc`), canvas events, auto-display |
+| `src/Client/CanvasAwareness.fs` | Pure helpers for doc awareness: recording/seeding viewed hashes (`markDocViewed`, `seedLastViewedHashes`), unviewed detection (`unviewedDocsByScopedKey`, `mostRecentUnviewedDoc`), canvas events, auto-display |
 | `src/Client/index.html` | Canvas layout, badge, tab, banner, liveness, and overview styling |
 | `src/Server/RefreshScheduler.fs` | Canvas scanning, content hashing, watcher lifecycle, scheduler state updates |
 | `src/Server/WorktreeApi.fs` | Canvas config persistence, archive endpoint, send routing, bridge-liveness API wiring |
