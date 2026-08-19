@@ -18,6 +18,7 @@ import {
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import {
+  basename,
   dirname,
   isAbsolute,
   join,
@@ -27,14 +28,34 @@ import {
 } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { WebSocket, WebSocketServer } from "ws";
+
+const localWebSocketPath = join(
+  import.meta.dirname,
+  "node_modules",
+  "ws",
+  "wrapper.mjs",
+);
+const contentAddressedRuntime =
+  basename(dirname(import.meta.dirname)) === "terminal-runtime-bundles" &&
+  /^[0-9a-f]{64}$/.test(basename(import.meta.dirname));
+const webSocketPath =
+  contentAddressedRuntime ||
+  existsSync(localWebSocketPath)
+    ? localWebSocketPath
+    : join(import.meta.dirname, "..", "node_modules", "ws", "wrapper.mjs");
+process.env.WS_NO_BUFFER_UTIL = "1";
+process.env.WS_NO_UTF_8_VALIDATE = "1";
+const { WebSocket, WebSocketServer } = await import(
+  pathToFileURL(webSocketPath).href
+);
 
 export const hostProtocolVersion = 3;
 export const terminalOwnershipBoundary = "windows-job-v1";
 export const terminalJobProtocolGeneration = 2;
 export const terminalGenerationRecordVersion = 2;
-export const terminalRuntimeBundleVersion = 1;
+export const terminalRuntimeBundleVersion = 2;
 export const terminalRuntimeCapabilities = Object.freeze([
+  "immutable-executable-dependencies-v1",
   "immutable-runtime-bundle-v1",
   "strict-evidence-paths-v1",
   "trusted-empty-supervisor-v1",
@@ -59,10 +80,58 @@ const maximumGenerationRecords = 64;
 const unixEpochTicks = 621355968000000000n;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const generationPattern = /^[A-Za-z0-9_-]{1,128}$/;
-const runtimeBundleRoles = Object.freeze([
+const generationClaimNoncePattern = /^[A-Za-z0-9_-]{8,128}$/;
+const webSocketPackageVersion = "8.21.3";
+const pinnedTtydSha256 =
+  "e33a27501b10b96981335bcba938b1145c7f52551a343e72160f00ab71832b37";
+const coreRuntimeBundleRoles = Object.freeze([
   ["host", "durable-terminal-host.mjs"],
   ["supervisor", "terminal-job-supervisor.ps1"],
   ["processIdentityHelper", "terminate-owned-process.ps1"],
+  ["ttyd", "ttyd.exe"],
+]);
+const webSocketRuntimeFiles = Object.freeze([
+  "LICENSE",
+  "package.json",
+  "wrapper.mjs",
+  "lib/buffer-util.js",
+  "lib/constants.js",
+  "lib/event-target.js",
+  "lib/extension.js",
+  "lib/limiter.js",
+  "lib/permessage-deflate.js",
+  "lib/receiver.js",
+  "lib/sender.js",
+  "lib/stream.js",
+  "lib/subprotocol.js",
+  "lib/validation.js",
+  "lib/websocket-server.js",
+  "lib/websocket.js",
+]);
+const optionalDependencyGuardContent = Buffer.from(
+  "'use strict';\nthrow new Error('Optional native WebSocket dependency is disabled in the immutable terminal runtime');\n",
+  "utf8",
+);
+const optionalDependencyGuardPackage = Buffer.from(
+  '{"private":true,"main":"index.js"}\n',
+  "utf8",
+);
+const runtimeBundleLayout = Object.freeze([
+  ...coreRuntimeBundleRoles,
+  ...webSocketRuntimeFiles.map((relativePath) => [
+    `ws:${relativePath}`,
+    `node_modules/ws/${relativePath}`,
+  ]),
+  ...["bufferutil", "utf-8-validate"].flatMap((packageName) => [
+    [
+      `ws-optional-guard:${packageName}:package`,
+      `node_modules/ws/node_modules/${packageName}/package.json`,
+    ],
+    [
+      `ws-optional-guard:${packageName}:entry`,
+      `node_modules/ws/node_modules/${packageName}/index.js`,
+    ],
+  ]),
 ]);
 const processIdentityHelperPath = join(
   import.meta.dirname,
@@ -75,6 +144,21 @@ const terminalJobSupervisorPath = join(
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+
+const renameDirectoryWithRetry = (source, destination, attempts = 20) => {
+  try {
+    renameSync(source, destination);
+  } catch (error) {
+    if (
+      attempts <= 0 ||
+      !["EPERM", "EBUSY"].includes(error?.code)
+    ) {
+      throw error;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    renameDirectoryWithRetry(source, destination, attempts - 1);
+  }
+};
 
 const timestamp = () => new Date().toISOString();
 
@@ -93,11 +177,15 @@ export function runtimeBundleHash({
   hostScriptHash,
   supervisorScriptHash,
   processIdentityHelperHash,
+  ttydExecutableHash,
+  webSocketPackageHash,
 }) {
   const hashes = new Map([
     ["host", hostScriptHash],
     ["supervisor", supervisorScriptHash],
     ["processIdentityHelper", processIdentityHelperHash],
+    ["ttyd", ttydExecutableHash],
+    ["webSocketPackage", webSocketPackageHash],
   ]);
   if ([...hashes.values()].some((hash) => !sha256Pattern.test(hash ?? ""))) {
     throw new Error("Durable terminal runtime file hash is invalid");
@@ -109,12 +197,23 @@ export function runtimeBundleHash({
     ...[...terminalRuntimeCapabilities]
       .sort()
       .map((capability) => `capability:${capability}`),
-    ...runtimeBundleRoles.map(
+    ...coreRuntimeBundleRoles.map(
       ([role, name]) => `file:${role}:${name}:${hashes.get(role)}`,
     ),
+    `package:ws:${webSocketPackageVersion}:${webSocketPackageHash}`,
   ];
   return sha256Bytes(Buffer.from(`${lines.join("\n")}\n`, "utf8"));
 }
+
+const webSocketRuntimeHash = (assets) => {
+  const lines = assets
+    .filter(({ name }) => name.startsWith("node_modules/ws/"))
+    .sort((left, right) =>
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+    )
+    .map(({ name, sha256 }) => `file:${name}:${sha256}`);
+  return sha256Bytes(Buffer.from(`${lines.join("\n")}\n`, "utf8"));
+};
 
 const pathComparisonValue = (value) =>
   process.platform === "win32" ? value.toLowerCase() : value;
@@ -181,13 +280,11 @@ export function containedStatePath(root, candidate) {
 
 const containedRegularFile = (bundleDirectory, filePath, expectedName) => {
   const path = containedStatePath(bundleDirectory, filePath);
-  if (
-    dirname(pathComparisonValue(path)) !==
-      pathComparisonValue(resolve(bundleDirectory)) ||
-    pathComparisonValue(path.slice(path.lastIndexOf(sep) + 1)) !==
-      pathComparisonValue(expectedName)
-  ) {
-    throw new Error("Durable terminal runtime file is not a direct bundle child");
+  const relativeName = relative(resolve(bundleDirectory), path)
+    .split(sep)
+    .join("/");
+  if (pathComparisonValue(relativeName) !== pathComparisonValue(expectedName)) {
+    throw new Error("Durable terminal runtime file path changed");
   }
   const info = lstatSync(path);
   if (!info.isFile() || info.isSymbolicLink()) {
@@ -217,10 +314,16 @@ export function verifyRuntimeBundle({
   stateDirectory,
   bundleDirectory,
   bundleHash,
+  runtimeBundleVersion,
   hostScriptHash,
   supervisorScriptHash,
   processIdentityHelperHash,
+  ttydExecutableHash,
+  webSocketPackageHash,
 }) {
+  if (runtimeBundleVersion !== terminalRuntimeBundleVersion) {
+    throw new Error("Durable terminal runtime bundle version is incompatible");
+  }
   if (!sha256Pattern.test(bundleHash ?? "")) {
     throw new Error("Durable terminal runtime bundle hash is invalid");
   }
@@ -229,6 +332,8 @@ export function verifyRuntimeBundle({
       hostScriptHash,
       supervisorScriptHash,
       processIdentityHelperHash,
+      ttydExecutableHash,
+      webSocketPackageHash,
     }) !== bundleHash
   ) {
     throw new Error("Durable terminal runtime bundle hash does not match its files");
@@ -253,10 +358,55 @@ export function verifyRuntimeBundle({
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   const expectedNames = [
     "bundle.json",
-    ...runtimeBundleRoles.map(([, name]) => name),
+    ...runtimeBundleLayout.map(([, name]) => name),
   ].sort();
-  const actualNames = readdirSync(expectedDirectory).sort();
-  if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+  const readEntries = (directory, prefix = "") =>
+    readdirSync(directory, { withFileTypes: true })
+      .map((entry) => {
+        if (entry.isSymbolicLink()) {
+          throw new Error(
+            "Durable terminal runtime bundle contains a reparse point",
+          );
+        }
+        const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          const nested = readEntries(join(directory, entry.name), name);
+          return {
+            files: nested.files,
+            directories: [name, ...nested.directories],
+          };
+        }
+        if (!entry.isFile()) {
+          throw new Error(
+            "Durable terminal runtime bundle contains a non-file entry",
+          );
+        }
+        return { files: [name], directories: [] };
+      })
+      .reduce(
+        (state, entry) => ({
+          files: [...state.files, ...entry.files],
+          directories: [...state.directories, ...entry.directories],
+        }),
+        { files: [], directories: [] },
+      );
+  const actualEntries = readEntries(expectedDirectory);
+  const expectedDirectories = [
+    ...new Set(
+      expectedNames.flatMap((name) => {
+        const segments = name.split("/");
+        return segments
+          .slice(0, -1)
+          .map((_, index) => segments.slice(0, index + 1).join("/"));
+      }),
+    ),
+  ].sort();
+  if (
+    JSON.stringify(actualEntries.files.sort()) !==
+      JSON.stringify(expectedNames) ||
+    JSON.stringify(actualEntries.directories.sort()) !==
+      JSON.stringify(expectedDirectories)
+  ) {
     throw new Error("Durable terminal runtime bundle contains unexpected files");
   }
   const expectedCapabilities = [...terminalRuntimeCapabilities].sort();
@@ -265,11 +415,15 @@ export function verifyRuntimeBundle({
     : [];
   if (
     manifest.version !== terminalRuntimeBundleVersion ||
+    manifest.runtimeBundleVersion !== terminalRuntimeBundleVersion ||
     manifest.bundleHash !== bundleHash ||
     manifest.hostProtocolVersion !== hostProtocolVersion ||
     manifest.hostScriptHash !== hostScriptHash ||
     manifest.supervisorScriptHash !== supervisorScriptHash ||
     manifest.processIdentityHelperHash !== processIdentityHelperHash ||
+    manifest.ttydExecutableHash !== ttydExecutableHash ||
+    manifest.webSocketPackageHash !== webSocketPackageHash ||
+    manifest.webSocketPackageVersion !== webSocketPackageVersion ||
     manifest.supervisorProtocolGeneration !== terminalJobProtocolGeneration ||
     JSON.stringify(actualCapabilities) !== JSON.stringify(expectedCapabilities)
   ) {
@@ -280,16 +434,29 @@ export function verifyRuntimeBundle({
     ["host", hostScriptHash],
     ["supervisor", supervisorScriptHash],
     ["processIdentityHelper", processIdentityHelperHash],
+    ["ttyd", ttydExecutableHash],
   ]);
   const files = Array.isArray(manifest.files) ? manifest.files : [];
-  if (files.length !== runtimeBundleRoles.length) {
+  if (files.length !== runtimeBundleLayout.length) {
     throw new Error("Durable terminal runtime bundle manifest has invalid files");
   }
 
+  const fileIdentities = files.map((entry) => [
+    entry?.role,
+    entry?.name,
+  ]);
+  if (
+    JSON.stringify(fileIdentities) !== JSON.stringify(runtimeBundleLayout) ||
+    files.some((entry) => !sha256Pattern.test(entry?.sha256 ?? "")) ||
+    webSocketRuntimeHash(files) !== webSocketPackageHash
+  ) {
+    throw new Error("Durable terminal runtime bundle manifest file identity changed");
+  }
+
   const resolvedFiles = Object.fromEntries(
-    runtimeBundleRoles.map(([role, name]) => {
+    runtimeBundleLayout.map(([role, name]) => {
       const entry = files.find((candidate) => candidate?.role === role);
-      const expectedHash = expectedHashes.get(role);
+      const expectedHash = expectedHashes.get(role) ?? entry?.sha256;
       if (
         entry?.name !== name ||
         entry?.sha256 !== expectedHash ||
@@ -301,7 +468,7 @@ export function verifyRuntimeBundle({
         role,
         verifiedRuntimeFile(
           expectedDirectory,
-          join(expectedDirectory, name),
+          join(expectedDirectory, ...name.split("/")),
           name,
           expectedHash,
         ),
@@ -315,9 +482,29 @@ export function verifyRuntimeBundle({
 export function materializeRuntimeBundle(
   stateDirectory,
   sourceDirectory = import.meta.dirname,
+  expectedTtydHash = pinnedTtydSha256,
 ) {
-  const assets = runtimeBundleRoles.map(([role, name]) => {
-    const sourcePath = resolve(sourceDirectory, name);
+  const sourceRoot = resolve(sourceDirectory, "..");
+  const wsPackageDirectory = existsSync(
+    join(sourceDirectory, "node_modules", "ws"),
+  )
+    ? join(sourceDirectory, "node_modules", "ws")
+    : join(sourceRoot, "node_modules", "ws");
+  const ttydPath = existsSync(join(sourceDirectory, "ttyd.exe"))
+    ? join(sourceDirectory, "ttyd.exe")
+    : join(sourceRoot, ".tools", "ttyd", "1.7.7", "ttyd.exe");
+  const sourceAssets = [
+    ...coreRuntimeBundleRoles.map(([role, name]) => [
+      role,
+      name,
+      role === "ttyd" ? ttydPath : resolve(sourceDirectory, name),
+    ]),
+    ...webSocketRuntimeFiles.map((relativePath) => [
+      `ws:${relativePath}`,
+      `node_modules/ws/${relativePath}`,
+      join(wsPackageDirectory, ...relativePath.split("/")),
+    ]),
+  ].map(([role, name, sourcePath]) => {
     const info = lstatSync(sourcePath);
     if (!info.isFile() || info.isSymbolicLink()) {
       throw new Error(`Durable terminal runtime source is invalid for ${name}`);
@@ -325,12 +512,47 @@ export function materializeRuntimeBundle(
     const content = readFileSync(sourcePath);
     return { role, name, content, sha256: sha256Bytes(content) };
   });
+  const guardAssets = ["bufferutil", "utf-8-validate"].flatMap(
+    (packageName) => [
+      {
+        role: `ws-optional-guard:${packageName}:package`,
+        name: `node_modules/ws/node_modules/${packageName}/package.json`,
+        content: optionalDependencyGuardPackage,
+        sha256: sha256Bytes(optionalDependencyGuardPackage),
+      },
+      {
+        role: `ws-optional-guard:${packageName}:entry`,
+        name: `node_modules/ws/node_modules/${packageName}/index.js`,
+        content: optionalDependencyGuardContent,
+        sha256: sha256Bytes(optionalDependencyGuardContent),
+      },
+    ],
+  );
+  const assets = [...sourceAssets, ...guardAssets];
+  const packageManifest = JSON.parse(
+    sourceAssets
+      .find(({ name }) => name === "node_modules/ws/package.json")
+      .content.toString("utf8"),
+  );
+  if (packageManifest.version !== webSocketPackageVersion) {
+    throw new Error(
+      `Durable terminal WebSocket package must be exactly ${webSocketPackageVersion}`,
+    );
+  }
   const hashFor = (role) =>
     assets.find((asset) => asset.role === role)?.sha256;
+  if (expectedTtydHash && hashFor("ttyd") !== expectedTtydHash) {
+    throw new Error(
+      `ttyd checksum mismatch. Expected ${expectedTtydHash}; rerun '.\\treemon.ps1 setup-ttyd'.`,
+    );
+  }
   const identity = {
+    runtimeBundleVersion: terminalRuntimeBundleVersion,
     hostScriptHash: hashFor("host"),
     supervisorScriptHash: hashFor("supervisor"),
     processIdentityHelperHash: hashFor("processIdentityHelper"),
+    ttydExecutableHash: hashFor("ttyd"),
+    webSocketPackageHash: webSocketRuntimeHash(assets),
   };
   const bundleHash = runtimeBundleHash(identity);
   const runtimeRoot = join(
@@ -353,11 +575,13 @@ export function materializeRuntimeBundle(
     try {
       mkdirSync(staging);
       containedStatePath(runtimeRoot, staging);
-      assets.forEach((asset) =>
-        writeFileSync(join(staging, asset.name), asset.content, {
+      assets.forEach((asset) => {
+        const destination = join(staging, ...asset.name.split("/"));
+        mkdirSync(dirname(destination), { recursive: true });
+        writeFileSync(destination, asset.content, {
           flush: true,
-        }),
-      );
+        });
+      });
       writeFileSync(
         join(staging, "bundle.json"),
         `${JSON.stringify(
@@ -366,6 +590,7 @@ export function materializeRuntimeBundle(
             bundleHash,
             hostProtocolVersion,
             ...identity,
+            webSocketPackageVersion,
             supervisorProtocolGeneration: terminalJobProtocolGeneration,
             capabilities: terminalRuntimeCapabilities,
             files: assets.map(({ role, name, sha256 }) => ({
@@ -380,7 +605,7 @@ export function materializeRuntimeBundle(
         { flush: true },
       );
       try {
-        renameSync(staging, bundleDirectory);
+        renameDirectoryWithRetry(staging, bundleDirectory);
       } catch (error) {
         if (!existsSync(bundleDirectory)) throw error;
       }
@@ -598,8 +823,7 @@ export function removeManifestIfOwned(path, owner) {
 const generationRecordOwnership = (value) => {
   const generation =
     value?.version === terminalGenerationRecordVersion &&
-    typeof value?.generation === "string" &&
-    value.generation
+    isValidGeneration(value?.generation)
       ? value.generation
       : null;
   const hostPid =
@@ -627,31 +851,165 @@ const sameGenerationRecordOwner = (left, right) =>
   left?.hostProcessStartTicks === right?.hostProcessStartTicks &&
   left?.bundleHash === right?.bundleHash;
 
-function removeEmptyGenerationIfOwned(path, owner) {
+function recoverLegacyGenerationCompactionClaims(directory) {
+  readdirSync(directory)
+    .filter((name) => name.endsWith(".reclaim.json"))
+    .sort()
+    .forEach((name) => {
+      const parsed = parseGenerationCompactionClaimName(name);
+      if (!parsed?.legacy) {
+        throw new Error(
+          "Durable terminal generation directory contains an invalid legacy compaction claim",
+        );
+      }
+      const claimPath = containedStatePath(directory, join(directory, name));
+      const recordPath = containedStatePath(
+        directory,
+        join(directory, `${parsed.recordGeneration}.json`),
+      );
+      const info = lstatSync(claimPath);
+      if (
+        !info.isFile() ||
+        info.isSymbolicLink() ||
+        info.size > 1024 * 1024
+      ) {
+        throw new Error(
+          "Durable terminal generation compaction claim is not a regular file",
+        );
+      }
+      if (existsSync(recordPath)) {
+        throw new Error(
+          "Durable terminal generation compaction claim conflicts with live evidence",
+        );
+      }
+      try {
+        renameSync(claimPath, recordPath);
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+    });
+}
+
+export function generationCompactionClaimName(recordGeneration, owner) {
+  const ownerGeneration = owner?.ownerGeneration;
+  const ownerPid = owner?.ownerPid;
+  const ownerProcessStartTicks = owner?.ownerProcessStartTicks;
+  const nonce = owner?.nonce;
+  if (
+    !isValidGeneration(recordGeneration) ||
+    !isValidGeneration(ownerGeneration) ||
+    !Number.isInteger(ownerPid) ||
+    ownerPid <= 0 ||
+    !/^\d+$/.test(ownerProcessStartTicks ?? "") ||
+    !generationClaimNoncePattern.test(nonce ?? "")
+  ) {
+    throw new Error("Durable terminal generation compaction owner is invalid");
+  }
+  return `${recordGeneration}.json.${ownerGeneration}.${ownerPid}.${ownerProcessStartTicks}.${nonce}.reclaim`;
+}
+
+export function parseGenerationCompactionClaimName(name) {
+  const parts = String(name ?? "").split(".");
+  if (parts.length === 7 && parts[1] === "json" && parts[6] === "reclaim") {
+    const [
+      recordGeneration,
+      ,
+      ownerGeneration,
+      pidText,
+      startTicks,
+      nonce,
+    ] = parts;
+    const ownerPid = Number.parseInt(pidText, 10);
+    if (
+      !isValidGeneration(recordGeneration) ||
+      !isValidGeneration(ownerGeneration) ||
+      !/^\d+$/.test(pidText) ||
+      !Number.isSafeInteger(ownerPid) ||
+      ownerPid <= 0 ||
+      !/^\d+$/.test(startTicks) ||
+      !generationClaimNoncePattern.test(nonce)
+    ) {
+      return null;
+    }
+    return {
+      recordGeneration,
+      ownerGeneration,
+      ownerPid,
+      ownerProcessStartTicks: startTicks,
+      nonce,
+    };
+  }
+  if (
+    ((parts.length === 6 &&
+      parts[4] === "reclaim" &&
+      parts[5] === "json") ||
+      (parts.length === 5 && parts[4] === "reclaim")) &&
+    parts[1] === "json"
+  ) {
+    const [recordGeneration, , pidText, nonce] = parts;
+    const ownerPid = Number.parseInt(pidText, 10);
+    if (
+      isValidGeneration(recordGeneration) &&
+      /^\d+$/.test(pidText) &&
+      Number.isSafeInteger(ownerPid) &&
+      ownerPid > 0 &&
+      generationClaimNoncePattern.test(nonce)
+    ) {
+      return { recordGeneration, legacy: true, ownerPid, nonce };
+    }
+  }
+  return null;
+}
+
+export function removeEmptyGenerationIfOwned(
+  path,
+  owner,
+  onStage = () => {},
+) {
   if (!existsSync(path)) return true;
-  const claimedPath =
-    `${path}.${process.pid}.${randomToken(6)}.reclaim.json`;
+  const claimName = generationCompactionClaimName(owner.generation, {
+    ownerGeneration: owner.generation,
+    ownerPid: owner.hostPid,
+    ownerProcessStartTicks: owner.hostProcessStartTicks,
+    nonce: randomToken(12),
+  });
+  const claimedPath = join(dirname(path), claimName);
+  onStage("before-rename", claimedPath);
   try {
     renameSync(path, claimedPath);
   } catch (error) {
     return error?.code === "ENOENT";
   }
 
+  onStage("after-rename", claimedPath);
+  let owned;
   try {
     const current = JSON.parse(readFileSync(claimedPath, "utf8"));
-    if (
-      !sameGenerationRecordOwner(
+    owned =
+      sameGenerationRecordOwner(
         generationRecordOwnership(current),
         owner,
-      ) ||
-      !Array.isArray(current.sessions) ||
-      current.sessions.length !== 0
-    ) {
-      if (!existsSync(path)) renameSync(claimedPath, path);
-      return false;
+      ) &&
+      Array.isArray(current.sessions) &&
+      current.sessions.length === 0;
+  } catch {
+    owned = false;
+  }
+
+  if (!owned) {
+    if (existsSync(claimedPath) && !existsSync(path)) {
+      try {
+        renameSync(claimedPath, path);
+      } catch {
+        return false;
+      }
     }
+    return false;
+  }
+
+  onStage("before-claim-deletion", claimedPath);
+  try {
     rmSync(claimedPath);
-    return true;
   } catch {
     if (existsSync(claimedPath) && !existsSync(path)) {
       try {
@@ -662,6 +1020,9 @@ function removeEmptyGenerationIfOwned(path, owner) {
     }
     return false;
   }
+  if (existsSync(path) || existsSync(claimedPath)) return false;
+  onStage("after-claim-deletion", claimedPath);
+  return true;
 }
 
 function writeManifestIfUnowned(path, manifest) {
@@ -1936,6 +2297,14 @@ export class DurableTerminalHost {
           "Loaded durable terminal host does not match its runtime bundle",
         );
       }
+      if (
+        pathComparisonValue(resolve(options.ttydPath)) !==
+        pathComparisonValue(this.runtimeBundle.files.ttyd)
+      ) {
+        throw new Error(
+          "Durable terminal host ttyd path is not the pinned bundle executable",
+        );
+      }
     }
     this.processStartTicks =
       options.processStartTicks ?? currentProcessStartTicks();
@@ -2046,12 +2415,18 @@ export class DurableTerminalHost {
         process.platform === "win32"
           ? terminalOwnershipBoundary
           : "unsupported",
+      runtimeBundleVersion:
+        this.options.runtimeBundle?.runtimeBundleVersion ?? null,
       bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
       hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
       supervisorScriptHash:
         this.options.runtimeBundle?.supervisorScriptHash ?? null,
       processIdentityHelperHash:
         this.options.runtimeBundle?.processIdentityHelperHash ?? null,
+      ttydExecutableHash:
+        this.options.runtimeBundle?.ttydExecutableHash ?? null,
+      webSocketPackageHash:
+        this.options.runtimeBundle?.webSocketPackageHash ?? null,
       supervisorProtocolGeneration: terminalJobProtocolGeneration,
       capabilities: terminalRuntimeCapabilities,
       controlPort: this.controlPort,
@@ -2081,12 +2456,18 @@ export class DurableTerminalHost {
         process.platform === "win32"
           ? terminalOwnershipBoundary
           : "unsupported",
+      runtimeBundleVersion:
+        this.options.runtimeBundle?.runtimeBundleVersion ?? null,
       bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
       hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
       supervisorScriptHash:
         this.options.runtimeBundle?.supervisorScriptHash ?? null,
       processIdentityHelperHash:
         this.options.runtimeBundle?.processIdentityHelperHash ?? null,
+      ttydExecutableHash:
+        this.options.runtimeBundle?.ttydExecutableHash ?? null,
+      webSocketPackageHash:
+        this.options.runtimeBundle?.webSocketPackageHash ?? null,
       supervisorProtocolGeneration: terminalJobProtocolGeneration,
       capabilities: terminalRuntimeCapabilities,
       startedAt: this.startedAt,
@@ -2126,6 +2507,7 @@ export class DurableTerminalHost {
       this.options.stateDirectory,
       this.generationDirectory,
     );
+    recoverLegacyGenerationCompactionClaims(this.generationDirectory);
     const records = readdirSync(this.generationDirectory)
       .filter((name) => name.endsWith(".json"));
     if (
@@ -2252,12 +2634,18 @@ export class DurableTerminalHost {
     atomicWriteJson(this.statusPath, {
       version: hostProtocolVersion,
       generation: this.generation,
+      runtimeBundleVersion:
+        this.options.runtimeBundle?.runtimeBundleVersion ?? null,
       bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
       hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
       supervisorScriptHash:
         this.options.runtimeBundle?.supervisorScriptHash ?? null,
       processIdentityHelperHash:
         this.options.runtimeBundle?.processIdentityHelperHash ?? null,
+      ttydExecutableHash:
+        this.options.runtimeBundle?.ttydExecutableHash ?? null,
+      webSocketPackageHash:
+        this.options.runtimeBundle?.webSocketPackageHash ?? null,
       supervisorProtocolGeneration: terminalJobProtocolGeneration,
       capabilities: terminalRuntimeCapabilities,
       hostPid: process.pid,
@@ -2340,12 +2728,18 @@ export class DurableTerminalHost {
           process.platform === "win32"
             ? terminalOwnershipBoundary
             : "unsupported",
+        runtimeBundleVersion:
+          this.options.runtimeBundle?.runtimeBundleVersion ?? null,
         bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
         hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
         supervisorScriptHash:
           this.options.runtimeBundle?.supervisorScriptHash ?? null,
         processIdentityHelperHash:
           this.options.runtimeBundle?.processIdentityHelperHash ?? null,
+        ttydExecutableHash:
+          this.options.runtimeBundle?.ttydExecutableHash ?? null,
+        webSocketPackageHash:
+          this.options.runtimeBundle?.webSocketPackageHash ?? null,
         supervisorProtocolGeneration: terminalJobProtocolGeneration,
         capabilities: terminalRuntimeCapabilities,
         startedAt: this.startedAt,
@@ -3013,6 +3407,12 @@ export class DurableTerminalHost {
     session.jobSupervisor.onBoundaryFailure = (error) => {
       if (!session.closing) void this.interruptSession(session, error);
     };
+    const pinnedTtydPath = verifiedRuntimeFile(
+      this.runtimeBundle.directory,
+      this.runtimeBundle.files.ttyd,
+      "ttyd.exe",
+      this.options.runtimeBundle.ttydExecutableHash,
+    );
     const ownership = await session.jobSupervisor.start({
       sessionId: session.id,
       generation: this.generation,
@@ -3020,7 +3420,7 @@ export class DurableTerminalHost {
       witnessRoot: this.witnessDirectory,
       witnessPath: this.witnessPath(session),
       witnessNonce: session.witnessNonce,
-      fileName: this.options.ttydPath,
+      fileName: pinnedTtydPath,
       argumentsList: ttydArguments,
       workingDirectory: session.worktreePath,
       environment: {
@@ -3573,19 +3973,19 @@ export class DurableTerminalHost {
     if (!removed) {
       this.record("host-manifest-ownership-changed", null, { reason });
     }
-    if (
-      !removeEmptyGenerationIfOwned(
-        this.generationPath,
-        this.generationOwner(),
-      )
-    ) {
+    const generationRemoved = removeEmptyGenerationIfOwned(
+      this.generationPath,
+      this.generationOwner(),
+    );
+    if (!generationRemoved) {
       this.record("host-generation-compaction-deferred", null, { reason });
-    }
-    try {
-      rmSync(this.witnessDirectory);
-    } catch (error) {
-      if (!["ENOENT", "ENOTEMPTY"].includes(error?.code)) {
-        this.record("host-witness-compaction-deferred", null, { reason });
+    } else {
+      try {
+        rmSync(this.witnessDirectory);
+      } catch (error) {
+        if (!["ENOENT", "ENOTEMPTY"].includes(error?.code)) {
+          this.record("host-witness-compaction-deferred", null, { reason });
+        }
       }
     }
     this.exitProcess(0);
@@ -3620,21 +4020,30 @@ function parseArguments(argumentsList) {
   const runtimeBundleValues = {
     bundleDirectory: resolve(String(values["runtime-bundle-dir"] ?? "")),
     bundleHash: String(values["runtime-bundle-hash"] ?? ""),
+    runtimeBundleVersion: Number.parseInt(
+      values["runtime-bundle-version"],
+      10,
+    ),
     hostScriptHash: String(values["host-script-hash"] ?? ""),
     supervisorScriptHash: String(values["supervisor-script-hash"] ?? ""),
     processIdentityHelperHash: String(
       values["process-helper-hash"] ?? "",
     ),
+    ttydExecutableHash: String(values["ttyd-hash"] ?? ""),
+    webSocketPackageHash: String(values["ws-package-hash"] ?? ""),
   };
 
   if (!values["state-dir"]) throw new Error("--state-dir is required");
   if (!values.ttyd) throw new Error("--ttyd is required");
   if (
     !values["runtime-bundle-dir"] ||
+    runtimeBundleValues.runtimeBundleVersion !== terminalRuntimeBundleVersion ||
     !sha256Pattern.test(runtimeBundleValues.bundleHash) ||
     !sha256Pattern.test(runtimeBundleValues.hostScriptHash) ||
     !sha256Pattern.test(runtimeBundleValues.supervisorScriptHash) ||
-    !sha256Pattern.test(runtimeBundleValues.processIdentityHelperHash)
+    !sha256Pattern.test(runtimeBundleValues.processIdentityHelperHash) ||
+    !sha256Pattern.test(runtimeBundleValues.ttydExecutableHash) ||
+    !sha256Pattern.test(runtimeBundleValues.webSocketPackageHash)
   ) {
     throw new Error("Immutable durable terminal runtime bundle is required");
   }

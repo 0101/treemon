@@ -1459,6 +1459,7 @@ try {
     }
 } catch {
     $failure = $_.Exception
+    $startupFailureEmptyEmitted = $false
     $emptyProven =
         if ($null -ne $owner) {
             try {
@@ -1507,10 +1508,11 @@ try {
                     }
                 error = Bounded-Error $failure
             })
+            $startupFailureEmptyEmitted = $emptyProven
         } catch {
         }
     }
-    exit 1
+    exit $(if ($emptyProven -and $startupFailureEmptyEmitted) { 0 } else { 1 })
 } finally {
     if ($null -ne $owner) {
         if (-not $emptyWitnessWritten) {

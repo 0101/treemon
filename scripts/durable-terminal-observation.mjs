@@ -18,7 +18,6 @@ import {
 } from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
-const hostScript = join(repo, "scripts", "durable-terminal-host.mjs");
 const ttyd = join(repo, ".tools", "ttyd", "1.7.7", "ttyd.exe");
 const stateDirectory = join(repo, ".agents", "durable-terminal-observation");
 const worktree = join(stateDirectory, "worktree");
@@ -71,11 +70,14 @@ export function hostStateMatchesObservation(observation, hostState) {
   return (
     hostState?.version === observation.hostProtocolVersion &&
     hostState?.generation === observation.hostGeneration &&
+    hostState?.runtimeBundleVersion === observation.runtimeBundleVersion &&
     hostState?.bundleHash === observation.hostBundleHash &&
     hostState?.hostScriptHash === observation.hostScriptHash &&
     hostState?.supervisorScriptHash === observation.supervisorScriptHash &&
     hostState?.processIdentityHelperHash ===
       observation.processIdentityHelperHash &&
+    hostState?.ttydExecutableHash === observation.ttydExecutableHash &&
+    hostState?.webSocketPackageHash === observation.webSocketPackageHash &&
     hostState?.supervisorProtocolGeneration ===
       observation.supervisorProtocolGeneration &&
     JSON.stringify(hostState?.capabilities) ===
@@ -200,11 +202,11 @@ async function start() {
   const host = spawn(
     process.execPath,
     [
-      hostScript,
+      join(bundle.bundleDirectory, "durable-terminal-host.mjs"),
       "--state-dir",
       stateDirectory,
       "--ttyd",
-      ttyd,
+      join(bundle.bundleDirectory, "ttyd.exe"),
       "--shell",
       "pwsh",
       "--generation",
@@ -213,12 +215,18 @@ async function start() {
       bundle.bundleDirectory,
       "--runtime-bundle-hash",
       bundle.bundleHash,
+      "--runtime-bundle-version",
+      String(bundle.runtimeBundleVersion),
       "--host-script-hash",
       bundle.hostScriptHash,
       "--supervisor-script-hash",
       bundle.supervisorScriptHash,
       "--process-helper-hash",
       bundle.processIdentityHelperHash,
+      "--ttyd-hash",
+      bundle.ttydExecutableHash,
+      "--ws-package-hash",
+      bundle.webSocketPackageHash,
     ],
     {
       cwd: repo,
@@ -280,10 +288,13 @@ async function start() {
       lastCheckedAt: new Date().toISOString(),
       hostProtocolVersion: hostState.version,
       hostGeneration: hostState.generation,
+      runtimeBundleVersion: hostState.runtimeBundleVersion,
       hostBundleHash: hostState.bundleHash,
       hostScriptHash: hostState.hostScriptHash,
       supervisorScriptHash: hostState.supervisorScriptHash,
       processIdentityHelperHash: hostState.processIdentityHelperHash,
+      ttydExecutableHash: hostState.ttydExecutableHash,
+      webSocketPackageHash: hostState.webSocketPackageHash,
       supervisorProtocolGeneration: hostState.supervisorProtocolGeneration,
       hostCapabilities: hostState.capabilities,
       hostPid: hostState.pid,

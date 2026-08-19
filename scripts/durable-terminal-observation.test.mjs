@@ -14,12 +14,16 @@ const originalIdentity = {
 const observation = {
   hostProtocolVersion: 3,
   hostGeneration: "observed-generation",
+  runtimeBundleVersion: 2,
   hostBundleHash: "a".repeat(64),
   hostScriptHash: "b".repeat(64),
   supervisorScriptHash: "c".repeat(64),
   processIdentityHelperHash: "d".repeat(64),
+  ttydExecutableHash: "e".repeat(64),
+  webSocketPackageHash: "f".repeat(64),
   supervisorProtocolGeneration: 2,
   hostCapabilities: [
+    "immutable-executable-dependencies-v1",
     "immutable-runtime-bundle-v1",
     "strict-evidence-paths-v1",
     "trusted-empty-supervisor-v1",
@@ -36,10 +40,13 @@ const observation = {
 const hostState = {
   version: 3,
   generation: observation.hostGeneration,
+  runtimeBundleVersion: observation.runtimeBundleVersion,
   bundleHash: observation.hostBundleHash,
   hostScriptHash: observation.hostScriptHash,
   supervisorScriptHash: observation.supervisorScriptHash,
   processIdentityHelperHash: observation.processIdentityHelperHash,
+  ttydExecutableHash: observation.ttydExecutableHash,
+  webSocketPackageHash: observation.webSocketPackageHash,
   supervisorProtocolGeneration: observation.supervisorProtocolGeneration,
   capabilities: observation.hostCapabilities,
   pid: observation.hostPid,
@@ -119,6 +126,22 @@ test("changed runtime bundle is never treated as the observed host", async () =>
   assert.equal(hostStateMatchesObservation(observation, changedBundle), false);
   assert.equal(result.ownershipChanged, true);
   assert.deepEqual(calls, []);
+});
+
+test("changed dependency identity is never treated as the observed host", () => {
+  [
+    { runtimeBundleVersion: 1 },
+    { ttydExecutableHash: "0".repeat(64) },
+    { webSocketPackageHash: "1".repeat(64) },
+  ].forEach((change) =>
+    assert.equal(
+      hostStateMatchesObservation(
+        observation,
+        { ...hostState, ...change },
+      ),
+      false,
+    ),
+  );
 });
 
 test("reused PID is never sent shutdown or waited on", async () => {

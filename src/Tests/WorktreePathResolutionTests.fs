@@ -53,6 +53,11 @@ let private createApi agent roots =
             roots |> List.head,
             $".terminal-test-{Guid.NewGuid():N}"
         )
+    let ttydPath =
+        Path.Combine(stateDirectory, "fake-ttyd.exe")
+
+    Directory.CreateDirectory stateDirectory |> ignore
+    File.WriteAllText(ttydPath, "")
 
     let manager =
         EmbeddedTerminal.createWithConfig
@@ -87,9 +92,19 @@ let private createApi agent roots =
                         "terminate-owned-process.ps1"
                     )
                 )
+              WebSocketPackagePath =
+                Path.GetFullPath(
+                    Path.Combine(
+                        __SOURCE_DIRECTORY__,
+                        "..",
+                        "..",
+                        "node_modules",
+                        "ws"
+                    )
+                )
               HostStateDirectory = stateDirectory
-              TtydExecutablePath =
-                Path.Combine(stateDirectory, "missing-ttyd.exe")
+              TtydExecutablePath = ttydPath
+              TtydExpectedHash = None
               ShellCommand = "pwsh"
               StartupTimeout = TimeSpan.FromSeconds 5.0
               ControlRequestTimeout = TimeSpan.FromSeconds 5.0
@@ -591,6 +606,18 @@ type ArchiveWorktreeResolutionTests() =
                             "durable-terminal-host.mjs"
                         )
                     )
+                let ttydPath =
+                    Path.GetFullPath(
+                        Path.Combine(
+                            __SOURCE_DIRECTORY__,
+                            "..",
+                            "..",
+                            ".tools",
+                            "ttyd",
+                            "1.7.7",
+                            "ttyd.exe"
+                        )
+                    )
 
                 EmbeddedTerminal.createWithConfig
                     { NodeExecutable = "node"
@@ -615,16 +642,23 @@ type ArchiveWorktreeResolutionTests() =
                                 "terminate-owned-process.ps1"
                             )
                         )
-                      HostStateDirectory = Path.Combine(tempDirA, "terminal-host")
-                      TtydExecutablePath =
-                        Path.Combine(
-                            tempDirA,
-                            $"missing-ttyd-{Guid.NewGuid():N}.exe"
+                      WebSocketPackagePath =
+                        Path.GetFullPath(
+                            Path.Combine(
+                                __SOURCE_DIRECTORY__,
+                                "..",
+                                "..",
+                                "node_modules",
+                                "ws"
+                            )
                         )
+                      HostStateDirectory = Path.Combine(tempDirA, "terminal-host")
+                      TtydExecutablePath = ttydPath
+                      TtydExpectedHash = None
                       ShellCommand = "pwsh"
-                      StartupTimeout = TimeSpan.FromSeconds 1.0
-                      ControlRequestTimeout = TimeSpan.FromSeconds 1.0
-                      ProbeInterval = TimeSpan.FromMilliseconds 10.0
+                      StartupTimeout = TimeSpan.FromSeconds 10.0
+                      ControlRequestTimeout = TimeSpan.FromSeconds 10.0
+                      ProbeInterval = TimeSpan.FromMilliseconds 25.0
                       ReservationRenewalInterval = TimeSpan.FromSeconds 30.0 }
 
             try

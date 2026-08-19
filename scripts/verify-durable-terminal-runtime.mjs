@@ -17,7 +17,6 @@ import {
 } from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
-const hostScript = join(repo, "scripts", "durable-terminal-host.mjs");
 const ttyd = join(repo, ".tools", "ttyd", "1.7.7", "ttyd.exe");
 const fixture = join(
   repo,
@@ -168,23 +167,29 @@ try {
   host = spawn(
     process.execPath,
     [
-      hostScript,
+      join(bundle.bundleDirectory, "durable-terminal-host.mjs"),
       "--state-dir",
       stateDirectory,
       "--ttyd",
-      ttyd,
+      join(bundle.bundleDirectory, "ttyd.exe"),
       "--shell",
       "pwsh",
       "--runtime-bundle-dir",
       bundle.bundleDirectory,
       "--runtime-bundle-hash",
       bundle.bundleHash,
+      "--runtime-bundle-version",
+      String(bundle.runtimeBundleVersion),
       "--host-script-hash",
       bundle.hostScriptHash,
       "--supervisor-script-hash",
       bundle.supervisorScriptHash,
       "--process-helper-hash",
       bundle.processIdentityHelperHash,
+      "--ttyd-hash",
+      bundle.ttydExecutableHash,
+      "--ws-package-hash",
+      bundle.webSocketPackageHash,
     ],
     {
       windowsHide: true,

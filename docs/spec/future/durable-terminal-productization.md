@@ -22,15 +22,17 @@ still a release gate.
 The current implementation is deliberately checkout-scoped:
 
 - the source runtime entry point is `scripts/durable-terminal-host.mjs`; server builds/publishes copy
-  it, `terminal-job-supervisor.ps1`, and `terminate-owned-process.ps1`, then atomically materializes
-  their verified hashes into checkout-local
+  it, `terminal-job-supervisor.ps1`, `terminate-owned-process.ps1`, the exact locked `ws` runtime,
+  and checksum-pinned ttyd, then atomically materializes every verified file into checkout-local
   `.agents/durable-terminal/terminal-runtime-bundles/<bundle-hash>/`. A running protocol-3 host
-  validates that bundle and revalidates its pinned helper before every spawn, but the bundle is not
-  yet a machine-global installed terminal-host artifact;
-- candidate files still resolve from the output/publish copy or source checkout, while ttyd and
-  Node dependencies remain checkout-local. The loaded host hash closes the publish replacement
-  race, but the staged runtime is not independently installable;
-- `ws` is a root dependency without a committed runtime-specific lockfile;
+  launches from that bundle, resolves `ws` bundle-relatively, and revalidates its pinned helper and
+  ttyd before every spawn, but the bundle is not yet a machine-global installed terminal-host
+  artifact;
+- candidate files still resolve from the output/publish copy or source checkout. They are copied
+  into the immutable bundle and are never runtime fallbacks, but the staged runtime is not
+  independently installable;
+- `ws` is exact-pinned by the committed root lockfile; a dedicated terminal-host package boundary
+  remains future organization rather than a dependency-integrity gap;
 - host discovery lives in the checkout's `.agents/durable-terminal/`;
 - reconnect uses a bounded raw-byte ring plus resize rather than serialized terminal state;
 - one session-lifetime attachment capability is returned in the iframe endpoint;
@@ -38,8 +40,8 @@ The current implementation is deliberately checkout-scoped:
   retained and independently dismissible/restartable across host replacement;
 - checkout-local startup is serialized by a state-directory lock and each live host manifest has a
   unique runtime generation, exact PID/start identity, bundle/component hashes, supervisor protocol
-  generation, and capabilities, but discovery is still confined to one checkout rather than a
-  machine-global artifact generation;
+  generation, capabilities, and ttyd/`ws` hashes, but discovery is still confined to one checkout
+  rather than a machine-global artifact generation;
 - every session starts ttyd suspended under a retained Windows Job Object supervisor with
   kill-on-close/no-breakaway policy; explicit close retains a failed session until the supervisor
   exits and supplies an authenticated session-bound empty-job proof. `STARTUPINFOEX` whitelists only
@@ -50,9 +52,11 @@ The current implementation is deliberately checkout-scoped:
   promotion remains untrusted after host or Treemon-manager crash; delete/archive hold a renewable
   per-worktree host reservation from authoritative cleanup through mutation;
 - dead/replaced generation records are retained until every recorded supervisor has a matching
-  terminal trusted state, durable witness, and exact exit identity, then compacted
-  compare-before-delete. Referenced runtime bundles remain immutable and excess unreferenced bundles
-  use the same compare-before-delete discipline. The checkout-local
+  terminal trusted state, durable witness, and exact exit identity, then compacted by an
+  exact-owner claim that commits record deletion before best-effort witness cleanup. Stale current
+  claims and bounded legacy host/manager claims recover without stealing a live compactor.
+  Referenced runtime bundles remain immutable and excess unreferenced bundles use recursive
+  compare-before-delete discipline. The checkout-local
   store refuses a 65th unresolved generation rather than discarding evidence; dead protocol-1 and
   pre-bundle protocol-2 migration records fail strict cleanup closed until the operator
   authoritatively drains their terminals (or restarts the machine) and manually removes those
@@ -197,18 +201,19 @@ backpressure, and heartbeat age—never terminal content.
 ### Runtime layout and dependency lock
 
 Promote the existing checkout-local content-addressed bundle into a cohesive
-`src/TerminalHost/` component with its own
-minimal package manifest and committed lockfile (including a narrow `.gitignore` exception for that
-lock). Keep Node plus `ws`; the proxy has already proved the lifecycle contract, so replacing it
-with a custom PTY host is not a productization task. Pin and record the MIT licenses for `ws`,
-headless xterm, serialization, and ttyd in the staged artifact.
+`src/TerminalHost/` component with its own minimal package manifest. The current bundle already
+contains the exact root-lockfile `ws` runtime, optional-native guards, checksum-pinned ttyd, and
+their licenses; productization moves that closed set into an independently installable
+machine-global artifact rather than changing its integrity model. Keep Node plus `ws`; the proxy
+has already proved the lifecycle contract, so replacing it with a custom PTY host is not a
+productization task. Add and license headless xterm and serialization only when bounded snapshots
+are implemented.
 
-Deployment stages the same host/supervisor/helper hash manifest the checkout-local manager already
-verifies, adds locked production Node dependencies, then installs it into the machine-global
-immutable artifact store at `terminal-host/artifacts/<generation>`, including production Node
-dependencies and a generation manifest. `treemon.ps1` verifies that artifact before replacing the
-web server. The current host keeps its files until its sessions drain; deployment never mutates or
-removes an active generation directory.
+Deployment installs the same closed host/supervisor/helper/ttyd/`ws` manifest the checkout-local
+manager already verifies into the machine-global immutable artifact store at
+`terminal-host/artifacts/<generation>`, with a generation manifest. `treemon.ps1` verifies that
+artifact before replacing the web server. The current host keeps its files until its sessions
+drain; deployment never mutates or removes an active generation directory.
 
 `Server.EmbeddedTerminal` uses `AppContext.BaseDirectory` only to locate the candidate artifact
 shipped with that server, then resolves the installed generation from the machine-global registry.
@@ -312,9 +317,9 @@ retry of in-flight tools remain forbidden.
 
 ## Implementation Sequence
 
-1. **Package the frozen protocol-3 runtime.** Promote the current bundle manifest, add its dependency
-   lockfile and publish staging, resolve paths from the installed artifact, and document
-   prerequisites.
+1. **Install the frozen protocol-3 runtime globally.** Promote the current self-contained bundle
+   manifest and publish staging into the machine-global artifact store, resolve paths from the
+   installed artifact, and document prerequisites.
 2. **Introduce machine-global discovery and generations.** Add atomic manifests, locking, stale
    identity checks, the bounded legacy-host adoption, multi-generation listing,
    current-generation routing, drain, and rollback compatibility.

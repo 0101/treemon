@@ -115,6 +115,13 @@ async function waitForHttp(url) {
   });
 }
 
+async function reloadDashboard() {
+  await page.goto(`http://localhost:${vitePort}/`, {
+    waitUntil: "domcontentloaded",
+  });
+  await page.waitForSelector(".wt-card", { timeout: 60_000 });
+}
+
 function runGit(argumentsList) {
   execFileSync("git", argumentsList, {
     cwd: worktree,
@@ -365,7 +372,7 @@ try {
     terminalSession.shellPid,
   );
 
-  await page.reload();
+  await reloadDashboard();
   const reloadedTerminalUrl = await proveTerminal(
     markers.browserReload,
     terminalSession.shellPid,
@@ -383,7 +390,7 @@ try {
     () => processController.inspect(restartedServer.pid),
   );
   await waitForHttp(`http://localhost:${apiPort}/`);
-  await page.reload();
+  await reloadDashboard();
   const restartedTerminalUrl = await proveTerminal(
     markers.serverRestart,
     terminalSession.shellPid,

@@ -168,9 +168,12 @@ const args = process.argv.slice(2);
 const stateDirectory = resolve(args[args.indexOf("--state-dir") + 1]);
 const generation = args[args.indexOf("--generation") + 1];
 const bundleHash = args[args.indexOf("--runtime-bundle-hash") + 1];
+const runtimeBundleVersion = Number(args[args.indexOf("--runtime-bundle-version") + 1]);
 const hostScriptHash = args[args.indexOf("--host-script-hash") + 1];
 const supervisorScriptHash = args[args.indexOf("--supervisor-script-hash") + 1];
 const processIdentityHelperHash = args[args.indexOf("--process-helper-hash") + 1];
+const ttydExecutableHash = args[args.indexOf("--ttyd-hash") + 1];
+const webSocketPackageHash = args[args.indexOf("--ws-package-hash") + 1];
 const statePath = join(stateDirectory, "host.json");
 const lockPath = join(stateDirectory, "host.lock");
 const eventPath = join(stateDirectory, "events.json");
@@ -210,6 +213,7 @@ const ownershipBoundary = () =>
 
 const manifestVersion = behavior().protocolVersion ?? 3;
 const runtimeCapabilities = [
+  "immutable-executable-dependencies-v1",
   "immutable-runtime-bundle-v1",
   "strict-evidence-paths-v1",
   "trusted-empty-supervisor-v1",
@@ -266,10 +270,13 @@ function writeGeneration() {
     ownershipBoundary: "windows-job-v1",
     ...(manifestVersion === 3
       ? {
+          runtimeBundleVersion,
           bundleHash,
           hostScriptHash,
           supervisorScriptHash,
           processIdentityHelperHash,
+          ttydExecutableHash,
+          webSocketPackageHash,
           supervisorProtocolGeneration: 2,
           capabilities: runtimeCapabilities,
         }
@@ -364,10 +371,13 @@ const server = createServer(async (request, response) => {
             ...ownershipBoundary(),
             ...(manifestVersion === 3
               ? {
+                  runtimeBundleVersion,
                   bundleHash,
                   hostScriptHash,
                   supervisorScriptHash,
                   processIdentityHelperHash,
+                  ttydExecutableHash,
+                  webSocketPackageHash,
                   supervisorProtocolGeneration: 2,
                   capabilities: runtimeCapabilities,
                 }
@@ -541,10 +551,13 @@ server.listen(0, "127.0.0.1", async () => {
           ...ownershipBoundary(),
           ...(manifestVersion === 3
             ? {
+                runtimeBundleVersion,
                 bundleHash,
                 hostScriptHash,
                 supervisorScriptHash,
                 processIdentityHelperHash,
+                ttydExecutableHash,
+                webSocketPackageHash,
                 supervisorProtocolGeneration: 2,
                 capabilities: runtimeCapabilities,
               }
@@ -574,13 +587,48 @@ let private config stateDirectory hostScript ttydPath : EmbeddedTerminal.Config 
                 "terminate-owned-process.ps1"
             )
         )
+      WebSocketPackagePath =
+        Path.GetFullPath(
+            Path.Combine(
+                __SOURCE_DIRECTORY__,
+                "..",
+                "..",
+                "node_modules",
+                "ws"
+            )
+        )
       HostStateDirectory = stateDirectory
       TtydExecutablePath = ttydPath
+      TtydExpectedHash = None
       ShellCommand = "pwsh"
       StartupTimeout = TimeSpan.FromSeconds 5.0
       ControlRequestTimeout = TimeSpan.FromSeconds 5.0
       ProbeInterval = TimeSpan.FromMilliseconds 25.0
       ReservationRenewalInterval = TimeSpan.FromSeconds 30.0 }
+
+let private copyDirectory source destination =
+    Directory.GetFiles(
+        source,
+        "*",
+        SearchOption.AllDirectories
+    )
+    |> Array.map (fun sourcePath ->
+        let relative =
+            Path.GetRelativePath(source, sourcePath)
+
+        sourcePath,
+        Path.Combine(destination, relative))
+    |> Array.iter (fun (sourcePath, destinationPath) ->
+        Directory.CreateDirectory(
+            Path.GetDirectoryName destinationPath
+        )
+        |> ignore
+
+        File.Copy(
+            sourcePath,
+            destinationPath,
+            true
+        ))
 
 let private readHostPid stateDirectory =
     use document =
@@ -709,6 +757,8 @@ let private writeGenerationRecord
                    hostProcessStartTicks = string hostStartTicks
                    hostProcessStartExact = true
                    ownershipBoundary = "windows-job-v1"
+                   runtimeBundleVersion =
+                    bundle.Identity.Version
                    bundleHash =
                     bundle.Identity.BundleHash
                    hostScriptHash =
@@ -717,9 +767,14 @@ let private writeGenerationRecord
                     bundle.Identity.SupervisorScriptHash
                    processIdentityHelperHash =
                     bundle.Identity.ProcessIdentityHelperHash
+                   ttydExecutableHash =
+                    bundle.Identity.TtydExecutableHash.Value
+                   webSocketPackageHash =
+                    bundle.Identity.WebSocketPackageHash.Value
                    supervisorProtocolGeneration = 2
                    capabilities =
-                    [| "immutable-runtime-bundle-v1"
+                    [| "immutable-executable-dependencies-v1"
+                       "immutable-runtime-bundle-v1"
                        "strict-evidence-paths-v1"
                        "trusted-empty-supervisor-v1" |]
                    startedAt =
@@ -2156,6 +2211,50 @@ type EmbeddedTerminalTests() =
                 Is.EqualTo tampered
             ))
 
+    [<TestCase("ttyd.exe")>]
+    [<TestCase("node_modules/ws/wrapper.mjs")>]
+    member _.``runtime dependency tampering fails closed``(
+        relativePath: string
+    ) =
+        withFakeHost (fun _ _ hostConfig _ ->
+            let bundle =
+                match
+                    EmbeddedTerminal.materializeRuntimeBundle
+                        hostConfig
+                with
+                | Ok value -> value
+                | Error error ->
+                    Assert.Fail(error)
+                    Unchecked.defaultof<_>
+
+            let target =
+                relativePath.Split('/')
+                |> Array.fold (fun parent child ->
+                    Path.Combine(parent, child)) bundle.Directory
+
+            File.AppendAllText(target, "tampered")
+            let tampered = File.ReadAllBytes target
+
+            match
+                EmbeddedTerminal.materializeRuntimeBundle
+                    hostConfig
+            with
+            | Ok _ ->
+                Assert.Fail(
+                    "A tampered immutable runtime dependency was accepted"
+                )
+            | Error error ->
+                Assert.That(
+                    error,
+                    Does.Contain("hash mismatch")
+                        .IgnoreCase
+                )
+
+            Assert.That(
+                File.ReadAllBytes target,
+                Is.EqualTo tampered
+            ))
+
     [<Test>]
     member _.``abandoned runtime bundle compaction claim is recovered immutably``() =
         withFakeHost (fun _ _ hostConfig _ ->
@@ -2575,6 +2674,125 @@ type EmbeddedTerminalTests() =
                             )
                         ).Length,
                         Is.EqualTo 2
+                    )))
+
+    [<TestCase("ttyd")>]
+    [<TestCase("ws")>]
+    member _.``dependency-only deployment drains the old immutable bundle``(
+        dependency
+    ) =
+        withFakeHostConfig
+            (fun original ->
+                let webSocketCopy =
+                    Path.Combine(
+                        Path.GetDirectoryName
+                            original.HostScriptPath,
+                        "ws-runtime"
+                    )
+
+                copyDirectory
+                    original.WebSocketPackagePath
+                    webSocketCopy
+
+                { original with
+                    WebSocketPackagePath =
+                        webSocketCopy })
+            (fun tempDir stateDirectory hostConfig manager ->
+                let oldPath =
+                    Path.Combine(
+                        tempDir,
+                        $"old-{dependency}"
+                    )
+
+                let newPath =
+                    Path.Combine(
+                        tempDir,
+                        $"new-{dependency}"
+                    )
+
+                [ oldPath; newPath ]
+                |> List.iter (Directory.CreateDirectory >> ignore)
+
+                let oldWorktree = canonical oldPath
+                let newWorktree = canonical newPath
+                let oldSnapshot = start manager oldWorktree
+                let oldEndpoint =
+                    endpointFor oldWorktree oldSnapshot
+
+                let bundleRoot =
+                    Path.Combine(
+                        stateDirectory,
+                        "terminal-runtime-bundles"
+                    )
+
+                let oldBundle =
+                    Directory.GetDirectories(bundleRoot)
+                    |> Array.exactlyOne
+
+                match dependency with
+                | "ttyd" ->
+                    File.AppendAllText(
+                        hostConfig.TtydExecutablePath,
+                        "replacement ttyd"
+                    )
+                | _ ->
+                    File.AppendAllText(
+                        Path.Combine(
+                            hostConfig.WebSocketPackagePath,
+                            "wrapper.mjs"
+                        ),
+                        $"{Environment.NewLine}// replacement ws"
+                    )
+
+                let rejected =
+                    EmbeddedTerminal.start
+                        manager
+                        newWorktree
+                    |> run
+
+                let retained =
+                    EmbeddedTerminal.get manager
+                    |> run
+
+                Assert.Multiple(fun () ->
+                    match rejected with
+                    | Ok _ ->
+                        Assert.Fail(
+                            "A dependency-only deployment reused the old immutable runtime"
+                        )
+                    | Error error ->
+                        Assert.That(
+                            error,
+                            Does.Contain(
+                                "different immutable runtime bundle"
+                            ).IgnoreCase
+                        )
+
+                    Assert.That(
+                        endpointFor oldWorktree retained,
+                        Is.EqualTo oldEndpoint
+                    ))
+
+                EmbeddedTerminal.close
+                    manager
+                    oldWorktree
+                |> run
+                |> ignore
+
+                let current = start manager newWorktree
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        endpointFor newWorktree current,
+                        Is.Not.Empty
+                    )
+                    Assert.That(
+                        Directory.Exists oldBundle,
+                        Is.True
+                    )
+                    Assert.That(
+                        Directory.GetDirectories(bundleRoot),
+                        Has.Length.EqualTo(2)
                     )))
 
     [<Test>]
@@ -4246,6 +4464,326 @@ type EmbeddedTerminalTests() =
 
                 Assert.That(File.Exists record, Is.False)
                 Assert.That(File.Exists claim, Is.False)))
+
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member _.``manager recovers current and legacy host generation claims``(
+        legacy
+    ) =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let worktreePath =
+                Path.Combine(
+                    tempDir,
+                    if legacy then
+                        "legacy-host-claim"
+                    else
+                        "current-host-claim"
+                )
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            let worktree = canonical worktreePath
+            let generation =
+                if legacy then
+                    "legacy-host-generation"
+                else
+                    "current-host-generation"
+
+            let session =
+                fixtureSession
+                    (if legacy then "legacy-host" else "current-host")
+                    worktreePath
+                    2_000_000_043
+                    52001L
+
+            writeGenerationRecord
+                stateDirectory
+                hostConfig
+                generation
+                2_000_000_044
+                52002L
+                3
+                false
+                [ session ]
+
+            writeEmptyWitness
+                stateDirectory
+                generation
+                session
+
+            let record =
+                generationRecordPath
+                    stateDirectory
+                    generation
+
+            let directory = Path.GetDirectoryName record
+            let claimName =
+                if legacy then
+                    $"{generation}.json.2000000045.legacy_nonce_123456.reclaim.json"
+                else
+                    $"{generation}.json.dead-owner.2000000045.52003.current_nonce_123456.reclaim"
+
+            let claim =
+                Path.Combine(directory, claimName)
+
+            File.Move(record, claim)
+
+            let result =
+                EmbeddedTerminal.closeStrict
+                    manager
+                    worktree
+                |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok _ -> ()
+                | Error error -> Assert.Fail(error)
+
+                Assert.That(File.Exists record, Is.False)
+                Assert.That(File.Exists claim, Is.False)
+                Assert.That(
+                    File.Exists(
+                        witnessPath
+                            stateDirectory
+                            generation
+                            session.SessionId
+                    ),
+                    Is.False
+                )))
+
+    [<Test>]
+    member _.``parallel manager never reclaims a live compactor claim``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "live-compactor")
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            let worktree = canonical worktreePath
+            let generation = "live-compactor-generation"
+            let session =
+                fixtureSession
+                    "live-compactor"
+                    worktreePath
+                    2_000_000_046
+                    53001L
+
+            writeGenerationRecord
+                stateDirectory
+                hostConfig
+                generation
+                2_000_000_047
+                53002L
+                3
+                false
+                [ session ]
+
+            writeEmptyWitness
+                stateDirectory
+                generation
+                session
+
+            let ownerInfo =
+                ProcessStartInfo(
+                    FileName = "node",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                )
+
+            ownerInfo.ArgumentList.Add("-e")
+            ownerInfo.ArgumentList.Add(
+                "setInterval(() => {}, 1000)"
+            )
+
+            use owner = Process.Start ownerInfo
+            let startTicks =
+                owner.StartTime.ToUniversalTime().Ticks
+            let record =
+                generationRecordPath
+                    stateDirectory
+                    generation
+            let claim =
+                Path.Combine(
+                    Path.GetDirectoryName record,
+                    $"{generation}.json.active-owner.{owner.Id}.{startTicks}.active_nonce_123456.reclaim"
+                )
+
+            File.Move(record, claim)
+
+            let stopOwner () =
+                if not owner.HasExited then
+                    owner.Kill(true)
+                    owner.WaitForExit()
+
+            try
+                let pending =
+                    EmbeddedTerminal.closeStrict
+                        manager
+                        worktree
+                    |> Async.StartAsTask
+
+                Thread.Sleep 100
+
+                Assert.Multiple(fun () ->
+                    Assert.That(pending.IsCompleted, Is.False)
+                    Assert.That(File.Exists record, Is.False)
+                    Assert.That(File.Exists claim, Is.True))
+
+                stopOwner ()
+
+                match pending.GetAwaiter().GetResult() with
+                | Error error -> Assert.Fail(error)
+                | Ok _ ->
+                    Assert.Multiple(fun () ->
+                        Assert.That(File.Exists record, Is.False)
+                        Assert.That(File.Exists claim, Is.False)
+                        Assert.That(
+                            File.Exists(
+                                witnessPath
+                                    stateDirectory
+                                    generation
+                                    session.SessionId
+                            ),
+                            Is.False
+                        ))
+            finally
+                stopOwner ())
+
+    [<Test>]
+    member _.``generation compaction faults preserve proof until record removal commits``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let stages =
+                [ EmbeddedTerminal.GenerationCompactionStage.BeforeRename
+                  EmbeddedTerminal.GenerationCompactionStage.AfterRename
+                  EmbeddedTerminal.GenerationCompactionStage.BeforeClaimDeletion
+                  EmbeddedTerminal.GenerationCompactionStage.AfterClaimDeletion
+                  EmbeddedTerminal.GenerationCompactionStage.DuringWitnessCleanup ]
+
+            stages
+            |> List.iteri (fun index stage ->
+                let worktreePath =
+                    Path.Combine(
+                        tempDir,
+                        $"compaction-stage-{index}"
+                    )
+
+                Directory.CreateDirectory worktreePath
+                |> ignore
+
+                let worktree = canonical worktreePath
+                let generation = $"compaction-stage-{index}"
+                let sessions =
+                    [ fixtureSession
+                        $"stage-{index}-first"
+                        worktreePath
+                        (2_000_000_100 + index * 10)
+                        (54000L + int64 (index * 10))
+                      fixtureSession
+                        $"stage-{index}-second"
+                        worktreePath
+                        (2_000_000_101 + index * 10)
+                        (54001L + int64 (index * 10)) ]
+
+                writeGenerationRecord
+                    stateDirectory
+                    hostConfig
+                    generation
+                    (2_000_000_102 + index * 10)
+                    (54002L + int64 (index * 10))
+                    3
+                    false
+                    sessions
+
+                sessions
+                |> List.iter (writeEmptyWitness stateDirectory generation)
+
+                let record =
+                    generationRecordPath
+                        stateDirectory
+                        generation
+
+                EmbeddedTerminal.compactGenerationForTest
+                    hostConfig
+                    generation
+                    ((=) stage)
+                |> ignore
+
+                let claims =
+                    Directory.GetFiles(
+                        Path.GetDirectoryName record,
+                        $"{generation}.json.*.reclaim"
+                    )
+
+                match stage with
+                | EmbeddedTerminal.GenerationCompactionStage.BeforeRename ->
+                    Assert.That(File.Exists record, Is.True)
+                    Assert.That(claims, Is.Empty)
+                | EmbeddedTerminal.GenerationCompactionStage.AfterRename
+                | EmbeddedTerminal.GenerationCompactionStage.BeforeClaimDeletion ->
+                    Assert.That(File.Exists record, Is.False)
+                    Assert.That(claims, Has.Length.EqualTo(1))
+                    Assert.That(
+                        sessions
+                        |> List.forall (fun session ->
+                            File.Exists(
+                                witnessPath
+                                    stateDirectory
+                                    generation
+                                    session.SessionId
+                            )),
+                        Is.True
+                    )
+                    File.Move(claims[0], record)
+                | EmbeddedTerminal.GenerationCompactionStage.AfterClaimDeletion ->
+                    Assert.That(File.Exists record, Is.False)
+                    Assert.That(claims, Is.Empty)
+                    Assert.That(
+                        sessions
+                        |> List.forall (fun session ->
+                            File.Exists(
+                                witnessPath
+                                    stateDirectory
+                                    generation
+                                    session.SessionId
+                            )),
+                        Is.True
+                    )
+                | EmbeddedTerminal.GenerationCompactionStage.DuringWitnessCleanup ->
+                    Assert.That(File.Exists record, Is.False)
+                    Assert.That(claims, Is.Empty)
+                    Assert.That(
+                        sessions
+                        |> List.filter (fun session ->
+                            File.Exists(
+                                witnessPath
+                                    stateDirectory
+                                    generation
+                                    session.SessionId
+                            )),
+                        Has.Length.EqualTo(1)
+                    )
+
+                match
+                    EmbeddedTerminal.closeStrict
+                        manager
+                        worktree
+                    |> run
+                with
+                | Error error -> Assert.Fail(error)
+                | Ok _ ->
+                    Assert.That(File.Exists record, Is.False)
+                    Assert.That(
+                        Directory.Exists(
+                            Path.Combine(
+                                stateDirectory,
+                                "terminal-empty-witnesses",
+                                generation
+                            )
+                        ),
+                        Is.False
+                    )))
 
     [<Test>]
     member _.``unresolved generation retention is bounded without discarding evidence``() =

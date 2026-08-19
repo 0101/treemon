@@ -3,14 +3,17 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import {
+  cpSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
@@ -19,17 +22,20 @@ import {
   createTerminalJobSupervisor,
   DurableTerminalHost,
   emptyReplayBuffer,
+  generationCompactionClaimName,
   jobSupervisorPolicyIsSafe,
   isValidGeneration,
+  materializeRuntimeBundle,
   manifestOwnership,
   parseInitialHandshake,
+  parseGenerationCompactionClaimName,
   parseResizeFrame,
   publicDiagnosticSession,
   requireKernelTerminalOwnership,
   removeManifestIfOwned,
+  removeEmptyGenerationIfOwned,
   replayFramesFrom,
   resizeFrame,
-  runtimeBundleHash,
   sameManifestOwner,
   sanitizeMetadataText,
   sessionCookieName,
@@ -174,60 +180,13 @@ test("each terminal uses a distinct loopback cookie name", () => {
 const testStateDirectory = () =>
   resolve(".agents", "durable-terminal-host-tests", randomUUID());
 
+const currentTestProcessStartTicks = (
+  621355968000000000n +
+  BigInt(Math.round(Date.now() - process.uptime() * 1000)) * 10_000n
+).toString();
+
 const runtimeBundleFixture = (stateDirectory) => {
-  const assets = [
-    ["host", "durable-terminal-host.mjs"],
-    ["supervisor", "terminal-job-supervisor.ps1"],
-    ["processIdentityHelper", "terminate-owned-process.ps1"],
-  ].map(([role, name]) => {
-    const content = readFileSync(join(import.meta.dirname, name));
-    return {
-      role,
-      name,
-      content,
-      sha256: createHash("sha256").update(content).digest("hex"),
-    };
-  });
-  const hashes = Object.fromEntries(
-    assets.map((asset) => [asset.role, asset.sha256]),
-  );
-  const identity = {
-    hostScriptHash: hashes.host,
-    supervisorScriptHash: hashes.supervisor,
-    processIdentityHelperHash: hashes.processIdentityHelper,
-  };
-  const bundleHash = runtimeBundleHash(identity);
-  const bundleDirectory = join(
-    stateDirectory,
-    "terminal-runtime-bundles",
-    bundleHash,
-  );
-  mkdirSync(bundleDirectory, { recursive: true });
-  assets.forEach((asset) =>
-    writeFileSync(join(bundleDirectory, asset.name), asset.content),
-  );
-  writeFileSync(
-    join(bundleDirectory, "bundle.json"),
-    JSON.stringify({
-      version: 1,
-      bundleHash,
-      hostProtocolVersion: 3,
-      ...identity,
-      supervisorProtocolGeneration: terminalJobProtocolGeneration,
-      capabilities: terminalRuntimeCapabilities,
-      files: assets.map(({ role, name, sha256 }) => ({
-        role,
-        name,
-        sha256,
-      })),
-    }),
-  );
-  return {
-    stateDirectory,
-    bundleDirectory,
-    bundleHash,
-    ...identity,
-  };
+  return materializeRuntimeBundle(stateDirectory);
 };
 
 const supervisorWitnessOptions = (sessionId, directory = resolve(".agents")) => ({
@@ -523,13 +482,234 @@ test("runtime bundle pins and revalidates the supervisor before every spawn", ()
   }
 });
 
+test("runtime bundle pins ws and ttyd bytes into dependency-sensitive identities", async () => {
+  const fixture = testStateDirectory();
+  const stateDirectory = join(fixture, "state");
+  const sourceDirectory = join(fixture, "candidate");
+  const sourceWebSocket = join(sourceDirectory, "node_modules", "ws");
+  mkdirSync(sourceDirectory, { recursive: true });
+  [
+    "durable-terminal-host.mjs",
+    "terminal-job-supervisor.ps1",
+    "terminate-owned-process.ps1",
+  ].forEach((name) =>
+    cpSync(join(import.meta.dirname, name), join(sourceDirectory, name)),
+  );
+  cpSync(
+    resolve(import.meta.dirname, "..", ".tools", "ttyd", "1.7.7", "ttyd.exe"),
+    join(sourceDirectory, "ttyd.exe"),
+  );
+  mkdirSync(dirname(sourceWebSocket), { recursive: true });
+  cpSync(
+    resolve(import.meta.dirname, "..", "node_modules", "ws"),
+    sourceWebSocket,
+    { recursive: true },
+  );
+
+  try {
+    const first = materializeRuntimeBundle(
+      stateDirectory,
+      sourceDirectory,
+      null,
+    );
+    const firstManifest = verifyRuntimeBundle(first).manifest;
+    const firstTtyd = readFileSync(
+      join(first.bundleDirectory, "ttyd.exe"),
+    );
+    const firstWebSocket = readFileSync(
+      join(first.bundleDirectory, "node_modules", "ws", "wrapper.mjs"),
+    );
+
+    writeFileSync(
+      join(sourceWebSocket, "wrapper.mjs"),
+      Buffer.concat([
+        readFileSync(join(sourceWebSocket, "wrapper.mjs")),
+        Buffer.from("\n// replacement deployment\n"),
+      ]),
+    );
+    writeFileSync(
+      join(sourceDirectory, "ttyd.exe"),
+      Buffer.concat([
+        readFileSync(join(sourceDirectory, "ttyd.exe")),
+        Buffer.from("replacement"),
+      ]),
+    );
+    let launchedTtydPath = null;
+    const supervisor = new FakeJobSupervisor();
+    supervisor.start = async (request) => {
+      launchedTtydPath = request.fileName;
+      throw new Error("captured pinned ttyd");
+    };
+    const oldHost = new DurableTerminalHost({
+      stateDirectory,
+      ttydPath: join(first.bundleDirectory, "ttyd.exe"),
+      shellCommand: "pwsh",
+      replayBytes: 1024,
+      diagnosticBytes: 1024,
+      runtimeBundle: first,
+      supervisorFactory: () => supervisor,
+      exitProcess: () => {},
+    });
+    oldHost.persistStatus = () => {};
+    oldHost.record = () => {};
+    const oldSession = oldHost.newSession(
+      resolve(fixture, "old-session"),
+      0,
+    );
+    await assert.rejects(
+      oldHost.startSessionProxy(oldSession),
+      /captured pinned ttyd/,
+    );
+    assert.equal(
+      launchedTtydPath,
+      join(first.bundleDirectory, "ttyd.exe"),
+    );
+    oldSession.browserWebSockets?.close();
+    oldHost.stopTimers();
+
+    const second = materializeRuntimeBundle(
+      stateDirectory,
+      sourceDirectory,
+      null,
+    );
+
+    assert.notEqual(first.bundleHash, second.bundleHash);
+    assert.notEqual(first.ttydExecutableHash, second.ttydExecutableHash);
+    assert.notEqual(first.webSocketPackageHash, second.webSocketPackageHash);
+    assert.deepEqual(
+      readFileSync(join(first.bundleDirectory, "ttyd.exe")),
+      firstTtyd,
+    );
+    assert.deepEqual(
+      readFileSync(
+        join(first.bundleDirectory, "node_modules", "ws", "wrapper.mjs"),
+      ),
+      firstWebSocket,
+    );
+    assert(
+      firstManifest.files.some(
+        ({ name }) => name === "node_modules/ws/wrapper.mjs",
+      ),
+    );
+    assert(
+      firstManifest.files.some(({ name }) => name === "ttyd.exe"),
+    );
+    writeFileSync(
+      join(first.bundleDirectory, "ttyd.exe"),
+      Buffer.from("tampered"),
+    );
+    assert.throws(() => verifyRuntimeBundle(first), /hash mismatch/i);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("bundled ws cannot resolve optional native modules from a parent", () => {
+  const stateDirectory = testStateDirectory();
+  const bundle = runtimeBundleFixture(stateDirectory);
+  const parentModule = join(
+    stateDirectory,
+    "node_modules",
+    "bufferutil",
+  );
+  const marker = join(stateDirectory, "optional-module-loaded");
+  mkdirSync(parentModule, { recursive: true });
+  writeFileSync(
+    join(parentModule, "package.json"),
+    '{"main":"index.js"}',
+  );
+  writeFileSync(
+    join(parentModule, "index.js"),
+    "require('node:fs').writeFileSync(process.env.OPTIONAL_MODULE_MARKER, 'loaded'); module.exports = { mask(){}, unmask(){} };",
+  );
+  rmSync(
+    join(bundle.bundleDirectory, "node_modules", "ws", "node_modules"),
+    { recursive: true, force: true },
+  );
+
+  try {
+    const hostUrl = pathToFileURL(
+      join(bundle.bundleDirectory, "durable-terminal-host.mjs"),
+    ).href;
+    execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `await import(${JSON.stringify(hostUrl)});`,
+      ],
+      {
+        cwd: stateDirectory,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          WS_NO_BUFFER_UTIL: "",
+          WS_NO_UTF_8_VALIDATE: "",
+          OPTIONAL_MODULE_MARKER: marker,
+        },
+      },
+    );
+    assert.equal(existsSync(marker), false);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("a damaged bundle never falls back to a parent ws package", () => {
+  const stateDirectory = testStateDirectory();
+  const bundle = runtimeBundleFixture(stateDirectory);
+  const parentWebSocket = join(
+    dirname(bundle.bundleDirectory),
+    "node_modules",
+    "ws",
+  );
+  const marker = join(stateDirectory, "parent-ws-loaded");
+  mkdirSync(parentWebSocket, { recursive: true });
+  writeFileSync(
+    join(parentWebSocket, "wrapper.mjs"),
+    "import { writeFileSync } from 'node:fs'; writeFileSync(process.env.PARENT_WS_MARKER, 'loaded'); export class WebSocket {}; export class WebSocketServer {};",
+  );
+  rmSync(join(bundle.bundleDirectory, "node_modules", "ws"), {
+    recursive: true,
+    force: true,
+  });
+
+  try {
+    const hostUrl = pathToFileURL(
+      join(bundle.bundleDirectory, "durable-terminal-host.mjs"),
+    ).href;
+    assert.throws(() =>
+      execFileSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `await import(${JSON.stringify(hostUrl)});`,
+        ],
+        {
+          cwd: stateDirectory,
+          windowsHide: true,
+          stdio: "ignore",
+          env: {
+            ...process.env,
+            PARENT_WS_MARKER: marker,
+          },
+        },
+      ),
+    );
+    assert.equal(existsSync(marker), false);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
 test("host discovery manifest reports its exact immutable runtime bundle", async () => {
   const stateDirectory = testStateDirectory();
   const bundle = runtimeBundleFixture(stateDirectory);
   const exits = [];
   const host = new DurableTerminalHost({
     stateDirectory,
-    ttydPath: resolve("unused-ttyd.exe"),
+    ttydPath: join(bundle.bundleDirectory, "ttyd.exe"),
     shellCommand: "pwsh",
     replayBytes: 1024,
     diagnosticBytes: 1024,
@@ -543,6 +723,10 @@ test("host discovery manifest reports its exact immutable runtime bundle", async
       readFileSync(join(stateDirectory, "host.json"), "utf8"),
     );
     assert.equal(manifest.version, 3);
+    assert.equal(
+      manifest.runtimeBundleVersion,
+      bundle.runtimeBundleVersion,
+    );
     assert.equal(manifest.bundleHash, bundle.bundleHash);
     assert.equal(manifest.hostScriptHash, bundle.hostScriptHash);
     assert.equal(
@@ -552,6 +736,11 @@ test("host discovery manifest reports its exact immutable runtime bundle", async
     assert.equal(
       manifest.processIdentityHelperHash,
       bundle.processIdentityHelperHash,
+    );
+    assert.equal(manifest.ttydExecutableHash, bundle.ttydExecutableHash);
+    assert.equal(
+      manifest.webSocketPackageHash,
+      bundle.webSocketPackageHash,
     );
     assert.equal(
       manifest.supervisorProtocolGeneration,
@@ -721,6 +910,8 @@ test(
           },
         );
         assert.equal(supervisor.exited, true);
+        assert.equal(supervisor.exitCode, 0);
+        assert.equal(supervisor.trustedEmptyEvidence().exitCode, 0);
       }
     } finally {
       rmSync(fixture, { recursive: true, force: true });
@@ -772,6 +963,7 @@ test(
       ]);
       assert.equal(supervisor.emptyAcknowledged, false);
       assert.equal(supervisor.exited, true);
+      assert.notEqual(supervisor.exitCode, 0);
     } finally {
       if (!supervisor.exited) {
         await Promise.race([
@@ -1543,7 +1735,7 @@ test("startup failure stays failed after authoritative supervisor cleanup", asyn
 });
 
 test("proved startup failure permits retry close reservation and unrelated sessions", async () => {
-  await withTestHost({}, async (host) => {
+  await withTestHost({}, async (host, exits) => {
     const failingPath = join(
       host.options.stateDirectory,
       "proved-startup-failure",
@@ -1605,8 +1797,14 @@ test("proved startup failure permits retry close reservation and unrelated sessi
       await host.releaseReservation(reservation.id),
       true,
     );
+    const failedBeforeShutdown = await host.startSession(failingPath);
+    assert.equal(failedBeforeShutdown.state, "failed");
+    await host.shutdown("proved-startup-shutdown");
+    assert.equal(host.sessions.size, 0);
+    assert.deepEqual(exits, [0]);
     assert.ok(closedListeners.includes(failed.id));
     assert.ok(closedListeners.includes(failedAgain.id));
+    assert.ok(closedListeners.includes(failedBeforeShutdown.id));
   });
 });
 
@@ -1719,6 +1917,174 @@ test("shell PID is accepted only when the Job Object reports membership", async 
     assert.deepEqual(supervisor.containsCalls, [709]);
   });
   rmSync(stateDirectory, { recursive: true, force: true });
+});
+
+test("generation compaction claims carry exact owner identity", () => {
+  const owner = {
+    ownerGeneration: "owner-generation",
+    ownerPid: 4102,
+    ownerProcessStartTicks: "638911234567890000",
+    nonce: "claim_nonce_123456",
+  };
+  const name = generationCompactionClaimName(
+    "record-generation",
+    owner,
+  );
+
+  assert.deepEqual(parseGenerationCompactionClaimName(name), {
+    recordGeneration: "record-generation",
+    ...owner,
+  });
+  assert.deepEqual(
+    parseGenerationCompactionClaimName(
+      "record.json.4102.legacy_token_123456.reclaim.json",
+    ),
+    {
+      recordGeneration: "record",
+      legacy: true,
+      ownerPid: 4102,
+      nonce: "legacy_token_123456",
+    },
+  );
+  [
+    "record.json.owner.4102.1.short.reclaim",
+    "nested/record.json.owner.4102.1.claim_nonce_123456.reclaim",
+  ].forEach((candidate) =>
+    assert.equal(parseGenerationCompactionClaimName(candidate), null),
+  );
+});
+
+test("host generation compaction crash leaves a recoverable current-format claim", () => {
+  const stateDirectory = testStateDirectory();
+  const generationDirectory = join(
+    stateDirectory,
+    "terminal-generations",
+  );
+  const generation = "host-claim-crash";
+  const recordPath = join(generationDirectory, `${generation}.json`);
+  const owner = {
+    generation,
+    hostPid: process.pid,
+    hostProcessStartTicks: currentTestProcessStartTicks,
+    bundleHash: "a".repeat(64),
+  };
+  mkdirSync(generationDirectory, { recursive: true });
+  writeFileSync(
+    recordPath,
+    JSON.stringify({
+      version: 2,
+      generation,
+      hostPid: owner.hostPid,
+      hostProcessStartTicks: owner.hostProcessStartTicks,
+      bundleHash: owner.bundleHash,
+      sessions: [],
+    }),
+  );
+
+  try {
+    assert.throws(
+      () =>
+        removeEmptyGenerationIfOwned(recordPath, owner, (stage) => {
+          if (stage === "after-rename") {
+            throw new Error("simulated host crash");
+          }
+        }),
+      /simulated host crash/,
+    );
+    assert.equal(existsSync(recordPath), false);
+    const claimName = readdirSync(generationDirectory).at(0);
+    const claim = parseGenerationCompactionClaimName(claimName);
+    assert.equal(claim.recordGeneration, generation);
+    assert.equal(claim.ownerGeneration, generation);
+    assert.equal(claim.ownerPid, process.pid);
+    assert.equal(
+      claim.ownerProcessStartTicks,
+      currentTestProcessStartTicks,
+    );
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("host generation compaction commits record removal before later cleanup", () => {
+  const stateDirectory = testStateDirectory();
+  const generationDirectory = join(
+    stateDirectory,
+    "terminal-generations",
+  );
+  const generation = "host-claim-committed";
+  const recordPath = join(generationDirectory, `${generation}.json`);
+  const owner = {
+    generation,
+    hostPid: process.pid,
+    hostProcessStartTicks: currentTestProcessStartTicks,
+    bundleHash: "b".repeat(64),
+  };
+  mkdirSync(generationDirectory, { recursive: true });
+  writeFileSync(
+    recordPath,
+    JSON.stringify({
+      version: 2,
+      generation,
+      hostPid: owner.hostPid,
+      hostProcessStartTicks: owner.hostProcessStartTicks,
+      bundleHash: owner.bundleHash,
+      sessions: [],
+    }),
+  );
+
+  try {
+    assert.throws(
+      () =>
+        removeEmptyGenerationIfOwned(recordPath, owner, (stage) => {
+          if (stage === "after-claim-deletion") {
+            throw new Error("simulated post-commit crash");
+          }
+        }),
+      /simulated post-commit crash/,
+    );
+    assert.equal(existsSync(recordPath), false);
+    assert.deepEqual(readdirSync(generationDirectory), []);
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("host recovers bounded legacy reclaim-json evidence before enumeration", () => {
+  const stateDirectory = testStateDirectory();
+  const generationDirectory = join(
+    stateDirectory,
+    "terminal-generations",
+  );
+  const generation = "legacy-reclaim-json";
+  const legacyClaim = join(
+    generationDirectory,
+    `${generation}.json.4103.legacy_nonce_123456.reclaim.json`,
+  );
+  mkdirSync(generationDirectory, { recursive: true });
+  writeFileSync(legacyClaim, '{"preserved":true}');
+  const host = new DurableTerminalHost({
+    stateDirectory,
+    ttydPath: resolve("unused-ttyd.exe"),
+    shellCommand: "pwsh",
+    replayBytes: 1024,
+    diagnosticBytes: 1024,
+    exitProcess: () => {},
+  });
+
+  try {
+    host.ensureGenerationCapacity();
+    assert.equal(existsSync(legacyClaim), false);
+    assert.equal(
+      readFileSync(
+        join(generationDirectory, `${generation}.json`),
+        "utf8",
+      ),
+      '{"preserved":true}',
+    );
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test("manifest deletion requires the exact generation and process identity", () => {

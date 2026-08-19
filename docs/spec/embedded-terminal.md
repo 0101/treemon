@@ -197,26 +197,50 @@ as part of the same failed transition. A conclusive helper-written witness, clea
 helper exit, and terminal trust promotion leave the failed tab retryable and eligible for public
 close or strict reservation; cleanup without proof
 leaves the tab failed and blocks those transitions without affecting other keys.
+`startup-failure-empty` carries the failed-launch result in the authenticated protocol while the
+supervisor exits zero: zero means only that every possible artifact was proved absent, the
+generation/session/nonce/exact-supervisor witness was durably written, and the proof event was
+successfully emitted. Any unproved cleanup, witness failure, or proof-write failure exits nonzero
+and cannot be promoted.
 
 Generation records outlive a dead or replaced host manifest. Strict cleanup scans every current and
 retired record relevant to the canonical worktree and requires every matching supervisor's terminal
 `trusted-empty` state, exact nonce witness, zero exit transcript, and dead process identity. Legacy,
 in-progress, and quarantined records never authorize cleanup. Fully witnessed dead generations are
-compacted with compare-before-delete;
-witness files are removed only after their generation record is safely gone. At most 64 unresolved
+compacted by atomically renaming the canonical record to a claim whose filename
+binds the record generation and a unique compactor generation/PID/exact-start identity. The owned
+claim is compared and deleted first; only after both canonical record and claim are confirmed absent
+does best-effort witness cleanup begin. No path can restore a record after witness cleanup starts.
+A competing manager waits for a live exact owner and recovers only a stale claim, so parallel
+compactors converge without discarding proof. Bounded claims from the former manager grammar and
+the former host `*.reclaim.json` grammar are restored as evidence before normal record enumeration;
+unknown or conflicting claims are preserved and fail closed. Witnesses left by a crash after the
+record commit are orphaned and removed idempotently by later manager cleanup. At most 64 unresolved
 generation records are retained. Reaching that bound refuses another host generation rather than
 dropping evidence. A dead protocol-1, pre-bundle protocol-2, or pre-trust generation has no
 sufficient proof and blocks matching strict cleanup until the operator authoritatively drains it or
 manually removes the retained migration record after a machine restart.
 
-Runtime bundles referenced by the current host manifest or any live/retired generation record are
-never removed. Startup retains at most eight additional unreferenced bundles and compacts only older
-unreferenced directories after an atomic claim and before/after content comparison. Deploy and
-rollback may therefore replace publish files while old pinned artifacts coexist until their host
-and evidence drain; an existing hash directory is verified, never rewritten. A Start reuses an
-existing session on the running bundle, but a different deployed candidate makes that host
-drain-only for new keys. Once its registry is empty, it shuts down before the new bundle generation
-starts.
+The immutable bundle contains the host, supervisor, process-identity helper, checksum-pinned ttyd
+executable, and the exact locked `ws` ESM runtime. Every included file is named and hashed in the
+manifest; the bundle identity also commits the ttyd hash, aggregate `ws` package hash, host and
+supervisor protocol versions, and capability set. The host is launched from the bundle, resolves
+`ws` by an explicit bundle-relative URL, and includes local throwing guards for `bufferutil` and
+`utf-8-validate` while disabling both optional imports before loading `ws`, so optional-module
+resolution cannot climb into mutable parent `node_modules`.
+Immediately before each supervisor request the host revalidates the bundled ttyd bytes and passes
+only that path. Source, build-output, and publish copies are candidate inputs only and are never a
+runtime fallback.
+
+Bundles referenced by the current host manifest or any live/retired generation record are never
+removed. Startup retains at most eight additional unreferenced bundles and compacts only older
+unreferenced directories after an atomic claim and before/after recursive content comparison.
+Deploy and rollback may therefore replace publish files while old pinned artifacts coexist until
+their host and evidence drain; an existing hash directory is verified, never rewritten. A change
+to host code, supervisor/helper code, `ws`, ttyd, protocol, or capabilities produces a different
+bundle. A Start reuses an existing session on the running bundle, but a different deployed
+candidate makes that host drain-only for new keys. Once its registry is empty, it shuts down before
+the new bundle generation starts.
 
 Delete/archive reservations are per-key five-minute leases. Acquisition is itself serialized,
 publishes the lease before terminal cleanup, and releases it if cleanup fails. Treemon renews the
@@ -254,9 +278,10 @@ binding.
 - serializes host creation across Treemon processes with an OS-held exclusive
   `.agents/durable-terminal/host.lock`, then starts the Node host when no healthy host exists;
 - resolves candidate files from the server output/publish `scripts` directory, falling back to the
-  source checkout for development; it hashes the host, supervisor, and process-identity helper into
-  `terminal-runtime-bundles/<bundle-hash>/`, atomically installs or verifies that immutable set, then
-  launches the host with pinned paths and hashes;
+  source checkout for development; it validates the pinned ttyd checksum and locked `ws` version,
+  hashes every runtime file into `terminal-runtime-bundles/<bundle-hash>/`, atomically installs or
+  verifies that immutable set, then launches the bundled host with bundled dependency paths and
+  hashes;
 - lists, starts, and closes sessions through the loopback control API;
 - records each Treemon process reconnect in the host diagnostics;
 - keeps the last known snapshot plus per-key prior-generation ownership evidence so replacement
@@ -335,12 +360,12 @@ session identity, host/ttyd/PowerShell PIDs and liveness, attachment state, upst
 metadata, reconnect events, replay truncation, and heartbeat age. It never stores terminal bytes,
 prompts, environment contents, worktree paths, or attachment/control capabilities.
 
-The detached observation records the host generation, bundle/component hashes, supervisor
-generation/capabilities, manifest PID/start identity, actual process creation identity, endpoint,
-and control credential (the credential is omitted from displayed output). Stop re-reads all of
-those fields and revalidates the actual process identity immediately before sending shutdown. A
-replaced runtime, manifest, or reused PID is reported as changed ownership; no shutdown is sent and
-no wait is performed against the replacement.
+The detached observation records the host generation, bundle/component/ttyd/`ws` hashes,
+supervisor generation/capabilities, manifest PID/start identity, actual process creation identity,
+endpoint, and control credential (the credential is omitted from displayed output). Stop re-reads
+all of those fields and revalidates the actual process identity immediately before sending
+shutdown. A replaced runtime, manifest, or reused PID is reported as changed ownership; no shutdown
+is sent and no wait is performed against the replacement.
 
 ## Decisions
 
@@ -372,8 +397,9 @@ no wait is performed against the replacement.
 - **State-directory lock plus runtime generation** — concurrent checkout-local Treemon starters
   converge on one host without treating a PID alone as ownership.
 - **Content-addressed runtime bundle** — deployment can replace mutable publish files without
-  changing a running host/helper contract. Bundle directories are immutable; live/current/retired
-  generation references retain them, while only excess unreferenced bundles are compacted through a
+  changing a running host/helper/dependency contract. Bundle directories contain the exact host,
+  supervisor, process helper, ttyd, and locked `ws` files; all are hashed, and live/current/retired
+  generation references retain them while only excess unreferenced bundles are compacted through a
   compare-before-delete claim.
 - **Job Object ownership before execution** — a per-session supervisor creates ttyd suspended,
   assigns it to a kill-on-close/no-breakaway Job Object, and resumes only after assignment.
@@ -418,7 +444,8 @@ no wait is performed against the replacement.
 | `scripts/durable-terminal-verifier-env.mjs` | Pure isolated-server environment construction, including both reporting port variables |
 | `scripts/verify-ttyd-runtime.mjs` | Import-safe stock-ttyd verifier using the same Job Object supervisor boundary |
 | `src/Server/EmbeddedTerminal.fs` | Runtime-bundle materialization/retention, durable-host discovery, trusted generation/witness recovery, contained compaction, reservation cancellation, and control client |
-| `src/Server/Server.fsproj` | Copies the host, Job Object supervisor, and process-identity helper into build/publish layouts |
+| `src/Server/Server.fsproj` | Copies the host, Job Object supervisor, process helper, locked `ws` runtime, and checksum-pinned ttyd into build/publish layouts |
+| `package.json` / `package-lock.json` | Exact `ws` dependency and committed package-resolution lock |
 | `src/Server/Program.fs` | Creates the control client without closing durable sessions on shutdown |
 | `src/Client/TerminalPane.fs` | Accessible multi-tab iframe pane pointed at durable proxy endpoints |
 | `src/Tests/EmbeddedTerminalTests.fs` | Host generation races, reservation cancellation/locking, discovery, restart, selective close, and API validation |

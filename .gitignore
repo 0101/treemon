@@ -10,7 +10,6 @@ obj/
 
 # Node / Fable
 node_modules/
-package-lock.json
 dist/
 src/Client/output/
 *.fs.js
