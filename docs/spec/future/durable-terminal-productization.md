@@ -37,8 +37,9 @@ The current implementation is deliberately checkout-scoped:
   checkout rather than a machine-global artifact generation;
 - every session starts ttyd suspended under a retained Windows Job Object supervisor with
   kill-on-close/no-breakaway policy; explicit close retains a failed session until the supervisor
-  acknowledges an empty job and exits, and delete/archive hold a renewable per-worktree host
-  reservation from authoritative cleanup through mutation;
+  exits and supplies an authenticated session-bound empty-job proof, while ttyd cannot inherit the
+  supervisor control pipes; delete/archive hold a renewable per-worktree host reservation from
+  authoritative cleanup through mutation;
 - the immediately preceding protocol-1 manifest remains listable; close/reuse/drain is permitted
   only when it declares the same Job Object ownership capability;
 - deployment preserves a running host but does not upgrade or drain host generations;
@@ -240,10 +241,11 @@ reconnect screen or bypass memory limits.
 Preserve the current two-layer boundary. ttyd `--once` remains the graceful path when the host
 closes its upstream WebSocket, while a per-session supervisor is the ownership authority: it creates
 ttyd suspended, assigns it to a kill-on-close/no-breakaway Windows Job Object before first resume,
-retains the job handle, validates shell PID membership, and acknowledges an empty job before
-registry removal. Host/control-pipe loss drives supervisor cleanup, and supervisor failure closes
-the job handle. Productization must package this boundary with the immutable host artifact rather
-than reverting to descendant enumeration or PID termination.
+retains the job handle, excludes its authenticated stdin/stdout/stderr pipes from child inheritance,
+validates shell PID membership, and provides a session-bound empty-job proof before registry
+removal. Cleanup requires that proof plus supervisor exit. Host/control-pipe loss drives supervisor
+cleanup, and supervisor failure closes the job handle. Productization must package this boundary
+with the immutable host artifact rather than reverting to descendant enumeration or PID termination.
 
 Track host, supervisor, ttyd, and PowerShell identity from owned startup metadata for diagnostics,
 but never discover or kill by process name and never use PID ancestry as cleanup proof. Add

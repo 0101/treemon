@@ -31,6 +31,7 @@ import {
   sanitizeMetadataText,
   sessionCookieName,
   TerminalJobSupervisor,
+  terminalJobProtocolGeneration,
   terminalSize,
   terminateRetainedChild,
 } from "./durable-terminal-host.mjs";
@@ -274,13 +275,17 @@ const ownedSession = (
 });
 
 test("checked-in supervisor compiles with assign-before-resume no-breakaway policy", () => {
+  const supervisorPath = join(
+    import.meta.dirname,
+    "terminal-job-supervisor.ps1",
+  );
   const output = execFileSync(
     "pwsh",
     [
       "-NoProfile",
       "-NonInteractive",
       "-File",
-      join(import.meta.dirname, "terminal-job-supervisor.ps1"),
+      supervisorPath,
       "-SelfTest",
     ],
     { encoding: "utf8", windowsHide: true },
@@ -290,6 +295,35 @@ test("checked-in supervisor compiles with assign-before-resume no-breakaway poli
   assert.equal(jobSupervisorPolicyIsSafe(policy), true);
   assert.equal(policy.descendantsInheritMembership, true);
   assert.equal(policy.createSuspended, 4);
+  assert.equal(policy.controlStandardHandlesNonInheritable, true);
+  assert.equal(policy.childInheritedHandleCount, 1);
+  assert.equal(policy.childStandardHandles, "NUL");
+  assert.equal(policy.failedLaunchHandleDelta, 0);
+  assert.equal(policy.quoteProbe, '"C:\\path with space\\\\"');
+});
+
+test("supervisor launch boundary excludes every control standard handle", () => {
+  const source = readFileSync(
+    join(import.meta.dirname, "terminal-job-supervisor.ps1"),
+    "utf8",
+  );
+  const prepare = source.indexOf("DisableControlHandleInheritance();");
+  const launch = source.indexOf("if (!CreateProcessW(", prepare);
+
+  assert.notEqual(prepare, -1);
+  assert.ok(launch > prepare);
+  assert.match(source, /GetStdHandle\(standardHandle\)/);
+  assert.match(
+    source,
+    /SetHandleInformation\(handle, HandleFlagInherit, 0\)/,
+  );
+  assert.match(source, /hStdInput = nullHandle/);
+  assert.match(source, /hStdOutput = nullHandle/);
+  assert.match(source, /hStdError = nullHandle/);
+  assert.match(
+    source.slice(launch, launch + 700),
+    /IntPtr\.Zero,\s+IntPtr\.Zero,\s+true,[\s\S]*workingDirectory,\s+ref startup/,
+  );
 });
 
 test("unsupported platforms fail instead of using process enumeration", () => {
@@ -310,6 +344,7 @@ test(
     try {
       supervisor = createTerminalJobSupervisor();
       await supervisor.start({
+        sessionId: randomUUID(),
         fileName: process.execPath,
         argumentsList: ["-e", "setInterval(() => {}, 1000)"],
         workingDirectory: fixture,
@@ -355,32 +390,78 @@ const protocolSupervisor = (respond) => {
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
   const token = "owned-control-token";
+  const sessionId = "owned-protocol-session";
   let buffered = "";
+  const response = {
+    send: (message) =>
+      child.stdout.write(
+        `${JSON.stringify({
+          token,
+          sessionId,
+          protocolGeneration: terminalJobProtocolGeneration,
+          ...message,
+        })}\n`,
+      ),
+    sendRaw: (line) => child.stdout.write(`${line}\n`),
+    closeOutput: () => child.stdout.end(),
+    exit: (code = 0, { closeOutput = true } = {}) => {
+      child.exitCode = code;
+      child.emit("exit", code, null);
+      if (closeOutput) child.stdout.end();
+    },
+  };
   child.stdin.on("data", (data) => {
     buffered += data.toString();
     const lines = buffered.split("\n");
     buffered = lines.pop();
     lines.filter(Boolean).forEach((line) => {
       const request = JSON.parse(line);
-      respond(request, {
-        send: (message) =>
-          child.stdout.write(`${JSON.stringify({ token, ...message })}\n`),
-        exit: (code = 0) => {
-          child.exitCode = code;
-          child.emit("exit", code, null);
-        },
-      });
+      respond(request, response);
     });
   });
   return {
     child,
+    response,
+    sessionId,
     supervisor: new TerminalJobSupervisor(child, token, 100),
   };
 };
 
+const startProtocolSupervisor = ({ child, sessionId, supervisor }) =>
+  supervisor.start({
+    sessionId,
+    fileName: "ttyd.exe",
+    argumentsList: [],
+    workingDirectory: resolve(".agents"),
+    environment: {},
+    timeoutMs: 100,
+  });
+
+const terminationProtocol = (onTerminate) => {
+  const protocol = protocolSupervisor((request, response) => {
+    if (request.command === "start") {
+      response.send({
+        event: "ready",
+        requestId: request.requestId,
+        ttydPid: 601,
+        supervisorPid: protocol.child.pid,
+        supervisorStartTimeUtcTicks: "456",
+        assignedBeforeResume: true,
+        killOnJobClose: true,
+        breakawayAllowed: false,
+        silentBreakawayAllowed: false,
+      });
+    } else if (request.command === "terminate") {
+      onTerminate(request, response);
+    }
+  });
+  return protocol;
+};
+
 test("supervisor protocol preserves argv cwd env and validates job membership", async () => {
   const requests = [];
-  const { child, supervisor } = protocolSupervisor((request, response) => {
+  const protocol = protocolSupervisor((request, response) => {
+    const { child } = protocol;
     requests.push(request);
     if (request.command === "start") {
       response.send({
@@ -404,22 +485,29 @@ test("supervisor protocol preserves argv cwd env and validates job membership", 
     }
   });
 
-  await supervisor.start({
+  await protocol.supervisor.start({
+    sessionId: protocol.sessionId,
     fileName: "ttyd.exe",
     argumentsList: ["-w", "Q:\\path with spaces"],
     workingDirectory: "Q:\\path with spaces",
     environment: { TMTW: "Q:\\path with spaces" },
     timeoutMs: 100,
   });
-  assert.equal(await supervisor.contains(502), true);
+  assert.equal(await protocol.supervisor.contains(502), true);
   assert.deepEqual(requests[0].arguments, ["-w", "Q:\\path with spaces"]);
   assert.equal(requests[0].workingDirectory, "Q:\\path with spaces");
   assert.equal(requests[0].environment.TMTW, "Q:\\path with spaces");
+  assert.equal(requests[0].sessionId, protocol.sessionId);
+  assert.equal(
+    requests[0].protocolGeneration,
+    terminalJobProtocolGeneration,
+  );
 });
 
 test("supervisor termination requires empty acknowledgement and process exit", async () => {
   const commands = [];
-  const { child, supervisor } = protocolSupervisor((request, response) => {
+  const protocol = protocolSupervisor((request, response) => {
+    const { child } = protocol;
     commands.push(request.command);
     if (request.command === "start") {
       response.send({
@@ -443,17 +531,153 @@ test("supervisor termination requires empty acknowledgement and process exit", a
     }
   });
 
-  await supervisor.start({
-    fileName: "ttyd.exe",
-    argumentsList: [],
-    workingDirectory: resolve(".agents"),
-    environment: {},
-    timeoutMs: 100,
-  });
-  await supervisor.terminate(100);
+  await startProtocolSupervisor(protocol);
+  await Promise.all([
+    protocol.supervisor.terminate(100),
+    protocol.supervisor.terminate(100),
+  ]);
 
   assert.deepEqual(commands, ["start", "terminate"]);
-  assert.equal(supervisor.exited, true);
+  assert.equal(protocol.supervisor.exited, true);
+  assert.equal(
+    protocol.supervisor.emptyAcknowledgementSource,
+    "terminated",
+  );
+});
+
+test("natural authenticated empty exit proves cleanup and tolerates duplicates", async () => {
+  const protocol = terminationProtocol(() => {});
+
+  await startProtocolSupervisor(protocol);
+  const exited = {
+    event: "exited",
+    empty: true,
+    rootExitCode: 0,
+  };
+  protocol.response.send(exited);
+  protocol.response.send(exited);
+  protocol.response.exit();
+  await protocol.supervisor.terminate(100);
+
+  assert.equal(protocol.supervisor.exited, true);
+  assert.equal(protocol.supervisor.emptyAcknowledgementSource, "exited");
+});
+
+test("supervisor crash cannot substitute for empty-job proof", async () => {
+  const protocol = terminationProtocol(() => {});
+  await startProtocolSupervisor(protocol);
+  protocol.response.exit(23);
+
+  await assert.rejects(
+    protocol.supervisor.terminate(100),
+    /exited with code 23 without an authenticated empty-job acknowledgement/,
+  );
+});
+
+test("forced supervisor exit while the job may be active fails cleanup", async () => {
+  const protocol = terminationProtocol((_request, response) =>
+    response.exit(),
+  );
+  await startProtocolSupervisor(protocol);
+
+  await assert.rejects(
+    protocol.supervisor.terminate(100),
+    /supervisor exited with code 0/i,
+  );
+  assert.equal(protocol.supervisor.emptyAcknowledged, false);
+});
+
+test("spoofed supervisor identity cannot prove an empty job", async () => {
+  const spoofs = [
+    { token: "spoofed-control-token" },
+    { sessionId: "spoofed-protocol-session" },
+    { protocolGeneration: terminalJobProtocolGeneration + 1 },
+  ];
+
+  await Promise.all(
+    spoofs.map(async (spoof) => {
+      const protocol = terminationProtocol((_request, response) => {
+        response.send({
+          event: "exited",
+          empty: true,
+          rootExitCode: 0,
+          ...spoof,
+        });
+        response.exit();
+      });
+      await startProtocolSupervisor(protocol);
+      await assert.rejects(
+        protocol.supervisor.terminate(100),
+        /authentication changed/,
+      );
+      assert.equal(protocol.supervisor.emptyAcknowledged, false);
+    }),
+  );
+});
+
+test("malformed and empty-false exit events cannot prove cleanup", async () => {
+  const cases = [
+    {
+      emit: (response) => response.sendRaw("{"),
+      expected: /invalid JSON/,
+    },
+    {
+      emit: (response) =>
+        response.send({
+          event: "exited",
+          empty: false,
+          rootExitCode: 0,
+        }),
+      expected: /invalid empty-job exit acknowledgement/,
+    },
+  ];
+
+  await Promise.all(
+    cases.map(async (testCase) => {
+      const protocol = terminationProtocol((_request, response) => {
+        testCase.emit(response);
+        response.exit();
+      });
+      await startProtocolSupervisor(protocol);
+      await assert.rejects(
+        protocol.supervisor.terminate(100),
+        testCase.expected,
+      );
+      assert.equal(protocol.supervisor.emptyAcknowledged, false);
+    }),
+  );
+});
+
+test("supervisor exit waits for a late buffered empty-job proof", async () => {
+  const protocol = terminationProtocol((_request, response) => {
+    response.exit(0, { closeOutput: false });
+    setImmediate(() => {
+      response.send({
+        event: "exited",
+        empty: true,
+        rootExitCode: 0,
+      });
+      response.closeOutput();
+    });
+  });
+  await startProtocolSupervisor(protocol);
+
+  await protocol.supervisor.terminate(100);
+
+  assert.equal(protocol.supervisor.exited, true);
+  assert.equal(protocol.supervisor.emptyAcknowledgementSource, "exited");
+});
+
+test("supervisor termination times out without empty proof or exit", async () => {
+  const protocol = terminationProtocol(() => {});
+  await startProtocolSupervisor(protocol);
+
+  await assert.rejects(
+    protocol.supervisor.terminate(20),
+    /Timed out waiting for (?:terminal Job Object supervisor terminate acknowledgement|authenticated empty-job acknowledgement and supervisor exit)/,
+  );
+  assert.equal(protocol.supervisor.emptyAcknowledged, false);
+  protocol.response.exit();
 });
 
 test("close waits for empty acknowledgement and supervisor exit before registry removal", async () => {
@@ -475,6 +699,62 @@ test("close waits for empty acknowledgement and supervisor exit before registry 
     releaseTermination();
     await closing;
     assert.equal(host.sessions.has(session.id), false);
+  });
+});
+
+test("reservation is granted only after authenticated empty proof and exit", async () => {
+  const proven = terminationProtocol((request, response) => {
+    response.send({
+      event: "terminated",
+      requestId: request.requestId,
+      empty: true,
+    });
+    response.exit();
+  });
+  const unproven = terminationProtocol((_request, response) =>
+    response.exit(),
+  );
+  await Promise.all([
+    startProtocolSupervisor(proven),
+    startProtocolSupervisor(unproven),
+  ]);
+
+  await withTestHost({}, async (host) => {
+    host.cleanupTimeouts = { graceful: 0, forced: 100 };
+    const provenPath = resolve(".agents");
+    const unprovenPath = resolve("scripts");
+    const key = (path) =>
+      process.platform === "win32" ? path.toLowerCase() : path;
+    const provenSession = {
+      ...ownedSession("reservation-proven", 601, 602, proven.supervisor),
+      worktreePath: provenPath,
+      key: key(provenPath),
+    };
+    host.sessions.set(provenSession.id, provenSession);
+
+    const reservation = await host.reserveWorktree(provenPath);
+    assert.equal(host.sessions.has(provenSession.id), false);
+    assert.equal(host.reservations.size, 1);
+    await host.releaseReservation(reservation.id);
+
+    const unprovenSession = {
+      ...ownedSession(
+        "reservation-unproven",
+        701,
+        702,
+        unproven.supervisor,
+      ),
+      worktreePath: unprovenPath,
+      key: key(unprovenPath),
+    };
+    host.sessions.set(unprovenSession.id, unprovenSession);
+
+    await assert.rejects(
+      host.reserveWorktree(unprovenPath),
+      /without an authenticated empty-job acknowledgement/,
+    );
+    assert.equal(host.sessions.get(unprovenSession.id), unprovenSession);
+    assert.equal(host.reservations.size, 0);
   });
 });
 
@@ -534,19 +814,24 @@ test("closing one session never terminates another session job", async () => {
 });
 
 test("supervisor pipe loss rejects startup and closes the ownership boundary", async () => {
-  const { child, supervisor } = protocolSupervisor(() => {});
+  const { response, sessionId, supervisor } = protocolSupervisor(
+    () => {},
+  );
   const starting = supervisor.start({
+    sessionId,
     fileName: "ttyd.exe",
     argumentsList: [],
     workingDirectory: resolve(".agents"),
     environment: {},
     timeoutMs: 100,
   });
-  child.exitCode = 1;
-  child.emit("exit", 1, null);
+  response.exit(1);
 
   await assert.rejects(starting, /supervisor exited/);
-  await supervisor.terminate(100);
+  await assert.rejects(
+    supervisor.terminate(100),
+    /without an authenticated empty-job acknowledgement/,
+  );
   assert.equal(supervisor.exited, true);
 });
 

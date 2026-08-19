@@ -21,6 +21,7 @@ import { WebSocket, WebSocketServer } from "ws";
 
 export const hostProtocolVersion = 2;
 export const terminalOwnershipBoundary = "windows-job-v1";
+export const terminalJobProtocolGeneration = 1;
 export const defaultReplayBytes = 1024 * 1024;
 export const defaultDiagnosticBytes = 1024 * 1024;
 
@@ -597,15 +598,39 @@ export class TerminalJobSupervisor {
     this.child = child;
     this.token = token;
     this.requestTimeoutMs = requestTimeoutMs;
+    this.sessionId = null;
     this.pending = new Map();
+    this.terminateRequestIds = new Set();
     this.exited = child.exitCode !== null || child.signalCode != null;
     this.boundaryFailure = null;
+    this.protocolFailure = null;
+    this.channelFailure = null;
+    this.emptyAcknowledged = false;
+    this.emptyPromise = new Promise((resolveEmpty) => {
+      this.resolveEmpty = resolveEmpty;
+    });
     this.exitPromise = new Promise((resolveExit) => {
       this.resolveExit = resolveExit;
     });
+    this.outputClosed = !child.stdout;
+    this.outputClosedPromise = new Promise((resolveOutputClosed) => {
+      this.resolveOutputClosed = resolveOutputClosed;
+    });
+    if (this.outputClosed) this.resolveOutputClosed();
     child.stderr?.resume();
     this.lines = createInterface({ input: child.stdout });
     this.lines.on("line", (line) => this.handleLine(line));
+    this.lines.once("close", () => {
+      this.outputClosed = true;
+      this.resolveOutputClosed();
+      if (!this.exited) {
+        this.recordChannelFailure(
+          new Error("Terminal Job Object supervisor control output closed"),
+        );
+      }
+    });
+    child.stdin?.on("error", (error) => this.recordChannelFailure(error));
+    child.stdout?.on("error", (error) => this.recordChannelFailure(error));
     child.once("error", (error) => {
       this.exited = true;
       this.exitCode = null;
@@ -624,6 +649,14 @@ export class TerminalJobSupervisor {
         ),
       );
     });
+    if (this.exited) {
+      this.exitCode = child.exitCode;
+      this.exitSignal = child.signalCode;
+      this.resolveExit({
+        code: child.exitCode,
+        signal: child.signalCode,
+      });
+    }
   }
 
   handleLine(line) {
@@ -631,17 +664,45 @@ export class TerminalJobSupervisor {
     try {
       message = JSON.parse(line);
     } catch {
-      this.fail(
+      this.recordProtocolFailure(
         new Error("Terminal Job Object supervisor returned invalid JSON"),
       );
       return;
     }
 
-    if (message?.token !== this.token) {
-      this.fail(
+    if (
+      message?.token !== this.token ||
+      message?.sessionId !== this.sessionId ||
+      message?.protocolGeneration !== terminalJobProtocolGeneration
+    ) {
+      this.recordProtocolFailure(
         new Error("Terminal Job Object supervisor authentication changed"),
       );
       return;
+    }
+
+    if (message.event === "exited") {
+      if (
+        message.empty === true &&
+        Number.isInteger(message.rootExitCode)
+      ) {
+        this.acknowledgeEmpty("exited");
+      } else {
+        this.recordProtocolFailure(
+          new Error(
+            "Terminal Job Object supervisor returned an invalid empty-job exit acknowledgement",
+          ),
+        );
+      }
+      return;
+    }
+
+    if (
+      message.event === "terminated" &&
+      this.terminateRequestIds.has(message.requestId) &&
+      message.empty === true
+    ) {
+      this.acknowledgeEmpty("terminated");
     }
 
     if (message.event === "boundary-failed") {
@@ -653,7 +714,19 @@ export class TerminalJobSupervisor {
     }
 
     const pending = this.pending.get(message.requestId);
-    if (!pending) return;
+    if (!pending) {
+      if (
+        message.event !== "terminated" ||
+        !this.terminateRequestIds.has(message.requestId)
+      ) {
+        this.recordProtocolFailure(
+          new Error(
+            "Terminal Job Object supervisor returned an unsolicited protocol message",
+          ),
+        );
+      }
+      return;
+    }
     this.pending.delete(message.requestId);
     clearTimeout(pending.timeout);
 
@@ -673,6 +746,23 @@ export class TerminalJobSupervisor {
     }
   }
 
+  acknowledgeEmpty(source) {
+    if (this.emptyAcknowledged) return;
+    this.emptyAcknowledged = true;
+    this.emptyAcknowledgementSource = source;
+    this.resolveEmpty();
+  }
+
+  recordProtocolFailure(error) {
+    this.protocolFailure ??= error;
+    this.fail(error);
+  }
+
+  recordChannelFailure(error) {
+    this.channelFailure ??= error;
+    this.fail(error);
+  }
+
   fail(error) {
     const pending = [...this.pending.values()];
     this.pending.clear();
@@ -690,6 +780,7 @@ export class TerminalJobSupervisor {
     }
 
     const requestId = supervisorRequestId();
+    if (command === "terminate") this.terminateRequestIds.add(requestId);
     return new Promise((resolveRequest, rejectRequest) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
@@ -708,6 +799,8 @@ export class TerminalJobSupervisor {
       const body = JSON.stringify({
         command,
         token: this.token,
+        sessionId: this.sessionId,
+        protocolGeneration: terminalJobProtocolGeneration,
         requestId,
         ...payload,
       });
@@ -729,6 +822,17 @@ export class TerminalJobSupervisor {
   }
 
   async start(options) {
+    if (
+      typeof options.sessionId !== "string" ||
+      !/^[A-Za-z0-9_-]{16,128}$/.test(options.sessionId)
+    ) {
+      throw new Error("Terminal Job Object protocol session identity is invalid");
+    }
+    if (this.sessionId !== null && this.sessionId !== options.sessionId) {
+      throw new Error("Terminal Job Object protocol session identity changed");
+    }
+    this.sessionId = options.sessionId;
+
     const ready = await this.request(
       "start",
       {
@@ -772,33 +876,91 @@ export class TerminalJobSupervisor {
     return response.member;
   }
 
-  async terminate(timeoutMs) {
-    if (this.exited) return;
-
-    try {
-      const response = await this.request(
-        "terminate",
-        { timeoutMilliseconds: Math.max(1, Math.floor(timeoutMs)) },
-        timeoutMs,
-      );
-      if (response.event !== "terminated" || response.empty !== true) {
-        throw new Error(
-          "Terminal Job Object supervisor did not acknowledge an empty job",
-        );
-      }
-    } catch (error) {
-      if (this.exited) return;
-      throw error;
+  async waitForTerminationEvidence(deadline) {
+    while (!this.emptyAcknowledged || !this.exited) {
+      if (this.outputClosed && !this.emptyAcknowledged) break;
+      const evidence = [
+        deadline,
+        ...(!this.emptyAcknowledged
+          ? [this.emptyPromise.then(() => "empty")]
+          : []),
+        ...(!this.exited ? [this.exitPromise.then(() => "exit")] : []),
+        ...(!this.outputClosed
+          ? [this.outputClosedPromise.then(() => "output-closed")]
+          : []),
+      ];
+      if ((await Promise.race(evidence)) === "timeout") break;
     }
+  }
 
-    const exited = await Promise.race([
-      this.exitPromise.then(() => true),
-      delay(timeoutMs).then(() => false),
-    ]);
-    if (!exited && !this.exited) {
-      throw new Error(
+  terminationFailure(requestError) {
+    if (this.emptyAcknowledged && !this.exited) {
+      return new Error(
         "Timed out waiting for terminal Job Object supervisor to exit after empty acknowledgement",
       );
+    }
+    if (this.protocolFailure) return this.protocolFailure;
+    if (this.exited) {
+      return new Error(
+        `Terminal Job Object supervisor exited with code ${this.exitCode ?? "unknown"} without an authenticated empty-job acknowledgement`,
+      );
+    }
+    if (requestError) return requestError;
+    if (this.channelFailure) return this.channelFailure;
+    return new Error(
+      "Timed out waiting for authenticated empty-job acknowledgement and supervisor exit",
+    );
+  }
+
+  async terminateOnce(timeoutMs) {
+    const boundedTimeoutMs = Math.max(1, Math.floor(timeoutMs));
+    let deadlineTimer;
+    const deadline = new Promise((resolveDeadline) => {
+      deadlineTimer = setTimeout(
+        () => resolveDeadline("timeout"),
+        boundedTimeoutMs,
+      );
+    });
+    const requestOutcome = { error: null };
+
+    if (!this.exited) {
+      void this.request(
+        "terminate",
+        { timeoutMilliseconds: boundedTimeoutMs },
+        boundedTimeoutMs,
+      )
+        .then((response) => {
+          if (response.event !== "terminated" || response.empty !== true) {
+            throw new Error(
+              "Terminal Job Object supervisor did not acknowledge an empty job",
+            );
+          }
+        })
+        .catch((error) => {
+          requestOutcome.error = error;
+        });
+    }
+
+    try {
+      await this.waitForTerminationEvidence(deadline);
+    } finally {
+      clearTimeout(deadlineTimer);
+    }
+    if (this.emptyAcknowledged && this.exited) return;
+    await Promise.resolve();
+    throw this.terminationFailure(requestOutcome.error);
+  }
+
+  async terminate(timeoutMs) {
+    if (this.terminationAttempt) return this.terminationAttempt;
+    const attempt = this.terminateOnce(timeoutMs);
+    this.terminationAttempt = attempt;
+    try {
+      return await attempt;
+    } finally {
+      if (this.terminationAttempt === attempt) {
+        this.terminationAttempt = null;
+      }
     }
   }
 }
@@ -1775,6 +1937,7 @@ export class DurableTerminalHost {
       if (!session.closing) void this.interruptSession(session, error);
     };
     const ownership = await session.jobSupervisor.start({
+      sessionId: session.id,
       fileName: this.options.ttydPath,
       argumentsList: ttydArguments,
       workingDirectory: session.worktreePath,

@@ -8,7 +8,9 @@ $source = @'
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -32,6 +34,10 @@ public sealed class TerminalJobOwner : IDisposable
     private const uint FileShareWrite = 0x00000002;
     private const uint OpenExisting = 3;
     private const uint Infinite = 0xffffffff;
+    private const uint HandleFlagInherit = 0x00000001;
+    private const int StdInputHandle = -10;
+    private const int StdOutputHandle = -11;
+    private const int StdErrorHandle = -12;
     private static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
 
     private IntPtr jobHandle;
@@ -102,6 +108,7 @@ public sealed class TerminalJobOwner : IDisposable
                     new[] { fileName }
                         .Concat(arguments ?? Array.Empty<string>())
                         .Select(QuoteWindowsArgument)));
+            DisableControlHandleInheritance();
 
             if (!CreateProcessW(
                     fileName,
@@ -233,6 +240,7 @@ public sealed class TerminalJobOwner : IDisposable
 
     public static IDictionary<string, object> Policy()
     {
+        DisableControlHandleInheritance();
         var flags = JobObjectLimitKillOnJobClose;
         return new Dictionary<string, object>
         {
@@ -245,6 +253,11 @@ public sealed class TerminalJobOwner : IDisposable
             ["descendantsInheritMembership"] =
                 (flags & (JobObjectLimitBreakawayOk | JobObjectLimitSilentBreakawayOk)) == 0,
             ["quoteProbe"] = QuoteWindowsArgument("C:\\path with space\\"),
+            ["controlStandardHandlesNonInheritable"] =
+                ControlStandardHandles().All(handle => !HandleIsInheritable(handle)),
+            ["childInheritedHandleCount"] = 1,
+            ["childStandardHandles"] = "NUL",
+            ["failedLaunchHandleDelta"] = FailedLaunchHandleDelta(),
         };
     }
 
@@ -333,6 +346,74 @@ public sealed class TerminalJobOwner : IDisposable
         if (handle == InvalidHandleValue)
             throw Win32("CreateFileW(NUL)");
         return handle;
+    }
+
+    private static IntPtr[] ControlStandardHandles() =>
+        new[] { StdInputHandle, StdOutputHandle, StdErrorHandle }
+            .Select(GetRequiredStandardHandle)
+            .ToArray();
+
+    private static IntPtr GetRequiredStandardHandle(int standardHandle)
+    {
+        var handle = GetStdHandle(standardHandle);
+        if (handle == InvalidHandleValue)
+            throw Win32("GetStdHandle");
+        if (handle == IntPtr.Zero)
+            throw new InvalidOperationException(
+                "Supervisor control standard handle is unavailable");
+        return handle;
+    }
+
+    private static void DisableControlHandleInheritance()
+    {
+        foreach (var handle in ControlStandardHandles())
+        {
+            if (!SetHandleInformation(handle, HandleFlagInherit, 0))
+                throw Win32("SetHandleInformation");
+        }
+    }
+
+    private static bool HandleIsInheritable(IntPtr handle)
+    {
+        if (!GetHandleInformation(handle, out var flags))
+            throw Win32("GetHandleInformation");
+        return (flags & HandleFlagInherit) != 0;
+    }
+
+    private static int FailedLaunchHandleDelta()
+    {
+        ProbeFailedLaunch();
+        var before = CurrentProcessHandleCount();
+        ProbeFailedLaunch();
+        return checked((int)CurrentProcessHandleCount() - (int)before);
+    }
+
+    private static void ProbeFailedLaunch()
+    {
+        try
+        {
+            Start(
+                Path.Combine(
+                    Environment.CurrentDirectory,
+                    "treemon-missing-" + Guid.NewGuid().ToString("N") + ".exe"),
+                Array.Empty<string>(),
+                Environment.CurrentDirectory,
+                new Dictionary<string, string>());
+            throw new InvalidOperationException(
+                "Missing launch probe unexpectedly started");
+        }
+        catch (Win32Exception error) when (
+            error.NativeErrorCode == 2 ||
+            error.NativeErrorCode == 3)
+        {
+        }
+    }
+
+    private static uint CurrentProcessHandleCount()
+    {
+        if (!GetProcessHandleCount(GetCurrentProcess(), out var count))
+            throw Win32("GetProcessHandleCount");
+        return count;
     }
 
     private static void SetJobInformation(
@@ -553,6 +634,31 @@ public sealed class TerminalJobOwner : IDisposable
         IntPtr templateFile);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int standardHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetHandleInformation(
+        IntPtr handle,
+        uint mask,
+        uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetHandleInformation(
+        IntPtr handle,
+        out uint flags);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetProcessHandleCount(
+        IntPtr process,
+        out uint handleCount);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CloseHandle(IntPtr handle);
 }
@@ -585,6 +691,8 @@ function Bounded-Error([Exception]$Exception) {
 
 $owner = $null
 $token = $null
+$sessionId = $null
+$protocolGeneration = 1
 $startRequestId = $null
 
 try {
@@ -594,12 +702,18 @@ try {
     }
 
     $start = Read-Message $startLine
-    if ($start.command -ne "start" -or [string]::IsNullOrWhiteSpace($start.token)) {
+    $token = [string]$start.token
+    $sessionId = [string]$start.sessionId
+    $startRequestId = [string]$start.requestId
+    if (
+        $start.command -ne "start" -or
+        [string]::IsNullOrWhiteSpace($token) -or
+        [string]::IsNullOrWhiteSpace($sessionId) -or
+        $start.protocolGeneration -ne $protocolGeneration
+    ) {
         throw "First supervisor protocol message must be an authenticated start"
     }
 
-    $token = [string]$start.token
-    $startRequestId = [string]$start.requestId
     $arguments = @($start.arguments | ForEach-Object { [string]$_ })
     $environment = [Collections.Generic.Dictionary[string,string]]::new(
         [StringComparer]::OrdinalIgnoreCase
@@ -620,6 +734,8 @@ try {
     Write-Protocol ([ordered]@{
         event = "ready"
         token = $token
+        sessionId = $sessionId
+        protocolGeneration = $protocolGeneration
         requestId = [string]$start.requestId
         ttydPid = $owner.RootProcessId
         supervisorPid = $PID
@@ -645,6 +761,8 @@ try {
                 Write-Protocol ([ordered]@{
                     event = "exited"
                     token = $token
+                    sessionId = $sessionId
+                    protocolGeneration = $protocolGeneration
                     empty = $true
                     rootExitCode = $rootExitTask.GetAwaiter().GetResult()
                 })
@@ -654,6 +772,8 @@ try {
             Write-Protocol ([ordered]@{
                 event = "boundary-failed"
                 token = $token
+                sessionId = $sessionId
+                protocolGeneration = $protocolGeneration
                 error = "Timed out emptying the terminal Job Object after ttyd exited"
             })
             $rootExitTask = [Threading.Tasks.Task]::Delay(-1)
@@ -668,10 +788,16 @@ try {
 
         $message = Read-Message $line
         $requestId = [string]$message.requestId
-        if ([string]$message.token -cne $token) {
+        if (
+            [string]$message.token -cne $token -or
+            [string]$message.sessionId -cne $sessionId -or
+            $message.protocolGeneration -ne $protocolGeneration
+        ) {
             Write-Protocol ([ordered]@{
                 event = "request-failed"
                 token = $token
+                sessionId = $sessionId
+                protocolGeneration = $protocolGeneration
                 requestId = $requestId
                 error = "Supervisor control authentication failed"
             })
@@ -680,6 +806,8 @@ try {
             Write-Protocol ([ordered]@{
                 event = "contains"
                 token = $token
+                sessionId = $sessionId
+                protocolGeneration = $protocolGeneration
                 requestId = $requestId
                 processId = $processId
                 member = $owner.ContainsProcess($processId)
@@ -690,6 +818,8 @@ try {
                 Write-Protocol ([ordered]@{
                     event = "terminated"
                     token = $token
+                    sessionId = $sessionId
+                    protocolGeneration = $protocolGeneration
                     requestId = $requestId
                     empty = $true
                 })
@@ -699,6 +829,8 @@ try {
             Write-Protocol ([ordered]@{
                 event = "terminate-failed"
                 token = $token
+                sessionId = $sessionId
+                protocolGeneration = $protocolGeneration
                 requestId = $requestId
                 error = "Timed out waiting for the terminal Job Object to become empty"
             })
@@ -706,6 +838,8 @@ try {
             Write-Protocol ([ordered]@{
                 event = "request-failed"
                 token = $token
+                sessionId = $sessionId
+                protocolGeneration = $protocolGeneration
                 requestId = $requestId
                 error = "Unsupported supervisor command"
             })
@@ -719,6 +853,8 @@ try {
             Write-Protocol ([ordered]@{
                 event = "start-failed"
                 token = $token
+                sessionId = $sessionId
+                protocolGeneration = $protocolGeneration
                 requestId = $startRequestId
                 error = Bounded-Error $_.Exception
             })

@@ -119,22 +119,29 @@ attachment.
 ttyd runs with writable mode, Origin checking, and single-client/exit-on-disconnect behavior. The
 durable host is that sole client. ttyd is never started directly. The host first spawns the
 plainly-invoked `terminal-job-supervisor.ps1` over private stdin/stdout pipes with a random
-per-supervisor control token. The supervisor creates a Windows Job Object with
+per-supervisor control token; every message also carries the exact terminal session identity and
+supervisor-protocol generation. The supervisor creates a Windows Job Object with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and neither breakaway flag, creates ttyd with
-`CREATE_SUSPENDED`, assigns it to the job, and only then resumes its first thread. ttyd and every
+`CREATE_SUSPENDED`, assigns it to the job, and only then resumes its first thread. Before launch it
+removes inheritance from its stdin/stdout/stderr control-pipe handles; ttyd receives only an
+inheritable `NUL` handle for its three standard handles. No job member can consume supervisor
+commands, emit authenticated protocol output, or keep a control pipe open. ttyd and every
 PowerShell/Copilot descendant therefore inherit one kernel-enforced session boundary before any of
 their code can run.
 
 The host retains both the authenticated supervisor channel and its Node `ChildProcess` handle for
 the session lifetime. Shell PID discovery accepts the bootstrap metadata only after the supervisor
 confirms that PID is a member of the session job. Explicit close first disconnects the upstream,
-then asks the supervisor to terminate the job and waits for an empty-job acknowledgement plus
-supervisor exit before removing the registry entry. Timeout or failed acknowledgement leaves the
-session failed and retryable. Host exit or pipe loss makes the supervisor terminate the job; helper
-failure still closes its retained job handle, so kill-on-close prevents descendants escaping the
-owning host. Unsupported operating systems fail explicitly rather than falling back to descendant
-enumeration. Targeted PID/start-identity inspection remains only for host/verifier metadata and is
-not a terminal ownership or cleanup authority.
+then asks the supervisor to terminate the job. Registry removal requires both supervisor exit and
+an authenticated, session-bound, generation-matched `empty: true` proof, accepted from either the
+explicit termination response or the natural root-exit event. Exit alone is never cleanup proof;
+buffered final protocol lines are drained within the shared cleanup deadline. Timeout, pipe loss,
+malformed or unauthenticated output, or failed acknowledgement without a valid late proof leaves
+the session failed and retryable. Host exit or pipe loss makes the supervisor terminate the job;
+helper failure still closes its retained job handle, so kill-on-close prevents descendants escaping
+the owning host. Unsupported operating systems fail explicitly rather than falling back to
+descendant enumeration. Targeted PID/start-identity inspection remains only for host/verifier
+metadata and is not a terminal ownership or cleanup authority.
 
 Start, close, failed-session replacement, and reservation transitions are serialized by canonical
 worktree key. A close queued behind a live start waits for it and then closes the exact published
