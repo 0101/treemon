@@ -144,6 +144,42 @@ test("changed dependency identity is never treated as the observed host", () => 
   );
 });
 
+test("changed runtime lock owner is never treated as the observed host", async () => {
+  const lockedObservation = {
+    ...observation,
+    runtimeBundleVersion: 1,
+    extendedBundleHash: "1".repeat(64),
+    runtimeLockHelperHash: "2".repeat(64),
+    runtimeLockBoundary: "windows-file-share-read-v1",
+    runtimeLockOwnerPid: 4202,
+    runtimeLockOwnerProcessStartTicks: "200",
+  };
+  const lockedHost = {
+    ...hostState,
+    runtimeBundleVersion: 1,
+    extendedRuntime: {
+      bundleHash: lockedObservation.extendedBundleHash,
+      runtimeLockHelperHash: lockedObservation.runtimeLockHelperHash,
+      ttydExecutableHash: observation.ttydExecutableHash,
+      webSocketPackageHash: observation.webSocketPackageHash,
+    },
+    runtimeLockBoundary: lockedObservation.runtimeLockBoundary,
+    runtimeLockOwnerPid: 4203,
+    runtimeLockOwnerProcessStartTicks:
+      lockedObservation.runtimeLockOwnerProcessStartTicks,
+  };
+  const { calls, dependencies } = stoppingDependencies(originalIdentity);
+
+  const result = await stopObservedHost(
+    lockedObservation,
+    lockedHost,
+    dependencies,
+  );
+
+  assert.equal(result.ownershipChanged, true);
+  assert.deepEqual(calls, []);
+});
+
 test("reused PID is never sent shutdown or waited on", async () => {
   const reusedIdentity = {
     ...originalIdentity,

@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -11,6 +11,7 @@ import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import {
   defaultProcessController,
+  launchLockedRuntimeHost,
   materializeRuntimeBundle,
   sameProcessIdentity,
   terminateRetainedChild,
@@ -32,6 +33,7 @@ const secondMarker = `TREEMON_RECONNECT_B_${Date.now()}`;
 let host;
 let hostState;
 let hostIdentity;
+let lockedHost;
 let session;
 let browser;
 const processController = defaultProcessController();
@@ -41,6 +43,25 @@ const delay = (milliseconds) =>
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function assertRuntimeMutationRejected(path) {
+  const rejected = (action) => {
+    try {
+      action();
+      return false;
+    } catch (error) {
+      return ["EACCES", "EBUSY", "EPERM"].includes(error?.code);
+    }
+  };
+  assert(
+    rejected(() => appendFileSync(path, Buffer.alloc(0))),
+    `Runtime lock permitted writing '${path}'`,
+  );
+  assert(
+    rejected(() => rmSync(path)),
+    `Runtime lock permitted deleting '${path}'`,
+  );
 }
 
 function processIsAlive(pid) {
@@ -164,45 +185,36 @@ try {
   mkdirSync(worktree, { recursive: true });
   const bundle = materializeRuntimeBundle(stateDirectory);
 
-  host = spawn(
-    process.execPath,
-    [
-      join(bundle.bundleDirectory, "durable-terminal-host.mjs"),
-      "--state-dir",
-      stateDirectory,
-      "--ttyd",
-      join(bundle.bundleDirectory, "ttyd.exe"),
-      "--shell",
-      "pwsh",
-      "--runtime-bundle-dir",
-      bundle.bundleDirectory,
-      "--runtime-bundle-hash",
-      bundle.bundleHash,
-      "--runtime-bundle-version",
-      String(bundle.runtimeBundleVersion),
-      "--host-script-hash",
-      bundle.hostScriptHash,
-      "--supervisor-script-hash",
-      bundle.supervisorScriptHash,
-      "--process-helper-hash",
-      bundle.processIdentityHelperHash,
-      "--ttyd-hash",
-      bundle.ttydExecutableHash,
-      "--ws-package-hash",
-      bundle.webSocketPackageHash,
-    ],
-    {
-      windowsHide: true,
-      stdio: "ignore",
-    },
-  );
+  lockedHost = await launchLockedRuntimeHost(bundle, {
+    stateDirectory,
+  });
+  host = lockedHost.lockOwner;
 
   hostState = await waitFor("durable host state", () => {
     if (!existsSync(statePath)) return null;
     return JSON.parse(readFileSync(statePath, "utf8"));
   });
-  assert(hostState.pid === host.pid, "Host state did not identify the spawned host");
-  hostIdentity = await processController.inspect(host.pid);
+  assert(
+    hostState.pid === lockedHost.hostPid,
+    "Host state did not identify the spawned host",
+  );
+  assert(
+    hostState.runtimeLockOwnerPid === lockedHost.runtimeLockOwnerPid,
+    "Host state did not identify the runtime lock owner",
+  );
+  [
+    "durable-terminal-host.mjs",
+    "terminal-job-supervisor.ps1",
+    "terminate-owned-process.ps1",
+    "terminal-runtime-lock.ps1",
+    "ttyd.exe",
+    join("node_modules", "ws", "wrapper.mjs"),
+  ].forEach((relativePath) =>
+    assertRuntimeMutationRejected(
+      join(bundle.bundleDirectory, relativePath),
+    ),
+  );
+  hostIdentity = await processController.inspect(lockedHost.hostPid);
   assert(hostIdentity, "Could not capture the spawned host process identity");
   assert(hostState.controlPort !== 5000, "Host selected production port 5000");
 

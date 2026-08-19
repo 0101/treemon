@@ -22,12 +22,14 @@ still a release gate.
 The current implementation is deliberately checkout-scoped:
 
 - the source runtime entry point is `scripts/durable-terminal-host.mjs`; server builds/publishes copy
-  it, `terminal-job-supervisor.ps1`, `terminate-owned-process.ps1`, the exact locked `ws` runtime,
-  and checksum-pinned ttyd, then atomically materializes every verified file into checkout-local
-  `.agents/durable-terminal/terminal-runtime-bundles/<bundle-hash>/`. A running protocol-3 host
-  launches from that bundle, resolves `ws` bundle-relatively, and revalidates its pinned helper and
-  ttyd before every spawn, but the bundle is not yet a machine-global installed terminal-host
-  artifact;
+  it, `terminal-runtime-lock.ps1`, `terminal-job-supervisor.ps1`,
+  `terminate-owned-process.ps1`, the exact locked `ws` runtime, and checksum-pinned ttyd. Staging is
+  exact-owner identified and promoted only after complete verification into checkout-local
+  `.agents/durable-terminal/terminal-runtime-bundles/<extended-bundle-hash>/`. Treemon hands
+  `FileShare.Read` locks to a separately lived owner without a gap; that owner launches Node and
+  retains write/delete exclusion over every bundle file. A running protocol-3 host resolves `ws`
+  bundle-relatively and spawns only its locked supervisor/helper/ttyd, but the bundle is not yet a
+  machine-global installed terminal-host artifact;
 - candidate files still resolve from the output/publish copy or source checkout. They are copied
   into the immutable bundle and are never runtime fallbacks, but the staged runtime is not
   independently installable;
@@ -39,9 +41,10 @@ The current implementation is deliberately checkout-scoped:
 - the shared UI lifecycle is `Starting | Running | Failed | Interrupted`, with interrupted tabs
   retained and independently dismissible/restartable across host replacement;
 - checkout-local startup is serialized by a state-directory lock and each live host manifest has a
-  unique runtime generation, exact PID/start identity, bundle/component hashes, supervisor protocol
-  generation, capabilities, and ttyd/`ws` hashes, but discovery is still confined to one checkout
-  rather than a machine-global artifact generation;
+  unique runtime generation, exact host and lock-owner PID/start identities, a previous-server
+  compatibility bundle view, additive extended dependency hashes, supervisor protocol generation,
+  and capabilities, but discovery is still confined to one checkout rather than a machine-global
+  artifact generation;
 - every session starts ttyd suspended under a retained Windows Job Object supervisor with
   kill-on-close/no-breakaway policy; explicit close retains a failed session until the supervisor
   exits and supplies an authenticated session-bound empty-job proof. `STARTUPINFOEX` whitelists only
@@ -55,8 +58,10 @@ The current implementation is deliberately checkout-scoped:
   terminal trusted state, durable witness, and exact exit identity, then compacted by an
   exact-owner claim that commits record deletion before best-effort witness cleanup. Stale current
   claims and bounded legacy host/manager claims recover without stealing a live compactor.
-  Referenced runtime bundles remain immutable and excess unreferenced bundles use recursive
-  compare-before-delete discipline. The checkout-local
+  Referenced runtime bundles remain immutable. Excess unreferenced bundles are atomically renamed
+  to exact-owner, phase-leased deletion tombstones that are never restored; unlocked tombstones and
+  staging directories are stale even if the former owner process remains alive, and are safely
+  removed. The checkout-local
   store refuses a 65th unresolved generation rather than discarding evidence; dead protocol-1 and
   pre-bundle protocol-2 migration records fail strict cleanup closed until the operator
   authoritatively drains their terminals (or restarts the machine) and manually removes those
@@ -202,15 +207,17 @@ backpressure, and heartbeat age—never terminal content.
 
 Promote the existing checkout-local content-addressed bundle into a cohesive
 `src/TerminalHost/` component with its own minimal package manifest. The current bundle already
-contains the exact root-lockfile `ws` runtime, optional-native guards, checksum-pinned ttyd, and
-their licenses; productization moves that closed set into an independently installable
+contains the exact root-lockfile `ws` runtime, optional-native guards, checksum-pinned ttyd, the
+runtime-lock owner, and their licenses. Its stable protocol-3 compatibility fields remain readable
+by the immediately previous server while the additive extended identity and long-lived file locks
+bind the bytes that execute. Productization moves that closed set into an independently installable
 machine-global artifact rather than changing its integrity model. Keep Node plus `ws`; the proxy
 has already proved the lifecycle contract, so replacing it with a custom PTY host is not a
 productization task. Add and license headless xterm and serialization only when bounded snapshots
 are implemented.
 
-Deployment installs the same closed host/supervisor/helper/ttyd/`ws` manifest the checkout-local
-manager already verifies into the machine-global immutable artifact store at
+Deployment installs the same closed host/lock-owner/supervisor/helper/ttyd/`ws` manifest the
+checkout-local manager already verifies into the machine-global immutable artifact store at
 `terminal-host/artifacts/<generation>`, with a generation manifest. `treemon.ps1` verifies that
 artifact before replacing the web server. The current host keeps its files until its sessions
 drain; deployment never mutates or removes an active generation directory.
@@ -281,6 +288,12 @@ failure is durably quarantined before later output and cannot be repaired. Host/
 cleanup, and supervisor failure closes the job handle. Productization must package the generation
 record, witness store, bounded compaction, and launch boundary with the immutable host artifact
 rather than reverting to descendant enumeration or PID termination.
+
+The host prepares ports, public listener, generation/session metadata, witness paths, pinned ttyd
+path, and the complete authenticated payload before spawning that supervisor. Spawn and start are
+one transition; an authenticated `startup-failed` message is also valid as the first message so a
+post-spawn transport failure can prove the untouched boundary empty. This ordering and the
+long-lived runtime file locks are part of the ownership boundary and move with the artifact.
 
 Track host, supervisor, ttyd, and PowerShell identity from owned startup metadata for diagnostics,
 but never discover or kill by process name and never use PID ancestry as cleanup proof. Add

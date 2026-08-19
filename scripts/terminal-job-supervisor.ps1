@@ -1284,7 +1284,7 @@ try {
     $witnessPath = [string]$start.witness.path
     $witnessNonce = [string]$start.witness.nonce
     if (
-        $start.command -ne "start" -or
+        @("start", "startup-failed") -cnotcontains [string]$start.command -or
         [string]::IsNullOrWhiteSpace($token) -or
         [string]::IsNullOrWhiteSpace($sessionId) -or
         $start.protocolGeneration -ne $protocolGeneration -or
@@ -1296,10 +1296,28 @@ try {
         -not [IO.Path]::IsPathFullyQualified($witnessPath) -or
         $witnessNonce -notmatch '^[A-Za-z0-9_-]{24,128}$'
     ) {
-        throw "First supervisor protocol message must be an authenticated start"
+        throw "First supervisor protocol message must initialize an authenticated session"
     }
     $witnessPath =
         Assert-ContainedWitnessPath $witnessRoot $witnessPath $sessionId
+
+    if ($start.command -eq "startup-failed") {
+        Publish-EmptyWitness
+        Write-Protocol ([ordered]@{
+            event = "startup-failure-empty"
+            token = $token
+            sessionId = $sessionId
+            protocolGeneration = $protocolGeneration
+            requestId = $startRequestId
+            empty = $true
+            supervisorPid = $PID
+            supervisorStartTimeUtcTicks = $supervisorStartTimeUtcTicks
+            error = Bounded-Error ([Exception]::new(
+                [string]$start.error
+            ))
+        })
+        exit 0
+    }
 
     $arguments = @($start.arguments | ForEach-Object { [string]$_ })
     $environment = [Collections.Generic.Dictionary[string,string]]::new(

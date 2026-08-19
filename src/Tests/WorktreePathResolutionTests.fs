@@ -92,6 +92,16 @@ let private createApi agent roots =
                         "terminate-owned-process.ps1"
                     )
                 )
+              RuntimeLockHelperPath =
+                Path.GetFullPath(
+                    Path.Combine(
+                        __SOURCE_DIRECTORY__,
+                        "..",
+                        "..",
+                        "scripts",
+                        "terminal-runtime-lock.ps1"
+                    )
+                )
               WebSocketPackagePath =
                 Path.GetFullPath(
                     Path.Combine(
@@ -449,6 +459,7 @@ type ArchiveWorktreeResolutionTests() =
         if Directory.Exists(tempDirB) then Directory.Delete(tempDirB, recursive = true)
 
     [<Test>]
+    [<Platform("Win")>]
     member _.``archiveWorktree with WorktreePath archives correct repo branch when duplicated``() =
         task {
             let agent = SchedulerState.createAgent ()
@@ -484,6 +495,7 @@ type ArchiveWorktreeResolutionTests() =
         }
 
     [<Test>]
+    [<Platform("Win")>]
     member _.``archiveWorktree for repoB does not affect repoA``() =
         task {
             let agent = SchedulerState.createAgent ()
@@ -581,6 +593,7 @@ type ArchiveWorktreeResolutionTests() =
         }
 
     [<Test>]
+    [<Platform("Win")>]
     member _.``archiveWorktree removes its embedded terminal before archiving``() =
         task {
             let agent = SchedulerState.createAgent ()
@@ -640,6 +653,16 @@ type ArchiveWorktreeResolutionTests() =
                                 "..",
                                 "scripts",
                                 "terminate-owned-process.ps1"
+                            )
+                        )
+                      RuntimeLockHelperPath =
+                        Path.GetFullPath(
+                            Path.Combine(
+                                __SOURCE_DIRECTORY__,
+                                "..",
+                                "..",
+                                "scripts",
+                                "terminal-runtime-lock.ps1"
                             )
                         )
                       WebSocketPackagePath =

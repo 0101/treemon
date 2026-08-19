@@ -169,11 +169,16 @@ const stateDirectory = resolve(args[args.indexOf("--state-dir") + 1]);
 const generation = args[args.indexOf("--generation") + 1];
 const bundleHash = args[args.indexOf("--runtime-bundle-hash") + 1];
 const runtimeBundleVersion = Number(args[args.indexOf("--runtime-bundle-version") + 1]);
+const extendedRuntimeBundleVersion = Number(args[args.indexOf("--extended-runtime-bundle-version") + 1]);
+const extendedBundleHash = args[args.indexOf("--extended-runtime-bundle-hash") + 1];
 const hostScriptHash = args[args.indexOf("--host-script-hash") + 1];
 const supervisorScriptHash = args[args.indexOf("--supervisor-script-hash") + 1];
 const processIdentityHelperHash = args[args.indexOf("--process-helper-hash") + 1];
+const runtimeLockHelperHash = args[args.indexOf("--runtime-lock-helper-hash") + 1];
 const ttydExecutableHash = args[args.indexOf("--ttyd-hash") + 1];
 const webSocketPackageHash = args[args.indexOf("--ws-package-hash") + 1];
+const runtimeLockOwnerPid = Number(args[args.indexOf("--runtime-lock-owner-pid") + 1]);
+const runtimeLockOwnerProcessStartTicks = args[args.indexOf("--runtime-lock-owner-start-ticks") + 1];
 const statePath = join(stateDirectory, "host.json");
 const lockPath = join(stateDirectory, "host.lock");
 const eventPath = join(stateDirectory, "events.json");
@@ -213,11 +218,36 @@ const ownershipBoundary = () =>
 
 const manifestVersion = behavior().protocolVersion ?? 3;
 const runtimeCapabilities = [
-  "immutable-executable-dependencies-v1",
   "immutable-runtime-bundle-v1",
   "strict-evidence-paths-v1",
   "trusted-empty-supervisor-v1",
 ];
+const extendedRuntimeCapabilities = [
+  "immutable-executable-dependencies-v1",
+  "immutable-runtime-bundle-v1",
+  "locked-runtime-files-v1",
+  "strict-evidence-paths-v1",
+  "trusted-empty-supervisor-v1",
+];
+
+const runtimeIdentity = {
+  runtimeBundleVersion,
+  bundleHash,
+  hostScriptHash,
+  supervisorScriptHash,
+  processIdentityHelperHash,
+  extendedRuntime: {
+    version: extendedRuntimeBundleVersion,
+    bundleHash: extendedBundleHash,
+    runtimeLockHelperHash,
+    ttydExecutableHash,
+    webSocketPackageHash,
+    capabilities: extendedRuntimeCapabilities,
+  },
+  runtimeLockBoundary: "windows-file-share-read-v1",
+  runtimeLockOwnerPid,
+  runtimeLockOwnerProcessStartTicks,
+};
 
 function appendSession(worktreePath) {
   const key = process.platform === "win32" ? worktreePath.toLowerCase() : worktreePath;
@@ -270,13 +300,7 @@ function writeGeneration() {
     ownershipBoundary: "windows-job-v1",
     ...(manifestVersion === 3
       ? {
-          runtimeBundleVersion,
-          bundleHash,
-          hostScriptHash,
-          supervisorScriptHash,
-          processIdentityHelperHash,
-          ttydExecutableHash,
-          webSocketPackageHash,
+          ...runtimeIdentity,
           supervisorProtocolGeneration: 2,
           capabilities: runtimeCapabilities,
         }
@@ -371,13 +395,7 @@ const server = createServer(async (request, response) => {
             ...ownershipBoundary(),
             ...(manifestVersion === 3
               ? {
-                  runtimeBundleVersion,
-                  bundleHash,
-                  hostScriptHash,
-                  supervisorScriptHash,
-                  processIdentityHelperHash,
-                  ttydExecutableHash,
-                  webSocketPackageHash,
+                  ...runtimeIdentity,
                   supervisorProtocolGeneration: 2,
                   capabilities: runtimeCapabilities,
                 }
@@ -519,6 +537,11 @@ const server = createServer(async (request, response) => {
   }
 });
 
+process.stdin.resume();
+process.stdin.once("end", () => {
+  server.close(() => process.exit(12));
+});
+
 mkdirSync(stateDirectory, { recursive: true });
 server.listen(0, "127.0.0.1", async () => {
   const { port } = server.address();
@@ -551,13 +574,7 @@ server.listen(0, "127.0.0.1", async () => {
           ...ownershipBoundary(),
           ...(manifestVersion === 3
             ? {
-                runtimeBundleVersion,
-                bundleHash,
-                hostScriptHash,
-                supervisorScriptHash,
-                processIdentityHelperHash,
-                ttydExecutableHash,
-                webSocketPackageHash,
+                ...runtimeIdentity,
                 supervisorProtocolGeneration: 2,
                 capabilities: runtimeCapabilities,
               }
@@ -585,6 +602,13 @@ let private config stateDirectory hostScript ttydPath : EmbeddedTerminal.Config 
             Path.Combine(
                 "scripts",
                 "terminate-owned-process.ps1"
+            )
+        )
+      RuntimeLockHelperPath =
+        Path.GetFullPath(
+            Path.Combine(
+                "scripts",
+                "terminal-runtime-lock.ps1"
             )
         )
       WebSocketPackagePath =
@@ -767,14 +791,26 @@ let private writeGenerationRecord
                     bundle.Identity.SupervisorScriptHash
                    processIdentityHelperHash =
                     bundle.Identity.ProcessIdentityHelperHash
-                   ttydExecutableHash =
-                    bundle.Identity.TtydExecutableHash.Value
-                   webSocketPackageHash =
-                    bundle.Identity.WebSocketPackageHash.Value
+                   extendedRuntime =
+                    {| version =
+                        bundle.Identity.ExtendedVersion.Value
+                       bundleHash =
+                        bundle.Identity.ExtendedBundleHash.Value
+                       runtimeLockHelperHash =
+                        bundle.Identity.RuntimeLockHelperHash.Value
+                       ttydExecutableHash =
+                        bundle.Identity.TtydExecutableHash.Value
+                       webSocketPackageHash =
+                        bundle.Identity.WebSocketPackageHash.Value
+                       capabilities =
+                        [| "immutable-executable-dependencies-v1"
+                           "immutable-runtime-bundle-v1"
+                           "locked-runtime-files-v1"
+                           "strict-evidence-paths-v1"
+                           "trusted-empty-supervisor-v1" |] |}
                    supervisorProtocolGeneration = 2
                    capabilities =
-                    [| "immutable-executable-dependencies-v1"
-                       "immutable-runtime-bundle-v1"
+                    [| "immutable-runtime-bundle-v1"
                        "strict-evidence-paths-v1"
                        "trusted-empty-supervisor-v1" |]
                    startedAt =
@@ -917,6 +953,7 @@ let private withFakeHost test =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+[<Platform("Win")>]
 [<NonParallelizable>]
 type EmbeddedTerminalTests() =
 
@@ -2256,7 +2293,197 @@ type EmbeddedTerminalTests() =
             ))
 
     [<Test>]
-    member _.``abandoned runtime bundle compaction claim is recovered immutably``() =
+    [<Platform("Win")>]
+    member _.``runtime launch locks reject mutation before spawn and throughout host life``() =
+        let runtimeFiles bundleDirectory =
+            [ "bundle.json"
+              "durable-terminal-host.mjs"
+              "terminal-job-supervisor.ps1"
+              "terminate-owned-process.ps1"
+              "terminal-runtime-lock.ps1"
+              "ttyd.exe"
+              "node_modules/ws/wrapper.mjs" ]
+            |> List.map (fun relativePath ->
+                relativePath.Split('/')
+                |> Array.fold (fun parent child ->
+                    Path.Combine(parent, child)) bundleDirectory)
+
+        let assertLocked path =
+            Assert.Throws<IOException>(fun () ->
+                use _ =
+                    new FileStream(
+                        path,
+                        FileMode.Open,
+                        FileAccess.Write,
+                        FileShare.Read
+                    )
+
+                ())
+            |> ignore
+
+            Assert.Throws<IOException>(fun () ->
+                File.Delete path)
+            |> ignore
+
+        let assertReleased path =
+            use _ =
+                new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.ReadWrite,
+                    FileShare.None
+                )
+
+            ()
+
+        withFakeHost (fun tempDir _ hostConfig manager ->
+            let bundle =
+                match
+                    EmbeddedTerminal.materializeRuntimeBundle
+                        hostConfig
+                with
+                | Ok value -> value
+                | Error error ->
+                    Assert.Fail(error)
+                    Unchecked.defaultof<_>
+
+            let launchLocks =
+                match
+                    EmbeddedTerminal.openRuntimeBundleLaunchLocks
+                        bundle
+                with
+                | Ok value -> value
+                | Error error ->
+                    Assert.Fail(error)
+                    []
+
+            try
+                runtimeFiles bundle.Directory
+                |> List.iter assertLocked
+            finally
+                launchLocks |> List.iter _.Dispose()
+
+            runtimeFiles bundle.Directory
+            |> List.iter assertReleased
+
+            let worktreePath =
+                Path.Combine(tempDir, "lock lifetime worktree")
+            let worktree = canonical worktreePath
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            Assert.That(
+                start manager worktree
+                |> endpointFor worktree
+                |> String.IsNullOrWhiteSpace,
+                Is.False
+            )
+
+            runtimeFiles bundle.Directory
+            |> List.iter assertLocked
+
+            match EmbeddedTerminal.shutdownHost manager |> run with
+            | Error error -> Assert.Fail(error)
+            | Ok () -> ()
+
+            waitUntil
+                "runtime lock handles to close"
+                (fun () ->
+                    try
+                        runtimeFiles bundle.Directory
+                        |> List.iter assertReleased
+
+                        true
+                    with :? IOException ->
+                        false))
+
+    [<Test>]
+    [<Platform("Win")>]
+    member _.``runtime lock owner crash makes the host unusable and releases every bundle handle``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "lock-owner-crash")
+            let worktree = canonical worktreePath
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            start manager worktree |> ignore
+
+            use manifest =
+                Path.Combine(stateDirectory, "host.json")
+                |> File.ReadAllText
+                |> JsonDocument.Parse
+
+            let root = manifest.RootElement
+            let hostPid = root.GetProperty("pid").GetInt32()
+            let lockOwnerPid =
+                root.GetProperty("runtimeLockOwnerPid").GetInt32()
+            let lockOwnerStartTicks =
+                root
+                    .GetProperty(
+                        "runtimeLockOwnerProcessStartTicks"
+                    )
+                    .GetString()
+                |> Int64.Parse
+
+            let bundleDirectory =
+                Path.Combine(
+                    stateDirectory,
+                    "terminal-runtime-bundles",
+                    root
+                        .GetProperty("extendedRuntime")
+                        .GetProperty("bundleHash")
+                        .GetString()
+                )
+            let hostPath =
+                Path.Combine(
+                    bundleDirectory,
+                    "durable-terminal-host.mjs"
+                )
+
+            use owner = Process.GetProcessById lockOwnerPid
+
+            Assert.That(
+                owner.StartTime.ToUniversalTime().Ticks,
+                Is.EqualTo lockOwnerStartTicks
+            )
+
+            owner.Kill true
+            Assert.That(owner.WaitForExit 5000, Is.True)
+
+            waitUntil
+                "host exit after runtime lock loss"
+                (fun () -> not (processIsAlive hostPid))
+
+            waitUntil
+                "bundle handles to release after lock-owner crash"
+                (fun () ->
+                    try
+                        use _ =
+                            new FileStream(
+                                hostPath,
+                                FileMode.Open,
+                                FileAccess.ReadWrite,
+                                FileShare.None
+                            )
+
+                        true
+                    with :? IOException ->
+                        false)
+
+            let interrupted =
+                EmbeddedTerminal.get manager |> run
+
+            Assert.That(
+                interruptedErrorFor worktree interrupted,
+                Does.Contain("unavailable")
+                    .IgnoreCase
+            ))
+
+    [<Test>]
+    member _.``abandoned runtime bundle deletion claim is discarded and rematerialized``() =
         withFakeHost (fun _ _ hostConfig _ ->
             let original =
                 match
@@ -2269,7 +2496,7 @@ type EmbeddedTerminalTests() =
                     Unchecked.defaultof<_>
 
             let claim =
-                $"{original.Directory}.{Environment.ProcessId}.{Guid.NewGuid():N}.reclaim"
+                $"{original.Directory}.2147483000.{Guid.NewGuid():N}.reclaim"
 
             Directory.Move(original.Directory, claim)
 
@@ -4949,6 +5176,11 @@ type EmbeddedTerminalTests() =
                 manifest.RootElement
                     .GetProperty("bundleHash")
                     .GetString()
+            let extendedBundleHash =
+                manifest.RootElement
+                    .GetProperty("extendedRuntime")
+                    .GetProperty("bundleHash")
+                    .GetString()
 
             File.Delete(
                 generationRecordPath
@@ -4991,11 +5223,18 @@ type EmbeddedTerminalTests() =
                     Is.EqualTo bundleHash
                 )
                 Assert.That(
+                    retained.RootElement
+                        .GetProperty("extendedRuntime")
+                        .GetProperty("bundleHash")
+                        .GetString(),
+                    Is.EqualTo extendedBundleHash
+                )
+                Assert.That(
                     Directory.Exists(
                         Path.Combine(
                             stateDirectory,
                             "terminal-runtime-bundles",
-                            bundleHash
+                            extendedBundleHash
                         )
                     ),
                     Is.True
@@ -5111,3 +5350,755 @@ type EmbeddedTerminalTests() =
                     tryFindTab paths[1] afterOther,
                     Is.EqualTo(None)
                 )))
+
+[<Category("Unit")>]
+[<Category("Fast")>]
+type EmbeddedTerminalPortableRuntimeTests() =
+    let materialize hostConfig =
+        match EmbeddedTerminal.materializeRuntimeBundle hostConfig with
+        | Ok bundle -> bundle
+        | Error error ->
+            Assert.Fail(error)
+            Unchecked.defaultof<_>
+
+    [<Test>]
+    member _.``protocol-three manifest keeps the previous compatibility view and additive locked identity``() =
+        withFakeHost (fun _ _ hostConfig _ ->
+            let bundle = materialize hostConfig
+
+            use manifest =
+                Path.Combine(bundle.Directory, "bundle.json")
+                |> File.ReadAllText
+                |> JsonDocument.Parse
+
+            let root = manifest.RootElement
+            let compatibilityFiles =
+                root.GetProperty("files").EnumerateArray()
+                |> Seq.map (fun file ->
+                    file.GetProperty("name").GetString())
+                |> Seq.toList
+            let compatibilityCapabilities =
+                root
+                    .GetProperty("capabilities")
+                    .EnumerateArray()
+                |> Seq.map _.GetString()
+                |> Set.ofSeq
+            let extended =
+                root.GetProperty("extendedRuntime")
+            let extendedFiles =
+                extended.GetProperty("files").EnumerateArray()
+                |> Seq.map (fun file ->
+                    file.GetProperty("name").GetString())
+                |> Set.ofSeq
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    root
+                        .GetProperty("runtimeBundleVersion")
+                        .GetInt32(),
+                    Is.EqualTo 1
+                )
+                Assert.That(
+                    compatibilityCapabilities,
+                    Is.EqualTo(
+                        set
+                            [ "immutable-runtime-bundle-v1"
+                              "strict-evidence-paths-v1"
+                              "trusted-empty-supervisor-v1" ]
+                    )
+                )
+                Assert.That(
+                    compatibilityFiles,
+                    Is.EqualTo(
+                        [ "durable-terminal-host.mjs"
+                          "terminal-job-supervisor.ps1"
+                          "terminate-owned-process.ps1" ]
+                    )
+                )
+                Assert.That(
+                    extended.GetProperty("version").GetInt32(),
+                    Is.EqualTo 3
+                )
+                Assert.That(
+                    extendedFiles,
+                    Does.Contain("terminal-runtime-lock.ps1")
+                )
+                Assert.That(
+                    extendedFiles,
+                    Does.Contain("ttyd.exe")
+                )
+                Assert.That(
+                    extendedFiles,
+                    Does.Contain(
+                        "node_modules/ws/wrapper.mjs"
+                    )
+                )))
+
+    [<Test>]
+    member _.``materialization rename faults recover without trusting staging``() =
+        [ EmbeddedTerminal.RuntimeBundleStage.BeforeCanonicalRename
+          EmbeddedTerminal.RuntimeBundleStage.AfterCanonicalRename ]
+        |> List.iter (fun stage ->
+            withFakeHost (fun _ stateDirectory hostConfig _ ->
+                let failed =
+                    EmbeddedTerminal.materializeRuntimeBundleWithFault
+                        hostConfig
+                        (fun current ->
+                            if current = stage then
+                                raise (
+                                    IOException(
+                                        $"Injected {stage}"
+                                    )
+                                ))
+
+                match failed with
+                | Ok _ ->
+                    Assert.Fail(
+                        $"Injected materialization fault {stage} was ignored"
+                    )
+                | Error _ -> ()
+
+                let recovered = materialize hostConfig
+                let artifacts =
+                    Directory.GetDirectories(
+                        Path.Combine(
+                            stateDirectory,
+                            "terminal-runtime-bundles"
+                        ),
+                        "*",
+                        SearchOption.TopDirectoryOnly
+                    )
+                    |> Array.filter (fun path ->
+                        path.EndsWith(
+                            ".pending",
+                            StringComparison.Ordinal
+                        )
+                        || path.EndsWith(
+                            ".tombstone",
+                            StringComparison.Ordinal
+                        ))
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        Directory.Exists recovered.Directory,
+                        Is.True
+                    )
+                    Assert.That(artifacts, Is.Empty))))
+
+    [<Test>]
+    [<Platform("Win")>]
+    member _.``active materializers and deletions coexist while stale partial artifacts are discarded``() =
+        withFakeHost (fun _ stateDirectory hostConfig _ ->
+            let original = materialize hostConfig
+            let root = Path.GetDirectoryName original.Directory
+            let hash = Path.GetFileName original.Directory
+            let ownerStartTicks =
+                Process
+                    .GetCurrentProcess()
+                    .StartTime
+                    .ToUniversalTime()
+                    .Ticks
+            let activeTombstone =
+                Path.Combine(
+                    root,
+                    $"{hash}.delete.{Environment.ProcessId}.{ownerStartTicks}.{Guid.NewGuid():N}.tombstone"
+                )
+            let activePending =
+                Path.Combine(
+                    root,
+                    $"{hash}.stage.{Environment.ProcessId}.{ownerStartTicks}.{Guid.NewGuid():N}.pending"
+                )
+            let activeTombstoneLease =
+                new FileStream(
+                    $"{activeTombstone}.lease",
+                    FileMode.CreateNew,
+                    FileAccess.ReadWrite,
+                    FileShare.None
+                )
+            let activePendingLease =
+                new FileStream(
+                    $"{activePending}.lease",
+                    FileMode.CreateNew,
+                    FileAccess.ReadWrite,
+                    FileShare.None
+                )
+
+            Directory.Move(
+                original.Directory,
+                activeTombstone
+            )
+            Directory.CreateDirectory activePending
+            |> ignore
+            File.WriteAllText(
+                Path.Combine(activePending, "partial"),
+                "not a bundle"
+            )
+
+            let rematerialized = materialize hostConfig
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    Directory.Exists rematerialized.Directory,
+                    Is.True
+                )
+                Assert.That(
+                    Directory.Exists activeTombstone,
+                    Is.True
+                )
+                Assert.That(
+                    Directory.Exists activePending,
+                    Is.True
+                ))
+
+            activeTombstoneLease.Dispose()
+            activePendingLease.Dispose()
+            File.Delete $"{activeTombstone}.lease"
+            File.Delete $"{activePending}.lease"
+
+            File.Delete(
+                Path.Combine(
+                    activeTombstone,
+                    "node_modules",
+                    "ws",
+                    "wrapper.mjs"
+                )
+            )
+
+            let staleName phase suffix =
+                Path.Combine(
+                    root,
+                    $"{hash}.{phase}.2147483000.1.{Guid.NewGuid():N}.{suffix}"
+                )
+
+            let staleTombstone =
+                staleName
+                    "delete"
+                    "tombstone"
+            let stalePending =
+                staleName
+                    "stage"
+                    "pending"
+
+            Directory.Move(activeTombstone, staleTombstone)
+            Directory.Move(activePending, stalePending)
+            materialize hostConfig |> ignore
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    Directory.Exists staleTombstone,
+                    Is.False
+                )
+                Assert.That(
+                    Directory.Exists stalePending,
+                    Is.False
+                )
+                Assert.That(
+                    Directory.Exists rematerialized.Directory,
+                    Is.True
+                )))
+
+    [<Test>]
+    member _.``parallel materializers converge on one verified canonical bundle``() =
+        withFakeHost (fun _ stateDirectory hostConfig _ ->
+            let tasks =
+                [| 1..2 |]
+                |> Array.map (fun _ ->
+                    Task.Run(fun () ->
+                        EmbeddedTerminal.materializeRuntimeBundle
+                            hostConfig))
+
+            let results =
+                Task.WhenAll(tasks)
+                    .GetAwaiter()
+                    .GetResult()
+
+            let bundles =
+                results
+                |> Array.map (function
+                    | Ok bundle -> bundle
+                    | Error error ->
+                        Assert.Fail(error)
+                        Unchecked.defaultof<_>)
+
+            let canonicalDirectories =
+                Directory.GetDirectories(
+                    Path.Combine(
+                        stateDirectory,
+                        "terminal-runtime-bundles"
+                    )
+                )
+                |> Array.filter (fun path ->
+                    let name = Path.GetFileName path
+                    name.Length = 64
+                    && name |> Seq.forall Uri.IsHexDigit)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    bundles
+                    |> Array.map _.Identity
+                    |> Array.distinct,
+                    Has.Length.EqualTo(1)
+                )
+                Assert.That(
+                    bundles
+                    |> Array.map _.Directory
+                    |> Array.distinct,
+                    Has.Length.EqualTo(1)
+                )
+                Assert.That(
+                    canonicalDirectories,
+                    Has.Length.EqualTo(1)
+                )))
+
+    [<Test>]
+    member _.``partial deletion tombstones never become canonical and rollback rematerializes``() =
+        withFakeHost (fun _ _ hostConfig _ ->
+            let original = materialize hostConfig
+            let faulted =
+                EmbeddedTerminal.compactRuntimeBundleWithFault
+                    hostConfig
+                    (fun stage ->
+                        if
+                            stage
+                            = EmbeddedTerminal.RuntimeBundleStage.DuringTombstoneDeletion
+                        then
+                            raise (
+                                IOException(
+                                    "Injected recursive deletion crash"
+                                )
+                            ))
+                    original
+
+            match faulted with
+            | Ok () ->
+                Assert.Fail(
+                    "Injected recursive deletion fault was ignored"
+                )
+            | Error _ -> ()
+
+            let tombstone =
+                Directory.GetDirectories(
+                    Path.GetDirectoryName original.Directory,
+                    "*.tombstone"
+                )
+                |> Array.exactlyOne
+
+            File.Delete(
+                Path.Combine(
+                    tombstone,
+                    "terminal-job-supervisor.ps1"
+                )
+            )
+
+            let recovered = materialize hostConfig
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    Directory.Exists tombstone,
+                    Is.False
+                )
+                Assert.That(
+                    Directory.Exists recovered.Directory,
+                    Is.True
+                ))
+
+            match
+                EmbeddedTerminal.compactRuntimeBundleWithFault
+                    hostConfig
+                    ignore
+                    recovered
+            with
+            | Error error -> Assert.Fail(error)
+            | Ok () -> ()
+
+            Assert.That(
+                Directory.Exists recovered.Directory,
+                Is.False
+            )
+
+            let rollback = materialize hostConfig
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    rollback.Identity,
+                    Is.EqualTo original.Identity
+                )
+                Assert.That(
+                    Directory.Exists rollback.Directory,
+                    Is.True
+                )))
+
+[<Category("DurableRollback")>]
+[<Platform("Win")>]
+[<NonParallelizable>]
+type EmbeddedTerminalRollbackCompatibilityTests() =
+    let runExternal
+        (workingDirectory: string)
+        (fileName: string)
+        (arguments: string list)
+        (timeout: TimeSpan)
+        =
+        let psi =
+            ProcessStartInfo(
+                FileName = fileName,
+                WorkingDirectory = workingDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            )
+
+        arguments |> List.iter psi.ArgumentList.Add
+        use proc = new Process(StartInfo = psi)
+
+        if not (proc.Start()) then
+            Assert.Fail($"Could not start {fileName}")
+
+        let stdout = proc.StandardOutput.ReadToEndAsync()
+        let stderr = proc.StandardError.ReadToEndAsync()
+
+        if not (proc.WaitForExit(int timeout.TotalMilliseconds)) then
+            proc.Kill true
+            proc.WaitForExit 5000 |> ignore
+            Assert.Fail($"{fileName} timed out")
+
+        Task.WhenAll(stdout, stderr)
+            .GetAwaiter()
+            .GetResult()
+        |> ignore
+
+        let output = stdout.Result
+        let error = stderr.Result
+
+        if proc.ExitCode <> 0 then
+            Assert.Fail(
+                $"{fileName} exited {proc.ExitCode}{Environment.NewLine}{output}{Environment.NewLine}{error}"
+            )
+
+        output
+
+    let previousRunnerSource =
+        """
+module PreviousRollbackClient
+
+open System
+open System.IO
+open Server
+open Shared
+
+let run workflow = Async.RunSynchronously workflow
+
+[<EntryPoint>]
+let main arguments =
+    if arguments.Length <> 4 then
+        eprintfn "Expected state, source, worktree, and ttyd paths"
+        2
+    else
+        let stateDirectory = Path.GetFullPath arguments[0]
+        let sourceDirectory = Path.GetFullPath arguments[1]
+        let worktreePath = Path.GetFullPath arguments[2]
+        let ttydPath = Path.GetFullPath arguments[3]
+        let config: EmbeddedTerminal.Config =
+            { NodeExecutable = "node"
+              HostScriptPath =
+                Path.Combine(sourceDirectory, "scripts", "durable-terminal-host.mjs")
+              SupervisorScriptPath =
+                Path.Combine(sourceDirectory, "scripts", "terminal-job-supervisor.ps1")
+              ProcessIdentityHelperPath =
+                Path.Combine(sourceDirectory, "scripts", "terminate-owned-process.ps1")
+              HostStateDirectory = stateDirectory
+              TtydExecutablePath = ttydPath
+              ShellCommand = "pwsh"
+              StartupTimeout = TimeSpan.FromSeconds 30.0
+              ControlRequestTimeout = TimeSpan.FromSeconds 30.0
+              ProbeInterval = TimeSpan.FromMilliseconds 50.0
+              ReservationRenewalInterval = TimeSpan.FromSeconds 30.0 }
+
+        match EmbeddedTerminal.materializeRuntimeBundle config with
+        | Error error ->
+            eprintfn "Previous bundle materialization failed: %s" error
+            3
+        | Ok _ ->
+            let manager = EmbeddedTerminal.createWithConfig config
+            let worktree = Server.PathUtils.toWorktreePath worktreePath
+            let listed = EmbeddedTerminal.get manager |> run
+            let found =
+                listed.Tabs
+                |> List.filter (fun tab ->
+                    Shared.PathUtils.pathEquals
+                        (WorktreePath.value tab.Worktree)
+                        worktreePath)
+
+            if found.Length <> 1 then
+                eprintfn "Previous client listed %d matching sessions" found.Length
+                4
+            else
+                let closed = EmbeddedTerminal.close manager worktree |> run
+
+                if not closed.Tabs.IsEmpty then
+                    eprintfn "Previous client close retained %d sessions" closed.Tabs.Length
+                    5
+                else
+                    match EmbeddedTerminal.shutdownHost manager |> run with
+                    | Error error ->
+                        eprintfn "Previous client drain failed: %s" error
+                        6
+                    | Ok () ->
+                        printfn "previous-client:list=1;close=0;drain=ok"
+                        0
+"""
+
+    let previousRunnerProject =
+        """
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Tests</AssemblyName>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.fs" />
+    <ProjectReference Include="..\source\src\Server\Server.fsproj" />
+  </ItemGroup>
+</Project>
+"""
+
+    [<Test>]
+    member _.``previous protocol-three binary lists closes and drains the current locked host``() =
+        let repositoryRoot =
+            Path.GetFullPath(
+                Path.Combine(
+                    __SOURCE_DIRECTORY__,
+                    "..",
+                    ".."
+                )
+            )
+        let fixture =
+            Path.Combine(
+                repositoryRoot,
+                ".agents",
+                "rollback-compat-tests",
+                Guid.NewGuid().ToString("N")
+            )
+        let source = Path.Combine(fixture, "source")
+        let runner = Path.Combine(fixture, "runner")
+        let output = Path.Combine(fixture, "output")
+        let stateDirectory =
+            Path.Combine(fixture, "state with spaces")
+        let worktreePath =
+            Path.Combine(fixture, "worktree with spaces")
+        let archive = Path.Combine(fixture, "parent.tar")
+        let ttydPath =
+            Path.Combine(
+                repositoryRoot,
+                ".tools",
+                "ttyd",
+                "1.7.7",
+                "ttyd.exe"
+            )
+
+        Directory.CreateDirectory source |> ignore
+        Directory.CreateDirectory runner |> ignore
+        Directory.CreateDirectory worktreePath |> ignore
+
+        // The fixture retains owned processes across failures so finally can stop only their exact PIDs.
+        let mutable manager: EmbeddedTerminal.Manager option = None
+        let mutable hostPid: int option = None
+        let mutable lockOwnerPid: int option = None
+
+        try
+            runExternal
+                repositoryRoot
+                "git"
+                [ "archive"
+                  "--format=tar"
+                  $"--output={archive}"
+                  "5af773d0" ]
+                (TimeSpan.FromMinutes 1.0)
+            |> ignore
+
+            runExternal
+                repositoryRoot
+                "tar"
+                [ "-xf"; archive; "-C"; source ]
+                (TimeSpan.FromMinutes 1.0)
+            |> ignore
+
+            File.Delete archive
+            File.WriteAllText(
+                Path.Combine(runner, "Program.fs"),
+                previousRunnerSource
+            )
+            let runnerProject =
+                Path.Combine(
+                    runner,
+                    "PreviousRollbackClient.fsproj"
+                )
+            File.WriteAllText(
+                runnerProject,
+                previousRunnerProject
+            )
+
+            runExternal
+                repositoryRoot
+                "dotnet"
+                [ "publish"
+                  runnerProject
+                  "-c"
+                  "Release"
+                  "-o"
+                  output
+                  "--nologo" ]
+                (TimeSpan.FromMinutes 5.0)
+            |> ignore
+
+            let currentConfig: EmbeddedTerminal.Config =
+                { NodeExecutable = "node"
+                  HostScriptPath =
+                    Path.Combine(
+                        repositoryRoot,
+                        "scripts",
+                        "durable-terminal-host.mjs"
+                    )
+                  SupervisorScriptPath =
+                    Path.Combine(
+                        repositoryRoot,
+                        "scripts",
+                        "terminal-job-supervisor.ps1"
+                    )
+                  ProcessIdentityHelperPath =
+                    Path.Combine(
+                        repositoryRoot,
+                        "scripts",
+                        "terminate-owned-process.ps1"
+                    )
+                  RuntimeLockHelperPath =
+                    Path.Combine(
+                        repositoryRoot,
+                        "scripts",
+                        "terminal-runtime-lock.ps1"
+                    )
+                  WebSocketPackagePath =
+                    Path.Combine(
+                        repositoryRoot,
+                        "node_modules",
+                        "ws"
+                    )
+                  HostStateDirectory = stateDirectory
+                  TtydExecutablePath = ttydPath
+                  TtydExpectedHash = None
+                  ShellCommand = "pwsh"
+                  StartupTimeout = TimeSpan.FromSeconds 30.0
+                  ControlRequestTimeout = TimeSpan.FromSeconds 30.0
+                  ProbeInterval = TimeSpan.FromMilliseconds 50.0
+                  ReservationRenewalInterval =
+                    TimeSpan.FromSeconds 30.0 }
+
+            let currentManager =
+                EmbeddedTerminal.createWithConfig
+                    currentConfig
+            manager <- Some currentManager
+            let worktree = canonical worktreePath
+
+            match EmbeddedTerminal.start currentManager worktree |> run with
+            | Error error -> Assert.Fail(error)
+            | Ok snapshot ->
+                match
+                    snapshot
+                    |> tryFindTab worktree
+                    |> Option.map _.Lifecycle
+                with
+                | Some (EmbeddedTerminalLifecycle.Running endpoint) ->
+                    Assert.That(endpoint, Is.Not.Empty)
+                | lifecycle ->
+                    let diagnosticsPath =
+                        Path.Combine(
+                            stateDirectory,
+                            "diagnostics.jsonl"
+                        )
+                    let diagnostics =
+                        if File.Exists diagnosticsPath then
+                            File.ReadAllText diagnosticsPath
+                        else
+                            ""
+                    let runtimeStatus =
+                        Directory.GetFiles(
+                            stateDirectory,
+                            "runtime-ready-*.status.json"
+                        )
+                        |> Array.map File.ReadAllText
+                        |> String.concat Environment.NewLine
+
+                    Assert.Fail(
+                        $"Current host startup failed: {lifecycle}{Environment.NewLine}{runtimeStatus}{Environment.NewLine}{diagnostics}"
+                    )
+
+            use manifest =
+                Path.Combine(stateDirectory, "host.json")
+                |> File.ReadAllText
+                |> JsonDocument.Parse
+
+            hostPid <-
+                Some(
+                    manifest.RootElement
+                        .GetProperty("pid")
+                        .GetInt32()
+                )
+            lockOwnerPid <-
+                Some(
+                    manifest.RootElement
+                        .GetProperty("runtimeLockOwnerPid")
+                        .GetInt32()
+                )
+
+            let previousOutput =
+                runExternal
+                    repositoryRoot
+                    "dotnet"
+                    [ Path.Combine(output, "Tests.dll")
+                      stateDirectory
+                      source
+                      worktreePath
+                      ttydPath ]
+                    (TimeSpan.FromMinutes 2.0)
+
+            Assert.That(
+                previousOutput,
+                Does.Contain(
+                    "previous-client:list=1;close=0;drain=ok"
+                )
+            )
+
+            waitUntil
+                "current host and lock owner to drain"
+                (fun () ->
+                    (hostPid
+                     |> Option.forall (
+                         processIsAlive >> not
+                     ))
+                    && (lockOwnerPid
+                        |> Option.forall (
+                            processIsAlive >> not
+                        )))
+        finally
+            manager
+            |> Option.iter (fun currentManager ->
+                EmbeddedTerminal.shutdownHost currentManager
+                |> run
+                |> ignore)
+
+            hostPid
+            |> Option.iter (fun pid ->
+                waitUntil
+                    "rollback fixture host cleanup"
+                    (fun () -> not (processIsAlive pid)))
+
+            lockOwnerPid
+            |> Option.iter (fun pid ->
+                waitUntil
+                    "rollback fixture lock-owner cleanup"
+                    (fun () -> not (processIsAlive pid)))
+
+            if Directory.Exists fixture then
+                Directory.Delete(fixture, true)

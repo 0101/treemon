@@ -22,6 +22,7 @@ import {
   createTerminalJobSupervisor,
   DurableTerminalHost,
   emptyReplayBuffer,
+  extendedTerminalRuntimeCapabilities,
   generationCompactionClaimName,
   jobSupervisorPolicyIsSafe,
   isValidGeneration,
@@ -299,8 +300,10 @@ class FakeJobSupervisor {
     this.child.exit();
   }
 
-  terminateStartupFailure() {
-    return this.terminate();
+  async terminateStartupFailure() {
+    await this.terminate();
+    this.supervisorPid = this.child.pid;
+    this.supervisorStartTimeUtcTicks = "100";
   }
 
   trustedEmptyEvidence() {
@@ -492,6 +495,7 @@ test("runtime bundle pins ws and ttyd bytes into dependency-sensitive identities
     "durable-terminal-host.mjs",
     "terminal-job-supervisor.ps1",
     "terminate-owned-process.ps1",
+    "terminal-runtime-lock.ps1",
   ].forEach((name) =>
     cpSync(join(import.meta.dirname, name), join(sourceDirectory, name)),
   );
@@ -565,6 +569,11 @@ test("runtime bundle pins ws and ttyd bytes into dependency-sensitive identities
       join(first.bundleDirectory, "ttyd.exe"),
     );
     oldSession.browserWebSockets?.close();
+    if (oldSession.publicServer?.listening) {
+      await new Promise((resolveClose) =>
+        oldSession.publicServer.close(() => resolveClose()),
+      );
+    }
     oldHost.stopTimers();
 
     const second = materializeRuntimeBundle(
@@ -573,7 +582,9 @@ test("runtime bundle pins ws and ttyd bytes into dependency-sensitive identities
       null,
     );
 
-    assert.notEqual(first.bundleHash, second.bundleHash);
+    assert.equal(first.bundleHash, second.bundleHash);
+    assert.notEqual(first.extendedBundleHash, second.extendedBundleHash);
+    assert.notEqual(first.bundleDirectory, second.bundleDirectory);
     assert.notEqual(first.ttydExecutableHash, second.ttydExecutableHash);
     assert.notEqual(first.webSocketPackageHash, second.webSocketPackageHash);
     assert.deepEqual(
@@ -587,12 +598,14 @@ test("runtime bundle pins ws and ttyd bytes into dependency-sensitive identities
       firstWebSocket,
     );
     assert(
-      firstManifest.files.some(
+      firstManifest.extendedRuntime.files.some(
         ({ name }) => name === "node_modules/ws/wrapper.mjs",
       ),
     );
     assert(
-      firstManifest.files.some(({ name }) => name === "ttyd.exe"),
+      firstManifest.extendedRuntime.files.some(
+        ({ name }) => name === "ttyd.exe",
+      ),
     );
     writeFileSync(
       join(first.bundleDirectory, "ttyd.exe"),
@@ -636,7 +649,7 @@ test("bundled ws cannot resolve optional native modules from a parent", () => {
       [
         "--input-type=module",
         "-e",
-        `await import(${JSON.stringify(hostUrl)});`,
+        `const runtime = await import(${JSON.stringify(hostUrl)}); await runtime.loadWebSocketRuntime(${JSON.stringify(join(bundle.bundleDirectory, "node_modules", "ws", "wrapper.mjs"))});`,
       ],
       {
         cwd: stateDirectory,
@@ -684,7 +697,7 @@ test("a damaged bundle never falls back to a parent ws package", () => {
         [
           "--input-type=module",
           "-e",
-          `await import(${JSON.stringify(hostUrl)});`,
+          `const runtime = await import(${JSON.stringify(hostUrl)}); await runtime.loadWebSocketRuntime(${JSON.stringify(join(bundle.bundleDirectory, "node_modules", "ws", "wrapper.mjs"))});`,
         ],
         {
           cwd: stateDirectory,
@@ -714,6 +727,16 @@ test("host discovery manifest reports its exact immutable runtime bundle", async
     replayBytes: 1024,
     diagnosticBytes: 1024,
     runtimeBundle: bundle,
+    runtimeLockOwner: {
+      pid: process.pid,
+      processStartTicks: currentTestProcessStartTicks,
+    },
+    processController: {
+      inspect: async () => ({
+        pid: process.pid,
+        startIdentity: `windows:${currentTestProcessStartTicks}`,
+      }),
+    },
     exitProcess: (code) => exits.push(code),
   });
 
@@ -737,9 +760,12 @@ test("host discovery manifest reports its exact immutable runtime bundle", async
       manifest.processIdentityHelperHash,
       bundle.processIdentityHelperHash,
     );
-    assert.equal(manifest.ttydExecutableHash, bundle.ttydExecutableHash);
     assert.equal(
-      manifest.webSocketPackageHash,
+      manifest.extendedRuntime.ttydExecutableHash,
+      bundle.ttydExecutableHash,
+    );
+    assert.equal(
+      manifest.extendedRuntime.webSocketPackageHash,
       bundle.webSocketPackageHash,
     );
     assert.equal(
@@ -747,6 +773,14 @@ test("host discovery manifest reports its exact immutable runtime bundle", async
       terminalJobProtocolGeneration,
     );
     assert.deepEqual(manifest.capabilities, terminalRuntimeCapabilities);
+    assert.deepEqual(
+      manifest.extendedRuntime.capabilities,
+      extendedTerminalRuntimeCapabilities,
+    );
+    assert.equal(
+      manifest.runtimeLockOwnerPid,
+      process.pid,
+    );
     await host.shutdown("bundle-handshake-test");
     assert.deepEqual(exits, [0]);
   } finally {
@@ -1022,6 +1056,51 @@ test(
         await terminateRetainedChild(supervisor.child);
       }
       rmSync(fixture, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "authenticated startup abort may be the supervisor first message",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const stateDirectory = testStateDirectory();
+    const sessionId = "startup-abort-first-message";
+    const witnessPath = join(stateDirectory, `${sessionId}.json`);
+    mkdirSync(stateDirectory, { recursive: true });
+    const supervisor = createTerminalJobSupervisor();
+    const options = {
+      sessionId,
+      generation: "startup-abort-generation",
+      worktreePath: stateDirectory,
+      witnessRoot: stateDirectory,
+      witnessPath,
+      witnessNonce: "startup-abort-witness-nonce",
+      fileName: "unused.exe",
+      argumentsList: [],
+      workingDirectory: stateDirectory,
+      environment: {},
+      timeoutMs: 10_000,
+    };
+
+    try {
+      supervisor.prepareStart(options);
+      await supervisor.terminateStartupFailure(
+        10_000,
+        "fault before initial start write",
+      );
+      const evidence = supervisor.trustedEmptyEvidence();
+      const witness = JSON.parse(readFileSync(witnessPath, "utf8"));
+
+      assert.equal(evidence.supervisorPid, supervisor.child.pid);
+      assert.equal(evidence.exitCode, 0);
+      assert.equal(witness.sessionId, sessionId);
+      assert.equal(witness.nonce, options.witnessNonce);
+    } finally {
+      if (!supervisor.exited) {
+        await terminateRetainedChild(supervisor.child);
+      }
+      rmSync(stateDirectory, { recursive: true, force: true });
     }
   },
 );
@@ -1725,6 +1804,12 @@ test("startup failure stays failed after authoritative supervisor cleanup", asyn
   await withTestHost(
     { supervisorFactory: () => supervisor },
     async (host) => {
+      host.startSessionProxy = async (session) => {
+        session.supervisorSpawnAttempted = true;
+        session.jobSupervisor = supervisor;
+        session.supervisorProcess = supervisor.child;
+        await supervisor.start();
+      };
       const session = await host.startSession(resolve(".agents"));
 
       assert.equal(session.state, "failed");
@@ -1732,6 +1817,154 @@ test("startup failure stays failed after authoritative supervisor cleanup", asyn
       assert.equal(host.sessions.get(session.id), session);
     },
   );
+});
+
+test("every pre-start boundary leaves the same key retryable and drainable", async () => {
+  const stateDirectory = testStateDirectory();
+  const bundle = runtimeBundleFixture(stateDirectory);
+  const stages = [
+    "after-websocket-runtime",
+    "after-public-server-created",
+    "after-ttyd-port",
+    "after-public-listen",
+    "after-witness-ready",
+    "after-ttyd-verified",
+    "before-supervisor-spawn",
+    "after-supervisor-spawn-before-start",
+    "after-supervisor-start",
+  ];
+
+  try {
+    for (const stage of stages) {
+      const worktreePath = join(stateDirectory, `boundary-${stage}`);
+      mkdirSync(worktreePath, { recursive: true });
+      const host = new DurableTerminalHost({
+        stateDirectory,
+        ttydPath: join(bundle.bundleDirectory, "ttyd.exe"),
+        shellCommand: "pwsh",
+        replayBytes: 1024,
+        diagnosticBytes: 1024,
+        runtimeBundle: bundle,
+        supervisorFactory: () => new FakeJobSupervisor(),
+        startupFault: (current) => {
+          if (current === stage) {
+            throw new Error(`injected ${stage}`);
+          }
+        },
+        cleanupTimeouts: { graceful: 1, forced: 10 },
+        exitProcess: () => {},
+      });
+      host.persistStatus = () => {};
+      host.record = () => {};
+      host.validateEmptyWitness = () => {};
+
+      try {
+        const failed = await host.startSession(worktreePath);
+        assert.equal(failed.state, "failed", stage);
+        assert.equal(failed.resourcesStopped, true, stage);
+
+        await host.closeSession(failed, "fault-close");
+        assert.equal(host.sessions.size, 0, stage);
+
+        host.startupFault = () => {};
+        host.startSessionProxy = async (session) => {
+          markStartupReady(session);
+        };
+        host.stopSessionResources = async () => {};
+
+        const retried = await host.startSession(worktreePath);
+        assert.equal(retried.state, "running", stage);
+
+        const reservation = await host.reserveWorktree(
+          worktreePath,
+          `reservation-${stage}`,
+        );
+        assert.equal(host.sessions.size, 0, stage);
+        assert.equal(
+          await host.releaseReservation(reservation.id),
+          true,
+          stage,
+        );
+
+        const restarted = await host.startSession(worktreePath);
+        assert.equal(restarted.state, "running", stage);
+        await host.beginShutdown(`boundary-${stage}`);
+        assert.equal(host.sessions.size, 0, stage);
+      } finally {
+        host.stopTimers();
+        for (const session of host.sessions.values()) {
+          if (session.publicServer?.listening) {
+            await new Promise((resolveClose) =>
+              session.publicServer.close(() => resolveClose()),
+            );
+          }
+        }
+        if (host.controlServer.listening) {
+          await new Promise((resolveClose) =>
+            host.controlServer.close(() => resolveClose()),
+          );
+        }
+      }
+    }
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("supervisor spawn failure retains no child or durable ownership", async () => {
+  const stateDirectory = testStateDirectory();
+  const worktreePath = join(stateDirectory, "spawn-failure");
+  mkdirSync(worktreePath, { recursive: true });
+  const bundle = runtimeBundleFixture(stateDirectory);
+  const supervisorFactory = () => {
+    const child = new EventEmitter();
+    child.pid = undefined;
+    child.exitCode = null;
+    child.signalCode = null;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const supervisor = new TerminalJobSupervisor(
+      child,
+      "spawn-failure-token",
+      100,
+    );
+    queueMicrotask(() =>
+      child.emit("error", new Error("injected spawn failure")),
+    );
+    return supervisor;
+  };
+  const host = new DurableTerminalHost({
+    stateDirectory,
+    ttydPath: join(bundle.bundleDirectory, "ttyd.exe"),
+    shellCommand: "pwsh",
+    replayBytes: 1024,
+    diagnosticBytes: 1024,
+    runtimeBundle: bundle,
+    supervisorFactory,
+    exitProcess: () => {},
+  });
+  host.persistStatus = () => {};
+  host.record = () => {};
+
+  try {
+    const failed = await host.startSession(worktreePath);
+    const generation = JSON.parse(
+      readFileSync(host.generationPath, "utf8"),
+    );
+
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.resourcesStopped, true);
+    assert.equal(failed.jobSupervisor, null);
+    assert.equal(failed.supervisorProcess, null);
+    assert.deepEqual(generation.sessions, []);
+
+    await host.closeSession(failed, "spawn-failure-close");
+    assert.equal(host.sessions.size, 0);
+  } finally {
+    host.stopTimers();
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test("proved startup failure permits retry close reservation and unrelated sessions", async () => {
@@ -2585,6 +2818,7 @@ test("shutdown rejects new starts and cleans every in-flight start", async () =>
     const headers = {
       authorization: `Bearer ${host.controlToken}`,
       "content-type": "application/json",
+      connection: "close",
     };
     const firstStart = fetch(
       `http://127.0.0.1:${host.controlPort}/sessions`,
@@ -2711,6 +2945,7 @@ test("shutdown retains a session whose Job Object does not acknowledge empty", a
       {
         method: "POST",
         headers: {
+          connection: "close",
           authorization: `Bearer ${host.controlToken}`,
         },
       },

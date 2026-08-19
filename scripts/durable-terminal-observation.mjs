@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   existsSync,
@@ -12,6 +11,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   defaultProcessController,
+  launchLockedRuntimeHost,
   materializeRuntimeBundle,
   sameProcessIdentity,
   terminateRetainedChild,
@@ -24,7 +24,6 @@ const worktree = join(stateDirectory, "worktree");
 const hostStatePath = join(stateDirectory, "host.json");
 const observationPath = join(stateDirectory, "observation.json");
 const diagnosticsPath = join(stateDirectory, "diagnostics.jsonl");
-const lockPath = join(stateDirectory, "host.lock");
 const durationMs = 24 * 60 * 60 * 1000;
 const staleHeartbeatMs = 2 * 60 * 1000;
 const processController = defaultProcessController();
@@ -76,8 +75,25 @@ export function hostStateMatchesObservation(observation, hostState) {
     hostState?.supervisorScriptHash === observation.supervisorScriptHash &&
     hostState?.processIdentityHelperHash ===
       observation.processIdentityHelperHash &&
-    hostState?.ttydExecutableHash === observation.ttydExecutableHash &&
-    hostState?.webSocketPackageHash === observation.webSocketPackageHash &&
+    (observation.extendedBundleHash === undefined ||
+      hostState?.extendedRuntime?.bundleHash ===
+        observation.extendedBundleHash) &&
+    (observation.runtimeLockHelperHash === undefined ||
+      hostState?.extendedRuntime?.runtimeLockHelperHash ===
+        observation.runtimeLockHelperHash) &&
+    (hostState?.extendedRuntime?.ttydExecutableHash ??
+      hostState?.ttydExecutableHash) ===
+      observation.ttydExecutableHash &&
+    (hostState?.extendedRuntime?.webSocketPackageHash ??
+      hostState?.webSocketPackageHash) ===
+      observation.webSocketPackageHash &&
+    (observation.runtimeLockBoundary === undefined ||
+      hostState?.runtimeLockBoundary === observation.runtimeLockBoundary) &&
+    (observation.runtimeLockOwnerPid === undefined ||
+      hostState?.runtimeLockOwnerPid === observation.runtimeLockOwnerPid) &&
+    (observation.runtimeLockOwnerProcessStartTicks === undefined ||
+      hostState?.runtimeLockOwnerProcessStartTicks ===
+        observation.runtimeLockOwnerProcessStartTicks) &&
     hostState?.supervisorProtocolGeneration ===
       observation.supervisorProtocolGeneration &&
     JSON.stringify(hostState?.capabilities) ===
@@ -195,47 +211,13 @@ async function start() {
   const bundle = materializeRuntimeBundle(stateDirectory);
   const startedAt = new Date();
   const generation = randomBytes(16).toString("hex");
-  atomicWrite(lockPath, {
+  const lockedHost = await launchLockedRuntimeHost(bundle, {
+    stateDirectory,
     generation,
-    ownerPid: process.pid,
+    detached: true,
   });
-  const host = spawn(
-    process.execPath,
-    [
-      join(bundle.bundleDirectory, "durable-terminal-host.mjs"),
-      "--state-dir",
-      stateDirectory,
-      "--ttyd",
-      join(bundle.bundleDirectory, "ttyd.exe"),
-      "--shell",
-      "pwsh",
-      "--generation",
-      generation,
-      "--runtime-bundle-dir",
-      bundle.bundleDirectory,
-      "--runtime-bundle-hash",
-      bundle.bundleHash,
-      "--runtime-bundle-version",
-      String(bundle.runtimeBundleVersion),
-      "--host-script-hash",
-      bundle.hostScriptHash,
-      "--supervisor-script-hash",
-      bundle.supervisorScriptHash,
-      "--process-helper-hash",
-      bundle.processIdentityHelperHash,
-      "--ttyd-hash",
-      bundle.ttydExecutableHash,
-      "--ws-package-hash",
-      bundle.webSocketPackageHash,
-    ],
-    {
-      cwd: repo,
-      detached: true,
-      windowsHide: true,
-      stdio: "ignore",
-    },
-  );
-  const spawnedHostPid = host.pid;
+  const host = lockedHost.lockOwner;
+  const spawnedHostPid = lockedHost.hostPid;
   host.unref();
 
   let hostState;
@@ -245,20 +227,6 @@ async function start() {
       "spawned durable host process identity",
       () => processController.inspect(spawnedHostPid),
     );
-    const windowsStartTicks =
-      /^windows:(\d+)$/.exec(spawnedHostIdentity.startIdentity)?.[1];
-    const claimStartTicks =
-      windowsStartTicks ??
-      (
-        621355968000000000n +
-        BigInt(Date.now()) * 10_000n
-      ).toString();
-    atomicWrite(lockPath, {
-      generation,
-      ownerPid: process.pid,
-      hostPid: spawnedHostPid,
-      hostProcessStartTicks: claimStartTicks,
-    });
     hostState = await waitFor("durable host state", () => {
       if (!existsSync(hostStatePath)) return null;
       return readJson(hostStatePath);
@@ -293,8 +261,17 @@ async function start() {
       hostScriptHash: hostState.hostScriptHash,
       supervisorScriptHash: hostState.supervisorScriptHash,
       processIdentityHelperHash: hostState.processIdentityHelperHash,
-      ttydExecutableHash: hostState.ttydExecutableHash,
-      webSocketPackageHash: hostState.webSocketPackageHash,
+      extendedBundleHash: hostState.extendedRuntime.bundleHash,
+      runtimeLockHelperHash:
+        hostState.extendedRuntime.runtimeLockHelperHash,
+      ttydExecutableHash:
+        hostState.extendedRuntime.ttydExecutableHash,
+      webSocketPackageHash:
+        hostState.extendedRuntime.webSocketPackageHash,
+      runtimeLockBoundary: hostState.runtimeLockBoundary,
+      runtimeLockOwnerPid: hostState.runtimeLockOwnerPid,
+      runtimeLockOwnerProcessStartTicks:
+        hostState.runtimeLockOwnerProcessStartTicks,
       supervisorProtocolGeneration: hostState.supervisorProtocolGeneration,
       hostCapabilities: hostState.capabilities,
       hostPid: hostState.pid,

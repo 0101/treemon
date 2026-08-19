@@ -19,6 +19,7 @@ type internal Config =
       HostScriptPath: string
       SupervisorScriptPath: string
       ProcessIdentityHelperPath: string
+      RuntimeLockHelperPath: string
       WebSocketPackagePath: string
       HostStateDirectory: string
       TtydExecutablePath: string
@@ -35,6 +36,9 @@ type internal RuntimeBundleIdentity =
       HostScriptHash: string
       SupervisorScriptHash: string
       ProcessIdentityHelperHash: string
+      ExtendedVersion: int option
+      ExtendedBundleHash: string option
+      RuntimeLockHelperHash: string option
       TtydExecutableHash: string option
       WebSocketPackageHash: string option }
 
@@ -56,6 +60,18 @@ type internal GenerationCompactionStage =
     | AfterClaimDeletion
     | DuringWitnessCleanup
 
+[<RequireQualifiedAccess>]
+type internal RuntimeBundleStage =
+    | BeforeStaging
+    | AfterStaging
+    | AfterFilesWritten
+    | AfterStagingVerified
+    | BeforeCanonicalRename
+    | AfterCanonicalRename
+    | BeforeTombstoneRename
+    | AfterTombstoneRename
+    | DuringTombstoneDeletion
+
 type private HostIdentity =
     { Generation: string
       Pid: int
@@ -75,7 +91,10 @@ type private HostConnection =
       StartedAt: string
       RuntimeBundle: RuntimeBundleIdentity option
       SupervisorProtocolGeneration: int option
-      Capabilities: Set<string> }
+      Capabilities: Set<string>
+      RuntimeLockBoundary: string option
+      RuntimeLockOwnerPid: int option
+      RuntimeLockOwnerStartTicks: int64 option }
 
 type private SupervisorIdentity =
     { Pid: int
@@ -201,28 +220,33 @@ let private previousGenerationRecordVersion = 1
 let private supervisorProtocolGeneration = 2
 let private maximumGenerationRecords = 64
 let private maximumUnreferencedRuntimeBundles = 8
-let private legacyRuntimeBundleVersion = 1
-let private runtimeBundleVersion = 2
+let private runtimeBundleVersion = 1
+let private intermediateRuntimeBundleVersion = 2
+let private extendedRuntimeBundleVersion = 3
 let private webSocketPackageVersion = "8.21.3"
 let private pinnedTtydSha256 =
     "e33a27501b10b96981335bcba938b1145c7f52551a343e72160f00ab71832b37"
 
-let private legacyRuntimeCapabilities =
+let private runtimeCapabilities =
     set
         [ "immutable-runtime-bundle-v1"
           "strict-evidence-paths-v1"
           "trusted-empty-supervisor-v1" ]
 
-let private runtimeCapabilities =
-    legacyRuntimeCapabilities
+let private intermediateRuntimeCapabilities =
+    runtimeCapabilities
     |> Set.add "immutable-executable-dependencies-v1"
+
+let private extendedRuntimeCapabilities =
+    intermediateRuntimeCapabilities
+    |> Set.add "locked-runtime-files-v1"
 
 let private runtimeBundleCapabilitiesMatch bundleVersion capabilities =
     match bundleVersion with
-    | version when version = legacyRuntimeBundleVersion ->
-        capabilities = legacyRuntimeCapabilities
     | version when version = runtimeBundleVersion ->
         capabilities = runtimeCapabilities
+    | version when version = intermediateRuntimeBundleVersion ->
+        capabilities = intermediateRuntimeCapabilities
     | _ -> false
 
 let private webSocketRuntimeFiles =
@@ -306,6 +330,8 @@ let private defaultConfig () =
         runtimeScript "terminal-job-supervisor.ps1"
       ProcessIdentityHelperPath =
         runtimeScript "terminate-owned-process.ps1"
+      RuntimeLockHelperPath =
+        runtimeScript "terminal-runtime-lock.ps1"
       WebSocketPackagePath =
         if Directory.Exists deployedWebSocket then
             deployedWebSocket
@@ -670,10 +696,7 @@ let private parseRuntimeBundleIdentity root : Result<RuntimeBundleIdentity, stri
     result {
         let! version =
             optionalInt "runtimeBundleVersion" root
-            |> Result.map (
-                Option.defaultValue
-                    legacyRuntimeBundleVersion
-            )
+            |> Result.map (Option.defaultValue runtimeBundleVersion)
 
         let! bundleHash = requiredString "bundleHash" root
         let! hostScriptHash = requiredString "hostScriptHash" root
@@ -681,11 +704,12 @@ let private parseRuntimeBundleIdentity root : Result<RuntimeBundleIdentity, stri
             requiredString "supervisorScriptHash" root
         let! processIdentityHelperHash =
             requiredString "processIdentityHelperHash" root
-        let! ttydExecutableHash,
+        let! extendedVersion,
+             extendedBundleHash,
+             runtimeLockHelperHash,
+             ttydExecutableHash,
              webSocketPackageHash =
-            if version = legacyRuntimeBundleVersion then
-                Ok(None, None)
-            elif version = runtimeBundleVersion then
+            if version = intermediateRuntimeBundleVersion then
                 result {
                     let! ttyd =
                         requiredString
@@ -697,17 +721,75 @@ let private parseRuntimeBundleIdentity root : Result<RuntimeBundleIdentity, stri
                             "webSocketPackageHash"
                             root
 
-                    return Some ttyd, Some webSocket
+                    return
+                        None,
+                        None,
+                        None,
+                        Some ttyd,
+                        Some webSocket
                 }
-            else
+            elif version <> runtimeBundleVersion then
                 Error
                     "Durable terminal runtime bundle version is incompatible"
+            else
+                match tryProperty "extendedRuntime" root with
+                | None ->
+                    Ok(None, None, None, None, None)
+                | Some extended
+                    when extended.ValueKind
+                         = JsonValueKind.Object ->
+                    result {
+                        let! extendedVersion =
+                            requiredInt "version" extended
+                        let! extendedBundleHash =
+                            requiredString
+                                "bundleHash"
+                                extended
+                        let! runtimeLockHelperHash =
+                            requiredString
+                                "runtimeLockHelperHash"
+                                extended
+                        let! ttydExecutableHash =
+                            requiredString
+                                "ttydExecutableHash"
+                                extended
+                        let! webSocketPackageHash =
+                            requiredString
+                                "webSocketPackageHash"
+                                extended
+                        let! capabilities =
+                            requiredStringSet
+                                "capabilities"
+                                extended
+
+                        if
+                            extendedVersion
+                            <> extendedRuntimeBundleVersion
+                            || capabilities
+                               <> extendedRuntimeCapabilities
+                        then
+                            return!
+                                Error
+                                    "Durable terminal extended runtime capabilities are incompatible"
+
+                        return
+                            Some extendedVersion,
+                            Some extendedBundleHash,
+                            Some runtimeLockHelperHash,
+                            Some ttydExecutableHash,
+                            Some webSocketPackageHash
+                    }
+                | Some _ ->
+                    Error
+                        "Durable terminal extended runtime identity is invalid"
 
         if
             [ bundleHash
               hostScriptHash
               supervisorScriptHash
               processIdentityHelperHash
+              yield! extendedBundleHash |> Option.toList
+              yield! runtimeLockHelperHash |> Option.toList
               yield!
                   ttydExecutableHash
                   |> Option.toList
@@ -729,6 +811,13 @@ let private parseRuntimeBundleIdentity root : Result<RuntimeBundleIdentity, stri
                 supervisorScriptHash.ToLowerInvariant()
               ProcessIdentityHelperHash =
                 processIdentityHelperHash.ToLowerInvariant()
+              ExtendedVersion = extendedVersion
+              ExtendedBundleHash =
+                extendedBundleHash
+                |> Option.map _.ToLowerInvariant()
+              RuntimeLockHelperHash =
+                runtimeLockHelperHash
+                |> Option.map _.ToLowerInvariant()
               TtydExecutableHash =
                 ttydExecutableHash
                 |> Option.map _.ToLowerInvariant()
@@ -831,6 +920,34 @@ let private parseHostConnection (text: string) =
                 else
                     Ok(None, None, Set.empty)
 
+            let runtimeLockBoundary =
+                optionalString "runtimeLockBoundary" root
+            let! runtimeLockOwnerPid =
+                optionalInt "runtimeLockOwnerPid" root
+            let! runtimeLockOwnerStartTicks =
+                optionalInt64String
+                    "runtimeLockOwnerProcessStartTicks"
+                    root
+
+            match
+                runtimeBundle
+                |> Option.bind _.ExtendedVersion,
+                runtimeLockBoundary,
+                runtimeLockOwnerPid,
+                runtimeLockOwnerStartTicks
+            with
+            | Some _, Some "windows-file-share-read-v1", Some lockPid, Some _
+                when lockPid > 0 -> ()
+            | Some _, _, _, _ ->
+                return!
+                    Error
+                        "Durable terminal host omitted its immutable runtime lock owner"
+            | None, None, None, None -> ()
+            | None, _, _, _ ->
+                return!
+                    Error
+                        "Durable terminal host returned an unexpected runtime lock owner"
+
             return
                 { Version = version
                   Generation = generation
@@ -844,7 +961,13 @@ let private parseHostConnection (text: string) =
                   RuntimeBundle = runtimeBundle
                   SupervisorProtocolGeneration =
                     supervisorGeneration
-                  Capabilities = capabilities }
+                  Capabilities = capabilities
+                  RuntimeLockBoundary =
+                    runtimeLockBoundary
+                  RuntimeLockOwnerPid =
+                    runtimeLockOwnerPid
+                  RuntimeLockOwnerStartTicks =
+                    runtimeLockOwnerStartTicks }
         }
     with
     | :? JsonException as ex ->
@@ -1412,6 +1535,38 @@ let private processIdentityMatches (connection: HostConnection) =
         connection.ProcessStartTicks
         connection.ProcessStartExact
 
+let private runtimeLockOwnerIdentityMatches
+    (connection: HostConnection)
+    =
+    match
+        connection.RuntimeLockOwnerPid,
+        connection.RuntimeLockOwnerStartTicks
+    with
+    | Some pid, Some startTicks ->
+        processIdentityMatchesValues
+            pid
+            startTicks
+            true
+    | None, None -> Ok true
+    | _ ->
+        Error
+            "Durable terminal runtime lock owner identity is incomplete"
+
+let private runtimeLockOwnerHasExited
+    (connection: HostConnection)
+    =
+    match
+        connection.RuntimeLockOwnerPid,
+        connection.RuntimeLockOwnerStartTicks
+    with
+    | None, None -> Ok true
+    | Some _, Some _ ->
+        runtimeLockOwnerIdentityMatches connection
+        |> Result.map not
+    | _ ->
+        Error
+            "Durable terminal runtime lock owner identity is incomplete"
+
 let private hostIdentityMatches (identity: HostIdentity) =
     processIdentityMatchesValues
         identity.Pid
@@ -1516,27 +1671,51 @@ let private webSocketPackageHash (assets: RuntimeAsset list) =
     |> sha256Hex
 
 let private runtimeBundleHash (identity: RuntimeBundleIdentity) =
+    let capabilities =
+        if identity.Version = intermediateRuntimeBundleVersion then
+            intermediateRuntimeCapabilities
+        else
+            runtimeCapabilities
+
     let lines =
         [ $"bundle-version:{identity.Version}"
           $"host-protocol:{hostProtocolVersion}"
           $"supervisor-protocol:{supervisorProtocolGeneration}"
           yield!
-              (if
-                   identity.Version
-                   = legacyRuntimeBundleVersion
-               then
-                   legacyRuntimeCapabilities
-               else
-                   runtimeCapabilities)
+              capabilities
               |> Set.toList
               |> List.map (fun capability ->
                   $"capability:{capability}")
           $"file:host:durable-terminal-host.mjs:{identity.HostScriptHash}"
           $"file:supervisor:terminal-job-supervisor.ps1:{identity.SupervisorScriptHash}"
           $"file:processIdentityHelper:terminate-owned-process.ps1:{identity.ProcessIdentityHelperHash}"
-          if identity.Version = runtimeBundleVersion then
+          if identity.Version = intermediateRuntimeBundleVersion then
               $"file:ttyd:ttyd.exe:{identity.TtydExecutableHash.Value}"
               $"package:ws:{webSocketPackageVersion}:{identity.WebSocketPackageHash.Value}" ]
+
+    (String.concat "\n" lines) + "\n"
+    |> Encoding.UTF8.GetBytes
+    |> sha256Hex
+
+let private extendedRuntimeBundleHash
+    (identity: RuntimeBundleIdentity)
+    =
+    let lines =
+        [ $"bundle-version:{identity.ExtendedVersion.Value}"
+          $"compatibility-bundle:{identity.BundleHash}"
+          $"host-protocol:{hostProtocolVersion}"
+          $"supervisor-protocol:{supervisorProtocolGeneration}"
+          yield!
+              extendedRuntimeCapabilities
+              |> Set.toList
+              |> List.map (fun capability ->
+                  $"capability:{capability}")
+          $"file:host:durable-terminal-host.mjs:{identity.HostScriptHash}"
+          $"file:supervisor:terminal-job-supervisor.ps1:{identity.SupervisorScriptHash}"
+          $"file:processIdentityHelper:terminate-owned-process.ps1:{identity.ProcessIdentityHelperHash}"
+          $"file:runtimeLockHelper:terminal-runtime-lock.ps1:{identity.RuntimeLockHelperHash.Value}"
+          $"file:ttyd:ttyd.exe:{identity.TtydExecutableHash.Value}"
+          $"package:ws:{webSocketPackageVersion}:{identity.WebSocketPackageHash.Value}" ]
 
     (String.concat "\n" lines) + "\n"
     |> Encoding.UTF8.GetBytes
@@ -1547,6 +1726,12 @@ let private runtimeBundleRoot config =
         config.HostStateDirectory,
         "terminal-runtime-bundles"
     )
+
+let private runtimeBundleStorageHash
+    (identity: RuntimeBundleIdentity)
+    =
+    identity.ExtendedBundleHash
+    |> Option.defaultValue identity.BundleHash
 
 let private runtimeBundleDirectory config (bundleHash: string) =
     if validSha256Hex bundleHash then
@@ -1606,6 +1791,9 @@ let private runtimeAssets (config: Config) =
               ("processIdentityHelper",
                "terminate-owned-process.ps1",
                config.ProcessIdentityHelperPath)
+              ("runtimeLockHelper",
+               "terminal-runtime-lock.ps1",
+               config.RuntimeLockHelperPath)
               ("ttyd",
                "ttyd.exe",
                config.TtydExecutablePath)
@@ -1697,13 +1885,37 @@ let private identityForAssets (assets: RuntimeAsset list) =
           SupervisorScriptHash = hashFor "supervisor"
           ProcessIdentityHelperHash =
             hashFor "processIdentityHelper"
+          ExtendedVersion =
+            Some extendedRuntimeBundleVersion
+          ExtendedBundleHash = None
+          RuntimeLockHelperHash =
+            Some(hashFor "runtimeLockHelper")
           TtydExecutableHash =
             Some(hashFor "ttyd")
           WebSocketPackageHash =
             Some(webSocketPackageHash assets) }
 
-    { provisional with
-        BundleHash = runtimeBundleHash provisional }
+    let compatible =
+        { provisional with
+            BundleHash = runtimeBundleHash provisional }
+
+    { compatible with
+        ExtendedBundleHash =
+            Some(extendedRuntimeBundleHash compatible) }
+
+let private compatibilityBundleFiles
+    (identity: RuntimeBundleIdentity)
+    =
+    [ {| role = "host"
+         name = "durable-terminal-host.mjs"
+         sha256 = identity.HostScriptHash |}
+      {| role = "supervisor"
+         name = "terminal-job-supervisor.ps1"
+         sha256 = identity.SupervisorScriptHash |}
+      {| role = "processIdentityHelper"
+         name = "terminate-owned-process.ps1"
+         sha256 =
+            identity.ProcessIdentityHelperHash |} ]
 
 let private bundleManifestBytes
     (identity: RuntimeBundleIdentity)
@@ -1719,31 +1931,51 @@ let private bundleManifestBytes
             identity.SupervisorScriptHash
            processIdentityHelperHash =
             identity.ProcessIdentityHelperHash
-           ttydExecutableHash =
-            identity.TtydExecutableHash.Value
-           webSocketPackageHash =
-            identity.WebSocketPackageHash.Value
-           webSocketPackageVersion =
-            webSocketPackageVersion
            supervisorProtocolGeneration =
             supervisorProtocolGeneration
            capabilities =
             runtimeCapabilities |> Set.toArray
            files =
-            assets
-            |> List.map (fun asset ->
-                {| role = asset.Role
-                   name = asset.Name
-                   sha256 = asset.Hash |})
-            |> List.toArray |}
+            compatibilityBundleFiles identity
+            |> List.toArray
+           extendedRuntime =
+            {| version = identity.ExtendedVersion.Value
+               bundleHash =
+                identity.ExtendedBundleHash.Value
+               runtimeLockHelperHash =
+                identity.RuntimeLockHelperHash.Value
+               ttydExecutableHash =
+                identity.TtydExecutableHash.Value
+               webSocketPackageHash =
+                identity.WebSocketPackageHash.Value
+               webSocketPackageVersion =
+                webSocketPackageVersion
+               capabilities =
+                extendedRuntimeCapabilities
+                |> Set.toArray
+               files =
+                assets
+                |> List.map (fun asset ->
+                    {| role = asset.Role
+                       name = asset.Name
+                       sha256 = asset.Hash |})
+                |> List.toArray |} |}
     )
 
-let private runtimeBundleFileLayout (version: int) =
+let private runtimeBundleFileLayout
+    (identity: RuntimeBundleIdentity)
+    =
     [ ("host", "durable-terminal-host.mjs")
       ("supervisor", "terminal-job-supervisor.ps1")
       ("processIdentityHelper",
        "terminate-owned-process.ps1")
-      if version = runtimeBundleVersion then
+      if identity.ExtendedVersion.IsSome then
+          ("runtimeLockHelper",
+           "terminal-runtime-lock.ps1")
+      if
+          identity.Version = intermediateRuntimeBundleVersion
+          || identity.ExtendedVersion.IsSome
+      then
           ("ttyd", "ttyd.exe")
           yield!
               webSocketRuntimeFiles
@@ -1765,6 +1997,23 @@ let private verifyBundleManifest
     try
         use document = JsonDocument.Parse text
         let root = document.RootElement
+
+        let parseFiles element =
+            match tryProperty "files" element with
+            | Some files when files.ValueKind = JsonValueKind.Array ->
+                files.EnumerateArray()
+                |> Seq.map (fun file ->
+                    result {
+                        let! role = requiredString "role" file
+                        let! name = requiredString "name" file
+                        let! hash = requiredString "sha256" file
+                        return role, name, hash
+                    })
+                |> Seq.toList
+                |> List.sequenceResultM
+            | _ ->
+                Error
+                    "Durable terminal runtime bundle manifest omitted its files"
 
         result {
             let! version = requiredInt "version" root
@@ -1797,31 +2046,61 @@ let private verifyBundleManifest
                     Error
                         "Durable terminal runtime bundle manifest is incompatible"
 
-            let! actual =
-                match tryProperty "files" root with
-                | Some files
-                    when files.ValueKind
-                         = JsonValueKind.Array ->
-                    files.EnumerateArray()
-                    |> Seq.map (fun file ->
-                        result {
-                            let! role =
-                                requiredString "role" file
-                            let! name =
-                                requiredString "name" file
-                            let! hash =
-                                requiredString "sha256" file
+            let! compatibilityFiles = parseFiles root
+            let compatibilityLayout =
+                if identity.Version = intermediateRuntimeBundleVersion then
+                    runtimeBundleFileLayout identity
+                else
+                    [ ("host", "durable-terminal-host.mjs")
+                      ("supervisor", "terminal-job-supervisor.ps1")
+                      ("processIdentityHelper",
+                       "terminate-owned-process.ps1") ]
 
-                            return role, name, hash
-                        })
-                    |> Seq.toList
-                    |> List.sequenceResultM
-                | _ ->
+            if
+                (compatibilityFiles
+                 |> List.map (fun (role, name, _) ->
+                     role, name))
+                <> compatibilityLayout
+                || (compatibilityFiles
+                    |> List.exists (fun (_, _, hash) ->
+                        not (validSha256Hex hash)))
+            then
+                return!
                     Error
-                        "Durable terminal runtime bundle manifest omitted its files"
+                        "Durable terminal runtime bundle manifest file identity changed"
 
-            let expectedLayout =
-                runtimeBundleFileLayout identity.Version
+            let compatibilityHashFor role =
+                compatibilityFiles
+                |> List.find (fun (candidateRole, _, _) ->
+                    candidateRole = role)
+                |> fun (_, _, hash) -> hash
+
+            if
+                compatibilityHashFor "host"
+                <> identity.HostScriptHash
+                || compatibilityHashFor "supervisor"
+                   <> identity.SupervisorScriptHash
+                || compatibilityHashFor "processIdentityHelper"
+                   <> identity.ProcessIdentityHelperHash
+            then
+                return!
+                    Error
+                        "Durable terminal runtime bundle manifest file identity changed"
+
+            let! actual =
+                match identity.ExtendedVersion with
+                | None -> Ok compatibilityFiles
+                | Some _ ->
+                    match tryProperty "extendedRuntime" root with
+                    | Some extended
+                        when extended.ValueKind
+                             = JsonValueKind.Object ->
+                        parseFiles extended
+                    | _ ->
+                        Error
+                            "Durable terminal runtime bundle omitted its extended identity"
+
+            let expectedLayout = runtimeBundleFileLayout identity
 
             if
                 (actual
@@ -1853,7 +2132,10 @@ let private verifyBundleManifest
                     Error
                         "Durable terminal runtime bundle manifest file identity changed"
 
-            if identity.Version = runtimeBundleVersion then
+            if
+                identity.Version = intermediateRuntimeBundleVersion
+                || identity.ExtendedVersion.IsSome
+            then
                 let! expectedTtydHash =
                     identity.TtydExecutableHash
                     |> Result.requireSome
@@ -1864,10 +2146,29 @@ let private verifyBundleManifest
                     |> Result.requireSome
                         "Durable terminal runtime bundle omitted its WebSocket identity"
 
+                let! expectedRuntimeLockHash =
+                    match identity.ExtendedVersion with
+                    | Some _ ->
+                        identity.RuntimeLockHelperHash
+                        |> Result.requireSome
+                            "Durable terminal runtime bundle omitted its lock helper identity"
+                        |> Result.map Some
+                    | None -> Ok None
+
                 let! packageVersion =
-                    requiredString
-                        "webSocketPackageVersion"
-                        root
+                    match identity.ExtendedVersion with
+                    | Some _ ->
+                        tryProperty "extendedRuntime" root
+                        |> Result.requireSome
+                            "Durable terminal runtime bundle omitted its extended identity"
+                        |> Result.bind (
+                            requiredString
+                                "webSocketPackageVersion"
+                        )
+                    | None ->
+                        requiredString
+                            "webSocketPackageVersion"
+                            root
 
                 let webSocketAssets =
                     actual
@@ -1888,6 +2189,10 @@ let private verifyBundleManifest
 
                 if
                     hashFor "ttyd" <> expectedTtydHash
+                    || (expectedRuntimeLockHash
+                        |> Option.exists (fun expected ->
+                            hashFor "runtimeLockHelper"
+                            <> expected))
                     || webSocketPackageHash
                            webSocketAssets
                        <> expectedWebSocketHash
@@ -1897,6 +2202,17 @@ let private verifyBundleManifest
                     return!
                         Error
                             "Durable terminal runtime dependency identity changed"
+
+            match identity.ExtendedVersion with
+            | Some version
+                when version
+                     <> extendedRuntimeBundleVersion
+                     || extendedRuntimeBundleHash identity
+                        <> identity.ExtendedBundleHash.Value ->
+                return!
+                    Error
+                        "Durable terminal extended runtime bundle hash does not match its files"
+            | _ -> ()
 
             return actual
         }
@@ -1958,11 +2274,21 @@ let private verifyRuntimeBundleUnsafe
                 Error
                     "Durable terminal runtime bundle hash does not match its files"
 
+        match identity.ExtendedVersion with
+        | Some version
+            when version <> extendedRuntimeBundleVersion
+                 || extendedRuntimeBundleHash identity
+                    <> identity.ExtendedBundleHash.Value ->
+            return!
+                Error
+                    "Durable terminal extended runtime bundle hash does not match its files"
+        | _ -> ()
+
         let root = runtimeBundleRoot config
         let! directory =
             runtimeBundleDirectory
                 config
-                identity.BundleHash
+                (runtimeBundleStorageHash identity)
 
         if not (Directory.Exists directory) then
             return!
@@ -1984,7 +2310,7 @@ let private verifyRuntimeBundleUnsafe
 
         let expectedFiles =
             "bundle.json"
-            :: (runtimeBundleFileLayout identity.Version
+            :: (runtimeBundleFileLayout identity
                 |> List.map snd)
             |> Set.ofList
 
@@ -2126,7 +2452,429 @@ let private writeBundleFile
     stream.Write(content, 0, content.Length)
     stream.Flush true
 
-let internal materializeRuntimeBundle config =
+let private runtimeOwnerName bundleHash phase suffix =
+    $"{bundleHash}.{phase}.{Environment.ProcessId}.{currentProcessStartTicks ()}.{Guid.NewGuid():N}.{suffix}"
+
+let private parseRuntimeOwnerName
+    expectedPhase
+    expectedSuffix
+    (name: string)
+    =
+    match name.Split('.') with
+    | [| bundleHash
+         phase
+         pidText
+         startTicksText
+         nonce
+         suffix |]
+        when validSha256Hex bundleHash
+             && phase = expectedPhase
+             && suffix = expectedSuffix
+             && validBoundedToken 8 128 nonce ->
+        match
+            Int32.TryParse pidText,
+            Int64.TryParse startTicksText
+        with
+        | (true, pid), (true, startTicks)
+            when pid > 0 && startTicks > 0L ->
+            Ok(bundleHash, pid, startTicks)
+        | _ ->
+            Error
+                "Durable terminal runtime owner identity is invalid"
+    | _ ->
+        Error
+            "Durable terminal runtime owner identity is invalid"
+
+let private legacyRuntimeOwnerPid (name: string) =
+    match name.Split('.') with
+    | [| bundleHash; pidText; _; suffix |]
+        when validSha256Hex bundleHash
+             && (suffix = "pending"
+                 || suffix = "reclaim") ->
+        match Int32.TryParse pidText with
+        | true, pid when pid > 0 -> Some pid
+        | _ -> None
+    | _ -> None
+
+let private runtimeArtifactLeasePath root artifactName =
+    containedDirectChild
+        root
+        $"{artifactName}.lease"
+
+let private runtimeArtifactLeaseIsHeld
+    root
+    artifactName
+    =
+    result {
+        let! leasePath =
+            runtimeArtifactLeasePath
+                root
+                artifactName
+
+        if not (File.Exists leasePath) then
+            return false
+        else
+            return
+                try
+                    use _ =
+                        new FileStream(
+                            leasePath,
+                            FileMode.Open,
+                            FileAccess.ReadWrite,
+                            FileShare.None
+                        )
+
+                    false
+                with :? IOException ->
+                    true
+    }
+
+let private runtimeOwnerIsActive
+    root
+    artifactName
+    pid
+    startTicks
+    =
+    processIdentityMatchesValues pid startTicks true
+    |> Result.bind (fun identityMatches ->
+        if identityMatches then
+            runtimeArtifactLeaseIsHeld
+                root
+                artifactName
+        else
+            Ok false)
+
+let private createRuntimeArtifactLease
+    root
+    artifactName
+    phase
+    =
+    result {
+        let! path =
+            runtimeArtifactLeasePath root artifactName
+
+        return!
+            try
+                let stream =
+                    new FileStream(
+                        path,
+                        FileMode.CreateNew,
+                        FileAccess.ReadWrite,
+                        FileShare.None,
+                        4096,
+                        FileOptions.WriteThrough
+                    )
+
+                try
+                    let content =
+                        JsonSerializer.SerializeToUtf8Bytes(
+                            {| phase = phase
+                               ownerPid = Environment.ProcessId
+                               ownerProcessStartTicks =
+                                currentProcessStartTicks () |}
+                        )
+
+                    stream.Write(content, 0, content.Length)
+                    stream.Flush true
+                    stream.Position <- 0L
+                    Ok(stream, path)
+                with ex ->
+                    stream.Dispose()
+                    try
+                        File.Delete path
+                    with _ ->
+                        ()
+                    Error
+                        $"Could not initialize durable terminal runtime {phase} lease: {ex.Message}"
+            with ex ->
+                Error
+                    $"Could not create durable terminal runtime {phase} lease: {ex.Message}"
+    }
+
+let private recoverOrphanRuntimeArtifactLeases root =
+    try
+        Directory.GetFiles(
+            root,
+            "*.lease",
+            SearchOption.TopDirectoryOnly
+        )
+        |> Array.toList
+        |> List.map (fun lease ->
+            result {
+                let leaseName = Path.GetFileName lease
+                let artifactName =
+                    leaseName.Substring(
+                        0,
+                        leaseName.Length - ".lease".Length
+                    )
+                let validArtifact =
+                    match
+                        parseRuntimeOwnerName
+                            "stage"
+                            "pending"
+                            artifactName,
+                        parseRuntimeOwnerName
+                            "delete"
+                            "tombstone"
+                            artifactName
+                    with
+                    | Ok _, _
+                    | _, Ok _ -> true
+                    | _ -> false
+
+                if not validArtifact then
+                    return!
+                        Error
+                            "Durable terminal runtime store contains an invalid artifact lease"
+
+                let! containedLease =
+                    containedDirectChild root leaseName
+                let! artifact =
+                    containedDirectChild root artifactName
+
+                if not (Directory.Exists artifact) then
+                    let! held =
+                        runtimeArtifactLeaseIsHeld
+                            root
+                            artifactName
+
+                    if not held then
+                        File.Delete containedLease
+
+                return ()
+            })
+        |> List.sequenceResultM
+        |> Result.map ignore
+    with ex ->
+        Error
+            $"Could not recover durable terminal runtime artifact leases: {ex.Message}"
+
+let private recoverRuntimeBundleArtifacts root =
+    try
+        Directory.GetDirectories(
+            root,
+            "*",
+            SearchOption.TopDirectoryOnly
+        )
+        |> Array.toList
+        |> List.filter (fun directory ->
+            let name = Path.GetFileName directory
+            name.EndsWith(
+                ".pending",
+                StringComparison.Ordinal
+            )
+            || name.EndsWith(
+                ".tombstone",
+                StringComparison.Ordinal
+            )
+            || name.EndsWith(
+                ".reclaim",
+                StringComparison.Ordinal
+            ))
+        |> List.map (fun directory ->
+            result {
+                let name = Path.GetFileName directory
+                let! contained =
+                    containedDirectChild root name
+
+                do! ensureNoReparsePoint root contained
+
+                let! active =
+                    if
+                        name.EndsWith(
+                            ".pending",
+                            StringComparison.Ordinal
+                        )
+                        && name.Contains(
+                            ".stage.",
+                            StringComparison.Ordinal
+                        )
+                    then
+                        parseRuntimeOwnerName
+                            "stage"
+                            "pending"
+                            name
+                        |> Result.bind (fun (_, pid, startTicks) ->
+                            runtimeOwnerIsActive
+                                root
+                                name
+                                pid
+                                startTicks)
+                    elif
+                        name.EndsWith(
+                            ".tombstone",
+                            StringComparison.Ordinal
+                        )
+                    then
+                        parseRuntimeOwnerName
+                            "delete"
+                            "tombstone"
+                            name
+                        |> Result.bind (fun (_, pid, startTicks) ->
+                            runtimeOwnerIsActive
+                                root
+                                name
+                                pid
+                                startTicks)
+                    else
+                        match legacyRuntimeOwnerPid name with
+                        | Some pid -> Ok(pidIsAlive pid)
+                        | None ->
+                            Error
+                                "Durable terminal runtime store contains an invalid staging or deletion artifact"
+
+                if not active then
+                    Directory.Delete(contained, true)
+                    let! leasePath =
+                        runtimeArtifactLeasePath
+                            root
+                            name
+
+                    File.Delete leasePath
+
+                return ()
+            })
+        |> List.sequenceResultM
+        |> Result.map ignore
+        |> Result.bind (fun () ->
+            recoverOrphanRuntimeArtifactLeases
+                root)
+    with ex ->
+        Error
+            $"Could not recover durable terminal runtime staging or deletion: {ex.Message}"
+
+let private verifyStagedRuntimeBundle
+    identity
+    assets
+    staging
+    =
+    result {
+        do! ensureNoReparsePoint staging staging
+
+        let normalizedRelativePath path =
+            Path.GetRelativePath(staging, path)
+                .Replace(
+                    Path.DirectorySeparatorChar,
+                    '/'
+                )
+                .Replace(
+                    Path.AltDirectorySeparatorChar,
+                    '/'
+                )
+
+        let expectedFiles =
+            "bundle.json"
+            :: (runtimeBundleFileLayout identity
+                |> List.map snd)
+            |> Set.ofList
+        let expectedDirectories =
+            expectedFiles
+            |> Set.toList
+            |> List.collect (fun name ->
+                let segments = name.Split('/')
+
+                [ 1 .. max 0 (segments.Length - 1) ]
+                |> List.map (fun count ->
+                    segments
+                    |> Array.take count
+                    |> String.concat "/"))
+            |> Set.ofList
+
+        let actualFiles =
+            Directory.GetFiles(
+                staging,
+                "*",
+                SearchOption.AllDirectories
+            )
+            |> Array.map normalizedRelativePath
+            |> Set.ofArray
+        let actualDirectories =
+            Directory.GetDirectories(
+                staging,
+                "*",
+                SearchOption.AllDirectories
+            )
+            |> Array.map (fun path ->
+                path,
+                normalizedRelativePath path)
+
+        if
+            actualFiles <> expectedFiles
+            || (actualDirectories
+                |> Array.map snd
+                |> Set.ofArray)
+               <> expectedDirectories
+            || (actualDirectories
+                |> Array.exists (fun (path, _) ->
+                    (File.GetAttributes path
+                     &&& FileAttributes.ReparsePoint)
+                    <> enum 0))
+        then
+            return!
+                Error
+                    "Durable terminal runtime staging contains unexpected files or directories"
+
+        let! manifestPath =
+            containedDirectChild staging "bundle.json"
+
+        let! manifestFiles =
+            File.ReadAllText manifestPath
+            |> verifyBundleManifest identity
+
+        if
+            manifestFiles
+            |> List.map (fun (role, name, hash) ->
+                role, name, hash)
+            <> (assets
+                |> List.map (fun asset ->
+                    asset.Role,
+                    asset.Name,
+                    asset.Hash))
+        then
+            return!
+                Error
+                    "Durable terminal runtime staging manifest does not match its files"
+
+        let! _ =
+            assets
+            |> List.map (fun asset ->
+                result {
+                    let! path =
+                        bundleRelativePath
+                            staging
+                            asset.Name
+                        |> containedPath staging
+
+                    let info = FileInfo path
+
+                    if
+                        not info.Exists
+                        || (info.Attributes
+                            &&& FileAttributes.ReparsePoint)
+                           <> enum 0
+                    then
+                        return!
+                            Error
+                                "Durable terminal runtime staging contains a non-file entry"
+
+                    if
+                        File.ReadAllBytes path
+                        |> sha256Hex
+                        |> (<>) asset.Hash
+                    then
+                        return!
+                            Error
+                                $"Durable terminal runtime staging hash mismatch for {asset.Name}"
+                })
+            |> List.sequenceResultM
+
+        return ()
+    }
+
+let internal materializeRuntimeBundleWithFault
+    config
+    fault
+    =
     result {
         let! assets = runtimeAssets config
         let identity = identityForAssets assets
@@ -2148,144 +2896,138 @@ let internal materializeRuntimeBundle config =
                     $"Could not create durable terminal runtime bundle store: {ex.Message}"
 
         do! rootReady
+        do! recoverRuntimeBundleArtifacts root
 
         let! directory =
             runtimeBundleDirectory
                 config
-                identity.BundleHash
-
-        let claimRecovery =
-            try
-                let claims =
-                    Directory.GetDirectories(
-                        root,
-                        $"{identity.BundleHash}.*.reclaim",
-                        SearchOption.TopDirectoryOnly
-                    )
-
-                match
-                    Directory.Exists directory,
-                    claims
-                with
-                | false, [| claim |] ->
-                    result {
-                        let! containedClaim =
-                            containedDirectChild
-                                root
-                                (Path.GetFileName claim)
-
-                        do!
-                            ensureNoReparsePoint
-                                root
-                                containedClaim
-
-                        Directory.Move(
-                            containedClaim,
-                            directory
-                        )
-
-                        return ()
-                    }
-                | _, [||] -> Ok ()
-                | _ ->
-                    Error
-                        "Durable terminal runtime bundle has conflicting compaction claims"
-            with ex ->
-                Error
-                    $"Could not recover durable terminal runtime bundle: {ex.Message}"
-
-        do! claimRecovery
+                (runtimeBundleStorageHash identity)
 
         if not (Directory.Exists directory) then
             let stagingName =
-                $"{identity.BundleHash}.{Environment.ProcessId}.{Guid.NewGuid():N}.pending"
+                runtimeOwnerName
+                    (runtimeBundleStorageHash identity)
+                    "stage"
+                    "pending"
 
             let! staging =
                 containedDirectChild root stagingName
+            let! stagingLease, stagingLeasePath =
+                createRuntimeArtifactLease
+                    root
+                    stagingName
+                    "stage"
 
             let installation =
                 try
                     try
-                        Directory.CreateDirectory staging
-                        |> ignore
+                        try
+                            fault RuntimeBundleStage.BeforeStaging
+                            Directory.CreateDirectory staging
+                            |> ignore
+                            fault RuntimeBundleStage.AfterStaging
 
-                        match
-                            ensureNoReparsePoint
-                                root
-                                staging
-                        with
-                        | Ok () -> ()
-                        | Error error ->
-                            raise (
-                                InvalidDataException
-                                    error
-                            )
-
-                        let files =
-                            assets
-                            |> List.map (fun asset ->
-                                bundleRelativePath
-                                    staging
-                                    asset.Name
-                                |> containedPath staging
-                                |> Result.map (fun path ->
-                                    path,
-                                    asset.Content))
-                            |> List.sequenceResultM
-                            |> function
-                                | Ok paths -> paths
-                                | Error error ->
-                                    raise (
-                                        InvalidDataException
-                                            error
-                                    )
-
-                        files
-                        |> List.iter (fun (path, content) ->
-                            writeBundleFile
-                                path
-                                content)
-
-                        let manifestPath =
                             match
-                                containedDirectChild
+                                ensureNoReparsePoint
+                                    root
                                     staging
-                                    "bundle.json"
                             with
-                            | Ok path -> path
+                            | Ok () -> ()
                             | Error error ->
                                 raise (
                                     InvalidDataException
                                         error
                                 )
 
-                        writeBundleFile
-                            manifestPath
-                            (bundleManifestBytes
-                                identity
-                                assets)
+                            let files =
+                                assets
+                                |> List.map (fun asset ->
+                                    bundleRelativePath
+                                        staging
+                                        asset.Name
+                                    |> containedPath staging
+                                    |> Result.map (fun path ->
+                                        path,
+                                        asset.Content))
+                                |> List.sequenceResultM
+                                |> function
+                                    | Ok paths -> paths
+                                    | Error error ->
+                                        raise (
+                                            InvalidDataException
+                                                error
+                                        )
 
-                        try
-                            Directory.Move(
-                                staging,
-                                directory
-                            )
-                        with :? IOException
-                            when Directory.Exists directory ->
-                            ()
-                    finally
-                        if Directory.Exists staging then
-                            Directory.Delete(staging, true)
+                            files
+                            |> List.iter (fun (path, content) ->
+                                writeBundleFile
+                                    path
+                                    content)
 
-                    Ok ()
-                with ex ->
-                    Error
-                        $"Could not materialize durable terminal runtime bundle: {ex.Message}"
+                            let manifestPath =
+                                match
+                                    containedDirectChild
+                                        staging
+                                        "bundle.json"
+                                with
+                                | Ok path -> path
+                                | Error error ->
+                                    raise (
+                                        InvalidDataException
+                                            error
+                                    )
+
+                            writeBundleFile
+                                manifestPath
+                                (bundleManifestBytes
+                                    identity
+                                    assets)
+                            fault RuntimeBundleStage.AfterFilesWritten
+
+                            match
+                                verifyStagedRuntimeBundle
+                                    identity
+                                    assets
+                                    staging
+                            with
+                            | Ok () -> ()
+                            | Error error ->
+                                raise (InvalidDataException error)
+
+                            fault RuntimeBundleStage.AfterStagingVerified
+                            fault RuntimeBundleStage.BeforeCanonicalRename
+
+                            try
+                                Directory.Move(
+                                    staging,
+                                    directory
+                                )
+                            with :? IOException
+                                when Directory.Exists directory ->
+                                ()
+                            fault RuntimeBundleStage.AfterCanonicalRename
+                        finally
+                            if Directory.Exists staging then
+                                Directory.Delete(staging, true)
+
+                        Ok ()
+                    with ex ->
+                        Error
+                            $"Could not materialize durable terminal runtime bundle: {ex.Message}"
+                finally
+                    stagingLease.Dispose()
+                    try
+                        File.Delete stagingLeasePath
+                    with _ ->
+                        ()
 
             do! installation
 
         return! verifyRuntimeBundle config identity
     }
+
+let internal materializeRuntimeBundle config =
+    materializeRuntimeBundleWithFault config ignore
 
 let private readEvidenceText path =
     use stream =
@@ -2723,50 +3465,114 @@ let private persistUnknownRetiredGeneration
                                 "Current durable terminal host omitted its runtime bundle identity"
 
                         return
-                            JsonSerializer.SerializeToUtf8Bytes(
-                                {| version =
-                                    generationRecordVersion
-                                   hostProtocolVersion =
-                                    connection.Version
-                                   generation =
-                                    connection.Generation
-                                   hostPid = connection.Pid
-                                   hostProcessStartTicks =
-                                    string connection.ProcessStartTicks
-                                   hostProcessStartExact =
-                                    connection.ProcessStartExact
-                                   ownershipBoundary =
-                                    if connection.KernelOwnership then
-                                        "windows-job-v1"
-                                    else
-                                        "unsupported"
-                                   runtimeBundleVersion =
-                                    bundle.Version
-                                   bundleHash =
-                                    bundle.BundleHash
-                                   hostScriptHash =
-                                    bundle.HostScriptHash
-                                   supervisorScriptHash =
-                                    bundle.SupervisorScriptHash
-                                   processIdentityHelperHash =
-                                    bundle.ProcessIdentityHelperHash
-                                   ttydExecutableHash =
-                                    bundle.TtydExecutableHash
-                                    |> Option.toObj
-                                   webSocketPackageHash =
-                                    bundle.WebSocketPackageHash
-                                    |> Option.toObj
-                                   supervisorProtocolGeneration =
-                                    supervisorProtocolGeneration
-                                   capabilities =
-                                    connection.Capabilities
-                                    |> Set.toArray
-                                   startedAt =
-                                    connection.StartedAt
-                                   sessionsUnknown = true
-                                   sessions =
-                                    Array.empty<obj> |}
-                            )
+                            match bundle.ExtendedVersion with
+                            | Some extendedVersion ->
+                                JsonSerializer.SerializeToUtf8Bytes(
+                                    {| version =
+                                        generationRecordVersion
+                                       hostProtocolVersion =
+                                        connection.Version
+                                       generation =
+                                        connection.Generation
+                                       hostPid = connection.Pid
+                                       hostProcessStartTicks =
+                                        string connection.ProcessStartTicks
+                                       hostProcessStartExact =
+                                        connection.ProcessStartExact
+                                       ownershipBoundary =
+                                        if connection.KernelOwnership then
+                                            "windows-job-v1"
+                                        else
+                                            "unsupported"
+                                       runtimeBundleVersion =
+                                        bundle.Version
+                                       bundleHash =
+                                        bundle.BundleHash
+                                       hostScriptHash =
+                                        bundle.HostScriptHash
+                                       supervisorScriptHash =
+                                        bundle.SupervisorScriptHash
+                                       processIdentityHelperHash =
+                                        bundle.ProcessIdentityHelperHash
+                                       extendedRuntime =
+                                        {| version = extendedVersion
+                                           bundleHash =
+                                            bundle.ExtendedBundleHash.Value
+                                           runtimeLockHelperHash =
+                                            bundle.RuntimeLockHelperHash.Value
+                                           ttydExecutableHash =
+                                            bundle.TtydExecutableHash.Value
+                                           webSocketPackageHash =
+                                            bundle.WebSocketPackageHash.Value
+                                           capabilities =
+                                            extendedRuntimeCapabilities
+                                            |> Set.toArray |}
+                                       runtimeLockBoundary =
+                                        connection.RuntimeLockBoundary
+                                        |> Option.toObj
+                                       runtimeLockOwnerPid =
+                                        connection.RuntimeLockOwnerPid
+                                        |> Option.toNullable
+                                       runtimeLockOwnerProcessStartTicks =
+                                        connection.RuntimeLockOwnerStartTicks
+                                        |> Option.map string
+                                        |> Option.toObj
+                                       supervisorProtocolGeneration =
+                                        supervisorProtocolGeneration
+                                       capabilities =
+                                        connection.Capabilities
+                                        |> Set.toArray
+                                       startedAt =
+                                        connection.StartedAt
+                                       sessionsUnknown = true
+                                       sessions =
+                                        Array.empty<obj> |}
+                                )
+                            | None ->
+                                JsonSerializer.SerializeToUtf8Bytes(
+                                    {| version =
+                                        generationRecordVersion
+                                       hostProtocolVersion =
+                                        connection.Version
+                                       generation =
+                                        connection.Generation
+                                       hostPid = connection.Pid
+                                       hostProcessStartTicks =
+                                        string connection.ProcessStartTicks
+                                       hostProcessStartExact =
+                                        connection.ProcessStartExact
+                                       ownershipBoundary =
+                                        if connection.KernelOwnership then
+                                            "windows-job-v1"
+                                        else
+                                            "unsupported"
+                                       runtimeBundleVersion =
+                                        bundle.Version
+                                       bundleHash =
+                                        bundle.BundleHash
+                                       hostScriptHash =
+                                        bundle.HostScriptHash
+                                       supervisorScriptHash =
+                                        bundle.SupervisorScriptHash
+                                       processIdentityHelperHash =
+                                        bundle.ProcessIdentityHelperHash
+                                       ttydExecutableHash =
+                                        bundle.TtydExecutableHash
+                                        |> Option.toObj
+                                       webSocketPackageHash =
+                                        bundle.WebSocketPackageHash
+                                        |> Option.toObj
+                                       supervisorProtocolGeneration =
+                                        supervisorProtocolGeneration
+                                       capabilities =
+                                        connection.Capabilities
+                                        |> Set.toArray
+                                       startedAt =
+                                        connection.StartedAt
+                                       sessionsUnknown = true
+                                       sessions =
+                                        Array.empty<obj> |}
+                                )
                     }
                 else
                     JsonSerializer.SerializeToUtf8Bytes(
@@ -3270,201 +4076,52 @@ let private compactFullyWitnessedGenerations
         return ()
     }
 
-let private runtimeBundleSnapshot root directory =
-    result {
-        do! ensureNoReparsePoint root directory
-
-        let directories =
-            Directory.GetDirectories(
-                directory,
-                "*",
-                SearchOption.AllDirectories
-            )
-
-        if
-            directories
-            |> Array.exists (fun path ->
-                (File.GetAttributes path
-                 &&& FileAttributes.ReparsePoint)
-                <> enum 0)
-        then
-            return!
-                Error
-                    "Durable terminal runtime bundle contains a reparse point"
-
-        let relative path =
-            Path.GetRelativePath(directory, path)
-                .Replace(
-                    Path.DirectorySeparatorChar,
-                    '/'
-                )
-                .Replace(
-                    Path.AltDirectorySeparatorChar,
-                    '/'
-                )
-
-        let directorySnapshot =
-            directories
-            |> Array.map (fun path ->
-                $"directory:{relative path}", "")
-            |> Array.toList
-
-        let! fileSnapshot =
-            Directory.GetFiles(
-                directory,
-                "*",
-                SearchOption.AllDirectories
-            )
-            |> Array.sort
-            |> Array.toList
-            |> List.map (fun path ->
-                result {
-                    let! contained =
-                        containedPath directory path
-
-                    let info = FileInfo contained
-
-                    if
-                        not info.Exists
-                        || (info.Attributes
-                            &&& FileAttributes.ReparsePoint)
-                           <> enum 0
-                    then
-                        return!
-                            Error
-                                "Durable terminal runtime bundle contains a non-file entry"
-
-                    return
-                        $"file:{relative path}",
-                        (File.ReadAllBytes contained
-                         |> sha256Hex)
-                })
-            |> List.sequenceResultM
-
-        return
-            directorySnapshot @ fileSnapshot
-            |> List.sortBy fst
-    }
-
-let private compactRuntimeBundle
+let internal compactRuntimeBundleWithFault
     config
+    fault
     (bundle: RuntimeBundle)
     =
     let root = runtimeBundleRoot config
-    let claimName =
-        $"{bundle.Identity.BundleHash}.{Environment.ProcessId}.{Guid.NewGuid():N}.reclaim"
+    let tombstoneName =
+        runtimeOwnerName
+            (runtimeBundleStorageHash bundle.Identity)
+            "delete"
+            "tombstone"
 
     result {
-        let! before =
-            runtimeBundleSnapshot
+        let! tombstone =
+            containedDirectChild root tombstoneName
+        let! tombstoneLease, tombstoneLeasePath =
+            createRuntimeArtifactLease
                 root
-                bundle.Directory
+                tombstoneName
+                "delete"
 
-        let! claim =
-            containedDirectChild root claimName
-
-        try
-            Directory.Move(bundle.Directory, claim)
-
-            let! after =
-                runtimeBundleSnapshot root claim
-
-            if after <> before then
-                if not (Directory.Exists bundle.Directory) then
-                    Directory.Move(claim, bundle.Directory)
-
-                return!
-                    Error
-                        "Durable terminal runtime bundle changed during compare-before-delete compaction"
-
-            Directory.Delete(claim, true)
-            return ()
-        with
-        | :? DirectoryNotFoundException -> return ()
-        | ex ->
-            if
-                Directory.Exists claim
-                && not (Directory.Exists bundle.Directory)
-            then
-                try
-                    Directory.Move(claim, bundle.Directory)
-                with _ ->
-                    ()
-
-            return!
+        let outcome =
+            try
+                fault RuntimeBundleStage.BeforeTombstoneRename
+                Directory.Move(bundle.Directory, tombstone)
+                fault RuntimeBundleStage.AfterTombstoneRename
+                fault RuntimeBundleStage.DuringTombstoneDeletion
+                Directory.Delete(tombstone, true)
+                Ok ()
+            with
+            | :? DirectoryNotFoundException -> Ok ()
+            | :? IOException
+                when Directory.Exists bundle.Directory
+                     && not (Directory.Exists tombstone) ->
+                Ok ()
+            | ex ->
                 Error
                     $"Could not compact unreferenced durable terminal runtime bundle: {ex.Message}"
+
+        tombstoneLease.Dispose()
+        File.Delete tombstoneLeasePath
+        return! outcome
     }
 
-let private recoverRuntimeBundleCompactionClaims root =
-    try
-        Directory.GetDirectories(
-            root,
-            "*.reclaim",
-            SearchOption.TopDirectoryOnly
-        )
-        |> Array.toList
-        |> List.map (fun claim ->
-            result {
-                let name = Path.GetFileName claim
-                let marker = name.IndexOf('.')
-
-                let bundleHash =
-                    if marker > 0 then
-                        name.Substring(0, marker)
-                    else
-                        ""
-
-                if
-                    not (validSha256Hex bundleHash)
-                    || not (
-                        name.EndsWith(
-                            ".reclaim",
-                            StringComparison.Ordinal
-                        )
-                    )
-                then
-                    return!
-                        Error
-                            "Durable terminal runtime store contains an invalid compaction claim"
-
-                let! containedClaim =
-                    containedDirectChild root name
-
-                do!
-                    ensureNoReparsePoint
-                        root
-                        containedClaim
-
-                let! bundleDirectory =
-                    containedDirectChild
-                        root
-                        bundleHash
-
-                if Directory.Exists bundleDirectory then
-                    return!
-                        Error
-                            "Durable terminal runtime compaction claim conflicts with an immutable bundle"
-
-                try
-                    Directory.Move(
-                        containedClaim,
-                        bundleDirectory
-                    )
-                with
-                | :? DirectoryNotFoundException ->
-                    ()
-                | :? IOException
-                    when Directory.Exists bundleDirectory ->
-                    ()
-
-                return ()
-            })
-        |> List.sequenceResultM
-        |> Result.map ignore
-    with ex ->
-        Error
-            $"Could not recover durable terminal runtime compaction: {ex.Message}"
+let private compactRuntimeBundle config bundle =
+    compactRuntimeBundleWithFault config ignore bundle
 
 let private compactRuntimeBundlesUnsafe
     config
@@ -3482,7 +4139,7 @@ let private compactRuntimeBundlesUnsafe
                 config.HostStateDirectory
                 root
 
-        do! recoverRuntimeBundleCompactionClaims root
+        do! recoverRuntimeBundleArtifacts root
 
         let! records = readGenerationEvidence config
 
@@ -3492,11 +4149,11 @@ let private compactRuntimeBundlesUnsafe
                   records
                   |> List.choose (fun evidence ->
                       evidence.RuntimeBundle
-                      |> Option.map _.BundleHash)
+                      |> Option.map runtimeBundleStorageHash)
               yield!
                   current
                   |> Option.bind _.RuntimeBundle
-                  |> Option.map _.BundleHash
+                  |> Option.map runtimeBundleStorageHash
                   |> Option.toList ]
             |> Set.ofList
 
@@ -3518,7 +4175,8 @@ let private compactRuntimeBundlesUnsafe
                                     directory
 
                             if
-                                knownIdentity.BundleHash
+                                runtimeBundleStorageHash
+                                    knownIdentity
                                 <> name
                             then
                                 return!
@@ -3538,7 +4196,10 @@ let private compactRuntimeBundlesUnsafe
             bundles
             |> List.filter (fun bundle ->
                 referenced
-                |> Set.contains bundle.Identity.BundleHash
+                |> Set.contains (
+                    runtimeBundleStorageHash
+                        bundle.Identity
+                )
                 |> not)
 
         let removable =
@@ -3762,6 +4423,18 @@ let private parseHealth connection (text: string) =
 
                 let! capabilities =
                     requiredStringSet "capabilities" root
+                let runtimeLockBoundary =
+                    optionalString
+                        "runtimeLockBoundary"
+                        root
+                let! runtimeLockOwnerPid =
+                    optionalInt
+                        "runtimeLockOwnerPid"
+                        root
+                let! runtimeLockOwnerStartTicks =
+                    optionalInt64String
+                        "runtimeLockOwnerProcessStartTicks"
+                        root
 
                 if
                     connection.RuntimeBundle
@@ -3777,6 +4450,12 @@ let private parseHealth connection (text: string) =
                             runtimeBundle.Version
                             capabilities
                     )
+                    || connection.RuntimeLockBoundary
+                       <> runtimeLockBoundary
+                    || connection.RuntimeLockOwnerPid
+                       <> runtimeLockOwnerPid
+                    || connection.RuntimeLockOwnerStartTicks
+                       <> runtimeLockOwnerStartTicks
                 then
                     return!
                         Error
@@ -3810,6 +4489,18 @@ let private requireCurrentRuntimeBundle
             connection.RuntimeBundle
             |> Result.requireSome
                 "Durable terminal host omitted its immutable runtime bundle identity"
+
+        if
+            identity.ExtendedVersion
+            <> Some extendedRuntimeBundleVersion
+            || connection.RuntimeLockBoundary
+               <> Some "windows-file-share-read-v1"
+            || connection.RuntimeLockOwnerPid.IsNone
+            || connection.RuntimeLockOwnerStartTicks.IsNone
+        then
+            return!
+                Error
+                    "The protocol-3 durable terminal host exposes only the rollback compatibility runtime; close or drain its sessions before starting a terminal with the locked runtime"
 
         return! verifyRuntimeBundle config identity
     }
@@ -3845,23 +4536,30 @@ let private discoverHost config =
                         )
                     )
             | Ok true ->
-                match! probe config connection with
-                | Ok () -> return Ok(HealthyHost connection)
-                | Error probeError ->
-                    match processIdentityMatches connection with
-                    | Ok false ->
-                        return
-                            Ok(
-                                DeadHost(
-                                    connection,
-                                    $"Durable terminal host PID {connection.Pid} exited: {probeError}"
+                match runtimeLockOwnerIdentityMatches connection with
+                | Error error -> return Error error
+                | Ok false ->
+                    return
+                        Error
+                            $"Durable terminal host PID {connection.Pid} lost its immutable runtime lock owner"
+                | Ok true ->
+                    match! probe config connection with
+                    | Ok () -> return Ok(HealthyHost connection)
+                    | Error probeError ->
+                        match processIdentityMatches connection with
+                        | Ok false ->
+                            return
+                                Ok(
+                                    DeadHost(
+                                        connection,
+                                        $"Durable terminal host PID {connection.Pid} exited: {probeError}"
+                                    )
                                 )
-                            )
-                    | Ok true ->
-                        return
-                            Error
-                                $"Durable terminal host PID {connection.Pid} is alive but unhealthy: {probeError}"
-                    | Error identityError -> return Error identityError
+                        | Ok true ->
+                            return
+                                Error
+                                    $"Durable terminal host PID {connection.Pid} is alive but unhealthy: {probeError}"
+                        | Error identityError -> return Error identityError
     }
 
 let private sameConnectionOwner
@@ -3887,6 +4585,12 @@ let private sameConnectionOwner
         && left.SupervisorProtocolGeneration
            = right.SupervisorProtocolGeneration
         && left.Capabilities = right.Capabilities
+        && left.RuntimeLockBoundary
+           = right.RuntimeLockBoundary
+        && left.RuntimeLockOwnerPid
+           = right.RuntimeLockOwnerPid
+        && left.RuntimeLockOwnerStartTicks
+           = right.RuntimeLockOwnerStartTicks
     else
         sameHostIdentity (hostIdentity left) (hostIdentity right)
 
@@ -4020,10 +4724,17 @@ let private tryAcquireStartupLock config =
         Error
             $"Could not acquire durable terminal host startup ownership: {ex.Message}"
 
+type private StartedHostProcess =
+    { HostPid: int
+      HostProcessStartTicks: int64
+      RuntimeLockOwnerPid: int
+      RuntimeLockOwnerStartTicks: int64
+      RuntimeStatusPath: string }
+
 let private writeStartupClaim
     (stream: FileStream)
     generation
-    (hostProcess: (int * int64) option)
+    (hostProcess: StartedHostProcess option)
     =
     try
         let claim =
@@ -4035,15 +4746,19 @@ let private writeStartupClaim
                        ownerProcessStartTicks =
                         currentProcessStartTicks () |}
                 )
-            | Some(hostPid, hostProcessStartTicks) ->
+            | Some started ->
                 JsonSerializer.SerializeToUtf8Bytes(
                     {| generation = generation
                        ownerPid = Environment.ProcessId
                        ownerProcessStartTicks =
                         currentProcessStartTicks ()
-                       hostPid = hostPid
+                       hostPid = started.HostPid
                        hostProcessStartTicks =
-                        string hostProcessStartTicks |}
+                        string started.HostProcessStartTicks
+                       runtimeLockOwnerPid =
+                        started.RuntimeLockOwnerPid
+                       runtimeLockOwnerProcessStartTicks =
+                        string started.RuntimeLockOwnerStartTicks |}
                 )
 
         stream.Position <- 0L
@@ -4054,9 +4769,215 @@ let private writeStartupClaim
     with ex ->
         Error $"Could not write durable terminal startup ownership: {ex.Message}"
 
+let internal openRuntimeBundleLaunchLocks
+    (bundle: RuntimeBundle)
+    =
+    let dispose (streams: FileStream list) =
+        streams |> List.iter _.Dispose()
+
+    let openReadLock path =
+        new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read
+        )
+
+    try
+        let manifestPath =
+            Path.Combine(bundle.Directory, "bundle.json")
+        let manifestStream = openReadLock manifestPath
+
+        let parsed =
+            try
+                use reader =
+                    new StreamReader(
+                        manifestStream,
+                        Encoding.UTF8,
+                        true,
+                        4096,
+                        true
+                    )
+
+                let result =
+                    reader.ReadToEnd()
+                    |> verifyBundleManifest bundle.Identity
+
+                manifestStream.Position <- 0L
+                result
+            with ex ->
+                Error ex.Message
+
+        match parsed with
+        | Error error ->
+            manifestStream.Dispose()
+            Error
+                $"Could not lock the durable terminal runtime manifest: {error}"
+        | Ok files ->
+            let rec lockFiles held remaining =
+                match remaining with
+                | [] -> Ok(manifestStream :: held)
+                | (_, name, expectedHash) :: tail ->
+                    match
+                        bundleRelativePath bundle.Directory name
+                        |> containedPath bundle.Directory
+                    with
+                    | Error error ->
+                        dispose held
+                        manifestStream.Dispose()
+                        Error error
+                    | Ok path ->
+                        try
+                            let stream = openReadLock path
+                            let actualHash =
+                                SHA256.HashData stream
+                                |> Convert.ToHexString
+                                |> _.ToLowerInvariant()
+
+                            stream.Position <- 0L
+
+                            if actualHash <> expectedHash then
+                                stream.Dispose()
+                                dispose held
+                                manifestStream.Dispose()
+                                Error
+                                    $"Durable terminal runtime changed while its launch lock was acquired for {name}"
+                            else
+                                lockFiles (stream :: held) tail
+                        with ex ->
+                            dispose held
+                            manifestStream.Dispose()
+                            Error
+                                $"Could not acquire the durable terminal runtime launch lock for {name}: {ex.Message}"
+
+            lockFiles [] files
+    with ex ->
+        Error
+            $"Could not acquire durable terminal runtime launch locks: {ex.Message}"
+
+let private terminateRetainedProcess (proc: Process) =
+    try
+        if proc.HasExited then
+            Ok ()
+        else
+            proc.Kill true
+
+            if proc.WaitForExit 5000 then
+                Ok ()
+            else
+                Error
+                    $"Timed out stopping retained runtime lock owner PID {proc.Id}"
+    with ex ->
+        Error
+            $"Could not stop retained runtime lock owner PID {proc.Id}: {ex.Message}"
+
+let private parseRuntimeLockReady
+    token
+    expectedOwnerPid
+    expectedOwnerStartTicks
+    statusPath
+    (text: string)
+    =
+    try
+        use document = JsonDocument.Parse text
+        let root = document.RootElement
+
+        result {
+            let! ready = requiredBool "ok" root
+            let! actualToken = requiredString "token" root
+
+            if actualToken <> token then
+                return!
+                    Error
+                        "Durable terminal runtime lock readiness authentication changed"
+
+            if not ready then
+                let error =
+                    optionalString "error" root
+                    |> Option.defaultValue
+                        "Runtime lock owner failed before host startup"
+
+                return! Error error
+
+            let! lockOwnerPid =
+                requiredInt
+                    "runtimeLockOwnerPid"
+                    root
+            let! lockOwnerStartTicks =
+                requiredInt64String
+                    "runtimeLockOwnerProcessStartTicks"
+                    root
+            let! hostPid = requiredInt "hostPid" root
+            let! hostStartTicks =
+                requiredInt64String
+                    "hostProcessStartTicks"
+                    root
+
+            if
+                lockOwnerPid <> expectedOwnerPid
+                || lockOwnerStartTicks
+                   <> expectedOwnerStartTicks
+                || hostPid <= 0
+            then
+                return!
+                    Error
+                        "Durable terminal runtime lock readiness identity changed"
+
+            return
+                { HostPid = hostPid
+                  HostProcessStartTicks = hostStartTicks
+                  RuntimeLockOwnerPid = lockOwnerPid
+                  RuntimeLockOwnerStartTicks =
+                    lockOwnerStartTicks
+                  RuntimeStatusPath = statusPath }
+        }
+    with ex ->
+        Error
+            $"Invalid durable terminal runtime lock readiness: {ex.Message}"
+
+let private waitForRuntimeLockReady
+    (proc: Process)
+    readyPath
+    token
+    deadline
+    =
+    let rec wait () =
+        if File.Exists readyPath then
+            try
+                File.ReadAllText readyPath
+                |> parseRuntimeLockReady
+                    token
+                    proc.Id
+                    (proc.StartTime.ToUniversalTime().Ticks)
+                    (Path.ChangeExtension(
+                        readyPath,
+                        ".status.json"
+                    ))
+            with
+            | :? IOException
+                when not proc.HasExited
+                     && DateTimeOffset.UtcNow < deadline ->
+                Thread.Sleep 10
+                wait ()
+            | ex ->
+                Error
+                    $"Could not read durable terminal runtime lock readiness: {ex.Message}"
+        elif proc.HasExited then
+            Error
+                $"Durable terminal runtime lock owner exited with code {proc.ExitCode} before host startup"
+        elif DateTimeOffset.UtcNow >= deadline then
+            Error
+                "Timed out waiting for durable terminal runtime lock ownership"
+        else
+            Thread.Sleep 10
+            wait ()
+
+    wait ()
+
 let private startHostProcess
     config
     generation
+    (startupLock: FileStream)
     (bundle: RuntimeBundle)
     =
     result {
@@ -4083,77 +5004,203 @@ let private startHostProcess
             |> Result.requireSome
                 "Immutable durable terminal runtime omitted ttyd"
 
-        if
-            (File.ReadAllBytes hostPath |> sha256Hex)
-            <> verified.Identity.HostScriptHash
-            || (File.ReadAllBytes ttydPath |> sha256Hex)
-               <> expectedTtydHash
-        then
-            return!
-                Error
-                    "Immutable durable terminal runtime changed immediately before host launch"
+        let! lockHelperPath =
+            containedDirectChild
+                verified.Directory
+                "terminal-runtime-lock.ps1"
+        let! extendedBundleHash =
+            verified.Identity.ExtendedBundleHash
+            |> Result.requireSome
+                "Immutable durable terminal runtime omitted its extended identity"
+        let! runtimeLockHelperHash =
+            verified.Identity.RuntimeLockHelperHash
+            |> Result.requireSome
+                "Immutable durable terminal runtime omitted its lock helper"
+        let! launchLocks =
+            openRuntimeBundleLaunchLocks verified
 
-        return!
+        let launch () =
+            result {
+                let launchId = Guid.NewGuid().ToString("N")
+                let! launchRequestPath =
+                    containedDirectChild
+                        config.HostStateDirectory
+                        $"runtime-launch-{generation}-{launchId}.json"
+                let! readyPath =
+                    containedDirectChild
+                        config.HostStateDirectory
+                        $"runtime-ready-{generation}-{launchId}.json"
+                let! statusPath =
+                    containedDirectChild
+                        config.HostStateDirectory
+                        $"runtime-ready-{generation}-{launchId}.status.json"
+                let token =
+                    $"{Guid.NewGuid():N}{Guid.NewGuid():N}"
+                let hostArguments =
+                    [ hostPath
+                      "--state-dir"
+                      config.HostStateDirectory
+                      "--ttyd"
+                      ttydPath
+                      "--shell"
+                      config.ShellCommand
+                      "--generation"
+                      generation
+                      "--runtime-bundle-dir"
+                      bundle.Directory
+                      "--runtime-bundle-hash"
+                      verified.Identity.BundleHash
+                      "--runtime-bundle-version"
+                      string verified.Identity.Version
+                      "--extended-runtime-bundle-version"
+                      string extendedRuntimeBundleVersion
+                      "--extended-runtime-bundle-hash"
+                      extendedBundleHash
+                      "--host-script-hash"
+                      verified.Identity.HostScriptHash
+                      "--supervisor-script-hash"
+                      verified.Identity.SupervisorScriptHash
+                      "--process-helper-hash"
+                      verified.Identity.ProcessIdentityHelperHash
+                      "--runtime-lock-helper-hash"
+                      runtimeLockHelperHash
+                      "--ttyd-hash"
+                      expectedTtydHash
+                      "--ws-package-hash"
+                      verified.Identity.WebSocketPackageHash.Value ]
+                let requestBytes =
+                    JsonSerializer.SerializeToUtf8Bytes(
+                        {| token = token
+                           nodeExecutable =
+                            config.NodeExecutable
+                           arguments =
+                            hostArguments |> List.toArray |}
+                    )
+
+                do! atomicWriteBytes launchRequestPath requestBytes
+
+                return!
+                    try
+                        let psi =
+                            ProcessStartInfo(
+                                FileName = "pwsh",
+                                UseShellExecute = false,
+                                CreateNoWindow = true,
+                                WorkingDirectory =
+                                    verified.Directory
+                            )
+
+                        [ "-NoProfile"
+                          "-NonInteractive"
+                          "-File"
+                          lockHelperPath
+                          "-BundleDirectory"
+                          verified.Directory
+                          "-CompatibilityBundleHash"
+                          verified.Identity.BundleHash
+                          "-ExtendedBundleHash"
+                          extendedBundleHash
+                          "-LaunchRequestPath"
+                          launchRequestPath
+                          "-ReadyPath"
+                          readyPath
+                          "-StatusPath"
+                          statusPath ]
+                        |> List.iter psi.ArgumentList.Add
+
+                        use proc = new Process(StartInfo = psi)
+
+                        if not (proc.Start()) then
+                            Error
+                                "PowerShell did not start the durable terminal runtime lock owner"
+                        else
+                            let started =
+                                waitForRuntimeLockReady
+                                    proc
+                                    readyPath
+                                    token
+                                    (DateTimeOffset.UtcNow
+                                     + TimeSpan.FromSeconds 10.0)
+
+                            match started with
+                            | Error error ->
+                                match
+                                    terminateRetainedProcess
+                                        proc
+                                with
+                                | Ok () -> Error error
+                                | Error cleanupError ->
+                                    Error
+                                        $"{error}; {cleanupError}"
+                            | Ok started ->
+                                match
+                                    writeStartupClaim
+                                        startupLock
+                                        generation
+                                        (Some started)
+                                with
+                                | Ok () -> Ok started
+                                | Error error ->
+                                    match
+                                        terminateRetainedProcess
+                                            proc
+                                    with
+                                    | Ok () -> Error error
+                                    | Error cleanupError ->
+                                        Error
+                                            $"{error}; {cleanupError}"
+                    finally
+                        File.Delete launchRequestPath
+                        File.Delete readyPath
+            }
+
+        let launchResult =
             try
-                Directory.CreateDirectory config.HostStateDirectory
-                |> ignore
-
-                let psi =
-                    ProcessStartInfo(
-                        FileName = config.NodeExecutable,
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        WorkingDirectory = verified.Directory
-                    )
-
-                [ hostPath
-                  "--state-dir"
-                  config.HostStateDirectory
-                  "--ttyd"
-                  ttydPath
-                  "--shell"
-                  config.ShellCommand
-                  "--generation"
-                  generation
-                  "--runtime-bundle-dir"
-                  bundle.Directory
-                  "--runtime-bundle-hash"
-                  verified.Identity.BundleHash
-                  "--runtime-bundle-version"
-                  string verified.Identity.Version
-                  "--host-script-hash"
-                  verified.Identity.HostScriptHash
-                  "--supervisor-script-hash"
-                  verified.Identity.SupervisorScriptHash
-                  "--process-helper-hash"
-                  verified.Identity.ProcessIdentityHelperHash
-                  "--ttyd-hash"
-                  expectedTtydHash
-                  "--ws-package-hash"
-                  verified.Identity.WebSocketPackageHash.Value ]
-                |> List.iter psi.ArgumentList.Add
-
-                use proc = new Process(StartInfo = psi)
-
-                if proc.Start() then
-                    Ok(
-                        proc.Id,
-                        proc.StartTime.ToUniversalTime().Ticks
-                    )
-                else
+                try
+                    launch ()
+                with ex ->
                     Error
-                        "Node did not start the durable terminal host"
-            with ex ->
-                Error
-                    $"Failed to start the durable terminal host: {ex.Message}"
+                        $"Failed to start the durable terminal host: {ex.Message}"
+            finally
+                launchLocks |> List.iter _.Dispose()
+
+        return! launchResult
     }
 
 let private waitForHost
     config
     deadline
-    startedPid
+    (started: StartedHostProcess)
     (expectedBundle: RuntimeBundle)
     =
+    let runtimeExitError () =
+        if not (File.Exists started.RuntimeStatusPath) then
+            None
+        else
+            try
+                try
+                    use document =
+                        File.ReadAllText started.RuntimeStatusPath
+                        |> JsonDocument.Parse
+
+                    let root = document.RootElement
+                    let code =
+                        requiredInt "exitCode" root
+                        |> Result.defaultValue -1
+                    let error =
+                        optionalString "error" root
+                        |> Option.defaultValue ""
+
+                    Some(
+                        $"Durable terminal host PID {started.HostPid} exited with code {code}: {error}"
+                    )
+                with _ ->
+                    Some(
+                        $"Durable terminal host PID {started.HostPid} exited before publishing diagnostics"
+                    )
+            finally
+                File.Delete started.RuntimeStatusPath
+
     let rec wait () =
         async {
             match! discoverHost config with
@@ -4190,39 +5237,59 @@ let private waitForHost
                     | Error error -> return Error error
                 | Error error -> return Error error
             | Ok (HealthyHost connection) ->
-                match
-                    requireCurrentRuntimeBundle
-                        config
-                        connection
-                with
-                | Error error -> return Error error
-                | Ok bundle
-                    when bundle.Identity
-                         = expectedBundle.Identity ->
-                    return Ok connection
-                | Ok _ ->
+                if
+                    connection.Pid <> started.HostPid
+                    || connection.RuntimeLockOwnerPid
+                       <> Some started.RuntimeLockOwnerPid
+                    || connection.RuntimeLockOwnerStartTicks
+                       <> Some started.RuntimeLockOwnerStartTicks
+                then
                     return
                         Error
-                            "Durable terminal host started with an unexpected runtime bundle"
+                            "Durable terminal host startup identity did not match its runtime lock owner"
+                else
+                    match
+                        requireCurrentRuntimeBundle
+                            config
+                            connection
+                    with
+                    | Error error -> return Error error
+                    | Ok bundle
+                        when bundle.Identity
+                             = expectedBundle.Identity ->
+                        File.Delete started.RuntimeStatusPath
+                        return Ok connection
+                    | Ok _ ->
+                        return
+                            Error
+                                "Durable terminal host started with an unexpected runtime bundle"
             | Error error when DateTimeOffset.UtcNow >= deadline ->
                 return
                     Error
-                        $"Timed out waiting for durable terminal host PID {startedPid}: {error}"
+                        $"Timed out waiting for durable terminal host PID {started.HostPid}: {error}"
             | Ok (DeadHost(_, error)) when DateTimeOffset.UtcNow >= deadline ->
                 return
                     Error
-                        $"Timed out waiting for durable terminal host PID {startedPid}: {error}"
+                        $"Timed out waiting for durable terminal host PID {started.HostPid}: {error}"
             | Ok MissingHost when DateTimeOffset.UtcNow >= deadline ->
                 return
                     Error
-                        $"Timed out waiting for durable terminal host PID {startedPid}"
+                        $"Timed out waiting for durable terminal host PID {started.HostPid}"
             | Error _
             | Ok (DeadHost _)
             | Ok MissingHost ->
-                if not (pidIsAlive startedPid) then
+                if
+                    not (pidIsAlive started.HostPid)
+                    || not (
+                        pidIsAlive
+                            started.RuntimeLockOwnerPid
+                    )
+                then
                     return
                         Error
-                            $"Durable terminal host PID {startedPid} exited during startup"
+                            (runtimeExitError ()
+                             |> Option.defaultValue
+                                 $"Durable terminal host PID {started.HostPid} or its runtime lock owner exited during startup")
                 else
                     do! Async.Sleep config.ProbeInterval
                     return! wait ()
@@ -4254,6 +5321,10 @@ let private ensureHostWithTtydRequirement requireTtyd config =
             return
                 Error
                     $"Durable terminal process identity helper is missing at '{config.ProcessIdentityHelperPath}'"
+        elif not (File.Exists config.RuntimeLockHelperPath) then
+            return
+                Error
+                    $"Durable terminal runtime lock helper is missing at '{config.RuntimeLockHelperPath}'"
         elif
             requireTtyd
             && not (Directory.Exists config.WebSocketPackagePath)
@@ -4335,7 +5406,8 @@ let private ensureHostWithTtydRequirement requireTtyd config =
                                                 config
                                                 None
                                                 (Set.singleton
-                                                    bundle.Identity.BundleHash)
+                                                    (runtimeBundleStorageHash
+                                                        bundle.Identity))
 
                                         do! requireGenerationCapacity config
 
@@ -4348,26 +5420,18 @@ let private ensureHostWithTtydRequirement requireTtyd config =
                                                 generation
                                                 None
 
-                                        let! startedPid, startedAt =
+                                        let! started =
                                             startHostProcess
                                                 config
                                                 generation
-                                                bundle
-
-                                        do!
-                                            writeStartupClaim
                                                 startupLock
-                                                generation
-                                                (Some(
-                                                    startedPid,
-                                                    startedAt
-                                                ))
+                                                bundle
 
                                         return!
                                             waitForHost
                                                 config
                                                 deadline
-                                                startedPid
+                                                started
                                                 bundle
                                     }
 
@@ -4673,7 +5737,8 @@ let rec private startTerminal config instanceId state worktreePath =
                                 config
                                 (Some connection)
                                 (Set.singleton
-                                    current.Identity.BundleHash)
+                                    (runtimeBundleStorageHash
+                                        current.Identity))
                         with
                         | Ok () ->
                             current.Identity <> running,
@@ -6004,31 +7069,45 @@ let private waitForHostExit
         async {
             match processIdentityMatches connection with
             | Ok false ->
-                let reclamation =
-                    if retainDeadGeneration then
-                        reclaimDeadHost config connection
-                    else
-                        reclaimKnownEmptyHost config connection
-
-                match reclamation with
-                | Ok Reclaimed
-                | Ok OwnershipChanged ->
-                    return Ok ()
-                | Ok ReclaimDeferred ->
-                    match readHostConnection config with
-                    | Ok None -> return Ok ()
-                    | Ok (Some current)
-                        when sameConnectionOwner current connection
-                             |> not ->
-                        return Ok ()
-                    | _ when DateTimeOffset.UtcNow >= deadline ->
-                        return
-                            Error
-                                "Timed out waiting to reclaim stopped durable terminal host metadata"
-                    | _ ->
-                        do! Async.Sleep config.ProbeInterval
-                        return! wait ()
+                match runtimeLockOwnerHasExited connection with
                 | Error error -> return Error error
+                | Ok false
+                    when DateTimeOffset.UtcNow
+                         < deadline ->
+                    do! Async.Sleep config.ProbeInterval
+                    return! wait ()
+                | Ok false ->
+                    return
+                        Error
+                            $"Timed out waiting for durable terminal runtime lock owner PID {connection.RuntimeLockOwnerPid.Value} to stop"
+                | Ok true ->
+                    let reclamation =
+                        if retainDeadGeneration then
+                            reclaimDeadHost config connection
+                        else
+                            reclaimKnownEmptyHost config connection
+
+                    match reclamation with
+                    | Ok Reclaimed
+                    | Ok OwnershipChanged ->
+                        return Ok ()
+                    | Ok ReclaimDeferred ->
+                        match readHostConnection config with
+                        | Ok None -> return Ok ()
+                        | Ok (Some current)
+                            when sameConnectionOwner
+                                     current
+                                     connection
+                                 |> not ->
+                            return Ok ()
+                        | _ when DateTimeOffset.UtcNow >= deadline ->
+                            return
+                                Error
+                                    "Timed out waiting to reclaim stopped durable terminal host metadata"
+                        | _ ->
+                            do! Async.Sleep config.ProbeInterval
+                            return! wait ()
+                    | Error error -> return Error error
             | Ok true when DateTimeOffset.UtcNow < deadline ->
                 do! Async.Sleep config.ProbeInterval
                 return! wait ()

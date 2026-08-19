@@ -40,3 +40,49 @@ jobs:
 
       - name: Test .NET
         run: dotnet test src/Tests/Tests.fsproj --filter "Category!=Local" --no-build --verbosity normal
+
+  durable-terminal-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Install pinned ttyd
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts\setup-ttyd.ps1
+
+      - name: Restore .NET tools
+        run: dotnet tool restore
+
+      - name: Build Release
+        run: dotnet build treemon.slnx --configuration Release
+
+      - name: Test durable Node runtime
+        run: npm run test:durable-terminal-host && npm run test:durable-terminal-observation && npm run test:durable-terminal-verifier-env && npm run test:ttyd-runtime-unit
+
+      - name: Test durable F# runtime
+        run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=Unit&FullyQualifiedName~EmbeddedTerminal" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "FullyQualifiedName~WorktreePathResolutionTests" --verbosity normal
+
+      - name: Test previous-binary rollback
+        run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=DurableRollback" --verbosity normal
+
+      - name: Publish runtime layout
+        run: dotnet publish src/Server/Server.fsproj --configuration Release --no-build --output .agents/ci-publish
+
+      - name: Verify isolated durable runtime
+        run: npm run test:ttyd-runtime && npm run test:durable-terminal-runtime && npm run test:durable-terminal-treemon

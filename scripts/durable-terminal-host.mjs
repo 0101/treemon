@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import {
@@ -45,18 +45,42 @@ const webSocketPath =
     : join(import.meta.dirname, "..", "node_modules", "ws", "wrapper.mjs");
 process.env.WS_NO_BUFFER_UTIL = "1";
 process.env.WS_NO_UTF_8_VALIDATE = "1";
-const { WebSocket, WebSocketServer } = await import(
-  pathToFileURL(webSocketPath).href
-);
+let WebSocket = { OPEN: 1, CLOSED: 3 };
+let WebSocketServer = null;
+let loadedWebSocketPath = null;
+
+export async function loadWebSocketRuntime(path = webSocketPath) {
+  const resolvedPath = resolve(path);
+  if (WebSocketServer) {
+    if (
+      pathComparisonValue(resolvedPath) !==
+      pathComparisonValue(loadedWebSocketPath)
+    ) {
+      throw new Error("Durable terminal WebSocket runtime identity changed");
+    }
+    return;
+  }
+  const runtime = await import(pathToFileURL(resolvedPath).href);
+  WebSocket = runtime.WebSocket;
+  WebSocketServer = runtime.WebSocketServer;
+  loadedWebSocketPath = resolvedPath;
+}
 
 export const hostProtocolVersion = 3;
 export const terminalOwnershipBoundary = "windows-job-v1";
 export const terminalJobProtocolGeneration = 2;
 export const terminalGenerationRecordVersion = 2;
-export const terminalRuntimeBundleVersion = 2;
+export const terminalRuntimeBundleVersion = 1;
+export const extendedTerminalRuntimeBundleVersion = 3;
 export const terminalRuntimeCapabilities = Object.freeze([
+  "immutable-runtime-bundle-v1",
+  "strict-evidence-paths-v1",
+  "trusted-empty-supervisor-v1",
+]);
+export const extendedTerminalRuntimeCapabilities = Object.freeze([
   "immutable-executable-dependencies-v1",
   "immutable-runtime-bundle-v1",
+  "locked-runtime-files-v1",
   "strict-evidence-paths-v1",
   "trusted-empty-supervisor-v1",
 ]);
@@ -84,10 +108,14 @@ const generationClaimNoncePattern = /^[A-Za-z0-9_-]{8,128}$/;
 const webSocketPackageVersion = "8.21.3";
 const pinnedTtydSha256 =
   "e33a27501b10b96981335bcba938b1145c7f52551a343e72160f00ab71832b37";
-const coreRuntimeBundleRoles = Object.freeze([
+const compatibilityRuntimeBundleRoles = Object.freeze([
   ["host", "durable-terminal-host.mjs"],
   ["supervisor", "terminal-job-supervisor.ps1"],
   ["processIdentityHelper", "terminate-owned-process.ps1"],
+]);
+const coreRuntimeBundleRoles = Object.freeze([
+  ...compatibilityRuntimeBundleRoles,
+  ["runtimeLockHelper", "terminal-runtime-lock.ps1"],
   ["ttyd", "ttyd.exe"],
 ]);
 const webSocketRuntimeFiles = Object.freeze([
@@ -177,15 +205,11 @@ export function runtimeBundleHash({
   hostScriptHash,
   supervisorScriptHash,
   processIdentityHelperHash,
-  ttydExecutableHash,
-  webSocketPackageHash,
 }) {
   const hashes = new Map([
     ["host", hostScriptHash],
     ["supervisor", supervisorScriptHash],
     ["processIdentityHelper", processIdentityHelperHash],
-    ["ttyd", ttydExecutableHash],
-    ["webSocketPackage", webSocketPackageHash],
   ]);
   if ([...hashes.values()].some((hash) => !sha256Pattern.test(hash ?? ""))) {
     throw new Error("Durable terminal runtime file hash is invalid");
@@ -195,6 +219,44 @@ export function runtimeBundleHash({
     `host-protocol:${hostProtocolVersion}`,
     `supervisor-protocol:${terminalJobProtocolGeneration}`,
     ...[...terminalRuntimeCapabilities]
+      .sort()
+      .map((capability) => `capability:${capability}`),
+    ...compatibilityRuntimeBundleRoles.map(
+      ([role, name]) => `file:${role}:${name}:${hashes.get(role)}`,
+    ),
+  ];
+  return sha256Bytes(Buffer.from(`${lines.join("\n")}\n`, "utf8"));
+}
+
+export function extendedRuntimeBundleHash({
+  bundleHash,
+  hostScriptHash,
+  supervisorScriptHash,
+  processIdentityHelperHash,
+  runtimeLockHelperHash,
+  ttydExecutableHash,
+  webSocketPackageHash,
+}) {
+  const hashes = new Map([
+    ["host", hostScriptHash],
+    ["supervisor", supervisorScriptHash],
+    ["processIdentityHelper", processIdentityHelperHash],
+    ["runtimeLockHelper", runtimeLockHelperHash],
+    ["ttyd", ttydExecutableHash],
+    ["webSocketPackage", webSocketPackageHash],
+  ]);
+  if (
+    !sha256Pattern.test(bundleHash ?? "") ||
+    [...hashes.values()].some((hash) => !sha256Pattern.test(hash ?? ""))
+  ) {
+    throw new Error("Durable terminal extended runtime file hash is invalid");
+  }
+  const lines = [
+    `bundle-version:${extendedTerminalRuntimeBundleVersion}`,
+    `compatibility-bundle:${bundleHash}`,
+    `host-protocol:${hostProtocolVersion}`,
+    `supervisor-protocol:${terminalJobProtocolGeneration}`,
+    ...[...extendedTerminalRuntimeCapabilities]
       .sort()
       .map((capability) => `capability:${capability}`),
     ...coreRuntimeBundleRoles.map(
@@ -315,9 +377,12 @@ export function verifyRuntimeBundle({
   bundleDirectory,
   bundleHash,
   runtimeBundleVersion,
+  extendedRuntimeBundleVersion,
+  extendedBundleHash,
   hostScriptHash,
   supervisorScriptHash,
   processIdentityHelperHash,
+  runtimeLockHelperHash,
   ttydExecutableHash,
   webSocketPackageHash,
 }) {
@@ -332,16 +397,30 @@ export function verifyRuntimeBundle({
       hostScriptHash,
       supervisorScriptHash,
       processIdentityHelperHash,
-      ttydExecutableHash,
-      webSocketPackageHash,
     }) !== bundleHash
   ) {
     throw new Error("Durable terminal runtime bundle hash does not match its files");
   }
+  if (
+    extendedRuntimeBundleVersion !== extendedTerminalRuntimeBundleVersion ||
+    extendedRuntimeBundleHash({
+      bundleHash,
+      hostScriptHash,
+      supervisorScriptHash,
+      processIdentityHelperHash,
+      runtimeLockHelperHash,
+      ttydExecutableHash,
+      webSocketPackageHash,
+    }) !== extendedBundleHash
+  ) {
+    throw new Error(
+      "Durable terminal extended runtime bundle hash does not match its files",
+    );
+  }
   const runtimeRoot = join(resolve(stateDirectory), "terminal-runtime-bundles");
   const expectedDirectory = containedStatePath(
     runtimeRoot,
-    join(runtimeRoot, bundleHash),
+    join(runtimeRoot, extendedBundleHash),
   );
   if (
     pathComparisonValue(expectedDirectory) !==
@@ -421,22 +500,70 @@ export function verifyRuntimeBundle({
     manifest.hostScriptHash !== hostScriptHash ||
     manifest.supervisorScriptHash !== supervisorScriptHash ||
     manifest.processIdentityHelperHash !== processIdentityHelperHash ||
-    manifest.ttydExecutableHash !== ttydExecutableHash ||
-    manifest.webSocketPackageHash !== webSocketPackageHash ||
-    manifest.webSocketPackageVersion !== webSocketPackageVersion ||
     manifest.supervisorProtocolGeneration !== terminalJobProtocolGeneration ||
     JSON.stringify(actualCapabilities) !== JSON.stringify(expectedCapabilities)
   ) {
     throw new Error("Durable terminal runtime bundle manifest is incompatible");
   }
 
+  const compatibilityFiles = Array.isArray(manifest.files)
+    ? manifest.files
+    : [];
+  const expectedCompatibilityFiles = compatibilityRuntimeBundleRoles.map(
+    ([role, name]) => [
+      role,
+      name,
+      {
+        host: hostScriptHash,
+        supervisor: supervisorScriptHash,
+        processIdentityHelper: processIdentityHelperHash,
+      }[role],
+    ],
+  );
+  if (
+    compatibilityFiles.length !== expectedCompatibilityFiles.length ||
+    compatibilityFiles.some(
+      (entry, index) =>
+        entry?.role !== expectedCompatibilityFiles[index][0] ||
+        entry?.name !== expectedCompatibilityFiles[index][1] ||
+        entry?.sha256 !== expectedCompatibilityFiles[index][2],
+    )
+  ) {
+    throw new Error(
+      "Durable terminal runtime bundle compatibility identity changed",
+    );
+  }
+
+  const extended = manifest.extendedRuntime;
+  const expectedExtendedCapabilities = [
+    ...extendedTerminalRuntimeCapabilities,
+  ].sort();
+  const actualExtendedCapabilities = Array.isArray(extended?.capabilities)
+    ? [...extended.capabilities].sort()
+    : [];
+  if (
+    extended?.version !== extendedTerminalRuntimeBundleVersion ||
+    extended?.bundleHash !== extendedBundleHash ||
+    extended?.runtimeLockHelperHash !== runtimeLockHelperHash ||
+    extended?.ttydExecutableHash !== ttydExecutableHash ||
+    extended?.webSocketPackageHash !== webSocketPackageHash ||
+    extended?.webSocketPackageVersion !== webSocketPackageVersion ||
+    JSON.stringify(actualExtendedCapabilities) !==
+      JSON.stringify(expectedExtendedCapabilities)
+  ) {
+    throw new Error(
+      "Durable terminal extended runtime bundle manifest is incompatible",
+    );
+  }
+
   const expectedHashes = new Map([
     ["host", hostScriptHash],
     ["supervisor", supervisorScriptHash],
     ["processIdentityHelper", processIdentityHelperHash],
+    ["runtimeLockHelper", runtimeLockHelperHash],
     ["ttyd", ttydExecutableHash],
   ]);
-  const files = Array.isArray(manifest.files) ? manifest.files : [];
+  const files = Array.isArray(extended?.files) ? extended.files : [];
   if (files.length !== runtimeBundleLayout.length) {
     throw new Error("Durable terminal runtime bundle manifest has invalid files");
   }
@@ -477,6 +604,191 @@ export function verifyRuntimeBundle({
   );
 
   return { directory: expectedDirectory, manifest, files: resolvedFiles };
+}
+
+const exactWindowsStartTicks = (pid, helperPath) => {
+  if (process.platform !== "win32") return null;
+  const result = spawnSync(
+    "pwsh",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      helperPath,
+      "-Operation",
+      "Inspect",
+      "-ProcessId",
+      String(pid),
+      "-TimeoutMilliseconds",
+      "5000",
+    ],
+    { encoding: "utf8", windowsHide: true },
+  );
+  if (result.status === 3) return null;
+  if (result.status !== 0) {
+    throw new Error("Could not inspect durable runtime materializer identity");
+  }
+  const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+  if (lines.length !== 1) {
+    throw new Error("Durable runtime identity helper returned invalid output");
+  }
+  const [actualPid, , startTicks] = lines[0].split("|");
+  if (
+    Number.parseInt(actualPid, 10) !== pid ||
+    !/^\d+$/.test(startTicks ?? "")
+  ) {
+    throw new Error("Durable runtime identity helper returned invalid output");
+  }
+  return startTicks;
+};
+
+const runtimeOwnerFromName = (name) => {
+  const current = /^([0-9a-f]{64})\.(stage|delete)\.(\d+)\.(\d+)\.([A-Za-z0-9_-]{8,128})\.(pending|tombstone)$/.exec(
+    name,
+  );
+  if (current) {
+    const [, bundleHash, phase, pid, startTicks, , suffix] = current;
+    if (
+      (phase === "stage" && suffix !== "pending") ||
+      (phase === "delete" && suffix !== "tombstone")
+    ) {
+      throw new Error("Durable runtime artifact phase is invalid");
+    }
+    return {
+      bundleHash,
+      pid: Number.parseInt(pid, 10),
+      startTicks,
+      exact: true,
+    };
+  }
+  const legacy = /^([0-9a-f]{64})\.(\d+)\.[A-Za-z0-9_-]+\.(pending|reclaim)$/.exec(
+    name,
+  );
+  if (legacy) {
+    return {
+      bundleHash: legacy[1],
+      pid: Number.parseInt(legacy[2], 10),
+      startTicks: null,
+      exact: false,
+    };
+  }
+  throw new Error(
+    "Durable runtime store contains an invalid staging or deletion artifact",
+  );
+};
+
+const processExists = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    if (error?.code === "EPERM") return true;
+    throw error;
+  }
+};
+
+function recoverRuntimeBundleArtifacts(runtimeRoot, helperPath) {
+  readdirSync(runtimeRoot, { withFileTypes: true })
+    .filter(
+      (entry) =>
+        entry.isDirectory() &&
+        (entry.name.endsWith(".pending") ||
+          entry.name.endsWith(".tombstone") ||
+          entry.name.endsWith(".reclaim")),
+    )
+    .forEach((entry) => {
+      if (entry.isSymbolicLink()) {
+        throw new Error("Durable runtime artifact is a reparse point");
+      }
+      const owner = runtimeOwnerFromName(entry.name);
+      const active = owner.exact
+        ? process.platform === "win32"
+          ? exactWindowsStartTicks(owner.pid, helperPath) === owner.startTicks
+          : owner.pid === process.pid &&
+            owner.startTicks === runtimeOwnerStartTicks
+        : processExists(owner.pid);
+      if (!active) {
+        rmSync(join(runtimeRoot, entry.name), {
+          recursive: true,
+          force: true,
+        });
+      }
+    });
+}
+
+function verifyStagedRuntimeBundle(
+  staging,
+  {
+    bundleHash,
+    extendedBundleHash,
+    identity,
+    assets,
+  },
+) {
+  const manifest = JSON.parse(
+    readFileSync(join(staging, "bundle.json"), "utf8"),
+  );
+  if (
+    manifest.version !== terminalRuntimeBundleVersion ||
+    manifest.bundleHash !== bundleHash ||
+    manifest.hostScriptHash !== identity.hostScriptHash ||
+    manifest.supervisorScriptHash !== identity.supervisorScriptHash ||
+    manifest.processIdentityHelperHash !==
+      identity.processIdentityHelperHash ||
+    manifest.extendedRuntime?.version !==
+      extendedTerminalRuntimeBundleVersion ||
+    manifest.extendedRuntime?.bundleHash !== extendedBundleHash
+  ) {
+    throw new Error("Durable runtime staging manifest identity changed");
+  }
+  const expectedFiles = new Set([
+    "bundle.json",
+    ...assets.map(({ name }) => name),
+  ]);
+  const expectedDirectories = new Set(
+    [...expectedFiles].flatMap((name) => {
+      const segments = name.split("/");
+      return segments
+        .slice(0, -1)
+        .map((_, index) => segments.slice(0, index + 1).join("/"));
+    }),
+  );
+  const actualDirectories = [];
+  const readFiles = (directory, prefix = "") =>
+    readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+      if (entry.isSymbolicLink()) {
+        throw new Error("Durable runtime staging contains a reparse point");
+      }
+      const name = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        actualDirectories.push(name);
+        return readFiles(join(directory, entry.name), name);
+      }
+      if (!entry.isFile()) {
+        throw new Error("Durable runtime staging contains a non-file entry");
+      }
+      return [name];
+    });
+  const actualFiles = new Set(readFiles(staging));
+  if (
+    expectedFiles.size !== actualFiles.size ||
+    [...expectedFiles].some((name) => !actualFiles.has(name)) ||
+    expectedDirectories.size !== actualDirectories.length ||
+    actualDirectories.some((name) => !expectedDirectories.has(name))
+  ) {
+    throw new Error(
+      "Durable runtime staging contains unexpected files or directories",
+    );
+  }
+  assets.forEach(({ name, sha256 }) => {
+    verifiedRuntimeFile(
+      staging,
+      join(staging, ...name.split("/")),
+      name,
+      sha256,
+    );
+  });
 }
 
 export function materializeRuntimeBundle(
@@ -548,28 +860,46 @@ export function materializeRuntimeBundle(
   }
   const identity = {
     runtimeBundleVersion: terminalRuntimeBundleVersion,
+    extendedRuntimeBundleVersion:
+      extendedTerminalRuntimeBundleVersion,
     hostScriptHash: hashFor("host"),
     supervisorScriptHash: hashFor("supervisor"),
     processIdentityHelperHash: hashFor("processIdentityHelper"),
+    runtimeLockHelperHash: hashFor("runtimeLockHelper"),
     ttydExecutableHash: hashFor("ttyd"),
     webSocketPackageHash: webSocketRuntimeHash(assets),
   };
   const bundleHash = runtimeBundleHash(identity);
+  const extendedBundleHash = extendedRuntimeBundleHash({
+    ...identity,
+    bundleHash,
+  });
   const runtimeRoot = join(
     resolve(stateDirectory),
     "terminal-runtime-bundles",
   );
+  const processHelperPath = resolve(
+    sourceDirectory,
+    "terminate-owned-process.ps1",
+  );
+  const ownerStartTicks =
+    exactWindowsStartTicks(process.pid, processHelperPath) ??
+    runtimeOwnerStartTicks;
   mkdirSync(runtimeRoot, { recursive: true });
+  recoverRuntimeBundleArtifacts(
+    runtimeRoot,
+    processHelperPath,
+  );
   const bundleDirectory = containedStatePath(
     runtimeRoot,
-    join(runtimeRoot, bundleHash),
+    join(runtimeRoot, extendedBundleHash),
   );
   if (!existsSync(bundleDirectory)) {
     const staging = containedStatePath(
       runtimeRoot,
       join(
         runtimeRoot,
-        `${bundleHash}.${process.pid}.${randomToken(8)}.pending`,
+        `${extendedBundleHash}.stage.${process.pid}.${ownerStartTicks}.${randomToken(8)}.pending`,
       ),
     );
     try {
@@ -587,23 +917,46 @@ export function materializeRuntimeBundle(
         `${JSON.stringify(
           {
             version: terminalRuntimeBundleVersion,
+            runtimeBundleVersion: terminalRuntimeBundleVersion,
             bundleHash,
             hostProtocolVersion,
-            ...identity,
-            webSocketPackageVersion,
+            hostScriptHash: identity.hostScriptHash,
+            supervisorScriptHash: identity.supervisorScriptHash,
+            processIdentityHelperHash:
+              identity.processIdentityHelperHash,
             supervisorProtocolGeneration: terminalJobProtocolGeneration,
             capabilities: terminalRuntimeCapabilities,
-            files: assets.map(({ role, name, sha256 }) => ({
+            files: compatibilityRuntimeBundleRoles.map(([role, name]) => ({
               role,
               name,
-              sha256,
+              sha256: hashFor(role),
             })),
+            extendedRuntime: {
+              version: extendedTerminalRuntimeBundleVersion,
+              bundleHash: extendedBundleHash,
+              runtimeLockHelperHash: identity.runtimeLockHelperHash,
+              ttydExecutableHash: identity.ttydExecutableHash,
+              webSocketPackageHash: identity.webSocketPackageHash,
+              webSocketPackageVersion,
+              capabilities: extendedTerminalRuntimeCapabilities,
+              files: assets.map(({ role, name, sha256 }) => ({
+                role,
+                name,
+                sha256,
+              })),
+            },
           },
           null,
           2,
         )}\n`,
         { flush: true },
       );
+      verifyStagedRuntimeBundle(staging, {
+        bundleHash,
+        extendedBundleHash,
+        identity,
+        assets,
+      });
       try {
         renameDirectoryWithRetry(staging, bundleDirectory);
       } catch (error) {
@@ -617,6 +970,7 @@ export function materializeRuntimeBundle(
     stateDirectory: resolve(stateDirectory),
     bundleDirectory,
     bundleHash,
+    extendedBundleHash,
     ...identity,
   };
   verifyRuntimeBundle(bundle);
@@ -628,6 +982,185 @@ const currentProcessStartTicks = () =>
     unixEpochTicks +
     BigInt(Math.round(Date.now() - process.uptime() * 1000)) * 10_000n
   ).toString();
+const runtimeOwnerStartTicks = currentProcessStartTicks();
+
+export async function launchLockedRuntimeHost(
+  bundle,
+  {
+    stateDirectory,
+    generation = randomToken(16),
+    shellCommand = "pwsh",
+    detached = false,
+    environment = process.env,
+  },
+) {
+  if (process.platform !== "win32") {
+    throw new Error(
+      `Durable runtime file locking is unsupported on ${process.platform}`,
+    );
+  }
+  const launchId = randomToken(12);
+  const requestPath = join(
+    resolve(stateDirectory),
+    `runtime-launch-${generation}-${launchId}.json`,
+  );
+  const readyPath = join(
+    resolve(stateDirectory),
+    `runtime-ready-${generation}-${launchId}.json`,
+  );
+  const statusPath = join(
+    resolve(stateDirectory),
+    `runtime-ready-${generation}-${launchId}.status.json`,
+  );
+  const token = randomToken(32);
+  const hostArguments = [
+    join(bundle.bundleDirectory, "durable-terminal-host.mjs"),
+    "--state-dir",
+    resolve(stateDirectory),
+    "--ttyd",
+    join(bundle.bundleDirectory, "ttyd.exe"),
+    "--shell",
+    shellCommand,
+    "--generation",
+    generation,
+    "--runtime-bundle-dir",
+    bundle.bundleDirectory,
+    "--runtime-bundle-hash",
+    bundle.bundleHash,
+    "--runtime-bundle-version",
+    String(bundle.runtimeBundleVersion),
+    "--extended-runtime-bundle-version",
+    String(bundle.extendedRuntimeBundleVersion),
+    "--extended-runtime-bundle-hash",
+    bundle.extendedBundleHash,
+    "--host-script-hash",
+    bundle.hostScriptHash,
+    "--supervisor-script-hash",
+    bundle.supervisorScriptHash,
+    "--process-helper-hash",
+    bundle.processIdentityHelperHash,
+    "--runtime-lock-helper-hash",
+    bundle.runtimeLockHelperHash,
+    "--ttyd-hash",
+    bundle.ttydExecutableHash,
+    "--ws-package-hash",
+    bundle.webSocketPackageHash,
+  ];
+  atomicWriteJson(requestPath, {
+    token,
+    nodeExecutable: process.execPath,
+    arguments: hostArguments,
+  });
+  atomicWriteJson(join(resolve(stateDirectory), "host.lock"), {
+    generation,
+    ownerPid: process.pid,
+    ownerProcessStartTicks: runtimeOwnerStartTicks,
+  });
+
+  const lockOwner = spawn(
+    "pwsh",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      join(bundle.bundleDirectory, "terminal-runtime-lock.ps1"),
+      "-BundleDirectory",
+      bundle.bundleDirectory,
+      "-CompatibilityBundleHash",
+      bundle.bundleHash,
+      "-ExtendedBundleHash",
+      bundle.extendedBundleHash,
+      "-LaunchRequestPath",
+      requestPath,
+      "-ReadyPath",
+      readyPath,
+      "-StatusPath",
+      statusPath,
+    ],
+    {
+      windowsHide: true,
+      stdio: "ignore",
+      detached,
+      env: environment,
+    },
+  );
+  let lockOwnerSpawnError = null;
+  lockOwner.once("error", (error) => {
+    lockOwnerSpawnError = error;
+  });
+
+  try {
+    const deadline = Date.now() + 10_000;
+    const waitForReady = async () => {
+      if (existsSync(readyPath)) {
+        try {
+          return JSON.parse(readFileSync(readyPath, "utf8"));
+        } catch (error) {
+          if (
+            !["EACCES", "EBUSY", "EPERM"].includes(error?.code) ||
+            Date.now() >= deadline
+          ) {
+            throw error;
+          }
+        }
+      }
+      if (lockOwnerSpawnError) throw lockOwnerSpawnError;
+      if (spawnedProcessExited(lockOwner)) {
+        throw new Error(
+          `Durable runtime lock owner exited with code ${lockOwner.exitCode ?? "unknown"}`,
+        );
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("Timed out waiting for durable runtime lock owner");
+      }
+      await delay(10);
+      return waitForReady();
+    };
+    const ready = await waitForReady();
+    if (
+      ready?.ok !== true ||
+      ready.token !== token ||
+      ready.runtimeLockOwnerPid !== lockOwner.pid ||
+      !validPid(ready.hostPid) ||
+      !/^\d+$/.test(ready.hostProcessStartTicks ?? "") ||
+      !/^\d+$/.test(ready.runtimeLockOwnerProcessStartTicks ?? "")
+    ) {
+      throw new Error(
+        sanitizeMetadataText(
+          ready?.error || "Durable runtime lock readiness was invalid",
+          500,
+        ),
+      );
+    }
+    atomicWriteJson(join(resolve(stateDirectory), "host.lock"), {
+      generation,
+      ownerPid: process.pid,
+      ownerProcessStartTicks: runtimeOwnerStartTicks,
+      hostPid: ready.hostPid,
+      hostProcessStartTicks: ready.hostProcessStartTicks,
+      runtimeLockOwnerPid: ready.runtimeLockOwnerPid,
+      runtimeLockOwnerProcessStartTicks:
+        ready.runtimeLockOwnerProcessStartTicks,
+    });
+    rmSync(requestPath, { force: true });
+    rmSync(readyPath, { force: true });
+    return {
+      lockOwner,
+      hostPid: ready.hostPid,
+      hostProcessStartTicks: ready.hostProcessStartTicks,
+      runtimeLockOwnerPid: ready.runtimeLockOwnerPid,
+      runtimeLockOwnerProcessStartTicks:
+        ready.runtimeLockOwnerProcessStartTicks,
+      statusPath,
+      generation,
+    };
+  } catch (error) {
+    await terminateRetainedChild(lockOwner);
+    rmSync(requestPath, { force: true });
+    rmSync(readyPath, { force: true });
+    throw error;
+  }
+}
 
 const safeInteger = (value, fallback, maximum) =>
   Number.isInteger(value) && value > 0 && value <= maximum ? value : fallback;
@@ -1432,6 +1965,7 @@ export class TerminalJobSupervisor {
       this.recordChannelFailure(error, "stdout"),
     );
     child.once("error", (error) => {
+      this.spawnFailed = error;
       this.exited = true;
       this.exitCode = null;
       this.exitSignal = null;
@@ -1768,7 +2302,7 @@ export class TerminalJobSupervisor {
     });
   }
 
-  async start(options) {
+  prepareStart(options) {
     if (
       typeof options.sessionId !== "string" ||
       !/^[A-Za-z0-9_-]{16,128}$/.test(options.sessionId)
@@ -1805,7 +2339,21 @@ export class TerminalJobSupervisor {
       throw new Error("Terminal Job Object empty-witness path is not session-bound");
     }
     this.sessionId = options.sessionId;
+    const witness = {
+      root: resolve(options.witnessRoot),
+      path: witnessPath,
+      nonce: options.witnessNonce,
+    };
+    this.startupAbortPayload = {
+      generation: options.generation,
+      worktreePath: options.worktreePath,
+      witness,
+    };
+    return this.startupAbortPayload;
+  }
 
+  async start(options) {
+    const startup = this.prepareStart(options);
     const ready = await this.request(
       "start",
       {
@@ -1813,13 +2361,7 @@ export class TerminalJobSupervisor {
         arguments: options.argumentsList,
         workingDirectory: options.workingDirectory,
         environment: options.environment,
-        generation: options.generation,
-        worktreePath: options.worktreePath,
-        witness: {
-          root: resolve(options.witnessRoot),
-          path: witnessPath,
-          nonce: options.witnessNonce,
-        },
+        ...startup,
         ...(options.testFailureStage
           ? { testFailureStage: options.testFailureStage }
           : {}),
@@ -1948,6 +2490,9 @@ export class TerminalJobSupervisor {
         {
           timeoutMilliseconds: boundedTimeoutMs,
           ...(error ? { error: sanitizeMetadataText(error, 240) } : {}),
+          ...(command === "startup-failed"
+            ? this.startupAbortPayload
+            : {}),
         },
         boundedTimeoutMs,
       )
@@ -2308,6 +2853,8 @@ export class DurableTerminalHost {
     }
     this.processStartTicks =
       options.processStartTicks ?? currentProcessStartTicks();
+    this.runtimeLockOwner = options.runtimeLockOwner ?? null;
+    this.runtimeLocksHealthy = !this.runtimeBundle;
     this.controlToken = randomToken();
     this.sessions = new Map();
     this.nextOrder = 0;
@@ -2338,6 +2885,7 @@ export class DurableTerminalHost {
           : {},
       );
     this.wait = options.wait ?? delay;
+    this.startupFault = options.startupFault ?? (() => {});
     this.now = options.now ?? (() => Date.now());
     this.reservationLeaseMs =
       options.reservationLeaseMs ?? reservationLeaseMs;
@@ -2393,6 +2941,45 @@ export class DurableTerminalHost {
         }
       });
     });
+    if (this.runtimeBundle && options.runtimeLockLease === true) {
+      process.stdin.resume();
+      process.stdin.once("end", () => {
+        this.runtimeLocksHealthy = false;
+        void this.shutdown("runtime-lock-lost");
+      });
+      process.stdin.once("error", () => {
+        this.runtimeLocksHealthy = false;
+        void this.shutdown("runtime-lock-lost");
+      });
+    }
+  }
+
+  runtimeLockManifest() {
+    return this.runtimeBundle
+      ? {
+          runtimeLockBoundary: "windows-file-share-read-v1",
+          runtimeLockOwnerPid: this.runtimeLockOwner?.pid ?? null,
+          runtimeLockOwnerProcessStartTicks:
+            this.runtimeLockOwner?.processStartTicks ?? null,
+        }
+      : {};
+  }
+
+  extendedRuntimeManifest() {
+    return this.options.runtimeBundle
+      ? {
+          version:
+            this.options.runtimeBundle.extendedRuntimeBundleVersion,
+          bundleHash: this.options.runtimeBundle.extendedBundleHash,
+          runtimeLockHelperHash:
+            this.options.runtimeBundle.runtimeLockHelperHash,
+          ttydExecutableHash:
+            this.options.runtimeBundle.ttydExecutableHash,
+          webSocketPackageHash:
+            this.options.runtimeBundle.webSocketPackageHash,
+          capabilities: extendedTerminalRuntimeCapabilities,
+        }
+      : null;
   }
 
   manifestOwner() {
@@ -2411,22 +2998,20 @@ export class DurableTerminalHost {
       pid: process.pid,
       processStartTicks: this.processStartTicks,
       processStartExact: Boolean(this.options.generation),
+      ...this.runtimeLockManifest(),
       ownershipBoundary:
         process.platform === "win32"
           ? terminalOwnershipBoundary
           : "unsupported",
       runtimeBundleVersion:
         this.options.runtimeBundle?.runtimeBundleVersion ?? null,
+      extendedRuntime: this.extendedRuntimeManifest(),
       bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
       hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
       supervisorScriptHash:
         this.options.runtimeBundle?.supervisorScriptHash ?? null,
       processIdentityHelperHash:
         this.options.runtimeBundle?.processIdentityHelperHash ?? null,
-      ttydExecutableHash:
-        this.options.runtimeBundle?.ttydExecutableHash ?? null,
-      webSocketPackageHash:
-        this.options.runtimeBundle?.webSocketPackageHash ?? null,
       supervisorProtocolGeneration: terminalJobProtocolGeneration,
       capabilities: terminalRuntimeCapabilities,
       controlPort: this.controlPort,
@@ -2452,26 +3037,25 @@ export class DurableTerminalHost {
       hostPid: process.pid,
       hostProcessStartTicks: this.processStartTicks,
       hostProcessStartExact: Boolean(this.options.generation),
+      ...this.runtimeLockManifest(),
       ownershipBoundary:
         process.platform === "win32"
           ? terminalOwnershipBoundary
           : "unsupported",
       runtimeBundleVersion:
         this.options.runtimeBundle?.runtimeBundleVersion ?? null,
+      extendedRuntime: this.extendedRuntimeManifest(),
       bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
       hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
       supervisorScriptHash:
         this.options.runtimeBundle?.supervisorScriptHash ?? null,
       processIdentityHelperHash:
         this.options.runtimeBundle?.processIdentityHelperHash ?? null,
-      ttydExecutableHash:
-        this.options.runtimeBundle?.ttydExecutableHash ?? null,
-      webSocketPackageHash:
-        this.options.runtimeBundle?.webSocketPackageHash ?? null,
       supervisorProtocolGeneration: terminalJobProtocolGeneration,
       capabilities: terminalRuntimeCapabilities,
       startedAt: this.startedAt,
       sessions: [...this.sessions.values()]
+        .filter((session) => !session.preSupervisorEmpty)
         .sort((left, right) => left.order - right.order)
         .map((session) => ({
           sessionId: session.id,
@@ -2577,7 +3161,10 @@ export class DurableTerminalHost {
       if (
         claim.hostPid === process.pid &&
         typeof claim.hostProcessStartTicks === "string" &&
-        /^\d+$/.test(claim.hostProcessStartTicks)
+        /^\d+$/.test(claim.hostProcessStartTicks) &&
+        claim.runtimeLockOwnerPid === this.runtimeLockOwner?.pid &&
+        claim.runtimeLockOwnerProcessStartTicks ===
+          this.runtimeLockOwner?.processStartTicks
       ) {
         this.processStartTicks = claim.hostProcessStartTicks;
         return;
@@ -2591,6 +3178,26 @@ export class DurableTerminalHost {
     };
 
     return read();
+  }
+
+  async verifyRuntimeLockOwner() {
+    if (!this.runtimeBundle) return;
+    if (!this.runtimeLockOwner) {
+      throw new Error("Durable terminal runtime lock owner is missing");
+    }
+    const identity = await this.processController.inspect(
+      this.runtimeLockOwner.pid,
+      processForceCommandMs,
+    );
+    if (
+      identity?.startIdentity !==
+      `windows:${this.runtimeLockOwner.processStartTicks}`
+    ) {
+      throw new Error(
+        "Durable terminal runtime lock owner identity is no longer alive",
+      );
+    }
+    this.runtimeLocksHealthy = true;
   }
 
   record(kind, session, details = {}) {
@@ -2636,21 +3243,19 @@ export class DurableTerminalHost {
       generation: this.generation,
       runtimeBundleVersion:
         this.options.runtimeBundle?.runtimeBundleVersion ?? null,
+      extendedRuntime: this.extendedRuntimeManifest(),
       bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
       hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
       supervisorScriptHash:
         this.options.runtimeBundle?.supervisorScriptHash ?? null,
       processIdentityHelperHash:
         this.options.runtimeBundle?.processIdentityHelperHash ?? null,
-      ttydExecutableHash:
-        this.options.runtimeBundle?.ttydExecutableHash ?? null,
-      webSocketPackageHash:
-        this.options.runtimeBundle?.webSocketPackageHash ?? null,
       supervisorProtocolGeneration: terminalJobProtocolGeneration,
       capabilities: terminalRuntimeCapabilities,
       hostPid: process.pid,
       processStartTicks: this.processStartTicks,
       processStartExact: Boolean(this.options.generation),
+      ...this.runtimeLockManifest(),
       controlPort: this.controlPort,
       startedAt: this.startedAt,
       observedAt: timestamp(),
@@ -2670,6 +3275,12 @@ export class DurableTerminalHost {
       if (this.options.generation && !this.runtimeBundle) {
         throw new Error(
           "Durable terminal host startup requires an immutable runtime bundle",
+        );
+      }
+      await this.verifyRuntimeLockOwner();
+      if (this.shuttingDown || !this.runtimeLocksHealthy) {
+        throw new Error(
+          "Durable terminal runtime locks were lost during host startup",
         );
       }
       this.controlPort = await listenLoopback(this.controlServer);
@@ -2714,6 +3325,12 @@ export class DurableTerminalHost {
       sendJson(response, 404, { error: "Not found" });
       return;
     }
+    if (this.runtimeBundle && !this.runtimeLocksHealthy) {
+      sendJson(response, 503, {
+        error: "Durable terminal runtime locks are unavailable",
+      });
+      return;
+    }
 
     const url = new URL(request.url, `http://127.0.0.1:${this.controlPort}`);
 
@@ -2730,18 +3347,16 @@ export class DurableTerminalHost {
             : "unsupported",
         runtimeBundleVersion:
           this.options.runtimeBundle?.runtimeBundleVersion ?? null,
+        extendedRuntime: this.extendedRuntimeManifest(),
         bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
         hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
         supervisorScriptHash:
           this.options.runtimeBundle?.supervisorScriptHash ?? null,
         processIdentityHelperHash:
           this.options.runtimeBundle?.processIdentityHelperHash ?? null,
-        ttydExecutableHash:
-          this.options.runtimeBundle?.ttydExecutableHash ?? null,
-        webSocketPackageHash:
-          this.options.runtimeBundle?.webSocketPackageHash ?? null,
         supervisorProtocolGeneration: terminalJobProtocolGeneration,
         capabilities: terminalRuntimeCapabilities,
+        ...this.runtimeLockManifest(),
         startedAt: this.startedAt,
       });
       return;
@@ -2997,6 +3612,8 @@ export class DurableTerminalHost {
       closing: false,
       failureRecorded: false,
       resourcesStopped: false,
+      supervisorSpawnAttempted: false,
+      preSupervisorEmpty: false,
       witnessNonce: randomToken(),
       jobSupervisor: null,
       supervisorProcess: null,
@@ -3076,6 +3693,28 @@ export class DurableTerminalHost {
         ttydPort: session.ttydPort,
       });
     } catch (error) {
+      let preSupervisorPersistenceError = null;
+      if (
+        session.jobSupervisor?.spawnFailed &&
+        !validPid(session.supervisorProcess?.pid)
+      ) {
+        session.jobSupervisor = null;
+        session.supervisorProcess = null;
+        session.supervisorSpawnAttempted = false;
+        session.preSupervisorEmpty = true;
+        try {
+          this.persistGeneration();
+        } catch (persistenceError) {
+          preSupervisorPersistenceError = persistenceError;
+        }
+      } else if (!session.supervisorSpawnAttempted) {
+        session.preSupervisorEmpty = true;
+        try {
+          this.persistGeneration();
+        } catch (persistenceError) {
+          preSupervisorPersistenceError = persistenceError;
+        }
+      }
       this.synchronizeSupervisorEvidence(session);
       if (!session.failureRecorded) {
         session.failureRecorded = true;
@@ -3090,8 +3729,10 @@ export class DurableTerminalHost {
         error,
       );
       this.synchronizeSupervisorEvidence(session);
-      if (cleanupError) {
-        session.error = `Terminal startup failed and owned process cleanup did not complete: ${sanitizeMetadataText(cleanupError.message, 240)}`;
+      const startupCleanupError =
+        cleanupError ?? preSupervisorPersistenceError;
+      if (startupCleanupError) {
+        session.error = `Terminal startup failed and owned process cleanup did not complete: ${sanitizeMetadataText(startupCleanupError.message, 240)}`;
         this.record("session-start-cleanup-failed", session, {
           supervisorPid: session.supervisorPid,
           ttydPid: session.ttydPid,
@@ -3106,7 +3747,6 @@ export class DurableTerminalHost {
   synchronizeSupervisorEvidence(session) {
     const supervisorPid =
       session.jobSupervisor?.supervisorPid ??
-      session.supervisorProcess?.pid ??
       session.supervisorPid;
     const supervisorStartTimeUtcTicks =
       session.jobSupervisor?.supervisorStartTimeUtcTicks ??
@@ -3283,6 +3923,10 @@ export class DurableTerminalHost {
   }
 
   async startSessionProxy(session) {
+    await loadWebSocketRuntime(
+      this.runtimeBundle?.files["ws:wrapper.mjs"] ?? webSocketPath,
+    );
+    this.startupFault("after-websocket-runtime", session);
     session.publicServer = createHttpServer((request, response) => {
       const authorization = authorizedSessionRequest(request, session);
       if (!authorization.authorized) {
@@ -3332,7 +3976,11 @@ export class DurableTerminalHost {
         session.browserWebSockets.emit("connection", webSocket, request),
       );
     });
+    this.startupFault("after-public-server-created", session);
     session.ttydPort = await freeLoopbackPort();
+    this.startupFault("after-ttyd-port", session);
+    session.publicPort = await listenLoopback(session.publicServer);
+    this.startupFault("after-public-listen", session);
     session.cookieName = sessionCookieName(session.id);
     session.pidFile = join(
       this.options.stateDirectory,
@@ -3373,15 +4021,42 @@ export class DurableTerminalHost {
       join(this.options.stateDirectory, "terminal-empty-witnesses"),
       this.witnessDirectory,
     );
+    const witnessPath = this.witnessPath(session);
+    this.startupFault("after-witness-ready", session);
+    const pinnedTtydPath = verifiedRuntimeFile(
+      this.runtimeBundle.directory,
+      this.runtimeBundle.files.ttyd,
+      "ttyd.exe",
+      this.options.runtimeBundle.ttydExecutableHash,
+    );
+    this.startupFault("after-ttyd-verified", session);
+    const startOptions = {
+      sessionId: session.id,
+      generation: this.generation,
+      worktreePath: session.worktreePath,
+      witnessRoot: this.witnessDirectory,
+      witnessPath,
+      witnessNonce: session.witnessNonce,
+      fileName: pinnedTtydPath,
+      argumentsList: ttydArguments,
+      workingDirectory: session.worktreePath,
+      environment: {
+        TMTP: session.pidFile,
+        TMTW: session.worktreePath,
+        TREEMON_TERMINAL_WORKTREE: session.worktreePath,
+        TREEMON_TERMINAL_SESSION_ID: session.id,
+      },
+      timeoutMs: 10_000,
+    };
+    this.persistGeneration();
+    this.startupFault("before-supervisor-spawn", session);
     session.jobSupervisor = this.supervisorFactory();
+    session.supervisorSpawnAttempted = true;
     session.supervisorProcess = session.jobSupervisor.child;
-    session.supervisorPid = validPid(session.supervisorProcess?.pid)
-      ? session.supervisorProcess.pid
-      : null;
+    session.jobSupervisor.prepareStart?.(startOptions);
     session.jobSupervisor.onProtocolFailure = (error) => {
       this.quarantineSupervisor(session, error);
     };
-    this.persistGeneration();
     session.supervisorProcess.once("error", (error) => {
       spawnFailure.error = error;
     });
@@ -3407,36 +4082,14 @@ export class DurableTerminalHost {
     session.jobSupervisor.onBoundaryFailure = (error) => {
       if (!session.closing) void this.interruptSession(session, error);
     };
-    const pinnedTtydPath = verifiedRuntimeFile(
-      this.runtimeBundle.directory,
-      this.runtimeBundle.files.ttyd,
-      "ttyd.exe",
-      this.options.runtimeBundle.ttydExecutableHash,
-    );
-    const ownership = await session.jobSupervisor.start({
-      sessionId: session.id,
-      generation: this.generation,
-      worktreePath: session.worktreePath,
-      witnessRoot: this.witnessDirectory,
-      witnessPath: this.witnessPath(session),
-      witnessNonce: session.witnessNonce,
-      fileName: pinnedTtydPath,
-      argumentsList: ttydArguments,
-      workingDirectory: session.worktreePath,
-      environment: {
-        TMTP: session.pidFile,
-        TMTW: session.worktreePath,
-        TREEMON_TERMINAL_WORKTREE: session.worktreePath,
-        TREEMON_TERMINAL_SESSION_ID: session.id,
-      },
-      timeoutMs: 10_000,
-    });
+    this.startupFault("after-supervisor-spawn-before-start", session);
+    const ownership = await session.jobSupervisor.start(startOptions);
+    this.startupFault("after-supervisor-start", session);
     session.ttydPid = ownership.ttydPid;
     session.supervisorPid = ownership.supervisorPid;
     session.supervisorStartTimeUtcTicks =
       ownership.supervisorStartTimeUtcTicks;
     this.persistGeneration();
-    session.publicPort = await listenLoopback(session.publicServer);
 
     const ttydHttp = `http://127.0.0.1:${session.ttydPort}/`;
     await waitForTtyd(
@@ -4024,10 +4677,20 @@ function parseArguments(argumentsList) {
       values["runtime-bundle-version"],
       10,
     ),
+    extendedRuntimeBundleVersion: Number.parseInt(
+      values["extended-runtime-bundle-version"],
+      10,
+    ),
+    extendedBundleHash: String(
+      values["extended-runtime-bundle-hash"] ?? "",
+    ),
     hostScriptHash: String(values["host-script-hash"] ?? ""),
     supervisorScriptHash: String(values["supervisor-script-hash"] ?? ""),
     processIdentityHelperHash: String(
       values["process-helper-hash"] ?? "",
+    ),
+    runtimeLockHelperHash: String(
+      values["runtime-lock-helper-hash"] ?? "",
     ),
     ttydExecutableHash: String(values["ttyd-hash"] ?? ""),
     webSocketPackageHash: String(values["ws-package-hash"] ?? ""),
@@ -4038,14 +4701,31 @@ function parseArguments(argumentsList) {
   if (
     !values["runtime-bundle-dir"] ||
     runtimeBundleValues.runtimeBundleVersion !== terminalRuntimeBundleVersion ||
+    runtimeBundleValues.extendedRuntimeBundleVersion !==
+      extendedTerminalRuntimeBundleVersion ||
     !sha256Pattern.test(runtimeBundleValues.bundleHash) ||
+    !sha256Pattern.test(runtimeBundleValues.extendedBundleHash) ||
     !sha256Pattern.test(runtimeBundleValues.hostScriptHash) ||
     !sha256Pattern.test(runtimeBundleValues.supervisorScriptHash) ||
     !sha256Pattern.test(runtimeBundleValues.processIdentityHelperHash) ||
+    !sha256Pattern.test(runtimeBundleValues.runtimeLockHelperHash) ||
     !sha256Pattern.test(runtimeBundleValues.ttydExecutableHash) ||
     !sha256Pattern.test(runtimeBundleValues.webSocketPackageHash)
   ) {
     throw new Error("Immutable durable terminal runtime bundle is required");
+  }
+  const runtimeLockOwnerPid = Number.parseInt(
+    values["runtime-lock-owner-pid"],
+    10,
+  );
+  const runtimeLockOwnerStartTicks = String(
+    values["runtime-lock-owner-start-ticks"] ?? "",
+  );
+  if (
+    !validPid(runtimeLockOwnerPid) ||
+    !/^\d+$/.test(runtimeLockOwnerStartTicks)
+  ) {
+    throw new Error("Durable terminal runtime lock owner is required");
   }
 
   return {
@@ -4054,6 +4734,11 @@ function parseArguments(argumentsList) {
     shellCommand,
     generation:
       typeof values.generation === "string" ? values.generation : undefined,
+    runtimeLockOwner: {
+      pid: runtimeLockOwnerPid,
+      processStartTicks: runtimeLockOwnerStartTicks,
+    },
+    runtimeLockLease: true,
     runtimeBundle: runtimeBundleValues,
     replayBytes: safeInteger(
       Number.parseInt(values["replay-bytes"], 10),

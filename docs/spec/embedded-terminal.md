@@ -12,6 +12,7 @@
 - Terminate only the ttyd and PowerShell process tree owned by the closed terminal.
 - Preserve generation-scoped empty-job evidence across host and Treemon-manager death.
 - Pin every host generation to an immutable, content-addressed host/supervisor runtime bundle.
+- Hold verified executable/runtime bytes against write and delete for the durable host lifetime.
 - Treat supervisor cleanup evidence as untrusted until a crash-safe terminal promotion.
 - Serialize terminal lifecycle and worktree mutation ownership independently per canonical worktree.
 - Drain protocol-1 and pre-bundle protocol-2 hosts without stranding their live sessions or stale
@@ -126,12 +127,18 @@ frames and late close/error events from the replaced browser cannot reach ttyd o
 attachment.
 
 ttyd runs with writable mode, Origin checking, and single-client/exit-on-disconnect behavior. The
-durable host is that sole client. ttyd is never started directly. The host first spawns the
-plainly-invoked, bundle-pinned `terminal-job-supervisor.ps1` over private stdin/stdout pipes with a
-random per-supervisor control token; every message also carries the exact terminal session identity and
-supervisor-protocol generation (currently generation 2). Before every helper spawn the host
-revalidates the pinned file's SHA-256 and containment inside its immutable bundle; it never resolves
-a mutable publish-directory sibling. The supervisor creates a Windows Job Object with
+durable host is that sole client. ttyd is never started directly. Before a supervisor process
+exists, the host allocates both dynamic ports, starts the guarded public listener, validates witness
+containment, persists the generation/session/nonce commitment, verifies the pinned ttyd path, and
+constructs the complete authenticated start payload. Supervisor creation and that mandatory first
+message are one operation. If the start cannot be sent, the same predeclared metadata permits
+`startup-failed` as an authenticated first message that writes an empty witness and exits; a spawn
+that never produced a child leaves no retained process or generation ownership.
+
+The plainly-invoked, bundle-pinned `terminal-job-supervisor.ps1` communicates over private
+stdin/stdout pipes with a random per-supervisor control token; every message also carries the exact
+terminal session identity and supervisor-protocol generation (currently generation 2). The
+supervisor creates a Windows Job Object with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and neither breakaway flag, creates ttyd with
 `CREATE_SUSPENDED`, assigns it to the job, and only then resumes its first thread. Launch uses
 `STARTUPINFOEX` with `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` and
@@ -221,26 +228,45 @@ dropping evidence. A dead protocol-1, pre-bundle protocol-2, or pre-trust genera
 sufficient proof and blocks matching strict cleanup until the operator authoritatively drains it or
 manually removes the retained migration record after a machine restart.
 
-The immutable bundle contains the host, supervisor, process-identity helper, checksum-pinned ttyd
-executable, and the exact locked `ws` ESM runtime. Every included file is named and hashed in the
-manifest; the bundle identity also commits the ttyd hash, aggregate `ws` package hash, host and
-supervisor protocol versions, and capability set. The host is launched from the bundle, resolves
-`ws` by an explicit bundle-relative URL, and includes local throwing guards for `bufferutil` and
-`utf-8-validate` while disabling both optional imports before loading `ws`, so optional-module
-resolution cannot climb into mutable parent `node_modules`.
-Immediately before each supervisor request the host revalidates the bundled ttyd bytes and passes
-only that path. Source, build-output, and publish copies are candidate inputs only and are never a
-runtime fallback.
+The immutable bundle contains the host, supervisor, process-identity helper, runtime-lock helper,
+checksum-pinned ttyd executable, and the exact locked `ws` ESM runtime. Its manifest has two views:
+the protocol-3 compatibility view retains bundle version 1, the immediately previous three
+capabilities, and the three core script entries consumed by the previous server; the additive
+`extendedRuntime` view commits the lock helper, ttyd, aggregate `ws` package hash, complete file
+layout, and locked-runtime capability. The storage directory is named by the extended hash, so a
+dependency-only deployment cannot collide with an equal compatibility hash. Current code requires
+and verifies both views, while the immediately previous parser can still authenticate, discover,
+list, close, and drain the host.
+
+Treemon opens every verified bundle file with `FileShare.Read` and hashes those open streams before
+launch. While those handles remain open it starts bundled `terminal-runtime-lock.ps1`; that owner
+opens and verifies the same complete set with the same sharing restriction, starts Node, publishes
+the exact host and lock-owner creation identities, and only then lets Treemon release its handles.
+The lock owner keeps the files readable/executable but denies write and delete for the host's entire
+lifetime. Node imports `ws` only under those held locks. The host monitors the lock owner's private
+stdin lease, becomes mutation-unavailable and shuts down if it is lost, and publishes the exact
+lock-owner identity in manifest and health responses. Discovery validates both host and lock-owner
+identities, and shutdown completion waits for both identities to exit before callers may remove the
+bundle state. Supervisor, process-helper, and ttyd launches therefore use the same bytes that were
+verified; source, build-output, and publish copies are candidate inputs only.
 
 Bundles referenced by the current host manifest or any live/retired generation record are never
 removed. Startup retains at most eight additional unreferenced bundles and compacts only older
-unreferenced directories after an atomic claim and before/after recursive content comparison.
-Deploy and rollback may therefore replace publish files while old pinned artifacts coexist until
-their host and evidence drain; an existing hash directory is verified, never rewritten. A change
-to host code, supervisor/helper code, `ws`, ttyd, protocol, or capabilities produces a different
-bundle. A Start reuses an existing session on the running bundle, but a different deployed
-candidate makes that host drain-only for new keys. Once its registry is empty, it shuts down before
-the new bundle generation starts.
+unreferenced directories after atomically renaming the canonical directory to a
+`delete.<pid>.<exact-start>.<nonce>.tombstone`. A tombstone is deletion garbage from that instant
+on: it is never promoted or restored, including after a partial recursive delete. Live exact owners
+hold a phase-specific exclusive lease and are left alone; an unlocked lease is stale even while its
+former owner process remains alive, so abandoned tombstones are containment-checked and deleted to
+completion. Materialization
+uses independently owned `stage.<pid>.<exact-start>.<nonce>.pending` directories. Active stages are
+identified by the same lease rule and left alone, stale or incomplete stages are deleted, and only
+the materializer that has written and verified every hash may atomically rename its stage to
+canonical. Parallel materializers either win that rename or verify and reuse the winner, then
+dispose their own stage. Deploy and rollback may
+therefore replace publish files while old pinned artifacts coexist until their host and evidence
+drain, and rollback can rematerialize a bundle while an old tombstone finishes deleting. A Start
+reuses an existing session on the running bundle, but a different deployed candidate makes that
+host drain-only for new keys.
 
 Delete/archive reservations are per-key five-minute leases. Acquisition is itself serialized,
 publishes the lease before terminal cleanup, and releases it if cleanup fails. Treemon renews the
@@ -267,8 +293,9 @@ binding.
 `Server.EmbeddedTerminal` is an authenticated control client, not a process registry. It:
 
 - discovers `.agents/durable-terminal/host.json`;
-- validates control protocol 3, runtime generation, exact PID start identity, immutable bundle and
-  component hashes, supervisor generation/capabilities, and dynamic non-production control port; a
+- validates control protocol 3, runtime generation, exact host and runtime-lock-owner start
+  identities, compatibility plus extended bundle/component hashes, supervisor
+  generation/capabilities, and dynamic non-production control port; a
   manifest/health pair without `ownershipBoundary:
   "windows-job-v1"` stays listable but cannot start a terminal, authorize strict cleanup, or shut
   down through the current manager;
@@ -279,9 +306,9 @@ binding.
   `.agents/durable-terminal/host.lock`, then starts the Node host when no healthy host exists;
 - resolves candidate files from the server output/publish `scripts` directory, falling back to the
   source checkout for development; it validates the pinned ttyd checksum and locked `ws` version,
-  hashes every runtime file into `terminal-runtime-bundles/<bundle-hash>/`, atomically installs or
-  verifies that immutable set, then launches the bundled host with bundled dependency paths and
-  hashes;
+  stages and verifies every runtime file into
+  `terminal-runtime-bundles/<extended-bundle-hash>/`, then hands read-only sharing locks without a
+  gap to the bundled runtime-lock owner that launches Node;
 - lists, starts, and closes sessions through the loopback control API;
 - records each Treemon process reconnect in the host diagnostics;
 - keeps the last known snapshot plus per-key prior-generation ownership evidence so replacement
@@ -299,7 +326,15 @@ unknown-session migration record is created when an older host never wrote one).
 deletes its manifest only when it still owns that exact identity, so a late old host cannot erase a
 replacement.
 
-Compatibility is bounded to protocol 1 and the immediately preceding pre-bundle protocol 2 schema.
+Compatibility is bounded to protocol 1, the immediately preceding pre-bundle protocol 2 schema,
+and one immediately previous protocol-3 control view. The current protocol-3 host continues to
+publish the previous exact capability set and core bundle identity at the fields that parser
+understands; dependency and lock identity is additive under `extendedRuntime`. The previous binary
+can therefore discover, list, close, and drain current sessions without interpreting the extended
+fields. It cannot authorize cleanup from omitted dependency evidence, while the current host itself
+enforces the extended hashes and held file locks for every session it starts. An isolated rollback
+test builds the actual previous server commit and drives those operations against a current host.
+
 A live legacy host never accepts a new canonical key from current Treemon: existing keys are reused,
 public close drains and stops the host when its last session closes, and protocol 2 can provide its
 existing per-key cleanup lease without stopping unrelated sessions. Protocol 1 uses its bounded
@@ -397,10 +432,14 @@ is sent and no wait is performed against the replacement.
 - **State-directory lock plus runtime generation** — concurrent checkout-local Treemon starters
   converge on one host without treating a PID alone as ownership.
 - **Content-addressed runtime bundle** — deployment can replace mutable publish files without
-  changing a running host/helper/dependency contract. Bundle directories contain the exact host,
-  supervisor, process helper, ttyd, and locked `ws` files; all are hashed, and live/current/retired
-  generation references retain them while only excess unreferenced bundles are compacted through a
-  compare-before-delete claim.
+  changing a running host/helper/dependency contract. The stable protocol-3 compatibility identity
+  remains readable by the previous binary, while an additive extended hash names storage and binds
+  the runtime-lock helper, ttyd, and `ws`. Live/current/retired generation references retain that
+  extended identity; excess bundles are atomically tombstoned and only deleted, never restored.
+- **Verified bytes stay locked while executing** — Treemon verifies from `FileShare.Read` handles
+  and hands them directly to a separately lived lock owner. That owner launches Node and holds the
+  complete bundle against write/delete until the host exits; host discovery binds its exact
+  PID/start identity and lock loss makes the host unusable.
 - **Job Object ownership before execution** — a per-session supervisor creates ttyd suspended,
   assigns it to a kill-on-close/no-breakaway Job Object, and resumes only after assignment.
   `STARTUPINFOEX` whitelists only the shared child `NUL` handle. The retained authenticated pipe,
@@ -413,8 +452,9 @@ is sent and no wait is performed against the replacement.
   every recorded supervisor is witnessed empty and exactly exited.
 - **Bounded compatibility** — protocol 1 and pre-bundle protocol 2 remain listable;
   close/reuse/drain requires their manifest and health response to declare the same Job Object
-  boundary. Neither can start a new key or authorize fresh-manager cleanup from optimistic legacy
-  state.
+  boundary. The immediately previous protocol-3 binary additionally retains authenticated
+  discover/list/close/drain through the stable compatibility view. Legacy protocols cannot start a
+  new key or authorize fresh-manager cleanup from optimistic state.
 - **Reconcile ambiguous mutations** — bounded timeouts are necessary, but a canonical-key registry
   read is what prevents an undisclosed or duplicate session after a lost response.
 - **No host-crash recovery claim** — losing the durable host closes ttyd's sole WebSocket and ends
@@ -437,18 +477,20 @@ is sent and no wait is performed against the replacement.
 | `scripts/durable-terminal-host.mjs` | Durable ttyd WebSocket owner, browser proxy, replay, lifecycle, and diagnostics |
 | `scripts/terminal-job-supervisor.ps1` | Windows P/Invoke supervisor: STARTUPINFOEX handle-whitelist launch, assign-before-resume Job Object ownership, membership checks, and atomic empty-witness publication |
 | `scripts/terminate-owned-process.ps1` | Targeted exact PID/start-identity inspection and isolated-verifier fallback termination; not terminal-session cleanup |
+| `scripts/terminal-runtime-lock.ps1` | Verifies the complete staged bundle from read-only-sharing handles, launches Node, and retains write/delete exclusion for the host lifetime |
 | `scripts/durable-terminal-control.mjs` | Authenticated status and graceful PID-scoped host shutdown |
 | `scripts/durable-terminal-observation.mjs` | Detached 24-hour heartbeat/liveness observation and final status evaluation |
 | `scripts/verify-durable-terminal-runtime.mjs` | Isolated real-ttyd reconnect and explicit-cleanup verification |
 | `scripts/verify-durable-terminal-treemon.mjs` | Browser reload and two-process Treemon restart demonstration |
 | `scripts/durable-terminal-verifier-env.mjs` | Pure isolated-server environment construction, including both reporting port variables |
 | `scripts/verify-ttyd-runtime.mjs` | Import-safe stock-ttyd verifier using the same Job Object supervisor boundary |
-| `src/Server/EmbeddedTerminal.fs` | Runtime-bundle materialization/retention, durable-host discovery, trusted generation/witness recovery, contained compaction, reservation cancellation, and control client |
-| `src/Server/Server.fsproj` | Copies the host, Job Object supervisor, process helper, locked `ws` runtime, and checksum-pinned ttyd into build/publish layouts |
+| `src/Server/EmbeddedTerminal.fs` | Crash/parallel-safe staging and tombstones, lock handoff/owner discovery, protocol compatibility, trusted generation/witness recovery, reservation cancellation, and control client |
+| `src/Server/Server.fsproj` | Copies the host, runtime-lock owner, Job Object supervisor, process helper, locked `ws` runtime, and checksum-pinned ttyd into build/publish layouts |
 | `package.json` / `package-lock.json` | Exact `ws` dependency and committed package-resolution lock |
 | `src/Server/Program.fs` | Creates the control client without closing durable sessions on shutdown |
 | `src/Client/TerminalPane.fs` | Accessible multi-tab iframe pane pointed at durable proxy endpoints |
-| `src/Tests/EmbeddedTerminalTests.fs` | Host generation races, reservation cancellation/locking, discovery, restart, selective close, and API validation |
+| `src/Tests/EmbeddedTerminalTests.fs` | Host generation races, bundle staging/tombstones, runtime lock mutation/crash, actual previous-binary rollback, reservation, restart, and API validation |
+| `.github/workflows/ci.yml` | Portable Ubuntu coverage plus Windows-only durable host, supervisor, rollback, publish, and real-runtime verification |
 | `scripts/durable-terminal-host.test.mjs` | Supervisor protocol/policy, cleanup acknowledgement, isolation, replay, and host lifecycle tests |
 | `scripts/durable-terminal-observation.test.mjs` | Observation replacement, credential, and PID-reuse ownership tests |
 | `scripts/verify-ttyd-runtime.test.mjs` | Verifier Job Object cleanup and failure propagation tests |
