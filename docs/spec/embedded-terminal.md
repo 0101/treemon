@@ -11,8 +11,12 @@
 - Bound reconnect replay and lifecycle diagnostics without persisting terminal content.
 - Terminate only the ttyd and PowerShell process tree owned by the closed terminal.
 - Preserve generation-scoped empty-job evidence across host and Treemon-manager death.
+- Pin every host generation to an immutable, content-addressed host/supervisor runtime bundle.
+- Treat supervisor cleanup evidence as untrusted until a crash-safe terminal promotion.
 - Serialize terminal lifecycle and worktree mutation ownership independently per canonical worktree.
-- Drain protocol-1 hosts without stranding their live sessions or stale manifests.
+- Drain protocol-1 and pre-bundle protocol-2 hosts without stranding their live sessions or stale
+  manifests.
+- Reject invalid generation identities and evidence paths before any filesystem access.
 - Keep the terminal pane free of an outer document scrollbar while preserving xterm scrollback.
 
 ## Expected Behavior
@@ -25,12 +29,13 @@ its durable session's kernel-owned Job Object, then selects a deterministic neig
 failure leaves the tab failed and retryable instead of pretending it closed. Closing the final tab
 hides the terminal pane. Deleting or
 archiving a worktree through Treemon first holds a cross-process canonical-key worktree lock. A
-protocol-2 host then grants a lease that rejects starts for that worktree, authoritatively closes its
+protocol-3 host then grants a lease that rejects starts for that worktree, authoritatively closes its
 terminal, remains renewed through the worktree mutation, and is explicitly released on success or
-error. With no live host, the same per-key OS lock bridges startup of a protocol-2 host; its lease is
-active before the mutation begins. A capability-bearing protocol-1 host may use the bounded drain
-path, while a host that does not declare Job Object ownership remains listable but cannot authorize
-strict mutation. Unrelated keys use different locks. The manager returns the acquired lease before
+error. With no live host, the same per-key OS lock bridges startup of a protocol-3 host; its lease is
+active before the mutation begins. A pre-bundle protocol-2 host may grant its existing per-key lease
+for already-running sessions, while a capability-bearing protocol-1 host uses the bounded drain
+path. A host that does not declare Job Object ownership remains listable but cannot authorize strict
+mutation. Unrelated keys use different locks. The manager returns the acquired lease before
 the Git/config mutation begins, so the
 singleton control mailbox remains available for Start/Get/Close on unrelated keys while the
 mutation is blocked. The acquired OS-lock handle transfers with the lease and remains held through
@@ -68,7 +73,8 @@ reconstruction is not guaranteed after the raw replay buffer truncates old outpu
 
 Treemon starts the durable host lazily on the first terminal request. A normal Treemon shutdown does
 not stop the host or its sessions. On restart, Treemon reads the host's authenticated loopback
-control state and reconstructs the same terminal snapshot, including the existing browser
+control state, validates its protocol-3 bundle hash, component hashes, supervisor generation, and
+capabilities, and reconstructs the same terminal snapshot, including the existing browser
 endpoints. A failed or unsupported host response is surfaced on the affected terminal tab rather
 than treated as a healthy session. If a previously observed host dies, every last-known tab remains
 visible as an interrupted tab until that canonical key is restarted or explicitly dismissed. An
@@ -121,9 +127,11 @@ attachment.
 
 ttyd runs with writable mode, Origin checking, and single-client/exit-on-disconnect behavior. The
 durable host is that sole client. ttyd is never started directly. The host first spawns the
-plainly-invoked `terminal-job-supervisor.ps1` over private stdin/stdout pipes with a random
-per-supervisor control token; every message also carries the exact terminal session identity and
-supervisor-protocol generation. The supervisor creates a Windows Job Object with
+plainly-invoked, bundle-pinned `terminal-job-supervisor.ps1` over private stdin/stdout pipes with a
+random per-supervisor control token; every message also carries the exact terminal session identity and
+supervisor-protocol generation (currently generation 2). Before every helper spawn the host
+revalidates the pinned file's SHA-256 and containment inside its immutable bundle; it never resolves
+a mutable publish-directory sibling. The supervisor creates a Windows Job Object with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and neither breakaway flag, creates ttyd with
 `CREATE_SUSPENDED`, assigns it to the job, and only then resumes its first thread. Launch uses
 `STARTUPINFOEX` with `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` and
@@ -135,10 +143,12 @@ or keep a control pipe open. ttyd and every
 PowerShell/Copilot descendant therefore inherit one kernel-enforced session boundary before any of
 their code can run.
 
-Before a session can launch, the host atomically records its host generation, canonical worktree,
-session ID, SHA-256 commitment to an unguessable per-supervisor witness nonce, and helper PID in
+Before a session can launch, the host atomically records its host generation, bundle identity,
+canonical worktree, session ID, SHA-256 commitment to an unguessable per-supervisor witness nonce,
+and helper PID in
 `terminal-generations/<generation>.json`. The exact helper creation identity is added before Running
-publication; an early helper failure supplies that identity in its witness. Once the helper observes
+publication; an early helper failure supplies that identity in its witness. Every new session is
+durably `in-progress`, which is untrusted for recovery. Once the helper observes
 `ActiveProcesses == 0`, it atomically writes and flushes
 `terminal-empty-witnesses/<generation>/<session>.json`, bound to the generation, worktree, session,
 nonce, and exact helper identity, before sending an authenticated empty event or exiting. Startup
@@ -153,14 +163,24 @@ an authenticated, session-bound, generation-matched `empty: true` proof, accepte
 explicit termination response or the natural root-exit event. Exit alone is never cleanup proof;
 buffered final protocol lines are drained through stream closure within the shared cleanup
 deadline. Wrong authentication/session/generation, malformed framing, unsolicited messages, and
-contradictory duplicates make the channel sticky-failed; a later valid-looking proof cannot restore
-trust. Exact duplicate events remain idempotent. Timeout, pipe loss, protocol failure, or failed
+contradictory duplicates make the channel sticky-failed and synchronously quarantine the generation
+record before any later proof can be considered; a later valid-looking proof cannot restore trust.
+If quarantine persistence fails, the callback catches the error, keeps the in-memory channel
+quarantined, and leaves the prior durable `in-progress` state untrusted. Exact duplicate events
+remain idempotent. Timeout, pipe loss, protocol failure, or failed
 acknowledgement without a valid late proof leaves the session failed and retryable. Host exit or
 pipe loss makes the supervisor terminate the job;
 helper failure still closes its retained job handle, so kill-on-close prevents descendants escaping
 the owning host. Unsupported operating systems fail explicitly rather than falling back to
 descendant enumeration. Targeted PID/start-identity inspection remains only for host/verifier
 metadata and is not a terminal ownership or cleanup authority.
+
+After an authenticated empty transcript, the host waits for the exact supervisor exit and closed
+output, validates the nonce-bound witness from its contained path, and atomically promotes the
+session to `trusted-empty` with the exact zero exit identity. Cleanup/removal proceeds only after
+that promotion. A crash before the promotion, including a crash after witness creation, therefore
+leaves durable state untrusted. A failed promotion write quarantines the session and returns cleanup
+failure rather than exposing an optimistic success.
 
 Start, close, failed-session replacement, and reservation transitions are serialized by canonical
 worktree key. A close queued behind a live start waits for it and then closes the exact published
@@ -173,18 +193,30 @@ authoritative startup cleanup and leaves the session failed for retry. Closed up
 excluded from heartbeat publication. Different keys have independent queues.
 
 Startup failure performs the same authoritative cleanup and closes its public listener and upstream
-as part of the same failed transition. A conclusive helper-written witness plus helper exit leaves
-the failed tab retryable and eligible for public close or strict reservation; cleanup without proof
+as part of the same failed transition. A conclusive helper-written witness, clean transcript,
+helper exit, and terminal trust promotion leave the failed tab retryable and eligible for public
+close or strict reservation; cleanup without proof
 leaves the tab failed and blocks those transitions without affecting other keys.
 
 Generation records outlive a dead or replaced host manifest. Strict cleanup scans every current and
-retired record relevant to the canonical worktree and requires every matching supervisor's exact
-witness and exit. Fully witnessed dead generations are compacted with compare-before-delete;
+retired record relevant to the canonical worktree and requires every matching supervisor's terminal
+`trusted-empty` state, exact nonce witness, zero exit transcript, and dead process identity. Legacy,
+in-progress, and quarantined records never authorize cleanup. Fully witnessed dead generations are
+compacted with compare-before-delete;
 witness files are removed only after their generation record is safely gone. At most 64 unresolved
 generation records are retained. Reaching that bound refuses another host generation rather than
-dropping evidence. A dead protocol-1 or pre-witness generation has no sufficient Job/witness proof
-and blocks strict cleanup until the operator drains its terminals (or restarts the machine) and
-manually removes that migration record.
+dropping evidence. A dead protocol-1, pre-bundle protocol-2, or pre-trust generation has no
+sufficient proof and blocks matching strict cleanup until the operator authoritatively drains it or
+manually removes the retained migration record after a machine restart.
+
+Runtime bundles referenced by the current host manifest or any live/retired generation record are
+never removed. Startup retains at most eight additional unreferenced bundles and compacts only older
+unreferenced directories after an atomic claim and before/after content comparison. Deploy and
+rollback may therefore replace publish files while old pinned artifacts coexist until their host
+and evidence drain; an existing hash directory is verified, never rewritten. A Start reuses an
+existing session on the running bundle, but a different deployed candidate makes that host
+drain-only for new keys. Once its registry is empty, it shuts down before the new bundle generation
+starts.
 
 Delete/archive reservations are per-key five-minute leases. Acquisition is itself serialized,
 publishes the lease before terminal cleanup, and releases it if cleanup fails. Treemon renews the
@@ -211,17 +243,20 @@ binding.
 `Server.EmbeddedTerminal` is an authenticated control client, not a process registry. It:
 
 - discovers `.agents/durable-terminal/host.json`;
-- validates control protocol 2, runtime generation, exact PID start identity, and dynamic
-  non-production control port; a manifest/health pair without `ownershipBoundary:
+- validates control protocol 3, runtime generation, exact PID start identity, immutable bundle and
+  component hashes, supervisor generation/capabilities, and dynamic non-production control port; a
+  manifest/health pair without `ownershipBoundary:
   "windows-job-v1"` stays listable but cannot start a terminal, authorize strict cleanup, or shut
   down through the current manager;
-- recognizes authenticated protocol-1 manifests by PID, start timestamp, endpoint, and credential,
-  keeps them listable, and permits close/reuse/drain only when the same kernel-ownership capability
-  is present;
+- recognizes authenticated protocol-1 and protocol-2 manifests by PID, start timestamp, endpoint,
+  and credential, keeps existing sessions listable/reusable/closable, and permits bounded drain only
+  when the same kernel-ownership capability is present; neither protocol may accept a new key;
 - serializes host creation across Treemon processes with an OS-held exclusive
   `.agents/durable-terminal/host.lock`, then starts the Node host when no healthy host exists;
-- resolves the host from the server output/publish `scripts` directory, falling back to the source
-  checkout for development; the host locates its Job Object supervisor beside itself;
+- resolves candidate files from the server output/publish `scripts` directory, falling back to the
+  source checkout for development; it hashes the host, supervisor, and process-identity helper into
+  `terminal-runtime-bundles/<bundle-hash>/`, atomically installs or verifies that immutable set, then
+  launches the host with pinned paths and hashes;
 - lists, starts, and closes sessions through the loopback control API;
 - records each Treemon process reconnect in the host diagnostics;
 - keeps the last known snapshot plus per-key prior-generation ownership evidence so replacement
@@ -239,22 +274,32 @@ unknown-session migration record is created when an older host never wrote one).
 deletes its manifest only when it still owns that exact identity, so a late old host cannot erase a
 replacement.
 
-Protocol-1 compatibility is bounded to manifests written by the immediately preceding host schema.
+Compatibility is bounded to protocol 1 and the immediately preceding pre-bundle protocol 2 schema.
 A live legacy host never accepts a new canonical key from current Treemon: existing keys are reused,
-public close drains and stops the host when its last session closes, and strict delete/archive shuts
-down the whole legacy host while
-holding canonical-key ownership until a protocol-2 lease spans the mutation. A dead legacy manifest
+public close drains and stops the host when its last session closes, and protocol 2 can provide its
+existing per-key cleanup lease without stopping unrelated sessions. Protocol 1 uses its bounded
+whole-host drain for strict mutation because it has no reservation endpoint. A dead legacy manifest
 is reclaimed for replacement startup only after its PID/start evidence proves the recorded process
 is gone, and compare-before-delete includes its endpoint credential so legacy cleanup cannot remove
-a replacement. Before reclamation it becomes a bounded retired migration record; because protocol 1
-has no generation/session empty witnesses, that record cannot authorize strict cleanup and requires
-manual record removal after the operator drains its terminals or restarts the machine. Ownership
+a replacement. Before reclamation it becomes a bounded retired migration record. Protocol 1 has no
+generation/session empty witnesses, and protocol 2 lacks terminal trust/bundle identity, so neither
+record can authorize fresh-manager cleanup merely from an old witness. Unknown or matching live
+session evidence remains fail-closed until the operator authoritatively drains it or manually
+removes the retained record after a machine restart. Ownership
 change is distinct
-from I/O failure: when another Treemon installs a healthy protocol-2 manifest while the legacy host
+from I/O failure: when another Treemon installs a healthy protocol-3 manifest while the legacy host
 exits, retirement succeeds and strict close/reservation continues against that replacement without
 deleting it. This parser and drain path can be removed once supported installations can no longer
-contain a live or persisted protocol-1 `host.json`; it is not a general old-protocol compatibility
-layer.
+contain a live or persisted protocol-1/protocol-2 `host.json`; it is not a general old-protocol
+compatibility layer.
+
+Generation, bundle, session, and witness filenames use bounded ASCII identities. Host generations
+must match `[A-Za-z0-9_-]{1,128}` at every producer, parser, record, and supervisor boundary. Before
+reading, writing, moving, or deleting evidence, both host and manager resolve it under the intended
+state root, require the expected direct-child/descendant shape, reject rooted input, separators,
+`..`, alternate data streams, Unicode lookalikes, and reparse points, and compare paths using the
+platform's filesystem rules. An invalid host manifest is preserved as quarantined evidence and
+prevents replacement startup.
 
 The client/server wire type is
 `Starting | Running endpoint | Failed error | Interrupted error`; durable-host session IDs and
@@ -290,11 +335,12 @@ session identity, host/ttyd/PowerShell PIDs and liveness, attachment state, upst
 metadata, reconnect events, replay truncation, and heartbeat age. It never stores terminal bytes,
 prompts, environment contents, worktree paths, or attachment/control capabilities.
 
-The detached observation records the host generation, manifest PID/start identity, actual process
-creation identity, endpoint, and control credential (the credential is omitted from displayed
-output). Stop re-reads all of those fields and revalidates the actual process identity immediately
-before sending shutdown. A replaced manifest or reused PID is reported as changed ownership; no
-shutdown is sent and no wait is performed against the replacement.
+The detached observation records the host generation, bundle/component hashes, supervisor
+generation/capabilities, manifest PID/start identity, actual process creation identity, endpoint,
+and control credential (the credential is omitted from displayed output). Stop re-reads all of
+those fields and revalidates the actual process identity immediately before sending shutdown. A
+replaced runtime, manifest, or reused PID is reported as changed ownership; no shutdown is sent and
+no wait is performed against the replacement.
 
 ## Decisions
 
@@ -325,18 +371,24 @@ shutdown is sent and no wait is performed against the replacement.
   lock reaches cancellation-shielded release and disposal.
 - **State-directory lock plus runtime generation** — concurrent checkout-local Treemon starters
   converge on one host without treating a PID alone as ownership.
+- **Content-addressed runtime bundle** — deployment can replace mutable publish files without
+  changing a running host/helper contract. Bundle directories are immutable; live/current/retired
+  generation references retain them, while only excess unreferenced bundles are compacted through a
+  compare-before-delete claim.
 - **Job Object ownership before execution** — a per-session supervisor creates ttyd suspended,
   assigns it to a kill-on-close/no-breakaway Job Object, and resumes only after assignment.
   `STARTUPINFOEX` whitelists only the shared child `NUL` handle. The retained authenticated pipe,
-  exact supervisor identity, and durable nonce-bound empty witness are the cleanup authority; PID
-  ancestry is never used to decide membership or successful cleanup.
+  exact supervisor identity, durable nonce-bound empty witness, clean exit transcript, and atomic
+  `trusted-empty` promotion are the cleanup authority; PID ancestry is never used to decide
+  membership or successful cleanup.
 - **Generation changes preserve evidence** — identity replacement interrupts and retains old active
   tabs. Polling cannot replace those tabs or use a new registry's absence as cleanup proof. Strict
   cleanup scans bounded retired records even in a fresh manager and compacts a generation only after
   every recorded supervisor is witnessed empty and exactly exited.
-- **One-version bounded compatibility** — protocol 1 remains listable; close/reuse/drain requires
-  its manifest and health response to declare the same Job Object boundary. A predecessor without
-  that capability is evidence only and cannot authorize cleanup.
+- **Bounded compatibility** — protocol 1 and pre-bundle protocol 2 remain listable;
+  close/reuse/drain requires their manifest and health response to declare the same Job Object
+  boundary. Neither can start a new key or authorize fresh-manager cleanup from optimistic legacy
+  state.
 - **Reconcile ambiguous mutations** — bounded timeouts are necessary, but a canonical-key registry
   read is what prevents an undisclosed or duplicate session after a lost response.
 - **No host-crash recovery claim** — losing the durable host closes ttyd's sole WebSocket and ends
@@ -365,8 +417,8 @@ shutdown is sent and no wait is performed against the replacement.
 | `scripts/verify-durable-terminal-treemon.mjs` | Browser reload and two-process Treemon restart demonstration |
 | `scripts/durable-terminal-verifier-env.mjs` | Pure isolated-server environment construction, including both reporting port variables |
 | `scripts/verify-ttyd-runtime.mjs` | Import-safe stock-ttyd verifier using the same Job Object supervisor boundary |
-| `src/Server/EmbeddedTerminal.fs` | Durable-host discovery, retired-generation/witness recovery and compaction, reservation cancellation, and control client |
-| `src/Server/Server.fsproj` | Copies the host and Job Object supervisor into build/publish layouts |
+| `src/Server/EmbeddedTerminal.fs` | Runtime-bundle materialization/retention, durable-host discovery, trusted generation/witness recovery, contained compaction, reservation cancellation, and control client |
+| `src/Server/Server.fsproj` | Copies the host, Job Object supervisor, and process-identity helper into build/publish layouts |
 | `src/Server/Program.fs` | Creates the control client without closing durable sessions on shutdown |
 | `src/Client/TerminalPane.fs` | Accessible multi-tab iframe pane pointed at durable proxy endpoints |
 | `src/Tests/EmbeddedTerminalTests.fs` | Host generation races, reservation cancellation/locking, discovery, restart, selective close, and API validation |

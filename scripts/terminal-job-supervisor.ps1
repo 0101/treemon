@@ -1129,7 +1129,58 @@ function Get-LaunchEmptyProof([Exception]$Exception) {
     $false
 }
 
+function Assert-ContainedWitnessPath(
+    [string]$Root,
+    [string]$Path,
+    [string]$SessionId
+) {
+    if (
+        [string]::IsNullOrWhiteSpace($Root) -or
+        [string]::IsNullOrWhiteSpace($Path) -or
+        -not [IO.Path]::IsPathFullyQualified($Root) -or
+        -not [IO.Path]::IsPathFullyQualified($Path)
+    ) {
+        throw "Supervisor empty-witness path is invalid"
+    }
+
+    $fullRoot = [IO.Path]::TrimEndingDirectorySeparator(
+        [IO.Path]::GetFullPath($Root)
+    )
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (
+        -not [string]::Equals(
+            [IO.Path]::GetDirectoryName($fullPath),
+            $fullRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            [IO.Path]::GetFileName($fullPath),
+            "$SessionId.json",
+            [StringComparison]::Ordinal
+        )
+    ) {
+        throw "Supervisor empty-witness path escaped its generation directory"
+    }
+
+    @($fullRoot, $fullPath) | ForEach-Object {
+        if (
+            [IO.File]::Exists($_) -or
+            [IO.Directory]::Exists($_)
+        ) {
+            $attributes = [IO.File]::GetAttributes($_)
+            if (
+                ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+            ) {
+                throw "Supervisor empty-witness path crosses a reparse point"
+            }
+        }
+    }
+
+    $fullPath
+}
+
 function Write-EmptyWitness(
+    [string]$Root,
     [string]$Path,
     [string]$Generation,
     [string]$WorktreePath,
@@ -1138,16 +1189,15 @@ function Write-EmptyWitness(
     [string]$SupervisorStartTimeUtcTicks
 ) {
     if (
-        [string]::IsNullOrWhiteSpace($Path) -or
-        -not [IO.Path]::IsPathFullyQualified($Path) -or
-        [string]::IsNullOrWhiteSpace($Generation) -or
-        [string]::IsNullOrWhiteSpace($WorktreePath) -or
-        [string]::IsNullOrWhiteSpace($SessionId) -or
-        [string]::IsNullOrWhiteSpace($Nonce) -or
+        $Generation -notmatch '^[A-Za-z0-9_-]{1,128}$' -or
+        -not [IO.Path]::IsPathFullyQualified($WorktreePath) -or
+        $SessionId -notmatch '^[A-Za-z0-9_-]{16,128}$' -or
+        $Nonce -notmatch '^[A-Za-z0-9_-]{24,128}$' -or
         $SupervisorStartTimeUtcTicks -notmatch '^\d+$'
     ) {
         throw "Supervisor empty-witness metadata is invalid"
     }
+    $Path = Assert-ContainedWitnessPath $Root $Path $SessionId
 
     $payload = [ordered]@{
         version = 1
@@ -1190,10 +1240,11 @@ function Write-EmptyWitness(
 $owner = $null
 $token = $null
 $sessionId = $null
-$protocolGeneration = 1
+$protocolGeneration = 2
 $startRequestId = $null
 $generation = $null
 $worktreePath = $null
+$witnessRoot = $null
 $witnessPath = $null
 $witnessNonce = $null
 $supervisorStartTimeUtcTicks = [string](
@@ -1207,6 +1258,7 @@ function Publish-EmptyWitness {
         return
     }
     Write-EmptyWitness `
+        $witnessRoot `
         $witnessPath `
         $generation `
         $worktreePath `
@@ -1228,6 +1280,7 @@ try {
     $startRequestId = [string]$start.requestId
     $generation = [string]$start.generation
     $worktreePath = [string]$start.worktreePath
+    $witnessRoot = [string]$start.witness.root
     $witnessPath = [string]$start.witness.path
     $witnessNonce = [string]$start.witness.nonce
     if (
@@ -1236,13 +1289,17 @@ try {
         [string]::IsNullOrWhiteSpace($sessionId) -or
         $start.protocolGeneration -ne $protocolGeneration -or
         $generation -notmatch '^[A-Za-z0-9_-]{1,128}$' -or
-        [string]::IsNullOrWhiteSpace($worktreePath) -or
+        -not [IO.Path]::IsPathFullyQualified($worktreePath) -or
+        [string]::IsNullOrWhiteSpace($witnessRoot) -or
+        -not [IO.Path]::IsPathFullyQualified($witnessRoot) -or
         [string]::IsNullOrWhiteSpace($witnessPath) -or
         -not [IO.Path]::IsPathFullyQualified($witnessPath) -or
         $witnessNonce -notmatch '^[A-Za-z0-9_-]{24,128}$'
     ) {
         throw "First supervisor protocol message must be an authenticated start"
     }
+    $witnessPath =
+        Assert-ContainedWitnessPath $witnessRoot $witnessPath $sessionId
 
     $arguments = @($start.arguments | ForEach-Object { [string]$_ })
     $environment = [Collections.Generic.Dictionary[string,string]]::new(

@@ -11,6 +11,7 @@ import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import {
   defaultProcessController,
+  materializeRuntimeBundle,
   sameProcessIdentity,
   terminateRetainedChild,
 } from "./durable-terminal-host.mjs";
@@ -162,6 +163,7 @@ try {
   assert(existsSync(ttyd), `Missing ${ttyd}. Run '.\\treemon.ps1 setup-ttyd'.`);
   mkdirSync(stateDirectory, { recursive: true });
   mkdirSync(worktree, { recursive: true });
+  const bundle = materializeRuntimeBundle(stateDirectory);
 
   host = spawn(
     process.execPath,
@@ -173,6 +175,16 @@ try {
       ttyd,
       "--shell",
       "pwsh",
+      "--runtime-bundle-dir",
+      bundle.bundleDirectory,
+      "--runtime-bundle-hash",
+      bundle.bundleHash,
+      "--host-script-hash",
+      bundle.hostScriptHash,
+      "--supervisor-script-hash",
+      bundle.supervisorScriptHash,
+      "--process-helper-hash",
+      bundle.processIdentityHelperHash,
     ],
     {
       windowsHide: true,

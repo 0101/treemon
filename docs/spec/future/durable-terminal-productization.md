@@ -22,10 +22,14 @@ still a release gate.
 The current implementation is deliberately checkout-scoped:
 
 - the source runtime entry point is `scripts/durable-terminal-host.mjs`; server builds/publishes copy
-  it and `terminal-job-supervisor.ps1` beside the server, but they are not an installed immutable
-  terminal-host artifact;
-- the server prefers that output/publish copy and falls back to the checkout; ttyd and Node
-  dependencies are still resolved from checkout-local locations;
+  it, `terminal-job-supervisor.ps1`, and `terminate-owned-process.ps1`, then atomically materializes
+  their verified hashes into checkout-local
+  `.agents/durable-terminal/terminal-runtime-bundles/<bundle-hash>/`. A running protocol-3 host
+  validates that bundle and revalidates its pinned helper before every spawn, but the bundle is not
+  yet a machine-global installed terminal-host artifact;
+- candidate files still resolve from the output/publish copy or source checkout, while ttyd and
+  Node dependencies remain checkout-local. The loaded host hash closes the publish replacement
+  race, but the staged runtime is not independently installable;
 - `ws` is a root dependency without a committed runtime-specific lockfile;
 - host discovery lives in the checkout's `.agents/durable-terminal/`;
 - reconnect uses a bounded raw-byte ring plus resize rather than serialized terminal state;
@@ -33,23 +37,34 @@ The current implementation is deliberately checkout-scoped:
 - the shared UI lifecycle is `Starting | Running | Failed | Interrupted`, with interrupted tabs
   retained and independently dismissible/restartable across host replacement;
 - checkout-local startup is serialized by a state-directory lock and each live host manifest has a
-  unique runtime generation plus exact PID/start identity, but discovery is still confined to one
-  checkout rather than a machine-global artifact generation;
+  unique runtime generation, exact PID/start identity, bundle/component hashes, supervisor protocol
+  generation, and capabilities, but discovery is still confined to one checkout rather than a
+  machine-global artifact generation;
 - every session starts ttyd suspended under a retained Windows Job Object supervisor with
   kill-on-close/no-breakaway policy; explicit close retains a failed session until the supervisor
   exits and supplies an authenticated session-bound empty-job proof. `STARTUPINFOEX` whitelists only
   the child `NUL` standard handle, so ttyd cannot inherit any supervisor control or unrelated
-  inheritable handle. Generation manifests and nonce-bound helper-written empty witnesses survive a
-  host or Treemon-manager crash; delete/archive hold a renewable per-worktree host reservation from
-  authoritative cleanup through mutation;
+  inheritable handle. Generation manifests start untrusted, are quarantined write-ahead on protocol
+  failure, and become cleanup authority only after a nonce-bound helper witness, clean authenticated
+  transcript, exact zero supervisor exit, and atomic `trusted-empty` promotion. A witness without
+  promotion remains untrusted after host or Treemon-manager crash; delete/archive hold a renewable
+  per-worktree host reservation from authoritative cleanup through mutation;
 - dead/replaced generation records are retained until every recorded supervisor has a matching
-  durable witness and exact exit identity, then compacted compare-before-delete. The checkout-local
+  terminal trusted state, durable witness, and exact exit identity, then compacted
+  compare-before-delete. Referenced runtime bundles remain immutable and excess unreferenced bundles
+  use the same compare-before-delete discipline. The checkout-local
   store refuses a 65th unresolved generation rather than discarding evidence; dead protocol-1 and
-  pre-witness migration records fail strict cleanup closed until the operator drains their terminals
-  (or restarts the machine) and manually removes those records;
-- the immediately preceding protocol-1 manifest remains listable; close/reuse/drain is permitted
-  only when it declares the same Job Object ownership capability;
-- deployment preserves a running host but does not upgrade or drain host generations;
+  pre-bundle protocol-2 migration records fail strict cleanup closed until the operator
+  authoritatively drains their terminals (or restarts the machine) and manually removes those
+  records;
+- protocol-1 and pre-bundle protocol-2 manifests remain listable; existing-session
+  close/reuse/drain is permitted only when they declare the same Job Object ownership capability,
+  and neither may accept a new key. Protocol 2 retains its per-key reservation path, while an empty
+  legacy host drains before a protocol-3 generation starts;
+- deployment preserves a running host and its sessions; a different candidate bundle makes it
+  drain-only for new keys and replaces it after it empties. Checkout-local state still cannot run
+  multiple live host generations concurrently, so new sessions wait for that bounded drain instead
+  of immediately using the new artifact;
 - operations are standalone Node scripts rather than `tm` commands.
 
 These choices are accepted for feasibility but are not the target production contract. A following
@@ -98,16 +113,17 @@ A deployment follows these rules:
 A breaking control protocol starts a new generation. The server retains the smallest versioned
 client surface required to list and explicitly close older live sessions until they drain; it does
 not reinterpret an unknown protocol as an empty registry. The checkout-local implementation's
-protocol-1 parser is the concrete bounded precedent: it supports only the immediately prior schema,
-starts no new legacy keys, and is removable once no supported persisted or live protocol-1
-manifest can remain.
+protocol-1/pre-bundle-protocol-2 parser is the concrete bounded precedent: it starts no new legacy
+keys, preserves authenticated list/close/drain, and rejects fresh-manager cleanup from legacy
+optimistic state.
 
 The first productized deployment adopts a running, Job-capability-bearing checkout-local
-protocol-v2 host as a **legacy-draining generation**. It lists and controls that host but sends
-every new terminal to the machine-global current generation. A pre-boundary protocol-v2 host is
-listable evidence only and must not be treated as authoritative cleanup. Once the compatible
-legacy host has no sessions, it exits and its checkout-local state is removed. This is a bounded
-one-time migration, not a permanent scan of arbitrary worktrees.
+protocol-3 bundled host as a **legacy-draining generation**. It validates and retains that host's
+checkout-local immutable bundle while listing and controlling its sessions, but sends every new
+terminal to the machine-global current generation. Pre-bundle protocol-2 state remains listable
+evidence only and cannot authorize fresh-manager cleanup. Once the compatible legacy host has no
+sessions, it exits and its checkout-local state is removed. This is a bounded one-time migration,
+not a permanent scan of arbitrary worktrees.
 
 ### Terminal reconnect
 
@@ -180,13 +196,15 @@ backpressure, and heartbeat age—never terminal content.
 
 ### Runtime layout and dependency lock
 
-Move the runtime sidecar from `scripts/` to a cohesive `src/TerminalHost/` component with its own
+Promote the existing checkout-local content-addressed bundle into a cohesive
+`src/TerminalHost/` component with its own
 minimal package manifest and committed lockfile (including a narrow `.gitignore` exception for that
 lock). Keep Node plus `ws`; the proxy has already proved the lifecycle contract, so replacing it
 with a custom PTY host is not a productization task. Pin and record the MIT licenses for `ws`,
 headless xterm, serialization, and ttyd in the staged artifact.
 
-Deployment builds the host beside the published server, then installs it into the machine-global
+Deployment stages the same host/supervisor/helper hash manifest the checkout-local manager already
+verifies, adds locked production Node dependencies, then installs it into the machine-global
 immutable artifact store at `terminal-host/artifacts/<generation>`, including production Node
 dependencies and a generation manifest. `treemon.ps1` verifies that artifact before replacing the
 web server. The current host keeps its files until its sessions drain; deployment never mutates or
@@ -252,8 +270,9 @@ retains the job handle, and launches through `STARTUPINFOEX` with a one-handle
 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`; clearing inheritance on authenticated stdin/stdout/stderr
 remains defense in depth. It validates shell PID membership and atomically flushes a
 generation/worktree/session/nonce/exact-identity empty witness only after `ActiveProcesses == 0`,
-before reporting success or exit. Cleanup requires that witness plus supervisor exit. Sticky
-protocol failure cannot be repaired by later output. Host/control-pipe loss drives supervisor
+before reporting success or exit. Cleanup requires that witness, a clean authenticated transcript,
+the exact zero supervisor exit, and atomic terminal `trusted-empty` promotion. Sticky protocol
+failure is durably quarantined before later output and cannot be repaired. Host/control-pipe loss drives supervisor
 cleanup, and supervisor failure closes the job handle. Productization must package the generation
 record, witness store, bounded compaction, and launch boundary with the immutable host artifact
 rather than reverting to descendant enumeration or PID termination.
@@ -293,8 +312,9 @@ retry of in-flight tools remain forbidden.
 
 ## Implementation Sequence
 
-1. **Freeze the control protocol and package the host.** Move the runtime, add its lockfile and
-   publish staging, resolve paths from the installed artifact, and document prerequisites.
+1. **Package the frozen protocol-3 runtime.** Promote the current bundle manifest, add its dependency
+   lockfile and publish staging, resolve paths from the installed artifact, and document
+   prerequisites.
 2. **Introduce machine-global discovery and generations.** Add atomic manifests, locking, stale
    identity checks, the bounded legacy-host adoption, multi-generation listing,
    current-generation routing, drain, and rollback compatibility.

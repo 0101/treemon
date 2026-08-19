@@ -67,6 +67,26 @@ let private createApi agent roots =
                         "durable-terminal-host.mjs"
                     )
                 )
+              SupervisorScriptPath =
+                Path.GetFullPath(
+                    Path.Combine(
+                        __SOURCE_DIRECTORY__,
+                        "..",
+                        "..",
+                        "scripts",
+                        "terminal-job-supervisor.ps1"
+                    )
+                )
+              ProcessIdentityHelperPath =
+                Path.GetFullPath(
+                    Path.Combine(
+                        __SOURCE_DIRECTORY__,
+                        "..",
+                        "..",
+                        "scripts",
+                        "terminate-owned-process.ps1"
+                    )
+                )
               HostStateDirectory = stateDirectory
               TtydExecutablePath =
                 Path.Combine(stateDirectory, "missing-ttyd.exe")
@@ -575,6 +595,26 @@ type ArchiveWorktreeResolutionTests() =
                 EmbeddedTerminal.createWithConfig
                     { NodeExecutable = "node"
                       HostScriptPath = hostScriptPath
+                      SupervisorScriptPath =
+                        Path.GetFullPath(
+                            Path.Combine(
+                                __SOURCE_DIRECTORY__,
+                                "..",
+                                "..",
+                                "scripts",
+                                "terminal-job-supervisor.ps1"
+                            )
+                        )
+                      ProcessIdentityHelperPath =
+                        Path.GetFullPath(
+                            Path.Combine(
+                                __SOURCE_DIRECTORY__,
+                                "..",
+                                "..",
+                                "scripts",
+                                "terminate-owned-process.ps1"
+                            )
+                        )
                       HostStateDirectory = Path.Combine(tempDirA, "terminal-host")
                       TtydExecutablePath =
                         Path.Combine(

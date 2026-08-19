@@ -10,15 +10,17 @@ import {
   writeFileSync,
 } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
   appendReplayFrame,
+  containedStatePath,
   createTerminalJobSupervisor,
   DurableTerminalHost,
   emptyReplayBuffer,
   jobSupervisorPolicyIsSafe,
+  isValidGeneration,
   manifestOwnership,
   parseInitialHandshake,
   parseResizeFrame,
@@ -27,13 +29,16 @@ import {
   removeManifestIfOwned,
   replayFramesFrom,
   resizeFrame,
+  runtimeBundleHash,
   sameManifestOwner,
   sanitizeMetadataText,
   sessionCookieName,
   TerminalJobSupervisor,
   terminalJobProtocolGeneration,
+  terminalRuntimeCapabilities,
   terminalSize,
   terminateRetainedChild,
+  verifyRuntimeBundle,
 } from "./durable-terminal-host.mjs";
 
 test("browser handshake becomes a bounded resize frame", () => {
@@ -56,6 +61,45 @@ test("invalid initial handshake is rejected", () => {
     /JSON object/,
   );
   assert.throws(() => parseInitialHandshake(Buffer.from("not-json")));
+});
+
+test("generation grammar rejects path and normalization escapes", () => {
+  assert.equal(isValidGeneration("a"), true);
+  assert.equal(isValidGeneration("A_0-".repeat(32)), true);
+  [
+    "",
+    "..",
+    "../escape",
+    "..\\escape",
+    "nested/generation",
+    "nested\\generation",
+    "generation:stream",
+    "génération",
+    "a".repeat(129),
+    resolve("absolute-generation"),
+  ].forEach((generation) =>
+    assert.equal(isValidGeneration(generation), false, generation),
+  );
+});
+
+test("state path containment rejects rooted traversal and alternate streams", () => {
+  const root = testStateDirectory();
+  mkdirSync(root, { recursive: true });
+  try {
+    assert.equal(
+      containedStatePath(root, join(root, "child", "record.json")),
+      resolve(root, "child", "record.json"),
+    );
+    [
+      resolve(root, "..", "outside.json"),
+      join(root, "..", "outside.json"),
+      join(root, "generation:stream"),
+    ].forEach((path) =>
+      assert.throws(() => containedStatePath(root, path), /path/i),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("replay retains whole newest frames within its byte bound", () => {
@@ -130,10 +174,68 @@ test("each terminal uses a distinct loopback cookie name", () => {
 const testStateDirectory = () =>
   resolve(".agents", "durable-terminal-host-tests", randomUUID());
 
+const runtimeBundleFixture = (stateDirectory) => {
+  const assets = [
+    ["host", "durable-terminal-host.mjs"],
+    ["supervisor", "terminal-job-supervisor.ps1"],
+    ["processIdentityHelper", "terminate-owned-process.ps1"],
+  ].map(([role, name]) => {
+    const content = readFileSync(join(import.meta.dirname, name));
+    return {
+      role,
+      name,
+      content,
+      sha256: createHash("sha256").update(content).digest("hex"),
+    };
+  });
+  const hashes = Object.fromEntries(
+    assets.map((asset) => [asset.role, asset.sha256]),
+  );
+  const identity = {
+    hostScriptHash: hashes.host,
+    supervisorScriptHash: hashes.supervisor,
+    processIdentityHelperHash: hashes.processIdentityHelper,
+  };
+  const bundleHash = runtimeBundleHash(identity);
+  const bundleDirectory = join(
+    stateDirectory,
+    "terminal-runtime-bundles",
+    bundleHash,
+  );
+  mkdirSync(bundleDirectory, { recursive: true });
+  assets.forEach((asset) =>
+    writeFileSync(join(bundleDirectory, asset.name), asset.content),
+  );
+  writeFileSync(
+    join(bundleDirectory, "bundle.json"),
+    JSON.stringify({
+      version: 1,
+      bundleHash,
+      hostProtocolVersion: 3,
+      ...identity,
+      supervisorProtocolGeneration: terminalJobProtocolGeneration,
+      capabilities: terminalRuntimeCapabilities,
+      files: assets.map(({ role, name, sha256 }) => ({
+        role,
+        name,
+        sha256,
+      })),
+    }),
+  );
+  return {
+    stateDirectory,
+    bundleDirectory,
+    bundleHash,
+    ...identity,
+  };
+};
+
 const supervisorWitnessOptions = (sessionId, directory = resolve(".agents")) => ({
+  sessionId,
   generation: "test-generation",
   worktreePath: directory,
-  witnessPath: join(directory, `${sessionId}.empty.json`),
+  witnessRoot: directory,
+  witnessPath: join(directory, `${sessionId}.json`),
   witnessNonce: "test-supervisor-witness-nonce",
 });
 
@@ -160,6 +262,7 @@ const withTestHost = async (processController, action) => {
   });
   host.persistStatus = () => {};
   host.record = () => {};
+  host.validateEmptyWitness = () => {};
 
   try {
     await action(host, exits);
@@ -240,6 +343,17 @@ class FakeJobSupervisor {
   terminateStartupFailure() {
     return this.terminate();
   }
+
+  trustedEmptyEvidence() {
+    if (!this.exited) throw new Error("Supervisor is not empty");
+    return {
+      supervisorPid: this.child.pid,
+      supervisorStartTimeUtcTicks: "100",
+      exitCode: 0,
+      exitSignal: null,
+      outputClosed: true,
+    };
+  }
 }
 
 const markStartupReadyWith = (
@@ -286,6 +400,10 @@ const ownedSession = (
   supervisorProcess: supervisor.child,
   supervisorPid: supervisor.child.pid,
   supervisorStartTimeUtcTicks: "100",
+  supervisorTrustState: "in-progress",
+  supervisorExitCode: undefined,
+  supervisorExitSignal: undefined,
+  supervisorOutputClosed: false,
   ttydPid,
   shellPid,
 });
@@ -317,6 +435,140 @@ test("checked-in supervisor compiles with assign-before-resume no-breakaway poli
   assert.equal(policy.intendedStandardHandlesUsable, true);
   assert.equal(policy.failedLaunchHandleDelta, 0);
   assert.equal(policy.quoteProbe, '"C:\\path with space\\\\"');
+});
+
+test("runtime bundle pins and revalidates the supervisor before every spawn", () => {
+  const stateDirectory = testStateDirectory();
+  const bundle = runtimeBundleFixture(stateDirectory);
+  const supervisorPath = join(
+    bundle.bundleDirectory,
+    "terminal-job-supervisor.ps1",
+  );
+  const mutablePublishPath = join(
+    stateDirectory,
+    "mutable-publish",
+    "terminal-job-supervisor.ps1",
+  );
+  let launchedPath = null;
+
+  try {
+    mkdirSync(dirname(mutablePublishPath), { recursive: true });
+    writeFileSync(mutablePublishPath, "new incompatible publish helper");
+    assert.equal(verifyRuntimeBundle(bundle).directory, bundle.bundleDirectory);
+    const child = new EventEmitter();
+    child.pid = nextFakeSupervisorPid++;
+    child.exitCode = null;
+    child.signalCode = null;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const supervisor = createTerminalJobSupervisor({
+      supervisorPath,
+      supervisorHash: bundle.supervisorScriptHash,
+      bundleDirectory: bundle.bundleDirectory,
+      spawnProcess: (_fileName, argumentsList) => {
+        launchedPath =
+          argumentsList[argumentsList.indexOf("-File") + 1];
+        return child;
+      },
+    });
+
+    assert.equal(launchedPath, supervisorPath);
+    assert.notEqual(launchedPath, mutablePublishPath);
+    assert.equal(
+      createHash("sha256")
+        .update(readFileSync(launchedPath))
+        .digest("hex"),
+      bundle.supervisorScriptHash,
+    );
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+    child.stdout.end();
+    supervisor.lines.close();
+
+    const manifestPath = join(bundle.bundleDirectory, "bundle.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    writeFileSync(
+      manifestPath,
+      JSON.stringify({
+        ...manifest,
+        hostScriptHash: "f".repeat(64),
+      }),
+    );
+    assert.throws(
+      () => verifyRuntimeBundle(bundle),
+      /manifest is incompatible/i,
+    );
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+
+    writeFileSync(supervisorPath, "tampered");
+    assert.throws(
+      () => verifyRuntimeBundle(bundle),
+      /hash mismatch/i,
+    );
+    assert.throws(
+      () =>
+        createTerminalJobSupervisor({
+          supervisorPath,
+          supervisorHash: bundle.supervisorScriptHash,
+          bundleDirectory: bundle.bundleDirectory,
+          spawnProcess: () => {
+            throw new Error("tampered helper must not spawn");
+          },
+        }),
+      /hash mismatch/i,
+    );
+  } finally {
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+test("host discovery manifest reports its exact immutable runtime bundle", async () => {
+  const stateDirectory = testStateDirectory();
+  const bundle = runtimeBundleFixture(stateDirectory);
+  const exits = [];
+  const host = new DurableTerminalHost({
+    stateDirectory,
+    ttydPath: resolve("unused-ttyd.exe"),
+    shellCommand: "pwsh",
+    replayBytes: 1024,
+    diagnosticBytes: 1024,
+    runtimeBundle: bundle,
+    exitProcess: (code) => exits.push(code),
+  });
+
+  try {
+    await host.start();
+    const manifest = JSON.parse(
+      readFileSync(join(stateDirectory, "host.json"), "utf8"),
+    );
+    assert.equal(manifest.version, 3);
+    assert.equal(manifest.bundleHash, bundle.bundleHash);
+    assert.equal(manifest.hostScriptHash, bundle.hostScriptHash);
+    assert.equal(
+      manifest.supervisorScriptHash,
+      bundle.supervisorScriptHash,
+    );
+    assert.equal(
+      manifest.processIdentityHelperHash,
+      bundle.processIdentityHelperHash,
+    );
+    assert.equal(
+      manifest.supervisorProtocolGeneration,
+      terminalJobProtocolGeneration,
+    );
+    assert.deepEqual(manifest.capabilities, terminalRuntimeCapabilities);
+    await host.shutdown("bundle-handshake-test");
+    assert.deepEqual(exits, [0]);
+  } finally {
+    host.stopTimers();
+    if (host.controlServer.listening) {
+      await new Promise((resolveClose) =>
+        host.controlServer.close(() => resolveClose()),
+      );
+    }
+    rmSync(stateDirectory, { recursive: true, force: true });
+  }
 });
 
 test("supervisor launch boundary excludes every control standard handle", () => {
@@ -419,7 +671,7 @@ test(
     try {
       for (const stage of stages) {
         const sessionId = randomUUID();
-        const witnessPath = join(fixture, `${stage}.empty.json`);
+        const witnessPath = join(fixture, `${sessionId}.json`);
         const witnessNonce = randomUUID().replaceAll("-", "");
         const supervisor = createTerminalJobSupervisor({
           environment: {
@@ -433,6 +685,7 @@ test(
             sessionId,
             generation: "failure-stage-generation",
             worktreePath: fixture,
+            witnessRoot: fixture,
             witnessPath,
             witnessNonce,
             fileName: process.execPath,
@@ -483,6 +736,7 @@ test(
     mkdirSync(fixture, { recursive: true });
     const blocker = join(fixture, "not-a-directory");
     writeFileSync(blocker, "block");
+    const sessionId = randomUUID();
     const supervisor = createTerminalJobSupervisor({
       environment: {
         ...process.env,
@@ -493,10 +747,11 @@ test(
     try {
       await assert.rejects(
         supervisor.start({
-          sessionId: randomUUID(),
+          sessionId,
           generation: "no-proof-generation",
           worktreePath: fixture,
-          witnessPath: join(blocker, "empty.json"),
+          witnessRoot: blocker,
+          witnessPath: join(blocker, `${sessionId}.json`),
           witnessNonce: randomUUID().replaceAll("-", ""),
           fileName: process.execPath,
           argumentsList: ["-e", "setInterval(() => {}, 1000)"],
@@ -539,7 +794,7 @@ test(
     const fixture = testStateDirectory();
     mkdirSync(fixture, { recursive: true });
     const sessionId = randomUUID();
-    const witnessPath = join(fixture, "after-ready.empty.json");
+    const witnessPath = join(fixture, `${sessionId}.json`);
     const witnessNonce = randomUUID().replaceAll("-", "");
     const supervisor = createTerminalJobSupervisor();
 
@@ -548,6 +803,7 @@ test(
         sessionId,
         generation: "after-ready-generation",
         worktreePath: fixture,
+        witnessRoot: fixture,
         witnessPath,
         witnessNonce,
         fileName: process.execPath,
@@ -944,6 +1200,23 @@ test("supervisor exit waits for a late buffered empty-job proof", async () => {
   assert.equal(protocol.supervisor.emptyAcknowledgementSource, "exited");
 });
 
+test("authenticated empty output may close immediately before zero exit", async () => {
+  const protocol = terminationProtocol((request, response) => {
+    response.send({
+      event: "terminated",
+      requestId: request.requestId,
+      empty: true,
+    });
+    response.closeOutput();
+    setImmediate(() =>
+      response.exit(0, { closeOutput: false }),
+    );
+  });
+  await startProtocolSupervisor(protocol);
+  await protocol.supervisor.terminate(100);
+  assert.equal(protocol.supervisor.trustedEmptyEvidence().exitCode, 0);
+});
+
 test("late buffered proof cannot recover an earlier protocol failure", async () => {
   const protocol = terminationProtocol((_request, response) => {
     response.exit(0, { closeOutput: false });
@@ -964,6 +1237,104 @@ test("late buffered proof cannot recover an earlier protocol failure", async () 
     /invalid JSON/,
   );
   assert.equal(protocol.supervisor.emptyAcknowledged, false);
+});
+
+test("protocol quarantine persistence failure stays in-memory and never trusts disk", async () => {
+  await withTestHost({}, async (host) => {
+    const protocol = protocolSupervisor(() => {});
+    const session = {
+      ...host.newSession(resolve(".agents", "protocol-quarantine"), 0),
+      id: protocol.sessionId,
+      supervisorPid: protocol.child.pid,
+      supervisorStartTimeUtcTicks: "456",
+      jobSupervisor: protocol.supervisor,
+      supervisorProcess: protocol.child,
+    };
+    host.sessions.set(session.id, session);
+    host.persistGeneration();
+    protocol.supervisor.sessionId = session.id;
+    protocol.supervisor.onProtocolFailure = (error) =>
+      host.quarantineSupervisor(session, error);
+    host.persistGeneration = () => {
+      throw new Error("injected atomic write failure before rename");
+    };
+
+    protocol.response.sendRaw("{");
+    await new Promise((resolveTurn) => setImmediate(resolveTurn));
+
+    const durable = JSON.parse(readFileSync(host.generationPath, "utf8"));
+    assert.equal(session.supervisorTrustState, "quarantined");
+    assert.equal(protocol.supervisor.protocolFailure instanceof Error, true);
+    assert.equal(durable.sessions[0].supervisorState, "in-progress");
+    protocol.response.exit(1);
+  });
+});
+
+test("trusted-empty promotion follows witness validation and supervisor exit", async () => {
+  await withTestHost({}, async (host) => {
+    const supervisor = new FakeJobSupervisor();
+    const session = ownedSession("promotion-session-0001", 10, 11, supervisor);
+    host.sessions.set(session.id, session);
+    host.persistGeneration();
+    await supervisor.terminate();
+    let witnessValidated = false;
+    host.validateEmptyWitness = () => {
+      witnessValidated = true;
+    };
+    const originalPersist = host.persistGeneration.bind(host);
+    const writes = [];
+    host.persistGeneration = () => {
+      writes.push({
+        state: session.supervisorTrustState,
+        witnessValidated,
+        exited: supervisor.exited,
+      });
+      originalPersist();
+    };
+
+    host.promoteSupervisorTrustedEmpty(session);
+
+    assert.deepEqual(writes.at(-1), {
+      state: "trusted-empty",
+      witnessValidated: true,
+      exited: true,
+    });
+    const durable = JSON.parse(readFileSync(host.generationPath, "utf8"));
+    assert.equal(durable.sessions[0].supervisorState, "trusted-empty");
+    assert.equal(durable.sessions[0].supervisorExited, true);
+    assert.equal(durable.sessions[0].supervisorOutputClosed, true);
+  });
+});
+
+test("failed trusted-empty promotion persists quarantine instead of success", async () => {
+  await withTestHost({}, async (host) => {
+    const supervisor = new FakeJobSupervisor();
+    const session = ownedSession("promotion-session-0002", 12, 13, supervisor);
+    host.sessions.set(session.id, session);
+    host.persistGeneration();
+    await supervisor.terminate();
+    host.validateEmptyWitness = () => {};
+    const originalPersist = host.persistGeneration.bind(host);
+    let rejectedTrustedWrite = false;
+    host.persistGeneration = () => {
+      if (
+        session.supervisorTrustState === "trusted-empty" &&
+        !rejectedTrustedWrite
+      ) {
+        rejectedTrustedWrite = true;
+        throw new Error("injected trusted promotion write failure");
+      }
+      originalPersist();
+    };
+
+    assert.throws(
+      () => host.promoteSupervisorTrustedEmpty(session),
+      /Could not promote/i,
+    );
+    const durable = JSON.parse(readFileSync(host.generationPath, "utf8"));
+    assert.equal(session.supervisorTrustState, "quarantined");
+    assert.equal(durable.sessions[0].supervisorState, "quarantined");
+  });
 });
 
 test("clean duplicate proof and repeated termination remain idempotent", async () => {
@@ -1299,7 +1670,7 @@ test("generation record binds a witness-token commitment and supervisor identity
     const session = host.newSession(resolve(".agents", "generation"), 0);
     session.supervisorPid = 1234;
     session.supervisorStartTimeUtcTicks = "5678";
-    session.supervisorProtocolFailure = true;
+    session.supervisorTrustState = "quarantined";
     host.sessions.set(session.id, session);
     host.persistGeneration();
 
@@ -1315,7 +1686,11 @@ test("generation record binds a witness-token commitment and supervisor identity
           .digest("hex"),
         supervisorPid: 1234,
         supervisorStartTimeUtcTicks: "5678",
-        protocolFailure: true,
+        supervisorState: "quarantined",
+        supervisorExited: false,
+        supervisorExitCode: null,
+        supervisorExitSignal: null,
+        supervisorOutputClosed: false,
       },
     ]);
     assert.equal(JSON.stringify(record).includes(session.capability), false);
@@ -1353,11 +1728,13 @@ test("manifest deletion requires the exact generation and process identity", () 
     generation: "first",
     pid: 701,
     processStartTicks: "100",
+    bundleHash: null,
   };
   const replacement = {
     generation: "replacement",
     pid: 701,
     processStartTicks: "200",
+    bundleHash: null,
   };
   mkdirSync(stateDirectory, { recursive: true });
   writeFileSync(statePath, JSON.stringify(replacement));
@@ -1371,6 +1748,14 @@ test("manifest deletion requires the exact generation and process identity", () 
     );
     assert.equal(removeManifestIfOwned(statePath, replacement), true);
     assert.equal(existsSync(statePath), false);
+
+    assert.equal(
+      sameManifestOwner(
+        { ...first, bundleHash: "a".repeat(64) },
+        { ...first, bundleHash: "b".repeat(64) },
+      ),
+      false,
+    );
   } finally {
     rmSync(stateDirectory, { recursive: true, force: true });
   }

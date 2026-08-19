@@ -17,6 +17,8 @@ open Shared
 type internal Config =
     { NodeExecutable: string
       HostScriptPath: string
+      SupervisorScriptPath: string
+      ProcessIdentityHelperPath: string
       HostStateDirectory: string
       TtydExecutablePath: string
       ShellCommand: string
@@ -24,6 +26,22 @@ type internal Config =
       ControlRequestTimeout: TimeSpan
       ProbeInterval: TimeSpan
       ReservationRenewalInterval: TimeSpan }
+
+type internal RuntimeBundleIdentity =
+    { BundleHash: string
+      HostScriptHash: string
+      SupervisorScriptHash: string
+      ProcessIdentityHelperHash: string }
+
+type internal RuntimeBundle =
+    { Identity: RuntimeBundleIdentity
+      Directory: string }
+
+type private RuntimeAsset =
+    { Role: string
+      Name: string
+      Content: byte array
+      Hash: string }
 
 type private HostIdentity =
     { Generation: string
@@ -41,11 +59,20 @@ type private HostConnection =
       KernelOwnership: bool
       ControlPort: int
       ControlToken: string
-      StartedAt: string }
+      StartedAt: string
+      RuntimeBundle: RuntimeBundleIdentity option
+      SupervisorProtocolGeneration: int option
+      Capabilities: Set<string> }
 
 type private SupervisorIdentity =
     { Pid: int
       ProcessStartTicks: int64 }
+
+type private SupervisorTrustState =
+    | LegacyUntrusted
+    | InProgress
+    | Quarantined
+    | TrustedEmpty
 
 type private GenerationSessionEvidence =
     { SessionId: string
@@ -53,12 +80,20 @@ type private GenerationSessionEvidence =
       WitnessTokenHash: string
       SupervisorPid: int option
       SupervisorStartTicks: int64 option
-      ProtocolFailure: bool }
+      TrustState: SupervisorTrustState
+      SupervisorExited: bool
+      SupervisorExitCode: int option
+      SupervisorExitSignal: string option
+      SupervisorOutputClosed: bool }
 
 type private GenerationEvidence =
     { Path: string
       Serialized: string
+      RecordVersion: int
       HostProtocolVersion: int
+      RuntimeBundle: RuntimeBundleIdentity option
+      SupervisorProtocolGeneration: int option
+      Capabilities: Set<string>
       Identity: HostIdentity
       SessionsUnknown: bool
       Sessions: GenerationSessionEvidence list }
@@ -147,9 +182,29 @@ type private Message =
 
 type Manager = private Manager of MailboxProcessor<Message>
 
-let private hostProtocolVersion = 2
-let private generationRecordVersion = 1
+let private hostProtocolVersion = 3
+let private generationRecordVersion = 2
+let private previousGenerationRecordVersion = 1
+let private supervisorProtocolGeneration = 2
 let private maximumGenerationRecords = 64
+let private maximumUnreferencedRuntimeBundles = 8
+let private runtimeBundleVersion = 1
+
+let private runtimeCapabilities =
+    set
+        [ "immutable-runtime-bundle-v1"
+          "strict-evidence-paths-v1"
+          "trusted-empty-supervisor-v1" ]
+
+let private validGeneration (value: string) =
+    not (String.IsNullOrEmpty value)
+    && value.Length >= 1
+    && value.Length <= 128
+    && value
+       |> Seq.forall (fun character ->
+           Char.IsAsciiLetterOrDigit character
+           || character = '_'
+           || character = '-')
 
 let private kernelOwnershipError =
     "The durable terminal host predates kernel-enforced Job Object ownership; Treemon cannot start a terminal or authorize cleanup for that generation"
@@ -177,6 +232,10 @@ let private defaultConfig () =
     { NodeExecutable = "node"
       HostScriptPath =
         runtimeScript "durable-terminal-host.mjs"
+      SupervisorScriptPath =
+        runtimeScript "terminal-job-supervisor.ps1"
+      ProcessIdentityHelperPath =
+        runtimeScript "terminate-owned-process.ps1"
       HostStateDirectory = stateDirectory
       TtydExecutablePath =
         Path.Combine(root, ".tools", "ttyd", "1.7.7", "ttyd.exe")
@@ -185,6 +244,132 @@ let private defaultConfig () =
       ControlRequestTimeout = TimeSpan.FromSeconds 30.0
       ProbeInterval = TimeSpan.FromMilliseconds 100.0
       ReservationRenewalInterval = TimeSpan.FromSeconds 30.0 }
+
+let private pathComparison =
+    if OperatingSystem.IsWindows() then
+        StringComparison.OrdinalIgnoreCase
+    else
+        StringComparison.Ordinal
+
+let private samePathText left right =
+    String.Equals(
+        Path.GetFullPath left
+        |> Path.TrimEndingDirectorySeparator,
+        Path.GetFullPath right
+        |> Path.TrimEndingDirectorySeparator,
+        pathComparison
+    )
+
+let private ensureNoReparsePoint root candidate =
+    try
+        let rootPath =
+            Path.GetFullPath root
+            |> Path.TrimEndingDirectorySeparator
+
+        let candidatePath = Path.GetFullPath candidate
+        let relative = Path.GetRelativePath(rootPath, candidatePath)
+
+        let segments =
+            relative.Split(
+                [| Path.DirectorySeparatorChar
+                   Path.AltDirectorySeparatorChar |],
+                StringSplitOptions.RemoveEmptyEntries
+            )
+
+        let paths =
+            segments
+            |> Array.scan (fun parent child ->
+                Path.Combine(parent, child)) rootPath
+            |> Array.toList
+            |> fun descendants -> rootPath :: descendants
+
+        match
+            paths
+            |> List.tryFind (fun path ->
+                (File.Exists path || Directory.Exists path)
+                && (File.GetAttributes path
+                    &&& FileAttributes.ReparsePoint)
+                   <> enum 0)
+        with
+        | Some _ ->
+            Error
+                "Durable terminal evidence path crosses a reparse point"
+        | None -> Ok ()
+    with ex ->
+        Error
+            $"Could not validate durable terminal evidence path containment: {ex.Message}"
+
+let private containedPath root candidate =
+    result {
+        let rootPath =
+            Path.GetFullPath root
+            |> Path.TrimEndingDirectorySeparator
+
+        let candidatePath = Path.GetFullPath candidate
+        let relative = Path.GetRelativePath(rootPath, candidatePath)
+
+        let segments =
+            relative.Split(
+                [| Path.DirectorySeparatorChar
+                   Path.AltDirectorySeparatorChar |],
+                StringSplitOptions.RemoveEmptyEntries
+            )
+
+        if
+            String.IsNullOrWhiteSpace relative
+            || Path.IsPathRooted relative
+            || relative = ".."
+            || relative.StartsWith(
+                $"..{Path.DirectorySeparatorChar}",
+                StringComparison.Ordinal
+            )
+            || segments
+               |> Array.exists (fun segment ->
+                   segment = "."
+                   || segment = ".."
+                   || segment.Contains(':'))
+        then
+            return!
+                Error
+                    "Durable terminal evidence path escaped its state directory"
+
+        do! ensureNoReparsePoint rootPath candidatePath
+        return candidatePath
+    }
+
+let private containedDirectChild root name =
+    result {
+        if
+            String.IsNullOrWhiteSpace name
+            || Path.IsPathRooted name
+            || name = "."
+            || name = ".."
+            || name.Contains(':')
+            || name.Contains(Path.DirectorySeparatorChar)
+            || name.Contains(Path.AltDirectorySeparatorChar)
+            || Path.GetFileName name <> name
+        then
+            return!
+                Error
+                    "Durable terminal evidence path contains an invalid child name"
+
+        let! path =
+            Path.Combine(root, name)
+            |> containedPath root
+
+        if
+            not (
+                samePathText
+                    (Path.GetDirectoryName path)
+                    root
+            )
+        then
+            return!
+                Error
+                    "Durable terminal evidence path is not a direct child"
+
+        return path
+    }
 
 let private canonicalWorktreePath =
     WorktreePath.value >> PathUtils.toWorktreePath
@@ -372,9 +557,65 @@ let private validBoundedToken minimum maximum (value: string) =
            || character = '-')
 
 let private validSha256Hex (value: string) =
-    value.Length = 64
+    not (String.IsNullOrEmpty value)
+    && value.Length = 64
     && value
        |> Seq.forall Uri.IsHexDigit
+
+let private requiredStringSet name element =
+    match tryProperty name element with
+    | Some values when values.ValueKind = JsonValueKind.Array ->
+        values.EnumerateArray()
+        |> Seq.map (fun value ->
+            if value.ValueKind = JsonValueKind.String then
+                value.GetString()
+                |> Option.ofObj
+                |> Result.requireSome $"Invalid '{name}'"
+            else
+                Error $"Invalid '{name}'")
+        |> Seq.toList
+        |> List.sequenceResultM
+        |> Result.bind (fun entries ->
+            if
+                entries
+                |> List.exists String.IsNullOrWhiteSpace
+                || (entries |> Set.ofList |> Set.count)
+                   <> List.length entries
+            then
+                Error $"Invalid '{name}'"
+            else
+                Ok(Set.ofList entries))
+    | _ -> Error $"Missing or invalid '{name}'"
+
+let private parseRuntimeBundleIdentity root =
+    result {
+        let! bundleHash = requiredString "bundleHash" root
+        let! hostScriptHash = requiredString "hostScriptHash" root
+        let! supervisorScriptHash =
+            requiredString "supervisorScriptHash" root
+        let! processIdentityHelperHash =
+            requiredString "processIdentityHelperHash" root
+
+        if
+            [ bundleHash
+              hostScriptHash
+              supervisorScriptHash
+              processIdentityHelperHash ]
+            |> List.exists (validSha256Hex >> not)
+        then
+            return!
+                Error
+                    "Durable terminal runtime bundle contains an invalid content hash"
+
+        return
+            { BundleHash = bundleHash.ToLowerInvariant()
+              HostScriptHash =
+                hostScriptHash.ToLowerInvariant()
+              SupervisorScriptHash =
+                supervisorScriptHash.ToLowerInvariant()
+              ProcessIdentityHelperHash =
+                processIdentityHelperHash.ToLowerInvariant() }
+    }
 
 let private parseHostConnection (text: string) =
     try
@@ -384,7 +625,11 @@ let private parseHostConnection (text: string) =
         result {
             let! version = requiredInt "version" root
 
-            if version <> 1 && version <> hostProtocolVersion then
+            if
+                version <> 1
+                && version <> 2
+                && version <> hostProtocolVersion
+            then
                 return! Error $"Unsupported durable terminal host protocol version {version}"
 
             let! pid = requiredInt "pid" root
@@ -392,7 +637,7 @@ let private parseHostConnection (text: string) =
             let! controlToken = requiredString "controlToken" root
             let! startedAt = requiredString "startedAt" root
             let! generation, processStartTicks, processStartExact =
-                if version = hostProtocolVersion then
+                if version >= 2 then
                     result {
                         let! generation = requiredString "generation" root
                         let! processStartTicks =
@@ -424,7 +669,7 @@ let private parseHostConnection (text: string) =
             if pid <= 0 then
                 return! Error "Invalid durable terminal host PID"
 
-            if String.IsNullOrWhiteSpace generation then
+            if not (validGeneration generation) then
                 return! Error "Invalid durable terminal host generation"
 
             if controlPort <= 0 || controlPort > 65535 || controlPort = 5000 then
@@ -432,6 +677,35 @@ let private parseHostConnection (text: string) =
 
             if String.IsNullOrWhiteSpace controlToken then
                 return! Error "Invalid durable terminal host control token"
+
+            let! runtimeBundle, supervisorGeneration, capabilities =
+                if version = hostProtocolVersion then
+                    result {
+                        let! bundle =
+                            parseRuntimeBundleIdentity root
+                        let! generation =
+                            requiredInt
+                                "supervisorProtocolGeneration"
+                                root
+                        let! capabilities =
+                            requiredStringSet "capabilities" root
+
+                        if
+                            generation
+                            <> supervisorProtocolGeneration
+                            || capabilities <> runtimeCapabilities
+                        then
+                            return!
+                                Error
+                                    "Durable terminal host runtime capabilities are incompatible"
+
+                        return
+                            Some bundle,
+                            Some generation,
+                            capabilities
+                    }
+                else
+                    Ok(None, None, Set.empty)
 
             return
                 { Version = version
@@ -442,7 +716,11 @@ let private parseHostConnection (text: string) =
                   KernelOwnership = kernelOwnership
                   ControlPort = controlPort
                   ControlToken = controlToken
-                  StartedAt = startedAt }
+                  StartedAt = startedAt
+                  RuntimeBundle = runtimeBundle
+                  SupervisorProtocolGeneration =
+                    supervisorGeneration
+                  Capabilities = capabilities }
         }
     with
     | :? JsonException as ex ->
@@ -450,7 +728,7 @@ let private parseHostConnection (text: string) =
     | ex ->
         Error $"Could not read durable terminal host state: {ex.Message}"
 
-let private parseGenerationSession element =
+let private parseGenerationSession recordVersion element =
     result {
         let! sessionId = requiredString "sessionId" element
         let! worktreePath = requiredString "worktreePath" element
@@ -461,8 +739,59 @@ let private parseGenerationSession element =
             optionalInt64String
                 "supervisorStartTimeUtcTicks"
                 element
-        let! protocolFailure =
-            requiredBool "protocolFailure" element
+        let! trustState,
+             supervisorExited,
+             supervisorExitCode,
+             supervisorExitSignal,
+             supervisorOutputClosed =
+            if recordVersion = previousGenerationRecordVersion then
+                requiredBool "protocolFailure" element
+                |> Result.map (fun protocolFailure ->
+                    (if protocolFailure then
+                         Quarantined
+                     else
+                         LegacyUntrusted),
+                    false,
+                    None,
+                    None,
+                    false)
+            else
+                result {
+                    let! state =
+                        requiredString "supervisorState" element
+
+                    let! exited =
+                        requiredBool "supervisorExited" element
+
+                    let! exitCode =
+                        optionalInt "supervisorExitCode" element
+
+                    let exitSignal =
+                        optionalString
+                            "supervisorExitSignal"
+                            element
+
+                    let! outputClosed =
+                        requiredBool
+                            "supervisorOutputClosed"
+                            element
+
+                    let! parsedState =
+                        match state with
+                        | "in-progress" -> Ok InProgress
+                        | "quarantined" -> Ok Quarantined
+                        | "trusted-empty" -> Ok TrustedEmpty
+                        | _ ->
+                            Error
+                                "Durable terminal generation record has an invalid supervisor trust state"
+
+                    return
+                        parsedState,
+                        exited,
+                        exitCode,
+                        exitSignal,
+                        outputClosed
+                }
 
         if not (validBoundedToken 16 128 sessionId) then
             return!
@@ -490,6 +819,29 @@ let private parseGenerationSession element =
                     "Durable terminal generation record has a supervisor start identity without a PID"
         | _ -> ()
 
+        match trustState with
+        | TrustedEmpty
+            when supervisorPid.IsNone
+                 || supervisorStartTicks.IsNone
+                 || not supervisorExited
+                 || supervisorExitCode <> Some 0
+                 || supervisorExitSignal.IsSome
+                 || not supervisorOutputClosed ->
+            return!
+                Error
+                    "Durable terminal generation record has an incomplete trusted-empty supervisor state"
+        | InProgress
+        | Quarantined
+        | LegacyUntrusted
+            when supervisorExited
+                 || supervisorExitCode.IsSome
+                 || supervisorExitSignal.IsSome
+                 || supervisorOutputClosed ->
+            return!
+                Error
+                    "Durable terminal generation record has contradictory supervisor state"
+        | _ -> ()
+
         return
             { SessionId = sessionId
               WorktreePath =
@@ -498,7 +850,11 @@ let private parseGenerationSession element =
                 witnessTokenHash.ToLowerInvariant()
               SupervisorPid = supervisorPid
               SupervisorStartTicks = supervisorStartTicks
-              ProtocolFailure = protocolFailure }
+              TrustState = trustState
+              SupervisorExited = supervisorExited
+              SupervisorExitCode = supervisorExitCode
+              SupervisorExitSignal = supervisorExitSignal
+              SupervisorOutputClosed = supervisorOutputClosed }
     }
 
 let private parseGenerationEvidence
@@ -512,13 +868,17 @@ let private parseGenerationEvidence
         result {
             let! version = requiredInt "version" root
 
-            if version <> generationRecordVersion then
+            if
+                version <> previousGenerationRecordVersion
+                && version <> generationRecordVersion
+            then
                 return!
                     Error
                         $"Unsupported terminal generation record version {version}"
 
             let! protocolVersion =
                 requiredInt "hostProtocolVersion" root
+
             let! generation = requiredString "generation" root
             let! hostPid = requiredInt "hostPid" root
             let! hostStartTicks =
@@ -530,6 +890,53 @@ let private parseGenerationEvidence
             let! sessionsUnknown =
                 optionalBool "sessionsUnknown" root
                 |> Result.map (Option.defaultValue false)
+
+            if
+                version = previousGenerationRecordVersion
+                && protocolVersion >= hostProtocolVersion
+                && not sessionsUnknown
+            then
+                return!
+                    Error
+                        "Legacy terminal generation record cannot claim the current host protocol"
+
+            let! runtimeBundle,
+                 supervisorGeneration,
+                 capabilities =
+                if version = generationRecordVersion then
+                    result {
+                        if protocolVersion <> hostProtocolVersion then
+                            return!
+                                Error
+                                    "Current terminal generation record has an incompatible host protocol"
+
+                        let! bundle =
+                            parseRuntimeBundleIdentity root
+
+                        let! generation =
+                            requiredInt
+                                "supervisorProtocolGeneration"
+                                root
+
+                        let! capabilities =
+                            requiredStringSet "capabilities" root
+
+                        if
+                            generation
+                            <> supervisorProtocolGeneration
+                            || capabilities <> runtimeCapabilities
+                        then
+                            return!
+                                Error
+                                    "Terminal generation runtime capabilities are incompatible"
+
+                        return
+                            Some bundle,
+                            Some generation,
+                            capabilities
+                    }
+                else
+                    Ok(None, None, Set.empty)
 
             let filename =
                 Path.GetFileName path
@@ -543,7 +950,7 @@ let private parseGenerationEvidence
                     ""
 
             if
-                not (validBoundedToken 1 128 generation)
+                not (validGeneration generation)
                 || hostPid <= 0
                 || not (
                     String.Equals(
@@ -567,7 +974,7 @@ let private parseGenerationEvidence
                     when values.ValueKind
                          = JsonValueKind.Array ->
                     values.EnumerateArray()
-                    |> Seq.map parseGenerationSession
+                    |> Seq.map (parseGenerationSession version)
                     |> Seq.toList
                     |> List.sequenceResultM
                 | None when sessionsUnknown -> Ok []
@@ -588,7 +995,12 @@ let private parseGenerationEvidence
             return
                 { Path = path
                   Serialized = text
+                  RecordVersion = version
                   HostProtocolVersion = protocolVersion
+                  RuntimeBundle = runtimeBundle
+                  SupervisorProtocolGeneration =
+                    supervisorGeneration
+                  Capabilities = capabilities
                   Identity =
                     { Generation = generation
                       Pid = hostPid
@@ -630,7 +1042,7 @@ let private parseEmptyWitness (text: string) =
             let! nonce = requiredString "nonce" root
 
             if
-                not (validBoundedToken 1 128 generation)
+                not (validGeneration generation)
                 || not (validBoundedToken 16 128 sessionId)
                 || not (validBoundedToken 24 128 nonce)
                 || supervisorPid <= 0
@@ -885,23 +1297,45 @@ let private generationDirectory config =
     )
 
 let private generationRecordPath config generation =
-    Path.Combine(
-        generationDirectory config,
-        $"{generation}.json"
-    )
+    if validGeneration generation then
+        containedDirectChild
+            (generationDirectory config)
+            $"{generation}.json"
+    else
+        Error "Invalid durable terminal host generation"
 
 let private emptyWitnessDirectory config generation =
-    Path.Combine(
-        config.HostStateDirectory,
-        "terminal-empty-witnesses",
-        generation
-    )
+    result {
+        if not (validGeneration generation) then
+            return!
+                Error
+                    "Invalid durable terminal empty-witness generation"
+
+        let root =
+            Path.Combine(
+                config.HostStateDirectory,
+                "terminal-empty-witnesses"
+            )
+
+        return!
+            containedDirectChild root generation
+    }
 
 let private emptyWitnessPath config generation sessionId =
-    Path.Combine(
-        emptyWitnessDirectory config generation,
-        $"{sessionId}.json"
-    )
+    result {
+        if not (validBoundedToken 16 128 sessionId) then
+            return!
+                Error
+                    "Invalid durable terminal empty-witness session identity"
+
+        let! directory =
+            emptyWitnessDirectory config generation
+
+        return!
+            containedDirectChild
+                directory
+                $"{sessionId}.json"
+    }
 
 let private atomicWriteBytes (path: string) (content: byte array) =
     try
@@ -933,6 +1367,533 @@ let private atomicWriteBytes (path: string) (content: byte array) =
         Error
             $"Could not persist durable terminal generation evidence: {ex.Message}"
 
+let private sha256Hex (content: byte array) =
+    content
+    |> SHA256.HashData
+    |> Convert.ToHexString
+    |> _.ToLowerInvariant()
+
+let private runtimeBundleHash identity =
+    let lines =
+        [ $"bundle-version:{runtimeBundleVersion}"
+          $"host-protocol:{hostProtocolVersion}"
+          $"supervisor-protocol:{supervisorProtocolGeneration}"
+          yield!
+              runtimeCapabilities
+              |> Set.toList
+              |> List.map (fun capability ->
+                  $"capability:{capability}")
+          $"file:host:durable-terminal-host.mjs:{identity.HostScriptHash}"
+          $"file:supervisor:terminal-job-supervisor.ps1:{identity.SupervisorScriptHash}"
+          $"file:processIdentityHelper:terminate-owned-process.ps1:{identity.ProcessIdentityHelperHash}" ]
+
+    (String.concat "\n" lines) + "\n"
+    |> Encoding.UTF8.GetBytes
+    |> sha256Hex
+
+let private runtimeBundleRoot config =
+    Path.Combine(
+        config.HostStateDirectory,
+        "terminal-runtime-bundles"
+    )
+
+let private runtimeBundleDirectory config bundleHash =
+    if validSha256Hex bundleHash then
+        containedDirectChild
+            (runtimeBundleRoot config)
+            (bundleHash.ToLowerInvariant())
+    else
+        Error "Durable terminal runtime bundle hash is invalid"
+
+let private readRuntimeAsset role name path =
+    try
+        if not (File.Exists path) then
+            Error
+                $"Durable terminal runtime file is missing at '{path}'"
+        else
+            let info = FileInfo path
+
+            if
+                info.Length > 16L * 1024L * 1024L
+                || (info.Attributes
+                    &&& FileAttributes.ReparsePoint)
+                   <> enum 0
+            then
+                Error
+                    $"Durable terminal runtime file is not a bounded regular file at '{path}'"
+            else
+                let content = File.ReadAllBytes path
+
+                Ok
+                    { Role = role
+                      Name = name
+                      Content = content
+                      Hash = sha256Hex content }
+    with ex ->
+        Error
+            $"Could not read durable terminal runtime file '{path}': {ex.Message}"
+
+let private runtimeAssets config =
+    [ ("host",
+       "durable-terminal-host.mjs",
+       config.HostScriptPath)
+      ("supervisor",
+       "terminal-job-supervisor.ps1",
+       config.SupervisorScriptPath)
+      ("processIdentityHelper",
+       "terminate-owned-process.ps1",
+       config.ProcessIdentityHelperPath) ]
+    |> List.map (fun (role, name, path) ->
+        readRuntimeAsset role name path)
+    |> List.sequenceResultM
+
+let private identityForAssets assets =
+    let hashFor role =
+        assets
+        |> List.find (fun asset -> asset.Role = role)
+        |> _.Hash
+
+    let provisional =
+        { BundleHash = ""
+          HostScriptHash = hashFor "host"
+          SupervisorScriptHash = hashFor "supervisor"
+          ProcessIdentityHelperHash =
+            hashFor "processIdentityHelper" }
+
+    { provisional with
+        BundleHash = runtimeBundleHash provisional }
+
+let private bundleManifestBytes identity =
+    JsonSerializer.SerializeToUtf8Bytes(
+        {| version = runtimeBundleVersion
+           bundleHash = identity.BundleHash
+           hostProtocolVersion = hostProtocolVersion
+           hostScriptHash = identity.HostScriptHash
+           supervisorScriptHash =
+            identity.SupervisorScriptHash
+           processIdentityHelperHash =
+            identity.ProcessIdentityHelperHash
+           supervisorProtocolGeneration =
+            supervisorProtocolGeneration
+           capabilities =
+            runtimeCapabilities |> Set.toArray
+           files =
+            [| {| role = "host"
+                  name = "durable-terminal-host.mjs"
+                  sha256 = identity.HostScriptHash |}
+               {| role = "supervisor"
+                  name = "terminal-job-supervisor.ps1"
+                  sha256 = identity.SupervisorScriptHash |}
+               {| role = "processIdentityHelper"
+                  name = "terminate-owned-process.ps1"
+                  sha256 =
+                    identity.ProcessIdentityHelperHash |} |] |}
+    )
+
+let private verifyBundleManifest identity (text: string) =
+    try
+        use document = JsonDocument.Parse text
+        let root = document.RootElement
+
+        result {
+            let! version = requiredInt "version" root
+            let! bundleHash = requiredString "bundleHash" root
+            let! protocol = requiredInt "hostProtocolVersion" root
+            let! supervisorGeneration =
+                requiredInt
+                    "supervisorProtocolGeneration"
+                    root
+            let! capabilities =
+                requiredStringSet "capabilities" root
+
+            let! manifestIdentity =
+                parseRuntimeBundleIdentity root
+
+            if
+                version <> runtimeBundleVersion
+                || bundleHash <> identity.BundleHash
+                || manifestIdentity <> identity
+                || protocol <> hostProtocolVersion
+                || supervisorGeneration
+                   <> supervisorProtocolGeneration
+                || capabilities <> runtimeCapabilities
+            then
+                return!
+                    Error
+                        "Durable terminal runtime bundle manifest is incompatible"
+
+            let expected =
+                [ ("host",
+                   "durable-terminal-host.mjs",
+                   identity.HostScriptHash)
+                  ("supervisor",
+                   "terminal-job-supervisor.ps1",
+                   identity.SupervisorScriptHash)
+                  ("processIdentityHelper",
+                   "terminate-owned-process.ps1",
+                   identity.ProcessIdentityHelperHash) ]
+
+            let! actual =
+                match tryProperty "files" root with
+                | Some files
+                    when files.ValueKind
+                         = JsonValueKind.Array ->
+                    files.EnumerateArray()
+                    |> Seq.map (fun file ->
+                        result {
+                            let! role =
+                                requiredString "role" file
+                            let! name =
+                                requiredString "name" file
+                            let! hash =
+                                requiredString "sha256" file
+
+                            return role, name, hash
+                        })
+                    |> Seq.toList
+                    |> List.sequenceResultM
+                | _ ->
+                    Error
+                        "Durable terminal runtime bundle manifest omitted its files"
+
+            if actual <> expected then
+                return!
+                    Error
+                        "Durable terminal runtime bundle manifest file identity changed"
+
+            return ()
+        }
+    with
+    | :? JsonException as ex ->
+        Error
+            $"Invalid durable terminal runtime bundle manifest: {ex.Message}"
+    | ex ->
+        Error
+            $"Could not read durable terminal runtime bundle manifest: {ex.Message}"
+
+let private readRuntimeBundleIdentity directory =
+    try
+        result {
+            let! manifestPath =
+                containedDirectChild directory "bundle.json"
+
+            let info = FileInfo manifestPath
+
+            if
+                not info.Exists
+                || info.Length > 1024L * 1024L
+                || (info.Attributes
+                    &&& FileAttributes.ReparsePoint)
+                   <> enum 0
+            then
+                return!
+                    Error
+                        "Durable terminal runtime bundle manifest is not a bounded regular file"
+
+            use document =
+                File.ReadAllText manifestPath
+                |> JsonDocument.Parse
+
+            return!
+                parseRuntimeBundleIdentity
+                    document.RootElement
+        }
+    with
+    | :? JsonException as ex ->
+        Error
+            $"Invalid durable terminal runtime bundle manifest: {ex.Message}"
+    | ex ->
+        Error
+            $"Could not read durable terminal runtime bundle manifest: {ex.Message}"
+
+let private verifyRuntimeBundleUnsafe config identity =
+    result {
+        if
+            runtimeBundleHash identity
+            <> identity.BundleHash
+        then
+            return!
+                Error
+                    "Durable terminal runtime bundle hash does not match its files"
+
+        let root = runtimeBundleRoot config
+        let! directory =
+            runtimeBundleDirectory
+                config
+                identity.BundleHash
+
+        if not (Directory.Exists directory) then
+            return!
+                Error
+                    "Durable terminal runtime bundle directory is missing"
+
+        do! ensureNoReparsePoint root directory
+
+        let expectedNames =
+            set
+                [ "bundle.json"
+                  "durable-terminal-host.mjs"
+                  "terminal-job-supervisor.ps1"
+                  "terminate-owned-process.ps1" ]
+
+        let actualNames =
+            Directory.GetFileSystemEntries(
+                directory,
+                "*",
+                SearchOption.TopDirectoryOnly
+            )
+            |> Array.map Path.GetFileName
+            |> Set.ofArray
+
+        if actualNames <> expectedNames then
+            return!
+                Error
+                    "Durable terminal runtime bundle contains unexpected files"
+
+        let expectedFiles =
+            [ ("durable-terminal-host.mjs",
+               identity.HostScriptHash)
+              ("terminal-job-supervisor.ps1",
+               identity.SupervisorScriptHash)
+              ("terminate-owned-process.ps1",
+               identity.ProcessIdentityHelperHash) ]
+
+        let! _ =
+            expectedFiles
+            |> List.map (fun (name, expectedHash) ->
+                result {
+                    let! path =
+                        containedDirectChild directory name
+
+                    let info = FileInfo path
+
+                    if
+                        not info.Exists
+                        || (info.Attributes
+                            &&& FileAttributes.ReparsePoint)
+                           <> enum 0
+                    then
+                        return!
+                            Error
+                                "Durable terminal runtime bundle file is not a regular file"
+
+                    let actualHash =
+                        File.ReadAllBytes path
+                        |> sha256Hex
+
+                    if actualHash <> expectedHash then
+                        return!
+                            Error
+                                $"Durable terminal runtime bundle hash mismatch for {name}"
+
+                    return ()
+                })
+            |> List.sequenceResultM
+
+        let! manifestPath =
+            containedDirectChild directory "bundle.json"
+
+        let manifestInfo = FileInfo manifestPath
+
+        if
+            not manifestInfo.Exists
+            || manifestInfo.Length > 1024L * 1024L
+            || (manifestInfo.Attributes
+                &&& FileAttributes.ReparsePoint)
+               <> enum 0
+        then
+            return!
+                Error
+                    "Durable terminal runtime bundle manifest is not a bounded regular file"
+
+        do!
+            File.ReadAllText manifestPath
+            |> verifyBundleManifest identity
+
+        return
+            { Identity = identity
+              Directory = directory }
+    }
+
+let private verifyRuntimeBundle config identity =
+    try
+        verifyRuntimeBundleUnsafe config identity
+    with ex ->
+        Error
+            $"Could not verify durable terminal runtime bundle: {ex.Message}"
+
+let private writeBundleFile path content =
+    use stream =
+        new FileStream(
+            path,
+            FileMode.CreateNew,
+            FileAccess.Write,
+            FileShare.None,
+            4096,
+            FileOptions.WriteThrough
+        )
+
+    stream.Write(content, 0, content.Length)
+    stream.Flush true
+
+let internal materializeRuntimeBundle config =
+    result {
+        let! assets = runtimeAssets config
+        let identity = identityForAssets assets
+        let root = runtimeBundleRoot config
+
+        let rootReady =
+            try
+                Directory.CreateDirectory
+                    config.HostStateDirectory
+                |> ignore
+
+                Directory.CreateDirectory root |> ignore
+
+                ensureNoReparsePoint
+                    config.HostStateDirectory
+                    root
+            with ex ->
+                Error
+                    $"Could not create durable terminal runtime bundle store: {ex.Message}"
+
+        do! rootReady
+
+        let! directory =
+            runtimeBundleDirectory
+                config
+                identity.BundleHash
+
+        let claimRecovery =
+            try
+                let claims =
+                    Directory.GetDirectories(
+                        root,
+                        $"{identity.BundleHash}.*.reclaim",
+                        SearchOption.TopDirectoryOnly
+                    )
+
+                match
+                    Directory.Exists directory,
+                    claims
+                with
+                | false, [| claim |] ->
+                    result {
+                        let! containedClaim =
+                            containedDirectChild
+                                root
+                                (Path.GetFileName claim)
+
+                        do!
+                            ensureNoReparsePoint
+                                root
+                                containedClaim
+
+                        Directory.Move(
+                            containedClaim,
+                            directory
+                        )
+
+                        return ()
+                    }
+                | _, [||] -> Ok ()
+                | _ ->
+                    Error
+                        "Durable terminal runtime bundle has conflicting compaction claims"
+            with ex ->
+                Error
+                    $"Could not recover durable terminal runtime bundle: {ex.Message}"
+
+        do! claimRecovery
+
+        if not (Directory.Exists directory) then
+            let stagingName =
+                $"{identity.BundleHash}.{Environment.ProcessId}.{Guid.NewGuid():N}.pending"
+
+            let! staging =
+                containedDirectChild root stagingName
+
+            let installation =
+                try
+                    try
+                        Directory.CreateDirectory staging
+                        |> ignore
+
+                        match
+                            ensureNoReparsePoint
+                                root
+                                staging
+                        with
+                        | Ok () -> ()
+                        | Error error ->
+                            raise (
+                                InvalidDataException
+                                    error
+                            )
+
+                        let files =
+                            assets
+                            |> List.map (fun asset ->
+                                containedDirectChild
+                                    staging
+                                    asset.Name
+                                |> Result.map (fun path ->
+                                    path,
+                                    asset.Content))
+                            |> List.sequenceResultM
+                            |> function
+                                | Ok paths -> paths
+                                | Error error ->
+                                    raise (
+                                        InvalidDataException
+                                            error
+                                    )
+
+                        files
+                        |> List.iter (fun (path, content) ->
+                            writeBundleFile
+                                path
+                                content)
+
+                        let manifestPath =
+                            match
+                                containedDirectChild
+                                    staging
+                                    "bundle.json"
+                            with
+                            | Ok path -> path
+                            | Error error ->
+                                raise (
+                                    InvalidDataException
+                                        error
+                                )
+
+                        writeBundleFile
+                            manifestPath
+                            (bundleManifestBytes identity)
+
+                        try
+                            Directory.Move(
+                                staging,
+                                directory
+                            )
+                        with :? IOException
+                            when Directory.Exists directory ->
+                            ()
+                    finally
+                        if Directory.Exists staging then
+                            Directory.Delete(staging, true)
+
+                    Ok ()
+                with ex ->
+                    Error
+                        $"Could not materialize durable terminal runtime bundle: {ex.Message}"
+
+            do! installation
+
+        return! verifyRuntimeBundle config identity
+    }
+
 let private readEvidenceText path =
     use stream =
         new FileStream(
@@ -945,6 +1906,74 @@ let private readEvidenceText path =
     use reader = new StreamReader(stream, Encoding.UTF8, true)
     reader.ReadToEnd()
 
+let private recoverGenerationCompactionClaims directory =
+    try
+        Directory.GetFiles(
+            directory,
+            "*.reclaim",
+            SearchOption.TopDirectoryOnly
+        )
+        |> Array.toList
+        |> List.map (fun claim ->
+            result {
+                let filename = Path.GetFileName claim
+                let marker =
+                    filename.IndexOf(
+                        ".json.",
+                        StringComparison.Ordinal
+                    )
+
+                let generation =
+                    if marker > 0 then
+                        filename.Substring(0, marker)
+                    else
+                        ""
+
+                if
+                    not (validGeneration generation)
+                    || not (
+                        filename.EndsWith(
+                            ".reclaim",
+                            StringComparison.Ordinal
+                        )
+                    )
+                then
+                    return!
+                        Error
+                            "Durable terminal generation directory contains an invalid compaction claim"
+
+                let! containedClaim =
+                    containedDirectChild
+                        directory
+                        filename
+
+                let! record =
+                    containedDirectChild
+                        directory
+                        $"{generation}.json"
+
+                if File.Exists record then
+                    return!
+                        Error
+                            "Durable terminal generation compaction claim conflicts with live evidence"
+
+                try
+                    File.Move(containedClaim, record)
+                with
+                | :? FileNotFoundException ->
+                    ()
+                | :? IOException
+                    when File.Exists record ->
+                    ()
+
+                return ()
+            })
+        |> List.sequenceResultM
+        |> Result.map ignore
+    with ex ->
+        Error
+            $"Could not recover durable terminal generation compaction: {ex.Message}"
+
 let private generationRecordPaths config =
     try
         let directory = generationDirectory config
@@ -952,20 +1981,87 @@ let private generationRecordPaths config =
         if not (Directory.Exists directory) then
             Ok []
         else
-            let paths =
-                Directory.GetFiles(
-                    directory,
-                    "*.json",
-                    SearchOption.TopDirectoryOnly
-                )
-                |> Array.sort
-                |> Array.toList
+            result {
+                let! validatedDirectory =
+                    containedDirectChild
+                        config.HostStateDirectory
+                        "terminal-generations"
 
-            if List.length paths > maximumGenerationRecords then
-                Error
-                    $"Durable terminal generation retention exceeds {maximumGenerationRecords} unresolved records; verify or manually drain retired generations before continuing"
-            else
-                Ok paths
+                do!
+                    ensureNoReparsePoint
+                        config.HostStateDirectory
+                        validatedDirectory
+
+                do!
+                    recoverGenerationCompactionClaims
+                        validatedDirectory
+
+                let files =
+                    Directory.GetFiles(
+                        validatedDirectory,
+                        "*.json",
+                        SearchOption.TopDirectoryOnly
+                    )
+                    |> Array.sort
+                    |> Array.toList
+
+                if
+                    List.length files
+                    > maximumGenerationRecords
+                then
+                    return!
+                        Error
+                            $"Durable terminal generation retention exceeds {maximumGenerationRecords} unresolved records; verify or manually drain retired generations before continuing"
+
+                let! paths =
+                    files
+                    |> List.map (fun path ->
+                        result {
+                            let filename =
+                                Path.GetFileName path
+
+                            let generation =
+                                if
+                                    filename.EndsWith(
+                                        ".json",
+                                        StringComparison.Ordinal
+                                    )
+                                then
+                                    filename.Substring(
+                                        0,
+                                        filename.Length - 5
+                                    )
+                                else
+                                    ""
+
+                            if not (validGeneration generation) then
+                                return!
+                                    Error
+                                        "Durable terminal generation directory contains invalid evidence"
+
+                            let! contained =
+                                containedDirectChild
+                                    validatedDirectory
+                                    filename
+
+                            let attributes =
+                                File.GetAttributes contained
+
+                            if
+                                (attributes
+                                 &&& FileAttributes.ReparsePoint)
+                                <> enum 0
+                            then
+                                return!
+                                    Error
+                                        "Durable terminal generation evidence is a reparse point"
+
+                            return contained
+                        })
+                    |> List.sequenceResultM
+
+                return paths
+            }
     with ex ->
         Error
             $"Could not enumerate durable terminal generation evidence: {ex.Message}"
@@ -1016,13 +2112,14 @@ let private persistUnknownRetiredGeneration
     config
     (connection: HostConnection)
     =
-    let path =
-        generationRecordPath
-            config
-            connection.Generation
+    result {
+        let! path =
+            generationRecordPath
+                config
+                connection.Generation
 
-    readGenerationEvidence config
-    |> Result.bind (fun records ->
+        let! records = readGenerationEvidence config
+
         match
             records
             |> List.tryFind (fun evidence ->
@@ -1036,25 +2133,74 @@ let private persistUnknownRetiredGeneration
                     existing.Identity
                     (hostIdentity connection)
             then
-                Ok ()
+                return ()
             else
-                Error
+                return!
+                    Error
                     "Existing retired terminal generation evidence belongs to a different host identity"
         | None ->
-            result {
-                if
-                    List.length records
-                    >= maximumGenerationRecords
-                then
-                    return!
-                        Error
-                            $"Durable terminal generation retention reached {maximumGenerationRecords} unresolved records; verify or manually drain retired generations before starting another host"
+            if
+                List.length records
+                >= maximumGenerationRecords
+            then
+                return!
+                    Error
+                        $"Durable terminal generation retention reached {maximumGenerationRecords} unresolved records; verify or manually drain retired generations before starting another host"
 
-                let content =
+            let! content =
+                if connection.Version = hostProtocolVersion then
+                    result {
+                        let! bundle =
+                            connection.RuntimeBundle
+                            |> Result.requireSome
+                                "Current durable terminal host omitted its runtime bundle identity"
+
+                        return
+                            JsonSerializer.SerializeToUtf8Bytes(
+                                {| version =
+                                    generationRecordVersion
+                                   hostProtocolVersion =
+                                    connection.Version
+                                   generation =
+                                    connection.Generation
+                                   hostPid = connection.Pid
+                                   hostProcessStartTicks =
+                                    string connection.ProcessStartTicks
+                                   hostProcessStartExact =
+                                    connection.ProcessStartExact
+                                   ownershipBoundary =
+                                    if connection.KernelOwnership then
+                                        "windows-job-v1"
+                                    else
+                                        "unsupported"
+                                   bundleHash =
+                                    bundle.BundleHash
+                                   hostScriptHash =
+                                    bundle.HostScriptHash
+                                   supervisorScriptHash =
+                                    bundle.SupervisorScriptHash
+                                   processIdentityHelperHash =
+                                    bundle.ProcessIdentityHelperHash
+                                   supervisorProtocolGeneration =
+                                    supervisorProtocolGeneration
+                                   capabilities =
+                                    runtimeCapabilities
+                                    |> Set.toArray
+                                   startedAt =
+                                    connection.StartedAt
+                                   sessionsUnknown = true
+                                   sessions =
+                                    Array.empty<obj> |}
+                            )
+                    }
+                else
                     JsonSerializer.SerializeToUtf8Bytes(
-                        {| version = generationRecordVersion
-                           hostProtocolVersion = connection.Version
-                           generation = connection.Generation
+                        {| version =
+                            previousGenerationRecordVersion
+                           hostProtocolVersion =
+                            connection.Version
+                           generation =
+                            connection.Generation
                            hostPid = connection.Pid
                            hostProcessStartTicks =
                             string connection.ProcessStartTicks
@@ -1069,23 +2215,62 @@ let private persistUnknownRetiredGeneration
                            sessionsUnknown = true
                            sessions = Array.empty<obj> |}
                     )
+                    |> Ok
 
-                return! atomicWriteBytes path content
-            })
+            let directoryReady =
+                try
+                    Directory.CreateDirectory(
+                        generationDirectory config
+                    )
+                    |> ignore
+
+                    ensureNoReparsePoint
+                        config.HostStateDirectory
+                        (generationDirectory config)
+                with ex ->
+                    Error
+                        $"Could not prepare retired terminal generation evidence: {ex.Message}"
+
+            do! directoryReady
+
+            return! atomicWriteBytes path content
+    }
 
 let private witnessFor config evidence session =
     result {
-        if session.ProtocolFailure then
+        match session.TrustState with
+        | Quarantined ->
             return!
                 Error
-                    "Cannot authorize terminal cleanup because the retired supervisor channel recorded a sticky protocol failure"
+                    "Cannot authorize terminal cleanup because the retired supervisor was quarantined after a sticky protocol failure"
+        | InProgress
+        | LegacyUntrusted ->
+            return!
+                Error
+                    "Cannot authorize terminal cleanup because the retired supervisor did not reach terminal trusted-empty state"
+        | TrustedEmpty -> ()
+
+        if
+            not session.SupervisorExited
+            || session.SupervisorExitCode <> Some 0
+            || session.SupervisorExitSignal.IsSome
+            || not session.SupervisorOutputClosed
+        then
+            return!
+                Error
+                    "Cannot authorize terminal cleanup because the retired supervisor exit transcript is incomplete"
 
         let! expectedPid =
             session.SupervisorPid
             |> Result.requireSome
                 "Cannot confirm retired terminal cleanup because its supervisor PID was not durably published"
 
-        let path =
+        let! expectedStartTicks =
+            session.SupervisorStartTicks
+            |> Result.requireSome
+                "Cannot confirm retired terminal cleanup because its exact supervisor start identity was not durably published"
+
+        let! path =
             emptyWitnessPath
                 config
                 evidence.Identity.Generation
@@ -1097,8 +2282,19 @@ let private witnessFor config evidence session =
                     Error
                         "Cannot confirm retired terminal cleanup because its durable empty witness has not arrived"
                 else
-                    readEvidenceText path
-                    |> parseEmptyWitness
+                    let info = FileInfo path
+
+                    if
+                        info.Length > 1024L * 1024L
+                        || (info.Attributes
+                            &&& FileAttributes.ReparsePoint)
+                           <> enum 0
+                    then
+                        Error
+                            "Retired terminal empty witness is not a bounded regular file"
+                    else
+                        readEvidenceText path
+                        |> parseEmptyWitness
             with ex ->
                 Error
                     $"Could not read retired terminal empty witness: {ex.Message}"
@@ -1121,12 +2317,8 @@ let private witnessFor config evidence session =
             )
             || nonceHash <> session.WitnessTokenHash
             || witness.Supervisor.Pid <> expectedPid
-            || (
-                session.SupervisorStartTicks
-                |> Option.exists (fun expected ->
-                    expected
-                    <> witness.Supervisor.ProcessStartTicks)
-            )
+            || witness.Supervisor.ProcessStartTicks
+               <> expectedStartTicks
         then
             return!
                 Error
@@ -1163,67 +2355,95 @@ let private removeGenerationWitnesses
     config
     (evidence: GenerationEvidence)
     =
-    evidence.Sessions
-    |> List.iter (fun session ->
-        File.Delete(
-            emptyWitnessPath
+    result {
+        let! paths =
+            evidence.Sessions
+            |> List.map (fun session ->
+                emptyWitnessPath
+                    config
+                    evidence.Identity.Generation
+                    session.SessionId)
+            |> List.sequenceResultM
+
+        paths |> List.iter File.Delete
+
+        let! directory =
+            emptyWitnessDirectory
                 config
                 evidence.Identity.Generation
-                session.SessionId
-        ))
 
-    let directory =
-        emptyWitnessDirectory
-            config
-            evidence.Identity.Generation
+        if
+            Directory.Exists directory
+            && Directory.EnumerateFileSystemEntries directory
+               |> Seq.isEmpty
+        then
+            try
+                Directory.Delete directory
+            with :? DirectoryNotFoundException ->
+                ()
 
-    if
-        Directory.Exists directory
-        && Directory.EnumerateFileSystemEntries directory
-           |> Seq.isEmpty
-    then
-        Directory.Delete directory
+        return ()
+    }
 
 let private compactGeneration
     config
     (evidence: GenerationEvidence)
     =
-    let claimedPath =
-        $"{evidence.Path}.{Environment.ProcessId}.{Guid.NewGuid():N}.reclaim.json"
+    let directory = Path.GetDirectoryName evidence.Path
+    let claimedName =
+        $"{Path.GetFileName evidence.Path}.{Environment.ProcessId}.{Guid.NewGuid():N}.reclaim"
 
-    try
+    match containedDirectChild directory claimedName with
+    | Error error -> Error error
+    | Ok claimedPath ->
         try
-            File.Move(evidence.Path, claimedPath)
-        with :? FileNotFoundException ->
-            ()
-
-        if File.Exists claimedPath then
-            let claimed = readEvidenceText claimedPath
-
-            if claimed <> evidence.Serialized then
-                if not (File.Exists evidence.Path) then
-                    File.Move(claimedPath, evidence.Path)
-
-                Error
-                    "Durable terminal generation evidence changed during compare-before-delete compaction"
-            else
-                File.Delete claimedPath
-                removeGenerationWitnesses config evidence
-                Ok ()
-        else
-            Ok ()
-    with ex ->
-        if
-            File.Exists claimedPath
-            && not (File.Exists evidence.Path)
-        then
             try
-                File.Move(claimedPath, evidence.Path)
-            with _ ->
+                File.Move(evidence.Path, claimedPath)
+            with
+            | :? FileNotFoundException
+            | :? DirectoryNotFoundException ->
+                ()
+            | :? IOException
+                when not (File.Exists evidence.Path) ->
                 ()
 
-        Error
-            $"Could not compact fully witnessed terminal generation evidence: {ex.Message}"
+            if File.Exists claimedPath then
+                let claimed = readEvidenceText claimedPath
+
+                if claimed <> evidence.Serialized then
+                    if not (File.Exists evidence.Path) then
+                        File.Move(claimedPath, evidence.Path)
+
+                    Error
+                        "Durable terminal generation evidence changed during compare-before-delete compaction"
+                else
+                    match
+                        removeGenerationWitnesses
+                            config
+                            evidence
+                    with
+                    | Error error ->
+                        if not (File.Exists evidence.Path) then
+                            File.Move(claimedPath, evidence.Path)
+
+                        Error error
+                    | Ok () ->
+                        File.Delete claimedPath
+                        Ok ()
+            else
+                Ok ()
+        with ex ->
+            if
+                File.Exists claimedPath
+                && not (File.Exists evidence.Path)
+            then
+                try
+                    File.Move(claimedPath, evidence.Path)
+                with _ ->
+                    ()
+
+            Error
+                $"Could not compact fully witnessed terminal generation evidence: {ex.Message}"
 
 let private isCurrentGeneration
     (current: HostConnection option)
@@ -1241,19 +2461,27 @@ let private generationIsFullyWitnessed
     =
     if
         evidence.SessionsUnknown
+        || evidence.RecordVersion
+           <> generationRecordVersion
         || evidence.HostProtocolVersion
            <> hostProtocolVersion
         || not evidence.Identity.KernelOwnership
     then
         false
     else
-        match generationHostStopped evidence with
-        | Error _ -> false
-        | Ok () ->
-            evidence.Sessions
-            |> List.forall (fun session ->
-                witnessFor config evidence session
-                |> Result.isOk)
+        match evidence.RuntimeBundle with
+        | None -> false
+        | Some identity ->
+            match
+                verifyRuntimeBundle config identity,
+                generationHostStopped evidence
+            with
+            | Ok _, Ok () ->
+                evidence.Sessions
+                |> List.forall (fun session ->
+                    witnessFor config evidence session
+                    |> Result.isOk)
+            | _ -> false
 
 let private compactFullyWitnessedGenerations
     config
@@ -1276,42 +2504,338 @@ let private compactFullyWitnessedGenerations
 
         do!
             try
-                let witnessRoot =
-                    Path.Combine(
-                        config.HostStateDirectory,
-                        "terminal-empty-witnesses"
-                    )
+                result {
+                    let witnessRoot =
+                        Path.Combine(
+                            config.HostStateDirectory,
+                            "terminal-empty-witnesses"
+                        )
 
-                if Directory.Exists witnessRoot then
-                    let knownGenerations =
-                        records
-                        |> List.map _.Identity.Generation
-                        |> Set.ofList
+                    if Directory.Exists witnessRoot then
+                        do!
+                            ensureNoReparsePoint
+                                config.HostStateDirectory
+                                witnessRoot
 
-                    Directory.GetDirectories(
-                        witnessRoot,
-                        "*",
-                        SearchOption.TopDirectoryOnly
-                    )
-                    |> Array.filter (fun directory ->
-                        let generation =
-                            Path.GetFileName directory
+                        let knownGenerations =
+                            records
+                            |> List.map _.Identity.Generation
+                            |> Set.ofList
 
-                        validBoundedToken 1 128 generation
-                        && not (
-                            knownGenerations
-                            |> Set.contains generation
-                        ))
-                    |> Array.iter (fun directory ->
-                        Directory.Delete(directory, true))
+                        let! orphaned =
+                            Directory.GetDirectories(
+                                witnessRoot,
+                                "*",
+                                SearchOption.TopDirectoryOnly
+                            )
+                            |> Array.filter (fun directory ->
+                                let generation =
+                                    Path.GetFileName directory
 
-                Ok ()
+                                validGeneration generation
+                                && not (
+                                    knownGenerations
+                                    |> Set.contains generation
+                                ))
+                            |> Array.map (fun directory ->
+                                result {
+                                    let! contained =
+                                        containedDirectChild
+                                            witnessRoot
+                                            (Path.GetFileName directory)
+
+                                    do!
+                                        ensureNoReparsePoint
+                                            witnessRoot
+                                            contained
+
+                                    return contained
+                                })
+                            |> Array.toList
+                            |> List.sequenceResultM
+
+                        orphaned
+                        |> List.iter (fun directory ->
+                            Directory.Delete(directory, true))
+
+                    return ()
+                }
             with ex ->
                 Error
                     $"Could not compact orphaned terminal empty witnesses: {ex.Message}"
 
         return ()
     }
+
+let private runtimeBundleSnapshot root directory =
+    result {
+        do! ensureNoReparsePoint root directory
+
+        let entries =
+            Directory.GetFileSystemEntries(
+                directory,
+                "*",
+                SearchOption.TopDirectoryOnly
+            )
+            |> Array.sort
+            |> Array.toList
+
+        let! snapshot =
+            entries
+            |> List.map (fun path ->
+                result {
+                    let name = Path.GetFileName path
+                    let! contained =
+                        containedDirectChild directory name
+
+                    let info = FileInfo contained
+
+                    if
+                        not info.Exists
+                        || (info.Attributes
+                            &&& FileAttributes.ReparsePoint)
+                           <> enum 0
+                    then
+                        return!
+                            Error
+                                "Durable terminal runtime bundle contains a non-file entry"
+
+                    return
+                        name,
+                        (File.ReadAllBytes contained
+                         |> sha256Hex)
+                })
+            |> List.sequenceResultM
+
+        return snapshot
+    }
+
+let private compactRuntimeBundle
+    config
+    (bundle: RuntimeBundle)
+    =
+    let root = runtimeBundleRoot config
+    let claimName =
+        $"{bundle.Identity.BundleHash}.{Environment.ProcessId}.{Guid.NewGuid():N}.reclaim"
+
+    result {
+        let! before =
+            runtimeBundleSnapshot
+                root
+                bundle.Directory
+
+        let! claim =
+            containedDirectChild root claimName
+
+        try
+            Directory.Move(bundle.Directory, claim)
+
+            let! after =
+                runtimeBundleSnapshot root claim
+
+            if after <> before then
+                if not (Directory.Exists bundle.Directory) then
+                    Directory.Move(claim, bundle.Directory)
+
+                return!
+                    Error
+                        "Durable terminal runtime bundle changed during compare-before-delete compaction"
+
+            Directory.Delete(claim, true)
+            return ()
+        with
+        | :? DirectoryNotFoundException -> return ()
+        | ex ->
+            if
+                Directory.Exists claim
+                && not (Directory.Exists bundle.Directory)
+            then
+                try
+                    Directory.Move(claim, bundle.Directory)
+                with _ ->
+                    ()
+
+            return!
+                Error
+                    $"Could not compact unreferenced durable terminal runtime bundle: {ex.Message}"
+    }
+
+let private recoverRuntimeBundleCompactionClaims root =
+    try
+        Directory.GetDirectories(
+            root,
+            "*.reclaim",
+            SearchOption.TopDirectoryOnly
+        )
+        |> Array.toList
+        |> List.map (fun claim ->
+            result {
+                let name = Path.GetFileName claim
+                let marker = name.IndexOf('.')
+
+                let bundleHash =
+                    if marker > 0 then
+                        name.Substring(0, marker)
+                    else
+                        ""
+
+                if
+                    not (validSha256Hex bundleHash)
+                    || not (
+                        name.EndsWith(
+                            ".reclaim",
+                            StringComparison.Ordinal
+                        )
+                    )
+                then
+                    return!
+                        Error
+                            "Durable terminal runtime store contains an invalid compaction claim"
+
+                let! containedClaim =
+                    containedDirectChild root name
+
+                do!
+                    ensureNoReparsePoint
+                        root
+                        containedClaim
+
+                let! bundleDirectory =
+                    containedDirectChild
+                        root
+                        bundleHash
+
+                if Directory.Exists bundleDirectory then
+                    return!
+                        Error
+                            "Durable terminal runtime compaction claim conflicts with an immutable bundle"
+
+                try
+                    Directory.Move(
+                        containedClaim,
+                        bundleDirectory
+                    )
+                with
+                | :? DirectoryNotFoundException ->
+                    ()
+                | :? IOException
+                    when Directory.Exists bundleDirectory ->
+                    ()
+
+                return ()
+            })
+        |> List.sequenceResultM
+        |> Result.map ignore
+    with ex ->
+        Error
+            $"Could not recover durable terminal runtime compaction: {ex.Message}"
+
+let private compactRuntimeBundlesUnsafe
+    config
+    (current: HostConnection option)
+    protectedHashes
+    =
+    result {
+        let root = runtimeBundleRoot config
+
+        if not (Directory.Exists root) then
+            return ()
+
+        do!
+            ensureNoReparsePoint
+                config.HostStateDirectory
+                root
+
+        do! recoverRuntimeBundleCompactionClaims root
+
+        let! records = readGenerationEvidence config
+
+        let referenced =
+            [ yield! protectedHashes |> Set.toList
+              yield!
+                  records
+                  |> List.choose (fun evidence ->
+                      evidence.RuntimeBundle
+                      |> Option.map _.BundleHash)
+              yield!
+                  current
+                  |> Option.bind _.RuntimeBundle
+                  |> Option.map _.BundleHash
+                  |> Option.toList ]
+            |> Set.ofList
+
+        let! bundles =
+            Directory.GetDirectories(
+                root,
+                "*",
+                SearchOption.TopDirectoryOnly
+            )
+            |> Array.toList
+            |> List.choose (fun directory ->
+                let name = Path.GetFileName directory
+
+                if validSha256Hex name then
+                    Some(
+                        result {
+                            let! knownIdentity =
+                                readRuntimeBundleIdentity
+                                    directory
+
+                            if
+                                knownIdentity.BundleHash
+                                <> name
+                            then
+                                return!
+                                    Error
+                                        "Durable terminal runtime bundle directory does not match its manifest hash"
+
+                            return!
+                                verifyRuntimeBundle
+                                    config
+                                    knownIdentity
+                        })
+                else
+                    None)
+            |> List.sequenceResultM
+
+        let unreferenced =
+            bundles
+            |> List.filter (fun bundle ->
+                referenced
+                |> Set.contains bundle.Identity.BundleHash
+                |> not)
+
+        let removable =
+            unreferenced
+            |> List.sortByDescending (fun bundle ->
+                Directory.GetLastWriteTimeUtc bundle.Directory)
+            |> List.skip (
+                min
+                    maximumUnreferencedRuntimeBundles
+                    (List.length unreferenced)
+            )
+
+        let! _ =
+            removable
+            |> List.map (compactRuntimeBundle config)
+            |> List.sequenceResultM
+
+        return ()
+    }
+
+let private compactRuntimeBundles
+    config
+    (current: HostConnection option)
+    protectedHashes
+    =
+    try
+        compactRuntimeBundlesUnsafe
+            config
+            current
+            protectedHashes
+    with ex ->
+        Error
+            $"Could not compact durable terminal runtime bundles: {ex.Message}"
 
 let private confirmPersistedGenerationCleanup
     config
@@ -1344,7 +2868,9 @@ let private confirmPersistedGenerationCleanup
                 elif List.isEmpty matchingSessions then
                     Ok ()
                 elif
-                    evidence.HostProtocolVersion
+                    evidence.RecordVersion
+                    <> generationRecordVersion
+                    || evidence.HostProtocolVersion
                     <> hostProtocolVersion
                     || not evidence.Identity.KernelOwnership
                 then
@@ -1352,6 +2878,14 @@ let private confirmPersistedGenerationCleanup
                         "Cannot authorize strict terminal cleanup for a retired generation without the current Job Object witness protocol"
                 else
                     result {
+                        let! bundle =
+                            evidence.RuntimeBundle
+                            |> Result.requireSome
+                                "Cannot authorize strict terminal cleanup without an immutable runtime bundle identity"
+
+                        let! _ =
+                            verifyRuntimeBundle config bundle
+
                         do! generationHostStopped evidence
 
                         let! _ =
@@ -1462,7 +2996,7 @@ let private parseHealth connection (text: string) =
                     Error
                         "Durable terminal host ownership capability does not match the running control endpoint"
 
-            if version = hostProtocolVersion then
+            if version >= 2 then
                 let! generation = requiredString "generation" root
                 let! processStartTicks =
                     requiredInt64String "processStartTicks" root
@@ -1478,6 +3012,33 @@ let private parseHealth connection (text: string) =
                     return!
                         Error
                             "Durable terminal host state does not match the running control endpoint"
+
+            if version = hostProtocolVersion then
+                let! runtimeBundle =
+                    parseRuntimeBundleIdentity root
+
+                let! supervisorGeneration =
+                    requiredInt
+                        "supervisorProtocolGeneration"
+                        root
+
+                let! capabilities =
+                    requiredStringSet "capabilities" root
+
+                if
+                    connection.RuntimeBundle
+                    <> Some runtimeBundle
+                    || connection.SupervisorProtocolGeneration
+                       <> Some supervisorGeneration
+                    || connection.Capabilities
+                       <> capabilities
+                    || supervisorGeneration
+                       <> supervisorProtocolGeneration
+                    || capabilities <> runtimeCapabilities
+                then
+                    return!
+                        Error
+                            "Durable terminal host runtime bundle does not match the running control endpoint"
         }
     with
     | :? JsonException as ex ->
@@ -1491,6 +3052,24 @@ let private probe config connection =
             request config connection HttpMethod.Get "/health" None
 
         return! parseHealth connection response
+    }
+
+let private requireCurrentRuntimeBundle
+    config
+    (connection: HostConnection)
+    =
+    result {
+        if connection.Version <> hostProtocolVersion then
+            return!
+                Error
+                    $"The protocol-{connection.Version} durable terminal host is in drain-only compatibility mode"
+
+        let! identity =
+            connection.RuntimeBundle
+            |> Result.requireSome
+                "Durable terminal host omitted its immutable runtime bundle identity"
+
+        return! verifyRuntimeBundle config identity
     }
 
 type private HostDiscovery =
@@ -1554,6 +3133,18 @@ let private sameConnectionOwner
         && left.ControlPort = right.ControlPort
         && left.ControlToken = right.ControlToken
         && left.StartedAt = right.StartedAt
+    elif
+        left.Version = hostProtocolVersion
+        || right.Version = hostProtocolVersion
+    then
+        left.Version = right.Version
+        && sameHostIdentity
+            (hostIdentity left)
+            (hostIdentity right)
+        && left.RuntimeBundle = right.RuntimeBundle
+        && left.SupervisorProtocolGeneration
+           = right.SupervisorProtocolGeneration
+        && left.Capabilities = right.Capabilities
     else
         sameHostIdentity (hostIdentity left) (hostIdentity right)
 
@@ -1721,49 +3312,123 @@ let private writeStartupClaim
     with ex ->
         Error $"Could not write durable terminal startup ownership: {ex.Message}"
 
-let private startHostProcess config generation =
+let private startHostProcess
+    config
+    generation
+    (bundle: RuntimeBundle)
+    =
     try
-        Directory.CreateDirectory config.HostStateDirectory |> ignore
-
-        let psi =
-            ProcessStartInfo(
-                FileName = config.NodeExecutable,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WorkingDirectory = Directory.GetCurrentDirectory()
-            )
-
-        [ config.HostScriptPath
-          "--state-dir"
-          config.HostStateDirectory
-          "--ttyd"
-          config.TtydExecutablePath
-          "--shell"
-          config.ShellCommand
-          "--generation"
-          generation ]
-        |> List.iter psi.ArgumentList.Add
-
-        use proc = new Process(StartInfo = psi)
-
-        if proc.Start() then
-            Ok(
-                proc.Id,
-                proc.StartTime.ToUniversalTime().Ticks
-            )
+        if not (validGeneration generation) then
+            Error "Invalid durable terminal host generation"
+        elif
+            (File.ReadAllBytes config.HostScriptPath
+             |> sha256Hex)
+            <> bundle.Identity.HostScriptHash
+        then
+            Error
+                "Durable terminal host script changed after its runtime bundle was materialized"
         else
-            Error "Node did not start the durable terminal host"
+            Directory.CreateDirectory config.HostStateDirectory
+            |> ignore
+
+            let psi =
+                ProcessStartInfo(
+                    FileName = config.NodeExecutable,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = Directory.GetCurrentDirectory()
+                )
+
+            [ config.HostScriptPath
+              "--state-dir"
+              config.HostStateDirectory
+              "--ttyd"
+              config.TtydExecutablePath
+              "--shell"
+              config.ShellCommand
+              "--generation"
+              generation
+              "--runtime-bundle-dir"
+              bundle.Directory
+              "--runtime-bundle-hash"
+              bundle.Identity.BundleHash
+              "--host-script-hash"
+              bundle.Identity.HostScriptHash
+              "--supervisor-script-hash"
+              bundle.Identity.SupervisorScriptHash
+              "--process-helper-hash"
+              bundle.Identity.ProcessIdentityHelperHash ]
+            |> List.iter psi.ArgumentList.Add
+
+            use proc = new Process(StartInfo = psi)
+
+            if proc.Start() then
+                Ok(
+                    proc.Id,
+                    proc.StartTime.ToUniversalTime().Ticks
+                )
+            else
+                Error
+                    "Node did not start the durable terminal host"
     with ex ->
         Error $"Failed to start the durable terminal host: {ex.Message}"
 
-let private waitForHost config deadline startedPid =
+let private waitForHost
+    config
+    deadline
+    startedPid
+    (expectedBundle: RuntimeBundle)
+    =
     let rec wait () =
         async {
             match! discoverHost config with
             | Ok (HealthyHost connection)
                 when not connection.KernelOwnership ->
                 return Error kernelOwnershipError
-            | Ok (HealthyHost connection) -> return Ok connection
+            | Ok (HealthyHost connection)
+                when connection.Version
+                     <> hostProtocolVersion ->
+                match!
+                    request
+                        config
+                        connection
+                        HttpMethod.Get
+                        "/sessions"
+                        None
+                with
+                | Ok content ->
+                    match parseHostSessions content with
+                    | Ok (_ :: _) -> return Ok connection
+                    | Ok [] ->
+                        let!
+                            _ =
+                            request
+                                config
+                                connection
+                                HttpMethod.Post
+                                "/shutdown"
+                                None
+
+                        return
+                            Error
+                                $"New protocol-{connection.Version} durable terminal host has no sessions and cannot accept current starts"
+                    | Error error -> return Error error
+                | Error error -> return Error error
+            | Ok (HealthyHost connection) ->
+                match
+                    requireCurrentRuntimeBundle
+                        config
+                        connection
+                with
+                | Error error -> return Error error
+                | Ok bundle
+                    when bundle.Identity
+                         = expectedBundle.Identity ->
+                    return Ok connection
+                | Ok _ ->
+                    return
+                        Error
+                            "Durable terminal host started with an unexpected runtime bundle"
             | Error error when DateTimeOffset.UtcNow >= deadline ->
                 return
                     Error
@@ -1806,6 +3471,14 @@ let private ensureHostWithTtydRequirement requireTtyd config =
             return
                 Error
                     $"Durable terminal host script is missing at '{config.HostScriptPath}'"
+        elif not (File.Exists config.SupervisorScriptPath) then
+            return
+                Error
+                    $"Durable terminal supervisor script is missing at '{config.SupervisorScriptPath}'"
+        elif not (File.Exists config.ProcessIdentityHelperPath) then
+            return
+                Error
+                    $"Durable terminal process identity helper is missing at '{config.ProcessIdentityHelperPath}'"
         elif requireTtyd && not (File.Exists config.TtydExecutablePath) then
             return
                 Error
@@ -1820,6 +3493,15 @@ let private ensureHostWithTtydRequirement requireTtyd config =
                         when requireTtyd
                              && not connection.KernelOwnership ->
                         return Error kernelOwnershipError
+                    | Ok (HealthyHost connection)
+                        when requireTtyd
+                             && connection.Version
+                                = hostProtocolVersion ->
+                        return
+                            requireCurrentRuntimeBundle
+                                config
+                                connection
+                            |> Result.map (fun _ -> connection)
                     | Ok (HealthyHost connection) ->
                         return Ok connection
                     | Error error -> return Error error
@@ -1842,53 +3524,69 @@ let private ensureHostWithTtydRequirement requireTtyd config =
                                 when requireTtyd
                                      && not connection.KernelOwnership ->
                                 return Error kernelOwnershipError
+                            | Ok (HealthyHost connection)
+                                when requireTtyd
+                                     && connection.Version
+                                        = hostProtocolVersion ->
+                                return
+                                    requireCurrentRuntimeBundle
+                                        config
+                                        connection
+                                    |> Result.map (fun _ ->
+                                        connection)
                             | Ok (HealthyHost connection) ->
                                 return Ok connection
                             | Error error -> return Error error
                             | Ok discovery ->
                                 let startNewHost () =
-                                    async {
-                                        match
+                                    asyncResult {
+                                        do!
                                             compactFullyWitnessedGenerations
                                                 config
                                                 None
-                                        with
-                                        | Error error -> return Error error
-                                        | Ok () ->
-                                            match requireGenerationCapacity config with
-                                            | Error error -> return Error error
-                                            | Ok () ->
-                                                let generation =
-                                                    Guid.NewGuid().ToString("N")
 
-                                                match
-                                                    writeStartupClaim
-                                                        startupLock
-                                                        generation
-                                                        None
-                                                with
-                                                | Error error -> return Error error
-                                                | Ok () ->
-                                                    match startHostProcess config generation with
-                                                    | Error error -> return Error error
-                                                    | Ok(startedPid, startedAt) ->
-                                                        match
-                                                            writeStartupClaim
-                                                                startupLock
-                                                                generation
-                                                                (Some(
-                                                                    startedPid,
-                                                                    startedAt
-                                                                ))
-                                                        with
-                                                        | Error error ->
-                                                            return Error error
-                                                        | Ok () ->
-                                                            return!
-                                                                waitForHost
-                                                                    config
-                                                                    deadline
-                                                                    startedPid
+                                        let! bundle =
+                                            materializeRuntimeBundle config
+
+                                        do!
+                                            compactRuntimeBundles
+                                                config
+                                                None
+                                                (Set.singleton
+                                                    bundle.Identity.BundleHash)
+
+                                        do! requireGenerationCapacity config
+
+                                        let generation =
+                                            Guid.NewGuid().ToString("N")
+
+                                        do!
+                                            writeStartupClaim
+                                                startupLock
+                                                generation
+                                                None
+
+                                        let! startedPid, startedAt =
+                                            startHostProcess
+                                                config
+                                                generation
+                                                bundle
+
+                                        do!
+                                            writeStartupClaim
+                                                startupLock
+                                                generation
+                                                (Some(
+                                                    startedPid,
+                                                    startedAt
+                                                ))
+
+                                        return!
+                                            waitForHost
+                                                config
+                                                deadline
+                                                startedPid
+                                                bundle
                                     }
 
                                 match discovery with
@@ -1899,7 +3597,19 @@ let private ensureHostWithTtydRequirement requireTtyd config =
                                     | Ok OwnershipChanged ->
                                         match! discoverHost config with
                                         | Ok (HealthyHost replacement) ->
-                                            return Ok replacement
+                                            if
+                                                requireTtyd
+                                                && replacement.Version
+                                                   = hostProtocolVersion
+                                            then
+                                                return
+                                                    requireCurrentRuntimeBundle
+                                                        config
+                                                        replacement
+                                                    |> Result.map (fun _ ->
+                                                        replacement)
+                                            else
+                                                return Ok replacement
                                         | Ok _ ->
                                             return
                                                 Error
@@ -1912,7 +3622,19 @@ let private ensureHostWithTtydRequirement requireTtyd config =
                                 | MissingHost ->
                                     return! startNewHost ()
                                 | HealthyHost connection ->
-                                    return Ok connection
+                                    if
+                                        requireTtyd
+                                        && connection.Version
+                                           = hostProtocolVersion
+                                    then
+                                        return
+                                            requireCurrentRuntimeBundle
+                                                config
+                                                connection
+                                            |> Result.map (fun _ ->
+                                                connection)
+                                    else
+                                        return Ok connection
                 }
 
             return! acquireOrDiscover ()
@@ -2134,7 +3856,7 @@ let private announceIfNeeded config state connection instanceId =
                 return known
     }
 
-let private startTerminal config instanceId state worktreePath =
+let rec private startTerminal config instanceId state worktreePath =
     async {
         match! ensureHost config with
         | Error error ->
@@ -2146,12 +3868,45 @@ let private startTerminal config instanceId state worktreePath =
 
             let announced, priorFailure =
                 match
-                    confirmPriorGenerationStopped
+                    confirmAllPriorGenerationCleanup
+                        config
+                        (Some connection)
                         announced
                         worktreePath
                 with
                 | Ok confirmed -> confirmed, None
                 | Error error -> announced, Some error
+
+            let drainOnly, runtimeFailure =
+                if connection.Version <> hostProtocolVersion then
+                    true, None
+                else
+                    match
+                        materializeRuntimeBundle config,
+                        connection.RuntimeBundle
+                    with
+                    | Ok current, Some running ->
+                        match
+                            compactRuntimeBundles
+                                config
+                                (Some connection)
+                                (Set.singleton
+                                    current.Identity.BundleHash)
+                        with
+                        | Ok () ->
+                            current.Identity <> running,
+                            None
+                        | Error error -> false, Some error
+                    | Error error, _ -> false, Some error
+                    | Ok _, None ->
+                        false,
+                        Some
+                            "Durable terminal host omitted its immutable runtime bundle identity"
+
+            let startFailure =
+                match priorFailure with
+                | Some error -> Some error
+                | None -> runtimeFailure
 
             let reconcile failure =
                 async {
@@ -2207,7 +3962,7 @@ let private startTerminal config instanceId state worktreePath =
                             { announced with LastSnapshot = current }
                 }
 
-            match priorFailure, connection.Version with
+            match startFailure, drainOnly with
             | Some error, _ ->
                 let current =
                     withFailure
@@ -2216,7 +3971,7 @@ let private startTerminal config instanceId state worktreePath =
                         announced.LastSnapshot
 
                 return Error error, { announced with LastSnapshot = current }
-            | None, 1 ->
+            | None, true ->
                 match! getHostSessions config connection with
                 | Error error -> return! reconcile error
                 | Ok sessions
@@ -2238,6 +3993,118 @@ let private startTerminal config instanceId state worktreePath =
                     return
                         Ok current,
                         { announced with LastSnapshot = current }
+                | Ok [] ->
+                    match!
+                        request
+                            config
+                            connection
+                            HttpMethod.Post
+                            "/shutdown"
+                            None
+                    with
+                    | Error error ->
+                        return! reconcile error
+                    | Ok _ ->
+                        let retiredState =
+                            { announced with
+                                AnnouncedHost = None
+                                KnownHost = None }
+
+                        let deadline =
+                            DateTimeOffset.UtcNow
+                            + config.StartupTimeout
+
+                        let rec waitForRetirement () =
+                            async {
+                                match! discoverHost config with
+                                | Ok MissingHost ->
+                                    return!
+                                        startTerminal
+                                            config
+                                            instanceId
+                                            retiredState
+                                            worktreePath
+                                | Ok (HealthyHost current)
+                                    when sameConnectionOwner
+                                             current
+                                             connection ->
+                                    if
+                                        DateTimeOffset.UtcNow
+                                        >= deadline
+                                    then
+                                        return!
+                                            reconcile
+                                                $"Timed out draining protocol-{connection.Version} durable terminal host"
+                                    else
+                                        do!
+                                            Async.Sleep
+                                                config.ProbeInterval
+
+                                        return!
+                                            waitForRetirement ()
+                                | Ok (DeadHost(current, _))
+                                    when sameConnectionOwner
+                                             current
+                                             connection ->
+                                    match
+                                        removeStaleState
+                                            config
+                                            current
+                                    with
+                                    | Ok Reclaimed ->
+                                        return!
+                                            startTerminal
+                                                config
+                                                instanceId
+                                                retiredState
+                                                worktreePath
+                                    | Ok OwnershipChanged ->
+                                        return!
+                                            waitForRetirement ()
+                                    | Ok ReclaimDeferred
+                                    | Error _ when
+                                        DateTimeOffset.UtcNow
+                                        >= deadline
+                                        ->
+                                        return!
+                                            reconcile
+                                                $"Timed out reclaiming protocol-{connection.Version} durable terminal host"
+                                    | Ok ReclaimDeferred
+                                    | Error _ ->
+                                        do!
+                                            Async.Sleep
+                                                config.ProbeInterval
+
+                                        return!
+                                            waitForRetirement ()
+                                | Ok (HealthyHost current)
+                                    when current.Version
+                                         = hostProtocolVersion ->
+                                    return!
+                                        startTerminal
+                                            config
+                                            instanceId
+                                            retiredState
+                                            worktreePath
+                                | Ok _
+                                | Error _ when
+                                    DateTimeOffset.UtcNow
+                                    >= deadline
+                                    ->
+                                    return!
+                                        reconcile
+                                            $"Timed out waiting for protocol-{connection.Version} durable terminal ownership to retire"
+                                | Ok _
+                                | Error _ ->
+                                    do!
+                                        Async.Sleep
+                                            config.ProbeInterval
+
+                                    return!
+                                        waitForRetirement ()
+                            }
+
+                        return! waitForRetirement ()
                 | Ok sessions ->
                     let announced =
                         withKnownSessionSupervisors
@@ -2245,7 +4112,13 @@ let private startTerminal config instanceId state worktreePath =
                             sessions
 
                     let error =
-                        "The protocol-1 durable terminal host is in drain-only compatibility mode; close its remaining tabs before starting a new terminal"
+                        if
+                            connection.Version
+                            = hostProtocolVersion
+                        then
+                            "The running durable terminal host uses a different immutable runtime bundle; close its remaining tabs before starting a new terminal"
+                        else
+                            $"The protocol-{connection.Version} durable terminal host is in drain-only compatibility mode; close its remaining tabs before starting a new terminal"
 
                     let current =
                         sessions
@@ -2402,14 +4275,14 @@ let private waitForLegacyHostExit config connection =
                 return!
                     waitAgain
                         validateReplacement
-                        "Timed out waiting for protocol-1 durable terminal ownership to change"
+                        $"Timed out waiting for protocol-{connection.Version} durable terminal ownership to change"
             | Ok (HealthyHost current)
                 when current.Version = hostProtocolVersion ->
                 return Ok(LegacyReplaced current)
             | Ok (HealthyHost _) ->
                 return
                     Error
-                        "Protocol-1 durable terminal ownership changed to another legacy host"
+                        $"Protocol-{connection.Version} durable terminal ownership changed to another legacy host"
             | Ok (DeadHost(current, _))
                 when sameConnectionOwner current connection ->
                 return! wait ()
@@ -2444,7 +4317,7 @@ let private waitForLegacyHostExit config connection =
                         when DateTimeOffset.UtcNow >= deadline ->
                         return
                             Error
-                                "Timed out reclaiming protocol-1 durable terminal metadata"
+                                $"Timed out reclaiming protocol-{connection.Version} durable terminal metadata"
                     | Ok _ ->
                         do! Async.Sleep config.ProbeInterval
                         return! wait ()
@@ -2454,7 +4327,7 @@ let private waitForLegacyHostExit config connection =
                 return!
                     waitAgain
                         wait
-                        $"Timed out waiting for protocol-1 durable terminal host PID {connection.Pid} to drain"
+                        $"Timed out waiting for protocol-{connection.Version} durable terminal host PID {connection.Pid} to drain"
             | Error error -> return Error error
         }
 
@@ -2484,7 +4357,11 @@ let rec private closeTerminalStrict instanceId state config worktreePath =
                     sessions
 
             async {
-                if connection.Version <> 1 || not (List.isEmpty sessions) then
+                if
+                    connection.Version
+                    = hostProtocolVersion
+                    || not (List.isEmpty sessions)
+                then
                     return confirmedClosed sessions confirmedState
                 else
                     match!
@@ -2498,7 +4375,7 @@ let rec private closeTerminalStrict instanceId state config worktreePath =
                     | Error error ->
                         return
                             closeFailure
-                                $"Protocol-1 terminal closed, but its empty host did not drain: {error}"
+                                $"Protocol-{connection.Version} terminal closed, but its empty host did not drain: {error}"
                                 confirmedState.LastSnapshot
                                 confirmedState
                     | Ok _ ->
@@ -2870,6 +4747,41 @@ let private releaseReservation
     request config connection HttpMethod.Delete path None
     |> AsyncResult.ignore
 
+let private releaseReservationAndDrainLegacy
+    config
+    connection
+    reservationId
+    =
+    asyncResult {
+        do!
+            releaseReservation
+                config
+                connection
+                reservationId
+
+        if connection.Version <> hostProtocolVersion then
+            let! sessions =
+                getHostSessions config connection
+
+            if List.isEmpty sessions then
+                do!
+                    request
+                        config
+                        connection
+                        HttpMethod.Post
+                        "/shutdown"
+                        None
+                    |> AsyncResult.ignore
+
+                do!
+                    waitForLegacyHostExit
+                        config
+                        connection
+                    |> AsyncResult.ignore
+
+        return ()
+    }
+
 let private runReservedOperation
     (reservation: CleanupReservation)
     (operation: unit -> Async<Result<unit, string>>)
@@ -3148,7 +5060,7 @@ let private reserveOnCurrentHost
                                 reservation.Id
                           Release =
                             fun () ->
-                                releaseReservation
+                                releaseReservationAndDrainLegacy
                                     config
                                     connection
                                     reservation.Id },
@@ -3192,7 +5104,7 @@ let private reserveTerminalCleanup
                 return Error kernelOwnershipError, currentState
             | Ok connection
                 when connection.Version
-                     = hostProtocolVersion ->
+                     >= 2 ->
                 return!
                     reserveOnCurrentHost
                         config
@@ -3203,7 +5115,7 @@ let private reserveTerminalCleanup
             | Ok _ ->
                 return
                     Error
-                        "Protocol-1 durable terminal host did not finish draining",
+                        "Legacy durable terminal host did not finish draining",
                     currentState
         }
 
@@ -3226,7 +5138,7 @@ let private reserveTerminalCleanup
             when not connection.KernelOwnership ->
             return Error kernelOwnershipError, state
         | Ok (HealthyHost connection)
-            when connection.Version = hostProtocolVersion ->
+            when connection.Version >= 2 ->
             return!
                 reserveOnCurrentHost
                     config
@@ -3251,7 +5163,7 @@ let private reserveTerminalCleanup
             | Error error ->
                 return
                     Error
-                        $"Could not drain protocol-1 durable terminal host: {error}",
+                        $"Could not drain protocol-{connection.Version} durable terminal host: {error}",
                     state
             | Ok _ ->
                 match! waitForLegacyHostExit config connection with
@@ -3260,7 +5172,7 @@ let private reserveTerminalCleanup
                     let interrupted =
                         state.LastSnapshot
                         |> withHostFailure
-                            "the protocol-1 host was drained during its bounded compatibility window"
+                            $"the protocol-{connection.Version} host was drained during its bounded compatibility window"
                         |> withoutPath worktreePath
 
                     let retiredState =

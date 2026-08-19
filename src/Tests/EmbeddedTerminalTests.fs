@@ -167,6 +167,10 @@ import { dirname, resolve, join } from "node:path";
 const args = process.argv.slice(2);
 const stateDirectory = resolve(args[args.indexOf("--state-dir") + 1]);
 const generation = args[args.indexOf("--generation") + 1];
+const bundleHash = args[args.indexOf("--runtime-bundle-hash") + 1];
+const hostScriptHash = args[args.indexOf("--host-script-hash") + 1];
+const supervisorScriptHash = args[args.indexOf("--supervisor-script-hash") + 1];
+const processIdentityHelperHash = args[args.indexOf("--process-helper-hash") + 1];
 const statePath = join(stateDirectory, "host.json");
 const lockPath = join(stateDirectory, "host.lock");
 const eventPath = join(stateDirectory, "events.json");
@@ -204,7 +208,12 @@ const ownershipBoundary = () =>
     ? {}
     : { ownershipBoundary: "windows-job-v1" };
 
-const manifestVersion = behavior().protocolVersion ?? 2;
+const manifestVersion = behavior().protocolVersion ?? 3;
+const runtimeCapabilities = [
+  "immutable-runtime-bundle-v1",
+  "strict-evidence-paths-v1",
+  "trusted-empty-supervisor-v1",
+];
 
 function appendSession(worktreePath) {
   const key = process.platform === "win32" ? worktreePath.toLowerCase() : worktreePath;
@@ -223,6 +232,7 @@ function appendSession(worktreePath) {
       supervisorPid: behavior().supervisorPid ?? process.pid,
       supervisorStartTimeUtcTicks:
         behavior().supervisorStartTimeUtcTicks ?? processStartTicks,
+      supervisorState: "in-progress",
     },
   ];
 }
@@ -245,15 +255,25 @@ function writeJson(path, value) {
 }
 
 function writeGeneration() {
-  if (manifestVersion !== 2) return;
+  if (manifestVersion === 1) return;
   writeJson(generationPath, {
-    version: 1,
-    hostProtocolVersion: 2,
+    version: manifestVersion === 3 ? 2 : 1,
+    hostProtocolVersion: manifestVersion,
     generation,
     hostPid: process.pid,
     hostProcessStartTicks: processStartTicks,
     hostProcessStartExact: true,
     ownershipBoundary: "windows-job-v1",
+    ...(manifestVersion === 3
+      ? {
+          bundleHash,
+          hostScriptHash,
+          supervisorScriptHash,
+          processIdentityHelperHash,
+          supervisorProtocolGeneration: 2,
+          capabilities: runtimeCapabilities,
+        }
+      : {}),
     startedAt,
     sessions: sessions.map((session) => ({
       sessionId: session.id,
@@ -263,13 +283,23 @@ function writeGeneration() {
         .digest("hex"),
       supervisorPid: session.supervisorPid,
       supervisorStartTimeUtcTicks: session.supervisorStartTimeUtcTicks,
-      protocolFailure: false,
+      ...(manifestVersion === 3
+        ? {
+            supervisorState: session.supervisorState,
+            supervisorExited: session.supervisorState === "trusted-empty",
+            supervisorExitCode:
+              session.supervisorState === "trusted-empty" ? 0 : null,
+            supervisorExitSignal: null,
+            supervisorOutputClosed:
+              session.supervisorState === "trusted-empty",
+          }
+        : { protocolFailure: false }),
     })),
   });
 }
 
 function writeWitness(session) {
-  if (manifestVersion !== 2) return;
+  if (manifestVersion === 1) return;
   mkdirSync(witnessDirectory, { recursive: true });
   writeJson(join(witnessDirectory, `${session.id}.json`), {
     version: 1,
@@ -281,6 +311,7 @@ function writeWitness(session) {
     nonce: session.witnessNonce,
     observedAt: new Date().toISOString(),
   });
+  session.supervisorState = "trusted-empty";
 }
 
 function send(response, status, value) {
@@ -325,12 +356,22 @@ const server = createServer(async (request, response) => {
             startedAt,
           }
         : {
-            version: 2,
+            version: manifestVersion,
             generation,
             pid: process.pid,
             processStartTicks,
             processStartExact: true,
             ...ownershipBoundary(),
+            ...(manifestVersion === 3
+              ? {
+                  bundleHash,
+                  hostScriptHash,
+                  supervisorScriptHash,
+                  processIdentityHelperHash,
+                  supervisorProtocolGeneration: 2,
+                  capabilities: runtimeCapabilities,
+                }
+              : {}),
             startedAt,
           };
     send(response, current.healthStatus ?? 200, identity);
@@ -437,10 +478,10 @@ const server = createServer(async (request, response) => {
           statePath,
           JSON.parse(readFileSync(replacementManifestPath, "utf8")),
         );
-      } else if (manifestVersion === 1 && currentBehavior.upgradeAfterDrain) {
+      } else if (manifestVersion < 3 && currentBehavior.upgradeAfterDrain) {
         writeJson(behaviorPath, {
           ...currentBehavior,
-          protocolVersion: 2,
+          protocolVersion: 3,
           initialWorktreePaths: [],
         });
       }
@@ -460,7 +501,7 @@ const server = createServer(async (request, response) => {
     send(response, 200, { crashing: true });
     setImmediate(() => server.close(() => {
       if (!behavior().omitCrashWitness) sessions.forEach(writeWitness);
-      writeGeneration();
+      if (!behavior().omitCrashGeneration) writeGeneration();
       process.exit(0);
     }));
   } else {
@@ -492,12 +533,22 @@ server.listen(0, "127.0.0.1", async () => {
           startedAt,
         }
       : {
-          version: 2,
+          version: manifestVersion,
           generation,
           pid: process.pid,
           processStartTicks,
           processStartExact: true,
           ...ownershipBoundary(),
+          ...(manifestVersion === 3
+            ? {
+                bundleHash,
+                hostScriptHash,
+                supervisorScriptHash,
+                processIdentityHelperHash,
+                supervisorProtocolGeneration: 2,
+                capabilities: runtimeCapabilities,
+              }
+            : {}),
           controlPort: port,
           controlToken: token,
           startedAt,
@@ -509,6 +560,20 @@ server.listen(0, "127.0.0.1", async () => {
 let private config stateDirectory hostScript ttydPath : EmbeddedTerminal.Config =
     { NodeExecutable = "node"
       HostScriptPath = hostScript
+      SupervisorScriptPath =
+        Path.GetFullPath(
+            Path.Combine(
+                "scripts",
+                "terminal-job-supervisor.ps1"
+            )
+        )
+      ProcessIdentityHelperPath =
+        Path.GetFullPath(
+            Path.Combine(
+                "scripts",
+                "terminate-owned-process.ps1"
+            )
+        )
       HostStateDirectory = stateDirectory
       TtydExecutablePath = ttydPath
       ShellCommand = "pwsh"
@@ -554,7 +619,7 @@ type private GenerationSessionFixture =
       WitnessNonce: string
       SupervisorPid: int
       SupervisorStartTicks: int64
-      ProtocolFailure: bool }
+      TrustState: string }
 
 let private generationRecordPath stateDirectory generation =
     Path.Combine(
@@ -573,6 +638,7 @@ let private witnessPath stateDirectory generation sessionId =
 
 let private writeGenerationRecord
     stateDirectory
+    hostConfig
     generation
     hostPid
     hostStartTicks
@@ -588,40 +654,111 @@ let private writeGenerationRecord
     Directory.CreateDirectory(Path.GetDirectoryName path)
     |> ignore
 
-    let serializedSessions =
-        sessions
-        |> List.map (fun session ->
-            let witnessTokenHash =
-                session.WitnessNonce
-                |> Encoding.UTF8.GetBytes
-                |> SHA256.HashData
-                |> Convert.ToHexString
-                |> _.ToLowerInvariant()
+    let witnessTokenHash session =
+        session.WitnessNonce
+        |> Encoding.UTF8.GetBytes
+        |> SHA256.HashData
+        |> Convert.ToHexString
+        |> _.ToLowerInvariant()
 
-            {| sessionId = session.SessionId
-               worktreePath = session.WorktreePath
-               witnessTokenHash = witnessTokenHash
-               supervisorPid = session.SupervisorPid
-               supervisorStartTimeUtcTicks =
-                string session.SupervisorStartTicks
-               protocolFailure =
-                session.ProtocolFailure |})
-        |> List.toArray
+    let content =
+        if protocolVersion = 3 then
+            let bundle =
+                match
+                    EmbeddedTerminal.materializeRuntimeBundle
+                        hostConfig
+                with
+                | Ok bundle -> bundle
+                | Error error ->
+                    Assert.Fail(error)
+                    Unchecked.defaultof<_>
+
+            let serializedSessions =
+                sessions
+                |> List.map (fun session ->
+                    {| sessionId = session.SessionId
+                       worktreePath = session.WorktreePath
+                       witnessTokenHash =
+                        witnessTokenHash session
+                       supervisorPid = session.SupervisorPid
+                       supervisorStartTimeUtcTicks =
+                        string session.SupervisorStartTicks
+                       supervisorState =
+                        session.TrustState
+                       supervisorExited =
+                        (session.TrustState = "trusted-empty")
+                       supervisorExitCode =
+                        if
+                            session.TrustState
+                            <> "trusted-empty"
+                        then
+                            Nullable()
+                        else
+                            Nullable 0
+                       supervisorExitSignal =
+                        (null: string)
+                       supervisorOutputClosed =
+                        (session.TrustState = "trusted-empty") |})
+                |> List.toArray
+
+            JsonSerializer.Serialize(
+                {| version = 2
+                   hostProtocolVersion = protocolVersion
+                   generation = generation
+                   hostPid = hostPid
+                   hostProcessStartTicks = string hostStartTicks
+                   hostProcessStartExact = true
+                   ownershipBoundary = "windows-job-v1"
+                   bundleHash =
+                    bundle.Identity.BundleHash
+                   hostScriptHash =
+                    bundle.Identity.HostScriptHash
+                   supervisorScriptHash =
+                    bundle.Identity.SupervisorScriptHash
+                   processIdentityHelperHash =
+                    bundle.Identity.ProcessIdentityHelperHash
+                   supervisorProtocolGeneration = 2
+                   capabilities =
+                    [| "immutable-runtime-bundle-v1"
+                       "strict-evidence-paths-v1"
+                       "trusted-empty-supervisor-v1" |]
+                   startedAt =
+                    DateTimeOffset.UtcNow.ToString("O")
+                   sessionsUnknown = sessionsUnknown
+                   sessions = serializedSessions |}
+            )
+        else
+            let serializedSessions =
+                sessions
+                |> List.map (fun session ->
+                    {| sessionId = session.SessionId
+                       worktreePath = session.WorktreePath
+                       witnessTokenHash =
+                        witnessTokenHash session
+                       supervisorPid = session.SupervisorPid
+                       supervisorStartTimeUtcTicks =
+                        string session.SupervisorStartTicks
+                       protocolFailure =
+                        (session.TrustState = "quarantined") |})
+                |> List.toArray
+
+            JsonSerializer.Serialize(
+                {| version = 1
+                   hostProtocolVersion = protocolVersion
+                   generation = generation
+                   hostPid = hostPid
+                   hostProcessStartTicks = string hostStartTicks
+                   hostProcessStartExact = true
+                   ownershipBoundary = "windows-job-v1"
+                   startedAt =
+                    DateTimeOffset.UtcNow.ToString("O")
+                   sessionsUnknown = sessionsUnknown
+                   sessions = serializedSessions |}
+            )
 
     File.WriteAllText(
         path,
-        JsonSerializer.Serialize(
-            {| version = 1
-               hostProtocolVersion = protocolVersion
-               generation = generation
-               hostPid = hostPid
-               hostProcessStartTicks = string hostStartTicks
-               hostProcessStartExact = true
-               ownershipBoundary = "windows-job-v1"
-               startedAt = DateTimeOffset.UtcNow.ToString("O")
-               sessionsUnknown = sessionsUnknown
-               sessions = serializedSessions |}
-        )
+        content
     )
 
 let private writeEmptyWitnessAs
@@ -668,7 +805,7 @@ let private fixtureSession suffix worktreePath pid startTicks =
         $"witness-{suffix}-000000000000000000000000"
       SupervisorPid = pid
       SupervisorStartTicks = startTicks
-      ProtocolFailure = false }
+      TrustState = "trusted-empty" }
 
 let private crashFakeHostManifest (manifest: string) =
     use document =
@@ -1788,7 +1925,7 @@ type EmbeddedTerminalTests() =
                 Assert.That(snapshots[0].Tabs.Length, Is.EqualTo(1))))
 
     [<Test>]
-    member _.``stale manifest with a reused PID is replaced by a fresh generation``() =
+    member _.``dead protocol-two manifest is retained as untrusted evidence``() =
         withFakeHost (fun tempDir stateDirectory _ manager ->
             Directory.CreateDirectory stateDirectory |> ignore
             let staleGeneration = "stale-generation"
@@ -1810,14 +1947,705 @@ type EmbeddedTerminalTests() =
             let worktreePath = Path.Combine(tempDir, "worktree")
             Directory.CreateDirectory worktreePath |> ignore
             let worktree = canonical worktreePath
-            let started = start manager worktree
+            let result =
+                EmbeddedTerminal.start manager worktree
+                |> run
 
             Assert.Multiple(fun () ->
-                Assert.That(started.Tabs.Length, Is.EqualTo(1))
+                match result with
+                | Ok _ ->
+                    Assert.Fail(
+                        "Dead protocol-two evidence authorized a replacement start"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("retired protocol-2")
+                            .IgnoreCase
+                    )
+
                 Assert.That(
-                    readHostGeneration stateDirectory,
-                    Is.Not.EqualTo(staleGeneration)
+                    File.Exists(
+                        generationRecordPath
+                            stateDirectory
+                            staleGeneration
+                    ),
+                    Is.True
                 )))
+
+    [<Test>]
+    member _.``invalid manifest generations are preserved and never used as paths``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            use currentProcess = Process.GetCurrentProcess()
+
+            let processStartTicks =
+                currentProcess.StartTime
+                    .ToUniversalTime()
+                    .Ticks
+
+            let invalidGenerations =
+                [ Path.GetFullPath(
+                      Path.Combine(tempDir, "absolute")
+                  )
+                  "..\\escape"
+                  "../escape"
+                  "nested\\generation"
+                  "nested/generation"
+                  "generation:stream"
+                  "génération"
+                  String.replicate 129 "a" ]
+
+            invalidGenerations
+            |> List.iteri (fun index generation ->
+                let manifest =
+                    JsonSerializer.Serialize(
+                        {| version = 2
+                           generation = generation
+                           pid = Environment.ProcessId
+                           processStartTicks =
+                            string processStartTicks
+                           processStartExact = true
+                           ownershipBoundary =
+                            "windows-job-v1"
+                           controlPort = 41234
+                           controlToken = "invalid-generation"
+                           startedAt =
+                            DateTimeOffset.UtcNow.ToString("O") |}
+                    )
+
+                let statePath =
+                    Path.Combine(
+                        stateDirectory,
+                        "host.json"
+                    )
+
+                Directory.CreateDirectory stateDirectory
+                |> ignore
+
+                File.WriteAllText(statePath, manifest)
+
+                let worktreePath =
+                    Path.Combine(
+                        tempDir,
+                        $"invalid-{index}"
+                    )
+
+                Directory.CreateDirectory worktreePath
+                |> ignore
+
+                let snapshot =
+                    start
+                        manager
+                        (canonical worktreePath)
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        errorFor
+                            (canonical worktreePath)
+                            snapshot,
+                        Does.Contain("generation")
+                            .IgnoreCase
+                    )
+                    Assert.That(
+                        File.ReadAllText statePath,
+                        Is.EqualTo manifest
+                    )
+                    Assert.That(
+                        File.Exists(
+                            Path.Combine(
+                                stateDirectory,
+                                "launches.txt"
+                            )
+                        ),
+                        Is.False
+                    ))))
+
+    [<Test>]
+    member _.``generation evidence reparse containment fails closed``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let outside =
+                Path.Combine(tempDir, "outside-evidence")
+
+            let generationDirectory =
+                Path.Combine(
+                    stateDirectory,
+                    "terminal-generations"
+                )
+
+            Directory.CreateDirectory stateDirectory
+            |> ignore
+
+            Directory.CreateDirectory outside |> ignore
+
+            try
+                Directory.CreateSymbolicLink(
+                    generationDirectory,
+                    outside
+                )
+                |> ignore
+            with
+            | :? UnauthorizedAccessException ->
+                Assert.Ignore(
+                    "Directory symbolic links are unavailable"
+                )
+            | :? IOException ->
+                Assert.Ignore(
+                    "Directory symbolic links are unavailable"
+                )
+
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            let snapshot =
+                start manager (canonical worktreePath)
+
+            Assert.That(
+                errorFor
+                    (canonical worktreePath)
+                    snapshot,
+                Does.Contain("reparse")
+                    .IgnoreCase
+            ))
+
+    [<Test>]
+    member _.``runtime bundle tampering fails closed without rewriting the bundle``() =
+        withFakeHost (fun _ _ hostConfig _ ->
+            let bundle =
+                match
+                    EmbeddedTerminal.materializeRuntimeBundle
+                        hostConfig
+                with
+                | Ok value -> value
+                | Error error ->
+                    Assert.Fail(error)
+                    Unchecked.defaultof<_>
+
+            let supervisorPath =
+                Path.Combine(
+                    bundle.Directory,
+                    "terminal-job-supervisor.ps1"
+                )
+
+            File.AppendAllText(
+                supervisorPath,
+                $"{Environment.NewLine}# tampered"
+            )
+
+            let tampered = File.ReadAllText supervisorPath
+
+            match
+                EmbeddedTerminal.materializeRuntimeBundle
+                    hostConfig
+            with
+            | Ok _ ->
+                Assert.Fail(
+                    "A tampered immutable runtime bundle was accepted"
+                )
+            | Error error ->
+                Assert.That(
+                    error,
+                    Does.Contain("hash mismatch")
+                        .IgnoreCase
+                )
+
+            Assert.That(
+                File.ReadAllText supervisorPath,
+                Is.EqualTo tampered
+            ))
+
+    [<Test>]
+    member _.``abandoned runtime bundle compaction claim is recovered immutably``() =
+        withFakeHost (fun _ _ hostConfig _ ->
+            let original =
+                match
+                    EmbeddedTerminal.materializeRuntimeBundle
+                        hostConfig
+                with
+                | Ok bundle -> bundle
+                | Error error ->
+                    Assert.Fail(error)
+                    Unchecked.defaultof<_>
+
+            let claim =
+                $"{original.Directory}.{Environment.ProcessId}.{Guid.NewGuid():N}.reclaim"
+
+            Directory.Move(original.Directory, claim)
+
+            Assert.That(
+                Directory.Exists original.Directory,
+                Is.False
+            )
+
+            let recovered =
+                match
+                    EmbeddedTerminal.materializeRuntimeBundle
+                        hostConfig
+                with
+                | Ok bundle -> bundle
+                | Error error ->
+                    Assert.Fail(error)
+                    Unchecked.defaultof<_>
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    recovered.Identity,
+                    Is.EqualTo original.Identity
+                )
+                Assert.That(
+                    recovered.Directory,
+                    Is.EqualTo original.Directory
+                )
+                Assert.That(
+                    Directory.Exists recovered.Directory,
+                    Is.True
+                )
+                Assert.That(
+                    Directory.Exists claim,
+                    Is.False
+                )))
+
+    [<Test>]
+    member _.``concurrent startup compacts only excess unreferenced runtime bundles``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig firstManager ->
+            let bundles =
+                [ 0..10 ]
+                |> List.map (fun index ->
+                    File.AppendAllText(
+                        hostConfig.HostScriptPath,
+                        $"{Environment.NewLine}// bundle {index}"
+                    )
+
+                    match
+                        EmbeddedTerminal.materializeRuntimeBundle
+                            hostConfig
+                    with
+                    | Ok bundle -> bundle
+                    | Error error ->
+                        Assert.Fail(error)
+                        Unchecked.defaultof<_>)
+
+            let currentBundle =
+                bundles |> List.last
+
+            let secondManager =
+                EmbeddedTerminal.createWithConfig
+                    hostConfig
+
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            let worktree = canonical worktreePath
+
+            let results =
+                [ EmbeddedTerminal.start
+                    firstManager
+                    worktree
+                  EmbeddedTerminal.start
+                    secondManager
+                    worktree ]
+                |> Async.Parallel
+                |> run
+
+            let endpoints =
+                results
+                |> Array.map (function
+                    | Ok snapshot ->
+                        endpointFor worktree snapshot
+                    | Error error ->
+                        Assert.Fail(error)
+                        "")
+
+            let bundleDirectories =
+                Directory.GetDirectories(
+                    Path.Combine(
+                        stateDirectory,
+                        "terminal-runtime-bundles"
+                    )
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    endpoints |> Array.distinct,
+                    Has.Length.EqualTo(1)
+                )
+                Assert.That(
+                    bundleDirectories,
+                    Has.Length.EqualTo(9)
+                )
+                Assert.That(
+                    Directory.Exists currentBundle.Directory,
+                    Is.True
+                )))
+
+    [<Test>]
+    member _.``protocol-two host drains before a changed deployment starts a bundled generation``() =
+        withFakeHostConfig
+            (fun original ->
+                let directory =
+                    Path.GetDirectoryName
+                        original.HostScriptPath
+
+                let supervisor =
+                    Path.Combine(
+                        directory,
+                        "candidate-supervisor.ps1"
+                    )
+
+                let processHelper =
+                    Path.Combine(
+                        directory,
+                        "candidate-process-helper.ps1"
+                    )
+
+                File.Copy(
+                    original.SupervisorScriptPath,
+                    supervisor
+                )
+
+                File.Copy(
+                    original.ProcessIdentityHelperPath,
+                    processHelper
+                )
+
+                { original with
+                    SupervisorScriptPath = supervisor
+                    ProcessIdentityHelperPath =
+                        processHelper })
+            (fun tempDir stateDirectory hostConfig manager ->
+                let oldPath =
+                    Path.Combine(tempDir, "old-session")
+
+                let newPath =
+                    Path.Combine(tempDir, "new-session")
+
+                [ oldPath; newPath ]
+                |> List.iter (Directory.CreateDirectory >> ignore)
+
+                writeBehavior
+                    stateDirectory
+                    (JsonSerializer.Serialize(
+                        {| protocolVersion = 2
+                           upgradeAfterDrain = true
+                           initialWorktreePaths =
+                            [| oldPath |] |}
+                    ))
+
+                let oldWorktree = canonical oldPath
+                let newWorktree = canonical newPath
+                let oldSnapshot = start manager oldWorktree
+                let oldEndpoint =
+                    endpointFor
+                        oldWorktree
+                        oldSnapshot
+
+                let bundleRoot =
+                    Path.Combine(
+                        stateDirectory,
+                        "terminal-runtime-bundles"
+                    )
+
+                let oldBundle =
+                    Directory.GetDirectories(bundleRoot)
+                    |> Array.exactlyOne
+
+                File.AppendAllText(
+                    hostConfig.HostScriptPath,
+                    $"{Environment.NewLine}// changed publish"
+                )
+
+                File.AppendAllText(
+                    hostConfig.SupervisorScriptPath,
+                    $"{Environment.NewLine}# changed publish"
+                )
+
+                let rejected =
+                    EmbeddedTerminal.start
+                        manager
+                        newWorktree
+                    |> run
+
+                let retained =
+                    EmbeddedTerminal.get manager
+                    |> run
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        endpointFor oldWorktree retained,
+                        Is.EqualTo oldEndpoint
+                    )
+                    match rejected with
+                    | Ok _ ->
+                        Assert.Fail(
+                            "Protocol-two host accepted an incompatible new start"
+                        )
+                    | Error error ->
+                        Assert.That(
+                            error,
+                            Does.Contain("drain-only")
+                                .IgnoreCase
+                        )
+                    Assert.That(
+                        File.ReadAllLines(
+                            Path.Combine(
+                                stateDirectory,
+                                "launches.txt"
+                            )
+                        ).Length,
+                        Is.EqualTo(1)
+                    ))
+
+                let afterClose =
+                    EmbeddedTerminal.close
+                        manager
+                        oldWorktree
+                    |> run
+
+                let current = start manager newWorktree
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        tryFindTab oldWorktree afterClose,
+                        Is.EqualTo None
+                    )
+                    Assert.That(
+                        endpointFor newWorktree current,
+                        Is.Not.Empty
+                    )
+                    Assert.That(
+                        readHostVersion stateDirectory,
+                        Is.EqualTo 3
+                    )
+                    Assert.That(
+                        Directory.Exists oldBundle,
+                        Is.True
+                    )
+                    Assert.That(
+                        Directory.GetDirectories(bundleRoot).Length,
+                        Is.EqualTo 2
+                    )
+                    Assert.That(
+                        File.ReadAllLines(
+                            Path.Combine(
+                                stateDirectory,
+                                "launches.txt"
+                            )
+                        ).Length,
+                        Is.EqualTo 2
+                    )))
+
+    [<Test>]
+    member _.``changed current bundle drains before a new generation starts``() =
+        withFakeHostConfig
+            (fun original ->
+                let directory =
+                    Path.GetDirectoryName
+                        original.HostScriptPath
+
+                let supervisor =
+                    Path.Combine(
+                        directory,
+                        "current-supervisor.ps1"
+                    )
+
+                let processHelper =
+                    Path.Combine(
+                        directory,
+                        "current-process-helper.ps1"
+                    )
+
+                File.Copy(
+                    original.SupervisorScriptPath,
+                    supervisor
+                )
+
+                File.Copy(
+                    original.ProcessIdentityHelperPath,
+                    processHelper
+                )
+
+                { original with
+                    SupervisorScriptPath = supervisor
+                    ProcessIdentityHelperPath =
+                        processHelper })
+            (fun tempDir stateDirectory hostConfig manager ->
+                let oldPath =
+                    Path.Combine(tempDir, "old-current")
+
+                let newPath =
+                    Path.Combine(tempDir, "new-current")
+
+                [ oldPath; newPath ]
+                |> List.iter (Directory.CreateDirectory >> ignore)
+
+                let oldWorktree = canonical oldPath
+                let newWorktree = canonical newPath
+                let oldSnapshot = start manager oldWorktree
+                let oldEndpoint =
+                    endpointFor oldWorktree oldSnapshot
+
+                let bundleRoot =
+                    Path.Combine(
+                        stateDirectory,
+                        "terminal-runtime-bundles"
+                    )
+
+                let oldBundle =
+                    Directory.GetDirectories(bundleRoot)
+                    |> Array.exactlyOne
+
+                File.AppendAllText(
+                    hostConfig.HostScriptPath,
+                    $"{Environment.NewLine}// replacement bundle"
+                )
+
+                File.AppendAllText(
+                    hostConfig.SupervisorScriptPath,
+                    $"{Environment.NewLine}# replacement bundle"
+                )
+
+                let rejected =
+                    EmbeddedTerminal.start
+                        manager
+                        newWorktree
+                    |> run
+
+                let retained =
+                    EmbeddedTerminal.get manager |> run
+
+                Assert.Multiple(fun () ->
+                    match rejected with
+                    | Ok _ ->
+                        Assert.Fail(
+                            "A changed deployment reused the old runtime for a new key"
+                        )
+                    | Error error ->
+                        Assert.That(
+                            error,
+                            Does.Contain(
+                                "different immutable runtime bundle"
+                            ).IgnoreCase
+                        )
+
+                    Assert.That(
+                        endpointFor oldWorktree retained,
+                        Is.EqualTo oldEndpoint
+                    )
+                    Assert.That(
+                        File.ReadAllLines(
+                            Path.Combine(
+                                stateDirectory,
+                                "launches.txt"
+                            )
+                        ).Length,
+                        Is.EqualTo 1
+                    ))
+
+                EmbeddedTerminal.close
+                    manager
+                    oldWorktree
+                |> run
+                |> ignore
+
+                let current = start manager newWorktree
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        endpointFor newWorktree current,
+                        Is.Not.Empty
+                    )
+                    Assert.That(
+                        Directory.Exists oldBundle,
+                        Is.True
+                    )
+                    Assert.That(
+                        Directory.GetDirectories(bundleRoot).Length,
+                        Is.EqualTo 2
+                    )
+                    Assert.That(
+                        File.ReadAllLines(
+                            Path.Combine(
+                                stateDirectory,
+                                "launches.txt"
+                            )
+                        ).Length,
+                        Is.EqualTo 2
+                    )))
+
+    [<Test>]
+    member _.``protocol-two reservation closes only its key and preserves other live sessions``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let paths =
+                [ "legacy-two-a"; "legacy-two-b" ]
+                |> List.map (fun name ->
+                    let path = Path.Combine(tempDir, name)
+                    Directory.CreateDirectory path
+                    |> ignore
+                    path)
+
+            writeBehavior
+                stateDirectory
+                (JsonSerializer.Serialize(
+                    {| protocolVersion = 2
+                       initialWorktreePaths =
+                        paths |> List.toArray |}
+                ))
+
+            let first = canonical paths[0]
+            let second = canonical paths[1]
+            let discovered = start manager first
+            let secondEndpoint =
+                endpointFor second discovered
+
+            let legacyPid = readHostPid stateDirectory
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    first
+                    (fun () ->
+                        async {
+                            Assert.That(
+                                processIsAlive legacyPid,
+                                Is.True
+                            )
+
+                            return Ok ()
+                        })
+                |> run
+
+            let after = EmbeddedTerminal.get manager |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok () -> ()
+                | Error error -> Assert.Fail(error)
+
+                Assert.That(
+                    tryFindTab first after,
+                    Is.EqualTo None
+                )
+                Assert.That(
+                    endpointFor second after,
+                    Is.EqualTo secondEndpoint
+                )
+                Assert.That(
+                    processIsAlive legacyPid,
+                    Is.True
+                )
+                Assert.That(
+                    readHostVersion stateDirectory,
+                    Is.EqualTo 2
+                ))
+
+            EmbeddedTerminal.close manager second
+            |> run
+            |> ignore)
 
     [<Test>]
     member _.``capability-bearing protocol-one host remains discoverable reusable and closable``() =
@@ -1851,7 +2679,7 @@ type EmbeddedTerminalTests() =
                 )))
 
     [<Test>]
-    member _.``dead protocol-one state is reclaimed after process identity mismatch``() =
+    member _.``dead protocol-one state blocks replacement without cleanup proof``() =
         withFakeHost (fun tempDir stateDirectory _ manager ->
             Directory.CreateDirectory stateDirectory |> ignore
             let stale =
@@ -1871,11 +2699,49 @@ type EmbeddedTerminalTests() =
 
             let worktreePath = Path.Combine(tempDir, "worktree")
             Directory.CreateDirectory worktreePath |> ignore
-            let started = start manager (canonical worktreePath)
+            let result =
+                EmbeddedTerminal.start
+                    manager
+                    (canonical worktreePath)
+                |> run
 
             Assert.Multiple(fun () ->
-                Assert.That(started.Tabs.Length, Is.EqualTo(1))
-                Assert.That(readHostVersion stateDirectory, Is.EqualTo(2))))
+                match result with
+                | Ok _ ->
+                    Assert.Fail(
+                        "Dead protocol-one evidence authorized a replacement start"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("retired protocol-1")
+                            .IgnoreCase
+                    )
+
+                Assert.That(
+                    Directory.GetFiles(
+                        Path.Combine(
+                            stateDirectory,
+                            "terminal-generations"
+                        ),
+                        "*.json"
+                    )
+                    |> Array.exists (fun path ->
+                        use document =
+                            File.ReadAllText path
+                            |> JsonDocument.Parse
+
+                        let root =
+                            document.RootElement
+
+                        root.GetProperty(
+                            "hostProtocolVersion"
+                        ).GetInt32() = 1
+                        && root.GetProperty(
+                            "sessionsUnknown"
+                        ).GetBoolean()),
+                    Is.True
+                )))
 
     [<Test>]
     member _.``legacy cleanup compare does not delete a replacement manifest``() =
@@ -2425,7 +3291,7 @@ type EmbeddedTerminalTests() =
                 |> ignore)
 
     [<Test>]
-    member _.``fresh manager starts replacement but rejects a live retired supervisor``() =
+    member _.``fresh manager starts an unrelated replacement but rejects a live retired supervisor``() =
         withFakeHost (fun tempDir stateDirectory hostConfig manager ->
             let worktreePath =
                 Path.Combine(tempDir, "worktree")
@@ -2456,8 +3322,24 @@ type EmbeddedTerminalTests() =
             let freshManager =
                 EmbeddedTerminal.createWithConfig hostConfig
 
-            let replacement = start freshManager worktree
+            let replacementPath =
+                Path.Combine(tempDir, "replacement")
+
+            Directory.CreateDirectory replacementPath
+            |> ignore
+
+            let replacementWorktree =
+                canonical replacementPath
+
+            let replacement =
+                start freshManager replacementWorktree
+
             let replacementPid = readHostPid stateDirectory
+            let rejectedStart =
+                EmbeddedTerminal.start
+                    freshManager
+                    worktree
+                |> run
             let mutationEntered =
                 TaskCompletionSource<unit>(
                     TaskCreationOptions.RunContinuationsAsynchronously
@@ -2478,13 +3360,27 @@ type EmbeddedTerminalTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(
-                    endpointFor worktree replacement,
+                    endpointFor
+                        replacementWorktree
+                        replacement,
                     Is.Not.Empty
                 )
                 Assert.That(
                     replacementPid,
                     Is.Not.EqualTo retiredPid
                 )
+
+                match rejectedStart with
+                | Ok _ ->
+                    Assert.Fail(
+                        "A live retired supervisor authorized a same-key replacement start"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("supervisor is still running")
+                            .IgnoreCase
+                    )
 
                 match result with
                 | Ok () ->
@@ -2522,14 +3418,25 @@ type EmbeddedTerminalTests() =
 
             writeGenerationRecord
                 stateDirectory
+                hostConfig
                 generation
                 2_000_000_002
                 12344L
-                2
+                3
                 false
                 [ session ]
 
-            let replacement = start manager worktree
+            let replacementPath =
+                Path.Combine(tempDir, "replacement-worktree")
+
+            Directory.CreateDirectory replacementPath
+            |> ignore
+
+            let replacementWorktree =
+                canonical replacementPath
+
+            let replacement =
+                start manager replacementWorktree
             let mutationEntered =
                 TaskCompletionSource<unit>(
                     TaskCreationOptions.RunContinuationsAsynchronously
@@ -2564,7 +3471,9 @@ type EmbeddedTerminalTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(
-                    endpointFor worktree replacement,
+                    endpointFor
+                        replacementWorktree
+                        replacement,
                     Is.Not.Empty
                 )
 
@@ -2598,8 +3507,205 @@ type EmbeddedTerminalTests() =
                 )))
 
     [<Test>]
+    member _.``witness without terminal trusted promotion cannot authorize cleanup``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "unpromoted-worktree")
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            let worktree = canonical worktreePath
+            let generation = "retired-unpromoted-witness"
+
+            let session =
+                { fixtureSession
+                    "unpromoted"
+                    worktreePath
+                    2_000_000_005
+                    15001L with
+                    TrustState = "in-progress" }
+
+            writeGenerationRecord
+                stateDirectory
+                hostConfig
+                generation
+                2_000_000_006
+                15002L
+                3
+                false
+                [ session ]
+
+            writeEmptyWitness
+                stateDirectory
+                generation
+                session
+
+            let rejectedStart =
+                EmbeddedTerminal.start
+                    manager
+                    worktree
+                |> run
+
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () ->
+                        async {
+                            mutationEntered.TrySetResult(())
+                            |> ignore
+
+                            return Ok ()
+                        })
+                |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok () ->
+                    Assert.Fail(
+                        "An unpromoted witness authorized cleanup"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("trusted-empty")
+                            .IgnoreCase
+                    )
+
+                match rejectedStart with
+                | Ok _ ->
+                    Assert.Fail(
+                        "An unpromoted witness authorized a replacement start"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("trusted-empty")
+                            .IgnoreCase
+                    )
+
+                Assert.That(
+                    mutationEntered.Task.IsCompleted,
+                    Is.False
+                )
+                Assert.That(
+                    File.Exists(
+                        generationRecordPath
+                            stateDirectory
+                            generation
+                    ),
+                    Is.True
+                )))
+
+    [<Test>]
+    member _.``retired witness reparse path cannot authorize cleanup``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "reparse-worktree")
+
+            let outside =
+                Path.Combine(tempDir, "outside-witness")
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            Directory.CreateDirectory outside |> ignore
+
+            let worktree = canonical worktreePath
+            let generation = "retired-reparse-witness"
+
+            let session =
+                fixtureSession
+                    "reparse"
+                    worktreePath
+                    2_000_000_007
+                    16001L
+
+            writeGenerationRecord
+                stateDirectory
+                hostConfig
+                generation
+                2_000_000_008
+                16002L
+                3
+                false
+                [ session ]
+
+            let witnessRoot =
+                Path.Combine(
+                    stateDirectory,
+                    "terminal-empty-witnesses"
+                )
+
+            Directory.CreateDirectory witnessRoot
+            |> ignore
+
+            try
+                Directory.CreateSymbolicLink(
+                    Path.Combine(witnessRoot, generation),
+                    outside
+                )
+                |> ignore
+            with
+            | :? UnauthorizedAccessException ->
+                Assert.Ignore(
+                    "Directory symbolic links are unavailable"
+                )
+            | :? IOException ->
+                Assert.Ignore(
+                    "Directory symbolic links are unavailable"
+                )
+
+            writeEmptyWitness
+                stateDirectory
+                generation
+                session
+
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () ->
+                        async {
+                            mutationEntered.TrySetResult(())
+                            |> ignore
+
+                            return Ok ()
+                        })
+                |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok () ->
+                    Assert.Fail(
+                        "A witness reached through a reparse point authorized cleanup"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("reparse")
+                            .IgnoreCase
+                    )
+
+                Assert.That(
+                    mutationEntered.Task.IsCompleted,
+                    Is.False
+                )))
+
+    [<Test>]
     member _.``strict reservation requires every matching retired supervisor witness``() =
-        withFakeHost (fun tempDir stateDirectory _ manager ->
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
             let worktreePath =
                 Path.Combine(tempDir, "worktree")
 
@@ -2619,10 +3725,11 @@ type EmbeddedTerminalTests() =
 
                     writeGenerationRecord
                         stateDirectory
+                        hostConfig
                         generation
                         (pid + 100)
                         (ticks + 100L)
-                        2
+                        3
                         false
                         [ session ]
 
@@ -2691,7 +3798,7 @@ type EmbeddedTerminalTests() =
     member _.``delete and archive wait for every exact retired witness``(
         mutation
     ) =
-        withFakeHost (fun tempDir stateDirectory _ manager ->
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
             let mainPath = Path.Combine(tempDir, "main")
             let targetPath = Path.Combine(tempDir, "target")
             [ mainPath; targetPath ]
@@ -2709,10 +3816,11 @@ type EmbeddedTerminalTests() =
 
             writeGenerationRecord
                 stateDirectory
+                hostConfig
                 generation
                 2_000_000_016
                 25002L
-                2
+                3
                 false
                 [ session ]
 
@@ -2826,7 +3934,7 @@ type EmbeddedTerminalTests() =
     member _.``forged retired witness cannot authorize cleanup``(
         mismatch
     ) =
-        withFakeHost (fun tempDir stateDirectory _ manager ->
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
             let worktreePath =
                 Path.Combine(tempDir, $"worktree-{mismatch}")
 
@@ -2843,10 +3951,11 @@ type EmbeddedTerminalTests() =
 
             writeGenerationRecord
                 stateDirectory
+                hostConfig
                 generation
                 2_000_000_022
                 31002L
-                2
+                3
                 false
                 [ session ]
 
@@ -2910,7 +4019,7 @@ type EmbeddedTerminalTests() =
 
     [<Test>]
     member _.``sticky supervisor protocol failure rejects an otherwise valid witness``() =
-        withFakeHost (fun tempDir stateDirectory _ manager ->
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
             let worktreePath =
                 Path.Combine(tempDir, "mixed-transcript")
 
@@ -2924,14 +4033,15 @@ type EmbeddedTerminalTests() =
                     worktreePath
                     2_000_000_025
                     35001L with
-                    ProtocolFailure = true }
+                    TrustState = "quarantined" }
 
             writeGenerationRecord
                 stateDirectory
+                hostConfig
                 generation
                 2_000_000_026
                 35002L
-                2
+                3
                 false
                 [ session ]
 
@@ -3037,10 +4147,11 @@ type EmbeddedTerminalTests() =
 
             writeGenerationRecord
                 stateDirectory
+                hostConfig
                 generation
                 2_000_000_032
                 41002L
-                2
+                3
                 false
                 [ session ]
 
@@ -3078,16 +4189,76 @@ type EmbeddedTerminalTests() =
                 )))
 
     [<Test>]
+    member _.``abandoned generation compaction claim is recovered before cleanup``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "claim-recovery")
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            let worktree = canonical worktreePath
+            let generation = "retired-claim-recovery"
+
+            let session =
+                fixtureSession
+                    "claim"
+                    worktreePath
+                    2_000_000_041
+                    51001L
+
+            writeGenerationRecord
+                stateDirectory
+                hostConfig
+                generation
+                2_000_000_042
+                51002L
+                3
+                false
+                [ session ]
+
+            writeEmptyWitness
+                stateDirectory
+                generation
+                session
+
+            let record =
+                generationRecordPath
+                    stateDirectory
+                    generation
+
+            let claim =
+                $"{record}.{Environment.ProcessId}.{Guid.NewGuid():N}.reclaim"
+
+            File.Move(record, claim)
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () -> async { return Ok () })
+                |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok () -> ()
+                | Error error -> Assert.Fail(error)
+
+                Assert.That(File.Exists record, Is.False)
+                Assert.That(File.Exists claim, Is.False)))
+
+    [<Test>]
     member _.``unresolved generation retention is bounded without discarding evidence``() =
-        withFakeHost (fun tempDir stateDirectory _ manager ->
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
             [ 1..64 ]
             |> List.iter (fun index ->
                 writeGenerationRecord
                     stateDirectory
+                    hostConfig
                     $"unresolved-{index}"
                     (1_900_000_000 + index)
                     (int64 index)
-                    2
+                    3
                     true
                     [])
 
@@ -3210,6 +4381,86 @@ type EmbeddedTerminalTests() =
                         )
                     ),
                     Is.False
+                )))
+
+    [<Test>]
+    member _.``unknown current generation retains its immutable bundle identity``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath
+            |> ignore
+
+            let worktree = canonical worktreePath
+            writeBehavior
+                stateDirectory
+                """{"omitCrashWitness":true,"omitCrashGeneration":true}"""
+
+            start manager worktree |> ignore
+
+            let generation =
+                readHostGeneration stateDirectory
+
+            use manifest =
+                Path.Combine(stateDirectory, "host.json")
+                |> File.ReadAllText
+                |> JsonDocument.Parse
+
+            let bundleHash =
+                manifest.RootElement
+                    .GetProperty("bundleHash")
+                    .GetString()
+
+            File.Delete(
+                generationRecordPath
+                    stateDirectory
+                    generation
+            )
+
+            let deadPid = readHostPid stateDirectory
+            crashFakeHost stateDirectory
+
+            waitUntil "fixture host to exit" (fun () ->
+                processIsAlive deadPid |> not)
+
+            EmbeddedTerminal.get manager |> run |> ignore
+
+            use retained =
+                generationRecordPath
+                    stateDirectory
+                    generation
+                |> File.ReadAllText
+                |> JsonDocument.Parse
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    retained.RootElement
+                        .GetProperty("version")
+                        .GetInt32(),
+                    Is.EqualTo 2
+                )
+                Assert.That(
+                    retained.RootElement
+                        .GetProperty("sessionsUnknown")
+                        .GetBoolean(),
+                    Is.True
+                )
+                Assert.That(
+                    retained.RootElement
+                        .GetProperty("bundleHash")
+                        .GetString(),
+                    Is.EqualTo bundleHash
+                )
+                Assert.That(
+                    Directory.Exists(
+                        Path.Combine(
+                            stateDirectory,
+                            "terminal-runtime-bundles",
+                            bundleHash
+                        )
+                    ),
+                    Is.True
                 )))
 
     [<Test>]

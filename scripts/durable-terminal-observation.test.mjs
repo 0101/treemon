@@ -12,8 +12,18 @@ const originalIdentity = {
 };
 
 const observation = {
-  hostProtocolVersion: 2,
+  hostProtocolVersion: 3,
   hostGeneration: "observed-generation",
+  hostBundleHash: "a".repeat(64),
+  hostScriptHash: "b".repeat(64),
+  supervisorScriptHash: "c".repeat(64),
+  processIdentityHelperHash: "d".repeat(64),
+  supervisorProtocolGeneration: 2,
+  hostCapabilities: [
+    "immutable-runtime-bundle-v1",
+    "strict-evidence-paths-v1",
+    "trusted-empty-supervisor-v1",
+  ],
   hostPid: 4101,
   hostProcessStartTicks: "100",
   hostProcessStartExact: true,
@@ -24,8 +34,14 @@ const observation = {
 };
 
 const hostState = {
-  version: 2,
+  version: 3,
   generation: observation.hostGeneration,
+  bundleHash: observation.hostBundleHash,
+  hostScriptHash: observation.hostScriptHash,
+  supervisorScriptHash: observation.supervisorScriptHash,
+  processIdentityHelperHash: observation.processIdentityHelperHash,
+  supervisorProtocolGeneration: observation.supervisorProtocolGeneration,
+  capabilities: observation.hostCapabilities,
   pid: observation.hostPid,
   processStartTicks: observation.hostProcessStartTicks,
   processStartExact: observation.hostProcessStartExact,
@@ -66,7 +82,7 @@ test("replacement manifest is reported without shutdown or PID wait", async () =
     stopped: false,
     ownershipChanged: true,
     reason:
-      "Current host manifest generation, process identity, or credentials differ from the observation",
+      "Current host manifest runtime, process identity, or credentials differ from the observation",
   });
 });
 
@@ -84,6 +100,24 @@ test("changed host credential is never used to stop the endpoint", async () => {
   );
 
   assert.equal(result.shutdownSent, false);
+  assert.deepEqual(calls, []);
+});
+
+test("changed runtime bundle is never treated as the observed host", async () => {
+  const changedBundle = {
+    ...hostState,
+    bundleHash: "e".repeat(64),
+  };
+  const { calls, dependencies } = stoppingDependencies(originalIdentity);
+
+  const result = await stopObservedHost(
+    observation,
+    changedBundle,
+    dependencies,
+  );
+
+  assert.equal(hostStateMatchesObservation(observation, changedBundle), false);
+  assert.equal(result.ownershipChanged, true);
   assert.deepEqual(calls, []);
 });
 

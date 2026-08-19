@@ -107,7 +107,8 @@ export async function runTtydRuntimeVerification() {
       sessionId,
       generation: "ttyd-runtime-verification",
       worktreePath: fixture,
-      witnessPath: join(fixture, `${sessionId}.empty.json`),
+      witnessRoot: fixture,
+      witnessPath: join(fixture, `${sessionId}.json`),
       witnessNonce: randomUUID().replaceAll("-", ""),
       fileName: ttyd,
       argumentsList: [

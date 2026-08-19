@@ -4,10 +4,12 @@ import { once } from "node:events";
 import {
   appendFileSync,
   existsSync,
+  lstatSync,
   linkSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -15,15 +17,28 @@ import {
 } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createNetServer } from "node:net";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { createInterface } from "node:readline";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 
-export const hostProtocolVersion = 2;
+export const hostProtocolVersion = 3;
 export const terminalOwnershipBoundary = "windows-job-v1";
-export const terminalJobProtocolGeneration = 1;
-export const terminalGenerationRecordVersion = 1;
+export const terminalJobProtocolGeneration = 2;
+export const terminalGenerationRecordVersion = 2;
+export const terminalRuntimeBundleVersion = 1;
+export const terminalRuntimeCapabilities = Object.freeze([
+  "immutable-runtime-bundle-v1",
+  "strict-evidence-paths-v1",
+  "trusted-empty-supervisor-v1",
+]);
 export const defaultReplayBytes = 1024 * 1024;
 export const defaultDiagnosticBytes = 1024 * 1024;
 
@@ -42,6 +57,13 @@ const processForceCommandMs = 5000;
 const reservationLeaseMs = 5 * 60_000;
 const maximumGenerationRecords = 64;
 const unixEpochTicks = 621355968000000000n;
+const sha256Pattern = /^[0-9a-f]{64}$/;
+const generationPattern = /^[A-Za-z0-9_-]{1,128}$/;
+const runtimeBundleRoles = Object.freeze([
+  ["host", "durable-terminal-host.mjs"],
+  ["supervisor", "terminal-job-supervisor.ps1"],
+  ["processIdentityHelper", "terminate-owned-process.ps1"],
+]);
 const processIdentityHelperPath = join(
   import.meta.dirname,
   "terminate-owned-process.ps1",
@@ -60,6 +82,321 @@ const randomToken = (bytes = 24) => randomBytes(bytes).toString("base64url");
 
 const witnessTokenHash = (token) =>
   createHash("sha256").update(token, "utf8").digest("hex");
+
+export const isValidGeneration = (value) =>
+  typeof value === "string" && generationPattern.test(value);
+
+const sha256Bytes = (bytes) =>
+  createHash("sha256").update(bytes).digest("hex");
+
+export function runtimeBundleHash({
+  hostScriptHash,
+  supervisorScriptHash,
+  processIdentityHelperHash,
+}) {
+  const hashes = new Map([
+    ["host", hostScriptHash],
+    ["supervisor", supervisorScriptHash],
+    ["processIdentityHelper", processIdentityHelperHash],
+  ]);
+  if ([...hashes.values()].some((hash) => !sha256Pattern.test(hash ?? ""))) {
+    throw new Error("Durable terminal runtime file hash is invalid");
+  }
+  const lines = [
+    `bundle-version:${terminalRuntimeBundleVersion}`,
+    `host-protocol:${hostProtocolVersion}`,
+    `supervisor-protocol:${terminalJobProtocolGeneration}`,
+    ...[...terminalRuntimeCapabilities]
+      .sort()
+      .map((capability) => `capability:${capability}`),
+    ...runtimeBundleRoles.map(
+      ([role, name]) => `file:${role}:${name}:${hashes.get(role)}`,
+    ),
+  ];
+  return sha256Bytes(Buffer.from(`${lines.join("\n")}\n`, "utf8"));
+}
+
+const pathComparisonValue = (value) =>
+  process.platform === "win32" ? value.toLowerCase() : value;
+
+const isDescendantPath = (root, candidate) => {
+  const relativePath = relative(resolve(root), resolve(candidate));
+  return (
+    Boolean(relativePath) &&
+    !relativePath.startsWith(`..${sep}`) &&
+    relativePath !== ".." &&
+    !isAbsolute(relativePath)
+  );
+};
+
+const assertNoReparsePoint = (root, candidate) => {
+  const rootPath = resolve(root);
+  const relativePath = relative(rootPath, resolve(candidate));
+  const segments = relativePath.split(/[\\/]/).filter(Boolean);
+  const paths = [
+    rootPath,
+    ...segments.map((_, index) =>
+      join(rootPath, ...segments.slice(0, index + 1)),
+    ),
+  ];
+
+  paths.forEach((path) => {
+    if (!existsSync(path)) return;
+    if (lstatSync(path).isSymbolicLink()) {
+      throw new Error("Durable terminal evidence path crosses a reparse point");
+    }
+  });
+};
+
+export function containedStatePath(root, candidate) {
+  const rootPath = resolve(root);
+  const candidatePath = resolve(candidate);
+  if (!isDescendantPath(rootPath, candidatePath)) {
+    throw new Error("Durable terminal evidence path escaped its state directory");
+  }
+
+  const segments = relative(rootPath, candidatePath).split(/[\\/]/);
+  if (
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        segment.includes(":"),
+    )
+  ) {
+    throw new Error("Durable terminal evidence path contains an invalid segment");
+  }
+
+  assertNoReparsePoint(rootPath, candidatePath);
+  if (existsSync(rootPath) && existsSync(candidatePath)) {
+    const realRoot = realpathSync.native(rootPath);
+    const realCandidate = realpathSync.native(candidatePath);
+    if (!isDescendantPath(realRoot, realCandidate)) {
+      throw new Error("Durable terminal evidence path resolved outside its state directory");
+    }
+  }
+  return candidatePath;
+}
+
+const containedRegularFile = (bundleDirectory, filePath, expectedName) => {
+  const path = containedStatePath(bundleDirectory, filePath);
+  if (
+    dirname(pathComparisonValue(path)) !==
+      pathComparisonValue(resolve(bundleDirectory)) ||
+    pathComparisonValue(path.slice(path.lastIndexOf(sep) + 1)) !==
+      pathComparisonValue(expectedName)
+  ) {
+    throw new Error("Durable terminal runtime file is not a direct bundle child");
+  }
+  const info = lstatSync(path);
+  if (!info.isFile() || info.isSymbolicLink()) {
+    throw new Error("Durable terminal runtime file is not a regular file");
+  }
+  return path;
+};
+
+const verifiedRuntimeFile = (
+  bundleDirectory,
+  filePath,
+  expectedName,
+  expectedHash,
+) => {
+  if (!sha256Pattern.test(expectedHash ?? "")) {
+    throw new Error("Durable terminal runtime file hash is invalid");
+  }
+  const path = containedRegularFile(bundleDirectory, filePath, expectedName);
+  const actualHash = sha256Bytes(readFileSync(path));
+  if (actualHash !== expectedHash) {
+    throw new Error(`Durable terminal runtime file hash mismatch for ${expectedName}`);
+  }
+  return path;
+};
+
+export function verifyRuntimeBundle({
+  stateDirectory,
+  bundleDirectory,
+  bundleHash,
+  hostScriptHash,
+  supervisorScriptHash,
+  processIdentityHelperHash,
+}) {
+  if (!sha256Pattern.test(bundleHash ?? "")) {
+    throw new Error("Durable terminal runtime bundle hash is invalid");
+  }
+  if (
+    runtimeBundleHash({
+      hostScriptHash,
+      supervisorScriptHash,
+      processIdentityHelperHash,
+    }) !== bundleHash
+  ) {
+    throw new Error("Durable terminal runtime bundle hash does not match its files");
+  }
+  const runtimeRoot = join(resolve(stateDirectory), "terminal-runtime-bundles");
+  const expectedDirectory = containedStatePath(
+    runtimeRoot,
+    join(runtimeRoot, bundleHash),
+  );
+  if (
+    pathComparisonValue(expectedDirectory) !==
+    pathComparisonValue(resolve(bundleDirectory))
+  ) {
+    throw new Error("Durable terminal runtime bundle path does not match its hash");
+  }
+
+  const manifestPath = containedRegularFile(
+    expectedDirectory,
+    join(expectedDirectory, "bundle.json"),
+    "bundle.json",
+  );
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const expectedNames = [
+    "bundle.json",
+    ...runtimeBundleRoles.map(([, name]) => name),
+  ].sort();
+  const actualNames = readdirSync(expectedDirectory).sort();
+  if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+    throw new Error("Durable terminal runtime bundle contains unexpected files");
+  }
+  const expectedCapabilities = [...terminalRuntimeCapabilities].sort();
+  const actualCapabilities = Array.isArray(manifest.capabilities)
+    ? [...manifest.capabilities].sort()
+    : [];
+  if (
+    manifest.version !== terminalRuntimeBundleVersion ||
+    manifest.bundleHash !== bundleHash ||
+    manifest.hostProtocolVersion !== hostProtocolVersion ||
+    manifest.hostScriptHash !== hostScriptHash ||
+    manifest.supervisorScriptHash !== supervisorScriptHash ||
+    manifest.processIdentityHelperHash !== processIdentityHelperHash ||
+    manifest.supervisorProtocolGeneration !== terminalJobProtocolGeneration ||
+    JSON.stringify(actualCapabilities) !== JSON.stringify(expectedCapabilities)
+  ) {
+    throw new Error("Durable terminal runtime bundle manifest is incompatible");
+  }
+
+  const expectedHashes = new Map([
+    ["host", hostScriptHash],
+    ["supervisor", supervisorScriptHash],
+    ["processIdentityHelper", processIdentityHelperHash],
+  ]);
+  const files = Array.isArray(manifest.files) ? manifest.files : [];
+  if (files.length !== runtimeBundleRoles.length) {
+    throw new Error("Durable terminal runtime bundle manifest has invalid files");
+  }
+
+  const resolvedFiles = Object.fromEntries(
+    runtimeBundleRoles.map(([role, name]) => {
+      const entry = files.find((candidate) => candidate?.role === role);
+      const expectedHash = expectedHashes.get(role);
+      if (
+        entry?.name !== name ||
+        entry?.sha256 !== expectedHash ||
+        !sha256Pattern.test(expectedHash ?? "")
+      ) {
+        throw new Error("Durable terminal runtime bundle manifest file identity changed");
+      }
+      return [
+        role,
+        verifiedRuntimeFile(
+          expectedDirectory,
+          join(expectedDirectory, name),
+          name,
+          expectedHash,
+        ),
+      ];
+    }),
+  );
+
+  return { directory: expectedDirectory, manifest, files: resolvedFiles };
+}
+
+export function materializeRuntimeBundle(
+  stateDirectory,
+  sourceDirectory = import.meta.dirname,
+) {
+  const assets = runtimeBundleRoles.map(([role, name]) => {
+    const sourcePath = resolve(sourceDirectory, name);
+    const info = lstatSync(sourcePath);
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw new Error(`Durable terminal runtime source is invalid for ${name}`);
+    }
+    const content = readFileSync(sourcePath);
+    return { role, name, content, sha256: sha256Bytes(content) };
+  });
+  const hashFor = (role) =>
+    assets.find((asset) => asset.role === role)?.sha256;
+  const identity = {
+    hostScriptHash: hashFor("host"),
+    supervisorScriptHash: hashFor("supervisor"),
+    processIdentityHelperHash: hashFor("processIdentityHelper"),
+  };
+  const bundleHash = runtimeBundleHash(identity);
+  const runtimeRoot = join(
+    resolve(stateDirectory),
+    "terminal-runtime-bundles",
+  );
+  mkdirSync(runtimeRoot, { recursive: true });
+  const bundleDirectory = containedStatePath(
+    runtimeRoot,
+    join(runtimeRoot, bundleHash),
+  );
+  if (!existsSync(bundleDirectory)) {
+    const staging = containedStatePath(
+      runtimeRoot,
+      join(
+        runtimeRoot,
+        `${bundleHash}.${process.pid}.${randomToken(8)}.pending`,
+      ),
+    );
+    try {
+      mkdirSync(staging);
+      containedStatePath(runtimeRoot, staging);
+      assets.forEach((asset) =>
+        writeFileSync(join(staging, asset.name), asset.content, {
+          flush: true,
+        }),
+      );
+      writeFileSync(
+        join(staging, "bundle.json"),
+        `${JSON.stringify(
+          {
+            version: terminalRuntimeBundleVersion,
+            bundleHash,
+            hostProtocolVersion,
+            ...identity,
+            supervisorProtocolGeneration: terminalJobProtocolGeneration,
+            capabilities: terminalRuntimeCapabilities,
+            files: assets.map(({ role, name, sha256 }) => ({
+              role,
+              name,
+              sha256,
+            })),
+          },
+          null,
+          2,
+        )}\n`,
+        { flush: true },
+      );
+      try {
+        renameSync(staging, bundleDirectory);
+      } catch (error) {
+        if (!existsSync(bundleDirectory)) throw error;
+      }
+    } finally {
+      rmSync(staging, { recursive: true, force: true });
+    }
+  }
+  const bundle = {
+    stateDirectory: resolve(stateDirectory),
+    bundleDirectory,
+    bundleHash,
+    ...identity,
+  };
+  verifyRuntimeBundle(bundle);
+  return bundle;
+}
 
 const currentProcessStartTicks = () =>
   (
@@ -207,9 +544,14 @@ export function manifestOwnership(value) {
     /^\d+$/.test(value.processStartTicks)
       ? value.processStartTicks
       : null;
+  const bundleHash =
+    value?.version === hostProtocolVersion &&
+    sha256Pattern.test(value?.bundleHash ?? "")
+      ? value.bundleHash
+      : null;
 
   return generation && pid && processStartTicks
-    ? { generation, pid, processStartTicks }
+    ? { generation, pid, processStartTicks, bundleHash }
     : null;
 }
 
@@ -217,7 +559,8 @@ export function sameManifestOwner(left, right) {
   return (
     left?.generation === right?.generation &&
     left?.pid === right?.pid &&
-    left?.processStartTicks === right?.processStartTicks
+    left?.processStartTicks === right?.processStartTicks &&
+    left?.bundleHash === right?.bundleHash
   );
 }
 
@@ -268,15 +611,21 @@ const generationRecordOwnership = (value) => {
     /^\d+$/.test(value.hostProcessStartTicks)
       ? value.hostProcessStartTicks
       : null;
+  const bundleHash =
+    value?.version === terminalGenerationRecordVersion &&
+    sha256Pattern.test(value?.bundleHash ?? "")
+      ? value.bundleHash
+      : null;
   return generation && hostPid && hostProcessStartTicks
-    ? { generation, hostPid, hostProcessStartTicks }
+    ? { generation, hostPid, hostProcessStartTicks, bundleHash }
     : null;
 };
 
 const sameGenerationRecordOwner = (left, right) =>
   left?.generation === right?.generation &&
   left?.hostPid === right?.hostPid &&
-  left?.hostProcessStartTicks === right?.hostProcessStartTicks;
+  left?.hostProcessStartTicks === right?.hostProcessStartTicks &&
+  left?.bundleHash === right?.bundleHash;
 
 function removeEmptyGenerationIfOwned(path, owner) {
   if (!existsSync(path)) return true;
@@ -709,14 +1058,18 @@ export class TerminalJobSupervisor {
     this.lines.once("close", () => {
       this.outputClosed = true;
       this.resolveOutputClosed();
-      if (!this.exited) {
+      if (!this.exited && !this.emptyAcknowledged) {
         this.recordChannelFailure(
           new Error("Terminal Job Object supervisor control output closed"),
         );
       }
     });
-    child.stdin?.on("error", (error) => this.recordChannelFailure(error));
-    child.stdout?.on("error", (error) => this.recordChannelFailure(error));
+    child.stdin?.on("error", (error) =>
+      this.recordChannelFailure(error, "stdin"),
+    );
+    child.stdout?.on("error", (error) =>
+      this.recordChannelFailure(error, "stdout"),
+    );
     child.once("error", (error) => {
       this.exited = true;
       this.exitCode = null;
@@ -974,12 +1327,18 @@ export class TerminalJobSupervisor {
   }
 
   recordProtocolFailure(error) {
-    this.protocolFailure ??= error;
-    this.onProtocolFailure?.(this.protocolFailure);
+    if (this.protocolFailure) return;
+    this.protocolFailure = error;
+    try {
+      this.onProtocolFailure?.(this.protocolFailure);
+    } catch (persistenceError) {
+      this.protocolFailurePersistenceError ??= persistenceError;
+    }
     this.fail(error);
   }
 
-  recordChannelFailure(error) {
+  recordChannelFailure(error, channel = "output") {
+    if (channel === "stdin" && this.emptyAcknowledged) return;
     this.channelFailure ??= error;
     this.fail(error);
   }
@@ -1063,12 +1422,26 @@ export class TerminalJobSupervisor {
       !/^[A-Za-z0-9_-]{1,128}$/.test(options.generation) ||
       typeof options.worktreePath !== "string" ||
       !isAbsolute(options.worktreePath) ||
+      typeof options.witnessRoot !== "string" ||
+      !isAbsolute(options.witnessRoot) ||
       typeof options.witnessPath !== "string" ||
       !isAbsolute(options.witnessPath) ||
       typeof options.witnessNonce !== "string" ||
       !/^[A-Za-z0-9_-]{24,128}$/.test(options.witnessNonce)
     ) {
       throw new Error("Terminal Job Object empty-witness metadata is invalid");
+    }
+    const witnessPath = containedStatePath(
+      options.witnessRoot,
+      options.witnessPath,
+    );
+    if (
+      dirname(pathComparisonValue(witnessPath)) !==
+        pathComparisonValue(resolve(options.witnessRoot)) ||
+      pathComparisonValue(witnessPath.slice(witnessPath.lastIndexOf(sep) + 1)) !==
+        pathComparisonValue(`${options.sessionId}.json`)
+    ) {
+      throw new Error("Terminal Job Object empty-witness path is not session-bound");
     }
     this.sessionId = options.sessionId;
 
@@ -1082,7 +1455,8 @@ export class TerminalJobSupervisor {
         generation: options.generation,
         worktreePath: options.worktreePath,
         witness: {
-          path: options.witnessPath,
+          root: resolve(options.witnessRoot),
+          path: witnessPath,
           nonce: options.witnessNonce,
         },
         ...(options.testFailureStage
@@ -1151,6 +1525,7 @@ export class TerminalJobSupervisor {
         "Timed out waiting for terminal Job Object supervisor to exit after empty acknowledgement",
       );
     }
+
     if (this.exited) {
       return new Error(
         `Terminal Job Object supervisor exited with code ${this.exitCode ?? "unknown"} without an authenticated empty-job acknowledgement`,
@@ -1161,6 +1536,37 @@ export class TerminalJobSupervisor {
     return new Error(
       "Timed out waiting for authenticated empty-job acknowledgement and supervisor exit",
     );
+  }
+
+  trustedEmptyEvidence() {
+    const failures = [
+      ...(this.protocolFailure ? ["protocol-failure"] : []),
+      ...(this.protocolFailurePersistenceError
+        ? ["quarantine-persistence-failure"]
+        : []),
+      ...(this.channelFailure ? ["channel-failure"] : []),
+      ...(!this.emptyAcknowledged ? ["missing-empty"] : []),
+      ...(!this.exited ? ["running"] : []),
+      ...(!this.outputClosed ? ["output-open"] : []),
+      ...(this.exitCode !== 0 ? ["nonzero-exit"] : []),
+      ...(this.exitSignal != null ? ["signaled-exit"] : []),
+      ...(!validPid(this.supervisorPid) ? ["missing-pid"] : []),
+      ...(!/^\d+$/.test(this.supervisorStartTimeUtcTicks ?? "")
+        ? ["missing-start-identity"]
+        : []),
+    ];
+    if (failures.length > 0) {
+      throw new Error(
+        `Terminal Job Object supervisor did not complete a clean authenticated empty transcript (${failures.join(", ")})`,
+      );
+    }
+    return {
+      supervisorPid: this.supervisorPid,
+      supervisorStartTimeUtcTicks: this.supervisorStartTimeUtcTicks,
+      exitCode: this.exitCode,
+      exitSignal: this.exitSignal,
+      outputClosed: this.outputClosed,
+    };
   }
 
   async terminateOnce(timeoutMs, command = "terminate", error = null) {
@@ -1241,11 +1647,22 @@ export class TerminalJobSupervisor {
 export function createTerminalJobSupervisor({
   spawnProcess = spawn,
   supervisorPath = terminalJobSupervisorPath,
+  supervisorHash,
+  bundleDirectory,
   requestTimeoutMs = processForceCommandMs,
   environment = process.env,
 } = {}) {
   requireKernelTerminalOwnership();
 
+  const verifiedSupervisorPath =
+    supervisorHash && bundleDirectory
+      ? verifiedRuntimeFile(
+          bundleDirectory,
+          supervisorPath,
+          "terminal-job-supervisor.ps1",
+          supervisorHash,
+        )
+      : supervisorPath;
   const token = randomToken();
   const child = spawnProcess(
     "pwsh",
@@ -1253,7 +1670,7 @@ export function createTerminalJobSupervisor({
       "-NoProfile",
       "-NonInteractive",
       "-File",
-      supervisorPath,
+      verifiedSupervisorPath,
     ],
     {
       windowsHide: true,
@@ -1286,6 +1703,7 @@ const runWindowsProcessIdentityHelper = async (
   operation,
   identity,
   timeoutMs = processForceCommandMs,
+  helperPath = processIdentityHelperPath,
 ) => {
   const boundedTimeoutMs = Math.max(1, Math.floor(timeoutMs));
   const startIdentity = /^windows:(\d+)$/.exec(
@@ -1301,7 +1719,7 @@ const runWindowsProcessIdentityHelper = async (
     "-NoProfile",
     "-NonInteractive",
     "-File",
-    processIdentityHelperPath,
+    helperPath,
     "-Operation",
     operation,
     "-ProcessId",
@@ -1328,11 +1746,16 @@ const runWindowsProcessIdentityHelper = async (
   return parseWindowsProcessIdentities(result.stdout);
 };
 
-const inspectWindowsProcess = async (pid, timeoutMs) => {
+const inspectWindowsProcess = async (
+  pid,
+  timeoutMs,
+  helperPath = processIdentityHelperPath,
+) => {
   const identities = await runWindowsProcessIdentityHelper(
     "Inspect",
     { pid },
     timeoutMs,
+    helperPath,
   );
   if (identities === null) return null;
   if (identities.length !== 1 || identities[0].pid !== pid) {
@@ -1341,11 +1764,16 @@ const inspectWindowsProcess = async (pid, timeoutMs) => {
   return identities[0];
 };
 
-const terminateWindowsProcess = async (identity, timeoutMs) =>
+const terminateWindowsProcess = async (
+  identity,
+  timeoutMs,
+  helperPath = processIdentityHelperPath,
+) =>
   (await runWindowsProcessIdentityHelper(
     "Terminate",
     identity,
     timeoutMs,
+    helperPath,
   )) !== null;
 
 const linuxProcessIdentity = (pid) => {
@@ -1379,12 +1807,25 @@ export function sameProcessIdentity(left, right) {
   );
 }
 
-export function defaultProcessController() {
+export function defaultProcessController({
+  processHelperPath = processIdentityHelperPath,
+  processHelperHash,
+  bundleDirectory,
+} = {}) {
+  const pinnedHelperPath = () =>
+    processHelperHash && bundleDirectory
+      ? verifiedRuntimeFile(
+          bundleDirectory,
+          processHelperPath,
+          "terminate-owned-process.ps1",
+          processHelperHash,
+        )
+      : processHelperPath;
   const inspect =
     process.platform === "win32"
       ? async (pid, timeoutMs = processForceCommandMs) =>
           validPid(pid)
-            ? inspectWindowsProcess(pid, timeoutMs)
+            ? inspectWindowsProcess(pid, timeoutMs, pinnedHelperPath())
             : null
       : process.platform === "linux"
         ? async (pid) => (validPid(pid) ? linuxProcessIdentity(pid) : null)
@@ -1397,7 +1838,12 @@ export function defaultProcessController() {
     inspect,
     terminate:
       process.platform === "win32"
-        ? terminateWindowsProcess
+        ? (identity, timeoutMs) =>
+            terminateWindowsProcess(
+              identity,
+              timeoutMs,
+              pinnedHelperPath(),
+            )
         : async () => {
             throw new Error(
               `Identity-bound process termination is unsupported on ${process.platform}`,
@@ -1471,13 +1917,26 @@ export class DurableTerminalHost {
   constructor(options) {
     this.options = options;
     this.startedAt = timestamp();
-    if (
-      options.generation &&
-      !/^[A-Za-z0-9_-]{1,128}$/.test(options.generation)
-    ) {
+    if (options.generation && !isValidGeneration(options.generation)) {
       throw new Error("Durable terminal host generation is invalid");
     }
     this.generation = options.generation ?? randomToken(16);
+    this.runtimeBundle = options.runtimeBundle
+      ? verifyRuntimeBundle({
+          stateDirectory: options.stateDirectory,
+          ...options.runtimeBundle,
+        })
+      : null;
+    if (this.runtimeBundle) {
+      const loadedHostHash = sha256Bytes(
+        readFileSync(fileURLToPath(import.meta.url)),
+      );
+      if (loadedHostHash !== options.runtimeBundle.hostScriptHash) {
+        throw new Error(
+          "Loaded durable terminal host does not match its runtime bundle",
+        );
+      }
+    }
     this.processStartTicks =
       options.processStartTicks ?? currentProcessStartTicks();
     this.controlToken = randomToken();
@@ -1489,7 +1948,26 @@ export class DurableTerminalHost {
     this.keyOperations = new Map();
     this.reservations = new Map();
     this.supervisorFactory =
-      options.supervisorFactory ?? (() => createTerminalJobSupervisor());
+      options.supervisorFactory ??
+      (() =>
+        createTerminalJobSupervisor({
+          supervisorPath: this.runtimeBundle?.files.supervisor,
+          supervisorHash: options.runtimeBundle?.supervisorScriptHash,
+          bundleDirectory: this.runtimeBundle?.directory,
+        }));
+    this.processController =
+      options.processController ??
+      defaultProcessController(
+        this.runtimeBundle
+          ? {
+              processHelperPath:
+                this.runtimeBundle.files.processIdentityHelper,
+              processHelperHash:
+                options.runtimeBundle.processIdentityHelperHash,
+              bundleDirectory: this.runtimeBundle.directory,
+            }
+          : {},
+      );
     this.wait = options.wait ?? delay;
     this.now = options.now ?? (() => Date.now());
     this.reservationLeaseMs =
@@ -1499,21 +1977,34 @@ export class DurableTerminalHost {
       forced: options.cleanupTimeouts?.forced ?? forcedProcessExitMs,
     };
     this.exitProcess = options.exitProcess ?? ((code) => process.exit(code));
-    this.statePath = join(options.stateDirectory, "host.json");
-    this.statusPath = join(options.stateDirectory, "status.json");
-    this.lockPath = join(options.stateDirectory, "host.lock");
-    this.generationDirectory = join(
-      options.stateDirectory,
-      "terminal-generations",
+    const stateDirectory = resolve(options.stateDirectory);
+    this.statePath = containedStatePath(
+      stateDirectory,
+      join(stateDirectory, "host.json"),
     );
-    this.generationPath = join(
+    this.statusPath = containedStatePath(
+      stateDirectory,
+      join(stateDirectory, "status.json"),
+    );
+    this.lockPath = containedStatePath(
+      stateDirectory,
+      join(stateDirectory, "host.lock"),
+    );
+    this.generationDirectory = containedStatePath(
+      stateDirectory,
+      join(stateDirectory, "terminal-generations"),
+    );
+    this.generationPath = containedStatePath(
       this.generationDirectory,
-      `${this.generation}.json`,
+      join(this.generationDirectory, `${this.generation}.json`),
     );
-    this.witnessDirectory = join(
-      options.stateDirectory,
-      "terminal-empty-witnesses",
-      this.generation,
+    const witnessRoot = containedStatePath(
+      stateDirectory,
+      join(stateDirectory, "terminal-empty-witnesses"),
+    );
+    this.witnessDirectory = containedStatePath(
+      witnessRoot,
+      join(witnessRoot, this.generation),
     );
     this.diagnostics = new DiagnosticLog(
       join(options.stateDirectory, "diagnostics.jsonl"),
@@ -1540,6 +2031,7 @@ export class DurableTerminalHost {
       generation: this.generation,
       pid: process.pid,
       processStartTicks: this.processStartTicks,
+      bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
     };
   }
 
@@ -1554,6 +2046,14 @@ export class DurableTerminalHost {
         process.platform === "win32"
           ? terminalOwnershipBoundary
           : "unsupported",
+      bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
+      hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
+      supervisorScriptHash:
+        this.options.runtimeBundle?.supervisorScriptHash ?? null,
+      processIdentityHelperHash:
+        this.options.runtimeBundle?.processIdentityHelperHash ?? null,
+      supervisorProtocolGeneration: terminalJobProtocolGeneration,
+      capabilities: terminalRuntimeCapabilities,
       controlPort: this.controlPort,
       controlToken: this.controlToken,
       startedAt: this.startedAt,
@@ -1565,6 +2065,7 @@ export class DurableTerminalHost {
       generation: this.generation,
       hostPid: process.pid,
       hostProcessStartTicks: this.processStartTicks,
+      bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
     };
   }
 
@@ -1580,6 +2081,14 @@ export class DurableTerminalHost {
         process.platform === "win32"
           ? terminalOwnershipBoundary
           : "unsupported",
+      bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
+      hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
+      supervisorScriptHash:
+        this.options.runtimeBundle?.supervisorScriptHash ?? null,
+      processIdentityHelperHash:
+        this.options.runtimeBundle?.processIdentityHelperHash ?? null,
+      supervisorProtocolGeneration: terminalJobProtocolGeneration,
+      capabilities: terminalRuntimeCapabilities,
       startedAt: this.startedAt,
       sessions: [...this.sessions.values()]
         .sort((left, right) => left.order - right.order)
@@ -1590,15 +2099,50 @@ export class DurableTerminalHost {
           supervisorPid: session.supervisorPid ?? null,
           supervisorStartTimeUtcTicks:
             session.supervisorStartTimeUtcTicks ?? null,
-          protocolFailure: Boolean(session.supervisorProtocolFailure),
+          supervisorState: session.supervisorTrustState,
+          supervisorExited:
+            session.supervisorTrustState === "trusted-empty"
+              ? session.supervisorExitCode !== undefined
+              : false,
+          supervisorExitCode:
+            session.supervisorTrustState === "trusted-empty"
+              ? session.supervisorExitCode
+              : null,
+          supervisorExitSignal:
+            session.supervisorTrustState === "trusted-empty"
+              ? session.supervisorExitSignal ?? null
+              : null,
+          supervisorOutputClosed:
+            session.supervisorTrustState === "trusted-empty"
+              ? Boolean(session.supervisorOutputClosed)
+              : false,
         })),
     };
   }
 
   ensureGenerationCapacity() {
     mkdirSync(this.generationDirectory, { recursive: true });
+    assertNoReparsePoint(
+      this.options.stateDirectory,
+      this.generationDirectory,
+    );
     const records = readdirSync(this.generationDirectory)
       .filter((name) => name.endsWith(".json"));
+    if (
+      records.some(
+        (name) => !isValidGeneration(name.slice(0, -".json".length)),
+      )
+    ) {
+      throw new Error(
+        "Durable terminal generation directory contains invalid evidence",
+      );
+    }
+    if (
+      existsSync(this.generationPath) &&
+      lstatSync(this.generationPath).isSymbolicLink()
+    ) {
+      throw new Error("Durable terminal generation evidence is a reparse point");
+    }
     if (
       !records.includes(`${this.generation}.json`) &&
       records.length >= maximumGenerationRecords
@@ -1615,7 +2159,13 @@ export class DurableTerminalHost {
   }
 
   witnessPath(session) {
-    return join(this.witnessDirectory, `${session.id}.json`);
+    if (!/^[A-Za-z0-9_-]{16,128}$/.test(session.id ?? "")) {
+      throw new Error("Durable terminal session identity is invalid");
+    }
+    return containedStatePath(
+      this.witnessDirectory,
+      join(this.witnessDirectory, `${session.id}.json`),
+    );
   }
 
   removeSessionWitness(session) {
@@ -1702,6 +2252,14 @@ export class DurableTerminalHost {
     atomicWriteJson(this.statusPath, {
       version: hostProtocolVersion,
       generation: this.generation,
+      bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
+      hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
+      supervisorScriptHash:
+        this.options.runtimeBundle?.supervisorScriptHash ?? null,
+      processIdentityHelperHash:
+        this.options.runtimeBundle?.processIdentityHelperHash ?? null,
+      supervisorProtocolGeneration: terminalJobProtocolGeneration,
+      capabilities: terminalRuntimeCapabilities,
       hostPid: process.pid,
       processStartTicks: this.processStartTicks,
       processStartExact: Boolean(this.options.generation),
@@ -1717,6 +2275,15 @@ export class DurableTerminalHost {
   async start() {
     mkdirSync(this.options.stateDirectory, { recursive: true });
     try {
+      assertNoReparsePoint(
+        this.options.stateDirectory,
+        this.generationDirectory,
+      );
+      if (this.options.generation && !this.runtimeBundle) {
+        throw new Error(
+          "Durable terminal host startup requires an immutable runtime bundle",
+        );
+      }
       this.controlPort = await listenLoopback(this.controlServer);
       await this.acceptStartupClaim();
       this.persistGeneration();
@@ -1773,6 +2340,14 @@ export class DurableTerminalHost {
           process.platform === "win32"
             ? terminalOwnershipBoundary
             : "unsupported",
+        bundleHash: this.options.runtimeBundle?.bundleHash ?? null,
+        hostScriptHash: this.options.runtimeBundle?.hostScriptHash ?? null,
+        supervisorScriptHash:
+          this.options.runtimeBundle?.supervisorScriptHash ?? null,
+        processIdentityHelperHash:
+          this.options.runtimeBundle?.processIdentityHelperHash ?? null,
+        supervisorProtocolGeneration: terminalJobProtocolGeneration,
+        capabilities: terminalRuntimeCapabilities,
         startedAt: this.startedAt,
       });
       return;
@@ -2033,7 +2608,10 @@ export class DurableTerminalHost {
       supervisorProcess: null,
       supervisorPid: null,
       supervisorStartTimeUtcTicks: null,
-      supervisorProtocolFailure: false,
+      supervisorTrustState: "in-progress",
+      supervisorExitCode: undefined,
+      supervisorExitSignal: undefined,
+      supervisorOutputClosed: false,
       shellPid: null,
       ttydPid: null,
       upstreamOpenedAt: null,
@@ -2152,6 +2730,108 @@ export class DurableTerminalHost {
         ? supervisorStartTimeUtcTicks
         : null;
     if (changed) this.persistGeneration();
+  }
+
+  quarantineSupervisor(session, error) {
+    session.supervisorTrustState = "quarantined";
+    try {
+      this.persistGeneration();
+    } catch (persistenceError) {
+      try {
+        this.record("terminal-supervisor-quarantine-persist-failed", session, {
+          errorType: sanitizeMetadataText(
+            persistenceError?.name || "Error",
+            80,
+          ),
+        });
+      } catch {
+        // The in-memory quarantine and on-disk in-progress state both fail closed.
+      }
+    }
+    if (error && !session.error) {
+      session.error = sanitizeMetadataText(error.message, 240);
+    }
+  }
+
+  validateEmptyWitness(session, transcript) {
+    const path = this.witnessPath(session);
+    if (!existsSync(path)) {
+      throw new Error(
+        "Terminal Job Object supervisor exited without its durable empty witness",
+      );
+    }
+    const info = lstatSync(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 1024 * 1024) {
+      throw new Error("Terminal Job Object empty witness is not a bounded regular file");
+    }
+
+    let witness;
+    try {
+      witness = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      throw new Error("Terminal Job Object empty witness is invalid");
+    }
+    if (
+      witness?.version !== 1 ||
+      witness.generation !== this.generation ||
+      witness.sessionId !== session.id ||
+      typeof witness.worktreePath !== "string" ||
+      worktreeKey(witness.worktreePath) !== session.key ||
+      witness.nonce !== session.witnessNonce ||
+      witness.supervisorPid !== transcript.supervisorPid ||
+      witness.supervisorStartTimeUtcTicks !==
+        transcript.supervisorStartTimeUtcTicks
+    ) {
+      throw new Error(
+        "Terminal Job Object empty witness does not match the exact session identity",
+      );
+    }
+  }
+
+  promoteSupervisorTrustedEmpty(session) {
+    if (session.supervisorTrustState === "quarantined") {
+      throw new Error(
+        "Terminal Job Object supervisor transcript is quarantined",
+      );
+    }
+    const transcript = session.jobSupervisor?.trustedEmptyEvidence();
+    if (!transcript) {
+      throw new Error(
+        "Terminal Job Object supervisor omitted terminal empty evidence",
+      );
+    }
+    this.synchronizeSupervisorEvidence(session);
+    if (
+      session.supervisorPid !== transcript.supervisorPid ||
+      session.supervisorStartTimeUtcTicks !==
+        transcript.supervisorStartTimeUtcTicks
+    ) {
+      throw new Error(
+        "Terminal Job Object supervisor exit identity changed before promotion",
+      );
+    }
+    this.validateEmptyWitness(session, transcript);
+
+    session.supervisorTrustState = "trusted-empty";
+    session.supervisorExitCode = transcript.exitCode;
+    session.supervisorExitSignal = transcript.exitSignal;
+    session.supervisorOutputClosed = transcript.outputClosed;
+    try {
+      this.persistGeneration();
+    } catch (error) {
+      session.supervisorTrustState = "quarantined";
+      session.supervisorExitCode = undefined;
+      session.supervisorExitSignal = undefined;
+      session.supervisorOutputClosed = false;
+      try {
+        this.persistGeneration();
+      } catch {
+        // The previous durable in-progress state remains untrusted.
+      }
+      throw new Error(
+        `Could not promote terminal supervisor cleanup trust: ${sanitizeMetadataText(error.message, 240)}`,
+      );
+    }
   }
 
   startupReadinessError(session) {
@@ -2294,14 +2974,18 @@ export class DurableTerminalHost {
     ];
     const spawnFailure = { error: null };
 
+    mkdirSync(this.witnessDirectory, { recursive: true });
+    assertNoReparsePoint(
+      join(this.options.stateDirectory, "terminal-empty-witnesses"),
+      this.witnessDirectory,
+    );
     session.jobSupervisor = this.supervisorFactory();
     session.supervisorProcess = session.jobSupervisor.child;
     session.supervisorPid = validPid(session.supervisorProcess?.pid)
       ? session.supervisorProcess.pid
       : null;
-    session.jobSupervisor.onProtocolFailure = () => {
-      session.supervisorProtocolFailure = true;
-      this.persistGeneration();
+    session.jobSupervisor.onProtocolFailure = (error) => {
+      this.quarantineSupervisor(session, error);
     };
     this.persistGeneration();
     session.supervisorProcess.once("error", (error) => {
@@ -2333,6 +3017,7 @@ export class DurableTerminalHost {
       sessionId: session.id,
       generation: this.generation,
       worktreePath: session.worktreePath,
+      witnessRoot: this.witnessDirectory,
       witnessPath: this.witnessPath(session),
       witnessNonce: session.witnessNonce,
       fileName: this.options.ttydPath,
@@ -2760,7 +3445,7 @@ export class DurableTerminalHost {
       } else {
         await session.jobSupervisor.terminate(timeoutMs);
       }
-      this.synchronizeSupervisorEvidence(session);
+      this.promoteSupervisorTrustedEmpty(session);
     } else if (validPid(session.ttydPid) || validPid(session.shellPid)) {
       throw new Error(
         "Terminal process ownership has no Job Object supervisor acknowledgement",
@@ -2932,9 +3617,27 @@ function parseArguments(argumentsList) {
   const stateDirectory = resolve(String(values["state-dir"] ?? ""));
   const ttydPath = resolve(String(values.ttyd ?? ""));
   const shellCommand = String(values.shell ?? "pwsh");
+  const runtimeBundleValues = {
+    bundleDirectory: resolve(String(values["runtime-bundle-dir"] ?? "")),
+    bundleHash: String(values["runtime-bundle-hash"] ?? ""),
+    hostScriptHash: String(values["host-script-hash"] ?? ""),
+    supervisorScriptHash: String(values["supervisor-script-hash"] ?? ""),
+    processIdentityHelperHash: String(
+      values["process-helper-hash"] ?? "",
+    ),
+  };
 
   if (!values["state-dir"]) throw new Error("--state-dir is required");
   if (!values.ttyd) throw new Error("--ttyd is required");
+  if (
+    !values["runtime-bundle-dir"] ||
+    !sha256Pattern.test(runtimeBundleValues.bundleHash) ||
+    !sha256Pattern.test(runtimeBundleValues.hostScriptHash) ||
+    !sha256Pattern.test(runtimeBundleValues.supervisorScriptHash) ||
+    !sha256Pattern.test(runtimeBundleValues.processIdentityHelperHash)
+  ) {
+    throw new Error("Immutable durable terminal runtime bundle is required");
+  }
 
   return {
     stateDirectory,
@@ -2942,6 +3645,7 @@ function parseArguments(argumentsList) {
     shellCommand,
     generation:
       typeof values.generation === "string" ? values.generation : undefined,
+    runtimeBundle: runtimeBundleValues,
     replayBytes: safeInteger(
       Number.parseInt(values["replay-bytes"], 10),
       defaultReplayBytes,

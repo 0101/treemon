@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   defaultProcessController,
+  materializeRuntimeBundle,
   sameProcessIdentity,
   terminateRetainedChild,
 } from "./durable-terminal-host.mjs";
@@ -70,6 +71,15 @@ export function hostStateMatchesObservation(observation, hostState) {
   return (
     hostState?.version === observation.hostProtocolVersion &&
     hostState?.generation === observation.hostGeneration &&
+    hostState?.bundleHash === observation.hostBundleHash &&
+    hostState?.hostScriptHash === observation.hostScriptHash &&
+    hostState?.supervisorScriptHash === observation.supervisorScriptHash &&
+    hostState?.processIdentityHelperHash ===
+      observation.processIdentityHelperHash &&
+    hostState?.supervisorProtocolGeneration ===
+      observation.supervisorProtocolGeneration &&
+    JSON.stringify(hostState?.capabilities) ===
+      JSON.stringify(observation.hostCapabilities) &&
     hostState?.pid === observation.hostPid &&
     hostState?.processStartTicks === observation.hostProcessStartTicks &&
     hostState?.processStartExact === observation.hostProcessStartExact &&
@@ -88,7 +98,7 @@ export async function observedHostOwnership(
     return {
       owned: false,
       reason:
-        "Current host manifest generation, process identity, or credentials differ from the observation",
+        "Current host manifest runtime, process identity, or credentials differ from the observation",
     };
   }
 
@@ -180,6 +190,7 @@ async function start() {
   }
 
   mkdirSync(worktree, { recursive: true });
+  const bundle = materializeRuntimeBundle(stateDirectory);
   const startedAt = new Date();
   const generation = randomBytes(16).toString("hex");
   atomicWrite(lockPath, {
@@ -198,6 +209,16 @@ async function start() {
       "pwsh",
       "--generation",
       generation,
+      "--runtime-bundle-dir",
+      bundle.bundleDirectory,
+      "--runtime-bundle-hash",
+      bundle.bundleHash,
+      "--host-script-hash",
+      bundle.hostScriptHash,
+      "--supervisor-script-hash",
+      bundle.supervisorScriptHash,
+      "--process-helper-hash",
+      bundle.processIdentityHelperHash,
     ],
     {
       cwd: repo,
@@ -259,6 +280,12 @@ async function start() {
       lastCheckedAt: new Date().toISOString(),
       hostProtocolVersion: hostState.version,
       hostGeneration: hostState.generation,
+      hostBundleHash: hostState.bundleHash,
+      hostScriptHash: hostState.hostScriptHash,
+      supervisorScriptHash: hostState.supervisorScriptHash,
+      processIdentityHelperHash: hostState.processIdentityHelperHash,
+      supervisorProtocolGeneration: hostState.supervisorProtocolGeneration,
+      hostCapabilities: hostState.capabilities,
       hostPid: hostState.pid,
       hostProcessStartTicks: hostState.processStartTicks,
       hostProcessStartExact: hostState.processStartExact,
