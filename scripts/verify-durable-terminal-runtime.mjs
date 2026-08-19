@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -6,7 +7,6 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import {
@@ -18,7 +18,12 @@ import {
 const repo = resolve(import.meta.dirname, "..");
 const hostScript = join(repo, "scripts", "durable-terminal-host.mjs");
 const ttyd = join(repo, ".tools", "ttyd", "1.7.7", "ttyd.exe");
-const fixture = join(tmpdir(), `treemon-durable-terminal-${Date.now()}`);
+const fixture = join(
+  repo,
+  ".agents",
+  "durable-terminal-runtime-verification",
+  randomUUID(),
+);
 const stateDirectory = join(fixture, "state");
 const worktree = join(fixture, "worktree");
 const statePath = join(stateDirectory, "host.json");

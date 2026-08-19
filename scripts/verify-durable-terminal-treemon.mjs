@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -7,7 +8,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer as createNetServer } from "node:net";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium } from "playwright";
 import {
@@ -15,6 +15,7 @@ import {
   sameProcessIdentity,
   terminateRetainedChild,
 } from "./durable-terminal-host.mjs";
+import { isolatedTreemonEnvironment } from "./durable-terminal-verifier-env.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
 const ttyd = join(repo, ".tools", "ttyd", "1.7.7", "ttyd.exe");
@@ -23,15 +24,20 @@ const serverExecutable = join(
   "src",
   "Server",
   "bin",
-  "Debug",
+  "Release",
   "net10.0",
   "Treemon.exe",
 );
 const viteExecutable = join(repo, "node_modules", "vite", "bin", "vite.js");
-const fixture = join(tmpdir(), `treemon-durable-host-e2e-${Date.now()}`);
+const fixture = join(
+  repo,
+  ".agents",
+  "durable-terminal-treemon-verification",
+  randomUUID(),
+);
 const worktree = join(fixture, "worktree");
 const configDirectory = join(fixture, "config");
-const stateDirectory = join(repo, ".agents", "durable-terminal-verification");
+const stateDirectory = join(fixture, "terminal-state");
 const statePath = join(stateDirectory, "host.json");
 const diagnosticsPath = join(stateDirectory, "diagnostics.jsonl");
 const evidencePath = join(stateDirectory, "evidence.json");
@@ -141,11 +147,11 @@ function startServer() {
       cwd: repo,
       windowsHide: true,
       stdio: "ignore",
-      env: {
-        ...process.env,
-        TREEMON_CONFIG_DIR: configDirectory,
-        TREEMON_TERMINAL_STATE_DIR: stateDirectory,
-      },
+      env: isolatedTreemonEnvironment(process.env, {
+        apiPort,
+        configDirectory,
+        terminalStateDirectory: stateDirectory,
+      }),
     },
   );
 }
@@ -171,16 +177,16 @@ function startVite() {
 async function stopProcess(child, identity, description) {
   if (!child || child.exitCode !== null) return;
   const pid = child.pid;
-  if (identity) await processController.terminate(identity);
-  else await terminateRetainedChild(child);
+  await terminateRetainedChild(child);
   await waitFor(
     `${description} PID ${pid} to exit`,
     async () =>
       child.exitCode !== null ||
-      !sameProcessIdentity(
-        await processController.inspect(pid),
-        identity,
-      ),
+      (identity &&
+        !sameProcessIdentity(
+          await processController.inspect(pid),
+          identity,
+        )),
     15_000,
   );
 }
@@ -310,7 +316,14 @@ try {
   );
   execFileSync(
     "dotnet",
-    ["build", "src/Server/Server.fsproj", "--nologo", "--verbosity:quiet"],
+    [
+      "build",
+      "src/Server/Server.fsproj",
+      "--configuration",
+      "Release",
+      "--nologo",
+      "--verbosity:quiet",
+    ],
     { cwd: repo, stdio: "ignore", windowsHide: true },
   );
 
@@ -377,7 +390,7 @@ try {
   );
   const afterServerRestart = await currentTerminalSession();
 
-  await page.click('button[title="Close embedded terminal"]');
+  await page.click('button[title="Close this terminal"]');
   await waitFor("terminal session to close", async () => {
     const response = await control("/sessions");
     return response.sessions.length === 0;

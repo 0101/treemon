@@ -5,6 +5,7 @@ open System.Diagnostics
 open System.IO
 open System.Net.Http
 open System.Net.Http.Headers
+open System.Runtime.InteropServices
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
@@ -27,7 +28,9 @@ type internal Config =
 type private HostIdentity =
     { Generation: string
       Pid: int
-      ProcessStartTicks: int64 }
+      ProcessStartTicks: int64
+      ProcessStartExact: bool
+      KernelOwnership: bool }
 
 type private HostConnection =
     { Version: int
@@ -35,13 +38,23 @@ type private HostConnection =
       Pid: int
       ProcessStartTicks: int64
       ProcessStartExact: bool
+      KernelOwnership: bool
       ControlPort: int
       ControlToken: string
       StartedAt: string }
 
+type private SupervisorIdentity =
+    { Pid: int
+      ProcessStartTicks: int64 }
+
 type private HostSession =
     { Id: string
+      Supervisor: SupervisorIdentity option
       Tab: EmbeddedTerminalTab }
+
+type private PriorGenerationBoundary =
+    | KnownSupervisor of SupervisorIdentity
+    | MissingSupervisor
 
 type private Reservation =
     { Id: string
@@ -80,6 +93,10 @@ type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
       AnnouncedHost: HostIdentity option
       KnownHost: HostIdentity option
+      PriorGenerationOwners: Map<string, HostIdentity list>
+      KnownSessionSupervisors: Map<string, SupervisorIdentity>
+      PriorGenerationBoundaries:
+        Map<string, PriorGenerationBoundary list>
       PendingLocks:
         Map<LockAcquisitionToken, PendingLockAcquisition> }
 
@@ -109,11 +126,23 @@ type Manager = private Manager of MailboxProcessor<Message>
 
 let private hostProtocolVersion = 2
 
+let private kernelOwnershipError =
+    "The durable terminal host predates kernel-enforced Job Object ownership; Treemon cannot start a terminal or authorize cleanup for that generation"
+
 let private httpClient =
     new HttpClient(Timeout = Timeout.InfiniteTimeSpan)
 
 let private defaultConfig () =
     let root = Directory.GetCurrentDirectory()
+    let runtimeScript name =
+        let deployed =
+            Path.Combine(AppContext.BaseDirectory, "scripts", name)
+
+        if File.Exists deployed then
+            deployed
+        else
+            Path.Combine(root, "scripts", name)
+
     let stateDirectory =
         Environment.GetEnvironmentVariable("TREEMON_TERMINAL_STATE_DIR")
         |> Option.ofObj
@@ -121,7 +150,8 @@ let private defaultConfig () =
         |> Option.defaultValue (Path.Combine(root, ".agents", "durable-terminal"))
 
     { NodeExecutable = "node"
-      HostScriptPath = Path.Combine(root, "scripts", "durable-terminal-host.mjs")
+      HostScriptPath =
+        runtimeScript "durable-terminal-host.mjs"
       HostStateDirectory = stateDirectory
       TtydExecutablePath =
         Path.Combine(root, ".tools", "ttyd", "1.7.7", "ttyd.exe")
@@ -144,10 +174,28 @@ let private isInterrupted tab =
     | EmbeddedTerminalLifecycle.Interrupted _ -> true
     | _ -> false
 
+let private isHostOwned tab =
+    match tab.Lifecycle with
+    | EmbeddedTerminalLifecycle.Starting
+    | EmbeddedTerminalLifecycle.Running _ -> true
+    | _ -> false
+
+let private isFailed tab =
+    match tab.Lifecycle with
+    | EmbeddedTerminalLifecycle.Failed _ -> true
+    | _ -> false
+
+let private worktreeKey =
+    WorktreePath.value >> PathUtils.normalizePath
+
 let private withoutPath path snapshot =
     { Tabs = snapshot.Tabs |> List.filter (isPath path >> not) }
 
-let private mergeSnapshot previous current =
+let private mergeSnapshotWith
+    replacements
+    previous
+    current
+    =
     let replacementFor tab =
         current.Tabs |> List.tryFind (isPath tab.Worktree)
 
@@ -155,8 +203,12 @@ let private mergeSnapshot previous current =
         previous.Tabs
         |> List.choose (fun tab ->
             match replacementFor tab, tab.Lifecycle with
+            | Some replacement, EmbeddedTerminalLifecycle.Interrupted _
+                when replacements
+                     |> Set.contains (worktreeKey tab.Worktree) ->
+                Some replacement
+            | _, EmbeddedTerminalLifecycle.Interrupted _ -> Some tab
             | Some replacement, _ -> Some replacement
-            | None, EmbeddedTerminalLifecycle.Interrupted _ -> Some tab
             | None, _ -> None)
 
     let appended =
@@ -173,6 +225,12 @@ let private mergeSnapshot previous current =
                 tabs
             else
                 tabs @ [ tab ]) [] }
+
+let private mergeSnapshot =
+    mergeSnapshotWith Set.empty
+
+let private mergeSnapshotReplacing path =
+    mergeSnapshotWith (Set.singleton (worktreeKey path))
 
 let private withFailure path error snapshot =
     match snapshot.Tabs |> List.tryFind (isPath path) with
@@ -200,6 +258,19 @@ let private withHostFailure error snapshot =
                     EmbeddedTerminalLifecycle.Interrupted(
                         $"Durable terminal host unavailable: {error}"
                     ) }) }
+
+let private interruptForHostReplacement snapshot =
+    { Tabs =
+        snapshot.Tabs
+        |> List.map (fun tab ->
+            if isHostOwned tab then
+                    { tab with
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Interrupted(
+                                "Durable terminal host generation changed; the prior Job Object boundary must be confirmed stopped before cleanup can be inferred"
+                            ) }
+            else
+                    tab) }
 
 let private tryProperty (name: string) (element: JsonElement) =
     element.EnumerateObject()
@@ -284,6 +355,10 @@ let private parseHostConnection (text: string) =
                         Error
                             "Invalid protocol-1 durable terminal host start identity"
 
+            let kernelOwnership =
+                optionalString "ownershipBoundary" root
+                |> Option.contains "windows-job-v1"
+
             if pid <= 0 then
                 return! Error "Invalid durable terminal host PID"
 
@@ -302,6 +377,7 @@ let private parseHostConnection (text: string) =
                   Pid = pid
                   ProcessStartTicks = processStartTicks
                   ProcessStartExact = processStartExact
+                  KernelOwnership = kernelOwnership
                   ControlPort = controlPort
                   ControlToken = controlToken
                   StartedAt = startedAt }
@@ -339,6 +415,37 @@ let private lifecycleFor element =
                 )
     }
 
+let private supervisorIdentityFor element =
+    let nonNullProperty name =
+        tryProperty name element
+        |> Option.filter (fun value ->
+            value.ValueKind <> JsonValueKind.Null)
+
+    match
+        nonNullProperty "supervisorPid",
+        nonNullProperty "supervisorStartTimeUtcTicks"
+    with
+    | None, None -> Ok None
+    | Some _, Some _ ->
+        result {
+            let! pid = requiredInt "supervisorPid" element
+            let! processStartTicks =
+                requiredInt64String
+                    "supervisorStartTimeUtcTicks"
+                    element
+
+            if pid <= 0 then
+                return! Error "Invalid terminal supervisor PID"
+
+            return
+                Some
+                    { Pid = pid
+                      ProcessStartTicks = processStartTicks }
+        }
+    | _ ->
+        Error
+            "Durable terminal host returned incomplete supervisor identity"
+
 let private parseHostSessions (text: string) =
     try
         use document = JsonDocument.Parse(text)
@@ -352,9 +459,12 @@ let private parseHostSessions (text: string) =
                     let! id = requiredString "id" session
                     let! path = requiredString "worktreePath" session
                     let! lifecycle = lifecycleFor session
+                    let! supervisor =
+                        supervisorIdentityFor session
 
                     return
                         { Id = id
+                          Supervisor = supervisor
                           Tab =
                             { Worktree = PathUtils.toWorktreePath path
                               Lifecycle = lifecycle } }
@@ -399,6 +509,19 @@ let private parseReservation (text: string) =
 let private snapshot sessions =
     { Tabs = sessions |> List.map _.Tab }
 
+let private withKnownSessionSupervisors state sessions =
+    let supervisors =
+        sessions
+        |> List.choose (fun session ->
+            session.Supervisor
+            |> Option.map (fun supervisor ->
+                worktreeKey session.Tab.Worktree,
+                supervisor))
+        |> Map.ofList
+
+    { state with
+        KnownSessionSupervisors = supervisors }
+
 let private statePath config =
     Path.Combine(config.HostStateDirectory, "host.json")
 
@@ -422,12 +545,15 @@ let private readHostConnection config =
 let private hostIdentity (connection: HostConnection) =
     { Generation = connection.Generation
       Pid = connection.Pid
-      ProcessStartTicks = connection.ProcessStartTicks }
+      ProcessStartTicks = connection.ProcessStartTicks
+      ProcessStartExact = connection.ProcessStartExact
+      KernelOwnership = connection.KernelOwnership }
 
 let private sameHostIdentity (left: HostIdentity) (right: HostIdentity) =
     left.Generation = right.Generation
     && left.Pid = right.Pid
     && left.ProcessStartTicks = right.ProcessStartTicks
+    && left.KernelOwnership = right.KernelOwnership
 
 let private pidIsAlive pid =
     try
@@ -441,20 +567,24 @@ let private currentProcessStartTicks () =
     use proc = Process.GetCurrentProcess()
     proc.StartTime.ToUniversalTime().Ticks
 
-let private processIdentityMatches connection =
+let private processIdentityMatchesValues
+    pid
+    processStartTicks
+    processStartExact
+    =
     try
-        use proc = Process.GetProcessById connection.Pid
+        use proc = Process.GetProcessById pid
 
         if proc.HasExited then
             Ok false
         else
             let actual = proc.StartTime.ToUniversalTime().Ticks
             let difference =
-                abs (actual - connection.ProcessStartTicks)
+                abs (actual - processStartTicks)
 
-            if actual = connection.ProcessStartTicks then
+            if actual = processStartTicks then
                 Ok true
-            elif connection.ProcessStartExact then
+            elif processStartExact then
                 Ok false
             elif difference <= TimeSpan.FromSeconds(2.0).Ticks then
                 Ok true
@@ -465,7 +595,19 @@ let private processIdentityMatches connection =
     | :? InvalidOperationException -> Ok false
     | ex ->
         Error
-            $"Could not verify durable terminal host PID {connection.Pid} start identity: {ex.Message}"
+            $"Could not verify durable terminal host PID {pid} start identity: {ex.Message}"
+
+let private processIdentityMatches (connection: HostConnection) =
+    processIdentityMatchesValues
+        connection.Pid
+        connection.ProcessStartTicks
+        connection.ProcessStartExact
+
+let private hostIdentityMatches (identity: HostIdentity) =
+    processIdentityMatchesValues
+        identity.Pid
+        identity.ProcessStartTicks
+        identity.ProcessStartExact
 
 let private hostUri connection path =
     Uri($"http://127.0.0.1:{connection.ControlPort}{path}")
@@ -546,13 +688,21 @@ let private parseHealth connection (text: string) =
                     Error
                         "Durable terminal host state does not match the running control endpoint"
 
+            let kernelOwnership =
+                optionalString "ownershipBoundary" root
+                |> Option.contains "windows-job-v1"
+
+            if kernelOwnership <> connection.KernelOwnership then
+                return!
+                    Error
+                        "Durable terminal host ownership capability does not match the running control endpoint"
+
             if version = hostProtocolVersion then
                 let! generation = requiredString "generation" root
                 let! processStartTicks =
                     requiredInt64String "processStartTicks" root
                 let! processStartExact =
                     requiredBool "processStartExact" root
-
                 if
                     generation <> connection.Generation
                     || processStartTicks
@@ -840,6 +990,9 @@ let private waitForHost config deadline startedPid =
     let rec wait () =
         async {
             match! discoverHost config with
+            | Ok (HealthyHost connection)
+                when not connection.KernelOwnership ->
+                return Error kernelOwnershipError
             | Ok (HealthyHost connection) -> return Ok connection
             | Error error when DateTimeOffset.UtcNow >= deadline ->
                 return
@@ -869,7 +1022,17 @@ let private waitForHost config deadline startedPid =
 
 let private ensureHostWithTtydRequirement requireTtyd config =
     async {
-        if not (File.Exists config.HostScriptPath) then
+        if
+            not (
+                RuntimeInformation.IsOSPlatform(
+                    OSPlatform.Windows
+                )
+            )
+        then
+            return
+                Error
+                    $"Kernel-enforced durable terminal ownership is unsupported on {RuntimeInformation.OSDescription}"
+        elif not (File.Exists config.HostScriptPath) then
             return
                 Error
                     $"Durable terminal host script is missing at '{config.HostScriptPath}'"
@@ -883,6 +1046,10 @@ let private ensureHostWithTtydRequirement requireTtyd config =
             let rec acquireOrDiscover () =
                 async {
                     match! discoverHost config with
+                    | Ok (HealthyHost connection)
+                        when requireTtyd
+                             && not connection.KernelOwnership ->
+                        return Error kernelOwnershipError
                     | Ok (HealthyHost connection) ->
                         return Ok connection
                     | Error error -> return Error error
@@ -901,6 +1068,10 @@ let private ensureHostWithTtydRequirement requireTtyd config =
                             use startupLock = startupLock
 
                             match! discoverHost config with
+                            | Ok (HealthyHost connection)
+                                when requireTtyd
+                                     && not connection.KernelOwnership ->
+                                return Error kernelOwnershipError
                             | Ok (HealthyHost connection) ->
                                 return Ok connection
                             | Error error -> return Error error
@@ -992,10 +1163,156 @@ let private announce config connection instanceId =
     request config connection HttpMethod.Post "/events" (Some body)
     |> AsyncResult.ignore
 
+let private observeHostIdentity state connection =
+    let identity = hostIdentity connection
+
+    match state.KnownHost with
+    | Some previous
+        when sameHostIdentity previous identity
+             |> not ->
+        let transitionKeys =
+            state.LastSnapshot.Tabs
+            |> List.choose (fun tab ->
+                let key = worktreeKey tab.Worktree
+                let supervisor =
+                    state.KnownSessionSupervisors
+                    |> Map.tryFind key
+
+                if
+                    isHostOwned tab
+                    || isFailed tab
+                    || supervisor.IsSome
+                then
+                    Some(key, supervisor)
+                else
+                    None)
+
+        let addDistinct key value values =
+            let existing =
+                values
+                |> Map.tryFind key
+                |> Option.defaultValue []
+
+            let updated =
+                if existing |> List.contains value then
+                    existing
+                else
+                    value :: existing
+
+            values |> Map.add key updated
+
+        let priorOwners =
+            transitionKeys
+            |> List.fold (fun owners (key, _) ->
+                addDistinct key previous owners)
+                state.PriorGenerationOwners
+
+        let priorBoundaries =
+            transitionKeys
+            |> List.fold (fun boundaries (key, supervisor) ->
+                supervisor
+                |> Option.map KnownSupervisor
+                |> Option.defaultValue MissingSupervisor
+                |> fun boundary ->
+                    addDistinct key boundary boundaries)
+                state.PriorGenerationBoundaries
+
+        { state with
+            LastSnapshot =
+                interruptForHostReplacement state.LastSnapshot
+            AnnouncedHost = None
+            KnownHost = Some identity
+            PriorGenerationOwners = priorOwners
+            KnownSessionSupervisors = Map.empty
+            PriorGenerationBoundaries = priorBoundaries }
+    | _ ->
+        { state with KnownHost = Some identity }
+
+let private confirmPriorGenerationStopped
+    state
+    worktreePath
+    =
+    let key = worktreeKey worktreePath
+
+    match state.PriorGenerationOwners |> Map.tryFind key with
+    | None -> Ok state
+    | Some identities ->
+        let stopped stillRunningError inspectionError matches =
+            match
+                matches
+                |> List.tryPick (function
+                    | Error error -> Some error
+                    | Ok _ -> None),
+                matches
+                |> List.exists (function
+                    | Ok true -> true
+                    | _ -> false)
+            with
+            | None, false -> Ok ()
+            | None, true -> Error stillRunningError
+            | Some error, _ ->
+                Error $"{inspectionError}: {error}"
+
+        let ownerResult =
+            if
+                identities
+                |> List.exists (fun identity ->
+                    not identity.KernelOwnership)
+            then
+                Error
+                    "Cannot confirm cleanup for a prior durable host generation that lacked kernel-enforced Job Object ownership"
+            else
+                identities
+                |> List.map hostIdentityMatches
+                |> stopped
+                    "Cannot infer terminal cleanup from the replacement host: the prior durable host generation is still alive"
+                    "Cannot verify the prior durable host generation before terminal cleanup"
+
+        let boundaryResult =
+            match
+                state.PriorGenerationBoundaries
+                |> Map.tryFind key
+            with
+            | None ->
+                Error
+                    "Cannot confirm prior-generation cleanup because its Job Object supervisor identity was not published"
+            | Some boundaries
+                when boundaries
+                     |> List.contains MissingSupervisor ->
+                Error
+                    "Cannot confirm prior-generation cleanup because its Job Object supervisor identity was not published"
+            | Some boundaries ->
+                boundaries
+                |> List.choose (function
+                    | KnownSupervisor supervisor ->
+                        Some supervisor
+                    | MissingSupervisor -> None)
+                |> List.map (fun supervisor ->
+                    processIdentityMatchesValues
+                        supervisor.Pid
+                        supervisor.ProcessStartTicks
+                        true)
+                |> stopped
+                    "Cannot confirm prior-generation cleanup because its Job Object supervisor is still running"
+                    "Cannot verify the prior Job Object supervisor before terminal cleanup"
+
+        match ownerResult, boundaryResult with
+        | Ok (), Ok () ->
+            Ok
+                { state with
+                    PriorGenerationOwners =
+                        state.PriorGenerationOwners
+                        |> Map.remove key
+                    PriorGenerationBoundaries =
+                        state.PriorGenerationBoundaries
+                        |> Map.remove key }
+        | Error error, _
+        | _, Error error -> Error error
+
 let private announceIfNeeded config state connection instanceId =
     async {
         let identity = hostIdentity connection
-        let known = { state with KnownHost = Some identity }
+        let known = observeHostIdentity state connection
 
         if
             known.AnnouncedHost
@@ -1026,6 +1343,15 @@ let private startTerminal config instanceId state worktreePath =
             let! announced =
                 announceIfNeeded config state connection instanceId
 
+            let announced, priorFailure =
+                match
+                    confirmPriorGenerationStopped
+                        announced
+                        worktreePath
+                with
+                | Ok confirmed -> confirmed, None
+                | Error error -> announced, Some error
+
             let reconcile failure =
                 async {
                     match! getHostSessions config connection with
@@ -1033,19 +1359,33 @@ let private startTerminal config instanceId state worktreePath =
                         when sessions
                              |> List.exists (fun session ->
                                  isPath worktreePath session.Tab) ->
+                        let announced =
+                            withKnownSessionSupervisors
+                                announced
+                                sessions
+
                         let current =
                             sessions
                             |> snapshot
-                            |> mergeSnapshot announced.LastSnapshot
+                            |> mergeSnapshotReplacing
+                                worktreePath
+                                announced.LastSnapshot
 
                         return
                             Ok current,
                             { announced with LastSnapshot = current }
                     | Ok sessions ->
+                        let announced =
+                            withKnownSessionSupervisors
+                                announced
+                                sessions
+
                         let current =
                             sessions
                             |> snapshot
-                            |> mergeSnapshot announced.LastSnapshot
+                            |> mergeSnapshotReplacing
+                                worktreePath
+                                announced.LastSnapshot
 
                         return
                             Error
@@ -1066,33 +1406,56 @@ let private startTerminal config instanceId state worktreePath =
                             { announced with LastSnapshot = current }
                 }
 
-            if connection.Version = 1 then
+            match priorFailure, connection.Version with
+            | Some error, _ ->
+                let current =
+                    withFailure
+                        worktreePath
+                        error
+                        announced.LastSnapshot
+
+                return Error error, { announced with LastSnapshot = current }
+            | None, 1 ->
                 match! getHostSessions config connection with
                 | Error error -> return! reconcile error
                 | Ok sessions
                     when sessions
                          |> List.exists (fun session ->
                              isPath worktreePath session.Tab) ->
+                    let announced =
+                        withKnownSessionSupervisors
+                            announced
+                            sessions
+
                     let current =
                         sessions
                         |> snapshot
-                        |> mergeSnapshot announced.LastSnapshot
+                        |> mergeSnapshotReplacing
+                            worktreePath
+                            announced.LastSnapshot
 
                     return
                         Ok current,
                         { announced with LastSnapshot = current }
                 | Ok sessions ->
+                    let announced =
+                        withKnownSessionSupervisors
+                            announced
+                            sessions
+
                     let error =
                         "The protocol-1 durable terminal host is in drain-only compatibility mode; close its remaining tabs before starting a new terminal"
 
                     let current =
                         sessions
                         |> snapshot
-                        |> mergeSnapshot announced.LastSnapshot
+                        |> mergeSnapshotReplacing
+                            worktreePath
+                            announced.LastSnapshot
                         |> withFailure worktreePath error
 
                     return Error error, { announced with LastSnapshot = current }
-            else
+            | None, _ ->
                 let body =
                     JsonSerializer.Serialize(
                         {| worktreePath =
@@ -1112,10 +1475,17 @@ let private startTerminal config instanceId state worktreePath =
                     match parseHostSessions content with
                     | Error error -> return! reconcile error
                     | Ok sessions ->
+                        let announced =
+                            withKnownSessionSupervisors
+                                announced
+                                sessions
+
                         let current =
                             sessions
                             |> snapshot
-                            |> mergeSnapshot announced.LastSnapshot
+                            |> mergeSnapshotReplacing
+                                worktreePath
+                                announced.LastSnapshot
 
                         return
                             Ok current,
@@ -1173,6 +1543,11 @@ let private getTerminals instanceId state config =
                 Log.log "EmbeddedTerminal" error
                 return hostFailure error announced
             | Ok sessions ->
+                let announced =
+                    withKnownSessionSupervisors
+                        announced
+                        sessions
+
                 let current =
                     sessions
                     |> snapshot
@@ -1278,6 +1653,11 @@ let rec private closeTerminalStrict instanceId state config worktreePath =
             Ok current, { confirmedState with LastSnapshot = current }
 
         let finishConfirmed connection sessions confirmedState =
+            let confirmedState =
+                withKnownSessionSupervisors
+                    confirmedState
+                    sessions
+
             async {
                 if connection.Version <> 1 || not (List.isEmpty sessions) then
                     return confirmedClosed sessions confirmedState
@@ -1366,12 +1746,24 @@ let rec private closeTerminalStrict instanceId state config worktreePath =
 
         match! discoverHost config with
         | Ok MissingHost when state.KnownHost.IsNone ->
-            let current = withoutPath worktreePath state.LastSnapshot
-            return
-                Ok current,
-                { state with
-                    LastSnapshot = current
-                    AnnouncedHost = None }
+            match
+                confirmPriorGenerationStopped
+                    state
+                    worktreePath
+            with
+            | Error error ->
+                return closeFailure error state.LastSnapshot state
+            | Ok confirmed ->
+                let current =
+                    withoutPath
+                        worktreePath
+                        confirmed.LastSnapshot
+
+                return
+                    Ok current,
+                    { confirmed with
+                        LastSnapshot = current
+                        AnnouncedHost = None }
         | Ok MissingHost ->
             let error =
                 "Cannot confirm terminal cleanup because the previously known durable host disappeared"
@@ -1397,7 +1789,25 @@ let rec private closeTerminalStrict instanceId state config worktreePath =
             let! announced =
                 announceIfNeeded config state connection instanceId
 
-            match! getHostSessions config connection with
+            let confirmed =
+                if connection.KernelOwnership then
+                    confirmPriorGenerationStopped
+                        announced
+                        worktreePath
+                else
+                    Error kernelOwnershipError
+
+            let announced =
+                confirmed
+                |> Result.defaultValue announced
+
+            let! sessionsResult =
+                match confirmed with
+                | Ok _ ->
+                    getHostSessions config connection
+                | Error error -> async.Return(Error error)
+
+            match sessionsResult with
             | Error error ->
                 Log.log "EmbeddedTerminal" error
                 let actionable =
@@ -1502,6 +1912,11 @@ let private closeTerminal instanceId state config worktreePath =
                     when sessions
                          |> List.exists (fun session ->
                              isPath worktreePath session.Tab) ->
+                    let announced =
+                        withKnownSessionSupervisors
+                            announced
+                            sessions
+
                     let! result, next =
                         closeTerminalStrict
                             instanceId
@@ -1513,6 +1928,11 @@ let private closeTerminal instanceId state config worktreePath =
                         Result.defaultValue next.LastSnapshot result,
                         next
                 | Ok sessions ->
+                    let announced =
+                        withKnownSessionSupervisors
+                            announced
+                            sessions
+
                     return
                         dismiss
                             (sessions
@@ -1586,14 +2006,19 @@ let private releaseReservation
     |> AsyncResult.ignore
 
 let private runReservedOperation
-    reservation
-    operation
-    callerCancellation
+    (reservation: CleanupReservation)
+    (operation: unit -> Async<Result<unit, string>>)
+    (callerCancellation: CancellationToken)
     =
     task {
         try
             use renewalCancellation =
                 new CancellationTokenSource()
+
+            use mutationCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    callerCancellation
+                )
 
             let renewal =
                 task {
@@ -1612,7 +2037,7 @@ let private runReservedOperation
                                 $"Durable terminal cleanup reservation renewal failed unexpectedly: {ex.Message}"
                 }
 
-            let! operationOutcome =
+            let mutation =
                 task {
                     try
                         let! result =
@@ -1620,13 +2045,14 @@ let private runReservedOperation
                             |> fun workflow ->
                                 Async.StartAsTask(
                                     workflow,
-                                    cancellationToken = callerCancellation
+                                    cancellationToken =
+                                        mutationCancellation.Token
                                 )
 
                         return ReservedResult result
                     with
                     | :? OperationCanceledException as cancellation
-                        when callerCancellation.IsCancellationRequested ->
+                        when mutationCancellation.IsCancellationRequested ->
                         return ReservedCancelled cancellation
                     | ex ->
                         return
@@ -1636,8 +2062,37 @@ let private runReservedOperation
                             )
                 }
 
-            renewalCancellation.Cancel()
-            let! renewalResult = renewal
+            let! completed =
+                Task.WhenAny(
+                    [| mutation :> Task
+                       renewal :> Task |]
+                )
+
+            let! operationOutcome, renewalResult, renewalFailedFirst =
+                task {
+                    if Object.ReferenceEquals(completed, mutation) then
+                        let! operationOutcome = mutation
+                        renewalCancellation.Cancel()
+                        let! renewalResult = renewal
+                        return operationOutcome, renewalResult, false
+                    else
+                        let! renewalResult = renewal
+
+                        let renewalFailure =
+                            match renewalResult with
+                            | Error error -> Error error
+                            | Ok () ->
+                                Error
+                                    "Durable terminal cleanup reservation renewal ended before the worktree mutation completed"
+
+                        mutationCancellation.Cancel()
+                        renewalCancellation.Cancel()
+                        let! operationOutcome = mutation
+                        return
+                            operationOutcome,
+                            renewalFailure,
+                            true
+                }
 
             let! releaseResult =
                 task {
@@ -1656,9 +2111,10 @@ let private runReservedOperation
                 }
 
             let cleanupFailures =
-                [ match renewalResult with
-                  | Ok () -> ()
-                  | Error error -> yield error
+                [ if not renewalFailedFirst then
+                      match renewalResult with
+                      | Ok () -> ()
+                      | Error error -> yield error
 
                   match releaseResult with
                   | Ok () -> ()
@@ -1666,7 +2122,7 @@ let private runReservedOperation
                       yield
                           $"Terminal cleanup reservation release failed: {error}" ]
 
-            let resultWithCleanupFailures result =
+            let withCleanupFailures result =
                 let cleanupError =
                     String.concat "; " cleanupFailures
 
@@ -1678,16 +2134,32 @@ let private runReservedOperation
                     Error $"{error}; {cleanupError}"
 
             return
-                match operationOutcome, cleanupFailures with
-                | ReservedResult result, _ ->
-                    resultWithCleanupFailures result
+                match renewalFailedFirst, renewalResult, operationOutcome with
+                | true, Error renewalError, ReservedResult(Error settlementError) ->
+                    Error
+                        $"{renewalError}; mutation settlement failed: {settlementError}"
+                    |> withCleanupFailures
                     |> ReservedResult
-                | ReservedCancelled cancellation, [] ->
+                | true, Error renewalError, _ ->
+                    Error renewalError
+                    |> withCleanupFailures
+                    |> ReservedResult
+                | false, _, ReservedResult result ->
+                    withCleanupFailures result |> ReservedResult
+                | false, _, ReservedCancelled cancellation
+                    when List.isEmpty cleanupFailures ->
                     ReservedCancelled cancellation
-                | ReservedCancelled _, failures ->
-                    let cleanupError = String.concat "; " failures
+                | false, _, ReservedCancelled _ ->
+                    let cleanupError =
+                        String.concat "; " cleanupFailures
+
                     Error
                         $"Worktree mutation was cancelled; {cleanupError}"
+                    |> ReservedResult
+                | true, Ok (), _ ->
+                    Error
+                        "Durable terminal cleanup reservation renewal ended unexpectedly"
+                    |> withCleanupFailures
                     |> ReservedResult
         finally
             reservation.WorktreeLock.Dispose()
@@ -1704,6 +2176,18 @@ let private reserveOnCurrentHost
         let! announced =
             announceIfNeeded config state connection instanceId
 
+        let confirmed =
+            if connection.KernelOwnership then
+                confirmPriorGenerationStopped
+                    announced
+                    worktreePath
+            else
+                Error kernelOwnershipError
+
+        let announced =
+            confirmed
+            |> Result.defaultValue announced
+
         let reservationId =
             Guid.NewGuid().ToString("N")
 
@@ -1713,13 +2197,16 @@ let private reserveOnCurrentHost
                    reservationId = reservationId |}
             )
 
-        let reservationFailure error =
+        let reservationFailure releaseKnownLease error =
             async {
                 let! release =
-                    releaseReservation
-                        config
-                        connection
-                        reservationId
+                    if releaseKnownLease then
+                        releaseReservation
+                            config
+                            connection
+                            reservationId
+                    else
+                        async.Return(Ok())
 
                 let actionable =
                     match release with
@@ -1739,24 +2226,43 @@ let private reserveOnCurrentHost
                     { announced with LastSnapshot = current }
             }
 
-        match!
-            request
-                config
-                connection
-                HttpMethod.Post
-                "/reservations"
-                (Some body)
-        with
-        | Error error -> return! reservationFailure error
+        let! reservationResult =
+            match confirmed with
+            | Error error ->
+                async.Return(Error(false, error))
+            | Ok _ ->
+                request
+                    config
+                    connection
+                    HttpMethod.Post
+                    "/reservations"
+                    (Some body)
+                |> Async.map (
+                    Result.mapError (fun error ->
+                        true, error)
+                )
+
+        match reservationResult with
+        | Error (releaseKnownLease, error) ->
+            return!
+                reservationFailure
+                    releaseKnownLease
+                    error
         | Ok content ->
             match parseReservation content with
-            | Error error -> return! reservationFailure error
+            | Error error ->
+                return! reservationFailure true error
             | Ok reservation
                 when reservation.Id <> reservationId ->
                 return!
-                    reservationFailure
+                    reservationFailure true
                         "Durable terminal host returned a different reservation identity"
             | Ok reservation ->
+                let announced =
+                    withKnownSessionSupervisors
+                        announced
+                        reservation.Sessions
+
                 let current =
                     reservation.Sessions
                     |> snapshot
@@ -1815,6 +2321,8 @@ let private reserveTerminalCleanup
         async {
             match! ensureControlHost config with
             | Error error -> return Error error, currentState
+            | Ok connection when not connection.KernelOwnership ->
+                return Error kernelOwnershipError, currentState
             | Ok connection
                 when connection.Version
                      = hostProtocolVersion ->
@@ -1834,6 +2342,9 @@ let private reserveTerminalCleanup
 
     async {
         match! discoverHost config with
+        | Ok (HealthyHost connection)
+            when not connection.KernelOwnership ->
+            return Error kernelOwnershipError, state
         | Ok (HealthyHost connection)
             when connection.Version = hostProtocolVersion ->
             return!
@@ -1943,6 +2454,9 @@ let private shutdown config =
         | Ok MissingHost -> return Ok ()
         | Ok (DeadHost(connection, _)) ->
             return! waitForHostExit config connection
+        | Ok (HealthyHost connection)
+            when not connection.KernelOwnership ->
+            return Error kernelOwnershipError
         | Ok (HealthyHost connection) ->
             match!
                 request
@@ -2246,6 +2760,9 @@ let internal createWithLockAcquisition
                                     EmbeddedTerminalSnapshot.empty
                                   AnnouncedHost = None
                                   KnownHost = None
+                                  PriorGenerationOwners = Map.empty
+                                  KnownSessionSupervisors = Map.empty
+                                  PriorGenerationBoundaries = Map.empty
                                   PendingLocks = Map.empty }
                             | Error error ->
                                 let current =
@@ -2263,6 +2780,9 @@ let internal createWithLockAcquisition
                 { LastSnapshot = EmbeddedTerminalSnapshot.empty
                   AnnouncedHost = None
                   KnownHost = None
+                  PriorGenerationOwners = Map.empty
+                  KnownSessionSupervisors = Map.empty
+                  PriorGenerationBoundaries = Map.empty
                   PendingLocks = Map.empty })
 
     Manager agent

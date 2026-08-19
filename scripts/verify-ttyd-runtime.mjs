@@ -1,16 +1,10 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
-import {
-  captureSpawnedProcessIdentity,
-  cleanupOwnedProcessTree,
-  defaultProcessController,
-  terminateRetainedChild,
-} from "./durable-terminal-host.mjs";
+import { createTerminalJobSupervisor } from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
 const ttyd = join(repo, ".tools", "ttyd", "1.7.7", "ttyd.exe");
@@ -46,48 +40,7 @@ async function waitForUrl(url) {
   throw new Error(`Timed out waiting for ${url}`);
 }
 
-export async function waitForIdentity(
-  child,
-  processController,
-  { timeoutMs = 5000, wait = delay, now = () => Date.now() } = {},
-) {
-  let spawnError = null;
-  const observeSpawnError = (error) => {
-    spawnError = error;
-  };
-  child.once?.("error", observeSpawnError);
-  try {
-    return await captureSpawnedProcessIdentity(
-      child,
-      (pid, remainingMs) =>
-        processController.inspect(pid, remainingMs),
-      wait,
-      timeoutMs,
-      () => spawnError,
-      now,
-    );
-  } finally {
-    child.removeListener?.("error", observeSpawnError);
-  }
-}
-
-export async function cleanupOwnedTree(
-  rootIdentity,
-  processController,
-  { timeoutMs = 5000, wait = delay, now = () => Date.now() } = {},
-) {
-  await cleanupOwnedProcessTree(rootIdentity, processController, {
-    timeoutMs,
-    wait,
-    now,
-  });
-}
-
-export async function cleanupRuntimeResources(
-  { child, childIdentity, browser },
-  processController,
-  terminateChild = terminateRetainedChild,
-) {
+export async function cleanupRuntimeResources({ supervisor, browser }) {
   let browserError;
   let processError;
   try {
@@ -96,11 +49,7 @@ export async function cleanupRuntimeResources(
     browserError = error;
   }
   try {
-    if (childIdentity) {
-      await cleanupOwnedTree(childIdentity, processController);
-    } else if (child) {
-      await terminateChild(child);
-    }
+    if (supervisor) await supervisor.terminate(10_000);
   } catch (error) {
     processError = error;
   }
@@ -129,9 +78,7 @@ export async function runTtydRuntimeVerification() {
     "ttyd-runtime-verification",
     randomUUID(),
   );
-  const processController = defaultProcessController();
-  let child;
-  let childIdentity;
+  let supervisor;
   let browser;
 
   try {
@@ -154,9 +101,10 @@ export async function runTtydRuntimeVerification() {
       "ttyd child command exceeds the stock 1.7.7 Windows buffer",
     );
 
-    child = spawn(
-      ttyd,
-      [
+    supervisor = createTerminalJobSupervisor();
+    const ownership = await supervisor.start({
+      fileName: ttyd,
+      argumentsList: [
         "-p",
         String(port),
         "-i",
@@ -167,17 +115,12 @@ export async function runTtydRuntimeVerification() {
         fixture,
         ...shellArgs,
       ],
-      {
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, TREEMON_TERMINAL_WORKTREE: fixture },
+      workingDirectory: fixture,
+      environment: {
+        TREEMON_TERMINAL_WORKTREE: fixture,
       },
-    );
-    childIdentity = await waitForIdentity(child, processController);
-
-    let output = "";
-    child.stdout.on("data", (data) => (output += data.toString()));
-    child.stderr.on("data", (data) => (output += data.toString()));
+      timeoutMs: 10_000,
+    });
     await waitForUrl(`http://127.0.0.1:${port}/`);
 
     browser = await chromium.launch({ headless: true });
@@ -213,15 +156,12 @@ export async function runTtydRuntimeVerification() {
       text.includes(basename(fixture)),
       `Terminal cwd was not ${fixture}: ${text}`,
     );
-    assert(child.exitCode === null, `ttyd exited early with ${child.exitCode}: ${output}`);
-    console.log(`PASS: stock ttyd ${child.pid} accepted input in ${fixture}`);
+    assert(!supervisor.exited, "Terminal Job Object supervisor exited early");
+    console.log(`PASS: stock ttyd ${ownership.ttydPid} accepted input in ${fixture}`);
   } finally {
     let cleanupError;
     try {
-      await cleanupRuntimeResources(
-        { child, childIdentity, browser },
-        processController,
-      );
+      await cleanupRuntimeResources({ supervisor, browser });
     } catch (error) {
       cleanupError = error;
     }

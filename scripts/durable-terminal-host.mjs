@@ -20,6 +20,7 @@ import { pathToFileURL } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 
 export const hostProtocolVersion = 2;
+export const terminalOwnershipBoundary = "windows-job-v1";
 export const defaultReplayBytes = 1024 * 1024;
 export const defaultDiagnosticBytes = 1024 * 1024;
 
@@ -36,11 +37,14 @@ const gracefulProcessExitMs = 5000;
 const forcedProcessExitMs = 2000;
 const processForceCommandMs = 5000;
 const reservationLeaseMs = 5 * 60_000;
-const maximumOwnedProcesses = 1024;
 const unixEpochTicks = 621355968000000000n;
 const processIdentityHelperPath = join(
   import.meta.dirname,
   "terminate-owned-process.ps1",
+);
+const terminalJobSupervisorPath = join(
+  import.meta.dirname,
+  "terminal-job-supervisor.ps1",
 );
 
 const delay = (milliseconds) =>
@@ -157,6 +161,9 @@ export function publicDiagnosticSession(session) {
     id: session.id,
     state: session.state,
     order: session.order,
+    supervisorPid: session.supervisorPid ?? null,
+    supervisorStartTimeUtcTicks:
+      session.supervisorStartTimeUtcTicks ?? null,
     ttydPid: session.ttydPid ?? null,
     shellPid: session.shellPid ?? null,
     publicPort: session.publicPort ?? null,
@@ -519,6 +526,7 @@ const runBoundedProcess = (
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+
     const stdout = [];
     const stderr = [];
     let outputBytes = 0;
@@ -564,6 +572,260 @@ const runBoundedProcess = (
       }
     });
   });
+
+const supervisorRequestId = () => randomToken(12);
+
+export function jobSupervisorPolicyIsSafe(message) {
+  return (
+    message?.assignedBeforeResume === true &&
+    message?.killOnJobClose === true &&
+    message?.breakawayAllowed === false &&
+    message?.silentBreakawayAllowed === false
+  );
+}
+
+export function requireKernelTerminalOwnership(platform = process.platform) {
+  if (platform !== "win32") {
+    throw new Error(
+      `Kernel-enforced durable terminal ownership is unsupported on ${platform}`,
+    );
+  }
+}
+
+export class TerminalJobSupervisor {
+  constructor(child, token, requestTimeoutMs = processForceCommandMs) {
+    this.child = child;
+    this.token = token;
+    this.requestTimeoutMs = requestTimeoutMs;
+    this.pending = new Map();
+    this.exited = child.exitCode !== null || child.signalCode != null;
+    this.boundaryFailure = null;
+    this.exitPromise = new Promise((resolveExit) => {
+      this.resolveExit = resolveExit;
+    });
+    child.stderr?.resume();
+    this.lines = createInterface({ input: child.stdout });
+    this.lines.on("line", (line) => this.handleLine(line));
+    child.once("error", (error) => {
+      this.exited = true;
+      this.exitCode = null;
+      this.exitSignal = null;
+      this.resolveExit({ code: null, signal: null });
+      this.fail(error);
+    });
+    child.once("exit", (code, signal) => {
+      this.exited = true;
+      this.exitCode = code;
+      this.exitSignal = signal;
+      this.resolveExit({ code, signal });
+      this.fail(
+        new Error(
+          `Terminal Job Object supervisor exited with code ${code ?? "unknown"}`,
+        ),
+      );
+    });
+  }
+
+  handleLine(line) {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      this.fail(
+        new Error("Terminal Job Object supervisor returned invalid JSON"),
+      );
+      return;
+    }
+
+    if (message?.token !== this.token) {
+      this.fail(
+        new Error("Terminal Job Object supervisor authentication changed"),
+      );
+      return;
+    }
+
+    if (message.event === "boundary-failed") {
+      this.boundaryFailure =
+        sanitizeMetadataText(message.error, 240) ||
+        "Terminal Job Object boundary failed";
+      this.onBoundaryFailure?.(this.boundaryFailure);
+      return;
+    }
+
+    const pending = this.pending.get(message.requestId);
+    if (!pending) return;
+    this.pending.delete(message.requestId);
+    clearTimeout(pending.timeout);
+
+    if (
+      message.event === "request-failed" ||
+      message.event === "start-failed" ||
+      message.event === "terminate-failed"
+    ) {
+      pending.reject(
+        new Error(
+          sanitizeMetadataText(message.error, 240) ||
+            "Terminal Job Object supervisor request failed",
+        ),
+      );
+    } else {
+      pending.resolve(message);
+    }
+  }
+
+  fail(error) {
+    const pending = [...this.pending.values()];
+    this.pending.clear();
+    pending.forEach(({ reject, timeout }) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  }
+
+  request(command, payload = {}, timeoutMs = this.requestTimeoutMs) {
+    if (this.exited) {
+      return Promise.reject(
+        new Error("Terminal Job Object supervisor already exited"),
+      );
+    }
+
+    const requestId = supervisorRequestId();
+    return new Promise((resolveRequest, rejectRequest) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(requestId);
+        rejectRequest(
+          new Error(
+            `Timed out waiting for terminal Job Object supervisor ${command} acknowledgement`,
+          ),
+        );
+      }, timeoutMs);
+      this.pending.set(requestId, {
+        resolve: resolveRequest,
+        reject: rejectRequest,
+        timeout,
+      });
+
+      const body = JSON.stringify({
+        command,
+        token: this.token,
+        requestId,
+        ...payload,
+      });
+      const rejectWrite = (error) => {
+        if (!error) return;
+        const pending = this.pending.get(requestId);
+        if (!pending) return;
+        this.pending.delete(requestId);
+        clearTimeout(pending.timeout);
+        pending.reject(error);
+      };
+
+      try {
+        this.child.stdin.write(`${body}\n`, rejectWrite);
+      } catch (error) {
+        rejectWrite(error);
+      }
+    });
+  }
+
+  async start(options) {
+    const ready = await this.request(
+      "start",
+      {
+        fileName: options.fileName,
+        arguments: options.argumentsList,
+        workingDirectory: options.workingDirectory,
+        environment: options.environment,
+      },
+      options.timeoutMs,
+    );
+    if (
+      ready.event !== "ready" ||
+      !jobSupervisorPolicyIsSafe(ready) ||
+      !validPid(ready.ttydPid) ||
+      ready.supervisorPid !== this.child.pid ||
+      !/^\d+$/.test(ready.supervisorStartTimeUtcTicks ?? "")
+    ) {
+      throw new Error(
+        "Terminal Job Object supervisor did not prove assign-before-resume ownership",
+      );
+    }
+    return ready;
+  }
+
+  async contains(processId, timeoutMs = this.requestTimeoutMs) {
+    if (this.exited) return false;
+    const response = await this.request(
+      "contains",
+      { processId },
+      timeoutMs,
+    );
+    if (
+      response.event !== "contains" ||
+      response.processId !== processId ||
+      typeof response.member !== "boolean"
+    ) {
+      throw new Error(
+        "Terminal Job Object supervisor returned an invalid membership acknowledgement",
+      );
+    }
+    return response.member;
+  }
+
+  async terminate(timeoutMs) {
+    if (this.exited) return;
+
+    try {
+      const response = await this.request(
+        "terminate",
+        { timeoutMilliseconds: Math.max(1, Math.floor(timeoutMs)) },
+        timeoutMs,
+      );
+      if (response.event !== "terminated" || response.empty !== true) {
+        throw new Error(
+          "Terminal Job Object supervisor did not acknowledge an empty job",
+        );
+      }
+    } catch (error) {
+      if (this.exited) return;
+      throw error;
+    }
+
+    const exited = await Promise.race([
+      this.exitPromise.then(() => true),
+      delay(timeoutMs).then(() => false),
+    ]);
+    if (!exited && !this.exited) {
+      throw new Error(
+        "Timed out waiting for terminal Job Object supervisor to exit after empty acknowledgement",
+      );
+    }
+  }
+}
+
+export function createTerminalJobSupervisor({
+  spawnProcess = spawn,
+  supervisorPath = terminalJobSupervisorPath,
+  requestTimeoutMs = processForceCommandMs,
+} = {}) {
+  requireKernelTerminalOwnership();
+
+  const token = randomToken();
+  const child = spawnProcess(
+    "pwsh",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      supervisorPath,
+    ],
+    {
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  return new TerminalJobSupervisor(child, token, requestTimeoutMs);
+}
 
 const parseWindowsProcessIdentities = (output) =>
   output
@@ -642,9 +904,6 @@ const inspectWindowsProcess = async (pid, timeoutMs) => {
   return identities[0];
 };
 
-const childrenOfWindowsProcess = (identity, timeoutMs) =>
-  runWindowsProcessIdentityHelper("Children", identity, timeoutMs);
-
 const terminateWindowsProcess = async (identity, timeoutMs) =>
   (await runWindowsProcessIdentityHelper(
     "Terminate",
@@ -697,46 +956,8 @@ export function defaultProcessController() {
               `Durable terminal ownership inspection is unsupported on ${process.platform}`,
             );
           };
-  const children =
-    process.platform === "win32"
-      ? async (identity, timeoutMs = processForceCommandMs) =>
-          validPid(identity?.pid)
-            ? childrenOfWindowsProcess(identity, timeoutMs)
-            : null
-      : process.platform === "linux"
-        ? async (identity) => {
-            if (!validPid(identity?.pid)) return null;
-            const before = linuxProcessIdentity(identity.pid);
-            if (!sameProcessIdentity(before, identity)) return null;
-            try {
-              const children = readFileSync(
-                `/proc/${identity.pid}/task/${identity.pid}/children`,
-                "utf8",
-              )
-                .trim()
-                .split(/\s+/)
-                .filter(Boolean)
-                .map((value) => Number.parseInt(value, 10))
-                .filter(validPid)
-                .map(linuxProcessIdentity)
-                .filter(Boolean)
-                .filter((candidate) => candidate.parentPid === identity.pid);
-              const after = linuxProcessIdentity(identity.pid);
-              return sameProcessIdentity(after, identity) ? children : null;
-            } catch (error) {
-              if (error?.code === "ENOENT" || error?.code === "ESRCH") return null;
-              throw error;
-            }
-          }
-        : async () => {
-            throw new Error(
-              `Durable terminal descendant discovery is unsupported on ${process.platform}`,
-            );
-          };
-
   return {
     inspect,
-    children,
     terminate:
       process.platform === "win32"
         ? terminateWindowsProcess
@@ -809,322 +1030,6 @@ export async function terminateRetainedChild(
   }
 }
 
-const processIdentityKey = (identity) =>
-  `${identity.pid}:${identity.startIdentity}`;
-
-const ownedProcesses = (session) =>
-  session.ownedProcesses ?? new Map();
-
-const trackedOwnedProcessIds = (session) =>
-  [...ownedProcesses(session).values()].map(({ identity }) => identity.pid);
-
-const trackOwnedProcessIn = (processes, identity, depth) => {
-  const key = processIdentityKey(identity);
-  if (processes.has(key)) return false;
-  if (processes.size >= maximumOwnedProcesses) {
-    throw new Error("Owned terminal process set exceeded its safety bound");
-  }
-  processes.set(key, { identity, depth });
-  return true;
-};
-
-const trackOwnedProcess = (session, identity, depth) => {
-  session.ownedProcesses ??= new Map();
-  return trackOwnedProcessIn(session.ownedProcesses, identity, depth);
-};
-
-class CleanupDeadlineError extends Error {}
-
-const boundedBudget = (timeoutMs, now) => ({
-  deadline: now() + Math.max(0, timeoutMs),
-  now,
-});
-
-const budgetUntil = (deadline, now) => ({ deadline, now });
-
-const remainingCleanupTime = ({ deadline, now }) =>
-  Math.max(0, Math.floor(deadline - now()));
-
-const beforeCleanupDeadline = async (
-  budget,
-  description,
-  operation,
-) => {
-  const remainingMs = remainingCleanupTime(budget);
-  if (remainingMs <= 0) {
-    throw new CleanupDeadlineError(
-      `Durable terminal cleanup timed out before ${description}`,
-    );
-  }
-
-  try {
-    const result = await new Promise((resolveOperation, rejectOperation) => {
-      const timeout = setTimeout(
-        () =>
-          rejectOperation(
-            new CleanupDeadlineError(
-              `Durable terminal cleanup timed out during ${description}`,
-            ),
-          ),
-        remainingMs,
-      );
-      Promise.resolve()
-        .then(() => operation(remainingMs))
-        .then(
-          (value) => {
-            clearTimeout(timeout);
-            resolveOperation(value);
-          },
-          (error) => {
-            clearTimeout(timeout);
-            rejectOperation(error);
-          },
-        );
-    });
-    if (budget.now() > budget.deadline) {
-      throw new CleanupDeadlineError(
-        `Durable terminal cleanup timed out during ${description}`,
-      );
-    }
-    return result;
-  } catch (error) {
-    if (error instanceof CleanupDeadlineError) throw error;
-    if (budget.now() >= budget.deadline) {
-      throw new CleanupDeadlineError(
-        `Durable terminal cleanup timed out during ${description}`,
-        { cause: error },
-      );
-    }
-    throw error;
-  }
-};
-
-async function discoverOwnedDescendants(
-  processes,
-  processController,
-  budget,
-) {
-  const discover = async (pending, visited) => {
-    const [tracked, ...remaining] = pending;
-    if (!tracked) return;
-    const key = processIdentityKey(tracked.identity);
-    if (visited.has(key)) return discover(remaining, visited);
-
-    const children = await beforeCleanupDeadline(
-      budget,
-      `discovering descendants of PID ${tracked.identity.pid}`,
-      (remainingMs) =>
-        processController.children(tracked.identity, remainingMs),
-    );
-    if (children === null) {
-      processes.delete(key);
-      return discover(remaining, new Set([...visited, key]));
-    }
-
-    const captured = [];
-    for (const candidate of children) {
-      if (
-        validPid(candidate?.pid) &&
-        candidate.parentPid === tracked.identity.pid &&
-        typeof candidate.startIdentity === "string" &&
-        candidate.startIdentity.length > 0 &&
-        trackOwnedProcessIn(processes, candidate, tracked.depth + 1)
-      ) {
-        captured.push({ identity: candidate, depth: tracked.depth + 1 });
-      }
-    }
-
-    return discover(
-      [...remaining, ...captured],
-      new Set([...visited, key]),
-    );
-  };
-
-  await discover([...processes.values()], new Set());
-}
-
-const discoverSessionOwnedDescendants = (
-  session,
-  processController,
-  budget,
-) =>
-  discoverOwnedDescendants(
-    ownedProcesses(session),
-    processController,
-    budget,
-  );
-
-async function remainingOwnedProcesses(
-  processes,
-  processController,
-  budget,
-) {
-  const inspect = async (pending, remaining) => {
-    const [tracked, ...rest] = pending;
-    if (!tracked) return remaining;
-    const actual = await beforeCleanupDeadline(
-      budget,
-      `inspecting PID ${tracked.identity.pid}`,
-      (remainingMs) =>
-        processController.inspect(tracked.identity.pid, remainingMs),
-    );
-    if (sameProcessIdentity(tracked.identity, actual)) {
-      return inspect(rest, [...remaining, tracked]);
-    }
-
-    processes.delete(processIdentityKey(tracked.identity));
-    return inspect(rest, remaining);
-  };
-
-  return inspect([...processes.values()], []);
-}
-
-async function waitForOwnedProcessExit(
-  session,
-  processController,
-  cleanupBudget,
-  gracefulTimeoutMs,
-  wait,
-) {
-  const processes = ownedProcesses(session);
-  const gracefulBudget = budgetUntil(
-    Math.min(
-      cleanupBudget.deadline,
-      cleanupBudget.now() + gracefulTimeoutMs,
-    ),
-    cleanupBudget.now,
-  );
-
-  if (remainingCleanupTime(gracefulBudget) === 0) {
-    return [...processes.values()];
-  }
-
-  const check = async () => {
-    try {
-      await discoverSessionOwnedDescendants(
-        session,
-        processController,
-        gracefulBudget,
-      );
-      const remaining = await remainingOwnedProcesses(
-        processes,
-        processController,
-        gracefulBudget,
-      );
-      const remainingMs = remainingCleanupTime(gracefulBudget);
-      if (remaining.length === 0 || remainingMs === 0) return remaining;
-      await wait(Math.min(50, remainingMs));
-      return check();
-    } catch (error) {
-      if (error instanceof CleanupDeadlineError) {
-        return [...processes.values()];
-      }
-      throw error;
-    }
-  };
-
-  return check();
-}
-
-async function forceOwnedProcessExit(
-  session,
-  processController,
-  budget,
-  wait,
-) {
-  const processes = ownedProcesses(session);
-  const timeout = (cause) =>
-    new Error("Durable terminal forced cleanup timed out", { cause });
-
-  const terminateTracked = async (pending, description) => {
-    const [tracked, ...remaining] = pending;
-    if (!tracked) return;
-    await beforeCleanupDeadline(
-      budget,
-      `${description} PID ${tracked.identity.pid}`,
-      (remainingMs) =>
-        processController.terminate(tracked.identity, remainingMs),
-    );
-    processes.delete(processIdentityKey(tracked.identity));
-    return terminateTracked(remaining, description);
-  };
-  const force = async () => {
-    await discoverSessionOwnedDescendants(
-      session,
-      processController,
-      budget,
-    );
-    if (processes.size === 0) return [];
-
-    const minimumDepth = Math.min(
-      ...[...processes.values()].map(({ depth }) => depth),
-    );
-    const boundaries = [...processes.values()]
-      .filter(({ depth }) => depth === minimumDepth)
-      .sort((left, right) => left.depth - right.depth);
-    await terminateTracked(
-      boundaries,
-      "terminating process tree rooted at",
-    );
-
-    const survivors = await remainingOwnedProcesses(
-      processes,
-      processController,
-      budget,
-    );
-    if (survivors.length === 0) return [];
-    await terminateTracked(
-      survivors.sort((left, right) => left.depth - right.depth),
-      "terminating surviving",
-    );
-
-    if (processes.size === 0) return [];
-    const remainingMs = remainingCleanupTime(budget);
-    if (remainingMs === 0) throw timeout();
-    await wait(Math.min(50, remainingMs));
-    return force();
-  };
-
-  try {
-    return await force();
-  } catch (error) {
-    if (
-      error instanceof CleanupDeadlineError ||
-      /timed out/i.test(error?.message ?? "")
-    ) {
-      throw timeout(error);
-    }
-    throw error;
-  }
-}
-
-export async function cleanupOwnedProcessTree(
-  rootIdentity,
-  processController,
-  {
-    timeoutMs = processForceCommandMs,
-    wait = delay,
-    now = () => Date.now(),
-  } = {},
-) {
-  const session = {
-    ownedProcesses: new Map([
-      [
-        processIdentityKey(rootIdentity),
-        { identity: rootIdentity, depth: 0 },
-      ],
-    ]),
-  };
-
-  const budget = boundedBudget(timeoutMs, now);
-  await forceOwnedProcessExit(
-    session,
-    processController,
-    budget,
-    wait,
-  );
-}
-
 export class DurableTerminalHost {
   constructor(options) {
     this.options = options;
@@ -1146,8 +1051,8 @@ export class DurableTerminalHost {
     this.inFlightStarts = new Set();
     this.keyOperations = new Map();
     this.reservations = new Map();
-    this.processController =
-      options.processController ?? defaultProcessController();
+    this.supervisorFactory =
+      options.supervisorFactory ?? (() => createTerminalJobSupervisor());
     this.wait = options.wait ?? delay;
     this.now = options.now ?? (() => Date.now());
     this.reservationLeaseMs =
@@ -1195,6 +1100,10 @@ export class DurableTerminalHost {
       pid: process.pid,
       processStartTicks: this.processStartTicks,
       processStartExact: Boolean(this.options.generation),
+      ownershipBoundary:
+        process.platform === "win32"
+          ? terminalOwnershipBoundary
+          : "unsupported",
       controlPort: this.controlPort,
       controlToken: this.controlToken,
       startedAt: this.startedAt,
@@ -1258,6 +1167,9 @@ export class DurableTerminalHost {
             : null,
         error: session.error ?? null,
         order: session.order,
+        supervisorPid: session.supervisorPid ?? null,
+        supervisorStartTimeUtcTicks:
+          session.supervisorStartTimeUtcTicks ?? null,
         ttydPid: session.ttydPid ?? null,
         shellPid: session.shellPid ?? null,
         upstreamOpenedAt: session.upstreamOpenedAt ?? null,
@@ -1339,6 +1251,10 @@ export class DurableTerminalHost {
         pid: process.pid,
         processStartTicks: this.processStartTicks,
         processStartExact: Boolean(this.options.generation),
+        ownershipBoundary:
+          process.platform === "win32"
+            ? terminalOwnershipBoundary
+            : "unsupported",
         startedAt: this.startedAt,
       });
       return;
@@ -1594,8 +1510,10 @@ export class DurableTerminalHost {
       closing: false,
       failureRecorded: false,
       resourcesStopped: false,
-      ownedProcesses: new Map(),
-      unverifiedSpawnedPids: [],
+      jobSupervisor: null,
+      supervisorProcess: null,
+      supervisorPid: null,
+      supervisorStartTimeUtcTicks: null,
       shellPid: null,
       ttydPid: null,
       upstreamOpenedAt: null,
@@ -1677,8 +1595,8 @@ export class DurableTerminalHost {
       if (cleanupError) {
         session.error = `Terminal startup failed and owned process cleanup did not complete: ${sanitizeMetadataText(cleanupError.message, 240)}`;
         this.record("session-start-cleanup-failed", session, {
-          trackedPids: trackedOwnedProcessIds(session),
-          unverifiedPids: session.unverifiedSpawnedPids,
+          supervisorPid: session.supervisorPid,
+          ttydPid: session.ttydPid,
         });
       }
       this.persistStatus();
@@ -1697,8 +1615,12 @@ export class DurableTerminalHost {
     if (session.failureRecorded) {
       return session.error ?? "Terminal startup was interrupted";
     }
-    if (!session.ttydProcess || spawnedProcessExited(session.ttydProcess)) {
-      return "ttyd exited before terminal startup completed";
+    if (
+      !session.jobSupervisor ||
+      !session.supervisorProcess ||
+      session.jobSupervisor.exited
+    ) {
+      return "Terminal Job Object supervisor exited before startup completed";
     }
     if (!validPid(session.shellPid)) {
       return "PowerShell process identity was not ready";
@@ -1721,11 +1643,12 @@ export class DurableTerminalHost {
     if (
       message.includes("Timed out") ||
       message.includes("ttyd exited with code") ||
-      message.includes("exited during identity capture") ||
+      message.includes("Job Object") ||
+      message.includes("Kernel-enforced") ||
       message.includes("startup was interrupted") ||
       [
         "Terminal session ownership changed during startup",
-        "ttyd exited before terminal startup completed",
+        "Terminal Job Object supervisor exited before startup completed",
         "PowerShell process identity was not ready",
         "ttyd WebSocket was not open when terminal startup completed",
         "Terminal public server stopped listening during startup",
@@ -1824,69 +1747,57 @@ export class DurableTerminalHost {
     ];
     const spawnFailure = { error: null };
 
-    session.ttydProcess = spawn(this.options.ttydPath, ttydArguments, {
-      windowsHide: true,
-      detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        TMTP: session.pidFile,
-        TMTW: session.worktreePath,
-        TREEMON_TERMINAL_WORKTREE: session.worktreePath,
-        TREEMON_TERMINAL_SESSION_ID: session.id,
-      },
-    });
-    session.ttydPid = session.ttydProcess.pid ?? null;
-    session.ttydProcess.once("error", (error) => {
+    session.jobSupervisor = this.supervisorFactory();
+    session.supervisorProcess = session.jobSupervisor.child;
+    session.supervisorProcess.once("error", (error) => {
       spawnFailure.error = error;
     });
-    session.ttydProcess.once("exit", (code, signal) => {
-      this.record("ttyd-exited", session, {
+    session.supervisorProcess.once("exit", (code, signal) => {
+      if (!spawnFailure.error && code !== 0) {
+        spawnFailure.error = new Error(
+          `Terminal Job Object supervisor exited with code ${code ?? "unknown"}`,
+        );
+      }
+      this.record("terminal-supervisor-exited", session, {
+        supervisorPid: session.supervisorPid,
         ttydPid: session.ttydPid,
         exitCode: code,
         signal: sanitizeMetadataText(signal, 32),
       });
       if (!session.closing) {
-        void this.interruptSession(session, `ttyd exited with code ${code ?? "unknown"}`);
+        void this.interruptSession(
+          session,
+          `Terminal Job Object supervisor exited with code ${code ?? "unknown"}`,
+        );
       }
     });
-    let ttydIdentity;
-    try {
-      ttydIdentity = await captureSpawnedProcessIdentity(
-        session.ttydProcess,
-        (pid, timeoutMs) =>
-          this.processController.inspect(pid, timeoutMs),
-        this.wait,
-        2000,
-        () => spawnFailure.error,
-        this.now,
-      );
-    } catch (error) {
-      if (
-        validPid(session.ttydPid) &&
-        !spawnedProcessExited(session.ttydProcess)
-      ) {
-        session.unverifiedSpawnedPids = [session.ttydPid];
-      }
-      throw error;
-    }
-    trackOwnedProcess(session, ttydIdentity, 0);
-
-    [session.ttydProcess.stdout, session.ttydProcess.stderr].forEach((stream) => {
-      const lines = createInterface({ input: stream });
-      lines.on("line", (line) => {
-        const match = /started process, pid:\s*(\d+)/i.exec(line);
-        if (!match) return;
-        const shellPid = Number.parseInt(match[1], 10);
-        if (session.shellPid === shellPid) return;
-        session.shellPid = shellPid;
-        this.persistStatus();
-        this.record("shell-discovered", session, { shellPid: session.shellPid });
-      });
+    session.jobSupervisor.onBoundaryFailure = (error) => {
+      if (!session.closing) void this.interruptSession(session, error);
+    };
+    const ownership = await session.jobSupervisor.start({
+      fileName: this.options.ttydPath,
+      argumentsList: ttydArguments,
+      workingDirectory: session.worktreePath,
+      environment: {
+        TMTP: session.pidFile,
+        TMTW: session.worktreePath,
+        TREEMON_TERMINAL_WORKTREE: session.worktreePath,
+        TREEMON_TERMINAL_SESSION_ID: session.id,
+      },
+      timeoutMs: 10_000,
     });
+    session.ttydPid = ownership.ttydPid;
+    session.supervisorPid = ownership.supervisorPid;
+    session.supervisorStartTimeUtcTicks =
+      ownership.supervisorStartTimeUtcTicks;
 
     const ttydHttp = `http://127.0.0.1:${session.ttydPort}/`;
-    await waitForTtyd(ttydHttp, session.ttydProcess, spawnFailure, 10_000);
+    await waitForTtyd(
+      ttydHttp,
+      session.supervisorProcess,
+      spawnFailure,
+      10_000,
+    );
     session.upstream = await openUpstream(
       `ws://127.0.0.1:${session.ttydPort}/ws`,
       ttydHttp.slice(0, -1),
@@ -1913,40 +1824,30 @@ export class DurableTerminalHost {
   }
 
   async waitForShellPid(session) {
-    const budget = boundedBudget(5000, this.now);
+    const deadline = this.now() + 5000;
 
     const read = async () => {
-      if (session.ttydProcess.exitCode !== null) {
-        throw new Error(`ttyd exited with code ${session.ttydProcess.exitCode}`);
+      if (session.jobSupervisor?.exited) {
+        throw new Error(
+          `Terminal Job Object supervisor exited with code ${session.jobSupervisor.exitCode ?? "unknown"}`,
+        );
       }
 
       if (existsSync(session.pidFile)) {
         const pid = Number.parseInt(readFileSync(session.pidFile, "utf8").trim(), 10);
-        if (validPid(pid)) {
-          try {
-            await discoverSessionOwnedDescendants(
-              session,
-              this.processController,
-              budget,
-            );
-          } catch (error) {
-            if (error instanceof CleanupDeadlineError) {
-              throw new Error(
-                "Timed out waiting for PowerShell process identity",
-                { cause: error },
-              );
-            }
-            throw error;
-          }
-          const owned = [...ownedProcesses(session).values()].find(
-            ({ identity }) => identity.pid === pid,
-          );
-          if (owned) return pid;
+        if (
+          validPid(pid) &&
+          (await session.jobSupervisor.contains(
+            pid,
+            Math.max(1, deadline - this.now()),
+          ))
+        ) {
+          return pid;
         }
       }
 
-      const remainingMs = remainingCleanupTime(budget);
-      if (remainingMs === 0) {
+      const remainingMs = deadline - this.now();
+      if (remainingMs <= 0) {
         throw new Error("Timed out waiting for PowerShell process identity");
       }
 
@@ -2188,8 +2089,8 @@ export class DurableTerminalHost {
       if (cleanupError) {
         session.error = `Terminal interruption cleanup did not complete: ${sanitizeMetadataText(cleanupError.message, 240)}`;
         this.record("session-interrupt-cleanup-failed", session, {
-          trackedPids: trackedOwnedProcessIds(session),
-          unverifiedPids: session.unverifiedSpawnedPids,
+          supervisorPid: session.supervisorPid,
+          ttydPid: session.ttydPid,
         });
         this.persistStatus();
       }
@@ -2239,8 +2140,8 @@ export class DurableTerminalHost {
       session.error = `Terminal cleanup did not complete: ${sanitizeMetadataText(error.message, 240)}`;
       this.persistStatus();
       this.record("session-close-failed", session, {
-        trackedPids: trackedOwnedProcessIds(session),
-        unverifiedPids: session.unverifiedSpawnedPids,
+        supervisorPid: session.supervisorPid,
+        ttydPid: session.ttydPid,
       });
       throw new Error(session.error);
     }
@@ -2252,31 +2153,13 @@ export class DurableTerminalHost {
       session.upstream.readyState !== WebSocket.CLOSED
         ? 2000
         : 0;
-    const cleanupBudget = boundedBudget(
+    const cleanupDeadline =
+      this.now() +
       upstreamCloseAllowance +
-        this.cleanupTimeouts.graceful +
-        this.cleanupTimeouts.forced,
-      this.now,
-    );
-
-    try {
-      await discoverSessionOwnedDescendants(
-        session,
-        this.processController,
-        cleanupBudget,
-      );
-    } catch (error) {
-      if (error instanceof CleanupDeadlineError) {
-        throw new Error(
-          "Initial terminal descendant ownership capture timed out",
-          { cause: error },
-        );
-      }
-      throw new Error(
-        `Initial terminal descendant ownership capture failed: ${error.message}`,
-        { cause: error },
-      );
-    }
+      this.cleanupTimeouts.graceful +
+      this.cleanupTimeouts.forced;
+    const remaining = () =>
+      Math.max(0, Math.floor(cleanupDeadline - this.now()));
 
     const attachment = session.attachment;
     session.attachment = null;
@@ -2286,66 +2169,30 @@ export class DurableTerminalHost {
       session.upstream &&
       session.upstream.readyState !== WebSocket.CLOSED
     ) {
-      await beforeCleanupDeadline(
-        cleanupBudget,
-        "closing terminal upstream",
-        async (remainingMs) => {
-          session.upstream.close(1000, "Terminal session closed");
-          const closed = await Promise.race([
-            once(session.upstream, "close").then(() => true),
-            this.wait(Math.min(2000, remainingMs)).then(() => false),
-          ]);
-          if (!closed) session.upstream.terminate();
-        },
-      );
+      session.upstream.close(1000, "Terminal session closed");
+      const closed = await Promise.race([
+        once(session.upstream, "close").then(() => true),
+        this.wait(Math.min(2000, remaining())).then(() => false),
+      ]);
+      if (!closed) session.upstream.terminate();
     }
 
-    if (
-      session.unverifiedSpawnedPids?.includes(session.ttydPid) &&
-      session.ttydProcess
-    ) {
-      await beforeCleanupDeadline(
-        cleanupBudget,
-        `terminating retained process PID ${session.ttydPid}`,
-        (remainingMs) =>
-          terminateRetainedChild(
-            session.ttydProcess,
-            remainingMs,
-          ),
-      );
-      session.unverifiedSpawnedPids =
-        session.unverifiedSpawnedPids.filter(
-          (pid) => pid !== session.ttydPid,
+    if (session.jobSupervisor) {
+      const timeoutMs = remaining();
+      if (timeoutMs <= 0) {
+        throw new Error(
+          "Timed out before requesting terminal Job Object termination",
         );
+      }
+      await session.jobSupervisor.terminate(timeoutMs);
+    } else if (validPid(session.ttydPid) || validPid(session.shellPid)) {
+      throw new Error(
+        "Terminal process ownership has no Job Object supervisor acknowledgement",
+      );
     }
 
-    let remaining = await waitForOwnedProcessExit(
-      session,
-      this.processController,
-      cleanupBudget,
-      this.cleanupTimeouts.graceful,
-      this.wait,
-    );
-
-    remaining = await forceOwnedProcessExit(
-      session,
-      this.processController,
-      cleanupBudget,
-      this.wait,
-    );
-    const unverifiedRemaining = session.unverifiedSpawnedPids ?? [];
     await closeServer(session.publicServer);
     session.browserWebSockets?.close();
-
-    if (remaining.length > 0 || unverifiedRemaining.length > 0) {
-      const remainingPids = [
-        ...remaining.map(({ identity }) => identity.pid),
-        ...unverifiedRemaining,
-      ];
-      throw new Error(
-        `Owned terminal processes remain: ${remainingPids.join(", ")}`,
-      );
-    }
 
     if (session.pidFile) rmSync(session.pidFile, { force: true });
   }
@@ -2518,6 +2365,7 @@ function parseArguments(argumentsList) {
 }
 
 export async function runHost(argumentsList = process.argv.slice(2)) {
+  requireKernelTerminalOwnership();
   const host = new DurableTerminalHost(parseArguments(argumentsList));
   await host.start();
   return host;

@@ -196,6 +196,11 @@ const behavior = () =>
     ? JSON.parse(readFileSync(behaviorPath, "utf8"))
     : {};
 
+const ownershipBoundary = () =>
+  behavior().omitOwnershipBoundary
+    ? {}
+    : { ownershipBoundary: "windows-job-v1" };
+
 const manifestVersion = behavior().protocolVersion ?? 2;
 
 function appendSession(worktreePath) {
@@ -211,6 +216,9 @@ function appendSession(worktreePath) {
       endpoint: `http://127.0.0.1:${42000 + nextOrder}/?cap=fake`,
       error: null,
       order: nextOrder++,
+      supervisorPid: behavior().supervisorPid ?? process.pid,
+      supervisorStartTimeUtcTicks:
+        behavior().supervisorStartTimeUtcTicks ?? processStartTicks,
     },
   ];
 }
@@ -266,13 +274,19 @@ const server = createServer(async (request, response) => {
     const current = behavior();
     const identity =
       manifestVersion === 1
-        ? { version: 1, pid: process.pid, startedAt }
+        ? {
+            version: 1,
+            pid: process.pid,
+            ...ownershipBoundary(),
+            startedAt,
+          }
         : {
             version: 2,
             generation,
             pid: process.pid,
             processStartTicks,
             processStartExact: true,
+            ...ownershipBoundary(),
             startedAt,
           };
     send(response, current.healthStatus ?? 200, identity);
@@ -401,6 +415,11 @@ server.listen(0, "127.0.0.1", async () => {
   const { port } = server.address();
   const claim = await startupClaim();
   processStartTicks = claim.hostProcessStartTicks;
+  sessions = sessions.map((session) => ({
+    ...session,
+    supervisorStartTimeUtcTicks:
+      behavior().supervisorStartTimeUtcTicks ?? processStartTicks,
+  }));
   if (existsSync(statePath)) process.exit(3);
   appendFileSync(launchesPath, `${process.pid}\n`);
   const manifest =
@@ -408,6 +427,7 @@ server.listen(0, "127.0.0.1", async () => {
       ? {
           version: 1,
           pid: process.pid,
+          ...ownershipBoundary(),
           controlPort: port,
           controlToken: token,
           startedAt,
@@ -418,6 +438,7 @@ server.listen(0, "127.0.0.1", async () => {
           pid: process.pid,
           processStartTicks,
           processStartExact: true,
+          ...ownershipBoundary(),
           controlPort: port,
           controlToken: token,
           startedAt,
@@ -468,11 +489,9 @@ let private writeBehavior stateDirectory (json: string) =
         json
     )
 
-let private crashFakeHost stateDirectory =
+let private crashFakeHostManifest (manifest: string) =
     use document =
-        Path.Combine(stateDirectory, "host.json")
-        |> File.ReadAllText
-        |> JsonDocument.Parse
+        manifest |> JsonDocument.Parse
 
     let root = document.RootElement
     let port = root.GetProperty("controlPort").GetInt32()
@@ -489,6 +508,11 @@ let private crashFakeHost stateDirectory =
 
     use response = client.Send request
     response.EnsureSuccessStatusCode() |> ignore
+
+let private crashFakeHost stateDirectory =
+    Path.Combine(stateDirectory, "host.json")
+    |> File.ReadAllText
+    |> crashFakeHostManifest
 
 let private withFakeHostConfig configure test =
     Tests.TestUtils.withTempDir "durable-terminal-host" (fun tempDir ->
@@ -539,6 +563,77 @@ type EmbeddedTerminalTests() =
 
             let failed = start manager worktree
             Assert.That(errorFor worktree failed, Does.Contain(@".\treemon.ps1 setup-ttyd")))
+
+    [<Test>]
+    member _.``host without Job Object capability cannot start or authorize mutation``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            writeBehavior
+                stateDirectory
+                (JsonSerializer.Serialize(
+                    {| omitOwnershipBoundary = true
+                       initialWorktreePaths =
+                        [| worktreePath |] |}
+                ))
+
+            let failed = start manager worktree
+            let oldPid = readHostPid stateDirectory
+            let listed =
+                EmbeddedTerminal.get manager |> run
+
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let reserved =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () ->
+                        async {
+                            mutationEntered.TrySetResult(())
+                            |> ignore
+
+                            return Ok ()
+                        })
+                |> run
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    errorFor worktree failed,
+                    Does.Contain("Job Object ownership")
+                        .IgnoreCase
+                )
+                Assert.That(
+                    endpointFor worktree listed,
+                    Is.Not.Empty
+                )
+
+                match reserved with
+                | Ok () ->
+                    Assert.Fail(
+                        "A host without kernel ownership must not authorize mutation"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("Job Object ownership")
+                            .IgnoreCase
+                    )
+
+                Assert.That(
+                    mutationEntered.Task.IsCompleted,
+                    Is.False
+                ))
+
+            crashFakeHost stateDirectory
+            waitUntil "unsupported host to exit" (fun () ->
+                processIsAlive oldPid |> not))
 
     [<Test>]
     member _.``API rejects an unknown worktree before starting the host``() =
@@ -1090,19 +1185,31 @@ type EmbeddedTerminalTests() =
                         TimeSpan.FromMilliseconds 10.0 })
             (fun tempDir stateDirectory _ manager ->
                 let worktreePath = Path.Combine(tempDir, "worktree")
-                Directory.CreateDirectory worktreePath |> ignore
+                let unrelatedPath =
+                    Path.Combine(tempDir, "unrelated")
+
+                [ worktreePath; unrelatedPath ]
+                |> List.iter (Directory.CreateDirectory >> ignore)
+
                 let worktree = canonical worktreePath
+                let unrelated = canonical unrelatedPath
                 start manager worktree |> ignore
+                let releaseGate =
+                    Path.Combine(tempDir, "renewal-release-gate")
+
                 writeBehavior
                     stateDirectory
-                    """{"renewStatus":500}"""
+                    (JsonSerializer.Serialize(
+                        {| renewStatus = 500
+                           releaseGatePath = releaseGate |}
+                    ))
 
                 let mutationEntered =
                     TaskCompletionSource<unit>(
                         TaskCreationOptions.RunContinuationsAsynchronously
                     )
 
-                let releaseMutation =
+                let cancellationObserved =
                     TaskCompletionSource<unit>(
                         TaskCreationOptions.RunContinuationsAsynchronously
                     )
@@ -1114,8 +1221,19 @@ type EmbeddedTerminalTests() =
                         (fun () ->
                             async {
                                 mutationEntered.SetResult(())
+                                let! cancellation =
+                                    Async.CancellationToken
+
+                                use _registration =
+                                    cancellation.Register(fun () ->
+                                        cancellationObserved.TrySetResult(())
+                                        |> ignore)
+
                                 do!
-                                    releaseMutation.Task
+                                    Task.Delay(
+                                        Timeout.Infinite,
+                                        cancellation
+                                    )
                                     |> Async.AwaitTask
 
                                 return Ok ()
@@ -1123,6 +1241,10 @@ type EmbeddedTerminalTests() =
                     |> Async.StartAsTask
 
                 mutationEntered.Task.GetAwaiter().GetResult()
+
+                let sameKeyStart =
+                    EmbeddedTerminal.start manager worktree
+                    |> Async.StartAsTask
 
                 try
                     waitUntil
@@ -1134,16 +1256,42 @@ type EmbeddedTerminalTests() =
                             )
                             |> File.Exists)
 
-                    Assert.That(
-                        canAcquireWorktreeLock
-                            stateDirectory
-                            worktree,
-                        Is.False
-                    )
+                    awaitWithin
+                        "mutation cancellation observation"
+                        cancellationObserved.Task
+                    |> ignore
+
+                    waitUntil
+                        "cancellation-safe reservation release attempt"
+                        (fun () ->
+                            Path.Combine(
+                                stateDirectory,
+                                "reservation-releases.txt"
+                            )
+                            |> File.Exists)
+
+                    let unrelatedStarted =
+                        start manager unrelated
+
+                    Assert.Multiple(fun () ->
+                        Assert.That(reserved.IsCompleted, Is.False)
+                        Assert.That(sameKeyStart.IsCompleted, Is.False)
+                        Assert.That(
+                            canAcquireWorktreeLock
+                                stateDirectory
+                                worktree,
+                            Is.False
+                        )
+                        Assert.That(
+                            endpointFor unrelated unrelatedStarted,
+                            Is.Not.Empty
+                        ))
                 finally
-                    releaseMutation.TrySetResult(()) |> ignore
+                    File.WriteAllText(releaseGate, "")
 
                 let result = reserved.GetAwaiter().GetResult()
+                let restarted =
+                    sameKeyStart.GetAwaiter().GetResult()
 
                 Assert.Multiple(fun () ->
                     match result with
@@ -1165,12 +1313,78 @@ type EmbeddedTerminalTests() =
                         Is.EqualTo(1)
                     )
 
+                    match restarted with
+                    | Error error -> Assert.Fail(error)
+                    | Ok snapshot ->
+                        Assert.That(
+                            endpointFor worktree snapshot,
+                            Is.Not.Empty
+                        )
+
                     Assert.That(
                         canAcquireWorktreeLock
                             stateDirectory
                             worktree,
                         Is.True
                     )))
+
+    [<Test>]
+    member _.``renewal failure remains primary when reservation release also fails``() =
+        withFakeHostConfig
+            (fun hostConfig ->
+                { hostConfig with
+                    ReservationRenewalInterval =
+                        TimeSpan.FromMilliseconds 10.0 })
+            (fun tempDir stateDirectory _ manager ->
+                let worktreePath =
+                    Path.Combine(tempDir, "worktree")
+
+                Directory.CreateDirectory worktreePath |> ignore
+                let worktree = canonical worktreePath
+                start manager worktree |> ignore
+                writeBehavior
+                    stateDirectory
+                    """{"renewStatus":500,"releaseStatus":500}"""
+
+                let result =
+                    EmbeddedTerminal.withReservedCleanup
+                        manager
+                        worktree
+                        (fun () ->
+                            async {
+                                let! cancellation =
+                                    Async.CancellationToken
+
+                                do!
+                                    Task.Delay(
+                                        Timeout.Infinite,
+                                        cancellation
+                                    )
+                                    |> Async.AwaitTask
+
+                                return Ok ()
+                            })
+                    |> run
+
+                match result with
+                | Ok () ->
+                    Assert.Fail(
+                        "Renewal and release failures should be surfaced"
+                    )
+                | Error error ->
+                    Assert.Multiple(fun () ->
+                        Assert.That(
+                            error,
+                            Does.StartWith(
+                                "Durable terminal cleanup reservation renewal failed"
+                            )
+                        )
+                        Assert.That(
+                            error,
+                            Does.Contain(
+                                "reservation release failed"
+                            ).IgnoreCase
+                        )))
 
     [<Test>]
     member _.``caller cancellation still releases reservation and worktree lock``() =
@@ -1425,7 +1639,7 @@ type EmbeddedTerminalTests() =
                 )))
 
     [<Test>]
-    member _.``live protocol-one host remains discoverable reusable and closable``() =
+    member _.``capability-bearing protocol-one host remains discoverable reusable and closable``() =
         withFakeHost (fun tempDir stateDirectory _ manager ->
             let worktreePath = Path.Combine(tempDir, "legacy-worktree")
             Directory.CreateDirectory worktreePath |> ignore
@@ -1528,7 +1742,7 @@ type EmbeddedTerminalTests() =
                     )))
 
     [<Test>]
-    member _.``strict legacy cleanup drains the host while mutation is reserved``() =
+    member _.``capability-bearing legacy cleanup drains the host while mutation is reserved``() =
         withFakeHost (fun tempDir stateDirectory _ manager ->
             let paths =
                 [ "legacy-a"; "legacy-b" ]
@@ -1581,7 +1795,7 @@ type EmbeddedTerminalTests() =
 
     [<TestCase("delete")>]
     [<TestCase("archive")>]
-    member _.``valid replacement wins legacy drain before strict worktree mutation``(
+    member _.``valid replacement wins capability-bearing legacy drain before strict mutation``(
         mutation
     ) =
         withFakeHost (fun tempDir stateDirectory hostConfig manager ->
@@ -1733,6 +1947,296 @@ type EmbeddedTerminalTests() =
                     Assert.That(
                         tryFindTab target replacementAfter,
                         Is.EqualTo(None)
+                    ))
+            finally
+                EmbeddedTerminal.shutdownHost replacementManager
+                |> run
+                |> ignore)
+
+    [<Test>]
+    member _.``replacement generation preserves old tabs until each key is explicitly resolved``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let paths =
+                [ "alpha"; "beta"; "delete-target"; "archive-target" ]
+                |> List.map (fun name ->
+                    let path = Path.Combine(tempDir, name)
+                    Directory.CreateDirectory path |> ignore
+                    canonical path)
+
+            paths |> List.iter (start manager >> ignore)
+            let oldManifestPath =
+                Path.Combine(stateDirectory, "host.json")
+
+            let oldManifest =
+                File.ReadAllText oldManifestPath
+
+            let oldPid = readHostPid stateDirectory
+            let replacementStateDirectory =
+                Path.Combine(tempDir, "replacement-state")
+
+            let replacementManager =
+                EmbeddedTerminal.createWithConfig
+                    { hostConfig with
+                        HostStateDirectory =
+                            replacementStateDirectory }
+
+            try
+                start replacementManager paths[0] |> ignore
+                let replacementManifest =
+                    Path.Combine(
+                        replacementStateDirectory,
+                        "host.json"
+                    )
+                    |> File.ReadAllText
+
+                File.WriteAllText(
+                    oldManifestPath,
+                    replacementManifest
+                )
+
+                let polled =
+                    EmbeddedTerminal.get manager |> run
+
+                let blockedMutation =
+                    TaskCompletionSource<unit>(
+                        TaskCreationOptions.RunContinuationsAsynchronously
+                    )
+
+                let blocked =
+                    EmbeddedTerminal.withReservedCleanup
+                        manager
+                        paths[2]
+                        (fun () ->
+                            async {
+                                blockedMutation.TrySetResult(())
+                                |> ignore
+
+                                return Ok ()
+                            })
+                    |> run
+
+                let dismissed =
+                    EmbeddedTerminal.close manager paths[1]
+                    |> run
+
+                crashFakeHostManifest oldManifest
+                waitUntil "prior generation to exit" (fun () ->
+                    processIsAlive oldPid |> not)
+
+                let restarted = start manager paths[0]
+                let agent = SchedulerState.createAgent ()
+                let repoId =
+                    PathUtils.toRepoId (Path.GetFullPath tempDir)
+
+                let worktrees: WorktreeInfo list =
+                    [ { Path = Path.Combine(tempDir, "main")
+                        Head = "main-head"
+                        Branch = Some "main" }
+                      { Path = WorktreePath.value paths[2]
+                        Head = "delete-head"
+                        Branch = Some "delete-branch" }
+                      { Path = WorktreePath.value paths[3]
+                        Head = "archive-head"
+                        Branch = Some "archive-branch" } ]
+
+                agent.Post(
+                    SchedulerState.StateMsg.UpdateWorktreeList(
+                        repoId,
+                        worktrees
+                    )
+                )
+
+                agent.PostAndAsyncReply(
+                    SchedulerState.StateMsg.GetState
+                )
+                |> run
+                |> ignore
+
+                let rootPaths =
+                    Map.ofList [ repoId, tempDir ]
+
+                let deleted =
+                    WorktreeApi.deleteWorktreeWith
+                        (fun _ _ _ -> async.Return(Ok()))
+                        (EmbeddedTerminal.withReservedCleanup manager)
+                        (fun _ -> async.Return())
+                        agent
+                        rootPaths
+                        paths[2]
+                    |> run
+
+                let archived =
+                    WorktreeApi.updateArchivedBranchesWith
+                        agent
+                        rootPaths
+                        (EmbeddedTerminal.withReservedCleanup manager)
+                        Set.add
+                        paths[3]
+                    |> run
+
+                let after =
+                    EmbeddedTerminal.get manager |> run
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        polled.Tabs
+                        |> List.filter (fun tab ->
+                            match tab.Lifecycle with
+                            | EmbeddedTerminalLifecycle.Interrupted _ ->
+                                true
+                            | _ -> false)
+                        |> List.length,
+                        Is.EqualTo(paths.Length)
+                    )
+
+                    Assert.That(
+                        interruptedErrorFor paths[0] polled,
+                        Does.Contain("generation changed").IgnoreCase
+                    )
+
+                    match blocked with
+                    | Ok () ->
+                        Assert.Fail(
+                            "Replacement registry absence must not authorize cleanup while the prior host is alive"
+                        )
+                    | Error error ->
+                        Assert.That(
+                            error,
+                            Does.Contain("prior durable host generation")
+                                .IgnoreCase
+                        )
+
+                    Assert.That(
+                        blockedMutation.Task.IsCompleted,
+                        Is.False
+                    )
+                    Assert.That(
+                        tryFindTab paths[1] dismissed,
+                        Is.EqualTo(None)
+                    )
+                    Assert.That(
+                        endpointFor paths[0] restarted,
+                        Is.Not.Empty
+                    )
+
+                    match deleted with
+                    | Error error -> Assert.Fail(error)
+                    | Ok () -> ()
+
+                    match archived with
+                    | Error error -> Assert.Fail(error)
+                    | Ok () -> ()
+
+                    Assert.That(
+                        TreemonConfig.readArchivedBranches tempDir,
+                        Does.Contain("archive-branch")
+                    )
+                    Assert.That(
+                        after.Tabs |> List.map _.Worktree,
+                        Is.EqualTo([ paths[0] ])
+                    )
+                    Assert.That(
+                        File.ReadAllText oldManifestPath,
+                        Is.EqualTo(replacementManifest)
+                    ))
+            finally
+                EmbeddedTerminal.shutdownHost replacementManager
+                |> run
+                |> ignore)
+
+    [<Test>]
+    member _.``prior host death cannot bypass a still-running Job Object supervisor``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            use currentProcess = Process.GetCurrentProcess()
+            writeBehavior
+                stateDirectory
+                (JsonSerializer.Serialize(
+                    {| supervisorPid = Environment.ProcessId
+                       supervisorStartTimeUtcTicks =
+                        string (
+                            currentProcess.StartTime
+                                .ToUniversalTime()
+                                .Ticks
+                        ) |}
+                ))
+
+            start manager worktree |> ignore
+            let oldManifest =
+                Path.Combine(stateDirectory, "host.json")
+                |> File.ReadAllText
+
+            let oldPid = readHostPid stateDirectory
+            let replacementStateDirectory =
+                Path.Combine(tempDir, "replacement-state")
+
+            let replacementManager =
+                EmbeddedTerminal.createWithConfig
+                    { hostConfig with
+                        HostStateDirectory =
+                            replacementStateDirectory }
+
+            try
+                let replacementPath =
+                    Path.Combine(
+                        replacementStateDirectory,
+                        "host.json"
+                    )
+
+                start replacementManager worktree |> ignore
+                File.WriteAllText(
+                    Path.Combine(stateDirectory, "host.json"),
+                    File.ReadAllText replacementPath
+                )
+
+                crashFakeHostManifest oldManifest
+                waitUntil "prior host to exit" (fun () ->
+                    processIsAlive oldPid |> not)
+
+                EmbeddedTerminal.get manager |> run |> ignore
+                let mutationEntered =
+                    TaskCompletionSource<unit>(
+                        TaskCreationOptions.RunContinuationsAsynchronously
+                    )
+
+                let result =
+                    EmbeddedTerminal.withReservedCleanup
+                        manager
+                        worktree
+                        (fun () ->
+                            async {
+                                mutationEntered.TrySetResult(())
+                                |> ignore
+
+                                return Ok ()
+                            })
+                    |> run
+
+                Assert.Multiple(fun () ->
+                    match result with
+                    | Ok () ->
+                        Assert.Fail(
+                            "A live prior supervisor must block strict cleanup"
+                        )
+                    | Error error ->
+                        Assert.That(
+                            error,
+                            Does.Contain(
+                                "Job Object supervisor is still running"
+                            ).IgnoreCase
+                        )
+
+                    Assert.That(
+                        mutationEntered.Task.IsCompleted,
+                        Is.False
+                    )
+                    Assert.That(
+                        File.Exists replacementPath,
+                        Is.True
                     ))
             finally
                 EmbeddedTerminal.shutdownHost replacementManager

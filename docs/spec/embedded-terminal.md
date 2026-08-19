@@ -20,15 +20,17 @@ Opening an embedded terminal creates its tab or activates the existing tab for t
 Starting and running tabs are reused; opening a failed or interrupted tab creates a replacement
 session in the same tab position. Each tab is labelled with its worktree display name and shows
 starting, running, failed, or interrupted state independently. Closing a live tab terminates only
-its durable session and owned process tree, then selects a deterministic neighbour. A cleanup
-failure leaves the tab failed and retryable
-instead of pretending it closed. Closing the final tab hides the terminal pane. Deleting or
+its durable session's kernel-owned Job Object, then selects a deterministic neighbour. A cleanup
+failure leaves the tab failed and retryable instead of pretending it closed. Closing the final tab
+hides the terminal pane. Deleting or
 archiving a worktree through Treemon first holds a cross-process canonical-key worktree lock. A
 protocol-2 host then grants a lease that rejects starts for that worktree, authoritatively closes its
 terminal, remains renewed through the worktree mutation, and is explicitly released on success or
-error. With no live host, or while draining protocol 1, the same per-key OS lock bridges startup of
-a protocol-2 host; its lease is active before the mutation begins. Unrelated keys use different
-locks. The manager returns the acquired lease before the Git/config mutation begins, so the
+error. With no live host, the same per-key OS lock bridges startup of a protocol-2 host; its lease is
+active before the mutation begins. A capability-bearing protocol-1 host may use the bounded drain
+path, while a host that does not declare Job Object ownership remains listable but cannot authorize
+strict mutation. Unrelated keys use different locks. The manager returns the acquired lease before
+the Git/config mutation begins, so the
 singleton control mailbox remains available for Start/Get/Close on unrelated keys while the
 mutation is blocked. The acquired OS-lock handle transfers with the lease and remains held through
 renewal, mutation, cancellation-shielded explicit release, and final disposal; those steps run
@@ -36,11 +38,14 @@ outside the mailbox. OS-lock acquisition also runs outside the singleton mailbox
 acquisition has a request token and cancellation registration; a second lock-acquiring request for
 that canonical key receives a busy error, unrelated keys continue immediately, and stale
 completions dispose any acquired handle without starting or reserving a terminal. Discovery,
-reservation, transport, parsing, and process-cleanup failures abort the worktree operation with an
+reservation, transport, parsing, and Job Object cleanup failures abort the worktree operation with an
 actionable error. Public tab close is non-reserving and never grants permission to mutate a
 worktree. Closing a key already absent from the public snapshot is an unchanged success, including
 after an interrupted tab was dismissed; strict delete/archive cleanup retains its authoritative
-failure semantics.
+failure semantics. Mutation and renewal run under linked cancellation: renewal failure cancels the
+mutation immediately, waits for it to settle while the canonical-key lock remains held, then
+attempts cancellation-shielded release before disposing that lock. No same-key start can pass during
+that cancellation or settlement; unrelated keys remain responsive.
 
 The pane header has a Hide action matching the chat pane. Hiding collapses the terminal pane without
 closing tabs, stopping processes, disconnecting iframes, or changing the active tab. Opening any
@@ -65,11 +70,19 @@ not stop the host or its sessions. On restart, Treemon reads the host's authenti
 control state and reconstructs the same terminal snapshot, including the existing browser
 endpoints. A failed or unsupported host response is surfaced on the affected terminal tab rather
 than treated as a healthy session. If a previously observed host dies, every last-known tab remains
-visible as an interrupted tab until that canonical key is restarted or explicitly dismissed.
-Restarting one key merges the new host snapshot with the other interrupted tabs, and polling keeps
-those unresolved tabs without duplication. Dismissing an interrupted tab is local UI state and does
-not claim process cleanup; delete/archive still requires authoritative reservation. Absence of a
-never-started host remains an empty pane.
+visible as an interrupted tab until that canonical key is restarted or explicitly dismissed. An
+exact manifest generation/PID/start-identity change is detected before `KnownHost` is replaced:
+every prior-generation Starting or Running tab becomes Interrupted, and ordinary polling retains
+those tabs by canonical key even when the replacement registry omits them or already contains a
+same-key session. Restarting one key explicitly adopts the replacement generation's session without
+dropping the other interrupted tabs. Dismissing an interrupted tab is local UI state and does not
+claim process cleanup. Strict close/delete/archive never treats replacement-registry absence as
+cleanup evidence: it first proves the prior exact host identity is dead, relying on the per-session
+Job Object supervisor's host-pipe-loss/kill-on-close boundary, and proves every published prior
+supervisor identity has exited. A missing or still-running supervisor witness returns an actionable
+error instead of licensing cleanup.
+
+Absence of a never-started host remains an empty pane.
 
 The workspace renders `Terminal | Canvas | Dashboard` in fixed order, with equal-thirds and
 wide-center layouts. The terminal pane has a single horizontally scrolling tab strip with roving
@@ -104,44 +117,44 @@ frames and late close/error events from the replaced browser cannot reach ttyd o
 attachment.
 
 ttyd runs with writable mode, Origin checking, and single-client/exit-on-disconnect behavior. The
-durable host is that sole client. Explicit session close closes the upstream socket; ttyd then
-terminates its ConPTY child and exits. The host captures ttyd's exact process-creation identity
-immediately after spawn. On Windows, each descendant query opens and retains the expected parent's
-`Process` handle, verifies its creation time, and captures exact child creation identities while
-that non-reusable parent identity remains retained. A changed or exited parent is a distinct
-non-owned result and contributes no children; recursion always supplies the complete expected
-parent identity rather than a bare PID. Cleanup snapshots descendants
-before closing the upstream, retains captured processes after reparenting, and iterates discovery
-and identity-bound termination to convergence under one end-to-end cleanup deadline spanning the
-initial snapshot, upstream close, graceful wait, rediscovery, and forced termination. Every discovery,
-identity inspection, and termination helper receives only the remaining budget; expiry is an
-explicit failure that retains the session for retry. Termination never accepts a PID alone. The
-plainly-invoked checked-in Windows helper also verifies exact UTC start ticks, calls
-`Kill(entireProcessTree = true)` through the retained object, and waits; an identity mismatch is a
-safe no-op. A spawned root whose identity cannot be captured is stopped
-only through its retained Node `ChildProcess` handle. Linux discovery uses `/proc` identities but
-returns an explicit unsupported cleanup error where no stable termination handle is available. A
-reused PID is treated as the owned process having exited and is never signalled; a surviving
-captured descendant keeps the session failed and registered. No process-name scan or
-inspect-then-PID signal participates.
+durable host is that sole client. ttyd is never started directly. The host first spawns the
+plainly-invoked `terminal-job-supervisor.ps1` over private stdin/stdout pipes with a random
+per-supervisor control token. The supervisor creates a Windows Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and neither breakaway flag, creates ttyd with
+`CREATE_SUSPENDED`, assigns it to the job, and only then resumes its first thread. ttyd and every
+PowerShell/Copilot descendant therefore inherit one kernel-enforced session boundary before any of
+their code can run.
+
+The host retains both the authenticated supervisor channel and its Node `ChildProcess` handle for
+the session lifetime. Shell PID discovery accepts the bootstrap metadata only after the supervisor
+confirms that PID is a member of the session job. Explicit close first disconnects the upstream,
+then asks the supervisor to terminate the job and waits for an empty-job acknowledgement plus
+supervisor exit before removing the registry entry. Timeout or failed acknowledgement leaves the
+session failed and retryable. Host exit or pipe loss makes the supervisor terminate the job; helper
+failure still closes its retained job handle, so kill-on-close prevents descendants escaping the
+owning host. Unsupported operating systems fail explicitly rather than falling back to descendant
+enumeration. Targeted PID/start-identity inspection remains only for host/verifier metadata and is
+not a terminal ownership or cleanup authority.
 
 Start, close, failed-session replacement, and reservation transitions are serialized by canonical
 worktree key. A close queued behind a live start waits for it and then closes the exact published
 session. Concurrent failed-session retries recheck registry ownership after cleanup, so only one
-replacement can be created. Upstream close/error and child-exit handlers synchronously revoke
+replacement can be created. Upstream close/error and supervisor-exit handlers synchronously revoke
 startup before queuing cleanup on that key. Immediately before publishing Running, the host
-rechecks registry ownership, recorded failure, the retained child, upstream readiness, shell
-identity, and the public listener without yielding; failed validation performs authoritative
-startup cleanup and leaves the session failed for retry. Closed upstreams are excluded from
-heartbeat publication. Different keys have independent queues.
+rechecks registry ownership, recorded failure, the retained supervisor, upstream readiness,
+job-confirmed shell identity, and the public listener without yielding; failed validation performs
+authoritative startup cleanup and leaves the session failed for retry. Closed upstreams are
+excluded from heartbeat publication. Different keys have independent queues.
 
 Delete/archive reservations are per-key five-minute leases. Acquisition is itself serialized,
 publishes the lease before terminal cleanup, and releases it if cleanup fails. Treemon renews the
-lease while the worktree mutation runs and always attempts explicit release afterward, including
-after caller cancellation, operation failure, or renewal failure. Release runs without caller
-cancellation, and the matching per-key OS lock is disposed only after that attempt. The lock covers
-current Treemon callers before a host exists, during legacy drain, and throughout the mutation;
-neither mechanism blocks another key. An abandoned host lease expires.
+lease while the worktree mutation runs. Mutation completion is raced against renewal: if renewal
+fails first, linked cancellation stops the mutation promptly and Treemon waits for mutation
+settlement while retaining the per-key OS lock. It then always attempts explicit release,
+including after caller cancellation, operation failure, or renewal failure. Release runs without
+caller cancellation, and the matching lock is disposed only after that attempt. The lock covers
+current Treemon callers before a host exists, during legacy drain, cancellation/settlement, and
+throughout the mutation; neither mechanism blocks another key. An abandoned host lease expires.
 
 The control listener becomes mutation-unavailable as soon as host shutdown begins. New starts,
 closes, and diagnostic mutations receive HTTP 503; starts already in flight settle before the host
@@ -159,14 +172,20 @@ binding.
 
 - discovers `.agents/durable-terminal/host.json`;
 - validates control protocol 2, runtime generation, exact PID start identity, and dynamic
-  non-production control port;
+  non-production control port; a manifest/health pair without `ownershipBoundary:
+  "windows-job-v1"` stays listable but cannot start a terminal, authorize strict cleanup, or shut
+  down through the current manager;
 - recognizes authenticated protocol-1 manifests by PID, start timestamp, endpoint, and credential,
-  reuses their existing sessions, and keeps them listable and closable in drain-only mode;
+  keeps them listable, and permits close/reuse/drain only when the same kernel-ownership capability
+  is present;
 - serializes host creation across Treemon processes with an OS-held exclusive
   `.agents/durable-terminal/host.lock`, then starts the Node host when no healthy host exists;
+- resolves the host from the server output/publish `scripts` directory, falling back to the source
+  checkout for development; the host locates its Job Object supervisor beside itself;
 - lists, starts, and closes sessions through the loopback control API;
 - records each Treemon process reconnect in the host diagnostics;
-- keeps the last known snapshot only to surface host failures explicitly.
+- keeps the last known snapshot plus per-key prior-generation ownership evidence so replacement
+  reconciliation cannot erase or authorize cleanup of older tabs.
 
 The lock file is durable but the exclusive handle is not: a crashed starter releases ownership
 automatically. The owning Treemon publishes the spawned host's exact PID/start identity into the
@@ -254,16 +273,20 @@ shutdown is sent and no wait is performed against the replacement.
   host shutdown, process exit, or host failure ends a session.
 - **Per-key lease around worktree mutation** — delete and archive proceed only while a renewable
   host reservation rejects starts for the same canonical worktree; acquisition includes
-  authoritative close, and the matching OS lock stays held until cancellation-shielded release is
-  attempted on every result path.
+  authoritative close, and renewal failure cancels and settles the mutation before the matching OS
+  lock reaches cancellation-shielded release and disposal.
 - **State-directory lock plus runtime generation** — concurrent checkout-local Treemon starters
   converge on one host without treating a PID alone as ownership.
-- **Stable identity handles over PID signals** — the Windows helper retains and verifies the exact
-  parent while its parent-filtered query captures child identities, including later-reparented
-  processes; termination verifies creation time and kills through one retained `Process` object, so
-  a reused PID is never signalled.
-- **One-version drain compatibility** — protocol 1 is list/close/reuse compatible for existing
-  sessions only and is removed after its persisted/live population has drained.
+- **Job Object ownership before execution** — a per-session supervisor creates ttyd suspended,
+  assigns it to a kill-on-close/no-breakaway Job Object, and resumes only after assignment. The
+  retained authenticated pipe and supervisor process are the cleanup authority; PID ancestry is
+  never used to decide membership or successful cleanup.
+- **Generation changes preserve evidence** — identity replacement interrupts and retains old active
+  tabs. Polling cannot replace those tabs or use a new registry's absence as cleanup proof; an
+  explicit per-key restart/close plus prior exact-host death resolves them independently.
+- **One-version bounded compatibility** — protocol 1 remains listable; close/reuse/drain requires
+  its manifest and health response to declare the same Job Object boundary. A predecessor without
+  that capability is evidence only and cannot authorize cleanup.
 - **Reconcile ambiguous mutations** — bounded timeouts are necessary, but a canonical-key registry
   read is what prevents an undisclosed or duplicate session after a lost response.
 - **No host-crash recovery claim** — losing the durable host closes ttyd's sole WebSocket and ends
@@ -273,31 +296,34 @@ shutdown is sent and no wait is performed against the replacement.
 - The terminal remains loopback-only and is not a remote shell service.
 - Stock ttyd 1.7.7 has a 256-byte Windows child-command buffer, so child arguments remain
   path-independent and the worktree travels through the environment.
-- End-to-end production-safety checks attribute activity through fixture commands, requests,
-  process ancestry, connections/listeners, and termination targets. Unrelated global port-owner or
-  Copilot-process churn is recorded for context but does not fail the fixture; ancestry and cleanup
-  evidence includes process creation time so PID reuse cannot attach an unrelated process. The
-  isolated server also exports its API port through `TREEMON_PORT` and `TREEMON_PORTS`, preventing
-  inherited shell profiles or extensions from falling back to production port 5000.
+- End-to-end production-safety checks attribute activity through unique fixture commands, owned
+  control channels, connections/listeners, and Job Object acknowledgements. Unrelated global
+  port-owner or Copilot-process churn is never a cleanup input. The isolated server exports its API
+  port through both `TREEMON_PORT` and `TREEMON_PORTS`, preventing inherited shell profiles or
+  extensions from falling back to production port 5000.
 
 ## Key Files
 
 | File | Purpose |
 |---|---|
 | `scripts/durable-terminal-host.mjs` | Durable ttyd WebSocket owner, browser proxy, replay, lifecycle, and diagnostics |
-| `scripts/terminate-owned-process.ps1` | Windows exact-process inspection, parent-handle-bound child discovery, and identity-bound tree termination |
+| `scripts/terminal-job-supervisor.ps1` | Windows P/Invoke supervisor: create ttyd suspended, assign the no-breakaway/kill-on-close Job Object, membership checks, and empty-job acknowledgement |
+| `scripts/terminate-owned-process.ps1` | Targeted exact PID/start-identity inspection and isolated-verifier fallback termination; not terminal-session cleanup |
 | `scripts/durable-terminal-control.mjs` | Authenticated status and graceful PID-scoped host shutdown |
 | `scripts/durable-terminal-observation.mjs` | Detached 24-hour heartbeat/liveness observation and final status evaluation |
 | `scripts/verify-durable-terminal-runtime.mjs` | Isolated real-ttyd reconnect and explicit-cleanup verification |
 | `scripts/verify-durable-terminal-treemon.mjs` | Browser reload and two-process Treemon restart demonstration |
-| `scripts/verify-ttyd-runtime.mjs` | Import-safe stock-ttyd verifier with identity-bound cleanup and retained-child fallback |
-| `src/Server/EmbeddedTerminal.fs` | Durable-host discovery and control client |
+| `scripts/durable-terminal-verifier-env.mjs` | Pure isolated-server environment construction, including both reporting port variables |
+| `scripts/verify-ttyd-runtime.mjs` | Import-safe stock-ttyd verifier using the same Job Object supervisor boundary |
+| `src/Server/EmbeddedTerminal.fs` | Durable-host discovery, generation-aware reconciliation, reservation cancellation, and control client |
+| `src/Server/Server.fsproj` | Copies the host and Job Object supervisor into build/publish layouts |
 | `src/Server/Program.fs` | Creates the control client without closing durable sessions on shutdown |
 | `src/Client/TerminalPane.fs` | Accessible multi-tab iframe pane pointed at durable proxy endpoints |
-| `src/Tests/EmbeddedTerminalTests.fs` | Host discovery, Treemon restart, selective close, and API validation tests |
-| `scripts/durable-terminal-host.test.mjs` | Protocol, replay-bound, and metadata-projection tests |
+| `src/Tests/EmbeddedTerminalTests.fs` | Host generation races, reservation cancellation/locking, discovery, restart, selective close, and API validation |
+| `scripts/durable-terminal-host.test.mjs` | Supervisor protocol/policy, cleanup acknowledgement, isolation, replay, and host lifecycle tests |
 | `scripts/durable-terminal-observation.test.mjs` | Observation replacement, credential, and PID-reuse ownership tests |
-| `scripts/verify-ttyd-runtime.test.mjs` | Verifier helper visibility and identity-capture cleanup fallback tests |
+| `scripts/verify-ttyd-runtime.test.mjs` | Verifier Job Object cleanup and failure propagation tests |
+| `scripts/durable-terminal-verifier-env.test.mjs` | Isolated reporting-port/config/state environment test |
 
 ## Related Specs
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -9,26 +10,29 @@ import {
   writeFileSync,
 } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import {
   appendReplayFrame,
-  captureSpawnedProcessIdentity,
-  cleanupOwnedProcessTree,
+  createTerminalJobSupervisor,
   DurableTerminalHost,
   emptyReplayBuffer,
+  jobSupervisorPolicyIsSafe,
   manifestOwnership,
   parseInitialHandshake,
   parseResizeFrame,
   publicDiagnosticSession,
+  requireKernelTerminalOwnership,
   removeManifestIfOwned,
   replayFramesFrom,
   resizeFrame,
   sameManifestOwner,
-  sameProcessIdentity,
   sanitizeMetadataText,
   sessionCookieName,
+  TerminalJobSupervisor,
   terminalSize,
+  terminateRetainedChild,
 } from "./durable-terminal-host.mjs";
 
 test("browser handshake becomes a bounded resize frame", () => {
@@ -137,6 +141,8 @@ const withTestHost = async (processController, action) => {
     replayBytes: 1024,
     diagnosticBytes: 1024,
     processController,
+    supervisorFactory:
+      processController?.supervisorFactory ?? (() => new FakeJobSupervisor()),
     cleanupTimeouts: { graceful: 0, forced: 1 },
     wait: async (milliseconds) => {
       now += milliseconds;
@@ -160,78 +166,81 @@ const withTestHost = async (processController, action) => {
   }
 };
 
-const processIdentity = (pid, parentPid = 0, generation = "original") => ({
-  pid,
-  parentPid,
-  startIdentity: `test:${pid}:${generation}`,
-});
+const fakeProcessController = () => ({ controller: {} });
 
-const fakeProcessController = (
-  initialProcesses,
-  terminateProcess,
-  beforeTerminate,
-) => {
-  const processes = new Map(
-    initialProcesses.map((identity) => [identity.pid, identity]),
-  );
-  const terminated = [];
-  return {
-    processes,
-    terminated,
-    controller: {
-      inspect: async (pid) => processes.get(pid) ?? null,
-      children: async (parent) => {
-        const actual = processes.get(parent.pid);
-        return sameProcessIdentity(actual, parent)
-          ? [...processes.values()].filter(
-              (identity) => identity.parentPid === parent.pid,
-            )
-          : null;
-      },
-      terminate: async (identity) => {
-        if (beforeTerminate) beforeTerminate(identity, processes);
-        const actual = processes.get(identity.pid);
-        if (!sameProcessIdentity(actual, identity)) return false;
-        terminated.push(identity.pid);
-        if (terminateProcess) terminateProcess(identity.pid, processes);
-        else processes.delete(identity.pid);
-        return true;
-      },
-    },
-  };
-};
+let nextFakeSupervisorPid = 10_000;
+
+class FakeSupervisorChild extends EventEmitter {
+  constructor() {
+    super();
+    this.pid = nextFakeSupervisorPid++;
+    this.exitCode = null;
+    this.signalCode = null;
+  }
+
+  exit(code = 0) {
+    if (this.exitCode !== null) return;
+    this.exitCode = code;
+    this.emit("exit", code, null);
+  }
+}
+
+class FakeJobSupervisor {
+  constructor({
+    startError,
+    terminateError,
+    terminateGate,
+    members,
+  } = {}) {
+    this.child = new FakeSupervisorChild();
+    this.startError = startError;
+    this.terminateError = terminateError;
+    this.terminateGate = terminateGate;
+    this.members = members ?? new Set([2]);
+    this.terminateCalls = 0;
+    this.containsCalls = [];
+    this.exited = false;
+  }
+
+  async start() {
+    if (this.startError) throw this.startError;
+    return {
+      event: "ready",
+      ttydPid: 1,
+      supervisorPid: this.child.pid,
+      supervisorStartTimeUtcTicks: "100",
+      assignedBeforeResume: true,
+      killOnJobClose: true,
+      breakawayAllowed: false,
+      silentBreakawayAllowed: false,
+    };
+  }
+
+  async contains(pid) {
+    this.containsCalls.push(pid);
+    return this.members.has(pid);
+  }
+
+  async terminate() {
+    this.terminateCalls += 1;
+    if (this.terminateGate) await this.terminateGate;
+    if (this.terminateError) throw this.terminateError;
+    this.exited = true;
+    this.child.exit();
+  }
+}
 
 const markStartupReady = (session) => {
-  session.ttydProcess = {
-    pid: 1,
-    exitCode: null,
-    signalCode: null,
-  };
+  const supervisor = new FakeJobSupervisor();
+  session.jobSupervisor = supervisor;
+  session.supervisorProcess = supervisor.child;
+  session.supervisorPid = supervisor.child.pid;
+  session.supervisorStartTimeUtcTicks = "100";
   session.ttydPid = 1;
   session.shellPid = 2;
   session.publicServer = { listening: true };
   session.upstream = { readyState: 1 };
 };
-
-class FakeRetainedChild extends EventEmitter {
-  constructor(pid) {
-    super();
-    this.pid = pid;
-    this.exitCode = null;
-    this.signalCode = null;
-    this.killed = false;
-  }
-
-  kill() {
-    this.killed = true;
-    this.signalCode = "SIGKILL";
-    queueMicrotask(() => {
-      this.exitCode = 1;
-      this.emit("exit", 1, "SIGKILL");
-    });
-    return true;
-  }
-}
 
 class FakeStartupUpstream extends EventEmitter {
   constructor() {
@@ -244,10 +253,7 @@ const ownedSession = (
   id,
   ttydPid,
   shellPid,
-  tracked = [
-    ...(ttydPid ? [processIdentity(ttydPid)] : []),
-    ...(shellPid ? [processIdentity(shellPid, ttydPid ?? 0)] : []),
-  ],
+  supervisor = new FakeJobSupervisor(),
 ) => ({
   id,
   capability: `cap-${id}`,
@@ -259,481 +265,324 @@ const ownedSession = (
   replay: emptyReplayBuffer(),
   attachment: null,
   closing: false,
-  ownedProcesses: new Map(
-    tracked.map((identity, depth) => [
-      `${identity.pid}:${identity.startIdentity}`,
-      { identity, depth },
-    ]),
-  ),
+  jobSupervisor: supervisor,
+  supervisorProcess: supervisor.child,
+  supervisorPid: supervisor.child.pid,
+  supervisorStartTimeUtcTicks: "100",
   ttydPid,
   shellPid,
 });
 
-test("graceful close removes the registry entry without forcing a process", async () => {
-  const { controller, terminated } = fakeProcessController([]);
+test("checked-in supervisor compiles with assign-before-resume no-breakaway policy", () => {
+  const output = execFileSync(
+    "pwsh",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      join(import.meta.dirname, "terminal-job-supervisor.ps1"),
+      "-SelfTest",
+    ],
+    { encoding: "utf8", windowsHide: true },
+  );
+  const policy = JSON.parse(output);
 
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("graceful", 101, 102);
-    host.sessions.set(session.id, session);
-
-    await host.closeSession(session, "test");
-
-    assert.equal(host.sessions.has(session.id), false);
-    assert.deepEqual(terminated, []);
-  });
+  assert.equal(jobSupervisorPolicyIsSafe(policy), true);
+  assert.equal(policy.descendantsInheritMembership, true);
+  assert.equal(policy.createSuspended, 4);
 });
 
-test("close discovers and force-cleans only exact owned descendants", async () => {
-  const root = processIdentity(201);
-  const child = processIdentity(202, 201);
-  const unrelated = processIdentity(999);
-  const { controller, processes, terminated } = fakeProcessController([
-    root,
+test("unsupported platforms fail instead of using process enumeration", () => {
+  assert.throws(
+    () => requireKernelTerminalOwnership("linux"),
+    /kernel-enforced .* unsupported on linux/i,
+  );
+});
+
+test(
+  "host control pipe loss closes the real Job Object boundary",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = testStateDirectory();
+    mkdirSync(fixture, { recursive: true });
+    let supervisor;
+
+    try {
+      supervisor = createTerminalJobSupervisor();
+      await supervisor.start({
+        fileName: process.execPath,
+        argumentsList: ["-e", "setInterval(() => {}, 1000)"],
+        workingDirectory: fixture,
+        environment: { TREEMON_JOB_PIPE_FIXTURE: fixture },
+        timeoutMs: 10_000,
+      });
+      const exited = once(supervisor.child, "exit");
+
+      supervisor.child.stdin.end();
+      await new Promise((resolveExit, rejectExit) => {
+        const timeout = setTimeout(
+          () => rejectExit(new Error("Supervisor did not exit after pipe loss")),
+          15_000,
+        );
+        exited.then(
+          (result) => {
+            clearTimeout(timeout);
+            resolveExit(result);
+          },
+          (error) => {
+            clearTimeout(timeout);
+            rejectExit(error);
+          },
+        );
+      });
+
+      assert.equal(supervisor.exited, true);
+    } finally {
+      if (supervisor && !supervisor.exited) {
+        await terminateRetainedChild(supervisor.child);
+      }
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  },
+);
+
+const protocolSupervisor = (respond) => {
+  const child = new EventEmitter();
+  child.pid = nextFakeSupervisorPid++;
+  child.exitCode = null;
+  child.signalCode = null;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  const token = "owned-control-token";
+  let buffered = "";
+  child.stdin.on("data", (data) => {
+    buffered += data.toString();
+    const lines = buffered.split("\n");
+    buffered = lines.pop();
+    lines.filter(Boolean).forEach((line) => {
+      const request = JSON.parse(line);
+      respond(request, {
+        send: (message) =>
+          child.stdout.write(`${JSON.stringify({ token, ...message })}\n`),
+        exit: (code = 0) => {
+          child.exitCode = code;
+          child.emit("exit", code, null);
+        },
+      });
+    });
+  });
+  return {
     child,
-    unrelated,
-  ]);
+    supervisor: new TerminalJobSupervisor(child, token, 100),
+  };
+};
 
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("forced", 201, 202, [root]);
+test("supervisor protocol preserves argv cwd env and validates job membership", async () => {
+  const requests = [];
+  const { child, supervisor } = protocolSupervisor((request, response) => {
+    requests.push(request);
+    if (request.command === "start") {
+      response.send({
+        event: "ready",
+        requestId: request.requestId,
+        ttydPid: 501,
+        supervisorPid: child.pid,
+        supervisorStartTimeUtcTicks: "123",
+        assignedBeforeResume: true,
+        killOnJobClose: true,
+        breakawayAllowed: false,
+        silentBreakawayAllowed: false,
+      });
+    } else if (request.command === "contains") {
+      response.send({
+        event: "contains",
+        requestId: request.requestId,
+        processId: request.processId,
+        member: request.processId === 502,
+      });
+    }
+  });
+
+  await supervisor.start({
+    fileName: "ttyd.exe",
+    argumentsList: ["-w", "Q:\\path with spaces"],
+    workingDirectory: "Q:\\path with spaces",
+    environment: { TMTW: "Q:\\path with spaces" },
+    timeoutMs: 100,
+  });
+  assert.equal(await supervisor.contains(502), true);
+  assert.deepEqual(requests[0].arguments, ["-w", "Q:\\path with spaces"]);
+  assert.equal(requests[0].workingDirectory, "Q:\\path with spaces");
+  assert.equal(requests[0].environment.TMTW, "Q:\\path with spaces");
+});
+
+test("supervisor termination requires empty acknowledgement and process exit", async () => {
+  const commands = [];
+  const { child, supervisor } = protocolSupervisor((request, response) => {
+    commands.push(request.command);
+    if (request.command === "start") {
+      response.send({
+        event: "ready",
+        requestId: request.requestId,
+        ttydPid: 601,
+        supervisorPid: child.pid,
+        supervisorStartTimeUtcTicks: "456",
+        assignedBeforeResume: true,
+        killOnJobClose: true,
+        breakawayAllowed: false,
+        silentBreakawayAllowed: false,
+      });
+    } else if (request.command === "terminate") {
+      response.send({
+        event: "terminated",
+        requestId: request.requestId,
+        empty: true,
+      });
+      setImmediate(() => response.exit());
+    }
+  });
+
+  await supervisor.start({
+    fileName: "ttyd.exe",
+    argumentsList: [],
+    workingDirectory: resolve(".agents"),
+    environment: {},
+    timeoutMs: 100,
+  });
+  await supervisor.terminate(100);
+
+  assert.deepEqual(commands, ["start", "terminate"]);
+  assert.equal(supervisor.exited, true);
+});
+
+test("close waits for empty acknowledgement and supervisor exit before registry removal", async () => {
+  let releaseTermination;
+  const terminateGate = new Promise((resolveTermination) => {
+    releaseTermination = resolveTermination;
+  });
+  const supervisor = new FakeJobSupervisor({ terminateGate });
+
+  await withTestHost({}, async (host) => {
+    const session = ownedSession("acknowledged", 101, 102, supervisor);
     host.sessions.set(session.id, session);
+    const closing = host.closeSession(session, "test");
+    await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
 
-    await host.closeSession(session, "test");
+    assert.equal(host.sessions.get(session.id), session);
+    assert.equal(supervisor.terminateCalls, 1);
 
-    assert.deepEqual(terminated, [201, 202]);
-    assert.equal(processes.has(999), true);
+    releaseTermination();
+    await closing;
     assert.equal(host.sessions.has(session.id), false);
   });
 });
 
-test("cleanup timeout reports failure while owned processes remain", async () => {
-  const root = processIdentity(301);
-  const { controller } = fakeProcessController([root], () => {
-    throw new Error("Timed out in fake identity-bound termination");
-  });
+test("termination timeout retains a failed retryable session", async () => {
+  let failTermination = true;
+  const supervisor = new FakeJobSupervisor();
+  supervisor.terminate = async function () {
+    this.terminateCalls += 1;
+    if (failTermination) throw new Error("empty acknowledgement timed out");
+    this.exited = true;
+    this.child.exit();
+  };
 
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("timeout", 301, null, [root]);
+  await withTestHost({}, async (host) => {
+    const session = ownedSession("retry", 201, 202, supervisor);
     host.sessions.set(session.id, session);
 
     await assert.rejects(
-      host.closeSession(session, "test"),
-      /forced cleanup timed out/,
+      host.closeSession(session, "first"),
+      /acknowledgement timed out/,
     );
-    assert.equal(session.state, "failed");
-    assert.match(session.error, /cleanup did not complete/i);
-  });
-});
-
-test("failed cleanup retains a retryable registry entry", async () => {
-  const root = processIdentity(401);
-  let canForce = false;
-  const { controller } = fakeProcessController(
-    [root],
-    (pid, processes) => {
-      if (canForce) processes.delete(pid);
-      else throw new Error("Timed out in fake identity-bound termination");
-    },
-  );
-
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("retry", 401, null, [root]);
-    host.sessions.set(session.id, session);
-
-    await assert.rejects(host.closeSession(session, "first"));
     assert.equal(host.sessions.get(session.id), session);
+    assert.equal(session.state, "failed");
 
-    canForce = true;
+    failTermination = false;
     await host.closeSession(session, "retry");
     assert.equal(host.sessions.has(session.id), false);
   });
 });
 
-test("closing one session never signals another session's tracked PIDs", async () => {
-  const closingRoot = processIdentity(501);
-  const closingChild = processIdentity(502, 501);
-  const retainedRoot = processIdentity(601);
-  const retainedChild = processIdentity(602, 601);
-  const { controller, processes, terminated } = fakeProcessController([
-    closingRoot,
-    closingChild,
-    retainedRoot,
-    retainedChild,
-  ]);
+test("closing one session never terminates another session job", async () => {
+  const closingSupervisor = new FakeJobSupervisor();
+  const retainedSupervisor = new FakeJobSupervisor();
 
-  await withTestHost(controller, async (host) => {
-    const closing = ownedSession("closing", 501, 502, [closingRoot]);
-    const retained = ownedSession("retained", 601, 602, [retainedRoot]);
+  await withTestHost({}, async (host) => {
+    const closing = ownedSession(
+      "closing",
+      301,
+      302,
+      closingSupervisor,
+    );
+    const retained = ownedSession(
+      "retained",
+      401,
+      402,
+      retainedSupervisor,
+    );
     host.sessions.set(closing.id, closing);
     host.sessions.set(retained.id, retained);
 
     await host.closeSession(closing, "test");
 
-    assert.deepEqual(terminated, [501, 502]);
-    assert.equal(host.sessions.has(retained.id), true);
-    assert.equal(processes.has(601), true);
-    assert.equal(processes.has(602), true);
+    assert.equal(closingSupervisor.terminateCalls, 1);
+    assert.equal(retainedSupervisor.terminateCalls, 0);
+    assert.equal(host.sessions.get(retained.id), retained);
   });
 });
 
-test("PID reuse is treated as owned-process exit and never terminated", async () => {
-  const original = processIdentity(701);
-  const replacement = processIdentity(701, 0, "replacement");
-  const { controller, processes, terminated } = fakeProcessController([
-    replacement,
-  ]);
-
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("pid-reuse", 701, null, [original]);
-    host.sessions.set(session.id, session);
-
-    await host.closeSession(session, "test");
-
-    assert.deepEqual(terminated, []);
-    assert.equal(processes.get(701), replacement);
-    assert.equal(host.sessions.has(session.id), false);
+test("supervisor pipe loss rejects startup and closes the ownership boundary", async () => {
+  const { child, supervisor } = protocolSupervisor(() => {});
+  const starting = supervisor.start({
+    fileName: "ttyd.exe",
+    argumentsList: [],
+    workingDirectory: resolve(".agents"),
+    environment: {},
+    timeoutMs: 100,
   });
+  child.exitCode = 1;
+  child.emit("exit", 1, null);
+
+  await assert.rejects(starting, /supervisor exited/);
+  await supervisor.terminate(100);
+  assert.equal(supervisor.exited, true);
 });
 
-test("an unverified spawned root is stopped only through its retained child handle", async () => {
-  const unverified = processIdentity(705);
-  const { controller, processes, terminated } = fakeProcessController([unverified]);
+test("startup failure stays failed after authoritative supervisor cleanup", async () => {
+  const supervisor = new FakeJobSupervisor({
+    startError: new Error("assign-before-resume failed"),
+  });
 
-  await withTestHost(controller, async (host) => {
-    const retainedChild = new FakeRetainedChild(705);
+  await withTestHost(
+    { supervisorFactory: () => supervisor },
+    async (host) => {
+      const session = await host.startSession(resolve(".agents"));
+
+      assert.equal(session.state, "failed");
+      assert.equal(supervisor.terminateCalls, 1);
+      assert.equal(host.sessions.get(session.id), session);
+    },
+  );
+});
+
+test("shell PID is accepted only when the Job Object reports membership", async () => {
+  const stateDirectory = testStateDirectory();
+  mkdirSync(stateDirectory, { recursive: true });
+  const supervisor = new FakeJobSupervisor({ members: new Set([709]) });
+
+  await withTestHost({}, async (host) => {
     const session = {
-      ...ownedSession("unverified", 705, null, []),
-      unverifiedSpawnedPids: [705],
-      ttydProcess: retainedChild,
+      ...ownedSession("shell-membership", 708, null, supervisor),
+      pidFile: resolve(stateDirectory, "shell.pid"),
     };
-    host.sessions.set(session.id, session);
+    writeFileSync(session.pidFile, "709\n", "utf8");
 
-    await host.closeSession(session, "test");
-
-    assert.deepEqual(terminated, []);
-    assert.equal(retainedChild.killed, true);
-    assert.equal(processes.get(705), unverified);
-    assert.equal(host.sessions.has(session.id), false);
+    assert.equal(await host.waitForShellPid(session), 709);
+    assert.deepEqual(supervisor.containsCalls, [709]);
   });
-});
-
-test("identity replacement between observation and atomic termination is never signaled", async () => {
-  const original = processIdentity(706);
-  const replacement = processIdentity(706, 0, "replacement");
-  const { controller, processes, terminated } = fakeProcessController(
-    [original],
-    undefined,
-    (_, current) => current.set(replacement.pid, replacement),
-  );
-
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("identity-race", 706, null, [original]);
-    host.sessions.set(session.id, session);
-
-    await host.closeSession(session, "test");
-
-    assert.deepEqual(terminated, []);
-    assert.equal(processes.get(706), replacement);
-    assert.equal(host.sessions.has(session.id), false);
-  });
-});
-
-test("spawn identity capture rejects a root that exits during inspection", async () => {
-  const child = {
-    pid: 707,
-    exitCode: null,
-    signalCode: null,
-  };
-  const identity = processIdentity(707);
-
-  await assert.rejects(
-    captureSpawnedProcessIdentity(
-      child,
-      async () => {
-        child.exitCode = 1;
-        return identity;
-      },
-      async () => {},
-    ),
-    /exited during identity capture/,
-  );
-});
-
-test("startup discovers the shell PID through the bounded session ownership path", async () => {
-  const root = processIdentity(708);
-  const shell = processIdentity(709, 708);
-  const { controller } = fakeProcessController([root, shell]);
-
-  await withTestHost(controller, async (host) => {
-    const session = {
-      ...ownedSession("shell-discovery", 708, null, [root]),
-      ttydProcess: { exitCode: null },
-      pidFile: resolve(host.options.stateDirectory, "shell.pid"),
-    };
-    writeFileSync(session.pidFile, `${shell.pid}\n`);
-
-    const discovered = await host.waitForShellPid(session);
-
-    assert.equal(discovered, shell.pid);
-    assert.deepEqual(
-      [...session.ownedProcesses.values()].map(({ identity }) => identity),
-      [root, shell],
-    );
-  });
-});
-
-test("a captured descendant remains owned after reparenting", async () => {
-  const root = processIdentity(711);
-  const child = processIdentity(712, 711);
-  const { controller, processes, terminated } = fakeProcessController([
-    root,
-    child,
-  ]);
-  let firstChildQuery = true;
-  const discoverChildren = controller.children;
-  controller.children = async (parent, timeoutMs) => {
-    const children = await discoverChildren(parent, timeoutMs);
-    if (parent.pid === root.pid && firstChildQuery) {
-      firstChildQuery = false;
-      processes.delete(root.pid);
-      processes.set(child.pid, { ...child, parentPid: 0 });
-    }
-    return children;
-  };
-
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("reparented", 711, 712, [root]);
-    host.sessions.set(session.id, session);
-
-    await host.closeSession(session, "test");
-
-    assert.deepEqual(terminated, [712]);
-    assert.equal(host.sessions.has(session.id), false);
-  });
-});
-
-test("cleanup captures a descendant before upstream close reparents it", async () => {
-  const root = processIdentity(713);
-  const child = processIdentity(714, 713);
-  const { controller, processes, terminated } = fakeProcessController([
-    root,
-    child,
-  ]);
-
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("upstream-reparent", 713, 714, [root]);
-    let capturedBeforeClose = false;
-    let registeredBeforeClose = false;
-    const upstream = new EventEmitter();
-    upstream.readyState = 1;
-    upstream.close = () => {
-      capturedBeforeClose = [...session.ownedProcesses.values()].some(
-        ({ identity }) => sameProcessIdentity(identity, child),
-      );
-      registeredBeforeClose = host.sessions.get(session.id) === session;
-      processes.delete(root.pid);
-      processes.set(child.pid, { ...child, parentPid: 0 });
-      queueMicrotask(() => {
-        upstream.readyState = 3;
-        upstream.emit("close");
-      });
-    };
-    upstream.terminate = () => {};
-    session.upstream = upstream;
-    host.sessions.set(session.id, session);
-
-    await host.closeSession(session, "test");
-
-    assert.equal(capturedBeforeClose, true);
-    assert.equal(registeredBeforeClose, true);
-    assert.deepEqual(terminated, [child.pid]);
-    assert.equal(host.sessions.has(session.id), false);
-  });
-});
-
-test("replacement children are never claimed after a parent identity changes", async () => {
-  const root = processIdentity(715);
-  const originalParent = processIdentity(716, 715);
-  const replacementParent = processIdentity(716, 900, "replacement");
-  const replacementChild = processIdentity(717, 716, "replacement");
-  const { controller, processes, terminated } = fakeProcessController([
-    root,
-    originalParent,
-  ]);
-  const discoverChildren = controller.children;
-  let replaced = false;
-  controller.children = async (parent, timeoutMs) => {
-    const children = await discoverChildren(parent, timeoutMs);
-    if (!replaced && sameProcessIdentity(parent, root)) {
-      replaced = true;
-      processes.set(replacementParent.pid, replacementParent);
-      processes.set(replacementChild.pid, replacementChild);
-    }
-    return children;
-  };
-
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("parent-reuse", 715, null, [root]);
-    host.sessions.set(session.id, session);
-
-    await host.closeSession(session, "test");
-
-    assert.deepEqual(terminated, [715]);
-    assert.equal(processes.get(716), replacementParent);
-    assert.equal(processes.get(717), replacementChild);
-    assert.equal(host.sessions.has(session.id), false);
-  });
-});
-
-test("forced cleanup gives every slow operation only the remaining deadline", async () => {
-  const root = processIdentity(730);
-  const firstChild = processIdentity(731, 730);
-  const secondChild = processIdentity(732, 730);
-  const processes = new Map(
-    [root, firstChild, secondChild].map((identity) => [
-      identity.pid,
-      identity,
-    ]),
-  );
-  const budgets = [];
-  const terminated = [];
-  let now = 0;
-  const consume = (timeoutMs, durationMs) => {
-    budgets.push(timeoutMs);
-    now += Math.min(timeoutMs, durationMs);
-  };
-  const controller = {
-    children: async (parent, timeoutMs) => {
-      consume(timeoutMs, 2);
-      const actual = processes.get(parent.pid);
-      return sameProcessIdentity(actual, parent)
-        ? [...processes.values()].filter(
-            (identity) => identity.parentPid === parent.pid,
-          )
-        : null;
-    },
-    inspect: async (pid, timeoutMs) => {
-      consume(timeoutMs, 4);
-      return processes.get(pid) ?? null;
-    },
-    terminate: async (identity, timeoutMs) => {
-      consume(timeoutMs, 6);
-      terminated.push(identity.pid);
-      processes.delete(identity.pid);
-      return true;
-    },
-  };
-
-  await assert.rejects(
-    cleanupOwnedProcessTree(root, controller, {
-      timeoutMs: 20,
-      now: () => now,
-      wait: async (milliseconds) => {
-        now += milliseconds;
-      },
-    }),
-    /forced cleanup timed out/,
-  );
-
-  assert.equal(now, 20);
-  assert.deepEqual(terminated, [730]);
-  assert.deepEqual(budgets, [20, 18, 16, 14, 8, 4]);
-  assert.ok(budgets.every((budget) => budget <= 20));
-});
-
-test("initial descendant capture timeout retains the session and its resources", async () => {
-  const root = processIdentity(739);
-  const controller = {
-    children: async () => new Promise(() => {}),
-    inspect: async () => root,
-    terminate: async () => true,
-  };
-
-  await withTestHost(controller, async (host) => {
-    let attachmentCloses = 0;
-    const attachment = {
-      socket: { close: () => (attachmentCloses += 1) },
-    };
-    const session = {
-      ...ownedSession("capture-timeout", 739, null, [root]),
-      attachment,
-    };
-    host.sessions.set(session.id, session);
-
-    await assert.rejects(
-      host.closeSession(session, "test"),
-      /initial terminal descendant ownership capture timed out/i,
-    );
-
-    assert.equal(host.sessions.get(session.id), session);
-    assert.equal(session.attachment, attachment);
-    assert.equal(attachmentCloses, 0);
-    assert.equal(session.state, "failed");
-  });
-});
-
-test("a stalled cleanup cannot block another key or unbound shutdown", async () => {
-  const root = processIdentity(740);
-  const controller = {
-    children: async (parent) =>
-      parent.pid === root.pid
-        ? new Promise(() => {})
-        : [],
-    inspect: async () => null,
-    terminate: async () => true,
-  };
-
-  await withTestHost(controller, async (host) => {
-    const stalled = ownedSession("stalled-cleanup", 740, null, [root]);
-    const unrelated = ownedSession("unrelated-cleanup", null, null, []);
-    host.sessions.set(stalled.id, stalled);
-    host.sessions.set(unrelated.id, unrelated);
-
-    const stalledClose = host.closeSession(stalled, "test");
-    await host.closeSession(unrelated, "test");
-    await assert.rejects(stalledClose, /initial .* capture timed out/i);
-
-    assert.equal(host.sessions.has(unrelated.id), false);
-    assert.equal(host.sessions.get(stalled.id), stalled);
-
-    const startedAt = Date.now();
-    await assert.rejects(
-      host.beginShutdown("bounded-timeout"),
-      /could not close 1 session/,
-    );
-    assert.ok(Date.now() - startedAt < 250);
-    assert.equal(host.sessions.get(stalled.id), stalled);
-    host.resumeAfterFailedShutdown();
-  });
-});
-
-test("cleanup retains the session when a captured descendant survives force", async () => {
-  const root = processIdentity(721);
-  const child = processIdentity(722, 721);
-  const unrelated = processIdentity(799);
-  const { controller, processes, terminated } = fakeProcessController(
-    [root, child, unrelated],
-    (pid, current) => {
-      if (pid === child.pid) {
-        throw new Error("Timed out in fake identity-bound termination");
-      }
-      current.delete(pid);
-    },
-  );
-
-  await withTestHost(controller, async (host) => {
-    const session = ownedSession("surviving-child", 721, 722, [root]);
-    host.sessions.set(session.id, session);
-
-    await assert.rejects(
-      host.closeSession(session, "test"),
-      /forced cleanup timed out/,
-    );
-
-    assert.deepEqual(terminated, [721, 722]);
-    assert.equal(processes.has(799), true);
-    assert.equal(host.sessions.get(session.id), session);
-    assert.equal(session.state, "failed");
-  });
+  rmSync(stateDirectory, { recursive: true, force: true });
 });
 
 test("manifest deletion requires the exact generation and process identity", () => {
@@ -962,7 +811,7 @@ test("start racing synchronous interruption remains failed without deadlock", as
 
 test("startup readiness failures clean resources and never publish running", async () => {
   const cases = [
-    ["failed child", (session) => (session.ttydProcess.exitCode = 1)],
+    ["failed supervisor", (session) => (session.jobSupervisor.exited = true)],
     ["closed upstream", (session) => (session.upstream.readyState = 3)],
     ["closed public server", (session) => (session.publicServer.listening = false)],
     ["missing shell identity", (session) => (session.shellPid = null)],
@@ -1326,15 +1175,24 @@ test("shutdown rejects a start whose body was still arriving at quiescence", asy
   });
 });
 
-test("shutdown reports cleanup failure and retains the failed session", async () => {
-  const root = processIdentity(901);
-  const { controller, processes } = fakeProcessController([root], () => {
-    throw new Error("Timed out in fake identity-bound termination");
-  });
+test("shutdown retains a session whose Job Object does not acknowledge empty", async () => {
+  let failTermination = true;
+  const supervisor = new FakeJobSupervisor();
+  supervisor.terminate = async function () {
+    this.terminateCalls += 1;
+    if (failTermination) throw new Error("Job Object acknowledgement timed out");
+    this.exited = true;
+    this.child.exit();
+  };
 
-  await withTestHost(controller, async (host, exits) => {
+  await withTestHost({}, async (host, exits) => {
     await host.start();
-    const session = ownedSession("shutdown-failure", 901, null, [root]);
+    const session = ownedSession(
+      "shutdown-failure",
+      901,
+      null,
+      supervisor,
+    );
     host.sessions.set(session.id, session);
     const response = await fetch(
       `http://127.0.0.1:${host.controlPort}/shutdown`,
@@ -1353,7 +1211,7 @@ test("shutdown reports cleanup failure and retains the failed session", async ()
     assert.equal(host.shuttingDown, false);
     assert.equal(existsSync(host.statePath), true);
 
-    processes.clear();
+    failTermination = false;
     await host.shutdown("test-cleanup");
     assert.deepEqual(exits, [0]);
   });

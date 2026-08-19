@@ -21,8 +21,11 @@ still a release gate.
 
 The current implementation is deliberately checkout-scoped:
 
-- the runtime entry point is `scripts/durable-terminal-host.mjs`;
-- the server resolves the script and ttyd from `Directory.GetCurrentDirectory()`;
+- the source runtime entry point is `scripts/durable-terminal-host.mjs`; server builds/publishes copy
+  it and `terminal-job-supervisor.ps1` beside the server, but they are not an installed immutable
+  terminal-host artifact;
+- the server prefers that output/publish copy and falls back to the checkout; ttyd and Node
+  dependencies are still resolved from checkout-local locations;
 - `ws` is a root dependency without a committed runtime-specific lockfile;
 - host discovery lives in the checkout's `.agents/durable-terminal/`;
 - reconnect uses a bounded raw-byte ring plus resize rather than serialized terminal state;
@@ -32,11 +35,12 @@ The current implementation is deliberately checkout-scoped:
 - checkout-local startup is serialized by a state-directory lock and each live host manifest has a
   unique runtime generation plus exact PID/start identity, but discovery is still confined to one
   checkout rather than a machine-global artifact generation;
-- explicit close already retains a failed session until every exact-identity ttyd descendant is
-  verified gone, and delete/archive hold a renewable per-worktree host reservation from
-  authoritative cleanup through mutation;
-- the immediately preceding protocol-1 manifest remains listable, closable, and reusable for
-  existing keys in a bounded drain-only compatibility path;
+- every session starts ttyd suspended under a retained Windows Job Object supervisor with
+  kill-on-close/no-breakaway policy; explicit close retains a failed session until the supervisor
+  acknowledges an empty job and exits, and delete/archive hold a renewable per-worktree host
+  reservation from authoritative cleanup through mutation;
+- the immediately preceding protocol-1 manifest remains listable; close/reuse/drain is permitted
+  only when it declares the same Job Object ownership capability;
 - deployment preserves a running host but does not upgrade or drain host generations;
 - operations are standalone Node scripts rather than `tm` commands.
 
@@ -90,11 +94,12 @@ protocol-1 parser is the concrete bounded precedent: it supports only the immedi
 starts no new legacy keys, and is removable once no supported persisted or live protocol-1
 manifest can remain.
 
-The first productized deployment adopts a running checkout-local protocol-v2 host as a
-**legacy-draining generation**. It lists and controls that host but sends every new terminal to the
-machine-global current generation. Once the legacy host has no sessions, it exits and its
-checkout-local state is removed. This is a bounded one-time migration, not a permanent scan of
-arbitrary worktrees.
+The first productized deployment adopts a running, Job-capability-bearing checkout-local
+protocol-v2 host as a **legacy-draining generation**. It lists and controls that host but sends
+every new terminal to the machine-global current generation. A pre-boundary protocol-v2 host is
+listable evidence only and must not be treated as authoritative cleanup. Once the compatible
+legacy host has no sessions, it exits and its checkout-local state is removed. This is a bounded
+one-time migration, not a permanent scan of arbitrary worktrees.
 
 ### Terminal reconnect
 
@@ -232,19 +237,18 @@ reconnect screen or bypass memory limits.
 
 ### Process ownership
 
-Retain ttyd `--once` as the primary ownership mechanism: closing the host's upstream WebSocket makes
-ttyd terminate its ConPTY child and exit. Add fault-injection tests for host kill, ttyd kill,
-control timeout, and close during sustained output. If any case leaves a descendant alive, add the
-smallest Windows Job Object boundary around ttyd; do not replace the proven proxy architecture
-without that evidence.
+Preserve the current two-layer boundary. ttyd `--once` remains the graceful path when the host
+closes its upstream WebSocket, while a per-session supervisor is the ownership authority: it creates
+ttyd suspended, assigns it to a kill-on-close/no-breakaway Windows Job Object before first resume,
+retains the job handle, validates shell PID membership, and acknowledges an empty job before
+registry removal. Host/control-pipe loss drives supervisor cleanup, and supervisor failure closes
+the job handle. Productization must package this boundary with the immutable host artifact rather
+than reverting to descendant enumeration or PID termination.
 
-Track host, ttyd, and PowerShell identity from owned startup metadata. Never discover or kill by
-process name. The checkout-local host captures exact creation identity, discovers descendants only
-from known parents, snapshots them before roots disappear, retains reparented descendants, and
-revalidates every explicit PID immediately before termination. PID reuse is never signalled, and a
-surviving or unverified owned process retains the failed session. Productization must preserve that
-contract while adding real-process host/ttyd crash fault injection; add a Windows Job Object only
-if those isolated tests demonstrate an orphan the identity-scoped boundary cannot clean.
+Track host, supervisor, ttyd, and PowerShell identity from owned startup metadata for diagnostics,
+but never discover or kill by process name and never use PID ancestry as cleanup proof. Add
+isolated fault-injection tests for host kill, supervisor kill, ttyd kill, control timeout, and close
+during sustained output. A surviving or unacknowledged job keeps the session failed and retryable.
 
 ### Copilot binding and recovery
 
@@ -270,8 +274,8 @@ retry of in-flight tools remain forbidden.
 - **Explicit destructive close.** Closing the terminal stops Copilot; hiding or detaching does not.
 - **No terminal content on disk.** Conversation storage belongs to Copilot, not Treemon terminal
   diagnostics.
-- **Test ttyd cleanup before adding a Job Object component.** Simplicity wins unless fault evidence
-  demonstrates an orphan risk.
+- **Preserve Job Object ownership.** The checkout-local runtime already requires assign-before-resume
+  kernel ownership; productization changes its packaging and generation scope, not that guarantee.
 
 ## Implementation Sequence
 
@@ -282,8 +286,9 @@ retry of in-flight tools remain forbidden.
    current-generation routing, drain, and rollback compatibility.
 3. **Implement bounded terminal snapshots and flow control.** Add headless xterm state,
    snapshot/sequence cutover, upstream and browser watermarks, and truncation behavior.
-4. **Harden security and process lifecycle.** Add short-lived grants, host-only ttyd auth, control
-   bounds, fault-injection cleanup tests, and a Job Object only if required by evidence.
+4. **Harden security and process lifecycle.** Package the Job Object supervisor with each immutable
+   host generation, add short-lived grants, host-only ttyd auth, control bounds, and fault-injection
+   cleanup tests.
 5. **Expand shared state and UI.** Separate process/attachment state, add destructive-close
    confirmation, interruption/recovery UX, and truthful reconnect wording.
 6. **Bind Copilot identity.** Carry terminal session identity through reporting and implement

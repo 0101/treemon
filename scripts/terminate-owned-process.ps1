@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("Inspect", "Children", "Terminate")]
+    [ValidateSet("Inspect", "Terminate")]
     [string]$Operation = "Terminate",
 
     [Parameter(Mandatory = $true)]
@@ -90,64 +90,6 @@ try {
             }
 
             "{0}|{1}|{2}" -f $identity.ProcessId, $identity.ParentProcessId, $identity.StartTimeUtcTicks
-        }
-
-        "Children" {
-            $children = @(
-                Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId" |
-                    ForEach-Object {
-                        if (-not $ownedProcess.HasExited) {
-                            $item = $_
-                            $child = Open-ProcessHandle ([int]$item.ProcessId) 0
-                            if ($null -ne $child) {
-                                try {
-                                    $exactStartTimeUtcTicks = $child.StartTime.ToUniversalTime().Ticks
-                                    $reportedStartTimeUtcTicks = $item.CreationDate.ToUniversalTime().Ticks
-                                    $currentChild =
-                                        Get-CimInstance Win32_Process -Filter "ProcessId = $($item.ProcessId)"
-                                    if (
-                                        -not $child.HasExited -and
-                                        $null -ne $currentChild -and
-                                        [int]$currentChild.ParentProcessId -eq $ProcessId -and
-                                        [int]$item.ParentProcessId -eq $ProcessId -and
-                                        [Math]::Abs($exactStartTimeUtcTicks - $reportedStartTimeUtcTicks) -le 9
-                                    ) {
-                                        [PSCustomObject]@{
-                                            Process = $child
-                                            ProcessId = [int]$item.ProcessId
-                                            ParentProcessId = [int]$item.ParentProcessId
-                                            StartTimeUtcTicks = $exactStartTimeUtcTicks
-                                        }
-                                        $child = $null
-                                    }
-                                } catch [System.InvalidOperationException] {
-                                } finally {
-                                    if ($null -ne $child) {
-                                        $child.Dispose()
-                                    }
-                                }
-                            }
-                        }
-                    }
-            )
-
-            try {
-                $parentIdentity = Read-ProcessIdentity $ownedProcess
-                if (
-                    $null -eq $parentIdentity -or
-                    $parentIdentity.StartTimeUtcTicks -ne $StartTimeUtcTicks
-                ) {
-                    exit 3
-                }
-
-                $children |
-                    Where-Object { -not $_.Process.HasExited } |
-                    ForEach-Object {
-                        "{0}|{1}|{2}" -f $_.ProcessId, $_.ParentProcessId, $_.StartTimeUtcTicks
-                    }
-            } finally {
-                $children | ForEach-Object { $_.Process.Dispose() }
-            }
         }
 
         "Terminate" {
