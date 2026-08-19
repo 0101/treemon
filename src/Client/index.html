@@ -415,17 +415,13 @@
         /* In-band history chart (spec: docs/spec/overview-activity-history.md). Each stacked stepped-area
            chart hangs directly under its live section, split off by a dashed rule; the areas reuse the
            band's task and activity accent classes (fill = currentColor). Geometry mirrors the prototype
-           .agents/canvas/overview-chart-prototype.html. Empty series are omitted (chart + legend). */
+           .agents/canvas/overview-chart-prototype.html. Empty series are omitted from the chart. */
         .history-charts { margin-top: 14px; padding-top: 14px; border-top: 1px dashed #45475a; }
         /* Keep the live Agents/Tasks solid divider when the Agents chart sits between the sections. */
         .history-charts + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px solid #313244; }
         .history-charts figure { background: #181825; padding: 12px 14px 6px; border-radius: 10px; margin: 10px 0 0; }
         .history-charts .chart-stage { position: relative; }
         .history-charts svg { display: block; width: 100%; height: auto; }
-        .chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 0 0; font-size: var(--fs-sm); color: #a6adc8; }
-        .chart-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-        .chart-legend .swatch { width: 10px; height: 10px; border-radius: 2px; background: currentColor; flex: none; }
-        .chart-legend .chart-legend-label { color: #a6adc8; }
         /* Axis labels are SVG text inside the fixed 760x170 viewBox, so their size is in user units
            that scale with the chart — not screen px, and therefore not a type-scale token. */
         .history-charts .axis-label { fill: #6c7086; font: 10px system-ui; }

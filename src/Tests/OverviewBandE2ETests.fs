@@ -490,6 +490,7 @@ type OverviewBandE2ETests() =
             do! toggle.ClickAsync()
             do! Assertions.Expect(toggle).ToHaveTextAsync("\u25F7 12h")
             do! Assertions.Expect(charts).ToHaveCountAsync(2)
+            do! Assertions.Expect(charts.Locator(".chart-legend")).ToHaveCountAsync(0)
 
             let! axisLabels = charts.First.Locator(".axis-label-x").AllTextContentsAsync()
             Assert.That(
