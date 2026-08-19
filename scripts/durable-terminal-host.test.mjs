@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import {
   existsSync,
@@ -130,6 +130,13 @@ test("each terminal uses a distinct loopback cookie name", () => {
 const testStateDirectory = () =>
   resolve(".agents", "durable-terminal-host-tests", randomUUID());
 
+const supervisorWitnessOptions = (sessionId, directory = resolve(".agents")) => ({
+  generation: "test-generation",
+  worktreePath: directory,
+  witnessPath: join(directory, `${sessionId}.empty.json`),
+  witnessNonce: "test-supervisor-witness-nonce",
+});
+
 const withTestHost = async (processController, action) => {
   const stateDirectory = testStateDirectory();
   mkdirSync(stateDirectory, { recursive: true });
@@ -229,10 +236,16 @@ class FakeJobSupervisor {
     this.exited = true;
     this.child.exit();
   }
+
+  terminateStartupFailure() {
+    return this.terminate();
+  }
 }
 
-const markStartupReady = (session) => {
-  const supervisor = new FakeJobSupervisor();
+const markStartupReadyWith = (
+  session,
+  supervisor = new FakeJobSupervisor(),
+) => {
   session.jobSupervisor = supervisor;
   session.supervisorProcess = supervisor.child;
   session.supervisorPid = supervisor.child.pid;
@@ -242,6 +255,8 @@ const markStartupReady = (session) => {
   session.publicServer = { listening: true };
   session.upstream = { readyState: 1 };
 };
+
+const markStartupReady = (session) => markStartupReadyWith(session);
 
 class FakeStartupUpstream extends EventEmitter {
   constructor() {
@@ -266,6 +281,7 @@ const ownedSession = (
   replay: emptyReplayBuffer(),
   attachment: null,
   closing: false,
+  witnessNonce: "test-supervisor-witness-nonce",
   jobSupervisor: supervisor,
   supervisorProcess: supervisor.child,
   supervisorPid: supervisor.child.pid,
@@ -296,8 +312,9 @@ test("checked-in supervisor compiles with assign-before-resume no-breakaway poli
   assert.equal(policy.descendantsInheritMembership, true);
   assert.equal(policy.createSuspended, 4);
   assert.equal(policy.controlStandardHandlesNonInheritable, true);
-  assert.equal(policy.childInheritedHandleCount, 1);
   assert.equal(policy.childStandardHandles, "NUL");
+  assert.equal(policy.sentinelHandleExcluded, true);
+  assert.equal(policy.intendedStandardHandlesUsable, true);
   assert.equal(policy.failedLaunchHandleDelta, 0);
   assert.equal(policy.quoteProbe, '"C:\\path with space\\\\"');
 });
@@ -320,9 +337,13 @@ test("supervisor launch boundary excludes every control standard handle", () => 
   assert.match(source, /hStdInput = nullHandle/);
   assert.match(source, /hStdOutput = nullHandle/);
   assert.match(source, /hStdError = nullHandle/);
+  assert.match(source, /InitializeProcThreadAttributeList/);
+  assert.match(source, /UpdateProcThreadAttribute/);
+  assert.match(source, /ProcThreadAttributeHandleList/);
+  assert.match(source, /ExtendedStartupInfoPresent/);
   assert.match(
     source.slice(launch, launch + 700),
-    /IntPtr\.Zero,\s+IntPtr\.Zero,\s+true,[\s\S]*workingDirectory,\s+ref startup/,
+    /IntPtr\.Zero,\s+IntPtr\.Zero,\s+true,[\s\S]*ExtendedStartupInfoPresent[\s\S]*workingDirectory,\s+ref startup/,
   );
 });
 
@@ -345,6 +366,7 @@ test(
       supervisor = createTerminalJobSupervisor();
       await supervisor.start({
         sessionId: randomUUID(),
+        ...supervisorWitnessOptions(randomUUID(), fixture),
         fileName: process.execPath,
         argumentsList: ["-e", "setInterval(() => {}, 1000)"],
         workingDirectory: fixture,
@@ -374,6 +396,181 @@ test(
       assert.equal(supervisor.exited, true);
     } finally {
       if (supervisor && !supervisor.exited) {
+        await terminateRetainedChild(supervisor.child);
+      }
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "real supervisor persists exact empty witnesses for injected launch failures",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = testStateDirectory();
+    mkdirSync(fixture, { recursive: true });
+    const stages = [
+      "before-job",
+      "after-process-suspended",
+      "after-assignment",
+      "after-resume",
+    ];
+
+    try {
+      for (const stage of stages) {
+        const sessionId = randomUUID();
+        const witnessPath = join(fixture, `${stage}.empty.json`);
+        const witnessNonce = randomUUID().replaceAll("-", "");
+        const supervisor = createTerminalJobSupervisor({
+          environment: {
+            ...process.env,
+            TREEMON_TERMINAL_SUPERVISOR_TEST_MODE: "1",
+          },
+        });
+
+        await assert.rejects(
+          supervisor.start({
+            sessionId,
+            generation: "failure-stage-generation",
+            worktreePath: fixture,
+            witnessPath,
+            witnessNonce,
+            fileName: process.execPath,
+            argumentsList: ["-e", "setInterval(() => {}, 1000)"],
+            workingDirectory: fixture,
+            environment: {},
+            testFailureStage: stage,
+            timeoutMs: 15_000,
+          }),
+          /Injected terminal supervisor failure/,
+        );
+        await supervisor.terminateStartupFailure(15_000, stage);
+
+        const witness = JSON.parse(readFileSync(witnessPath, "utf8"));
+        assert.deepEqual(
+          {
+            generation: witness.generation,
+            worktreePath: witness.worktreePath,
+            sessionId: witness.sessionId,
+            supervisorPid: witness.supervisorPid,
+            supervisorStartTimeUtcTicks:
+              witness.supervisorStartTimeUtcTicks,
+            nonce: witness.nonce,
+          },
+          {
+            generation: "failure-stage-generation",
+            worktreePath: fixture,
+            sessionId,
+            supervisorPid: supervisor.child.pid,
+            supervisorStartTimeUtcTicks:
+              supervisor.supervisorStartTimeUtcTicks,
+            nonce: witnessNonce,
+          },
+        );
+        assert.equal(supervisor.exited, true);
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "witness persistence failure never emits authoritative startup cleanup",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = testStateDirectory();
+    mkdirSync(fixture, { recursive: true });
+    const blocker = join(fixture, "not-a-directory");
+    writeFileSync(blocker, "block");
+    const supervisor = createTerminalJobSupervisor({
+      environment: {
+        ...process.env,
+        TREEMON_TERMINAL_SUPERVISOR_TEST_MODE: "1",
+      },
+    });
+
+    try {
+      await assert.rejects(
+        supervisor.start({
+          sessionId: randomUUID(),
+          generation: "no-proof-generation",
+          worktreePath: fixture,
+          witnessPath: join(blocker, "empty.json"),
+          witnessNonce: randomUUID().replaceAll("-", ""),
+          fileName: process.execPath,
+          argumentsList: ["-e", "setInterval(() => {}, 1000)"],
+          workingDirectory: fixture,
+          environment: {},
+          testFailureStage: "after-assignment",
+          timeoutMs: 15_000,
+        }),
+        /empty witness persistence failed/,
+      );
+      await assert.rejects(
+        supervisor.terminateStartupFailure(15_000, "no proof"),
+        /(?:without an authenticated empty-job acknowledgement|control output closed)/,
+      );
+      await Promise.race([
+        supervisor.exitPromise,
+        new Promise((resolveWait) => setTimeout(resolveWait, 5000)),
+      ]);
+      assert.equal(supervisor.emptyAcknowledged, false);
+      assert.equal(supervisor.exited, true);
+    } finally {
+      if (!supervisor.exited) {
+        await Promise.race([
+          supervisor.exitPromise,
+          new Promise((resolveWait) => setTimeout(resolveWait, 5000)),
+        ]);
+      }
+      if (!supervisor.exited) {
+        await terminateRetainedChild(supervisor.child);
+      }
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "startup failure after ready persists proof before the helper exits",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const fixture = testStateDirectory();
+    mkdirSync(fixture, { recursive: true });
+    const sessionId = randomUUID();
+    const witnessPath = join(fixture, "after-ready.empty.json");
+    const witnessNonce = randomUUID().replaceAll("-", "");
+    const supervisor = createTerminalJobSupervisor();
+
+    try {
+      await supervisor.start({
+        sessionId,
+        generation: "after-ready-generation",
+        worktreePath: fixture,
+        witnessPath,
+        witnessNonce,
+        fileName: process.execPath,
+        argumentsList: ["-e", "setInterval(() => {}, 1000)"],
+        workingDirectory: fixture,
+        environment: {},
+        timeoutMs: 15_000,
+      });
+      await supervisor.terminateStartupFailure(
+        15_000,
+        "injected failure after ready",
+      );
+
+      const witness = JSON.parse(readFileSync(witnessPath, "utf8"));
+      assert.equal(
+        supervisor.emptyAcknowledgementSource,
+        "startup-failure",
+      );
+      assert.equal(witness.sessionId, sessionId);
+      assert.equal(witness.nonce, witnessNonce);
+      assert.equal(supervisor.exited, true);
+    } finally {
+      if (!supervisor.exited) {
         await terminateRetainedChild(supervisor.child);
       }
       rmSync(fixture, { recursive: true, force: true });
@@ -430,6 +627,7 @@ const protocolSupervisor = (respond) => {
 const startProtocolSupervisor = ({ child, sessionId, supervisor }) =>
   supervisor.start({
     sessionId,
+    ...supervisorWitnessOptions(sessionId),
     fileName: "ttyd.exe",
     argumentsList: [],
     workingDirectory: resolve(".agents"),
@@ -487,6 +685,7 @@ test("supervisor protocol preserves argv cwd env and validates job membership", 
 
   await protocol.supervisor.start({
     sessionId: protocol.sessionId,
+    ...supervisorWitnessOptions(protocol.sessionId),
     fileName: "ttyd.exe",
     argumentsList: ["-w", "Q:\\path with spaces"],
     workingDirectory: "Q:\\path with spaces",
@@ -648,6 +847,83 @@ test("malformed and empty-false exit events cannot prove cleanup", async () => {
   );
 });
 
+test("wrong-token or malformed output stays failed after a valid-looking proof", async () => {
+  const cases = [
+    (response) =>
+      response.send({
+        event: "exited",
+        empty: true,
+        rootExitCode: 0,
+        token: "wrong-token",
+      }),
+    (response) => response.sendRaw("{"),
+  ];
+
+  await Promise.all(
+    cases.map(async (emitFailure) => {
+      const protocol = terminationProtocol((_request, response) => {
+        emitFailure(response);
+        response.send({
+          event: "exited",
+          empty: true,
+          rootExitCode: 0,
+        });
+        response.exit();
+      });
+      await startProtocolSupervisor(protocol);
+
+      await assert.rejects(protocol.supervisor.terminate(100));
+      assert.equal(protocol.supervisor.emptyAcknowledged, false);
+    }),
+  );
+});
+
+test("contradictory duplicate acknowledgements make the channel terminal", async () => {
+  const protocol = terminationProtocol((request, response) => {
+    response.send({
+      event: "terminated",
+      requestId: request.requestId,
+      empty: true,
+    });
+    response.send({
+      event: "terminate-failed",
+      requestId: request.requestId,
+      error: "contradictory duplicate",
+    });
+    response.exit();
+  });
+  await startProtocolSupervisor(protocol);
+
+  await assert.rejects(
+    protocol.supervisor.terminate(100),
+    /contradictory duplicate responses/i,
+  );
+});
+
+test("unsolicited protocol output remains terminal after later empty proof", async () => {
+  const protocol = terminationProtocol((_request, response) => {
+    response.send({
+      event: "contains",
+      requestId: "unknown-request",
+      processId: 42,
+      member: false,
+    });
+    response.send({
+      event: "exited",
+      empty: true,
+      rootExitCode: 0,
+    });
+    response.exit();
+  });
+  await startProtocolSupervisor(protocol);
+
+  await assert.rejects(
+    protocol.supervisor.terminate(100),
+    /unsolicited protocol message/i,
+  );
+  assert.equal(protocol.supervisor.emptyAcknowledged, false);
+});
+
 test("supervisor exit waits for a late buffered empty-job proof", async () => {
   const protocol = terminationProtocol((_request, response) => {
     response.exit(0, { closeOutput: false });
@@ -666,6 +942,48 @@ test("supervisor exit waits for a late buffered empty-job proof", async () => {
 
   assert.equal(protocol.supervisor.exited, true);
   assert.equal(protocol.supervisor.emptyAcknowledgementSource, "exited");
+});
+
+test("late buffered proof cannot recover an earlier protocol failure", async () => {
+  const protocol = terminationProtocol((_request, response) => {
+    response.exit(0, { closeOutput: false });
+    setImmediate(() => {
+      response.sendRaw("not-json");
+      response.send({
+        event: "exited",
+        empty: true,
+        rootExitCode: 0,
+      });
+      response.closeOutput();
+    });
+  });
+  await startProtocolSupervisor(protocol);
+
+  await assert.rejects(
+    protocol.supervisor.terminate(100),
+    /invalid JSON/,
+  );
+  assert.equal(protocol.supervisor.emptyAcknowledged, false);
+});
+
+test("clean duplicate proof and repeated termination remain idempotent", async () => {
+  const protocol = terminationProtocol((request, response) => {
+    const acknowledgement = {
+      event: "terminated",
+      requestId: request.requestId,
+      empty: true,
+    };
+    response.send(acknowledgement);
+    response.send(acknowledgement);
+    response.exit();
+  });
+  await startProtocolSupervisor(protocol);
+
+  await protocol.supervisor.terminate(100);
+  await protocol.supervisor.terminate(100);
+
+  assert.equal(protocol.supervisor.protocolFailure, null);
+  assert.equal(protocol.supervisor.emptyAcknowledged, true);
 });
 
 test("supervisor termination times out without empty proof or exit", async () => {
@@ -819,6 +1137,7 @@ test("supervisor pipe loss rejects startup and closes the ownership boundary", a
   );
   const starting = supervisor.start({
     sessionId,
+    ...supervisorWitnessOptions(sessionId),
     fileName: "ttyd.exe",
     argumentsList: [],
     workingDirectory: resolve(".agents"),
@@ -850,6 +1169,163 @@ test("startup failure stays failed after authoritative supervisor cleanup", asyn
       assert.equal(host.sessions.get(session.id), session);
     },
   );
+});
+
+test("proved startup failure permits retry close reservation and unrelated sessions", async () => {
+  await withTestHost({}, async (host) => {
+    const failingPath = join(
+      host.options.stateDirectory,
+      "proved-startup-failure",
+    );
+    const unrelatedPath = join(
+      host.options.stateDirectory,
+      "unrelated-session",
+    );
+    mkdirSync(failingPath, { recursive: true });
+    mkdirSync(unrelatedPath, { recursive: true });
+    let failingStarts = 0;
+    const closedListeners = [];
+
+    host.startSessionProxy = async (session) => {
+      const supervisor = new FakeJobSupervisor();
+      markStartupReadyWith(session, supervisor);
+      if (session.worktreePath === failingPath && failingStarts++ !== 1) {
+        throw new Error("injected failure after ready");
+      }
+    };
+    host.stopSessionResources = async (session, startupFailure = null) => {
+      if (startupFailure) {
+        await session.jobSupervisor.terminateStartupFailure(
+          100,
+          startupFailure.message,
+        );
+      } else {
+        await session.jobSupervisor.terminate(100);
+      }
+      closedListeners.push(session.id);
+      session.publicServer = { listening: false };
+      session.upstream = { readyState: 3 };
+    };
+
+    const failed = await host.startSession(failingPath);
+    const unrelated = await host.startSession(unrelatedPath);
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.resourcesStopped, true);
+    assert.equal(failed.publicServer.listening, false);
+
+    const retried = await host.startSession(failingPath);
+    assert.equal(retried.state, "running");
+    assert.notEqual(retried.id, failed.id);
+    assert.equal(host.sessions.get(unrelated.id), unrelated);
+
+    await host.closeSession(retried, "public-close");
+    assert.equal(host.sessionForKey(retried.key), undefined);
+    assert.equal(host.sessions.get(unrelated.id), unrelated);
+
+    const failedAgain = await host.startSession(failingPath);
+    assert.equal(failedAgain.state, "failed");
+    const reservation = await host.reserveWorktree(
+      failingPath,
+      "proved-startup-reservation",
+    );
+    assert.equal(host.sessionForKey(failedAgain.key), undefined);
+    assert.equal(host.sessions.get(unrelated.id), unrelated);
+    assert.equal(
+      await host.releaseReservation(reservation.id),
+      true,
+    );
+    assert.ok(closedListeners.includes(failed.id));
+    assert.ok(closedListeners.includes(failedAgain.id));
+  });
+});
+
+test("startup cleanup without proof stays failed and cannot reserve its key", async () => {
+  await withTestHost({}, async (host) => {
+    const failingPath = join(
+      host.options.stateDirectory,
+      "unproved-startup-failure",
+    );
+    const unrelatedPath = join(
+      host.options.stateDirectory,
+      "unproved-unrelated",
+    );
+    mkdirSync(failingPath, { recursive: true });
+    mkdirSync(unrelatedPath, { recursive: true });
+    const unproved = new FakeJobSupervisor({
+      terminateError: new Error("empty proof unavailable"),
+    });
+
+    host.startSessionProxy = async (session) => {
+      const supervisor =
+        session.worktreePath === failingPath
+          ? unproved
+          : new FakeJobSupervisor();
+      markStartupReadyWith(session, supervisor);
+      if (session.worktreePath === failingPath) {
+        throw new Error("injected failure after ready");
+      }
+    };
+    host.stopSessionResources = async (session, startupFailure = null) => {
+      if (startupFailure) {
+        await session.jobSupervisor.terminateStartupFailure(
+          100,
+          startupFailure.message,
+        );
+      } else {
+        await session.jobSupervisor.terminate(100);
+      }
+    };
+
+    const failed = await host.startSession(failingPath);
+    const unrelated = await host.startSession(unrelatedPath);
+    assert.equal(failed.state, "failed");
+    assert.match(failed.error, /cleanup did not complete/i);
+
+    await assert.rejects(
+      host.reserveWorktree(
+        failingPath,
+        "unproved-startup-reservation",
+      ),
+      /empty proof unavailable/,
+    );
+    assert.equal(host.sessions.get(failed.id), failed);
+    assert.equal(host.sessions.get(unrelated.id), unrelated);
+    assert.equal(host.activeReservation(failed.key), null);
+  });
+});
+
+test("generation record binds a witness-token commitment and supervisor identity", async () => {
+  await withTestHost({}, async (host) => {
+    const session = host.newSession(resolve(".agents", "generation"), 0);
+    session.supervisorPid = 1234;
+    session.supervisorStartTimeUtcTicks = "5678";
+    session.supervisorProtocolFailure = true;
+    host.sessions.set(session.id, session);
+    host.persistGeneration();
+
+    const record = JSON.parse(
+      readFileSync(host.generationPath, "utf8"),
+    );
+    assert.deepEqual(record.sessions, [
+      {
+        sessionId: session.id,
+        worktreePath: session.worktreePath,
+        witnessTokenHash: createHash("sha256")
+          .update(session.witnessNonce, "utf8")
+          .digest("hex"),
+        supervisorPid: 1234,
+        supervisorStartTimeUtcTicks: "5678",
+        protocolFailure: true,
+      },
+    ]);
+    assert.equal(JSON.stringify(record).includes(session.capability), false);
+    assert.equal(
+      JSON.stringify(record).includes(session.witnessNonce),
+      false,
+    );
+    assert.equal(record.generation, host.generation);
+    assert.equal(record.hostPid, process.pid);
+  });
 });
 
 test("shell PID is accepted only when the Job Object reports membership", async () => {

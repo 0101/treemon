@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
 import {
   appendFileSync,
   existsSync,
   linkSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -22,6 +23,7 @@ import { WebSocket, WebSocketServer } from "ws";
 export const hostProtocolVersion = 2;
 export const terminalOwnershipBoundary = "windows-job-v1";
 export const terminalJobProtocolGeneration = 1;
+export const terminalGenerationRecordVersion = 1;
 export const defaultReplayBytes = 1024 * 1024;
 export const defaultDiagnosticBytes = 1024 * 1024;
 
@@ -38,6 +40,7 @@ const gracefulProcessExitMs = 5000;
 const forcedProcessExitMs = 2000;
 const processForceCommandMs = 5000;
 const reservationLeaseMs = 5 * 60_000;
+const maximumGenerationRecords = 64;
 const unixEpochTicks = 621355968000000000n;
 const processIdentityHelperPath = join(
   import.meta.dirname,
@@ -54,6 +57,9 @@ const delay = (milliseconds) =>
 const timestamp = () => new Date().toISOString();
 
 const randomToken = (bytes = 24) => randomBytes(bytes).toString("base64url");
+
+const witnessTokenHash = (token) =>
+  createHash("sha256").update(token, "utf8").digest("hex");
 
 const currentProcessStartTicks = () =>
   (
@@ -183,7 +189,10 @@ export function publicDiagnosticSession(session) {
 function atomicWriteJson(path, value) {
   mkdirSync(dirname(path), { recursive: true });
   const temporaryPath = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, {
+    encoding: "utf8",
+    flush: true,
+  });
   renameSync(temporaryPath, path);
 }
 
@@ -243,6 +252,69 @@ export function removeManifestIfOwned(path, owner) {
   }
 }
 
+const generationRecordOwnership = (value) => {
+  const generation =
+    value?.version === terminalGenerationRecordVersion &&
+    typeof value?.generation === "string" &&
+    value.generation
+      ? value.generation
+      : null;
+  const hostPid =
+    Number.isInteger(value?.hostPid) && value.hostPid > 0
+      ? value.hostPid
+      : null;
+  const hostProcessStartTicks =
+    typeof value?.hostProcessStartTicks === "string" &&
+    /^\d+$/.test(value.hostProcessStartTicks)
+      ? value.hostProcessStartTicks
+      : null;
+  return generation && hostPid && hostProcessStartTicks
+    ? { generation, hostPid, hostProcessStartTicks }
+    : null;
+};
+
+const sameGenerationRecordOwner = (left, right) =>
+  left?.generation === right?.generation &&
+  left?.hostPid === right?.hostPid &&
+  left?.hostProcessStartTicks === right?.hostProcessStartTicks;
+
+function removeEmptyGenerationIfOwned(path, owner) {
+  if (!existsSync(path)) return true;
+  const claimedPath =
+    `${path}.${process.pid}.${randomToken(6)}.reclaim.json`;
+  try {
+    renameSync(path, claimedPath);
+  } catch (error) {
+    return error?.code === "ENOENT";
+  }
+
+  try {
+    const current = JSON.parse(readFileSync(claimedPath, "utf8"));
+    if (
+      !sameGenerationRecordOwner(
+        generationRecordOwnership(current),
+        owner,
+      ) ||
+      !Array.isArray(current.sessions) ||
+      current.sessions.length !== 0
+    ) {
+      if (!existsSync(path)) renameSync(claimedPath, path);
+      return false;
+    }
+    rmSync(claimedPath);
+    return true;
+  } catch {
+    if (existsSync(claimedPath) && !existsSync(path)) {
+      try {
+        renameSync(claimedPath, path);
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
 function writeManifestIfUnowned(path, manifest) {
   const owner = manifestOwnership(manifest);
   const candidatePath = `${path}.${owner.generation}.${process.pid}.owner`;
@@ -252,7 +324,7 @@ function writeManifestIfUnowned(path, manifest) {
     writeFileSync(
       candidatePath,
       `${JSON.stringify(manifest, null, 2)}\n`,
-      "utf8",
+      { encoding: "utf8", flush: true },
     );
     linkSync(candidatePath, path);
     return;
@@ -576,6 +648,19 @@ const runBoundedProcess = (
 
 const supervisorRequestId = () => randomToken(12);
 
+const protocolFingerprint = (value) => {
+  if (Array.isArray(value)) {
+    return `[${value.map(protocolFingerprint).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${protocolFingerprint(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+
 export function jobSupervisorPolicyIsSafe(message) {
   return (
     message?.assignedBeforeResume === true &&
@@ -600,7 +685,8 @@ export class TerminalJobSupervisor {
     this.requestTimeoutMs = requestTimeoutMs;
     this.sessionId = null;
     this.pending = new Map();
-    this.terminateRequestIds = new Set();
+    this.requests = new Map();
+    this.naturalEvents = new Map();
     this.exited = child.exitCode !== null || child.signalCode != null;
     this.boundaryFailure = null;
     this.protocolFailure = null;
@@ -670,6 +756,13 @@ export class TerminalJobSupervisor {
       return;
     }
 
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      this.recordProtocolFailure(
+        new Error("Terminal Job Object supervisor returned an invalid message"),
+      );
+      return;
+    }
+
     if (
       message?.token !== this.token ||
       message?.sessionId !== this.sessionId ||
@@ -681,11 +774,14 @@ export class TerminalJobSupervisor {
       return;
     }
 
+    if (this.protocolFailure) return;
+
     if (message.event === "exited") {
       if (
         message.empty === true &&
         Number.isInteger(message.rootExitCode)
       ) {
+        if (!this.recordNaturalEvent("exited", message)) return;
         this.acknowledgeEmpty("exited");
       } else {
         this.recordProtocolFailure(
@@ -697,15 +793,21 @@ export class TerminalJobSupervisor {
       return;
     }
 
-    if (
-      message.event === "terminated" &&
-      this.terminateRequestIds.has(message.requestId) &&
-      message.empty === true
-    ) {
-      this.acknowledgeEmpty("terminated");
-    }
-
     if (message.event === "boundary-failed") {
+      if (
+        typeof message.error !== "string" ||
+        !message.error.trim() ||
+        !this.recordNaturalEvent("boundary-failed", message)
+      ) {
+        if (!this.protocolFailure) {
+          this.recordProtocolFailure(
+            new Error(
+              "Terminal Job Object supervisor returned an invalid boundary failure",
+            ),
+          );
+        }
+        return;
+      }
       this.boundaryFailure =
         sanitizeMetadataText(message.error, 240) ||
         "Terminal Job Object boundary failed";
@@ -713,27 +815,61 @@ export class TerminalJobSupervisor {
       return;
     }
 
-    const pending = this.pending.get(message.requestId);
-    if (!pending) {
-      if (
-        message.event !== "terminated" ||
-        !this.terminateRequestIds.has(message.requestId)
-      ) {
+    if (typeof message.requestId !== "string" || !message.requestId) {
+      this.recordProtocolFailure(
+        new Error(
+          "Terminal Job Object supervisor returned an unsolicited protocol message",
+        ),
+      );
+      return;
+    }
+
+    const request = this.requests.get(message.requestId);
+    if (!request) {
+      this.recordProtocolFailure(
+        new Error(
+          "Terminal Job Object supervisor returned an unsolicited protocol message",
+        ),
+      );
+      return;
+    }
+
+    if (!this.responseMatchesRequest(request, message)) {
+      this.recordProtocolFailure(
+        new Error(
+          "Terminal Job Object supervisor returned an invalid protocol response",
+        ),
+      );
+      return;
+    }
+
+    const fingerprint = protocolFingerprint(message);
+    if (request.responseFingerprint) {
+      if (request.responseFingerprint !== fingerprint) {
         this.recordProtocolFailure(
           new Error(
-            "Terminal Job Object supervisor returned an unsolicited protocol message",
+            "Terminal Job Object supervisor returned contradictory duplicate responses",
           ),
         );
       }
       return;
     }
+    request.responseFingerprint = fingerprint;
+
+    const pending = this.pending.get(message.requestId);
+    if (!pending) {
+      this.acceptEmptyResponse(message);
+      return;
+    }
     this.pending.delete(message.requestId);
     clearTimeout(pending.timeout);
 
+    this.acceptEmptyResponse(message);
     if (
       message.event === "request-failed" ||
       message.event === "start-failed" ||
-      message.event === "terminate-failed"
+      message.event === "terminate-failed" ||
+      message.event === "startup-failure-empty"
     ) {
       pending.reject(
         new Error(
@@ -746,8 +882,92 @@ export class TerminalJobSupervisor {
     }
   }
 
+  recordNaturalEvent(kind, message) {
+    const fingerprint = protocolFingerprint(message);
+    const existing = this.naturalEvents.get(kind);
+    if (!existing) {
+      this.naturalEvents.set(kind, fingerprint);
+      return true;
+    }
+    if (existing === fingerprint) return true;
+    this.recordProtocolFailure(
+      new Error(
+        "Terminal Job Object supervisor returned contradictory duplicate events",
+      ),
+    );
+    return false;
+  }
+
+  responseMatchesRequest(request, message) {
+    const expectedEvents = {
+      start: new Set([
+        "ready",
+        "start-failed",
+        "startup-failure-empty",
+        "request-failed",
+      ]),
+      contains: new Set(["contains", "request-failed"]),
+      terminate: new Set([
+        "terminated",
+        "terminate-failed",
+        "request-failed",
+      ]),
+      "startup-failed": new Set([
+        "startup-failure-empty",
+        "terminate-failed",
+        "request-failed",
+      ]),
+    }[request.command];
+    if (!expectedEvents?.has(message.event)) return false;
+
+    if (
+      ["request-failed", "start-failed", "terminate-failed"].includes(
+        message.event,
+      )
+    ) {
+      return typeof message.error === "string" && Boolean(message.error.trim());
+    }
+    if (message.event === "ready") {
+      return (
+        jobSupervisorPolicyIsSafe(message) &&
+        validPid(message.ttydPid) &&
+        message.supervisorPid === this.child.pid &&
+        /^\d+$/.test(message.supervisorStartTimeUtcTicks ?? "")
+      );
+    }
+    if (message.event === "contains") {
+      return (
+        message.processId === request.payload.processId &&
+        typeof message.member === "boolean"
+      );
+    }
+    if (message.event === "terminated") return message.empty === true;
+    if (message.event === "startup-failure-empty") {
+      return (
+        message.empty === true &&
+        message.supervisorPid === this.child.pid &&
+        /^\d+$/.test(message.supervisorStartTimeUtcTicks ?? "") &&
+        typeof message.error === "string" &&
+        Boolean(message.error.trim())
+      );
+    }
+    return false;
+  }
+
+  acceptEmptyResponse(message) {
+    if (this.protocolFailure) return;
+    if (message.event === "terminated") {
+      this.acknowledgeEmpty("terminated");
+    } else if (message.event === "startup-failure-empty") {
+      this.supervisorPid = message.supervisorPid;
+      this.supervisorStartTimeUtcTicks =
+        message.supervisorStartTimeUtcTicks;
+      this.acknowledgeEmpty("startup-failure");
+    }
+  }
+
   acknowledgeEmpty(source) {
-    if (this.emptyAcknowledged) return;
+    if (this.protocolFailure || this.emptyAcknowledged) return;
     this.emptyAcknowledged = true;
     this.emptyAcknowledgementSource = source;
     this.resolveEmpty();
@@ -755,6 +975,7 @@ export class TerminalJobSupervisor {
 
   recordProtocolFailure(error) {
     this.protocolFailure ??= error;
+    this.onProtocolFailure?.(this.protocolFailure);
     this.fail(error);
   }
 
@@ -773,6 +994,8 @@ export class TerminalJobSupervisor {
   }
 
   request(command, payload = {}, timeoutMs = this.requestTimeoutMs) {
+    if (this.protocolFailure) return Promise.reject(this.protocolFailure);
+    if (this.channelFailure) return Promise.reject(this.channelFailure);
     if (this.exited) {
       return Promise.reject(
         new Error("Terminal Job Object supervisor already exited"),
@@ -780,7 +1003,11 @@ export class TerminalJobSupervisor {
     }
 
     const requestId = supervisorRequestId();
-    if (command === "terminate") this.terminateRequestIds.add(requestId);
+    this.requests.set(requestId, {
+      command,
+      payload,
+      responseFingerprint: null,
+    });
     return new Promise((resolveRequest, rejectRequest) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
@@ -831,6 +1058,18 @@ export class TerminalJobSupervisor {
     if (this.sessionId !== null && this.sessionId !== options.sessionId) {
       throw new Error("Terminal Job Object protocol session identity changed");
     }
+    if (
+      typeof options.generation !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(options.generation) ||
+      typeof options.worktreePath !== "string" ||
+      !isAbsolute(options.worktreePath) ||
+      typeof options.witnessPath !== "string" ||
+      !isAbsolute(options.witnessPath) ||
+      typeof options.witnessNonce !== "string" ||
+      !/^[A-Za-z0-9_-]{24,128}$/.test(options.witnessNonce)
+    ) {
+      throw new Error("Terminal Job Object empty-witness metadata is invalid");
+    }
     this.sessionId = options.sessionId;
 
     const ready = await this.request(
@@ -840,6 +1079,15 @@ export class TerminalJobSupervisor {
         arguments: options.argumentsList,
         workingDirectory: options.workingDirectory,
         environment: options.environment,
+        generation: options.generation,
+        worktreePath: options.worktreePath,
+        witness: {
+          path: options.witnessPath,
+          nonce: options.witnessNonce,
+        },
+        ...(options.testFailureStage
+          ? { testFailureStage: options.testFailureStage }
+          : {}),
       },
       options.timeoutMs,
     );
@@ -854,6 +1102,9 @@ export class TerminalJobSupervisor {
         "Terminal Job Object supervisor did not prove assign-before-resume ownership",
       );
     }
+    this.supervisorPid = ready.supervisorPid;
+    this.supervisorStartTimeUtcTicks =
+      ready.supervisorStartTimeUtcTicks;
     return ready;
   }
 
@@ -877,7 +1128,7 @@ export class TerminalJobSupervisor {
   }
 
   async waitForTerminationEvidence(deadline) {
-    while (!this.emptyAcknowledged || !this.exited) {
+    while (!this.emptyAcknowledged || !this.exited || !this.outputClosed) {
       if (this.outputClosed && !this.emptyAcknowledged) break;
       const evidence = [
         deadline,
@@ -894,12 +1145,12 @@ export class TerminalJobSupervisor {
   }
 
   terminationFailure(requestError) {
+    if (this.protocolFailure) return this.protocolFailure;
     if (this.emptyAcknowledged && !this.exited) {
       return new Error(
         "Timed out waiting for terminal Job Object supervisor to exit after empty acknowledgement",
       );
     }
-    if (this.protocolFailure) return this.protocolFailure;
     if (this.exited) {
       return new Error(
         `Terminal Job Object supervisor exited with code ${this.exitCode ?? "unknown"} without an authenticated empty-job acknowledgement`,
@@ -912,7 +1163,8 @@ export class TerminalJobSupervisor {
     );
   }
 
-  async terminateOnce(timeoutMs) {
+  async terminateOnce(timeoutMs, command = "terminate", error = null) {
+    if (this.protocolFailure) throw this.protocolFailure;
     const boundedTimeoutMs = Math.max(1, Math.floor(timeoutMs));
     let deadlineTimer;
     const deadline = new Promise((resolveDeadline) => {
@@ -925,12 +1177,19 @@ export class TerminalJobSupervisor {
 
     if (!this.exited) {
       void this.request(
-        "terminate",
-        { timeoutMilliseconds: boundedTimeoutMs },
+        command,
+        {
+          timeoutMilliseconds: boundedTimeoutMs,
+          ...(error ? { error: sanitizeMetadataText(error, 240) } : {}),
+        },
         boundedTimeoutMs,
       )
         .then((response) => {
-          if (response.event !== "terminated" || response.empty !== true) {
+          const expectedEvent =
+            command === "startup-failed"
+              ? "startup-failure-empty"
+              : "terminated";
+          if (response.event !== expectedEvent || response.empty !== true) {
             throw new Error(
               "Terminal Job Object supervisor did not acknowledge an empty job",
             );
@@ -946,14 +1205,16 @@ export class TerminalJobSupervisor {
     } finally {
       clearTimeout(deadlineTimer);
     }
-    if (this.emptyAcknowledged && this.exited) return;
+    if (this.protocolFailure) throw this.protocolFailure;
+    if (this.emptyAcknowledged && this.exited && this.outputClosed) return;
     await Promise.resolve();
+    if (this.protocolFailure) throw this.protocolFailure;
     throw this.terminationFailure(requestOutcome.error);
   }
 
-  async terminate(timeoutMs) {
+  async terminateWith(command, timeoutMs, error = null) {
     if (this.terminationAttempt) return this.terminationAttempt;
-    const attempt = this.terminateOnce(timeoutMs);
+    const attempt = this.terminateOnce(timeoutMs, command, error);
     this.terminationAttempt = attempt;
     try {
       return await attempt;
@@ -963,12 +1224,25 @@ export class TerminalJobSupervisor {
       }
     }
   }
+
+  terminate(timeoutMs) {
+    return this.terminateWith("terminate", timeoutMs);
+  }
+
+  terminateStartupFailure(timeoutMs, error) {
+    return this.terminateWith(
+      "startup-failed",
+      timeoutMs,
+      error || "Terminal startup failed",
+    );
+  }
 }
 
 export function createTerminalJobSupervisor({
   spawnProcess = spawn,
   supervisorPath = terminalJobSupervisorPath,
   requestTimeoutMs = processForceCommandMs,
+  environment = process.env,
 } = {}) {
   requireKernelTerminalOwnership();
 
@@ -984,6 +1258,7 @@ export function createTerminalJobSupervisor({
     {
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
+      env: environment,
     },
   );
   return new TerminalJobSupervisor(child, token, requestTimeoutMs);
@@ -1227,6 +1502,19 @@ export class DurableTerminalHost {
     this.statePath = join(options.stateDirectory, "host.json");
     this.statusPath = join(options.stateDirectory, "status.json");
     this.lockPath = join(options.stateDirectory, "host.lock");
+    this.generationDirectory = join(
+      options.stateDirectory,
+      "terminal-generations",
+    );
+    this.generationPath = join(
+      this.generationDirectory,
+      `${this.generation}.json`,
+    );
+    this.witnessDirectory = join(
+      options.stateDirectory,
+      "terminal-empty-witnesses",
+      this.generation,
+    );
     this.diagnostics = new DiagnosticLog(
       join(options.stateDirectory, "diagnostics.jsonl"),
       options.diagnosticBytes,
@@ -1270,6 +1558,73 @@ export class DurableTerminalHost {
       controlToken: this.controlToken,
       startedAt: this.startedAt,
     };
+  }
+
+  generationOwner() {
+    return {
+      generation: this.generation,
+      hostPid: process.pid,
+      hostProcessStartTicks: this.processStartTicks,
+    };
+  }
+
+  generationRecord() {
+    return {
+      version: terminalGenerationRecordVersion,
+      hostProtocolVersion,
+      generation: this.generation,
+      hostPid: process.pid,
+      hostProcessStartTicks: this.processStartTicks,
+      hostProcessStartExact: Boolean(this.options.generation),
+      ownershipBoundary:
+        process.platform === "win32"
+          ? terminalOwnershipBoundary
+          : "unsupported",
+      startedAt: this.startedAt,
+      sessions: [...this.sessions.values()]
+        .sort((left, right) => left.order - right.order)
+        .map((session) => ({
+          sessionId: session.id,
+          worktreePath: session.worktreePath,
+          witnessTokenHash: witnessTokenHash(session.witnessNonce),
+          supervisorPid: session.supervisorPid ?? null,
+          supervisorStartTimeUtcTicks:
+            session.supervisorStartTimeUtcTicks ?? null,
+          protocolFailure: Boolean(session.supervisorProtocolFailure),
+        })),
+    };
+  }
+
+  ensureGenerationCapacity() {
+    mkdirSync(this.generationDirectory, { recursive: true });
+    const records = readdirSync(this.generationDirectory)
+      .filter((name) => name.endsWith(".json"));
+    if (
+      !records.includes(`${this.generation}.json`) &&
+      records.length >= maximumGenerationRecords
+    ) {
+      throw new Error(
+        `Durable terminal generation retention reached ${maximumGenerationRecords} unresolved records; verify or manually drain retired terminal generations before starting another host`,
+      );
+    }
+  }
+
+  persistGeneration() {
+    this.ensureGenerationCapacity();
+    atomicWriteJson(this.generationPath, this.generationRecord());
+  }
+
+  witnessPath(session) {
+    return join(this.witnessDirectory, `${session.id}.json`);
+  }
+
+  removeSessionWitness(session) {
+    rmSync(this.witnessPath(session), { force: true });
+    try {
+      rmSync(this.witnessDirectory);
+    } catch (error) {
+      if (!["ENOENT", "ENOTEMPTY"].includes(error?.code)) throw error;
+    }
   }
 
   async acceptStartupClaim() {
@@ -1364,6 +1719,7 @@ export class DurableTerminalHost {
     try {
       this.controlPort = await listenLoopback(this.controlServer);
       await this.acceptStartupClaim();
+      this.persistGeneration();
       writeManifestIfUnowned(this.statePath, this.manifest());
       this.persistStatus();
       this.record("host-started", null, {
@@ -1672,10 +2028,12 @@ export class DurableTerminalHost {
       closing: false,
       failureRecorded: false,
       resourcesStopped: false,
+      witnessNonce: randomToken(),
       jobSupervisor: null,
       supervisorProcess: null,
       supervisorPid: null,
       supervisorStartTimeUtcTicks: null,
+      supervisorProtocolFailure: false,
       shellPid: null,
       ttydPid: null,
       upstreamOpenedAt: null,
@@ -1728,6 +2086,7 @@ export class DurableTerminalHost {
 
     const session = this.newSession(worktreePath, order);
     this.sessions.set(session.id, session);
+    this.persistGeneration();
     this.persistStatus();
     this.record("session-starting", session);
 
@@ -1745,6 +2104,7 @@ export class DurableTerminalHost {
         ttydPort: session.ttydPort,
       });
     } catch (error) {
+      this.synchronizeSupervisorEvidence(session);
       if (!session.failureRecorded) {
         session.failureRecorded = true;
         session.error = this.startFailureMessage(error);
@@ -1753,7 +2113,11 @@ export class DurableTerminalHost {
       this.record("session-start-failed", session, {
         errorType: sanitizeMetadataText(error?.name || "Error", 80),
       });
-      const cleanupError = await this.stopFailedSessionResources(session);
+      const cleanupError = await this.stopFailedSessionResources(
+        session,
+        error,
+      );
+      this.synchronizeSupervisorEvidence(session);
       if (cleanupError) {
         session.error = `Terminal startup failed and owned process cleanup did not complete: ${sanitizeMetadataText(cleanupError.message, 240)}`;
         this.record("session-start-cleanup-failed", session, {
@@ -1765,6 +2129,29 @@ export class DurableTerminalHost {
     }
 
     return session;
+  }
+
+  synchronizeSupervisorEvidence(session) {
+    const supervisorPid =
+      session.jobSupervisor?.supervisorPid ??
+      session.supervisorProcess?.pid ??
+      session.supervisorPid;
+    const supervisorStartTimeUtcTicks =
+      session.jobSupervisor?.supervisorStartTimeUtcTicks ??
+      session.supervisorStartTimeUtcTicks;
+    const changed =
+      session.supervisorPid !== supervisorPid ||
+      session.supervisorStartTimeUtcTicks !==
+        supervisorStartTimeUtcTicks;
+    session.supervisorPid = validPid(supervisorPid)
+      ? supervisorPid
+      : null;
+    session.supervisorStartTimeUtcTicks =
+      typeof supervisorStartTimeUtcTicks === "string" &&
+      /^\d+$/.test(supervisorStartTimeUtcTicks)
+        ? supervisorStartTimeUtcTicks
+        : null;
+    if (changed) this.persistGeneration();
   }
 
   startupReadinessError(session) {
@@ -1871,8 +2258,6 @@ export class DurableTerminalHost {
         session.browserWebSockets.emit("connection", webSocket, request),
       );
     });
-    session.publicPort = await listenLoopback(session.publicServer);
-
     session.ttydPort = await freeLoopbackPort();
     session.cookieName = sessionCookieName(session.id);
     session.pidFile = join(
@@ -1911,6 +2296,14 @@ export class DurableTerminalHost {
 
     session.jobSupervisor = this.supervisorFactory();
     session.supervisorProcess = session.jobSupervisor.child;
+    session.supervisorPid = validPid(session.supervisorProcess?.pid)
+      ? session.supervisorProcess.pid
+      : null;
+    session.jobSupervisor.onProtocolFailure = () => {
+      session.supervisorProtocolFailure = true;
+      this.persistGeneration();
+    };
+    this.persistGeneration();
     session.supervisorProcess.once("error", (error) => {
       spawnFailure.error = error;
     });
@@ -1938,6 +2331,10 @@ export class DurableTerminalHost {
     };
     const ownership = await session.jobSupervisor.start({
       sessionId: session.id,
+      generation: this.generation,
+      worktreePath: session.worktreePath,
+      witnessPath: this.witnessPath(session),
+      witnessNonce: session.witnessNonce,
       fileName: this.options.ttydPath,
       argumentsList: ttydArguments,
       workingDirectory: session.worktreePath,
@@ -1953,6 +2350,8 @@ export class DurableTerminalHost {
     session.supervisorPid = ownership.supervisorPid;
     session.supervisorStartTimeUtcTicks =
       ownership.supervisorStartTimeUtcTicks;
+    this.persistGeneration();
+    session.publicPort = await listenLoopback(session.publicServer);
 
     const ttydHttp = `http://127.0.0.1:${session.ttydPort}/`;
     await waitForTtyd(
@@ -2260,11 +2659,11 @@ export class DurableTerminalHost {
     });
   }
 
-  async stopFailedSessionResources(session) {
+  async stopFailedSessionResources(session, startupFailure = null) {
     if (session.resourcesStopped) return null;
     session.closing = true;
     try {
-      await this.stopSessionResources(session);
+      await this.stopSessionResources(session, startupFailure);
       session.resourcesStopped = true;
       return null;
     } catch (error) {
@@ -2292,6 +2691,12 @@ export class DurableTerminalHost {
     try {
       await this.stopSessionResources(session);
       this.sessions.delete(session.id);
+      this.persistGeneration();
+      try {
+        this.removeSessionWitness(session);
+      } catch {
+        this.record("session-witness-cleanup-deferred", session);
+      }
       this.persistStatus();
       this.record("session-closed", session, {
         ttydOwnedAlive: false,
@@ -2310,7 +2715,7 @@ export class DurableTerminalHost {
     }
   }
 
-  async stopSessionResources(session) {
+  async stopSessionResources(session, startupFailure = null) {
     const upstreamCloseAllowance =
       session.upstream &&
       session.upstream.readyState !== WebSocket.CLOSED
@@ -2347,7 +2752,15 @@ export class DurableTerminalHost {
           "Timed out before requesting terminal Job Object termination",
         );
       }
-      await session.jobSupervisor.terminate(timeoutMs);
+      if (startupFailure) {
+        await session.jobSupervisor.terminateStartupFailure(
+          timeoutMs,
+          startupFailure.message,
+        );
+      } else {
+        await session.jobSupervisor.terminate(timeoutMs);
+      }
+      this.synchronizeSupervisorEvidence(session);
     } else if (validPid(session.ttydPid) || validPid(session.shellPid)) {
       throw new Error(
         "Terminal process ownership has no Job Object supervisor acknowledgement",
@@ -2474,6 +2887,21 @@ export class DurableTerminalHost {
     );
     if (!removed) {
       this.record("host-manifest-ownership-changed", null, { reason });
+    }
+    if (
+      !removeEmptyGenerationIfOwned(
+        this.generationPath,
+        this.generationOwner(),
+      )
+    ) {
+      this.record("host-generation-compaction-deferred", null, { reason });
+    }
+    try {
+      rmSync(this.witnessDirectory);
+    } catch (error) {
+      if (!["ENOENT", "ENOTEMPTY"].includes(error?.code)) {
+        this.record("host-witness-compaction-deferred", null, { reason });
+      }
     }
     this.exitProcess(0);
   }

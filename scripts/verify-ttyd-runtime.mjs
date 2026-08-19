@@ -102,8 +102,13 @@ export async function runTtydRuntimeVerification() {
     );
 
     supervisor = createTerminalJobSupervisor();
+    const sessionId = randomUUID();
     const ownership = await supervisor.start({
-      sessionId: randomUUID(),
+      sessionId,
+      generation: "ttyd-runtime-verification",
+      worktreePath: fixture,
+      witnessPath: join(fixture, `${sessionId}.empty.json`),
+      witnessNonce: randomUUID().replaceAll("-", ""),
       fileName: ttyd,
       argumentsList: [
         "-p",

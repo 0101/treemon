@@ -37,9 +37,16 @@ The current implementation is deliberately checkout-scoped:
   checkout rather than a machine-global artifact generation;
 - every session starts ttyd suspended under a retained Windows Job Object supervisor with
   kill-on-close/no-breakaway policy; explicit close retains a failed session until the supervisor
-  exits and supplies an authenticated session-bound empty-job proof, while ttyd cannot inherit the
-  supervisor control pipes; delete/archive hold a renewable per-worktree host reservation from
+  exits and supplies an authenticated session-bound empty-job proof. `STARTUPINFOEX` whitelists only
+  the child `NUL` standard handle, so ttyd cannot inherit any supervisor control or unrelated
+  inheritable handle. Generation manifests and nonce-bound helper-written empty witnesses survive a
+  host or Treemon-manager crash; delete/archive hold a renewable per-worktree host reservation from
   authoritative cleanup through mutation;
+- dead/replaced generation records are retained until every recorded supervisor has a matching
+  durable witness and exact exit identity, then compacted compare-before-delete. The checkout-local
+  store refuses a 65th unresolved generation rather than discarding evidence; dead protocol-1 and
+  pre-witness migration records fail strict cleanup closed until the operator drains their terminals
+  (or restarts the machine) and manually removes those records;
 - the immediately preceding protocol-1 manifest remains listable; close/reuse/drain is permitted
   only when it declares the same Job Object ownership capability;
 - deployment preserves a running host but does not upgrade or drain host generations;
@@ -241,11 +248,15 @@ reconnect screen or bypass memory limits.
 Preserve the current two-layer boundary. ttyd `--once` remains the graceful path when the host
 closes its upstream WebSocket, while a per-session supervisor is the ownership authority: it creates
 ttyd suspended, assigns it to a kill-on-close/no-breakaway Windows Job Object before first resume,
-retains the job handle, excludes its authenticated stdin/stdout/stderr pipes from child inheritance,
-validates shell PID membership, and provides a session-bound empty-job proof before registry
-removal. Cleanup requires that proof plus supervisor exit. Host/control-pipe loss drives supervisor
-cleanup, and supervisor failure closes the job handle. Productization must package this boundary
-with the immutable host artifact rather than reverting to descendant enumeration or PID termination.
+retains the job handle, and launches through `STARTUPINFOEX` with a one-handle
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`; clearing inheritance on authenticated stdin/stdout/stderr
+remains defense in depth. It validates shell PID membership and atomically flushes a
+generation/worktree/session/nonce/exact-identity empty witness only after `ActiveProcesses == 0`,
+before reporting success or exit. Cleanup requires that witness plus supervisor exit. Sticky
+protocol failure cannot be repaired by later output. Host/control-pipe loss drives supervisor
+cleanup, and supervisor failure closes the job handle. Productization must package the generation
+record, witness store, bounded compaction, and launch boundary with the immutable host artifact
+rather than reverting to descendant enumeration or PID termination.
 
 Track host, supervisor, ttyd, and PowerShell identity from owned startup metadata for diagnostics,
 but never discover or kill by process name and never use PID ancestry as cleanup proof. Add
@@ -277,7 +288,8 @@ retry of in-flight tools remain forbidden.
 - **No terminal content on disk.** Conversation storage belongs to Copilot, not Treemon terminal
   diagnostics.
 - **Preserve Job Object ownership.** The checkout-local runtime already requires assign-before-resume
-  kernel ownership; productization changes its packaging and generation scope, not that guarantee.
+  kernel ownership, a STARTUPINFOEX handle whitelist, and durable generation-scoped empty witnesses;
+  productization changes their packaging and generation scope, not those guarantees.
 
 ## Implementation Sequence
 

@@ -47,6 +47,29 @@ type private SupervisorIdentity =
     { Pid: int
       ProcessStartTicks: int64 }
 
+type private GenerationSessionEvidence =
+    { SessionId: string
+      WorktreePath: WorktreePath
+      WitnessTokenHash: string
+      SupervisorPid: int option
+      SupervisorStartTicks: int64 option
+      ProtocolFailure: bool }
+
+type private GenerationEvidence =
+    { Path: string
+      Serialized: string
+      HostProtocolVersion: int
+      Identity: HostIdentity
+      SessionsUnknown: bool
+      Sessions: GenerationSessionEvidence list }
+
+type private EmptyWitness =
+    { Generation: string
+      WorktreePath: WorktreePath
+      SessionId: string
+      Supervisor: SupervisorIdentity
+      Nonce: string }
+
 type private HostSession =
     { Id: string
       Supervisor: SupervisorIdentity option
@@ -125,6 +148,8 @@ type private Message =
 type Manager = private Manager of MailboxProcessor<Message>
 
 let private hostProtocolVersion = 2
+let private generationRecordVersion = 1
+let private maximumGenerationRecords = 64
 
 let private kernelOwnershipError =
     "The durable terminal host predates kernel-enforced Job Object ownership; Treemon cannot start a terminal or authorize cleanup for that generation"
@@ -305,6 +330,23 @@ let private requiredBool name element =
     | Some value when value.ValueKind = JsonValueKind.False -> Ok false
     | _ -> Error $"Missing or invalid '{name}'"
 
+let private optionalBool name element =
+    match tryProperty name element with
+    | None -> Ok None
+    | Some value when value.ValueKind = JsonValueKind.Null -> Ok None
+    | Some value when value.ValueKind = JsonValueKind.True -> Ok(Some true)
+    | Some value when value.ValueKind = JsonValueKind.False -> Ok(Some false)
+    | _ -> Error $"Invalid '{name}'"
+
+let private optionalInt name element =
+    match tryProperty name element with
+    | None -> Ok None
+    | Some value when value.ValueKind = JsonValueKind.Null -> Ok None
+    | Some value ->
+        match value.TryGetInt32() with
+        | true, result -> Ok(Some result)
+        | false, _ -> Error $"Invalid '{name}'"
+
 let private requiredInt64String name element =
     result {
         let! text = requiredString name element
@@ -313,6 +355,26 @@ let private requiredInt64String name element =
         | true, value when value > 0L -> return value
         | _ -> return! Error $"Invalid '{name}'"
     }
+
+let private optionalInt64String name element =
+    match tryProperty name element with
+    | None -> Ok None
+    | Some value when value.ValueKind = JsonValueKind.Null -> Ok None
+    | Some _ -> requiredInt64String name element |> Result.map Some
+
+let private validBoundedToken minimum maximum (value: string) =
+    value.Length >= minimum
+    && value.Length <= maximum
+    && value
+       |> Seq.forall (fun character ->
+           Char.IsAsciiLetterOrDigit character
+           || character = '_'
+           || character = '-')
+
+let private validSha256Hex (value: string) =
+    value.Length = 64
+    && value
+       |> Seq.forall Uri.IsHexDigit
 
 let private parseHostConnection (text: string) =
     try
@@ -387,6 +449,213 @@ let private parseHostConnection (text: string) =
         Error $"Invalid durable terminal host state: {ex.Message}"
     | ex ->
         Error $"Could not read durable terminal host state: {ex.Message}"
+
+let private parseGenerationSession element =
+    result {
+        let! sessionId = requiredString "sessionId" element
+        let! worktreePath = requiredString "worktreePath" element
+        let! witnessTokenHash =
+            requiredString "witnessTokenHash" element
+        let! supervisorPid = optionalInt "supervisorPid" element
+        let! supervisorStartTicks =
+            optionalInt64String
+                "supervisorStartTimeUtcTicks"
+                element
+        let! protocolFailure =
+            requiredBool "protocolFailure" element
+
+        if not (validBoundedToken 16 128 sessionId) then
+            return!
+                Error
+                    "Durable terminal generation record has an invalid session identity"
+
+        if not (validSha256Hex witnessTokenHash) then
+            return!
+                Error
+                    "Durable terminal generation record has an invalid witness-token commitment"
+
+        if not (Path.IsPathFullyQualified worktreePath) then
+            return!
+                Error
+                    "Durable terminal generation record has a non-canonical worktree path"
+
+        match supervisorPid, supervisorStartTicks with
+        | Some pid, _ when pid <= 0 ->
+            return!
+                Error
+                    "Durable terminal generation record has an invalid supervisor PID"
+        | None, Some _ ->
+            return!
+                Error
+                    "Durable terminal generation record has a supervisor start identity without a PID"
+        | _ -> ()
+
+        return
+            { SessionId = sessionId
+              WorktreePath =
+                PathUtils.toWorktreePath worktreePath
+              WitnessTokenHash =
+                witnessTokenHash.ToLowerInvariant()
+              SupervisorPid = supervisorPid
+              SupervisorStartTicks = supervisorStartTicks
+              ProtocolFailure = protocolFailure }
+    }
+
+let private parseGenerationEvidence
+    (path: string)
+    (text: string)
+    =
+    try
+        use document = JsonDocument.Parse(text)
+        let root = document.RootElement
+
+        result {
+            let! version = requiredInt "version" root
+
+            if version <> generationRecordVersion then
+                return!
+                    Error
+                        $"Unsupported terminal generation record version {version}"
+
+            let! protocolVersion =
+                requiredInt "hostProtocolVersion" root
+            let! generation = requiredString "generation" root
+            let! hostPid = requiredInt "hostPid" root
+            let! hostStartTicks =
+                requiredInt64String
+                    "hostProcessStartTicks"
+                    root
+            let! hostStartExact =
+                requiredBool "hostProcessStartExact" root
+            let! sessionsUnknown =
+                optionalBool "sessionsUnknown" root
+                |> Result.map (Option.defaultValue false)
+
+            let filename =
+                Path.GetFileName path
+
+            let filenameGeneration =
+                let marker = filename.IndexOf(".json", StringComparison.Ordinal)
+
+                if marker > 0 then
+                    filename.Substring(0, marker)
+                else
+                    ""
+
+            if
+                not (validBoundedToken 1 128 generation)
+                || hostPid <= 0
+                || not (
+                    String.Equals(
+                        filenameGeneration,
+                        generation,
+                        StringComparison.Ordinal
+                    )
+                )
+            then
+                return!
+                    Error
+                        "Durable terminal generation record has an invalid host identity"
+
+            let kernelOwnership =
+                optionalString "ownershipBoundary" root
+                |> Option.contains "windows-job-v1"
+
+            let! sessions =
+                match tryProperty "sessions" root with
+                | Some values
+                    when values.ValueKind
+                         = JsonValueKind.Array ->
+                    values.EnumerateArray()
+                    |> Seq.map parseGenerationSession
+                    |> Seq.toList
+                    |> List.sequenceResultM
+                | None when sessionsUnknown -> Ok []
+                | _ ->
+                    Error
+                        "Durable terminal generation record omitted its session evidence"
+
+            if
+                sessions
+                |> List.distinctBy _.SessionId
+                |> List.length
+                <> List.length sessions
+            then
+                return!
+                    Error
+                        "Durable terminal generation record contains duplicate session identities"
+
+            return
+                { Path = path
+                  Serialized = text
+                  HostProtocolVersion = protocolVersion
+                  Identity =
+                    { Generation = generation
+                      Pid = hostPid
+                      ProcessStartTicks = hostStartTicks
+                      ProcessStartExact = hostStartExact
+                      KernelOwnership = kernelOwnership }
+                  SessionsUnknown = sessionsUnknown
+                  Sessions = sessions }
+        }
+    with
+    | :? JsonException as ex ->
+        Error
+            $"Invalid durable terminal generation record: {ex.Message}"
+    | ex ->
+        Error
+            $"Could not read durable terminal generation record: {ex.Message}"
+
+let private parseEmptyWitness (text: string) =
+    try
+        use document = JsonDocument.Parse(text)
+        let root = document.RootElement
+
+        result {
+            let! version = requiredInt "version" root
+
+            if version <> 1 then
+                return!
+                    Error
+                        $"Unsupported terminal empty-witness version {version}"
+
+            let! generation = requiredString "generation" root
+            let! worktreePath = requiredString "worktreePath" root
+            let! sessionId = requiredString "sessionId" root
+            let! supervisorPid = requiredInt "supervisorPid" root
+            let! supervisorStartTicks =
+                requiredInt64String
+                    "supervisorStartTimeUtcTicks"
+                    root
+            let! nonce = requiredString "nonce" root
+
+            if
+                not (validBoundedToken 1 128 generation)
+                || not (validBoundedToken 16 128 sessionId)
+                || not (validBoundedToken 24 128 nonce)
+                || supervisorPid <= 0
+                || not (Path.IsPathFullyQualified worktreePath)
+            then
+                return!
+                    Error
+                        "Terminal empty witness has invalid ownership metadata"
+
+            return
+                { Generation = generation
+                  WorktreePath =
+                    PathUtils.toWorktreePath worktreePath
+                  SessionId = sessionId
+                  Supervisor =
+                    { Pid = supervisorPid
+                      ProcessStartTicks =
+                        supervisorStartTicks }
+                  Nonce = nonce }
+        }
+    with
+    | :? JsonException as ex ->
+        Error $"Invalid terminal empty witness: {ex.Message}"
+    | ex ->
+        Error $"Could not read terminal empty witness: {ex.Message}"
 
 let private lifecycleFor element =
     result {
@@ -608,6 +877,502 @@ let private hostIdentityMatches (identity: HostIdentity) =
         identity.Pid
         identity.ProcessStartTicks
         identity.ProcessStartExact
+
+let private generationDirectory config =
+    Path.Combine(
+        config.HostStateDirectory,
+        "terminal-generations"
+    )
+
+let private generationRecordPath config generation =
+    Path.Combine(
+        generationDirectory config,
+        $"{generation}.json"
+    )
+
+let private emptyWitnessDirectory config generation =
+    Path.Combine(
+        config.HostStateDirectory,
+        "terminal-empty-witnesses",
+        generation
+    )
+
+let private emptyWitnessPath config generation sessionId =
+    Path.Combine(
+        emptyWitnessDirectory config generation,
+        $"{sessionId}.json"
+    )
+
+let private atomicWriteBytes (path: string) (content: byte array) =
+    try
+        let directory = Path.GetDirectoryName path
+        Directory.CreateDirectory directory |> ignore
+        let temporaryPath =
+            $"{path}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp"
+
+        try
+            do
+                use stream =
+                    new FileStream(
+                        temporaryPath,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        4096,
+                        FileOptions.WriteThrough
+                    )
+
+                stream.Write(content, 0, content.Length)
+                stream.Flush true
+
+            File.Move(temporaryPath, path, true)
+            Ok ()
+        finally
+            File.Delete temporaryPath
+    with ex ->
+        Error
+            $"Could not persist durable terminal generation evidence: {ex.Message}"
+
+let private readEvidenceText path =
+    use stream =
+        new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite ||| FileShare.Delete
+        )
+
+    use reader = new StreamReader(stream, Encoding.UTF8, true)
+    reader.ReadToEnd()
+
+let private generationRecordPaths config =
+    try
+        let directory = generationDirectory config
+
+        if not (Directory.Exists directory) then
+            Ok []
+        else
+            let paths =
+                Directory.GetFiles(
+                    directory,
+                    "*.json",
+                    SearchOption.TopDirectoryOnly
+                )
+                |> Array.sort
+                |> Array.toList
+
+            if List.length paths > maximumGenerationRecords then
+                Error
+                    $"Durable terminal generation retention exceeds {maximumGenerationRecords} unresolved records; verify or manually drain retired generations before continuing"
+            else
+                Ok paths
+    with ex ->
+        Error
+            $"Could not enumerate durable terminal generation evidence: {ex.Message}"
+
+let private readGenerationEvidence config =
+    generationRecordPaths config
+    |> Result.bind (
+        List.map (fun path ->
+            try
+                let info = FileInfo path
+
+                if info.Length > 1024L * 1024L then
+                    Error
+                        "Durable terminal generation record exceeded 1 MiB"
+                else
+                    let text = readEvidenceText path
+                    parseGenerationEvidence path text
+            with ex ->
+                Error
+                    $"Could not read durable terminal generation evidence: {ex.Message}")
+        >> List.sequenceResultM
+        >> Result.bind (fun records ->
+            if
+                records
+                |> List.distinctBy _.Identity.Generation
+                |> List.length
+                <> List.length records
+            then
+                Error
+                    "Durable terminal generation evidence contains duplicate generation identities"
+            else
+                Ok records)
+    )
+
+let private requireGenerationCapacity config =
+    generationRecordPaths config
+    |> Result.bind (fun paths ->
+        if
+            List.length paths
+            >= maximumGenerationRecords
+        then
+            Error
+                $"Durable terminal generation retention reached {maximumGenerationRecords} unresolved records; verify or manually drain retired generations before starting another host"
+        else
+            Ok ())
+
+let private persistUnknownRetiredGeneration
+    config
+    (connection: HostConnection)
+    =
+    let path =
+        generationRecordPath
+            config
+            connection.Generation
+
+    readGenerationEvidence config
+    |> Result.bind (fun records ->
+        match
+            records
+            |> List.tryFind (fun evidence ->
+                evidence.Identity.Generation = connection.Generation)
+        with
+        | Some existing ->
+            if
+                existing.HostProtocolVersion
+                = connection.Version
+                && sameHostIdentity
+                    existing.Identity
+                    (hostIdentity connection)
+            then
+                Ok ()
+            else
+                Error
+                    "Existing retired terminal generation evidence belongs to a different host identity"
+        | None ->
+            result {
+                if
+                    List.length records
+                    >= maximumGenerationRecords
+                then
+                    return!
+                        Error
+                            $"Durable terminal generation retention reached {maximumGenerationRecords} unresolved records; verify or manually drain retired generations before starting another host"
+
+                let content =
+                    JsonSerializer.SerializeToUtf8Bytes(
+                        {| version = generationRecordVersion
+                           hostProtocolVersion = connection.Version
+                           generation = connection.Generation
+                           hostPid = connection.Pid
+                           hostProcessStartTicks =
+                            string connection.ProcessStartTicks
+                           hostProcessStartExact =
+                            connection.ProcessStartExact
+                           ownershipBoundary =
+                            if connection.KernelOwnership then
+                                "windows-job-v1"
+                            else
+                                "unsupported"
+                           startedAt = connection.StartedAt
+                           sessionsUnknown = true
+                           sessions = Array.empty<obj> |}
+                    )
+
+                return! atomicWriteBytes path content
+            })
+
+let private witnessFor config evidence session =
+    result {
+        if session.ProtocolFailure then
+            return!
+                Error
+                    "Cannot authorize terminal cleanup because the retired supervisor channel recorded a sticky protocol failure"
+
+        let! expectedPid =
+            session.SupervisorPid
+            |> Result.requireSome
+                "Cannot confirm retired terminal cleanup because its supervisor PID was not durably published"
+
+        let path =
+            emptyWitnessPath
+                config
+                evidence.Identity.Generation
+                session.SessionId
+
+        let! witness =
+            try
+                if not (File.Exists path) then
+                    Error
+                        "Cannot confirm retired terminal cleanup because its durable empty witness has not arrived"
+                else
+                    readEvidenceText path
+                    |> parseEmptyWitness
+            with ex ->
+                Error
+                    $"Could not read retired terminal empty witness: {ex.Message}"
+
+        let nonceHash =
+            witness.Nonce
+            |> Encoding.UTF8.GetBytes
+            |> SHA256.HashData
+            |> Convert.ToHexString
+            |> _.ToLowerInvariant()
+
+        if
+            witness.Generation
+            <> evidence.Identity.Generation
+            || witness.SessionId <> session.SessionId
+            || not (
+                Shared.PathUtils.pathEquals
+                    (WorktreePath.value witness.WorktreePath)
+                    (WorktreePath.value session.WorktreePath)
+            )
+            || nonceHash <> session.WitnessTokenHash
+            || witness.Supervisor.Pid <> expectedPid
+            || (
+                session.SupervisorStartTicks
+                |> Option.exists (fun expected ->
+                    expected
+                    <> witness.Supervisor.ProcessStartTicks)
+            )
+        then
+            return!
+                Error
+                    "Cannot confirm retired terminal cleanup because its empty witness does not match the generation, session, nonce, or exact supervisor identity"
+
+        match
+            processIdentityMatchesValues
+                witness.Supervisor.Pid
+                witness.Supervisor.ProcessStartTicks
+                true
+        with
+        | Ok false -> return witness
+        | Ok true ->
+            return!
+                Error
+                    "Cannot confirm retired terminal cleanup because its exact Job Object supervisor is still running"
+        | Error error ->
+            return!
+                Error
+                    $"Cannot verify the retired Job Object supervisor before terminal cleanup: {error}"
+    }
+
+let private generationHostStopped evidence =
+    match hostIdentityMatches evidence.Identity with
+    | Ok false -> Ok ()
+    | Ok true ->
+        Error
+            "Cannot authorize terminal cleanup while the retired durable host generation is still alive"
+    | Error error ->
+        Error
+            $"Cannot verify the retired durable host generation before terminal cleanup: {error}"
+
+let private removeGenerationWitnesses
+    config
+    (evidence: GenerationEvidence)
+    =
+    evidence.Sessions
+    |> List.iter (fun session ->
+        File.Delete(
+            emptyWitnessPath
+                config
+                evidence.Identity.Generation
+                session.SessionId
+        ))
+
+    let directory =
+        emptyWitnessDirectory
+            config
+            evidence.Identity.Generation
+
+    if
+        Directory.Exists directory
+        && Directory.EnumerateFileSystemEntries directory
+           |> Seq.isEmpty
+    then
+        Directory.Delete directory
+
+let private compactGeneration
+    config
+    (evidence: GenerationEvidence)
+    =
+    let claimedPath =
+        $"{evidence.Path}.{Environment.ProcessId}.{Guid.NewGuid():N}.reclaim.json"
+
+    try
+        try
+            File.Move(evidence.Path, claimedPath)
+        with :? FileNotFoundException ->
+            ()
+
+        if File.Exists claimedPath then
+            let claimed = readEvidenceText claimedPath
+
+            if claimed <> evidence.Serialized then
+                if not (File.Exists evidence.Path) then
+                    File.Move(claimedPath, evidence.Path)
+
+                Error
+                    "Durable terminal generation evidence changed during compare-before-delete compaction"
+            else
+                File.Delete claimedPath
+                removeGenerationWitnesses config evidence
+                Ok ()
+        else
+            Ok ()
+    with ex ->
+        if
+            File.Exists claimedPath
+            && not (File.Exists evidence.Path)
+        then
+            try
+                File.Move(claimedPath, evidence.Path)
+            with _ ->
+                ()
+
+        Error
+            $"Could not compact fully witnessed terminal generation evidence: {ex.Message}"
+
+let private isCurrentGeneration
+    (current: HostConnection option)
+    evidence
+    =
+    current
+    |> Option.exists (fun connection ->
+        sameHostIdentity
+            (hostIdentity connection)
+            evidence.Identity)
+
+let private generationIsFullyWitnessed
+    config
+    evidence
+    =
+    if
+        evidence.SessionsUnknown
+        || evidence.HostProtocolVersion
+           <> hostProtocolVersion
+        || not evidence.Identity.KernelOwnership
+    then
+        false
+    else
+        match generationHostStopped evidence with
+        | Error _ -> false
+        | Ok () ->
+            evidence.Sessions
+            |> List.forall (fun session ->
+                witnessFor config evidence session
+                |> Result.isOk)
+
+let private compactFullyWitnessedGenerations
+    config
+    current
+    =
+    result {
+        let! records = readGenerationEvidence config
+
+        let! _ =
+            records
+            |> List.filter (
+                isCurrentGeneration current
+                >> not
+            )
+            |> List.filter (
+                generationIsFullyWitnessed config
+            )
+            |> List.map (compactGeneration config)
+            |> List.sequenceResultM
+
+        do!
+            try
+                let witnessRoot =
+                    Path.Combine(
+                        config.HostStateDirectory,
+                        "terminal-empty-witnesses"
+                    )
+
+                if Directory.Exists witnessRoot then
+                    let knownGenerations =
+                        records
+                        |> List.map _.Identity.Generation
+                        |> Set.ofList
+
+                    Directory.GetDirectories(
+                        witnessRoot,
+                        "*",
+                        SearchOption.TopDirectoryOnly
+                    )
+                    |> Array.filter (fun directory ->
+                        let generation =
+                            Path.GetFileName directory
+
+                        validBoundedToken 1 128 generation
+                        && not (
+                            knownGenerations
+                            |> Set.contains generation
+                        ))
+                    |> Array.iter (fun directory ->
+                        Directory.Delete(directory, true))
+
+                Ok ()
+            with ex ->
+                Error
+                    $"Could not compact orphaned terminal empty witnesses: {ex.Message}"
+
+        return ()
+    }
+
+let private confirmPersistedGenerationCleanup
+    config
+    current
+    worktreePath
+    =
+    result {
+        let! records = readGenerationEvidence config
+
+        let retired =
+            records
+            |> List.filter (
+                isCurrentGeneration current
+                >> not
+            )
+
+        let! _ =
+            retired
+            |> List.map (fun evidence ->
+                let matchingSessions =
+                    evidence.Sessions
+                    |> List.filter (fun session ->
+                        Shared.PathUtils.pathEquals
+                            (WorktreePath.value session.WorktreePath)
+                            (WorktreePath.value worktreePath))
+
+                if evidence.SessionsUnknown then
+                    Error
+                        $"Cannot authorize strict terminal cleanup while retired protocol-{evidence.HostProtocolVersion} ownership lacks generation-scoped Job Object witnesses; manually drain its terminals—or restart the machine—then remove that retired record before retrying"
+                elif List.isEmpty matchingSessions then
+                    Ok ()
+                elif
+                    evidence.HostProtocolVersion
+                    <> hostProtocolVersion
+                    || not evidence.Identity.KernelOwnership
+                then
+                    Error
+                        "Cannot authorize strict terminal cleanup for a retired generation without the current Job Object witness protocol"
+                else
+                    result {
+                        do! generationHostStopped evidence
+
+                        let! _ =
+                            matchingSessions
+                            |> List.map (witnessFor config evidence)
+                            |> List.sequenceResultM
+
+                        return ()
+                    })
+            |> List.sequenceResultM
+
+        let! _ =
+            retired
+            |> List.filter (
+                generationIsFullyWitnessed config
+            )
+            |> List.map (compactGeneration config)
+            |> List.sequenceResultM
+
+        return ()
+    }
 
 let private hostUri connection path =
     Uri($"http://127.0.0.1:{connection.ControlPort}{path}")
@@ -852,13 +1617,18 @@ let internal removeManifestIfOwned path expectedText =
     parseHostConnection expectedText
     |> Result.bind (removeManifestIfConnectionOwned path)
 
-let private removeStaleState config expected =
+let private removeStoppedState config expected =
     removeManifestIfConnectionOwned
         (statePath config)
         expected
     |> Result.map (function
         | true -> Reclaimed
         | false -> OwnershipChanged)
+
+let private removeStaleState config expected =
+    persistUnknownRetiredGeneration config expected
+    |> Result.bind (fun () ->
+        removeStoppedState config expected)
 
 let private startupLockPath config =
     Path.Combine(config.HostStateDirectory, "host.lock")
@@ -1078,37 +1848,47 @@ let private ensureHostWithTtydRequirement requireTtyd config =
                             | Ok discovery ->
                                 let startNewHost () =
                                     async {
-                                        let generation =
-                                            Guid.NewGuid().ToString("N")
-
                                         match
-                                            writeStartupClaim
-                                                startupLock
-                                                generation
+                                            compactFullyWitnessedGenerations
+                                                config
                                                 None
                                         with
                                         | Error error -> return Error error
                                         | Ok () ->
-                                            match startHostProcess config generation with
+                                            match requireGenerationCapacity config with
                                             | Error error -> return Error error
-                                            | Ok(startedPid, startedAt) ->
+                                            | Ok () ->
+                                                let generation =
+                                                    Guid.NewGuid().ToString("N")
+
                                                 match
                                                     writeStartupClaim
                                                         startupLock
                                                         generation
-                                                        (Some(
-                                                            startedPid,
-                                                            startedAt
-                                                        ))
+                                                        None
                                                 with
-                                                | Error error ->
-                                                    return Error error
+                                                | Error error -> return Error error
                                                 | Ok () ->
-                                                    return!
-                                                        waitForHost
-                                                            config
-                                                            deadline
-                                                            startedPid
+                                                    match startHostProcess config generation with
+                                                    | Error error -> return Error error
+                                                    | Ok(startedPid, startedAt) ->
+                                                        match
+                                                            writeStartupClaim
+                                                                startupLock
+                                                                generation
+                                                                (Some(
+                                                                    startedPid,
+                                                                    startedAt
+                                                                ))
+                                                        with
+                                                        | Error error ->
+                                                            return Error error
+                                                        | Ok () ->
+                                                            return!
+                                                                waitForHost
+                                                                    config
+                                                                    deadline
+                                                                    startedPid
                                     }
 
                                 match discovery with
@@ -1309,6 +2089,27 @@ let private confirmPriorGenerationStopped
         | Error error, _
         | _, Error error -> Error error
 
+let private confirmAllPriorGenerationCleanup
+    config
+    current
+    state
+    worktreePath
+    =
+    result {
+        let! confirmed =
+            confirmPriorGenerationStopped
+                state
+                worktreePath
+
+        do!
+            confirmPersistedGenerationCleanup
+                config
+                current
+                worktreePath
+
+        return confirmed
+    }
+
 let private announceIfNeeded config state connection instanceId =
     async {
         let identity = hostIdentity connection
@@ -1500,6 +2301,14 @@ let private reclaimDeadHost config connection =
         use startupLock = startupLock
         removeStaleState config connection
 
+let private reclaimKnownEmptyHost config connection =
+    match tryAcquireStartupLock config with
+    | Error error -> Error error
+    | Ok None -> Ok ReclaimDeferred
+    | Ok (Some startupLock) ->
+        use startupLock = startupLock
+        removeStoppedState config connection
+
 let private hostFailure error state =
     let current = withHostFailure error state.LastSnapshot
     current, { state with LastSnapshot = current }
@@ -1525,12 +2334,28 @@ let private getTerminals instanceId state config =
 
             return hostFailure error state
         | Ok (DeadHost(connection, error)) ->
-            match reclaimDeadHost config connection with
-            | Ok _ -> ()
+            let reclamation =
+                reclaimDeadHost config connection
+
+            match reclamation with
             | Error reclaimError ->
                 Log.log "EmbeddedTerminal" reclaimError
+            | Ok _ -> ()
 
-            return hostFailure error state
+            let current, failed =
+                hostFailure error state
+
+            let next =
+                match reclamation with
+                | Ok Reclaimed
+                | Ok OwnershipChanged ->
+                    { failed with
+                        AnnouncedHost = None
+                        KnownHost = None }
+                | Ok ReclaimDeferred
+                | Error _ -> failed
+
+            return current, next
         | Error error ->
             Log.log "EmbeddedTerminal" error
             return hostFailure error state
@@ -1604,7 +2429,7 @@ let private waitForLegacyHostExit config connection =
         async {
             match processIdentityMatches connection with
             | Ok false ->
-                match reclaimDeadHost config connection with
+                match reclaimKnownEmptyHost config connection with
                 | Ok Reclaimed -> return Ok LegacyRetired
                 | Ok OwnershipChanged ->
                     return! validateReplacement ()
@@ -1747,7 +2572,9 @@ let rec private closeTerminalStrict instanceId state config worktreePath =
         match! discoverHost config with
         | Ok MissingHost when state.KnownHost.IsNone ->
             match
-                confirmPriorGenerationStopped
+                confirmAllPriorGenerationCleanup
+                    config
+                    None
                     state
                     worktreePath
             with
@@ -1771,14 +2598,50 @@ let rec private closeTerminalStrict instanceId state config worktreePath =
             return closeFailure error state.LastSnapshot state
         | Ok (DeadHost(connection, reason)) ->
             match reclaimDeadHost config connection with
-            | Ok _ -> ()
             | Error reclaimError ->
-                Log.log "EmbeddedTerminal" reclaimError
+                let error =
+                    $"Cannot retain dead durable-host evidence before terminal cleanup: {reclaimError}"
 
-            let error =
-                $"Cannot confirm terminal cleanup because {reason}"
+                return closeFailure error state.LastSnapshot state
+            | Ok ReclaimDeferred ->
+                let error =
+                    $"Cannot confirm terminal cleanup while dead-host reclamation is owned by another manager: {reason}"
 
-            return closeFailure error state.LastSnapshot state
+                return closeFailure error state.LastSnapshot state
+            | Ok Reclaimed ->
+                match
+                    confirmAllPriorGenerationCleanup
+                        config
+                        None
+                        state
+                        worktreePath
+                with
+                | Error error ->
+                    return
+                        closeFailure
+                            error
+                            state.LastSnapshot
+                            state
+                | Ok confirmed ->
+                    let current =
+                        confirmed.LastSnapshot
+                        |> withoutPath worktreePath
+
+                    return
+                        Ok current,
+                        { confirmed with
+                            LastSnapshot = current
+                            AnnouncedHost = None
+                            KnownHost = None }
+            | Ok OwnershipChanged ->
+                return!
+                    closeTerminalStrict
+                        instanceId
+                        { state with
+                            AnnouncedHost = None
+                            KnownHost = None }
+                        config
+                        worktreePath
         | Error error ->
             Log.log "EmbeddedTerminal" error
             let actionable =
@@ -1791,7 +2654,9 @@ let rec private closeTerminalStrict instanceId state config worktreePath =
 
             let confirmed =
                 if connection.KernelOwnership then
-                    confirmPriorGenerationStopped
+                    confirmAllPriorGenerationCleanup
+                        config
+                        (Some connection)
                         announced
                         worktreePath
                 else
@@ -2178,7 +3043,9 @@ let private reserveOnCurrentHost
 
         let confirmed =
             if connection.KernelOwnership then
-                confirmPriorGenerationStopped
+                confirmAllPriorGenerationCleanup
+                    config
+                    (Some connection)
                     announced
                     worktreePath
             else
@@ -2340,6 +3207,19 @@ let private reserveTerminalCleanup
                     currentState
         }
 
+    let confirmAndReserve currentState =
+        async {
+            match
+                confirmAllPriorGenerationCleanup
+                    config
+                    None
+                    currentState
+                    worktreePath
+            with
+            | Error error -> return Error error, currentState
+            | Ok confirmed -> return! reserveCurrent confirmed
+        }
+
     async {
         match! discoverHost config with
         | Ok (HealthyHost connection)
@@ -2400,19 +3280,43 @@ let private reserveTerminalCleanup
                                 retiredState
                                 replacement
                                 worktreePath
-        | Ok (DeadHost _)
+        | Ok (DeadHost(connection, reason)) ->
+            match reclaimDeadHost config connection with
+            | Error error ->
+                return
+                    Error
+                        $"Cannot retain dead durable-host evidence before reserving cleanup: {error}",
+                    state
+            | Ok ReclaimDeferred ->
+                return
+                    Error
+                        $"Cannot reserve terminal cleanup while dead-host reclamation is owned by another manager: {reason}",
+                    state
+            | Ok Reclaimed
+            | Ok OwnershipChanged ->
+                return! reserveCurrent state
         | Ok MissingHost ->
-            return! reserveCurrent state
+            return! confirmAndReserve state
     }
 
-let private waitForHostExit config connection =
+let private waitForHostExit
+    retainDeadGeneration
+    config
+    connection
+    =
     let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
 
     let rec wait () =
         async {
             match processIdentityMatches connection with
             | Ok false ->
-                match reclaimDeadHost config connection with
+                let reclamation =
+                    if retainDeadGeneration then
+                        reclaimDeadHost config connection
+                    else
+                        reclaimKnownEmptyHost config connection
+
+                match reclamation with
                 | Ok Reclaimed
                 | Ok OwnershipChanged ->
                     return Ok ()
@@ -2453,7 +3357,11 @@ let private shutdown config =
         | Error error -> return Error error
         | Ok MissingHost -> return Ok ()
         | Ok (DeadHost(connection, _)) ->
-            return! waitForHostExit config connection
+            return!
+                waitForHostExit
+                    true
+                    config
+                    connection
         | Ok (HealthyHost connection)
             when not connection.KernelOwnership ->
             return Error kernelOwnershipError
@@ -2468,7 +3376,12 @@ let private shutdown config =
                 |> AsyncResult.ignore
             with
             | Error error -> return Error error
-            | Ok () -> return! waitForHostExit config connection
+            | Ok () ->
+                return!
+                    waitForHostExit
+                        false
+                        config
+                        connection
     }
 
 let private lockAcquisitionCancelled =

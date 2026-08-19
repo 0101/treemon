@@ -159,10 +159,10 @@ let private canAcquireWorktreeLock stateDirectory worktree =
 
 let private fakeHostScript =
     """
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { resolve, join } from "node:path";
+import { dirname, resolve, join } from "node:path";
 
 const args = process.argv.slice(2);
 const stateDirectory = resolve(args[args.indexOf("--state-dir") + 1]);
@@ -172,6 +172,9 @@ const lockPath = join(stateDirectory, "host.lock");
 const eventPath = join(stateDirectory, "events.json");
 const behaviorPath = join(stateDirectory, "behavior.json");
 const launchesPath = join(stateDirectory, "launches.txt");
+const generationDirectory = join(stateDirectory, "terminal-generations");
+const witnessDirectory = join(stateDirectory, "terminal-empty-witnesses", generation);
+const generationPath = join(generationDirectory, `${generation}.json`);
 const token = randomBytes(16).toString("hex");
 const startedAt = new Date().toISOString();
 let processStartTicks = (
@@ -216,6 +219,7 @@ function appendSession(worktreePath) {
       endpoint: `http://127.0.0.1:${42000 + nextOrder}/?cap=fake`,
       error: null,
       order: nextOrder++,
+      witnessNonce: randomBytes(24).toString("base64url"),
       supervisorPid: behavior().supervisorPid ?? process.pid,
       supervisorStartTimeUtcTicks:
         behavior().supervisorStartTimeUtcTicks ?? processStartTicks,
@@ -234,9 +238,49 @@ const startupClaim = async () => {
 };
 
 function writeJson(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.tmp`;
   writeFileSync(temporary, JSON.stringify(value));
   renameSync(temporary, path);
+}
+
+function writeGeneration() {
+  if (manifestVersion !== 2) return;
+  writeJson(generationPath, {
+    version: 1,
+    hostProtocolVersion: 2,
+    generation,
+    hostPid: process.pid,
+    hostProcessStartTicks: processStartTicks,
+    hostProcessStartExact: true,
+    ownershipBoundary: "windows-job-v1",
+    startedAt,
+    sessions: sessions.map((session) => ({
+      sessionId: session.id,
+      worktreePath: session.worktreePath,
+      witnessTokenHash: createHash("sha256")
+        .update(session.witnessNonce, "utf8")
+        .digest("hex"),
+      supervisorPid: session.supervisorPid,
+      supervisorStartTimeUtcTicks: session.supervisorStartTimeUtcTicks,
+      protocolFailure: false,
+    })),
+  });
+}
+
+function writeWitness(session) {
+  if (manifestVersion !== 2) return;
+  mkdirSync(witnessDirectory, { recursive: true });
+  writeJson(join(witnessDirectory, `${session.id}.json`), {
+    version: 1,
+    generation,
+    worktreePath: session.worktreePath,
+    sessionId: session.id,
+    supervisorPid: session.supervisorPid,
+    supervisorStartTimeUtcTicks: session.supervisorStartTimeUtcTicks,
+    nonce: session.witnessNonce,
+    observedAt: new Date().toISOString(),
+  });
 }
 
 function send(response, status, value) {
@@ -303,7 +347,10 @@ const server = createServer(async (request, response) => {
     const body = await readBody(request);
     const key = process.platform === "win32" ? body.worktreePath.toLowerCase() : body.worktreePath;
     const existing = sessions.find((session) => session.key === key);
-    if (!existing) appendSession(body.worktreePath);
+    if (!existing) {
+      appendSession(body.worktreePath);
+      writeGeneration();
+    }
     const current = behavior();
     if (current.startDelayMs) await delay(current.startDelayMs);
     if (current.startTransportFailure) {
@@ -315,7 +362,9 @@ const server = createServer(async (request, response) => {
     const id = decodeURIComponent(url.pathname.slice("/sessions/".length));
     const current = behavior();
     if (!current.deleteKeepsSession && !current.deleteStatus && !current.deleteTransportFailure && !current.deleteMalformedResponse) {
+      sessions.filter((session) => session.id === id).forEach(writeWitness);
       sessions = sessions.filter((session) => session.id !== id);
+      writeGeneration();
     }
     if (current.deleteTransportFailure) {
       request.socket.destroy();
@@ -331,7 +380,9 @@ const server = createServer(async (request, response) => {
     }
     const body = await readBody(request);
     const key = process.platform === "win32" ? body.worktreePath.toLowerCase() : body.worktreePath;
+    sessions.filter((session) => session.key === key).forEach(writeWitness);
     sessions = sessions.filter((session) => session.key !== key);
+    writeGeneration();
     const reservation = {
       id: body.reservationId ?? randomBytes(16).toString("hex"),
       worktreePath: body.worktreePath,
@@ -373,6 +424,9 @@ const server = createServer(async (request, response) => {
   } else if (request.method === "POST" && url.pathname === "/shutdown") {
     send(response, 200, { stopping: true });
     setImmediate(() => server.close(() => {
+      sessions.forEach(writeWitness);
+      sessions = [];
+      writeGeneration();
       const currentBehavior = behavior();
       const replacementManifestPath =
         manifestVersion === 1
@@ -404,7 +458,11 @@ const server = createServer(async (request, response) => {
     }));
   } else if (request.method === "POST" && url.pathname === "/crash") {
     send(response, 200, { crashing: true });
-    setImmediate(() => server.close(() => process.exit(0)));
+    setImmediate(() => server.close(() => {
+      if (!behavior().omitCrashWitness) sessions.forEach(writeWitness);
+      writeGeneration();
+      process.exit(0);
+    }));
   } else {
     send(response, 404, { error: "Not found" });
   }
@@ -420,6 +478,7 @@ server.listen(0, "127.0.0.1", async () => {
     supervisorStartTimeUtcTicks:
       behavior().supervisorStartTimeUtcTicks ?? processStartTicks,
   }));
+  writeGeneration();
   if (existsSync(statePath)) process.exit(3);
   appendFileSync(launchesPath, `${process.pid}\n`);
   const manifest =
@@ -488,6 +547,128 @@ let private writeBehavior stateDirectory (json: string) =
         Path.Combine(stateDirectory, "behavior.json"),
         json
     )
+
+type private GenerationSessionFixture =
+    { SessionId: string
+      WorktreePath: string
+      WitnessNonce: string
+      SupervisorPid: int
+      SupervisorStartTicks: int64
+      ProtocolFailure: bool }
+
+let private generationRecordPath stateDirectory generation =
+    Path.Combine(
+        stateDirectory,
+        "terminal-generations",
+        $"{generation}.json"
+    )
+
+let private witnessPath stateDirectory generation sessionId =
+    Path.Combine(
+        stateDirectory,
+        "terminal-empty-witnesses",
+        generation,
+        $"{sessionId}.json"
+    )
+
+let private writeGenerationRecord
+    stateDirectory
+    generation
+    hostPid
+    hostStartTicks
+    protocolVersion
+    sessionsUnknown
+    sessions
+    =
+    let path =
+        generationRecordPath
+            stateDirectory
+            generation
+
+    Directory.CreateDirectory(Path.GetDirectoryName path)
+    |> ignore
+
+    let serializedSessions =
+        sessions
+        |> List.map (fun session ->
+            let witnessTokenHash =
+                session.WitnessNonce
+                |> Encoding.UTF8.GetBytes
+                |> SHA256.HashData
+                |> Convert.ToHexString
+                |> _.ToLowerInvariant()
+
+            {| sessionId = session.SessionId
+               worktreePath = session.WorktreePath
+               witnessTokenHash = witnessTokenHash
+               supervisorPid = session.SupervisorPid
+               supervisorStartTimeUtcTicks =
+                string session.SupervisorStartTicks
+               protocolFailure =
+                session.ProtocolFailure |})
+        |> List.toArray
+
+    File.WriteAllText(
+        path,
+        JsonSerializer.Serialize(
+            {| version = 1
+               hostProtocolVersion = protocolVersion
+               generation = generation
+               hostPid = hostPid
+               hostProcessStartTicks = string hostStartTicks
+               hostProcessStartExact = true
+               ownershipBoundary = "windows-job-v1"
+               startedAt = DateTimeOffset.UtcNow.ToString("O")
+               sessionsUnknown = sessionsUnknown
+               sessions = serializedSessions |}
+        )
+    )
+
+let private writeEmptyWitnessAs
+    stateDirectory
+    pathGeneration
+    payloadGeneration
+    session
+    =
+    let path =
+        witnessPath
+            stateDirectory
+            pathGeneration
+            session.SessionId
+
+    Directory.CreateDirectory(Path.GetDirectoryName path)
+    |> ignore
+
+    File.WriteAllText(
+        path,
+        JsonSerializer.Serialize(
+            {| version = 1
+               generation = payloadGeneration
+               worktreePath = session.WorktreePath
+               sessionId = session.SessionId
+               supervisorPid = session.SupervisorPid
+               supervisorStartTimeUtcTicks =
+                string session.SupervisorStartTicks
+               nonce = session.WitnessNonce
+               observedAt = DateTimeOffset.UtcNow.ToString("O") |}
+        )
+    )
+
+let private writeEmptyWitness stateDirectory generation session =
+    writeEmptyWitnessAs
+        stateDirectory
+        generation
+        generation
+        session
+
+let private fixtureSession suffix worktreePath pid startTicks =
+    { SessionId = $"session-{suffix}-00000000"
+      WorktreePath = worktreePath
+      WitnessNonce =
+        $"witness-{suffix}-000000000000000000000000"
+      SupervisorPid = pid
+      SupervisorStartTicks = startTicks
+      ProtocolFailure = false }
 
 let private crashFakeHostManifest (manifest: string) =
     use document =
@@ -2244,6 +2425,717 @@ type EmbeddedTerminalTests() =
                 |> ignore)
 
     [<Test>]
+    member _.``fresh manager starts replacement but rejects a live retired supervisor``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            use currentProcess = Process.GetCurrentProcess()
+
+            writeBehavior
+                stateDirectory
+                (JsonSerializer.Serialize(
+                    {| supervisorPid = Environment.ProcessId
+                       supervisorStartTimeUtcTicks =
+                        string (
+                            currentProcess.StartTime
+                                .ToUniversalTime()
+                                .Ticks
+                        ) |}
+                ))
+
+            start manager worktree |> ignore
+            let retiredPid = readHostPid stateDirectory
+            crashFakeHost stateDirectory
+
+            waitUntil "retired host to exit" (fun () ->
+                processIsAlive retiredPid |> not)
+
+            let freshManager =
+                EmbeddedTerminal.createWithConfig hostConfig
+
+            let replacement = start freshManager worktree
+            let replacementPid = readHostPid stateDirectory
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    freshManager
+                    worktree
+                    (fun () ->
+                        async {
+                            mutationEntered.TrySetResult(())
+                            |> ignore
+
+                            return Ok ()
+                        })
+                |> run
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    endpointFor worktree replacement,
+                    Is.Not.Empty
+                )
+                Assert.That(
+                    replacementPid,
+                    Is.Not.EqualTo retiredPid
+                )
+
+                match result with
+                | Ok () ->
+                    Assert.Fail(
+                        "A fresh manager must not reserve cleanup while the retired supervisor is alive"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("supervisor is still running")
+                            .IgnoreCase
+                    )
+
+                Assert.That(
+                    mutationEntered.Task.IsCompleted,
+                    Is.False
+                )))
+
+    [<Test>]
+    member _.``fresh manager accepts a witness that arrives after an initial refusal``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            let generation = "retired-late-witness"
+
+            let session =
+                fixtureSession
+                    "late"
+                    worktreePath
+                    2_000_000_001
+                    12345L
+
+            writeGenerationRecord
+                stateDirectory
+                generation
+                2_000_000_002
+                12344L
+                2
+                false
+                [ session ]
+
+            let replacement = start manager worktree
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let mutate () =
+                async {
+                    mutationEntered.TrySetResult(())
+                    |> ignore
+
+                    return Ok ()
+                }
+
+            let refused =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    mutate
+                |> run
+
+            writeEmptyWitness
+                stateDirectory
+                generation
+                session
+
+            let accepted =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    mutate
+                |> run
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    endpointFor worktree replacement,
+                    Is.Not.Empty
+                )
+
+                match refused with
+                | Ok () ->
+                    Assert.Fail(
+                        "Cleanup without the durable witness must fail"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("has not arrived")
+                            .IgnoreCase
+                    )
+
+                match accepted with
+                | Error error -> Assert.Fail(error)
+                | Ok () -> ()
+
+                Assert.That(
+                    mutationEntered.Task.IsCompleted,
+                    Is.True
+                )
+                Assert.That(
+                    File.Exists(
+                        generationRecordPath
+                            stateDirectory
+                            generation
+                    ),
+                    Is.False
+                )))
+
+    [<Test>]
+    member _.``strict reservation requires every matching retired supervisor witness``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+
+            let records =
+                [ "retired-first", "first", 2_000_000_011, 21001L
+                  "retired-second", "second", 2_000_000_012, 21002L ]
+                |> List.map (fun (generation, suffix, pid, ticks) ->
+                    let session =
+                        fixtureSession
+                            suffix
+                            worktreePath
+                            pid
+                            ticks
+
+                    writeGenerationRecord
+                        stateDirectory
+                        generation
+                        (pid + 100)
+                        (ticks + 100L)
+                        2
+                        false
+                        [ session ]
+
+                    generation, session)
+
+            records
+            |> List.head
+            |> fun (generation, session) ->
+                writeEmptyWitness
+                    stateDirectory
+                    generation
+                    session
+
+            let firstAttempt =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () -> async.Return(Ok()))
+                |> run
+
+            records
+            |> List.last
+            |> fun (generation, session) ->
+                writeEmptyWitness
+                    stateDirectory
+                    generation
+                    session
+
+            let secondAttempt =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () -> async.Return(Ok()))
+                |> run
+
+            Assert.Multiple(fun () ->
+                match firstAttempt with
+                | Ok () ->
+                    Assert.Fail(
+                        "One of two retired supervisors was still unwitnessed"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("has not arrived")
+                            .IgnoreCase
+                    )
+
+                match secondAttempt with
+                | Error error -> Assert.Fail(error)
+                | Ok () -> ()
+
+                records
+                |> List.iter (fun (generation, _) ->
+                    Assert.That(
+                        File.Exists(
+                            generationRecordPath
+                                stateDirectory
+                                generation
+                        ),
+                        Is.False
+                    ))))
+
+    [<TestCase("delete")>]
+    [<TestCase("archive")>]
+    member _.``delete and archive wait for every exact retired witness``(
+        mutation
+    ) =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let mainPath = Path.Combine(tempDir, "main")
+            let targetPath = Path.Combine(tempDir, "target")
+            [ mainPath; targetPath ]
+            |> List.iter (Directory.CreateDirectory >> ignore)
+
+            let target = canonical targetPath
+            let generation = $"retired-{mutation}-gate"
+
+            let session =
+                fixtureSession
+                    mutation
+                    targetPath
+                    2_000_000_015
+                    25001L
+
+            writeGenerationRecord
+                stateDirectory
+                generation
+                2_000_000_016
+                25002L
+                2
+                false
+                [ session ]
+
+            let agent = SchedulerState.createAgent ()
+            let repoId =
+                PathUtils.toRepoId (Path.GetFullPath tempDir)
+
+            agent.Post(
+                SchedulerState.StateMsg.UpdateWorktreeList(
+                    repoId,
+                    [ { Path = mainPath
+                        Head = "main-head"
+                        Branch = Some "main" }
+                      { Path = targetPath
+                        Head = "target-head"
+                        Branch = Some "feature" } ]
+                )
+            )
+
+            agent.PostAndAsyncReply(
+                SchedulerState.StateMsg.GetState
+            )
+            |> run
+            |> ignore
+
+            let rootPaths =
+                Map.ofList [ repoId, tempDir ]
+
+            let deleteInvoked =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let execute () =
+                match mutation with
+                | "delete" ->
+                    WorktreeApi.deleteWorktreeWith
+                        (fun _ _ _ ->
+                            async {
+                                deleteInvoked.TrySetResult(())
+                                |> ignore
+
+                                return Ok ()
+                            })
+                        (EmbeddedTerminal.withReservedCleanup manager)
+                        (fun _ -> async.Return())
+                        agent
+                        rootPaths
+                        target
+                | _ ->
+                    WorktreeApi.updateArchivedBranchesWith
+                        agent
+                        rootPaths
+                        (EmbeddedTerminal.withReservedCleanup manager)
+                        Set.add
+                        target
+
+            let refused = execute () |> run
+            let deleteInvokedBefore =
+                deleteInvoked.Task.IsCompleted
+            let archivedBefore =
+                TreemonConfig.readArchivedBranches tempDir
+
+            writeEmptyWitness
+                stateDirectory
+                generation
+                session
+
+            let accepted = execute () |> run
+
+            Assert.Multiple(fun () ->
+                match refused with
+                | Ok () ->
+                    Assert.Fail(
+                        $"{mutation} must wait for retired empty proof"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("has not arrived")
+                            .IgnoreCase
+                    )
+
+                match accepted with
+                | Error error -> Assert.Fail(error)
+                | Ok () -> ()
+
+                match mutation with
+                | "delete" ->
+                    Assert.That(
+                        deleteInvokedBefore,
+                        Is.False
+                    )
+                    Assert.That(
+                        deleteInvoked.Task.IsCompleted,
+                        Is.True
+                    )
+                | _ ->
+                    Assert.That(
+                        archivedBefore,
+                        Does.Not.Contain("feature")
+                    )
+                    Assert.That(
+                        TreemonConfig.readArchivedBranches tempDir,
+                        Does.Contain("feature")
+                    )))
+
+    [<TestCase("nonce")>]
+    [<TestCase("generation")>]
+    [<TestCase("pid")>]
+    member _.``forged retired witness cannot authorize cleanup``(
+        mismatch
+    ) =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath =
+                Path.Combine(tempDir, $"worktree-{mismatch}")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            let generation = $"retired-forged-{mismatch}"
+
+            let session =
+                fixtureSession
+                    mismatch
+                    worktreePath
+                    2_000_000_021
+                    31001L
+
+            writeGenerationRecord
+                stateDirectory
+                generation
+                2_000_000_022
+                31002L
+                2
+                false
+                [ session ]
+
+            match mismatch with
+            | "nonce" ->
+                writeEmptyWitness
+                    stateDirectory
+                    generation
+                    { session with
+                        WitnessNonce =
+                            "forged-witness-nonce-000000000000" }
+            | "generation" ->
+                writeEmptyWitnessAs
+                    stateDirectory
+                    generation
+                    "different-generation"
+                    session
+            | _ ->
+                writeEmptyWitness
+                    stateDirectory
+                    generation
+                    { session with
+                        SupervisorPid =
+                            session.SupervisorPid - 1 }
+
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () ->
+                        async {
+                            mutationEntered.TrySetResult(())
+                            |> ignore
+
+                            return Ok ()
+                        })
+                |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok () ->
+                    Assert.Fail(
+                        "A forged retired witness must not authorize cleanup"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("does not match")
+                            .IgnoreCase
+                    )
+
+                Assert.That(
+                    mutationEntered.Task.IsCompleted,
+                    Is.False
+                )))
+
+    [<Test>]
+    member _.``sticky supervisor protocol failure rejects an otherwise valid witness``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "mixed-transcript")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            let generation = "retired-mixed-transcript"
+
+            let session =
+                { fixtureSession
+                    "mixed"
+                    worktreePath
+                    2_000_000_025
+                    35001L with
+                    ProtocolFailure = true }
+
+            writeGenerationRecord
+                stateDirectory
+                generation
+                2_000_000_026
+                35002L
+                2
+                false
+                [ session ]
+
+            writeEmptyWitness
+                stateDirectory
+                generation
+                session
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () -> async.Return(Ok()))
+                |> run
+
+            match result with
+            | Ok () ->
+                Assert.Fail(
+                    "A mixed-trust supervisor transcript must remain terminal"
+                )
+            | Error error ->
+                Assert.That(
+                    error,
+                    Does.Contain("sticky protocol failure")
+                        .IgnoreCase
+                ))
+
+    [<Test>]
+    member _.``dead protocol-one generation fails closed with manual-drain guidance``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            Directory.CreateDirectory stateDirectory |> ignore
+
+            File.WriteAllText(
+                Path.Combine(stateDirectory, "host.json"),
+                JsonSerializer.Serialize(
+                    {| version = 1
+                       pid = Environment.ProcessId
+                       controlPort = 41234
+                       controlToken = "legacy"
+                       startedAt =
+                        DateTimeOffset.UnixEpoch.ToString("O") |}
+                )
+            )
+
+            let worktreePath =
+                Path.Combine(tempDir, "legacy-worktree")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    worktree
+                    (fun () ->
+                        async {
+                            mutationEntered.TrySetResult(())
+                            |> ignore
+
+                            return Ok ()
+                        })
+                |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok () ->
+                    Assert.Fail(
+                        "Dead protocol-one evidence must fail closed"
+                    )
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Does.Contain("protocol-1")
+                            .And.Contain("manually drain")
+                            .IgnoreCase
+                    )
+
+                Assert.That(
+                    mutationEntered.Task.IsCompleted,
+                    Is.False
+                )))
+
+    [<Test>]
+    member _.``fully witnessed generation compaction is race-idempotent``() =
+        withFakeHost (fun tempDir stateDirectory hostConfig firstManager ->
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            let generation = "retired-compaction-race"
+
+            let session =
+                fixtureSession
+                    "race"
+                    worktreePath
+                    2_000_000_031
+                    41001L
+
+            writeGenerationRecord
+                stateDirectory
+                generation
+                2_000_000_032
+                41002L
+                2
+                false
+                [ session ]
+
+            writeEmptyWitness
+                stateDirectory
+                generation
+                session
+
+            let secondManager =
+                EmbeddedTerminal.createWithConfig hostConfig
+
+            let results =
+                [ EmbeddedTerminal.closeStrict
+                    firstManager
+                    worktree
+                  EmbeddedTerminal.closeStrict
+                    secondManager
+                    worktree ]
+                |> Async.Parallel
+                |> run
+
+            Assert.Multiple(fun () ->
+                results
+                |> Array.iter (function
+                    | Ok _ -> ()
+                    | Error error -> Assert.Fail(error))
+
+                Assert.That(
+                    File.Exists(
+                        generationRecordPath
+                            stateDirectory
+                            generation
+                    ),
+                    Is.False
+                )))
+
+    [<Test>]
+    member _.``unresolved generation retention is bounded without discarding evidence``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            [ 1..64 ]
+            |> List.iter (fun index ->
+                writeGenerationRecord
+                    stateDirectory
+                    $"unresolved-{index}"
+                    (1_900_000_000 + index)
+                    (int64 index)
+                    2
+                    true
+                    [])
+
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath |> ignore
+
+            let result =
+                EmbeddedTerminal.start
+                    manager
+                    (canonical worktreePath)
+                |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Ok snapshot ->
+                    Assert.That(
+                        errorFor
+                            (canonical worktreePath)
+                            snapshot,
+                        Does.Contain("retention reached 64")
+                            .IgnoreCase
+                    )
+                | Error error ->
+                    Assert.Fail(error)
+
+                Assert.That(
+                    Directory.GetFiles(
+                        Path.Combine(
+                            stateDirectory,
+                            "terminal-generations"
+                        ),
+                        "*.json"
+                    ).Length,
+                    Is.EqualTo(64)
+                )
+                Assert.That(
+                    File.Exists(
+                        Path.Combine(
+                            stateDirectory,
+                            "launches.txt"
+                        )
+                    ),
+                    Is.False
+                )))
+
+    [<Test>]
     member _.``dead known host remains visible as interrupted and failed key recovers``() =
         withFakeHost (fun tempDir stateDirectory _ manager ->
             let worktreePath = Path.Combine(tempDir, "worktree")
@@ -2271,6 +3163,53 @@ type EmbeddedTerminalTests() =
                 Assert.That(
                     readHostPid stateDirectory,
                     Is.Not.EqualTo(deadPid)
+                )))
+
+    [<Test>]
+    member _.``shutdown of an already-dead host retains its unresolved generation``() =
+        withFakeHost (fun tempDir stateDirectory _ manager ->
+            let worktreePath =
+                Path.Combine(tempDir, "worktree")
+
+            Directory.CreateDirectory worktreePath |> ignore
+            let worktree = canonical worktreePath
+            writeBehavior
+                stateDirectory
+                """{"omitCrashWitness":true}"""
+            start manager worktree |> ignore
+            let generation =
+                readHostGeneration stateDirectory
+            let deadPid = readHostPid stateDirectory
+
+            crashFakeHost stateDirectory
+            waitUntil "fixture host to exit" (fun () ->
+                processIsAlive deadPid |> not)
+
+            let result =
+                EmbeddedTerminal.shutdownHost manager
+                |> run
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error -> Assert.Fail(error)
+                | Ok () -> ()
+
+                Assert.That(
+                    File.Exists(
+                        generationRecordPath
+                            stateDirectory
+                            generation
+                    ),
+                    Is.True
+                )
+                Assert.That(
+                    File.Exists(
+                        Path.Combine(
+                            stateDirectory,
+                            "host.json"
+                        )
+                    ),
+                    Is.False
                 )))
 
     [<Test>]
