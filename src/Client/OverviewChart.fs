@@ -2,13 +2,13 @@ module OverviewChart
 
 // Pure builders for the Overview band's in-band history chart (spec: docs/spec/overview-activity-history.md).
 // Turn an OverviewSnapshot list + a selected window (12h / 24h / 72h) into a STACKED, STEPPED inline SVG area
-// chart plus a legend, reusing the band's existing task-*/activity-* accent classes so a bucket's live
-// bar/circle and its history area share one colour (area fill = currentColor, tinted by the accent class).
+// chart, reusing the band's existing task-*/activity-* accent classes so a bucket's live bar/circle, history
+// area, and hover tooltip share one colour (area fill = currentColor, tinted by the accent class).
 //
 // Geometry uses the prototype's fixed 760x170 viewBox, with a 2px minimum for every present series,
 // LEFT-EDGE CARRY (a window opening mid-gap starts with the snapshot active at the window start), stepped
 // stacked areas (each value holds until the next logged change, so irregular gaps produce uneven step
-// widths), a RIGHT-EDGE HOLD flat to "now", and EMPTY SERIES OMITTED from both the chart and the legend.
+// widths), a RIGHT-EDGE HOLD flat to "now", and EMPTY SERIES OMITTED from the chart.
 //
 // Pure and Fable-safe: no Model dependency. Inline SVG geometry is the documented dynamic-value exception
 // (same as the band's proportional bar widths). Static geometry is cached independently from the local,
@@ -33,8 +33,8 @@ let [<Literal>] private minimumSeriesWidth = 2.0
 let private plotW = w - padL - padR
 let private plotH = h - padT - padB
 
-/// One chart series: its display label, the band accent class that tints both its legend swatch and its
-/// stacked area (via currentColor), and how to read its count out of a snapshot.
+/// One chart series: its display label, the band accent class that tints its stacked area and tooltip
+/// swatch, and how to read its count out of a snapshot.
 type private SeriesDef =
     { Label: string
       Accent: string
@@ -399,8 +399,7 @@ let lastPointPerPixel (xs: float[]) : int[] =
 
 type private ChartGeometry =
     { HoverSamples: HoverSample array
-      StaticSvgElements: ReactElement list
-      LegendElements: ReactElement list }
+      StaticSvgElements: ReactElement list }
 
 let private xOf (fraction: float) =
     padL + fraction * plotW
@@ -535,31 +534,12 @@ let private buildChartGeometry input =
                       svg.custom ("strokeLinecap", "butt")
                       svg.custom ("vector-effect", "non-scaling-stroke") ]))
 
-    let legendElements =
-        if pointCount = 0 then
-            []
-        else
-            defs
-            |> List.indexed
-            |> List.choose (fun (index, definition) ->
-                if points |> Array.exists (fun point -> List.item index point.Counts > 0) then
-                    Some(
-                        Html.span
-                            [ prop.className definition.Accent
-                              prop.children
-                                  [ Html.span [ prop.className "swatch" ]
-                                    Html.span [ prop.className "chart-legend-label"; prop.text definition.Label ] ] ]
-                    )
-                else
-                    None)
-
     let hoverSamples =
         points
         |> Array.mapi (hoverSampleForPoint defs input.Anchor)
 
     { HoverSamples = hoverSamples
-      StaticSvgElements = gridElements @ areaElements @ markerElements @ axisElements
-      LegendElements = legendElements }
+      StaticSvgElements = gridElements @ areaElements @ markerElements @ axisElements }
 
 type private HoverState =
     { Sample: HoverSample
@@ -696,13 +676,13 @@ let private chartKindOfKey =
     | 0 -> ChartKind.Agents
     | _ -> ChartKind.Tasks
 
-/// Render one stacked stepped-area chart with its legend and crosshair tooltip. The memoized component
-/// boundary skips unrelated dashboard polling renders entirely; static paths, markers, axes, and legend
-/// elements are rebuilt only when the chart kind, selected window, server anchor, or snapshot-list
-/// identity changes. ChartKindKey is deliberately primitive so React's shallow memo comparison does not
-/// see a freshly allocated discriminated-union value on every parent render. Local hover state still
-/// renders independently, committing at most the latest pointer candidate once per animation frame and
-/// ignoring candidates for the already-visible sampled point.
+/// Render one stacked stepped-area chart with its crosshair tooltip. The memoized component boundary
+/// skips unrelated dashboard polling renders entirely; static paths, markers, and axes are rebuilt only
+/// when the chart kind, selected window, server anchor, or snapshot-list identity changes. ChartKindKey
+/// is deliberately primitive so React's shallow memo comparison does not see a freshly allocated
+/// discriminated-union value on every parent render. Local hover state still renders independently,
+/// committing at most the latest pointer candidate once per animation frame and ignoring candidates for
+/// the already-visible sampled point.
 [<ReactMemoComponent>]
 let private HistoryChart (props: HistoryChartProps) : ReactElement =
     let chartKind = chartKindOfKey props.ChartKindKey
@@ -804,8 +784,7 @@ let private HistoryChart (props: HistoryChartProps) : ReactElement =
                     [ prop.children
                           [ Html.div
                                 [ prop.className "chart-stage"
-                                  prop.children [ svgElement; tooltipElement ] ] ] ]
-                Html.div [ prop.className "chart-legend"; prop.children geometry.LegendElements ] ] ]
+                                  prop.children [ svgElement; tooltipElement ] ] ] ] ] ]
 
 let agentsChart (window: HistoryWindow) (anchor: DateTimeOffset) (snapshots: OverviewSnapshot list) : ReactElement =
     HistoryChart
