@@ -44,7 +44,7 @@ will display the docs.
 |---|---|
 | `GET /canvas/:filename` | Read `.agents/canvas/<filename>` from disk, inject transport shim + content-poll script before `</head>`, serve as HTML |
 | `GET /canvas/:filename/hash` | Return MD5/SHA256 hex of file content (for change detection) |
-| `POST /_message` | Parse JSON body, forward as `session.send({ prompt: "[canvas] " + JSON.stringify(body) })` |
+| `POST /_message` | Parse a JSON object with a nonblank string `action`, reject canonical payloads above 64,000 UTF-16 code units, and enqueue the resulting canvas prompt through the same serialized send path as `/inject` |
 
 Both `POST` sinks (`/_message` and the always-on `/inject`) are hardened against cross-origin browser
 abuse: they require `Content-Type: application/json` (so a cross-origin call becomes a preflighted
@@ -59,8 +59,8 @@ Browser-mode AgentDocs receive four scripts injected before `</head>`:
 
 - **Transport shim** — in a top-level window (no parent frame) `window.parent.postMessage()` posts to the window itself; the shim listens for those self-posted `{ action, ... }` messages and forwards them via `fetch POST` to `/_message`, so canvas docs need no browser-specific code.
 - **`canvasSend`** — the same canonical `src/Extension/canvas-send.js` runtime embedded by the
-  Treemon server, so authored interactions use one payload merge, size cap, and return contract in
-  both hosts.
+  Treemon server, so authored interactions use one action check, serialization guard, payload
+  merge, size cap, and return contract in both hosts.
 - **Selected-text contextual actions** — the same canonical runtime the Treemon doc server embeds,
   calling only the shared `canvasSend` helper. SystemView filenames are excluded through the shared
   `src/Extension/canvas-doc-kinds.json` configuration rather than a fallback-only filename check.
