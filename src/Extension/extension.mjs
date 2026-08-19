@@ -9,7 +9,11 @@ import {
   canvasFilenameForClaim,
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
-import { promptForSession } from "./session-prompt.mjs";
+import { isTrustedInjectionHeaders } from "./injection-request.mjs";
+import {
+  promptForCanvasMessage,
+  promptForSession,
+} from "./session-prompt.mjs";
 import { createSendQueue } from "./send-queue.mjs";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
@@ -107,29 +111,25 @@ function parseCanvasRoute(url) {
   return { filename: decodeURIComponent(match[1]), isHash: !!match[2] };
 }
 
+function serverPort(server) {
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("canvas bridge did not bind a TCP port");
+  }
+  return address.port;
+}
+
 // Guard the local injection endpoints (/inject, /_message) against cross-origin abuse. Requiring
 // application/json turns any cross-origin browser POST into a preflighted (non-simple) request that
 // this server never answers, so the browser blocks it and the text/plain simple-request bypass is
 // closed; rejecting a present, non-loopback Origin is defense-in-depth. Legitimate callers comply:
 // Treemon POSTs /inject as application/json with no Origin, and the served-doc shim POSTs /_message
 // same-origin as application/json.
-function isLoopbackOrigin(origin) {
-  return /^https?:\/\/(127(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?$/i.test(origin);
-}
-
-function isTrustedInjectionRequest(req) {
-  const contentType = String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase();
-  if (contentType !== "application/json") return false;
-  const origin = req.headers["origin"];
-  if (origin && !isLoopbackOrigin(origin)) return false;
-  return true;
-}
-
 function startHttpServer(session, state) {
   return new Promise((resolvePromise, reject) => {
     const server = createServer(async (req, res) => {
       if (req.method === "POST" && req.url === "/inject") {
-        if (!isTrustedInjectionRequest(req)) {
+        if (!isTrustedInjectionHeaders(req.headers)) {
           log(`/inject rejected: untrusted request (content-type=${req.headers["content-type"] ?? ""}, origin=${req.headers["origin"] ?? ""})`);
           res.writeHead(403, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: "forbidden" }));
@@ -159,7 +159,7 @@ function startHttpServer(session, state) {
 
       if (state.browserMode) {
         if (req.method === "POST" && req.url === "/_message") {
-          if (!isTrustedInjectionRequest(req)) {
+          if (!isTrustedInjectionHeaders(req.headers)) {
             log(`/_message rejected: untrusted request (content-type=${req.headers["content-type"] ?? ""}, origin=${req.headers["origin"] ?? ""})`);
             res.writeHead(403, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error: "forbidden" }));
@@ -172,18 +172,15 @@ function startHttpServer(session, state) {
             return;
           }
           log(`/_message received: payload length=${body.length}`);
-          let parsed;
-          try { parsed = JSON.parse(body); } catch {
+          let transport;
+          try {
+            transport = promptForCanvasMessage(body);
+          } catch (err) {
             res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: false, error: "invalid JSON" }));
+            res.end(JSON.stringify({ ok: false, error: err.message }));
             return;
           }
-          if (typeof parsed?.action !== "string") {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: false, error: "missing action" }));
-            return;
-          }
-          enqueueSend(session, "canvas", `[canvas] ${JSON.stringify(parsed)}`);
+          enqueueSend(session, transport.kind, transport.prompt);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true }));
           return;
@@ -202,7 +199,7 @@ function startHttpServer(session, state) {
               res.writeHead(200, { "Content-Type": "text/plain" });
               res.end(hashContent(content));
             } else {
-              const port = server.address().port;
+              const port = serverPort(server);
               res.writeHead(200, {
                 "Content-Type": "text/html; charset=utf-8",
                 "Content-Security-Policy": "frame-ancestors 'none'",
@@ -228,7 +225,7 @@ function startHttpServer(session, state) {
     });
 
     server.listen(0, "127.0.0.1", () => {
-      resolvePromise({ server, port: server.address().port });
+      resolvePromise({ server, port: serverPort(server) });
     });
     server.on("error", reject);
   });
@@ -302,6 +299,7 @@ async function declareOwnership(worktreePath, filename, sessionId) {
 function startHeartbeat(worktreePath, injectUrl, sessionId) {
   let currentInterval = HEARTBEAT_INTERVAL_MS;
   let wasDisconnected = false;
+  /** @type {ReturnType<typeof setTimeout> | null} */
   let timerId = null;
 
   const scheduleNext = () => {
@@ -363,7 +361,15 @@ async function handleCanvasWrite(session, state, filename) {
 }
 
 const worktreePath = process.cwd();
-const extensionState = { browserMode: false, port: 0, sessionId: null, worktreePath };
+/**
+ * @type {{
+ *   browserMode: boolean,
+ *   port: number,
+ *   sessionId: string | undefined,
+ *   worktreePath: string
+ * }}
+ */
+const extensionState = { browserMode: false, port: 0, sessionId: undefined, worktreePath };
 
 // Explicit routing tool the agent can call on demand. AgentDocs assign author ownership;
 // SystemViews are not claimable - their interactions resolve to a live session. It stamps THIS session's id,
@@ -420,13 +426,15 @@ try {
   log(`joinSession with tools failed (${err?.message ?? err}); retrying without tools`);
   session = await joinSession();
 }
-// Read the session id defensively: the current native runtime populates `session.sessionId`,
-// but older/other SDK shapes expose it as `session.id`. The `@github/copilot-sdk` dependency is
-// floating ("*") with no runtime/version guard, so keep both. Dropping the `session.id` fallback
-// yields `undefined` on an id-only runtime -> anonymous registration + skipped declareOwnership
-// (see the `if (state.sessionId)` guard in handleCanvasWrite) -> unowned docs whose canvas replies
-// are queued rather than delivered (the server's single-session fallback is intentionally gone).
-const sessionId = session.sessionId ?? session.id;
+// The pinned SDK currently exposes `sessionId`; keep the older `id` compatibility boundary
+// locally so each independently installed extension remains self-contained.
+const sessionWithLegacyId =
+  /** @type {{ sessionId?: unknown, id?: unknown }} */ (session);
+const rawSessionId = sessionWithLegacyId.sessionId ?? sessionWithLegacyId.id;
+const sessionId =
+  typeof rawSessionId === "string"
+    ? rawSessionId.trim() || undefined
+    : undefined;
 extensionState.sessionId = sessionId;
 const canvasWrites = watchCanvasWrites(session, worktreePath);
 

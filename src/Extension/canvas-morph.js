@@ -376,6 +376,7 @@
     // morph) and two fetches have no completion order, so only the newest response may morph —
     // otherwise a late older response re-morphs the doc back to stale content and tints the undo.
     var generation = 0;
+    /** @type {{ key: string, generation: number } | null} */
     var pendingMorph = null;
 
     window.addEventListener('message', function (event) {

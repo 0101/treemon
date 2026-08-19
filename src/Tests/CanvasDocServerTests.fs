@@ -328,8 +328,10 @@ type BuildInjectionTests() =
         // The helper must measure the identical metric on the object it posts — NOT a UTF-8 byte
         // length, which would diverge from the client's String.length check.
         let injection = buildInjection AgentDoc "status.html"
-        Assert.That(injection, Does.Contain("JSON.stringify(msg).length"),
-                    "helper must size-check JSON.stringify(...).length — the same metric the client enforces")
+        Assert.Multiple(fun () ->
+            Assert.That(injection, Does.Contain("serialized=JSON.stringify(msg)"))
+            Assert.That(injection, Does.Contain("size=serialized.length"),
+                        "helper must size-check JSON.stringify(...).length — the same metric the client enforces"))
 
     [<Test>]
     member _.``the canvasSend size cap matches the client's MaxPayloadBytes``() =
