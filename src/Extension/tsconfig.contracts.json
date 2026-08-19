@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noImplicitAny": true
+  },
+  "include": [
+    "injection-request.mjs",
+    "reporting/reporting-core.mjs",
+    "send-queue.mjs",
+    "session-prompt.mjs"
+  ],
+  "exclude": []
+}

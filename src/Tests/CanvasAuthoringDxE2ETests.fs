@@ -946,7 +946,7 @@ type CanvasSelectionContextE2ETests() =
                     "() => { window.canvasSelectionMetadata = () => ({ kind: 'beads', detail: 'x'.repeat(64000) }); }")
             do! this.SelectAndWaitForToolbar "#selected"
             do! this.Page.Locator("canvas-selection-context button[data-intent=\"explain\"]").ClickAsync()
-            let expected = "The selected text or comment is too large to send."
+            let expected = "Selection source context is too large or deeply nested."
             let! _ = this.WaitForSelectionError expected
             let! outcome =
                 this.Page.EvaluateAsync<string>(
@@ -959,7 +959,7 @@ type CanvasSelectionContextE2ETests() =
             Assert.That(
                 outcome,
                 Is.EqualTo(
-                    """{"messages":[],"toolbar":"block","processing":"none","error":"The selected text or comment is too large to send."}"""))
+                    """{"messages":[],"toolbar":"block","processing":"none","error":"Selection source context is too large or deeply nested."}"""))
         }
 
     [<Test>]

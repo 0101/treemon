@@ -77,13 +77,17 @@ A tiny script injected **alongside `bridgeScript` (AgentDoc only)** exposes
 - The message shape stays flat: `canvasSend('navigate-canvas-doc', { filename })` posts
   `{ action: 'navigate-canvas-doc', filename }` — byte-identical in effect to the raw message the
   pane already handles.
+- Requires a nonblank string action and catches serialization failures before posting. Invalid or
+  non-serializable messages are rejected with a doc-side console error.
 - Validates serialized payload size against the client cap (`MaxPayloadBytes = 64_000`,
   `src/Client/CanvasPane.fs`) using the **same metric the client enforces** —
   `JSON.stringify({ action, ...payload }).length` (UTF-16 code units, the JS `String.length` the
   client checks at the `postMessage DROPPED: payload too large` path) — so the doc-side verdict is
   identical to the client's drop decision. Oversized messages are **not** posted; the helper logs a
   clear console error doc-side so the author gets immediate feedback instead of the silent
-  client-side drop. (See open question on whether the cap should become a true UTF-8 byte count.)
+  client-side drop. The helper returns `false` for any rejection, including unavailable transport,
+  an invalid action, serialization failure, or size overflow. (See open question on whether the cap
+  should become a true UTF-8 byte count.)
 - `src/Extension/skill/SKILL.md` is updated to teach `canvasSend` as the **primary** API; the raw
   `window.parent.postMessage` shape stays documented as the underlying contract / fallback.
 - **Acceptance:** a doc that calls `canvasSend('navigate-canvas-doc', { filename })` switches tabs
