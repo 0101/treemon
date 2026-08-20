@@ -737,6 +737,38 @@ type CanvasPaneTests() =
             Assert.That(ageText, Does.Match("^(now|\\d+[mhd])$"), $"Age '{ageText}' should be a compact relative time (now/Nm/Nh/Nd)")
         }
 
+    [<Test>]
+    member this.``Hovering a doc tab replaces its age with a path copy action without resizing``() =
+        task {
+            do! this.Context.GrantPermissionsAsync([| "clipboard-read"; "clipboard-write" |])
+            do! focusCanvasCard this.Page FixtureCanvasBranch
+            do! ensureCanvasPaneOpen this.Page
+
+            let shell = this.Page.Locator(".canvas-pane .canvas-tab-shell").First
+            let copyButton = shell.Locator(".canvas-tab-copy")
+            do! shell.WaitForAsync()
+
+            let! beforeHover = shell.BoundingBoxAsync()
+            let! initialOpacity =
+                copyButton.EvaluateAsync<string>("button => getComputedStyle(button).opacity")
+
+            do! shell.HoverAsync()
+            do! Assertions.Expect(copyButton).ToBeVisibleAsync()
+            let! afterHover = shell.BoundingBoxAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(initialOpacity, Is.EqualTo("0"), "The path copy action should be hidden until hover or keyboard focus")
+                Assert.That(afterHover.Width, Is.EqualTo(beforeHover.Width).Within(0.01), "Hover must not change the tab width")
+                Assert.That(afterHover.Height, Is.EqualTo(beforeHover.Height).Within(0.01), "Hover must not change the tab height"))
+
+            do! copyButton.ClickAsync()
+            do! this.Page.Locator(".canvas-clipboard-banner", PageLocatorOptions(HasText = "Path copied")).WaitForAsync()
+            let! copiedPath = this.Page.EvaluateAsync<string>("() => navigator.clipboard.readText()")
+            Assert.That(
+                copiedPath,
+                Is.EqualTo("Q:/code/TestProject/feature-active/.agents/canvas/e2e-test.html"))
+        }
+
     // ── Empty Canvas Overview ───────────────────────────────────────────
 
     [<Test>]

@@ -139,25 +139,19 @@ or the user starts another selection. Static shared exports receive no selection
 use resolved per-interaction routing and may enrich the payload with structured
 `sourceContext`; see `docs/spec/canvas-interaction-routing.md`.
 
-### 5. Always-visible doc tab with last-modified age (Phase 8)
+### 5. Always-visible doc tab with path copy (Phase 8)
 
-Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
+The active doc always has a visible tab, including a lone `AgentDoc`. Each `AgentDoc` tab shows a
+compact age (`now`, `3m`, `2h`, `2d`) from `doc.LastModified` in a fixed-width metadata slot. Hovering
+the tab, or focusing a control within it, replaces that age with an outlined two-rectangle Copy
+button. The button is an absolutely positioned sibling of the tab button, so revealing it changes
+only opacity and pointer behavior; tab width and height never change.
 
-1. **Always render the active doc's tab — even for a single doc.** Today the `tabs` binding
-   renders tabs only when `wt.CanvasDocs.Length > 1 || hasSystemView`, so a lone **AgentDoc**
-   shows no tab and its iframe fills the pane. Change the condition so the active doc always has a
-   visible, labeled tab. (The header bar itself already always renders; only the tab buttons were
-   suppressed.)
-2. **Show on-disk freshness inside each AgentDoc tab.** Render a compact relative age next to the
-   tab label from `doc.LastModified` (already on `CanvasDoc`, `src/Shared/Types.fs`) — e.g. `3m`,
-   `2h`, `2d`. Computed from `System.DateTimeOffset.Now` at render time (same pattern as the
-   dashboard's `relativeTime System.DateTimeOffset.Now wt.LastCommitTime`), so it refreshes on the
-   pane's existing render cadence.
-
-- The age is scoped to **AgentDoc** tabs, matching the AgentDoc-only liveness dot. The
-  `SystemView` "BD" badge is data-driven and carries no authored-file age.
-- **Acceptance:** a worktree with a single canvas doc shows its tab button (not a bare iframe), and
-  each AgentDoc tab shows a compact age (`3m`, `2d`) reflecting the file's `LastModified`.
+Copy dispatches an Elmish message and writes the full on-disk
+`{worktree}/.agents/canvas/{filename}` path with the worktree path's native separator. A landed write
+shows the dismissible clipboard notice; a rejected write surfaces the full path for manual copying.
+The age and copy action are scoped to `AgentDoc` tabs. A `SystemView` entry remains data-driven and
+has neither authored-file freshness nor this action.
 
 ## Technical Approach
 
@@ -216,9 +210,9 @@ Two coupled tab-bar changes in `src/Client/CanvasPane.fs`:
   forwarded to the session like a normal doc payload.
 - **Always-visible tab:** change the `tabs` condition so the active doc's tab always renders;
   preserve the existing SystemView-first ordering and the lone-SystemView behavior.
-- **Compact age:** add `Components.relativeTimeCompact` (a sibling of `relativeTime`) returning
-  `now`/`3m`/`2h`/`2d` (no `" ago"`). Render it inside `agentTab` from
-  `System.DateTimeOffset.Now` and `d.LastModified`.
+- **Tab metadata:** `Components.relativeTimeCompact` returns `now`/`3m`/`2h`/`2d` (no `" ago"`).
+  `agentTab` renders it in the fixed `.canvas-tab-meta` slot; `.canvas-tab-copy` overlays that same
+  slot on hover/focus and dispatches the clipboard command without changing tab geometry.
 
 ### Docs — `src/Extension/skill/SKILL.md`
 - Replace the primary `postMessage` example with `canvasSend`; keep the raw contract documented as

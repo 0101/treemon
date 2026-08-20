@@ -710,6 +710,10 @@ let update msg model =
 
     | ArchiveCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.archiveCanvasDocResult scopedKey filename result model
 
+    | CopyCanvasDocPath (scopedKey, filename) -> CanvasUpdate.copyCanvasDocPath scopedKey filename model
+
+    | CanvasDocPathCopyResult (path, outcome) -> CanvasUpdate.canvasDocPathCopyResult path outcome model
+
     | ShareCanvasDoc (scopedKey, filename) -> CanvasUpdate.shareCanvasDoc scopedKey filename model
 
     | ShareCanvasDocResult (scopedKey, filename, result) -> CanvasUpdate.shareCanvasDocResult scopedKey filename result model
@@ -717,7 +721,7 @@ let update msg model =
     | ClipboardWriteResult (scopedKey, filename, url, outcome) ->
         CanvasUpdate.clipboardWriteResult scopedKey filename url outcome model
 
-    | DismissShareNotice -> CanvasUpdate.dismissShareNotice model
+    | DismissClipboardNotice -> CanvasUpdate.dismissClipboardNotice model
 
     | NavigateCanvasDoc filename -> CanvasUpdate.navigateCanvasDoc filename model
 

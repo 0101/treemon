@@ -34,12 +34,9 @@ type CanvasState =
       // additionally clears it so a tab switch (and switch back) never re-shows it. Distinct from
       // CanvasSendState.Failed, which models pane→session message-delivery failures.
       DocError: DocJsError option
-      // Transient success banner shown after a canvas doc is shared and its rich link copied to the
-      // clipboard (the message text, e.g. "Shared — link copied", or None when nothing to show).
-      // A share *failure* reuses the CanvasSendState.Failed error banner per spec, so only the
-      // success path needs its own state; kept distinct from CanvasSendState (message delivery) and
-      // DocError (doc JS errors) so the banners never overwrite each other.
-      ShareNotice: string option
+      // Dismissible notice for a completed clipboard action, including rich-link sharing and copying
+      // a canvas doc's on-disk path. Failures reuse CanvasSendState.Failed.
+      ClipboardNotice: string option
       // Scoped identity and phase of the single in-flight share. The phase keeps the pane locked
       // through clipboard settlement, while the identity lets stale async results be ignored.
       ShareState: CanvasShareState
@@ -60,7 +57,7 @@ let empty : CanvasState =
       CanvasEvents = Map.empty
       CanvasSendState = CanvasSendState.Idle
       DocError = None
-      ShareNotice = None
+      ClipboardNotice = None
       ShareState = CanvasShareState.Idle
       BridgeLiveness = Map.empty }
 
