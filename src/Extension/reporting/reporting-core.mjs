@@ -4,6 +4,7 @@ export const MAX_TOOL_CALL_ID_CHARS = 512;
 /**
  * @typedef ReportBaseContext
  * @property {string} sessionId
+ * @property {string} [terminalSessionId]
  * @property {string} worktreePath
  * @property {string} provider
  */
@@ -11,6 +12,7 @@ export const MAX_TOOL_CALL_ID_CHARS = 512;
 /**
  * @typedef ReportContext
  * @property {string} sessionId
+ * @property {string} [terminalSessionId]
  * @property {string} worktreePath
  * @property {string} provider
  * @property {string} eventId
@@ -53,8 +55,10 @@ function cap(text) {
  * @param {string} kind
  */
 export function buildReport(context, kind) {
+  const terminalSessionId = context.terminalSessionId?.trim();
   return {
     sessionId: context.sessionId,
+    ...(terminalSessionId ? { terminalSessionId } : {}),
     worktreePath: context.worktreePath,
     provider: context.provider,
     eventId: context.eventId,

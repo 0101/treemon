@@ -30,6 +30,7 @@ type ServerLifecycleTests() =
 
             let report =
                 { SessionId = SessionId "lifecycle-session"
+                  TerminalSessionId = None
                   WorktreePath =
                     WorktreePath(Path.Combine(Path.GetTempPath(), "lifecycle-worktree"))
                   Provider = CopilotCli

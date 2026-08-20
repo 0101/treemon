@@ -80,12 +80,16 @@ let private otherWorktree = Path.Combine(Path.GetTempPath(), "treemon-other-work
 
 let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredStatus =
     { SessionId = SessionId sid
+      TerminalSessionId = None
       WorktreePath = WorktreePath wt
       Provider = CopilotCli
       Status = status
       UpdatedAt = ts updatedAt
       LastSeen = ts lastSeen
       ContextUsageAt = None }
+
+let private withTerminalOrigin terminalSessionId (stored: StoredStatus) =
+    { stored with TerminalSessionId = Some terminalSessionId }
 
 let private withUsage (usage: ContextUsage) usageAt lastSeen (stored: StoredStatus) : StoredStatus =
     { stored with
@@ -329,6 +333,8 @@ type LoadLiveStatusesTests() =
     [<Test>]
     member _.``Live state survives a restart (new store instance over the same file)``() =
         withDbPath (fun dbPath ->
+            let terminalSessionId =
+                TerminalSessionId "0123456789abcdef0123456789abcdef"
             let working =
                 { emptyStatus with
                     Status = SessionLevelStatus.Working
@@ -336,13 +342,21 @@ type LoadLiveStatusesTests() =
 
             // First instance writes, then is disposed (checkpoints WAL, releases the file).
             (use store = new SessionActivityStore(dbPath)
-             store.UpsertStatus(storedOf "s1" "C:/wt/a" working "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z"))
+             storedOf
+                 "s1"
+                 "C:/wt/a"
+                 working
+                 "2026-03-01T11:30:00Z"
+                 "2026-03-01T11:30:00Z"
+             |> withTerminalOrigin terminalSessionId
+             |> store.UpsertStatus)
 
             // A fresh instance over the same path rebuilds the live status with no new events.
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
             Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.Working))
-            Assert.That(row.Status.Skill, Is.EqualTo(Some "bd-execute")))
+            Assert.That(row.Status.Skill, Is.EqualTo(Some "bd-execute"))
+            Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
 
     [<Test>]
     member _.``Context usage survives a restart with its ordering timestamp``() =
@@ -536,7 +550,11 @@ END;
                     "2025-12-01T10:00:00Z"
                     "2025-12-01T10:00:00Z"
             )
-            store.RecordLiveness(SessionId "s1", ts "2026-03-01T11:59:00Z")
+            store.RecordLiveness(
+                SessionId "s1",
+                ts "2026-03-01T11:59:00Z",
+                None
+            )
 
             store.PruneOld(ts "2026-01-01T00:00:00Z") |> ignore
 
@@ -652,17 +670,21 @@ VALUES
     member _.``Construction adds metadata columns idempotently and preserves legacy rows``() =
         withDbPath (fun dbPath ->
             seedLegacyDatabase dbPath
+            let terminalSessionId =
+                TerminalSessionId "fedcba9876543210fedcba9876543210"
 
             (use store = new SessionActivityStore(dbPath)
              let legacy = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
              Assert.That(legacy.Status.Intent, Is.EqualTo(None))
              Assert.That(legacy.Status.Title, Is.EqualTo(None))
              Assert.That(legacy.Status.BackgroundAgentClocks, Is.Empty)
+             Assert.That(legacy.TerminalSessionId, Is.EqualTo None)
 
              let intent = msg "investigating the fold" "2026-03-01T11:45:00Z"
              let title = msg "Investigate the fold" "2026-03-01T11:46:00Z"
 
              { legacy with
+                 TerminalSessionId = Some terminalSessionId
                  Status.Intent = Some intent
                  Status.Title = Some title
                  UpdatedAt = ts "2026-03-01T11:46:00Z"
@@ -672,7 +694,8 @@ VALUES
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
             Assert.That(row.Status.Intent, Is.EqualTo(Some(msg "investigating the fold" "2026-03-01T11:45:00Z")))
-            Assert.That(row.Status.Title, Is.EqualTo(Some(msg "Investigate the fold" "2026-03-01T11:46:00Z"))))
+            Assert.That(row.Status.Title, Is.EqualTo(Some(msg "Investigate the fold" "2026-03-01T11:46:00Z")))
+            Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
 
     [<Test>]
     member _.``Construction adds context columns idempotently and preserves legacy rows``() =

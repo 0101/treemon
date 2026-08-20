@@ -20,6 +20,7 @@ let private tempDirectory () =
 
 let private storedSession sessionId worktreePath status updatedAt lastSeen =
     { SessionId = SessionId sessionId
+      TerminalSessionId = None
       WorktreePath = WorktreePath worktreePath
       Provider = CopilotCli
       Status = { emptyStatus with Status = status }

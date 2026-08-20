@@ -27,6 +27,11 @@ open Server.SessionActivityStore
 // intent_reported / title_reported / title_bootstrap and optionally awaiting_user_input;
 // `skillName` is only for skill_invoked, `toolCallId` only for background-agent lifecycle, and usage
 // counters only for usage_info.
+//
+// `terminalSessionId` is independent of `kind`: an optional 32-hex TerminalHost session id, present
+// on any report when the reporting process inherited `TREEMON_TERMINAL_SESSION_ID`. It is pure
+// attribution metadata carried onto the stored row and never affects parsing of `kind`-specific
+// fields or the status fold below.
 
 [<CLIMutable>]
 type MessageDto = { text: string; at: string }
@@ -34,6 +39,7 @@ type MessageDto = { text: string; at: string }
 [<CLIMutable>]
 type SessionActivityRequest =
     { sessionId: string
+      terminalSessionId: string
       worktreePath: string
       provider: string
       eventId: string
@@ -51,6 +57,16 @@ let private parseProvider (s: string) : Result<CodingToolProvider, string> =
     match s with
     | "copilot_cli" -> Ok CopilotCli
     | other -> Error $"unknown provider '{other}'"
+
+let private parseTerminalSessionId (value: string) : Result<TerminalSessionId option, string> =
+    if String.IsNullOrWhiteSpace value then
+        Ok None
+    else
+        match Guid.TryParseExact(value.Trim(), "N") with
+        | true, terminalSessionId ->
+            Ok(Some(TerminalSessionId(terminalSessionId.ToString("N"))))
+        | false, _ ->
+            Error "terminalSessionId must be a 32-character hexadecimal TerminalHost session id"
 
 let private tryParseTimestamp (s: string) : Result<DateTimeOffset, string> =
     match DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind) with
@@ -197,17 +213,20 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
     else
         parseProvider req.provider
         |> Result.bind (fun provider ->
-            tryParseTimestamp req.occurredAt
-            |> Result.bind (fun rawOccurredAt ->
-                let occurredAt = clampFutureTimestamp now rawOccurredAt
-                parseEvent occurredAt req.kind req.message req.skillName req.toolCallId req.currentTokens req.tokenLimit
-                |> Result.map (fun ev ->
-                    { SessionId = SessionId req.sessionId
-                      WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
-                      Provider = provider
-                      EventId = EventId req.eventId
-                      OccurredAt = occurredAt
-                      Event = withMessageTimestamp occurredAt ev })))
+            parseTerminalSessionId req.terminalSessionId
+            |> Result.bind (fun terminalSessionId ->
+                tryParseTimestamp req.occurredAt
+                |> Result.bind (fun rawOccurredAt ->
+                    let occurredAt = clampFutureTimestamp now rawOccurredAt
+                    parseEvent occurredAt req.kind req.message req.skillName req.toolCallId req.currentTokens req.tokenLimit
+                    |> Result.map (fun ev ->
+                        { SessionId = SessionId req.sessionId
+                          TerminalSessionId = terminalSessionId
+                          WorktreePath = WorktreePath(Server.PathUtils.normalizePath req.worktreePath)
+                          Provider = provider
+                          EventId = EventId req.eventId
+                          OccurredAt = occurredAt
+                          Event = withMessageTimestamp occurredAt ev }))))
 
 // --- Known-worktree guard (mirrors CanvasDocServer) --------------------------------------------
 
@@ -265,13 +284,102 @@ let internal retentionPeriod = TimeSpan.FromDays 60.0
 /// How often the retention timer fires.
 let internal pruneInterval = TimeSpan.FromHours 1.0
 
+type OwnedSessionState =
+    { TerminalSessionId: TerminalSessionId
+      CopilotSessionId: SessionId
+      Status: SessionLevelStatus }
+
+type OwnedSessionSnapshot =
+    { ActivityEpoch: int64
+      OpenSessions: OwnedSessionState list
+      ResumableSessionIds: Map<TerminalSessionId, SessionId> }
+
+let internal joinOwnedSessions
+    (terminalSessionIds: Set<TerminalSessionId>)
+    (sessions: StoredStatus seq)
+    : (TerminalSessionId * StoredStatus) list =
+    sessions
+    |> Seq.choose (fun session ->
+        session.TerminalSessionId
+        |> Option.filter terminalSessionIds.Contains
+        |> Option.map (fun terminalSessionId -> terminalSessionId, session))
+    |> Seq.toList
+
+let internal effectiveOwnedSessionStates
+    (now: DateTimeOffset)
+    (ownedSessions: (TerminalSessionId * StoredStatus) list)
+    : OwnedSessionState list =
+    ownedSessions
+    |> List.filter (fun (_, session) -> now - session.LastSeen < openWindow)
+    |> List.map (fun (terminalSessionId, session) ->
+        { TerminalSessionId = terminalSessionId
+          CopilotSessionId = session.SessionId
+          Status =
+            session.Status
+            |> freshnessAdjusted now session.LastSeen
+            |> effectiveStatus })
+    |> List.sortBy (fun session ->
+        TerminalSessionId.value session.TerminalSessionId,
+        SessionId.value session.CopilotSessionId)
+
+let internal resumableSessionIds
+    (ownedSessions: (TerminalSessionId * StoredStatus) list)
+    : Map<TerminalSessionId, SessionId> =
+    ownedSessions
+    |> List.groupBy fst
+    |> List.choose (fun (terminalSessionId, sessions) ->
+        sessions
+        |> List.map snd
+        |> StoredStatus.tryMostRecentActivity
+        |> Option.map (fun latest -> terminalSessionId, latest.SessionId))
+    |> Map.ofList
+
+let internal ownedSessionActivityEpoch
+    (terminalSessionIds: Set<TerminalSessionId>)
+    (activityEpochs: Map<TerminalSessionId, int64>)
+    : int64 =
+    terminalSessionIds
+    |> Seq.choose (fun terminalSessionId -> activityEpochs |> Map.tryFind terminalSessionId)
+    |> Seq.fold max 0L
+
+let internal queryOwnedSessions
+    (now: DateTimeOffset)
+    (terminalSessionIds: Set<TerminalSessionId>)
+    (activityEpochs: Map<TerminalSessionId, int64>)
+    (sessions: StoredStatus seq)
+    : OwnedSessionSnapshot =
+    let ownedSessions = joinOwnedSessions terminalSessionIds sessions
+
+    { ActivityEpoch = ownedSessionActivityEpoch terminalSessionIds activityEpochs
+      OpenSessions = effectiveOwnedSessionStates now ownedSessions
+      ResumableSessionIds = resumableSessionIds ownedSessions }
+
+let private mergeCurrentAndDurableStatuses
+    (live: Map<SessionId, StoredStatus>)
+    (durable: StoredStatus seq)
+    : StoredStatus seq =
+    durable
+    |> Seq.fold (fun sessions status -> Map.add status.SessionId status sessions) Map.empty
+    |> fun sessions -> live |> Map.fold (fun merged sessionId status -> Map.add sessionId status merged) sessions
+    |> Map.toSeq
+    |> Seq.map snd
+
 // --- Service -----------------------------------------------------------------------------------
 
 type private ServiceMsg =
     | Ingest of SessionActivityReport
     | Seed of StoredStatus list
     | Snapshot of AsyncReplyChannel<Map<SessionId, StoredStatus>>
+    | QueryOwnedSessions of
+        DateTimeOffset *
+        Set<TerminalSessionId> *
+        AsyncReplyChannel<Result<OwnedSessionSnapshot, string>>
     | Stop of AsyncReplyChannel<unit>
+
+type private ServiceState =
+    { Live: Map<SessionId, StoredStatus>
+      NextActivityEpoch: int64
+      ActivityEpochs: Map<TerminalSessionId, int64> }
 
 let private historyState
     (prior: StoredStatus option)
@@ -346,10 +454,12 @@ type SessionActivityService internal
                 match prior with
                 | Some existing ->
                     { existing with
+                        TerminalSessionId = report.TerminalSessionId
                         Status = status
                         LastSeen = max existing.LastSeen report.OccurredAt }
                 | None ->
                     { SessionId = report.SessionId
+                      TerminalSessionId = report.TerminalSessionId
                       WorktreePath = report.WorktreePath
                       Provider = report.Provider
                       Status = status
@@ -384,8 +494,16 @@ type SessionActivityService internal
             match prior with
             | None -> live
             | Some prior ->
-                let bumped = { prior with LastSeen = max prior.LastSeen report.OccurredAt }
-                store.RecordLiveness(report.SessionId, bumped.LastSeen)
+                let bumped =
+                    { prior with
+                        TerminalSessionId = report.TerminalSessionId
+                        LastSeen = max prior.LastSeen report.OccurredAt }
+
+                store.RecordLiveness(
+                    report.SessionId,
+                    bumped.LastSeen,
+                    bumped.TerminalSessionId
+                )
                 publish bumped.Status.BackgroundAgentClocks bumped
         | UsageInfo(currentTokens, tokenLimit) ->
             // A pure context-window gauge on its OWN order path, DECOUPLED from the status
@@ -413,6 +531,7 @@ type SessionActivityService internal
                     let usage = { CurrentTokens = currentTokens; TokenLimit = tokenLimit }
                     let bumped =
                         { prior with
+                            TerminalSessionId = report.TerminalSessionId
                             Status.ContextUsage = Some usage
                             ContextUsageAt = Some report.OccurredAt
                             LastSeen = max prior.LastSeen report.OccurredAt }
@@ -512,6 +631,7 @@ type SessionActivityService internal
 
             let stored =
                 { SessionId = report.SessionId
+                  TerminalSessionId = report.TerminalSessionId
                   WorktreePath = report.WorktreePath
                   Provider = report.Provider
                   Status = newStatus
@@ -534,9 +654,52 @@ type SessionActivityService internal
             | Some persisted ->
                 publish newStatus.BackgroundAgentClocks persisted
 
+    let priorForActivityEpoch
+        (live: Map<SessionId, StoredStatus>)
+        (report: SessionActivityReport)
+        =
+        live
+        |> Map.tryFind report.SessionId
+        |> Option.orElseWith (fun () -> store.StatusBySession report.SessionId)
+
+    let activityEpochOrigins
+        (prior: StoredStatus option)
+        (report: SessionActivityReport)
+        =
+        let reportHasSession =
+            match report.Event, prior with
+            | (Heartbeat | UsageInfo _), None -> false
+            | _ -> true
+
+        if reportHasSession then
+            [ prior |> Option.bind _.TerminalSessionId
+              report.TerminalSessionId ]
+            |> List.choose id
+            |> Set.ofList
+        else
+            Set.empty
+
+    let applyReport (state: ServiceState) (report: SessionActivityReport) =
+        let prior = priorForActivityEpoch state.Live report
+        let activityOrigins = activityEpochOrigins prior report
+        let live = apply state.Live report
+
+        if Set.isEmpty activityOrigins then
+            { state with Live = live }
+        else
+            let epoch = state.NextActivityEpoch + 1L
+            let activityEpochs =
+                activityOrigins
+                |> Set.fold (fun epochs terminalSessionId ->
+                    Map.add terminalSessionId epoch epochs) state.ActivityEpochs
+
+            { Live = live
+              NextActivityEpoch = epoch
+              ActivityEpochs = activityEpochs }
+
     let mailbox =
         MailboxProcessor<ServiceMsg>.Start(fun inbox ->
-            let rec loop (live: Map<SessionId, StoredStatus>) = async {
+            let rec loop (state: ServiceState) = async {
                 let! msg = inbox.Receive()
 
                 match msg with
@@ -545,22 +708,40 @@ type SessionActivityService internal
                     // alive with the unchanged live map (the report is dropped, best-effort like the wire).
                     let next =
                         try
-                            apply live report
+                            applyReport state report
                         with ex ->
                             Log.log "Activity" $"Ingest failed (report dropped, mailbox kept alive): {ex.Message}"
-                            live
+                            state
                     return! loop next
                 | Seed loaded ->
-                    let seeded = loaded |> List.fold (fun m s -> Map.add s.SessionId s m) live
-                    return! loop seeded
+                    let seeded =
+                        loaded
+                        |> List.fold (fun live status -> Map.add status.SessionId status live) state.Live
+
+                    return! loop { state with Live = seeded }
                 | Snapshot reply ->
-                    reply.Reply live
-                    return! loop live
+                    reply.Reply state.Live
+                    return! loop state
+                | QueryOwnedSessions(now, terminalSessionIds, reply) ->
+                    let result =
+                        try
+                            store.StatusesByTerminalSessionIds terminalSessionIds
+                            |> mergeCurrentAndDurableStatuses state.Live
+                            |> queryOwnedSessions now terminalSessionIds state.ActivityEpochs
+                            |> Ok
+                        with ex ->
+                            Error $"Could not query terminal-owned sessions: {ex.Message}"
+
+                    reply.Reply result
+                    return! loop state
                 | Stop reply ->
                     reply.Reply()
             }
 
-            loop Map.empty)
+            loop
+                { Live = Map.empty
+                  NextActivityEpoch = 0L
+                  ActivityEpochs = Map.empty })
 
     let prune _ =
         try
@@ -627,6 +808,18 @@ type SessionActivityService internal
     member _.LiveSnapshot() : Map<SessionId, StoredStatus> =
         ensureActive ()
         mailbox.PostAndReply Snapshot
+
+    /// Exact TerminalHost ownership snapshot. The mailbox serializes the durable read with ingestion
+    /// so status, resume identity, and the process-local activity epoch describe one observation.
+    member _.QueryOwnedSessions
+        (
+            now: DateTimeOffset,
+            terminalSessionIds: Set<TerminalSessionId>
+        )
+        : Result<OwnedSessionSnapshot, string> =
+        ensureActive ()
+        mailbox.PostAndReply(fun reply ->
+            QueryOwnedSessions(now, terminalSessionIds, reply))
 
     member internal _.Store = store
 

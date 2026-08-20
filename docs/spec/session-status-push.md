@@ -150,6 +150,8 @@ events never replace parent-authored skill, title, intent, or footer messages.
 `POST /api/session/activity` validates the DTO, provider, known worktree, event-specific fields, and
 CSRF origin. Future timestamps beyond five minutes are clamped to server time, and nested message
 timestamps are normalized to that value before ordering. Free text is bounded before persistence.
+An optional terminal origin must be the canonical 32-hex TerminalHost session id and is normalized
+to lowercase; blank values mean no origin.
 
 Runtime `<system_reminder>` messages arrive through the genuine `user.message` channel, so the
 server classifies them after validation and the known-worktree guard but before the single-writer
@@ -178,6 +180,13 @@ Ingestion paths consult the live map and then the durable row by session id when
 needed. This preserves retained state when a heartbeat, usage report, title bootstrap, activity
 report, or later lifecycle event arrives after restart. Before advancing a session after a stale
 gap, the service clears its old process-local background clocks.
+
+The mailbox also maintains a process-local monotonic activity sequence per terminal origin. A
+report stamps both its prior and reported origins, so moving or clearing a session changes the old
+terminal's epoch as well. The pure ownership query filters only the caller's current authoritative
+terminal ids, overlays live process-local clocks on durable rows, and returns their maximum epoch,
+each open session's effective state, and the greatest-activity durable resume identity per terminal.
+Unrelated origins and sessions with no origin cannot change that query's epoch or join result.
 
 ### Persistence
 
@@ -246,7 +255,7 @@ card or Overview status.
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Resume | Query durable most-recent activity identity, not the bounded live cache or heartbeat recency. |
-| Terminal origin | Persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; never infer it from worktree or use it in status folding. |
+| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; exact current-id queries use a process-local per-origin epoch and never infer ownership from worktree or use it in status folding. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 

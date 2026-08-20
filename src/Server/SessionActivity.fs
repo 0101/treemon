@@ -19,6 +19,13 @@ type SessionId = SessionId of string
 module SessionId =
     let value (SessionId id) = id
 
+/// Exact identity of one TerminalHost-owned terminal. This is deliberately distinct from the
+/// Copilot SessionId because both identifiers are carried through the same ownership queries.
+type TerminalSessionId = TerminalSessionId of string
+
+module TerminalSessionId =
+    let value (TerminalSessionId id) = id
+
 type EventId = EventId of string
 
 module EventId =
@@ -66,6 +73,7 @@ type SessionEvent =
 /// One pushed report: a single event for one session in one worktree.
 type SessionActivityReport =
     { SessionId: SessionId
+      TerminalSessionId: TerminalSessionId option
       WorktreePath: WorktreePath
       Provider: CodingToolProvider
       EventId: EventId
