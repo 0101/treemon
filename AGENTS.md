@@ -88,6 +88,18 @@ Before implementing a helper, utility, or any non-trivial logic, **search the co
   `pwsh.exe` PIDs whose decoded `-EncodedCommand` starts in that unique fixture path; never terminate
   the shared `WindowsTerminal.exe`/HWND-owner PID.
 
+### Private verification reports
+
+- The response-text-only rule for findings has one narrow exception: when a beads task is labeled
+  `verify`, explicitly requires a report path under gitignored `.agents/verify/`, and the path is
+  confirmed ignored, `bd-verify-executor` may create or update that redacted report and
+  `bd-verify-reviewer` may read it.
+- This report is a sanctioned private workflow artifact, not a tracked or shared findings dump.
+  The exception does not allow reports elsewhere, tracked result files, planning notes, general
+  review dumps, or unredacted secrets or private identifiers.
+- Keep the caller-facing verification summary concise. All other output-channel constraints remain
+  in force.
+
 ## Ports
 
 | Environment | Port |
