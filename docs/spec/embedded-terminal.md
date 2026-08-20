@@ -247,7 +247,13 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the
   `CodingToolCli Resume` command. A terminal without an exact resumable session receives no input
-  and remains a plain PowerShell shell.
+  and remains a plain PowerShell shell. Submitted terminal input is a shell boundary: a resume
+  command carrying a control character is rejected rather than written, so a stored Copilot
+  `SessionId` can never inject an extra command line into a recreated shell.
+- **Truthful lifecycle state on failure:** only evidence that the exact host was lost interrupts
+  every tab. A rejected single-terminal request keeps the authoritative registry and leaves other
+  terminals running, and a replacement that stops short of a proven live host never reports its
+  terminals as running.
 - **Executable-path replacement identity:** Treemon captures the exact running executable path
   before commit, waits for that exact process identity to exit, and verifies the replacement is
   running from the selected direct staging directory. The captured path is also the rollback target
