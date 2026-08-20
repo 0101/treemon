@@ -6,8 +6,8 @@
 - Keep terminals alive across browser attachment changes and ordinary Treemon server restarts.
 - Run the terminal on one small, separately running F#/.NET `TerminalHost` executable with no Node
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
-  `src/Server/EmbeddedTerminal.fs`, and any terminal-specific runtime script) stays at or below
-  4,000 nonblank production lines.
+  `src/Server/TerminalHost*.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific runtime
+  script) stays at or below 4,000 nonblank production lines.
 - Give every terminal an exact kernel-owned process boundary established before ttyd executes.
 - Keep lifecycle control loopback-only, authenticated, versioned, and limited to the five endpoints
   listed below.
@@ -188,10 +188,13 @@ loopback, exact Host/Origin, bearer, and request-size checks as the control API.
 
 ### Treemon integration
 
-`Server.EmbeddedTerminal` is a thin control client and replacement coordinator. It validates the
-minimal manifest, verifies the exact live host identity through health, lists the authoritative
-registry, and lazily starts a host only when none is healthy. Ambiguous start or close responses are
-resolved by listing the registry again.
+The server terminal runtime has one-way module boundaries: `TerminalHostProcess` owns process
+configuration, launch, and exact identity defaults; `TerminalHostManifest` validates discovery;
+`TerminalHostClient` owns authenticated control and attachment requests; and
+`TerminalHostReplacement` coordinates replacement. `Server.EmbeddedTerminal` retains only the
+mailbox, authoritative snapshot reconciliation, and public terminal lifecycle surface. It lazily
+starts a host only when none is healthy, and ambiguous start or close responses are resolved by
+listing the registry again.
 
 `treemon.ps1` publishes the host and stages a changed executable in a plain versioned directory. It
 preflights control-API compatibility before replacing the Treemon server; a deployment that cannot
@@ -268,13 +271,18 @@ PowerShell lifecycle helpers, or compatibility shims.
   before commit, waits for that exact process identity to exit, and verifies the replacement is
   running from the selected direct staging directory. The captured path is also the rollback target
   when the staged process cannot be launched.
+- **One-way server terminal modules:** process/configuration, manifest, control client, replacement,
+  then mailbox form a strict dependency chain. Replacement returns a commit transition for the
+  mailbox to apply, so only `EmbeddedTerminal` reconciles `ManagerState` and no module cycle is
+  required.
 
 ## Key Files
 
 | File | Purpose |
 |---|---|
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
-| `src/Server/EmbeddedTerminal.fs` | Host discovery, authenticated control client, compatibility preflight, and replacement coordination |
+| `src/Server/TerminalHostProcess.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, discovery validation, authenticated control client and compatibility preflight, and replacement coordination |
+| `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, authoritative snapshot reconciliation, and public start/get/close surface |
 | `src/Server/SessionActivity.fs` | Effective per-session state used by the idle gate |
 | `src/Server/SessionActivityService.fs` | Activity ingestion, terminal-origin validation, and owned-session activity epoch |
 | `src/Server/SessionActivityStore.fs` | Durable Copilot session state and optional terminal origin |

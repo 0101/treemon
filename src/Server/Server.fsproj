@@ -61,6 +61,10 @@
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="CardEventLog.fs" />
     <Compile Include="DemoFixture.fs" />
+    <Compile Include="TerminalHostProcess.fs" />
+    <Compile Include="TerminalHostManifest.fs" />
+    <Compile Include="TerminalHostClient.fs" />
+    <Compile Include="TerminalHostReplacement.fs" />
     <Compile Include="EmbeddedTerminal.fs" />
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="OverviewSnapshotCapture.fs" />

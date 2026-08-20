@@ -282,7 +282,7 @@ let internal runHostWithCapture
             BackgroundLoop.stop "Overview snapshot capture" loop
 
 let private runTerminalHostDeploymentPreflight () =
-    match EmbeddedTerminal.preflightDeployment () |> Async.RunSynchronously with
+    match TerminalHostClient.preflightDeployment () |> Async.RunSynchronously with
     | Error error ->
         Console.Error.WriteLine($"TerminalHost deployment preflight failed: {error}")
         2

@@ -430,7 +430,7 @@ type private FakeControlHost() =
 let private managerConfig
     (host: FakeControlHost)
     (launchHost: ProcessStartInfo -> Result<unit, string>)
-    : EmbeddedTerminal.Config =
+    : TerminalHostProcess.Config =
     let processIdentityMatches pid startTicks =
         try
             use child = Process.GetProcessById pid
@@ -578,7 +578,7 @@ type EmbeddedTerminalControlClientTests() =
                     ))
 
             let! result =
-                EmbeddedTerminal.sendTerminalCommandDefault
+                TerminalHostClient.sendTerminalCommandDefault
                     $"http://127.0.0.1:{port}/terminal/"
                     command.AsShellString
                 |> Async.StartAsTask
@@ -876,7 +876,7 @@ type EmbeddedTerminalReplacementTests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     outcome,
-                    Is.EqualTo EmbeddedTerminal.ReplacementOutcome.RaceLost
+                    Is.EqualTo TerminalHostReplacement.ReplacementOutcome.RaceLost
                 )
 
                 Assert.That(host.ShutdownRequestCount, Is.Zero)
@@ -941,7 +941,7 @@ type EmbeddedTerminalReplacementTests() =
                 Assert.That(
                     outcome,
                     Is.EqualTo
-                        EmbeddedTerminal.ReplacementOutcome.WaitingForIdle
+                        TerminalHostReplacement.ReplacementOutcome.WaitingForIdle
                 )
 
                 Assert.That(host.ShutdownRequestCount, Is.Zero)
@@ -1056,7 +1056,7 @@ type EmbeddedTerminalReplacementTests() =
                 Assert.That(
                     outcome,
                     Is.EqualTo(
-                        EmbeddedTerminal.ReplacementOutcome.Replaced
+                        TerminalHostReplacement.ReplacementOutcome.Replaced
                             stagedVersion
                     )
                 )
@@ -1153,7 +1153,7 @@ type EmbeddedTerminalReplacementTests() =
 
             let failure =
                 match outcome with
-                | EmbeddedTerminal.ReplacementOutcome.Failed(
+                | TerminalHostReplacement.ReplacementOutcome.Failed(
                     version,
                     error
                   ) ->
@@ -1237,7 +1237,7 @@ type EmbeddedTerminalReplacementTests() =
 
             let failure =
                 match outcome with
-                | EmbeddedTerminal.ReplacementOutcome.Failed(
+                | TerminalHostReplacement.ReplacementOutcome.Failed(
                     version,
                     error
                   ) ->
