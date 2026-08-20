@@ -56,6 +56,7 @@ $lifecyclePolicyPath = Join-Path $PSScriptRoot 'canvas-share-lifecycle-policy.js
 $deploymentSupportDirectory = Join-Path $PSScriptRoot 'canvas-share-viewer-deployment'
 
 . (Join-Path $deploymentSupportDirectory 'Common.ps1')
+. (Join-Path $deploymentSupportDirectory 'SubscriptionGuard.ps1')
 . (Join-Path $deploymentSupportDirectory 'ViewerBlobAccess.ps1')
 . (Join-Path $deploymentSupportDirectory 'Azure.ps1')
 . (Join-Path $deploymentSupportDirectory 'CrossSubscriptionCorrection.ps1')

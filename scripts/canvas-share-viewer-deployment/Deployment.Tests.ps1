@@ -10,6 +10,7 @@ $minimumLifecycleDays = 31
 $viewerBaseUrl = 'https://treemon.azurewebsites.net'
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
+. (Join-Path $PSScriptRoot 'SubscriptionGuard.ps1')
 
 function Assert-Equal {
     param(
@@ -42,6 +43,24 @@ function Invoke-TestCase {
 
     & $Body
     Write-Host "PASS: $Name"
+}
+
+Invoke-TestCase 'deployment entry point loads the subscription guard after Common and before Azure' {
+    $entryPoint =
+        [IO.File]::ReadAllText(
+            (Join-Path $repoRoot 'scripts' 'deploy-canvas-share-viewer.ps1'))
+    $commonIndex =
+        $entryPoint.IndexOf("'Common.ps1'", [StringComparison]::Ordinal)
+    $subscriptionGuardIndex =
+        $entryPoint.IndexOf("'SubscriptionGuard.ps1'", [StringComparison]::Ordinal)
+    $azureIndex =
+        $entryPoint.IndexOf("'Azure.ps1'", [StringComparison]::Ordinal)
+
+    Assert-True `
+        -Condition ($commonIndex -ge 0 -and
+            $subscriptionGuardIndex -gt $commonIndex -and
+            $azureIndex -gt $subscriptionGuardIndex) `
+        -Because 'the subscription guard depends on Common and must be available before Azure deployment orchestration'
 }
 
 function dotnet {
@@ -106,7 +125,9 @@ $script:azJsonCalls = @()
 $script:azTryCalls = @()
 $script:blobAccessAudits = @()
 $script:subscriptionAccounts = @{}
+$script:subscriptionLookupFailures = @{}
 $script:selectedAccount = $null
+$script:selectedAccountFailure = ''
 $script:publisherResult = $null
 $script:createCallCount = 0
 $script:nameAvailabilityCallCount = 0
@@ -200,6 +221,10 @@ function Invoke-AzJson {
                 $subscriptionIndex = [Array]::IndexOf($Arguments, '--subscription')
                 $subscription = [string] $Arguments[$subscriptionIndex + 1]
 
+                if ($script:subscriptionLookupFailures.ContainsKey($subscription)) {
+                    throw [string] $script:subscriptionLookupFailures[$subscription]
+                }
+
                 if (-not $script:subscriptionAccounts.ContainsKey($subscription)) {
                     throw 'Synthetic subscription is unavailable.'
                 }
@@ -207,6 +232,10 @@ function Invoke-AzJson {
                 return $script:subscriptionAccounts[$subscription]
             }
             'account show' {
+                if (-not [string]::IsNullOrWhiteSpace($script:selectedAccountFailure)) {
+                    throw $script:selectedAccountFailure
+                }
+
                 return $script:selectedAccount
             }
             'ad signed-in-user show' {
@@ -382,7 +411,9 @@ function Reset-AzureContextMocks {
     $script:scenario = 'azure-context'
     $script:azJsonCalls = @()
     $script:subscriptionAccounts = @{}
+    $script:subscriptionLookupFailures = @{}
     $script:selectedAccount = $null
+    $script:selectedAccountFailure = ''
     $script:publisherResult =
         [pscustomobject]@{
             id = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
@@ -491,6 +522,139 @@ Invoke-TestCase 'requested subscription mismatch fails before privileged Azure c
             $requestedSubscription,
             $approvedSubscriptionId,
             $otherSubscriptionId)
+}
+
+Invoke-TestCase 'selected-account authentication failure preserves the Azure CLI diagnostic' {
+    Reset-AzureContextMocks
+    $script:selectedAccountFailure =
+        "az account show failed: Please run 'az login' to set up an account."
+    $message = ''
+
+    try {
+        Get-AzureContext `
+            -ApprovedSubscription $approvedSubscription `
+            -RequestedSubscription $requestedSubscription `
+            -RequestedTenant $tenantId |
+            Out-Null
+    } catch {
+        $message = $_.Exception.Message
+    }
+
+    Assert-True `
+        -Condition ($message -match "Please run 'az login'") `
+        -Because 'an unavailable selected account must retain the actionable Azure CLI authentication diagnostic'
+    $subscriptionLookups =
+        @(
+            $script:azJsonCalls
+            | Where-Object { $_.Arguments -contains '--subscription' }
+        )
+    Assert-Equal `
+        -Actual $subscriptionLookups.Count `
+        -Expected 0 `
+        -Because 'the selected account must resolve before either private subscription value is used'
+    Assert-NoPrivilegedAzureCalls
+    Assert-SubscriptionValuesRedacted `
+        -Message $message `
+        -Values @($approvedSubscription, $requestedSubscription)
+}
+
+Invoke-TestCase 'private subscription lookup failures are sanitized' {
+    Reset-AzureContextMocks
+    $approvedAccount =
+        New-SyntheticAccount `
+            -Id $approvedSubscriptionId `
+            -TenantId $tenantId
+    $script:selectedAccount = $approvedAccount
+    $privateFailureMarker = 'private-lookup-stderr'
+    $script:subscriptionLookupFailures[$approvedSubscription] =
+        "$privateFailureMarker $approvedSubscription $approvedSubscriptionId"
+    $message = ''
+
+    try {
+        Get-AzureContext `
+            -ApprovedSubscription $approvedSubscription `
+            -RequestedSubscription $requestedSubscription `
+            -RequestedTenant $tenantId |
+            Out-Null
+    } catch {
+        $message = $_.Exception.Message
+    }
+
+    Assert-True `
+        -Condition ($message -match 'canvasShare\.approvedSubscription' -and
+            $message -match 'could not be resolved') `
+        -Because 'private-value lookup failures must identify only the protected configuration source'
+    Assert-SubscriptionValuesRedacted `
+        -Message $message `
+        -Values @(
+            $approvedSubscription,
+            $approvedSubscriptionId,
+            $privateFailureMarker)
+    Assert-NoPrivilegedAzureCalls
+}
+
+Invoke-TestCase 'missing approved subscription fails closed with a sanitized diagnostic' {
+    Reset-AzureContextMocks
+    $script:selectedAccount =
+        New-SyntheticAccount `
+            -Id $approvedSubscriptionId `
+            -TenantId $tenantId
+    $message = ''
+
+    try {
+        Get-AzureContext `
+            -ApprovedSubscription $approvedSubscription `
+            -RequestedSubscription $requestedSubscription `
+            -RequestedTenant $tenantId |
+            Out-Null
+    } catch {
+        $message = $_.Exception.Message
+    }
+
+    Assert-True `
+        -Condition ($message -match 'canvasShare\.approvedSubscription' -and
+            $message -match 'could not be resolved') `
+        -Because 'a missing approved subscription must fail closed'
+    Assert-SubscriptionValuesRedacted `
+        -Message $message `
+        -Values @($approvedSubscription, $approvedSubscriptionId)
+    Assert-NoPrivilegedAzureCalls
+}
+
+Invoke-TestCase 'disabled requested subscription fails closed with a sanitized diagnostic' {
+    Reset-AzureContextMocks
+    $approvedAccount =
+        New-SyntheticAccount `
+            -Id $approvedSubscriptionId `
+            -TenantId $tenantId
+    $disabledRequestedAccount =
+        New-SyntheticAccount `
+            -Id $approvedSubscriptionId `
+            -TenantId $tenantId
+    $disabledRequestedAccount.state = 'Disabled'
+    $script:selectedAccount = $approvedAccount
+    $script:subscriptionAccounts[$approvedSubscription] = $approvedAccount
+    $script:subscriptionAccounts[$requestedSubscription] = $disabledRequestedAccount
+    $message = ''
+
+    try {
+        Get-AzureContext `
+            -ApprovedSubscription $approvedSubscription `
+            -RequestedSubscription $requestedSubscription `
+            -RequestedTenant $tenantId |
+            Out-Null
+    } catch {
+        $message = $_.Exception.Message
+    }
+
+    Assert-True `
+        -Condition ($message -match 'The -Subscription input' -and
+            $message -match 'could not be resolved') `
+        -Because 'a disabled requested subscription must fail closed'
+    Assert-SubscriptionValuesRedacted `
+        -Message $message `
+        -Values @($requestedSubscription, $approvedSubscriptionId)
+    Assert-NoPrivilegedAzureCalls
 }
 
 Invoke-TestCase 'selected Azure account mismatch fails before privileged Azure calls' {
@@ -872,7 +1036,10 @@ Invoke-TestCase 'every Azure resource-plane call selects its subscription explic
         )
     $unguardedCalls =
         @(
-            'Azure.ps1', 'CrossSubscriptionCorrection.ps1', 'ViewerBlobAccess.ps1'
+            'SubscriptionGuard.ps1',
+            'Azure.ps1',
+            'CrossSubscriptionCorrection.ps1',
+            'ViewerBlobAccess.ps1'
             | ForEach-Object {
                 $path = Join-Path $PSScriptRoot $_
                 $tokens = $null

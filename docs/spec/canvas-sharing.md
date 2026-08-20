@@ -253,6 +253,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   the selected CLI account must all resolve to the same enabled subscription -- so a name and an ID
   naming the same subscription agree, while a raw-string near-miss cannot pass. Failure diagnostics
   name the configuration key and the mismatch, never the values.
+  The selected account resolves before either configured subscription value is looked up, so an
+  unusable Azure CLI sign-in keeps its own actionable authentication error instead of being
+  reported as a configuration problem.
   The guard is mandatory and independent of whatever restrictions the operator's environment
   places on direct Azure CLI use. An environment-level control can only see the commands issued to
   it, not the `az` child processes this script spawns, so the script proves its own target on every
@@ -412,6 +415,8 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | `src/Client/CanvasPane.fs`, `CanvasState.fs`, `CanvasUpdate.fs`, `index.html` | Share button, `ShareState` phase machine, clipboard write and banner routing (unchanged) |
 | `src/CanvasShareViewer/` | New App Service viewer: shell route, content route, expiry check, sandbox/CSP, Easy Auth configuration |
 | `scripts/deploy-canvas-share-viewer.ps1` | Idempotent non-production Azure provisioning, secret-free Easy Auth, Entra-authenticated ZIP deployment, validation, and machine-config update |
+| `scripts/canvas-share-viewer-deployment/Common.ps1` | Shared Azure CLI invocation and machine-configuration boundary for deployment helpers |
+| `scripts/canvas-share-viewer-deployment/SubscriptionGuard.ps1` | Fail-closed approved/requested/selected subscription, tenant, and delegated-publisher validation with private lookup diagnostics redacted |
 | `scripts/canvas-share-viewer-deployment/CrossSubscriptionCorrection.ps1` | Approved-destination preparation, redacted portal handoff, post-move discovery, and replacement-identity attachment |
 | `scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1` | Windows/Azure CLI shape, packaging-output, reconciliation, restricted-tenant registration, and Easy Auth callback regressions |
 | `scripts/canvas-share-viewer-deployment/ViewerBlobAccess.ps1` | Fail-closed audit of the viewer identity's effective Blob-read data-plane assignments |
