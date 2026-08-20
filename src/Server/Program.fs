@@ -281,8 +281,30 @@ let internal runHostWithCapture
             stoppingRegistration.Dispose()
             BackgroundLoop.stop "Overview snapshot capture" loop
 
+let private runTerminalHostDeploymentPreflight () =
+    match EmbeddedTerminal.preflightDeployment () |> Async.RunSynchronously with
+    | Error error ->
+        Console.Error.WriteLine($"TerminalHost deployment preflight failed: {error}")
+        2
+    | Ok None ->
+        Console.Out.WriteLine("""{"hasLiveHost":false}""")
+        0
+    | Ok(Some preflight) ->
+        {| hasLiveHost = true
+           pid = preflight.HostPid
+           processStartTimeUtcTicks = preflight.HostProcessStartTimeUtcTicks
+           executablePath = preflight.RunningExecutablePath
+           terminalCount = preflight.TerminalCount |}
+        |> System.Text.Json.JsonSerializer.Serialize
+        |> Console.Out.WriteLine
+
+        0
+
 [<EntryPoint>]
 let main args =
+    if args = [| "--terminal-host-deployment-preflight" |] then
+        runTerminalHostDeploymentPreflight () |> exit
+
     let config = parseArgs args
 
     let serverUrl = $"http://localhost:{config.Port}"

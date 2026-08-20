@@ -78,6 +78,9 @@ jobs:
       - name: Test durable F# runtime
         run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=Unit&FullyQualifiedName~EmbeddedTerminal" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "TestCategory=TerminalHost" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "FullyQualifiedName~WorktreePathResolutionTests" --verbosity normal
 
+      - name: Test Treemon deployment preflight
+        run: npm run test:treemon-deployment
+
       - name: Test previous-binary rollback
         run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=DurableRollback" --verbosity normal
 

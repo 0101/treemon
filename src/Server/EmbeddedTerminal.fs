@@ -73,6 +73,12 @@ type internal ReplacementActivityQuery =
         -> Set<SessionActivity.TerminalSessionId>
         -> Result<ReplacementActivitySnapshot, string>
 
+type internal DeploymentPreflight =
+    { HostPid: int
+      HostProcessStartTimeUtcTicks: int64
+      RunningExecutablePath: string
+      TerminalCount: int }
+
 [<RequireQualifiedAccess>]
 type internal ReplacementOutcome =
     | NoCandidate
@@ -807,30 +813,37 @@ let private defaultHostExecutable () =
         else
             "TerminalHost"
 
-    [ Path.Combine(AppContext.BaseDirectory, "terminal-host", executableName)
-      Path.Combine(AppContext.BaseDirectory, executableName)
-      Path.Combine(
-          __SOURCE_DIRECTORY__,
-          "..",
-          "TerminalHost",
-          "bin",
-          "Debug",
-          "net10.0",
-          executableName
-      )
-      Path.Combine(
-          __SOURCE_DIRECTORY__,
-          "..",
-          "TerminalHost",
-          "bin",
-          "Release",
-          "net10.0",
-          executableName
-      ) ]
-    |> List.map Path.GetFullPath
-    |> List.tryFind File.Exists
-    |> Option.defaultWith (fun () ->
-        Path.Combine(AppContext.BaseDirectory, "terminal-host", executableName))
+    match
+        Environment.GetEnvironmentVariable("TREEMON_TERMINAL_HOST_EXECUTABLE")
+        |> Option.ofObj
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+    with
+    | Some configured -> Path.GetFullPath configured
+    | None ->
+        [ Path.Combine(AppContext.BaseDirectory, "terminal-host", executableName)
+          Path.Combine(AppContext.BaseDirectory, executableName)
+          Path.Combine(
+              __SOURCE_DIRECTORY__,
+              "..",
+              "TerminalHost",
+              "bin",
+              "Debug",
+              "net10.0",
+              executableName
+          )
+          Path.Combine(
+              __SOURCE_DIRECTORY__,
+              "..",
+              "TerminalHost",
+              "bin",
+              "Release",
+              "net10.0",
+              executableName
+          ) ]
+        |> List.map Path.GetFullPath
+        |> List.tryFind File.Exists
+        |> Option.defaultWith (fun () ->
+            Path.Combine(AppContext.BaseDirectory, "terminal-host", executableName))
 
 let private distinctOrigins (origins: string list) =
     origins
@@ -887,6 +900,31 @@ let private defaultConfig allowedOrigins =
       ProcessIdentityMatches = processIdentityMatchesDefault
       ResolveProcessExecutable = resolveProcessExecutableDefault
       SendTerminalCommand = sendTerminalCommandDefault }
+
+let internal preflightDeployment () =
+    async {
+        let config = defaultConfig []
+
+        match! discoverHost config with
+        | MissingHost
+        | DeadHost _ -> return Ok None
+        | UnusableHost error -> return Error error
+        | HealthyHost connection ->
+            return!
+                asyncResult {
+                    let! registry = listTerminals config connection
+                    let! executablePath =
+                        resolveProcessExecutable config connection.Manifest
+
+                    return
+                        Some
+                            { HostPid = connection.Manifest.Pid
+                              HostProcessStartTimeUtcTicks =
+                                connection.Manifest.ProcessStartTimeUtcTicks
+                              RunningExecutablePath = executablePath
+                              TerminalCount = registry.Terminals.Length }
+                }
+    }
 
 let private hostStartInfo config =
     let workingDirectory =

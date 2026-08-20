@@ -192,7 +192,10 @@ resolved by listing the registry again.
 
 `treemon.ps1` publishes the host and stages a changed executable in a plain versioned directory. It
 preflights control-API compatibility before replacing the Treemon server; a deployment that cannot
-control a live host is refused while terminals remain.
+control a live host is refused while terminals remain. Server, frontend, and host candidates are
+built outside their active destinations, and the candidate Treemon's own compiled control client
+probes the exact live host before any active file or process is replaced. The staged directory
+carries the complete framework-dependent host publication alongside `TerminalHost.exe`.
 
 The reporting extension reads `TREEMON_TERMINAL_SESSION_ID` and adds it as optional origin metadata.
 `SessionActivityService` and `SessionActivityStore` retain that value without changing status
@@ -244,6 +247,10 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Plain machine discovery and staging:** one bounded manifest and direct version directories are
   sufficient. Registry state stays in the live host, and no generation journal or bundle store is
   recreated.
+- **Candidate-first deployment:** publish and preflight in inactive directories, then atomically
+  stage the complete host publication before swapping server files. Treemon receives that stable
+  staged executable as its lazy-start path; if an exact live host still runs from an older publish
+  directory, those files are preserved until that process exits rather than overwritten in place.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the
   `CodingToolCli Resume` command. A terminal without an exact resumable session receives no input

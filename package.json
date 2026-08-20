@@ -7,6 +7,7 @@
     "check:extension": "tsc --project src/Extension/tsconfig.json && tsc --project src/Extension/tsconfig.contracts.json",
     "test:extension": "npm run check:extension && node --test src/Extension/*.test.mjs src/Extension/reporting/*.test.mjs",
     "test:reporting": "node --test src/Extension/reporting/*.test.mjs",
+    "test:treemon-deployment": "pwsh -NoProfile -File scripts/treemon-deployment.test.ps1",
     "test:durable-terminal-host": "node --test scripts/durable-terminal-host.test.mjs",
     "test:durable-terminal-observation": "node --test scripts/durable-terminal-observation.test.mjs",
     "test:durable-terminal-verifier-env": "node --test scripts/durable-terminal-verifier-env.test.mjs",

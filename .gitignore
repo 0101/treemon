@@ -23,6 +23,11 @@ src/Client/output/
 # Production deployment
 wwwroot/
 .publish/
+.publish.candidate-*/
+.publish.backup-*/
+.publish.server-backup-*/
+wwwroot.candidate-*/
+wwwroot.backup-*/
 .tools/
 .treemon.pid
 .treemon.config
