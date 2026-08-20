@@ -82,3 +82,19 @@ let copyIcon =
             Svg.path [ svg.d "M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" ]
         ]
     ]
+
+let checkIcon =
+    Svg.svg [
+        svg.className "btn-icon check-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "2.5")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.custom ("aria-hidden", "true")
+        svg.custom ("focusable", "false")
+        svg.children [
+            Svg.path [ svg.d "M5 12l4 4L19 6" ]
+        ]
+    ]

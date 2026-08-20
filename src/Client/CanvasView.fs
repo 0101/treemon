@@ -108,6 +108,7 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           SendState = model.Canvas.CanvasSendState
           DocError = model.Canvas.DocError
           ClipboardNotice = model.Canvas.ClipboardNotice
+          PathCopyState = model.Canvas.PathCopyState
           ActiveScopedKey = activeCanvasScopedKey
           ShareState = model.Canvas.ShareState
           BridgeLiveness = model.Canvas.BridgeLiveness }

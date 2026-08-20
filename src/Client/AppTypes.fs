@@ -113,7 +113,8 @@ type Msg =
     | ArchiveCanvasDoc of scopedKey: string * filename: string
     | ArchiveCanvasDocResult of scopedKey: string * filename: string * Result<unit, string>
     | CopyCanvasDocPath of scopedKey: string * filename: string
-    | CanvasDocPathCopyResult of path: string * Result<unit, string>
+    | CanvasDocPathCopyResult of scopedKey: string * filename: string * revision: int * path: string * Result<unit, string>
+    | ClearCanvasDocPathCopied of scopedKey: string * filename: string * revision: int
     // Share the focused AgentDoc: publish it (server mints a per-doc read-only SAS URL + returns the
     // doc title) then write a rich clipboard link. ShareCanvasDocResult carries the CanvasShareResult
     // on Ok (→ dual-format clipboard write, deferring the banner to ClipboardWriteResult) or an error

@@ -962,12 +962,15 @@
             transition: opacity 0.15s, color 0.15s, border-color 0.15s;
         }
         .canvas-tab-copy .btn-icon { width: 12px; height: 12px; }
-        .canvas-tab-shell:hover .canvas-tab-age,
-        .canvas-tab-shell:focus-within .canvas-tab-age { opacity: 0; }
-        .canvas-tab-shell:hover .canvas-tab-copy,
-        .canvas-tab-shell:focus-within .canvas-tab-copy { opacity: 1; pointer-events: auto; }
+        .canvas-tab-shell:hover .canvas-tab-age { opacity: 0; }
+        .canvas-tab-shell:hover .canvas-tab-copy { opacity: 1; pointer-events: auto; }
         .canvas-tab-copy:hover { color: #89b4fa; border-color: #89b4fa; }
-        .canvas-tab-copy:focus-visible { outline: 2px solid #89b4fa; outline-offset: 1px; }
+        .canvas-tab-copy.copied,
+        .canvas-tab-copy.copied:hover { color: #a6e3a1; border-color: #a6e3a1; }
+        .canvas-tab-copy:focus-visible {
+            opacity: 1; pointer-events: auto;
+            outline: 2px solid #89b4fa; outline-offset: 1px;
+        }
         .canvas-system-tab {
             display: flex; align-items: center; gap: 5px;
             flex-shrink: 0; margin-right: 6px;

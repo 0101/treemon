@@ -712,7 +712,11 @@ let update msg model =
 
     | CopyCanvasDocPath (scopedKey, filename) -> CanvasUpdate.copyCanvasDocPath scopedKey filename model
 
-    | CanvasDocPathCopyResult (path, outcome) -> CanvasUpdate.canvasDocPathCopyResult path outcome model
+    | CanvasDocPathCopyResult (scopedKey, filename, revision, path, outcome) ->
+        CanvasUpdate.canvasDocPathCopyResult scopedKey filename revision path outcome model
+
+    | ClearCanvasDocPathCopied (scopedKey, filename, revision) ->
+        CanvasUpdate.clearCanvasDocPathCopied scopedKey filename revision model
 
     | ShareCanvasDoc (scopedKey, filename) -> CanvasUpdate.shareCanvasDoc scopedKey filename model
 

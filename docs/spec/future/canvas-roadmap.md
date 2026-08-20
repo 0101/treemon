@@ -117,14 +117,16 @@ Two tightly-coupled tab-bar tweaks that ship together:
    `"3m ago"` long form; add/adapt a **compact** variant (`3m`, `2h`, `2d`, no `" ago"`) for
    the tab. The age recomputes on the pane's existing render cadence (the dashboard already
    calls `relativeTime` with `System.DateTimeOffset.Now` per render).
-   The age occupies a fixed-width slot that swaps to a two-rectangle path-copy action on hover or
-   keyboard focus. The copy control overlays the reserved slot, so revealing it never resizes the tab.
+   The age occupies a fixed-width slot that swaps to a two-rectangle path-copy action only while
+   hovered. A successful copy shows a green checkmark in that button for 1.2 seconds instead of
+   opening a success banner. The copy control overlays the reserved slot, so revealing it never
+   resizes the tab.
 
 - Scope the age to **AgentDoc** tabs (consistent with the AgentDoc-only liveness dot); the
   SystemView "BD" badge is data-driven and carries no authored-file age.
 - Acceptance: a worktree with a single canvas doc shows its tab button (not a bare iframe);
-  each AgentDoc tab shows a compact age reflecting `LastModified`; hover/focus reveals a full-path
-  copy action without changing the tab's width or height.
+  each AgentDoc tab shows a compact age reflecting `LastModified`; hover reveals a full-path
+  copy action without changing the tab's width or height; success shows transient in-button feedback.
 
 ## Considered but not carried forward
 

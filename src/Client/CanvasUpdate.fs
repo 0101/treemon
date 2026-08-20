@@ -315,12 +315,19 @@ let private writeClipboardCmd (scopedKey: string) (filename: string) (payload: C
         Fable.Core.JsInterop.emitJsExpr (payload.Html, payload.Text, onCopied, onFailed)
             "try{navigator.clipboard.write([new ClipboardItem({'text/html': new Blob([$0], {type: 'text/html'}), 'text/plain': new Blob([$1], {type: 'text/plain'})})]).then(function(){ $2() }).catch(function(e){ console.error('[canvas] clipboard write failed', e); $3(String(e)) })}catch(e){ console.error('[canvas] clipboard write failed', e); $3(String(e)) }")
 
-let private writeCanvasDocPathCmd (path: string) : Cmd<Msg> =
+let private writeCanvasDocPathCmd (scopedKey: string) (filename: string) (revision: int) (path: string) : Cmd<Msg> =
     Cmd.ofEffect (fun dispatch ->
-        let onCopied () = dispatch (CanvasDocPathCopyResult (path, Ok ()))
-        let onFailed (e: string) = dispatch (CanvasDocPathCopyResult (path, Error e))
+        let onCopied () = dispatch (CanvasDocPathCopyResult (scopedKey, filename, revision, path, Ok ()))
+        let onFailed (e: string) = dispatch (CanvasDocPathCopyResult (scopedKey, filename, revision, path, Error e))
         Fable.Core.JsInterop.emitJsExpr (path, onCopied, onFailed)
             "try{navigator.clipboard.writeText($0).then(function(){ $1() }).catch(function(e){ console.error('[canvas] path clipboard write failed', e); $2(String(e)) })}catch(e){ console.error('[canvas] path clipboard write failed', e); $2(String(e)) }")
+
+let private clearCanvasDocPathCopiedCmd (scopedKey: string) (filename: string) (revision: int) =
+    Cmd.ofEffect (fun dispatch ->
+        Fable.Core.JS.setTimeout
+            (fun () -> dispatch (ClearCanvasDocPathCopied (scopedKey, filename, revision)))
+            1_200
+        |> ignore)
 
 /// Keep an independent queued-message wait visible when another canvas action fails.
 let preserveWaitingOnFailure (sendState: CanvasSendState) (message: string) : CanvasSendState =
@@ -332,31 +339,47 @@ let copyCanvasDocPath (scopedKey: string) (filename: string) (model: Model) =
     match findWorktree scopedKey model with
     | Some wt when wt.CanvasDocs |> List.exists (fun doc -> doc.Filename = filename) ->
         let path = canvasDocDiskPath wt.Path filename
-        { model with Canvas.ClipboardNotice = None }, writeCanvasDocPathCmd path
+        let revision = CanvasPathCopyState.revision model.Canvas.PathCopyState + 1
+        { model with
+            Canvas.ClipboardNotice = None
+            Canvas.PathCopyState = CanvasPathCopyState.Copying (scopedKey, filename, revision) },
+        writeCanvasDocPathCmd scopedKey filename revision path
     | _ ->
         let message = "Could not copy the canvas doc path because the document is no longer available."
         { model with
             Canvas.CanvasSendState = preserveWaitingOnFailure model.Canvas.CanvasSendState message
-            Canvas.ClipboardNotice = None },
+            Canvas.ClipboardNotice = None
+            Canvas.PathCopyState = CanvasPathCopyState.Idle (CanvasPathCopyState.revision model.Canvas.PathCopyState) },
         Cmd.none
 
-let canvasDocPathCopyResult (path: string) (outcome: Result<unit, string>) (model: Model) =
-    match outcome with
-    | Ok () ->
+let canvasDocPathCopyResult (scopedKey: string) (filename: string) (revision: int) (path: string) (outcome: Result<unit, string>) (model: Model) =
+    match model.Canvas.PathCopyState, outcome with
+    | CanvasPathCopyState.Copying (activeScopedKey, activeFilename, activeRevision), Ok ()
+        when (activeScopedKey, activeFilename, activeRevision) = (scopedKey, filename, revision) ->
         let sendState =
             match model.Canvas.CanvasSendState with
             | CanvasSendState.Failed _ -> CanvasSendState.Idle
             | other -> other
         { model with
             Canvas.CanvasSendState = sendState
-            Canvas.ClipboardNotice = Some "Path copied" },
-        Cmd.none
-    | Error _ ->
+            Canvas.PathCopyState = CanvasPathCopyState.Copied (scopedKey, filename, revision) },
+        clearCanvasDocPathCopiedCmd scopedKey filename revision
+    | CanvasPathCopyState.Copying (activeScopedKey, activeFilename, activeRevision), Error _
+        when (activeScopedKey, activeFilename, activeRevision) = (scopedKey, filename, revision) ->
         let message = $"Could not copy the path. Copy it manually: {path}"
         { model with
             Canvas.CanvasSendState = preserveWaitingOnFailure model.Canvas.CanvasSendState message
-            Canvas.ClipboardNotice = None },
+            Canvas.ClipboardNotice = None
+            Canvas.PathCopyState = CanvasPathCopyState.Idle revision },
         Cmd.none
+    | _ -> model, Cmd.none
+
+let clearCanvasDocPathCopied (scopedKey: string) (filename: string) (revision: int) (model: Model) =
+    match model.Canvas.PathCopyState with
+    | CanvasPathCopyState.Copied (activeScopedKey, activeFilename, activeRevision)
+        when (activeScopedKey, activeFilename, activeRevision) = (scopedKey, filename, revision) ->
+        { model with Canvas.PathCopyState = CanvasPathCopyState.Idle revision }, Cmd.none
+    | _ -> model, Cmd.none
 
 let shareCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     match model.Canvas.ShareState, findWorktree scopedKey model with

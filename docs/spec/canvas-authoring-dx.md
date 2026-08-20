@@ -143,15 +143,16 @@ use resolved per-interaction routing and may enrich the payload with structured
 
 The active doc always has a visible tab, including a lone `AgentDoc`. Each `AgentDoc` tab shows a
 compact age (`now`, `3m`, `2h`, `2d`) from `doc.LastModified` in a fixed-width metadata slot. Hovering
-the tab, or focusing a control within it, replaces that age with an outlined two-rectangle Copy
-button. The button is an absolutely positioned sibling of the tab button, so revealing it changes
+the tab replaces that age with an outlined two-rectangle Copy button. The button is an absolutely
+positioned sibling of the tab button, so revealing it changes
 only opacity and pointer behavior; tab width and height never change.
 
 Copy dispatches an Elmish message and writes the full on-disk
 `{worktree}/.agents/canvas/{filename}` path with the worktree path's native separator. A landed write
-shows the dismissible clipboard notice; a rejected write surfaces the full path for manual copying.
-The age and copy action are scoped to `AgentDoc` tabs. A `SystemView` entry remains data-driven and
-has neither authored-file freshness nor this action.
+replaces the rectangles with a green checkmark for 1.2 seconds; a rejected write surfaces the full
+path for manual copying. Scoped revision state prevents an older result or reset timer from
+overwriting newer feedback. The age and copy action are scoped to `AgentDoc` tabs. A `SystemView`
+entry remains data-driven and has neither authored-file freshness nor this action.
 
 ## Technical Approach
 
@@ -212,7 +213,8 @@ has neither authored-file freshness nor this action.
   preserve the existing SystemView-first ordering and the lone-SystemView behavior.
 - **Tab metadata:** `Components.relativeTimeCompact` returns `now`/`3m`/`2h`/`2d` (no `" ago"`).
   `agentTab` renders it in the fixed `.canvas-tab-meta` slot; `.canvas-tab-copy` overlays that same
-  slot on hover/focus and dispatches the clipboard command without changing tab geometry.
+  slot on hover and dispatches the clipboard command without changing tab geometry. A successful
+  result renders the checkmark from `CanvasPathCopyState.Copied`; a guarded timer returns it to idle.
 
 ### Docs — `src/Extension/skill/SKILL.md`
 - Replace the primary `postMessage` example with `canvasSend`; keep the raw contract documented as

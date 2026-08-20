@@ -232,6 +232,7 @@ type CanvasPaneState =
       SendState: CanvasSendState
       DocError: DocJsError option
       ClipboardNotice: string option
+      PathCopyState: CanvasPathCopyState
       ActiveScopedKey: string option
       ShareState: CanvasShareState
       BridgeLiveness: Map<string, BridgeLiveness> }
@@ -253,6 +254,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           SendState = sendState
           DocError = docError
           ClipboardNotice = clipboardNotice
+          PathCopyState = pathCopyState
           ActiveScopedKey = activeScopedKey
           ShareState = shareState
           BridgeLiveness = bridgeLiveness } = state
@@ -442,6 +444,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
             let agentTab (d: CanvasDoc) =
                 let isActive = d.Filename = doc.Filename
                 let isViewed = not (Set.contains d.Filename unviewedFilenames)
+                let isCopied = CanvasPathCopyState.isCopied activeScopedKey d.Filename pathCopyState
                 let cls =
                     [ "canvas-tab"
                       if isActive then "active"
@@ -470,11 +473,11 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                             ]
                         ]
                         Html.button [
-                            prop.className "canvas-tab-copy"
+                            prop.className (if isCopied then "canvas-tab-copy copied" else "canvas-tab-copy")
                             prop.onClick (fun _ -> copyDocPath d.Filename)
-                            prop.title $"Copy full path to {d.Filename}"
-                            prop.custom ("aria-label", $"Copy full path to {d.Filename}")
-                            prop.children [ copyIcon ]
+                            prop.title (if isCopied then "Path copied" else $"Copy full path to {d.Filename}")
+                            prop.custom ("aria-label", if isCopied then "Path copied" else $"Copy full path to {d.Filename}")
+                            prop.children [ if isCopied then checkIcon else copyIcon ]
                         ]
                     ]
                 ]

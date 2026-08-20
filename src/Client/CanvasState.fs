@@ -34,9 +34,10 @@ type CanvasState =
       // additionally clears it so a tab switch (and switch back) never re-shows it. Distinct from
       // CanvasSendState.Failed, which models pane→session message-delivery failures.
       DocError: DocJsError option
-      // Dismissible notice for a completed clipboard action, including rich-link sharing and copying
-      // a canvas doc's on-disk path. Failures reuse CanvasSendState.Failed.
+      // Dismissible notice for a completed rich-link share. Path-copy success uses PathCopyState;
+      // failures reuse CanvasSendState.Failed.
       ClipboardNotice: string option
+      PathCopyState: CanvasPathCopyState
       // Scoped identity and phase of the single in-flight share. The phase keeps the pane locked
       // through clipboard settlement, while the identity lets stale async results be ignored.
       ShareState: CanvasShareState
@@ -58,6 +59,7 @@ let empty : CanvasState =
       CanvasSendState = CanvasSendState.Idle
       DocError = None
       ClipboardNotice = None
+      PathCopyState = CanvasPathCopyState.Idle 0
       ShareState = CanvasShareState.Idle
       BridgeLiveness = Map.empty }
 

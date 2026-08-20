@@ -1069,30 +1069,69 @@ type DocErrorTests() =
 [<Category("Fast")>]
 type CanvasDocPathCopyResultTests() =
 
+    let scopedKey = "r/feat"
+    let filename = "status.html"
+    let revision = 1
     let path = @"Q:\code\demo\.agents\canvas\status.html"
+    let copyingModel sendState =
+        { defaultModel with
+            Canvas.CanvasSendState = sendState
+            Canvas.PathCopyState = CanvasPathCopyState.Copying (scopedKey, filename, revision) }
 
     [<Test>]
-    member _.``A completed path write reports success and clears a stale failure``() =
-        let model =
-            { defaultModel with
-                Canvas.CanvasSendState = CanvasSendState.Failed "earlier failure" }
-        let updated, _ = update (CanvasDocPathCopyResult (path, Ok ())) model
+    member _.``A completed path write shows a scoped checkmark without a banner``() =
+        let updated, cmd =
+            update
+                (CanvasDocPathCopyResult (scopedKey, filename, revision, path, Ok ()))
+                (copyingModel (CanvasSendState.Failed "earlier failure"))
 
         Assert.Multiple(fun () ->
-            Assert.That(updated.Canvas.ClipboardNotice, Is.EqualTo(Some "Path copied"))
-            Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Idle)))
+            Assert.That(updated.Canvas.ClipboardNotice, Is.EqualTo(None))
+            Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Idle))
+            Assert.That(
+                updated.Canvas.PathCopyState,
+                Is.EqualTo(CanvasPathCopyState.Copied (scopedKey, filename, revision)))
+            Assert.That(cmd, Is.Not.Empty))
 
     [<Test>]
     member _.``A rejected path write exposes the full path for manual copying``() =
         let updated, _ =
             update
-                (CanvasDocPathCopyResult (path, Error "NotAllowedError"))
-                defaultModel
+                (CanvasDocPathCopyResult (scopedKey, filename, revision, path, Error "NotAllowedError"))
+                (copyingModel CanvasSendState.Idle)
 
         Assert.Multiple(fun () ->
             Assert.That(updated.Canvas.ClipboardNotice, Is.EqualTo(None))
             Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(
-                CanvasSendState.Failed $"Could not copy the path. Copy it manually: {path}")))
+                CanvasSendState.Failed $"Could not copy the path. Copy it manually: {path}"))
+            Assert.That(updated.Canvas.PathCopyState, Is.EqualTo(CanvasPathCopyState.Idle revision)))
+
+    [<Test>]
+    member _.``A stale reset cannot clear newer copied feedback``() =
+        let newerRevision = revision + 1
+        let model =
+            { defaultModel with
+                Canvas.PathCopyState = CanvasPathCopyState.Copied (scopedKey, filename, newerRevision) }
+        let updated, cmd =
+            update
+                (ClearCanvasDocPathCopied (scopedKey, filename, revision))
+                model
+
+        Assert.That(updated, Is.EqualTo(model))
+        Assert.That(cmd, Is.Empty)
+
+    [<Test>]
+    member _.``The matching reset hides copied feedback``() =
+        let model =
+            { defaultModel with
+                Canvas.PathCopyState = CanvasPathCopyState.Copied (scopedKey, filename, revision) }
+        let updated, cmd =
+            update
+                (ClearCanvasDocPathCopied (scopedKey, filename, revision))
+                model
+
+        Assert.That(updated.Canvas.PathCopyState, Is.EqualTo(CanvasPathCopyState.Idle revision))
+        Assert.That(cmd, Is.Empty)
 
     [<Test>]
     member _.``Copying a missing canvas doc fails visibly without scheduling clipboard work``() =
@@ -1104,6 +1143,7 @@ type CanvasDocPathCopyResultTests() =
         Assert.That(
             updated.Canvas.CanvasSendState,
             Is.EqualTo(CanvasSendState.Failed "Could not copy the canvas doc path because the document is no longer available."))
+        Assert.That(updated.Canvas.PathCopyState, Is.EqualTo(CanvasPathCopyState.Idle 0))
         Assert.That(cmd, Is.Empty)
 
 // ── ShareCanvasDoc state machine + result banners (client share feature) ─────────────────────
