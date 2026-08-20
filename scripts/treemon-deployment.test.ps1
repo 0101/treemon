@@ -23,7 +23,7 @@ function Get-TestPort {
         $listener.Start()
         $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
         $listener.Stop()
-    } while ($port -eq 5000)
+    } while ($port -in @(5000, 5002))
     return $port
 }
 
@@ -92,14 +92,8 @@ function Invoke-TestHostRequest($Manifest, [string]$Method, [string]$Path, [stri
 }
 
 function Get-DirectorySnapshot([string]$Directory) {
-    return @(
-        Get-ChildItem -LiteralPath $Directory -File -Recurse -Force |
-            ForEach-Object {
-                $relative = [IO.Path]::GetRelativePath($Directory, $_.FullName).Replace('\', '/')
-                "$relative`0$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
-            } |
-            Sort-Object
-    ) -join "`n"
+    $files = @(Get-ChildItem -LiteralPath $Directory -File -Recurse -Force)
+    return @(Get-FileFingerprintEntries $Directory $files) -join "`n"
 }
 
 function Stop-TestHost($Process, $Manifest) {
@@ -128,6 +122,12 @@ $state = Join-Path $root "state"
 $emptyState = Join-Path $root "empty-state"
 $worktree = Join-Path $root "worktree"
 $originalPublishDir = $PublishDir
+$originalPidFile = $PidFile
+$originalWwwRoot = $WwwRoot
+$originalLogDir = $LogDir
+$originalLogFile = $LogFile
+$originalDefaultPort = $DefaultPort
+$originalCanvasPort = $CanvasPort
 $hadStateOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_STATE_DIR
 $previousStateOverride = $env:TREEMON_TERMINAL_HOST_STATE_DIR
 $hostProcess = $null
@@ -135,6 +135,55 @@ $manifest = $null
 
 try {
     New-Item -ItemType Directory -Path $root | Out-Null
+    $fingerprintDirectory = Join-Path $root "fingerprints"
+    $fingerprintNestedDirectory = Join-Path $fingerprintDirectory "nested"
+    New-Item -ItemType Directory -Path $fingerprintNestedDirectory -Force | Out-Null
+    @(
+        "TerminalHost.exe",
+        "TerminalHost.dll",
+        "TerminalHost.deps.json",
+        "TerminalHost.runtimeconfig.json",
+        "FSharp.Core.dll",
+        "ttyd.exe"
+    ) | ForEach-Object {
+        Set-Content -LiteralPath (Join-Path $fingerprintDirectory $_) -Value $_ -NoNewline
+    }
+    $fingerprintPdb = Join-Path $fingerprintNestedDirectory "TerminalHost.PDB"
+    Set-Content -LiteralPath $fingerprintPdb -Value "symbols-v1" -NoNewline
+    Set-Content -LiteralPath (
+        Join-Path $fingerprintNestedDirectory "runtime.json"
+    ) -Value "runtime" -NoNewline
+
+    $fingerprintFiles = @(
+        Get-ChildItem -LiteralPath $fingerprintDirectory -File -Recurse -Force
+    )
+    $allFingerprintEntries = @(
+        Get-FileFingerprintEntries $fingerprintDirectory $fingerprintFiles
+    )
+    $bundleFingerprintEntries = @(
+        Get-FileFingerprintEntries $fingerprintDirectory $fingerprintFiles -ExcludePdb
+    )
+    Assert-True (
+        ($allFingerprintEntries -join "`n") -ceq
+        ((@($allFingerprintEntries | Sort-Object)) -join "`n")
+    ) "Fingerprint entries were not sorted"
+    Assert-True (
+        $allFingerprintEntries.Count -eq ($bundleFingerprintEntries.Count + 1)
+    ) "PDB fingerprint mode did not exclude exactly the fixture PDB"
+
+    $bundleDigestBeforePdbChange = Get-TerminalHostBundleDigest $fingerprintDirectory
+    $directorySnapshotBeforePdbChange = Get-DirectorySnapshot $fingerprintDirectory
+    Set-Content -LiteralPath $fingerprintPdb -Value "symbols-v2" -NoNewline
+    Assert-True (
+        (Get-TerminalHostBundleDigest $fingerprintDirectory) -ceq
+        $bundleDigestBeforePdbChange
+    ) "TerminalHost bundle digest included a PDB"
+    Assert-True (
+        (Get-DirectorySnapshot $fingerprintDirectory) -cne
+        $directorySnapshotBeforePdbChange
+    ) "Directory snapshot excluded a PDB"
+    Write-Host "PASS: shared fingerprint entries support bundle and snapshot modes"
+
     Publish-TestProject (
         Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
     ) $baseline "1.0.0-deployment-test"
@@ -240,8 +289,163 @@ try {
     Assert-True (Test-Path -LiteralPath $noHostStage.ExecutablePath) "No-host deployment did not stage TerminalHost"
     Assert-True (Test-Path -LiteralPath (Join-Path $PublishDir "Treemon.exe")) "No-host deployment did not install Treemon"
     Write-Host "PASS: deployment with no live host proceeds normally"
+
+    $script:mockDeploymentCandidate = $candidateServer
+    $script:mockDeploymentScenario = ""
+    $script:deploymentWorkflowEvents = @()
+    $script:startedHostExecutable = $null
+    $script:startedRoots = @()
+    $script:mockStagedExecutable = Join-Path $root "staged\TerminalHost.exe"
+    $script:mockLiveExecutable = Join-Path $root "live\TerminalHost.exe"
+    $PidFile = Join-Path $root "workflow\.treemon.pid"
+    $WwwRoot = Join-Path $root "workflow-wwwroot"
+    $LogDir = Join-Path $root "workflow-logs"
+    $LogFile = Join-Path $LogDir "treemon.log"
+    $DefaultPort = Get-TestPort
+    do {
+        $CanvasPort = Get-TestPort
+    } while ($CanvasPort -eq $DefaultPort)
+
+    function Get-RunningPid { return $null }
+    function Ensure-WwwRoot {
+        $script:deploymentWorkflowEvents += "ensure-frontend"
+    }
+    function Build-Frontend([string]$Destination) {
+        $script:builtFrontendCandidate = $Destination
+        $script:deploymentWorkflowEvents += "build-frontend"
+    }
+    function Publish-ServerCandidate {
+        $script:deploymentWorkflowEvents += "publish-server"
+        return $script:mockDeploymentCandidate
+    }
+    function Test-TerminalHostDeployment([string]$PublishedServerDirectory) {
+        $script:preflightPublishedServerDirectory = $PublishedServerDirectory
+        $script:deploymentWorkflowEvents += "preflight"
+        if ($script:mockDeploymentScenario -ceq "start") {
+            return [pscustomobject]@{
+                HasLiveHost = $true
+                Pid = 123
+                ProcessStartTimeUtcTicks = 456L
+                TerminalCount = 2
+                ExecutablePath = $script:mockLiveExecutable
+            }
+        }
+        return [pscustomobject]@{
+            HasLiveHost = $false
+            Pid = $null
+            ProcessStartTimeUtcTicks = $null
+            TerminalCount = 0
+            ExecutablePath = $null
+        }
+    }
+    function Stop-ProductionPortListeners {
+        $script:deploymentWorkflowEvents += "stop-listeners"
+    }
+    function Stage-TerminalHost([string]$PublishedHostDirectory, $LiveHost) {
+        $script:stagedPublishedHostDirectory = $PublishedHostDirectory
+        $script:deploymentWorkflowEvents += "stage-host"
+        if ($script:mockDeploymentScenario -ceq "start") {
+            return [pscustomobject]@{
+                Changed = $false
+                Version = $null
+                ExecutablePath = $LiveHost.ExecutablePath
+            }
+        }
+        return [pscustomobject]@{
+            Changed = $true
+            Version = "fixture-stage"
+            ExecutablePath = $script:mockStagedExecutable
+        }
+    }
+    function Install-ServerPublish([string]$Candidate, [string]$LiveHostExecutable = "") {
+        $script:installedServerCandidate = $Candidate
+        $script:installedLiveHostExecutable = $LiveHostExecutable
+        $script:deploymentWorkflowEvents += "install-server"
+    }
+    function Install-PreparedDirectory([string]$Candidate, [string]$Destination) {
+        $script:installedFrontendCandidate = $Candidate
+        $script:installedFrontendDestination = $Destination
+        $script:deploymentWorkflowEvents += "install-frontend"
+    }
+    function Install-TmCommand {
+        $script:deploymentWorkflowEvents += "install-tm"
+    }
+    function Install-Skill {
+        $script:deploymentWorkflowEvents += "install-skill"
+    }
+    function Install-Extension {
+        $script:deploymentWorkflowEvents += "install-extension"
+    }
+    function Install-ReportingExtension {
+        $script:deploymentWorkflowEvents += "install-reporting"
+    }
+    function Start-ProductionProcess(
+        [string[]]$Roots,
+        [string]$TerminalHostExecutable
+    ) {
+        $script:startedRoots = @($Roots)
+        $script:startedHostExecutable = $TerminalHostExecutable
+        $script:deploymentWorkflowEvents += "start-server"
+    }
+
+    $script:mockDeploymentScenario = "start"
+    $script:deploymentWorkflowEvents = @()
+    Start-ProductionServer @("Q:\fixture-worktree")
+    Assert-True (
+        ($script:deploymentWorkflowEvents -join "|") -ceq
+        "ensure-frontend|publish-server|preflight|stage-host|install-server|start-server"
+    ) "Start-ProductionServer did not use the shared deployment workflow"
+    Assert-True (
+        $script:startedHostExecutable -ceq
+        (Join-Path $PublishDir "terminal-host\TerminalHost.exe")
+    ) "Start-ProductionServer did not resolve the installed unchanged host executable"
+    Assert-True (
+        $script:preflightPublishedServerDirectory -ceq $script:mockDeploymentCandidate -and
+        $script:stagedPublishedHostDirectory -ceq
+        (Join-Path $script:mockDeploymentCandidate "terminal-host") -and
+        $script:installedServerCandidate -ceq $script:mockDeploymentCandidate -and
+        $script:installedLiveHostExecutable -ceq $script:mockLiveExecutable
+    ) "Start-ProductionServer did not thread the candidate and live host through deployment"
+    Assert-True (
+        $script:startedRoots.Count -eq 1 -and
+        $script:startedRoots[0] -ceq "Q:\fixture-worktree"
+    ) "Start-ProductionServer did not preserve its roots"
+    Write-Host "PASS: start uses the shared server deployment workflow"
+
+    $script:mockDeploymentScenario = "deploy"
+    $script:deploymentWorkflowEvents = @()
+    $script:startedHostExecutable = $null
+    Deploy-Frontend
+    Assert-True (
+        ($script:deploymentWorkflowEvents -join "|") -ceq
+        "build-frontend|publish-server|preflight|stop-listeners|stage-host|install-server|install-frontend|install-tm|install-skill|install-extension|install-reporting|start-server"
+    ) "Deploy-Frontend did not preserve candidate-first deployment ordering"
+    Assert-True (
+        $script:installedFrontendCandidate -ceq $script:builtFrontendCandidate -and
+        $script:installedFrontendDestination -ceq $WwwRoot
+    ) "Deploy-Frontend did not install its prepared frontend candidate"
+    Assert-True (
+        $script:startedHostExecutable -ceq $script:mockStagedExecutable
+    ) "Deploy-Frontend did not use the changed staged host executable"
+    Assert-True (
+        $script:preflightPublishedServerDirectory -ceq $script:mockDeploymentCandidate -and
+        $script:stagedPublishedHostDirectory -ceq
+        (Join-Path $script:mockDeploymentCandidate "terminal-host") -and
+        $script:installedServerCandidate -ceq $script:mockDeploymentCandidate -and
+        [string]::IsNullOrEmpty($script:installedLiveHostExecutable)
+    ) "Deploy-Frontend did not thread its candidate through deployment"
+    Assert-True (
+        $script:startedRoots.Count -eq 0
+    ) "Deploy-Frontend unexpectedly supplied explicit roots"
+    Write-Host "PASS: deploy uses the shared candidate-first server deployment workflow"
 } finally {
     $PublishDir = $originalPublishDir
+    $PidFile = $originalPidFile
+    $WwwRoot = $originalWwwRoot
+    $LogDir = $originalLogDir
+    $LogFile = $originalLogFile
+    $DefaultPort = $originalDefaultPort
+    $CanvasPort = $originalCanvasPort
     if ($hadStateOverride) {
         $env:TREEMON_TERMINAL_HOST_STATE_DIR = $previousStateOverride
     } else {

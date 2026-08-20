@@ -242,6 +242,23 @@ function Test-TerminalHostDeployment([string]$PublishedServerDirectory) {
     }
 }
 
+function Get-FileFingerprintEntries(
+    [string]$Directory,
+    [IO.FileInfo[]]$Files,
+    [switch]$ExcludePdb
+) {
+    $root = [IO.Path]::GetFullPath($Directory)
+    return @(
+        $Files |
+            Where-Object { -not $ExcludePdb -or $_.Extension -ne ".pdb" } |
+            ForEach-Object {
+                $relative = [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
+                "$relative`0$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
+            } |
+            Sort-Object
+    )
+}
+
 function Get-TerminalHostBundleDigest([string]$Directory) {
     $root = [IO.Path]::GetFullPath($Directory)
     $rootInfo = Get-Item -LiteralPath $root -Force
@@ -267,15 +284,8 @@ function Get-TerminalHostBundleDigest([string]$Directory) {
         throw "Published TerminalHost output contains a reparse point"
     }
 
-    $entries = @(
-        $items |
-            Where-Object { -not $_.PSIsContainer -and $_.Extension -cne ".pdb" } |
-            ForEach-Object {
-                $relative = [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
-                "$relative`0$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
-            } |
-            Sort-Object
-    )
+    $files = @($items | Where-Object { -not $_.PSIsContainer })
+    $entries = @(Get-FileFingerprintEntries $root $files -ExcludePdb)
     $bytes = [Text.Encoding]::UTF8.GetBytes($entries -join "`n")
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 }
@@ -576,6 +586,35 @@ function Install-ServerPublish(
     Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+function Install-ServerDeployment(
+    [Parameter(Mandatory)]
+    [scriptblock]$OnPreflight
+) {
+    $candidate = $null
+    try {
+        $candidate = Publish-ServerCandidate
+        $preflight = Test-TerminalHostDeployment $candidate
+        & $OnPreflight $preflight | Out-Null
+
+        $publishedHost = Join-Path $candidate "terminal-host"
+        $staged = Stage-TerminalHost $publishedHost $preflight
+        if ($staged.Changed) {
+            Write-Host "TerminalHost staged as $($staged.Version)" -ForegroundColor Green
+        }
+
+        Install-ServerPublish $candidate $preflight.ExecutablePath | Out-Null
+        $candidate = $null
+        if ($staged.Changed) {
+            return $staged.ExecutablePath
+        }
+        return Join-Path $PublishDir "terminal-host\TerminalHost.exe"
+    } finally {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            Remove-Item -LiteralPath $candidate -Recurse -Force
+        }
+    }
+}
+
 function Start-ProductionProcess(
     [string[]]$Roots,
     [string]$TerminalHostExecutable
@@ -690,30 +729,13 @@ function Start-ProductionServer([string[]]$Roots) {
     }
 
     Ensure-WwwRoot
-    $candidate = $null
-    try {
-        $candidate = Publish-ServerCandidate
-        $publishedHost = Join-Path $candidate "terminal-host"
-        $preflight = Test-TerminalHostDeployment $candidate
+    $terminalHostExecutable = Install-ServerDeployment {
+        param($preflight)
         if ($preflight.HasLiveHost) {
             Write-Host "Compatible live TerminalHost found (PID: $($preflight.Pid), terminals: $($preflight.TerminalCount))" -ForegroundColor Green
         }
-        $staged = Stage-TerminalHost $publishedHost $preflight
-        if ($staged.Changed) {
-            Write-Host "TerminalHost staged as $($staged.Version)" -ForegroundColor Green
-        }
-
-        Install-ServerPublish $candidate $preflight.ExecutablePath
-        $candidate = $null
-        if (-not $staged.Changed) {
-            $staged.ExecutablePath = Join-Path $PublishDir "terminal-host\TerminalHost.exe"
-        }
-        Start-ProductionProcess $Roots $staged.ExecutablePath
-    } finally {
-        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
-            Remove-Item -LiteralPath $candidate -Recurse -Force
-        }
     }
+    Start-ProductionProcess $Roots $terminalHostExecutable
 }
 
 function Stop-ProductionServer {
@@ -1035,31 +1057,19 @@ function Restart-ServerIfRunning {
 
 function Deploy-Frontend {
     $frontendCandidate = "$WwwRoot.candidate-$([Guid]::NewGuid().ToString('N'))"
-    $serverCandidate = $null
     try {
         Write-Host "Building frontend candidate..." -ForegroundColor Cyan
         Build-Frontend $frontendCandidate
-        $serverCandidate = Publish-ServerCandidate
+        $terminalHostExecutable = Install-ServerDeployment {
+            param($preflight)
+            if ($preflight.HasLiveHost) {
+                Write-Host "Deployment preflight will reuse TerminalHost PID $($preflight.Pid) with $($preflight.TerminalCount) terminal(s)." -ForegroundColor Green
+            } else {
+                Write-Host "Deployment preflight found no exact live TerminalHost." -ForegroundColor Gray
+            }
 
-        $publishedHost = Join-Path $serverCandidate "terminal-host"
-        $preflight = Test-TerminalHostDeployment $serverCandidate
-        if ($preflight.HasLiveHost) {
-            Write-Host "Deployment preflight will reuse TerminalHost PID $($preflight.Pid) with $($preflight.TerminalCount) terminal(s)." -ForegroundColor Green
-        } else {
-            Write-Host "Deployment preflight found no exact live TerminalHost." -ForegroundColor Gray
-        }
-
-        # Nothing active is changed until the candidate can control the exact live host.
-        Stop-ProductionPortListeners
-        $staged = Stage-TerminalHost $publishedHost $preflight
-        if ($staged.Changed) {
-            Write-Host "TerminalHost staged as $($staged.Version)" -ForegroundColor Green
-        }
-
-        Install-ServerPublish $serverCandidate $preflight.ExecutablePath
-        $serverCandidate = $null
-        if (-not $staged.Changed) {
-            $staged.ExecutablePath = Join-Path $PublishDir "terminal-host\TerminalHost.exe"
+            # Nothing active is changed until the candidate can control the exact live host.
+            Stop-ProductionPortListeners
         }
         Install-PreparedDirectory $frontendCandidate $WwwRoot
         $frontendCandidate = $null
@@ -1070,11 +1080,8 @@ function Deploy-Frontend {
         try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
         try { Install-ReportingExtension } catch { Write-Host "Warning: reporting extension install failed: $_" -ForegroundColor Yellow }
 
-        Start-ProductionProcess @() $staged.ExecutablePath
+        Start-ProductionProcess @() $terminalHostExecutable
     } finally {
-        if ($serverCandidate -and (Test-Path -LiteralPath $serverCandidate)) {
-            Remove-Item -LiteralPath $serverCandidate -Recurse -Force
-        }
         if ($frontendCandidate -and (Test-Path -LiteralPath $frontendCandidate)) {
             Remove-Item -LiteralPath $frontendCandidate -Recurse -Force
         }
