@@ -4,7 +4,8 @@
     "start": "dotnet fable src/Client --outDir src/Client/output --watch --run npx vite",
     "build": "dotnet fable src/Client --outDir src/Client/output --noCache && npx vite build",
     "test:auto-sync-ui": "dotnet test src/Tests/Tests.fsproj --filter \"Category=AutoSyncUiVerification\" --logger \"console;verbosity=detailed\"",
-    "test:extension": "node --test src/Extension/*.test.mjs src/Extension/reporting/*.test.mjs",
+    "check:extension": "tsc --project src/Extension/tsconfig.json && tsc --project src/Extension/tsconfig.contracts.json",
+    "test:extension": "npm run check:extension && node --test src/Extension/*.test.mjs src/Extension/reporting/*.test.mjs",
     "test:reporting": "node --test src/Extension/reporting/*.test.mjs",
     "test:durable-terminal-host": "node --test scripts/durable-terminal-host.test.mjs",
     "test:durable-terminal-observation": "node --test scripts/durable-terminal-observation.test.mjs",
@@ -18,8 +19,11 @@
     "terminal:observation:stop": "node scripts/durable-terminal-observation.mjs stop"
   },
   "devDependencies": {
+    "@github/copilot-sdk": "1.0.9",
+    "@types/node": "20.19.43",
     "gifsicle": "^7.0.1",
     "playwright": "1.58.0",
+    "typescript": "7.0.2",
     "vite": "^6.0.0"
   },
   "dependencies": {
