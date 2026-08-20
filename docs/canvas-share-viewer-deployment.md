@@ -78,6 +78,60 @@ also resolves its direct and inherited role assignments and fails when any effec
 data action is scoped outside the configured share container. Group-derived assignments are
 included. It performs no Azure mutation and does not write machine configuration.
 
+## Correct a deployment from another subscription
+
+The correction workflow never accepts a source subscription, tenant, resource group, identity, or
+resource ID. Automation operates only in the machine-approved destination; the operator performs
+the App Service move in the Azure portal.
+
+First prepare the destination:
+
+```powershell
+.\scripts\deploy-canvas-share-viewer.ps1 `
+  -Subscription '<approved-personal-subscription>' `
+  -Tenant '<tenant-id>' `
+  -ResourceGroup '<destination-resource-group>' `
+  -Plan '<app-service-plan-being-moved>' `
+  -Identity '<replacement-viewer-identity>' `
+  -Registration '<retained-viewer-registration>' `
+  -PrepareCrossSubscriptionMove
+```
+
+Preparation confirms that the configured storage account and private share container already
+exist in the approved subscription. It creates or reconciles only the destination resource group,
+replacement user-assigned identity, and that identity's container-scoped `Storage Blob Data
+Reader` assignment. It does not check global availability of `treemon`, create or read the App
+Service or plan, mutate the app registration, change storage configuration, build or deploy the
+viewer, or write Treemon configuration. It finishes by printing a redacted portal checklist.
+
+Follow that checklist in the Azure portal: move the canonical `treemon` App Service and its App
+Service plan together into the prepared destination. Leave source-side identities, role
+assignments, storage, and resource groups in place for rollback. Do not substitute an ordinary
+`-ValidateOnly` or apply run for preparation; before the portal move those modes correctly stop
+because the existing app still owns the global name.
+
+After the portal reports success, use an isolated `TREEMON_CONFIG_DIR` seeded with the approved
+subscription, storage account, and container from the private machine configuration, then run:
+
+```powershell
+.\scripts\deploy-canvas-share-viewer.ps1 `
+  -Subscription '<approved-personal-subscription>' `
+  -Tenant '<tenant-id>' `
+  -ResourceGroup '<destination-resource-group>' `
+  -Plan '<moved-app-service-plan>' `
+  -Identity '<replacement-viewer-identity>' `
+  -Registration '<retained-viewer-registration>' `
+  -ReconcileCrossSubscriptionMove `
+  -ConfirmPortalMoveCompleted
+```
+
+The confirmation switch is mandatory and is checked before local tools or Azure are consulted.
+Reconciliation requires the moved canonical app, its plan, the prepared identity, and the retained
+registration to exist. It replaces the app's identity attachment with the destination identity,
+then reconciles federation, private-container RBAC, settings, lifecycle policy, package, Easy Auth,
+and deployed state through approved-subscription-only calls. The isolated config receives the
+canonical `viewerBaseUrl`; the production config remains unchanged.
+
 ## Provision and deploy
 
 Remove `-ValidateOnly` to apply the same plan:

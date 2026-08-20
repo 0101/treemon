@@ -1,6 +1,6 @@
 #requires -Version 7.4
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Deploy')]
 param(
     [Parameter(Mandatory)]
     [ValidateNotNullOrEmpty()]
@@ -26,7 +26,17 @@ param(
     [ValidateNotNullOrEmpty()]
     [string] $Registration,
 
-    [switch] $ValidateOnly
+    [Parameter(ParameterSetName = 'Deploy')]
+    [switch] $ValidateOnly,
+
+    [Parameter(Mandatory, ParameterSetName = 'PrepareMove')]
+    [switch] $PrepareCrossSubscriptionMove,
+
+    [Parameter(Mandatory, ParameterSetName = 'ReconcileMove')]
+    [switch] $ReconcileCrossSubscriptionMove,
+
+    [Parameter(ParameterSetName = 'ReconcileMove')]
+    [switch] $ConfirmPortalMoveCompleted
 )
 
 Set-StrictMode -Version Latest
@@ -48,11 +58,21 @@ $deploymentSupportDirectory = Join-Path $PSScriptRoot 'canvas-share-viewer-deplo
 . (Join-Path $deploymentSupportDirectory 'Common.ps1')
 . (Join-Path $deploymentSupportDirectory 'ViewerBlobAccess.ps1')
 . (Join-Path $deploymentSupportDirectory 'Azure.ps1')
+. (Join-Path $deploymentSupportDirectory 'CrossSubscriptionCorrection.ps1')
+
+Assert-CrossSubscriptionCorrectionParameters `
+    -ReconcileCrossSubscriptionMove:$ReconcileCrossSubscriptionMove `
+    -ConfirmPortalMoveCompleted:$ConfirmPortalMoveCompleted
 
 Write-Step 'Validating local tools and repository inputs'
 Assert-Prerequisites
 $treemonConfig = Read-TreemonCanvasShareConfig
-$desiredLifecycleRule = Get-LifecycleRule -Container $treemonConfig.Container
+$desiredLifecycleRule =
+    if ($PrepareCrossSubscriptionMove) {
+        $null
+    } else {
+        Get-LifecycleRule -Container $treemonConfig.Container
+    }
 
 Write-Step 'Validating Azure subscription, tenant, and delegated publisher'
 $azureContext = Get-AzureContext `
@@ -65,10 +85,33 @@ $storageAccount = Get-StorageAccount `
 $containerScope = Get-ShareContainerScope `
     -StorageAccount $storageAccount `
     -Container $treemonConfig.Container
-$existingResources = Get-ExistingResources -SubscriptionId $azureContext.SubscriptionId
-Assert-ExistingResourceSafety `
-    -Existing $existingResources `
-    -SubscriptionId $azureContext.SubscriptionId
+
+if ($PrepareCrossSubscriptionMove) {
+    Invoke-CrossSubscriptionMovePreparation `
+        -StorageAccount $storageAccount `
+        -Container $treemonConfig.Container `
+        -ContainerScope $containerScope `
+        -SubscriptionId $azureContext.SubscriptionId
+    return
+}
+
+$existingResources =
+    if ($ReconcileCrossSubscriptionMove) {
+        Get-CrossSubscriptionMoveDestinationResources `
+            -SubscriptionId $azureContext.SubscriptionId
+    } else {
+        Get-ExistingResources -SubscriptionId $azureContext.SubscriptionId
+    }
+
+if ($ReconcileCrossSubscriptionMove) {
+    Assert-CrossSubscriptionMovedResources `
+        -Existing $existingResources `
+        -SubscriptionId $azureContext.SubscriptionId
+} else {
+    Assert-ExistingResourceSafety `
+        -Existing $existingResources `
+        -SubscriptionId $azureContext.SubscriptionId
+}
 
 if ($null -ne $existingResources.Identity) {
     Write-Step 'Verifying the existing viewer identity has container-only Blob access'
@@ -89,6 +132,20 @@ try {
         Write-Host 'Validation succeeded. No Azure resource or machine configuration was changed.'
         Write-Host "An apply run will ensure the fixed viewer at $viewerBaseUrl, secret-free Easy Auth, container-scoped roles, and lifecycle deletion after at least $minimumLifecycleDays days."
         return
+    }
+
+    if ($ReconcileCrossSubscriptionMove) {
+        Set-CrossSubscriptionReplacementIdentity `
+            -ManagedIdentity $existingResources.Identity `
+            -SubscriptionId $azureContext.SubscriptionId
+        $existingResources =
+            Get-ExistingResources -SubscriptionId $azureContext.SubscriptionId
+        Assert-CrossSubscriptionMovedResources `
+            -Existing $existingResources `
+            -SubscriptionId $azureContext.SubscriptionId
+        Assert-ExistingResourceSafety `
+            -Existing $existingResources `
+            -SubscriptionId $azureContext.SubscriptionId
     }
 
     $group = Ensure-ResourceGroup `
@@ -168,7 +225,11 @@ try {
     }
 
     Write-Host ''
-    Write-Host "Deployment complete: $viewerBaseUrl"
+    if ($ReconcileCrossSubscriptionMove) {
+        Write-Host "Post-move reconciliation complete: $viewerBaseUrl"
+    } else {
+        Write-Host "Deployment complete: $viewerBaseUrl"
+    }
     Write-Host 'The canonical App Service, identity, Entra configuration, RBAC grants, and lifecycle policy remain deployed.'
 } finally {
     Remove-Item -LiteralPath $workingDirectory -Recurse -Force -ErrorAction SilentlyContinue

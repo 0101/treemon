@@ -308,15 +308,18 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   auxiliary resources created solely to prove the permission boundary.
 - A cross-subscription correction preserves the canonical hostname by moving the App Service and
   its plan together rather than deleting and recreating the globally named app. The correction is
-  split by who can reach which subscription: automation only ever operates in the approved
-  subscription and tenant, so it prepares the destination (resource group, replacement
-  user-assigned identity, container-scoped grant) and hands the operator a checklist; the operator
-  performs the move itself in the Azure portal; automation then blocks until the operator confirms
-  and reconciles the retained tenant-scoped app registration, federated credential, container
-  RBAC, settings, and deployed state against the replacement identity. Automation never queries,
-  validates, or mutates anything in the source subscription and never carries a resource ID,
-  subscription, or tenant identifier belonging to it; the checklist identifies what to move by the
-  canonical App Service and plan names the repository already fixes.
+  split by who can reach which subscription. `-PrepareCrossSubscriptionMove` confirms the
+  configured private storage/container and reconciles only the approved destination resource
+  group, replacement user-assigned identity, and its container-scoped reader grant; it neither
+  checks the global app name nor reads or creates an App Service or plan.
+  `-ReconcileCrossSubscriptionMove` requires `-ConfirmPortalMoveCompleted` before any tool or Azure
+  call, resolves the moved app and plan only in the approved destination, replaces the app's
+  identity attachment with the prepared identity, and reconciles the retained tenant-scoped app
+  registration, federated credential, container RBAC, settings, package, and deployed state.
+  Between those modes the operator performs the move in the Azure portal using the redacted
+  checklist. Automation never queries, validates, or mutates anything in the source subscription
+  and never carries a resource ID, subscription, or tenant identifier belonging to it; the
+  checklist identifies what to move by the canonical App Service and plan names.
   Source-side leftovers -- the obsolete identity, its role assignments, any stand-in verification
   storage, and the former resource groups -- stay in place until the move is independently
   verified, so the operator can move the app and plan back while automation restores the previous
@@ -384,6 +387,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Keep the in-script guard even when the environment already restricts direct CLI use | A control that filters issued commands cannot observe the `az` child processes a deployment script starts, so it stops covering exactly the operations this feature automates. The script's own check is the only one present inside a run, and an outer restriction is never accepted as a reason to remove or weaken it. |
 | Move the App Service and plan together when correcting subscription placement | An ARM move preserves the globally unique `treemon.azurewebsites.net` name; deleting and recreating the app would briefly release that name and make rollback dependent on reacquiring it. |
 | Have the operator perform the move in the portal rather than automating it | Automation is confined to the approved subscription and cannot query or validate the source one, so it cannot issue the move at all. Splitting the correction into prepare / operator move / reconcile keeps the one irreversible step under direct human control and leaves automation with only operations it is allowed to perform. |
+| Expose preparation and reconciliation as mutually exclusive deployment-script modes | Preparation must bypass the ordinary global-name guard without weakening it, while reconciliation must not begin from an unconfirmed portal handoff. Separate parameter sets and an explicit post-move confirmation make those safety boundaries visible at invocation time. |
 | Decommission by exact resource allowlist rather than broad scope | Shared subscriptions can contain unrelated workloads. Fresh inventory, drift checks, and individual resource-ID deletion make collateral changes falsifiable and leave ambiguous resources untouched. |
 | Reuse one unambiguous publisher-owned `serviceManagementReference` only when Entra requires it | Restricted tenants reject registration mutations without their organizational service reference, while an arbitrary GUID can be invalid or misrepresent ownership. Conditional discovery keeps the normal path unchanged, adds no secret or deployment-name input, and fails closed when publisher-owned state cannot identify one value. |
 | Pass the Linux runtime through Azure CLI's JSON-file configuration input | The runtime contains `|`, which the Windows `az.cmd` launcher can reinterpret as a command pipe even when PowerShell supplied it as one argument. A file preserves the exact value without platform-specific quoting or reliance on Azure CLI installation internals. |
@@ -408,6 +412,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | `src/Client/CanvasPane.fs`, `CanvasState.fs`, `CanvasUpdate.fs`, `index.html` | Share button, `ShareState` phase machine, clipboard write and banner routing (unchanged) |
 | `src/CanvasShareViewer/` | New App Service viewer: shell route, content route, expiry check, sandbox/CSP, Easy Auth configuration |
 | `scripts/deploy-canvas-share-viewer.ps1` | Idempotent non-production Azure provisioning, secret-free Easy Auth, Entra-authenticated ZIP deployment, validation, and machine-config update |
+| `scripts/canvas-share-viewer-deployment/CrossSubscriptionCorrection.ps1` | Approved-destination preparation, redacted portal handoff, post-move discovery, and replacement-identity attachment |
 | `scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1` | Windows/Azure CLI shape, packaging-output, reconciliation, restricted-tenant registration, and Easy Auth callback regressions |
 | `scripts/canvas-share-viewer-deployment/ViewerBlobAccess.ps1` | Fail-closed audit of the viewer identity's effective Blob-read data-plane assignments |
 | `scripts/canvas-share-lifecycle-policy.json` | Container-filtered deletion rule starting after 31 days |
