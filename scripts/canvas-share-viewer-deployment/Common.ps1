@@ -163,12 +163,20 @@ function Read-TreemonCanvasShareConfig {
             'canvas-shared'
         }
 
+    $approvedSubscription =
+        if ($canvasShare.Contains('approvedSubscription')) {
+            [string] $canvasShare['approvedSubscription']
+        } else {
+            ''
+        }
+
     [pscustomobject]@{
         Path = $path
         Raw = $raw
         Root = $root
         AccountName = $accountName.Trim()
         Container = $container
+        ApprovedSubscription = $approvedSubscription.Trim()
     }
 }
 

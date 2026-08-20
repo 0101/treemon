@@ -39,6 +39,7 @@ domain.
   ```json
   {
     "canvasShare": {
+      "approvedSubscription": "<personal-development-subscription>",
       "accountName": "<storage-account>",
       "container": "canvas-shared",
       "defaultExpiryDays": 7
@@ -46,9 +47,12 @@ domain.
   }
   ```
 
-The script reads the storage account and container from `~/.treemon/config.json` (or
-`$TREEMON_CONFIG_DIR/config.json`) and uses the current Azure CLI user as the publisher. Storage
-and publisher identifiers are therefore not additional command-line inputs.
+The script reads the approved subscription, storage account, and container from
+`~/.treemon/config.json` (or `$TREEMON_CONFIG_DIR/config.json`) and uses the current Azure CLI user
+as the publisher. The `-Subscription` argument and selected Azure CLI account must both exactly
+match the machine-private approved value before the script performs any resource-provider or Entra
+application operation. Exact subscription and tenant identifiers remain local and are never
+committed. Storage and publisher identifiers are therefore not additional command-line inputs.
 
 ## Validate without changing Azure
 
@@ -65,12 +69,14 @@ Run the read-only validation first:
   -ValidateOnly
 ```
 
-Validation checks the selected subscription and tenant, the storage configuration, any existing
-resources, global availability of `treemon` when the app does not yet exist, the lifecycle-policy
-invariant, and a local Release publish of the viewer. If the requested managed identity already
-exists, validation also resolves its direct and inherited role assignments and fails when any
-effective Blob-read data action is scoped outside the configured share container. Group-derived
-assignments are included. It performs no Azure mutation and does not write machine configuration.
+Validation first checks the requested and selected subscription against the machine-private
+approved target. A missing or mismatched value fails before any resource-provider or Entra
+application operation. It then checks the tenant, storage configuration, existing resources,
+global availability of `treemon` when the app does not yet exist, lifecycle-policy invariant, and
+a local Release publish of the viewer. If the requested managed identity already exists, validation
+also resolves its direct and inherited role assignments and fails when any effective Blob-read
+data action is scoped outside the configured share container. Group-derived assignments are
+included. It performs no Azure mutation and does not write machine configuration.
 
 ## Provision and deploy
 

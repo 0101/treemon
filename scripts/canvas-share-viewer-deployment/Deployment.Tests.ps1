@@ -101,6 +101,10 @@ $Registration = 'viewer-registration'
 
 $script:scenario = ''
 $script:azNoneCalls = @()
+$script:azJsonCalls = @()
+$script:subscriptionAccounts = @{}
+$script:selectedAccount = $null
+$script:publisherResult = $null
 $script:createCallCount = 0
 $script:serviceManagementReference = '11111111-2222-3333-4444-555555555555'
 $script:planResourceId =
@@ -139,6 +143,37 @@ function Invoke-AzNone {
 
 function Invoke-AzJson {
     param([Parameter(Mandatory)][string[]] $Arguments)
+
+    if ($script:scenario -eq 'azure-context') {
+        $script:azJsonCalls +=
+            [pscustomobject]@{ Arguments = @($Arguments) }
+        $command = $Arguments[0..([Math]::Min(2, $Arguments.Count - 1))] -join ' '
+
+        switch ($command) {
+            'cloud show' {
+                return [pscustomobject]@{ name = 'AzureCloud' }
+            }
+            'account show --subscription' {
+                $subscriptionIndex = [Array]::IndexOf($Arguments, '--subscription')
+                $subscription = [string] $Arguments[$subscriptionIndex + 1]
+
+                if (-not $script:subscriptionAccounts.ContainsKey($subscription)) {
+                    throw 'Synthetic subscription is unavailable.'
+                }
+
+                return $script:subscriptionAccounts[$subscription]
+            }
+            'account show' {
+                return $script:selectedAccount
+            }
+            'ad signed-in-user show' {
+                return $script:publisherResult
+            }
+            default {
+                throw 'Unexpected Azure CLI command in subscription-guard test.'
+            }
+        }
+    }
 
     $command = $Arguments[0..2] -join ' '
 
@@ -181,6 +216,294 @@ function Invoke-AzJson {
     }
 
     throw "Unexpected mocked Azure CLI command: $($Arguments -join ' ')"
+}
+
+function Reset-AzureContextMocks {
+    $script:scenario = 'azure-context'
+    $script:azJsonCalls = @()
+    $script:subscriptionAccounts = @{}
+    $script:selectedAccount = $null
+    $script:publisherResult =
+        [pscustomobject]@{
+            id = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+        }
+}
+
+function New-SyntheticAccount {
+    param(
+        [Parameter(Mandatory)][string] $Id,
+        [Parameter(Mandatory)][string] $TenantId
+    )
+
+    [pscustomobject]@{
+        id = $Id
+        tenantId = $TenantId
+        state = 'Enabled'
+        user = [pscustomobject]@{ type = 'user' }
+    }
+}
+
+function Assert-NoPrivilegedAzureCalls {
+    $privilegedCalls =
+        @(
+            $script:azJsonCalls
+            | Where-Object {
+                $_.Arguments[0] -notin @('cloud', 'account')
+            }
+        )
+
+    Assert-Equal `
+        -Actual $privilegedCalls.Count `
+        -Expected 0 `
+        -Because 'the subscription guard must fail before any resource-provider or Entra call'
+}
+
+function Assert-SubscriptionValuesRedacted {
+    param(
+        [Parameter(Mandatory)][string] $Message,
+        [Parameter(Mandatory)][string[]] $Values
+    )
+
+    $revealed =
+        @(
+            $Values
+            | Where-Object {
+                $Message.Contains($_, [StringComparison]::OrdinalIgnoreCase)
+            }
+        )
+
+    Assert-Equal `
+        -Actual $revealed.Count `
+        -Expected 0 `
+        -Because 'subscription guard diagnostics must not reveal configured names or IDs'
+}
+
+$approvedSubscription = 'approved-subscription'
+$requestedSubscription = 'requested-subscription'
+$approvedSubscriptionId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+$otherSubscriptionId = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+$tenantId = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+
+Invoke-TestCase 'requested subscription mismatch fails before privileged Azure calls' {
+    Reset-AzureContextMocks
+    $approvedAccount =
+        New-SyntheticAccount `
+            -Id $approvedSubscriptionId `
+            -TenantId $tenantId
+    $script:subscriptionAccounts[$approvedSubscription] = $approvedAccount
+    $script:subscriptionAccounts[$requestedSubscription] =
+        New-SyntheticAccount `
+            -Id $otherSubscriptionId `
+            -TenantId $tenantId
+    $script:selectedAccount = $approvedAccount
+    $message = ''
+
+    try {
+        Get-AzureContext `
+            -ApprovedSubscription $approvedSubscription `
+            -RequestedSubscription $requestedSubscription `
+            -RequestedTenant $tenantId |
+            Out-Null
+    } catch {
+        $message = $_.Exception.Message
+    }
+
+    Assert-True `
+        -Condition ($message -match 'mismatch' -and
+            $message -match 'canvasShare\.approvedSubscription') `
+        -Because 'the requested-subscription failure must identify the protected config key and mismatch'
+    Assert-NoPrivilegedAzureCalls
+    Assert-SubscriptionValuesRedacted `
+        -Message $message `
+        -Values @(
+            $approvedSubscription,
+            $requestedSubscription,
+            $approvedSubscriptionId,
+            $otherSubscriptionId)
+}
+
+Invoke-TestCase 'selected Azure account mismatch fails before privileged Azure calls' {
+    Reset-AzureContextMocks
+    $approvedAccount =
+        New-SyntheticAccount `
+            -Id $approvedSubscriptionId `
+            -TenantId $tenantId
+    $script:subscriptionAccounts[$approvedSubscription] = $approvedAccount
+    $script:subscriptionAccounts[$requestedSubscription] = $approvedAccount
+    $script:selectedAccount =
+        New-SyntheticAccount `
+            -Id $otherSubscriptionId `
+            -TenantId $tenantId
+    $message = ''
+
+    try {
+        Get-AzureContext `
+            -ApprovedSubscription $approvedSubscription `
+            -RequestedSubscription $requestedSubscription `
+            -RequestedTenant $tenantId |
+            Out-Null
+    } catch {
+        $message = $_.Exception.Message
+    }
+
+    Assert-True `
+        -Condition ($message -match 'mismatch' -and
+            $message -match 'canvasShare\.approvedSubscription') `
+        -Because 'the selected-account failure must identify the protected config key and mismatch'
+    Assert-NoPrivilegedAzureCalls
+    Assert-SubscriptionValuesRedacted `
+        -Message $message `
+        -Values @(
+            $approvedSubscription,
+            $requestedSubscription,
+            $approvedSubscriptionId,
+            $otherSubscriptionId)
+}
+
+Invoke-TestCase 'absent approved-subscription config fails before any Azure call' {
+    Reset-AzureContextMocks
+    $configDirectory =
+        Join-Path ([IO.Path]::GetTempPath()) "treemon-config-test-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $configDirectory | Out-Null
+    $previousConfigDirectory = $env:TREEMON_CONFIG_DIR
+
+    try {
+        $env:TREEMON_CONFIG_DIR = $configDirectory
+        [IO.File]::WriteAllText(
+            (Join-Path $configDirectory 'config.json'),
+            '{"canvasShare":{"accountName":"fixture-account","container":"fixture-container"}}',
+            [Text.UTF8Encoding]::new($false))
+        $configuration = Read-TreemonCanvasShareConfig
+        $message = ''
+
+        try {
+            Get-AzureContext `
+                -ApprovedSubscription $configuration.ApprovedSubscription `
+                -RequestedSubscription $requestedSubscription `
+                -RequestedTenant $tenantId |
+                Out-Null
+        } catch {
+            $message = $_.Exception.Message
+        }
+
+        Assert-True `
+            -Condition ($message -match 'canvasShare\.approvedSubscription') `
+            -Because 'an absent key must fail closed and identify the missing configuration'
+        Assert-Equal `
+            -Actual $script:azJsonCalls.Count `
+            -Expected 0 `
+            -Because 'an absent key must stop before Azure CLI is invoked'
+    } finally {
+        $env:TREEMON_CONFIG_DIR = $previousConfigDirectory
+        Remove-Item -LiteralPath $configDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Invoke-TestCase 'approved subscription context proceeds to publisher lookup' {
+    Reset-AzureContextMocks
+    $approvedAccount =
+        New-SyntheticAccount `
+            -Id $approvedSubscriptionId `
+            -TenantId $tenantId
+    $script:subscriptionAccounts[$approvedSubscription] = $approvedAccount
+    $script:subscriptionAccounts[$requestedSubscription] = $approvedAccount
+    $script:selectedAccount = $approvedAccount
+
+    $context =
+        Get-AzureContext `
+            -ApprovedSubscription $approvedSubscription `
+            -RequestedSubscription $requestedSubscription `
+            -RequestedTenant $tenantId
+
+    Assert-Equal `
+        -Actual $context.SubscriptionId `
+        -Expected $approvedSubscriptionId `
+        -Because 'the approved context must return the resolved subscription ID'
+    Assert-Equal `
+        -Actual $context.TenantId `
+        -Expected $tenantId `
+        -Because 'the approved context must retain the requested tenant'
+    $publisherCalls =
+        @(
+            $script:azJsonCalls
+            | Where-Object {
+                ($_.Arguments -join ' ') -ceq 'ad signed-in-user show'
+            }
+        )
+    Assert-Equal `
+        -Actual $publisherCalls.Count `
+        -Expected 1 `
+        -Because 'publisher lookup may proceed only after every subscription identity agrees'
+}
+
+Invoke-TestCase 'every Azure resource-plane call selects its subscription explicitly' {
+    $resourceFamilies =
+        @(
+            'appservice',
+            'group',
+            'identity',
+            'resource',
+            'role',
+            'storage',
+            'webapp'
+        )
+    $unguardedCalls =
+        @(
+            'Azure.ps1', 'ViewerBlobAccess.ps1'
+            | ForEach-Object {
+                $path = Join-Path $PSScriptRoot $_
+                $tokens = $null
+                $parseErrors = $null
+                $ast =
+                    [Management.Automation.Language.Parser]::ParseFile(
+                        $path,
+                        [ref] $tokens,
+                        [ref] $parseErrors)
+
+                Assert-Equal `
+                    -Actual $parseErrors.Count `
+                    -Expected 0 `
+                    -Because 'deployment helpers must parse before their Azure calls can be audited'
+
+                $ast.FindAll(
+                    {
+                        param($node)
+                        $node -is [Management.Automation.Language.CommandAst] -and
+                            $node.GetCommandName() -match '^(Invoke-AzJson|Try-AzJson|Invoke-AzNone)$'
+                    },
+                    $true)
+                | Where-Object {
+                    $literals =
+                        @(
+                            $_.FindAll(
+                                {
+                                    param($node)
+                                    $node -is [Management.Automation.Language.StringConstantExpressionAst]
+                                },
+                                $true)
+                            | ForEach-Object Value
+                        )
+                    $family =
+                        if ($literals.Count -gt 1) {
+                            $literals[1]
+                        } else {
+                            ''
+                        }
+
+                    ($family -in $resourceFamilies -or
+                        ($family -eq 'rest' -and
+                            $_.Extent.Text.Contains(
+                                '/subscriptions/',
+                                [StringComparison]::OrdinalIgnoreCase))) -and
+                        $literals -notcontains '--subscription'
+                }
+            }
+        )
+
+    Assert-Equal `
+        -Actual $unguardedCalls.Count `
+        -Expected 0 `
+        -Because 'resource-plane az calls must never inherit the ambient Azure CLI subscription'
 }
 
 Invoke-TestCase 'Azure CLI resource shapes resolve without external projections' {

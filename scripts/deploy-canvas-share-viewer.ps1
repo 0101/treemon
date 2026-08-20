@@ -55,7 +55,10 @@ $treemonConfig = Read-TreemonCanvasShareConfig
 $desiredLifecycleRule = Get-LifecycleRule -Container $treemonConfig.Container
 
 Write-Step 'Validating Azure subscription, tenant, and delegated publisher'
-$azureContext = Get-AzureContext
+$azureContext = Get-AzureContext `
+    -ApprovedSubscription $treemonConfig.ApprovedSubscription `
+    -RequestedSubscription $Subscription `
+    -RequestedTenant $Tenant
 $storageAccount = Get-StorageAccount `
     -AccountName $treemonConfig.AccountName `
     -SubscriptionId $azureContext.SubscriptionId
