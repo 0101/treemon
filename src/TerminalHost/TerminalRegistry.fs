@@ -2,12 +2,6 @@ namespace TerminalHost
 
 open System
 
-type TerminalStarter =
-    string -> CanonicalWorktree -> Async<Result<TerminalProcess, string>>
-
-type TerminalDataPlaneStarter =
-    string -> TerminalProcess -> Async<Result<TerminalDataPlane, string>>
-
 type private HostedTerminal =
     { Record: TerminalRecord
       Process: TerminalProcess
@@ -51,18 +45,20 @@ module TerminalRegistry =
                 terminal.Process.Close()
         }
 
+    let private closeAll entries =
+        entries
+        |> Map.values
+        |> Seq.map closeHosted
+        |> Async.Sequential
+        |> Async.Ignore
+
     let private pruneExited state =
         async {
             let exited, live =
                 state.Entries
                 |> Map.partition (fun _ terminal -> terminal.Process.HasExited())
 
-            do!
-                exited
-                |> Map.values
-                |> Seq.map closeHosted
-                |> Async.Sequential
-                |> Async.Ignore
+            do! closeAll exited
 
             if Map.isEmpty exited then
                 return state
@@ -72,13 +68,6 @@ module TerminalRegistry =
                         Entries = live
                         Revision = state.Revision + 1L }
         }
-
-    let private closeAll entries =
-        entries
-        |> Map.values
-        |> Seq.map closeHosted
-        |> Async.Sequential
-        |> Async.Ignore
 
     let create starter dataPlaneStarter =
         let mailbox =

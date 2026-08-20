@@ -559,8 +559,12 @@ type TerminalHostDataPlaneTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(retained, Is.EqualTo([ "0second"; "0third" ]))
-            Assert.That(ReplayBuffer.bytes replay, Is.EqualTo(13))
-            Assert.That(ReplayBuffer.droppedBytes replay, Is.EqualTo(6L)))
+            Assert.That(
+                replay
+                |> ReplayBuffer.frames
+                |> List.sumBy _.Data.Length,
+                Is.EqualTo(13)
+            ))
 
     [<Test>]
     member _.``attachment endpoint rejects invalid bearer origin and oversized requests``() =
@@ -697,8 +701,19 @@ type TerminalHostSecurityTests() =
                 Does.Contain(("TREEMON_TERMINAL_SESSION_ID", "stable-session-id"))
             )
 
+            Assert.That(
+                specification.Environment,
+                Does.Contain(("TREEMON_TERMINAL_WORKTREE", worktreePath))
+            )
+
             Assert.That(specification.Arguments, Does.Contain("127.0.0.1"))
-            Assert.That(specification.Arguments, Does.Contain(worktreePath)))
+            Assert.That(specification.Arguments, Does.Contain(worktreePath))
+            Assert.That(
+                specification.Arguments,
+                Does.Contain(
+                    "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE"
+                )
+            ))
 
 [<TestFixture>]
 [<Category("Unit")>]

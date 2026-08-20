@@ -2,21 +2,21 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { cleanupRuntimeResources } from "./verify-ttyd-runtime.mjs";
 
-test("verifier cleanup closes browser and authoritative job boundary", async () => {
+test("verifier cleanup closes browser and isolated TerminalHost", async () => {
   const events = [];
   await cleanupRuntimeResources({
     browser: {
       close: async () => events.push("browser"),
     },
-    supervisor: {
-      terminate: async () => events.push("job-empty"),
+    host: {
+      terminate: async () => events.push("host-stopped"),
     },
   });
 
-  assert.deepEqual(events, ["browser", "job-empty"]);
+  assert.deepEqual(events, ["browser", "host-stopped"]);
 });
 
-test("browser cleanup failure cannot skip Job Object termination", async () => {
+test("browser cleanup failure cannot skip TerminalHost termination", async () => {
   let terminated = false;
 
   await assert.rejects(
@@ -26,7 +26,7 @@ test("browser cleanup failure cannot skip Job Object termination", async () => {
           throw new Error("browser close failed");
         },
       },
-      supervisor: {
+      host: {
         terminate: async () => {
           terminated = true;
         },
@@ -38,16 +38,16 @@ test("browser cleanup failure cannot skip Job Object termination", async () => {
   assert.equal(terminated, true);
 });
 
-test("job acknowledgement failure is not hidden by successful browser cleanup", async () => {
+test("host shutdown failure is not hidden by successful browser cleanup", async () => {
   await assert.rejects(
     cleanupRuntimeResources({
       browser: { close: async () => {} },
-      supervisor: {
+      host: {
         terminate: async () => {
-          throw new Error("job did not become empty");
+          throw new Error("host did not stop");
         },
       },
     }),
-    /job did not become empty/,
+    /host did not stop/,
   );
 });

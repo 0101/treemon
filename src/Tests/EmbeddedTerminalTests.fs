@@ -469,19 +469,6 @@ let private replacementManagerConfig
                 host.ResolveExactProcessExecutable(pid, startTicks)
         SendTerminalCommand = sendTerminalCommand }
 
-let private asReplacementActivitySnapshot
-    (snapshot: SessionActivityService.OwnedSessionSnapshot)
-    : EmbeddedTerminal.ReplacementActivitySnapshot =
-    { ActivityEpoch = snapshot.ActivityEpoch
-      OpenSessions =
-        snapshot.OpenSessions
-        |> List.map (fun session ->
-            { TerminalSessionId = session.TerminalSessionId
-              CopilotSessionId = session.CopilotSessionId
-              Status = session.Status }
-            : EmbeddedTerminal.ReplacementOwnedSession)
-      ResumableSessionIds = snapshot.ResumableSessionIds }
-
 let private replacementStoredStatus
     sessionId
     terminalSessionId
@@ -765,7 +752,7 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk firstStarted |> ignore
 
-            let query _ _ : Result<EmbeddedTerminal.ReplacementActivitySnapshot, string> =
+            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
                 Ok
                     { ActivityEpoch = 4L
                       OpenSessions = []
@@ -831,7 +818,7 @@ type EmbeddedTerminalReplacementTests() =
             let terminal =
                 host.CurrentTerminals |> List.exactlyOne
 
-            let query _ _ : Result<EmbeddedTerminal.ReplacementActivitySnapshot, string> =
+            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
                 Ok
                     { ActivityEpoch = 9L
                       OpenSessions =
@@ -945,7 +932,6 @@ type EmbeddedTerminalReplacementTests() =
                     terminalIds
                     Map.empty
                     statuses
-                |> asReplacementActivitySnapshot
                 |> Ok
 
             let! outcome =
@@ -1049,7 +1035,7 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk started |> ignore
 
-            let query _ _ : Result<EmbeddedTerminal.ReplacementActivitySnapshot, string> =
+            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
                 Ok
                     { ActivityEpoch = 12L
                       OpenSessions = []

@@ -17,9 +17,6 @@ open Shared
 let private controlApiVersion = 1
 
 [<Literal>]
-let private maximumManifestBytes = 65_536L
-
-[<Literal>]
 let private maximumResponseBytes = 1_048_576L
 
 type private DiscoveryManifest =
@@ -30,9 +27,6 @@ type private DiscoveryManifest =
       HostVersion: string
       ControlApiVersion: int
       StagedExecutableVersion: string option }
-
-type private HostConnection =
-    { Manifest: DiscoveryManifest }
 
 type private TerminalRecord =
     { SessionId: string
@@ -57,27 +51,10 @@ type internal Config =
       ResolveProcessExecutable: int -> int64 -> Result<string, string>
       SendTerminalCommand: string -> string -> Async<Result<unit, string>> }
 
-type internal ReplacementOwnedSession =
-    { TerminalSessionId: SessionActivity.TerminalSessionId
-      CopilotSessionId: SessionActivity.SessionId
-      Status: SessionActivity.SessionLevelStatus }
-
-type internal ReplacementActivitySnapshot =
-    { ActivityEpoch: int64
-      OpenSessions: ReplacementOwnedSession list
-      ResumableSessionIds:
-        Map<SessionActivity.TerminalSessionId, SessionActivity.SessionId> }
-
 type internal ReplacementActivityQuery =
     DateTimeOffset
         -> Set<SessionActivity.TerminalSessionId>
-        -> Result<ReplacementActivitySnapshot, string>
-
-type internal DeploymentPreflight =
-    { HostPid: int
-      HostProcessStartTimeUtcTicks: int64
-      RunningExecutablePath: string
-      TerminalCount: int }
+        -> Result<SessionActivity.OwnedSessionSnapshot, string>
 
 [<RequireQualifiedAccess>]
 type internal ReplacementOutcome =
@@ -89,7 +66,7 @@ type internal ReplacementOutcome =
 
 type private HostDiscovery =
     | MissingHost
-    | HealthyHost of HostConnection
+    | HealthyHost of DiscoveryManifest
     | DeadHost of reason: string
     | UnusableHost of reason: string
 
@@ -109,10 +86,10 @@ type private ReplacementPlan =
 type private HostLaunchOutcome =
     | LaunchRejected of string
     | LaunchStartedButUnhealthy of string
-    | HostLaunched of HostConnection
+    | HostLaunched of DiscoveryManifest
 
 type private ReplacementRecheck =
-    | ReadyToCommit of HostConnection * ReplacementActivitySnapshot
+    | ReadyToCommit of DiscoveryManifest * SessionActivity.OwnedSessionSnapshot
     | RecheckChanged
     | RecheckFailed of string
 
@@ -125,7 +102,6 @@ type private Message =
     | CloseStrict of
         WorktreePath *
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
-    | ShutdownHost of AsyncReplyChannel<Result<unit, string>>
     | TryCommitReplacement of
         ReplacementPlan *
         ReplacementActivityQuery *
@@ -161,7 +137,7 @@ let private validBoundedText maximum (value: string) =
        |> Seq.forall (fun character ->
            not (Char.IsControl character))
 
-let private validVersion (value: string) =
+let private validVersion allowBuildMetadata (value: string) =
     validBoundedText 128 value
     && value
        |> Seq.forall (fun character ->
@@ -169,16 +145,7 @@ let private validVersion (value: string) =
            || character = '.'
            || character = '-'
            || character = '_'
-           || character = '+')
-
-let private validStagedVersion (value: string) =
-    validBoundedText 128 value
-    && value
-       |> Seq.forall (fun character ->
-           Char.IsAsciiLetterOrDigit character
-           || character = '.'
-           || character = '-'
-           || character = '_')
+           || (allowBuildMetadata && character = '+'))
 
 let private validBearerToken (value: string) =
     value.Length >= 32
@@ -252,12 +219,8 @@ let private parseManifest (text: string) =
 
         let required =
             set
-                [ "pid"
-                  "processStartTimeUtcTicks"
-                  "endpoint"
-                  "bearerToken"
-                  "hostVersion"
-                  "controlApiVersion" ]
+                [ "pid"; "processStartTimeUtcTicks"; "endpoint"
+                  "bearerToken"; "hostVersion"; "controlApiVersion" ]
 
         let optional = set [ "stagedExecutableVersion" ]
 
@@ -282,11 +245,16 @@ let private parseManifest (text: string) =
                     Error "TerminalHost discovery manifest has an invalid control endpoint"
                 elif bearerToken |> Option.ofObj |> Option.exists validBearerToken |> not then
                     Error "TerminalHost discovery manifest has an invalid bearer token"
-                elif hostVersion |> Option.ofObj |> Option.exists validVersion |> not then
+                elif
+                    hostVersion
+                    |> Option.ofObj
+                    |> Option.exists (validVersion true)
+                    |> not
+                then
                     Error "TerminalHost discovery manifest has an invalid host version"
                 elif
                     stagedVersion
-                    |> Option.exists (validStagedVersion >> not)
+                    |> Option.exists (validVersion false >> not)
                 then
                     Error "TerminalHost discovery manifest has an invalid staged executable version"
                 else
@@ -318,7 +286,7 @@ let private readManifest config =
             Ok None
         elif
             info.Length <= 0L
-            || info.Length > maximumManifestBytes
+            || info.Length > 65_536L
             || (info.Attributes &&& FileAttributes.ReparsePoint) <> enum 0
         then
             Error "TerminalHost discovery manifest is invalid"
@@ -420,7 +388,7 @@ let private responseError statusCode (reasonPhrase: string) (content: string) =
 
 let private request
     (config: Config)
-    (connection: HostConnection)
+    (manifest: DiscoveryManifest)
     (method: HttpMethod)
     (path: string)
     (body: string option)
@@ -430,13 +398,13 @@ let private request
             use timeout =
                 new CancellationTokenSource(config.ControlRequestTimeout)
 
-            let endpoint = Uri(connection.Manifest.Endpoint)
+            let endpoint = Uri(manifest.Endpoint)
             use message = new HttpRequestMessage(method, Uri(endpoint, path))
 
             message.Headers.Authorization <-
                 AuthenticationHeaderValue(
                     "Bearer",
-                    connection.Manifest.BearerToken
+                    manifest.BearerToken
                 )
 
             body
@@ -491,10 +459,8 @@ let private parseHealth (manifest: DiscoveryManifest) (text: string) =
 
         let fields =
             set
-                [ "pid"
-                  "processStartTimeUtcTicks"
-                  "hostVersion"
-                  "controlApiVersion" ]
+                [ "pid"; "processStartTimeUtcTicks"
+                  "hostVersion"; "controlApiVersion" ]
 
         if not (exactProperties fields Set.empty root) then
             Error "TerminalHost health response has an invalid shape"
@@ -526,14 +492,12 @@ let private parseHealth (manifest: DiscoveryManifest) (text: string) =
 
 let private probe config manifest =
     async {
-        let connection = { Manifest = manifest }
-
-        match! request config connection HttpMethod.Get "/api/v1/health" None with
+        match! request config manifest HttpMethod.Get "/api/v1/health" None with
         | Error error -> return Error error
         | Ok content ->
             return
                 parseHealth manifest content
-                |> Result.map (fun () -> connection)
+                |> Result.map (fun () -> manifest)
     }
 
 let private discoverHost config =
@@ -633,17 +597,6 @@ let private parseTerminal manifest (element: JsonElement) =
         | :? InvalidOperationException ->
             Error "TerminalHost terminal record is malformed"
 
-let private sequenceResults results =
-    let folder state result =
-        match state, result with
-        | Error error, _ -> Error error
-        | Ok _, Error error -> Error error
-        | Ok values, Ok value -> Ok(value :: values)
-
-    results
-    |> List.fold folder (Ok [])
-    |> Result.map List.rev
-
 let private parseRegistrySnapshot (manifest: DiscoveryManifest) (text: string) =
     try
         use document = JsonDocument.Parse(text)
@@ -664,9 +617,8 @@ let private parseRegistrySnapshot (manifest: DiscoveryManifest) (text: string) =
             else
                 match
                     terminalsElement.EnumerateArray()
-                    |> Seq.map (parseTerminal manifest)
                     |> Seq.toList
-                    |> sequenceResults
+                    |> List.traverseResultM (parseTerminal manifest)
                 with
                 | Error error -> Error error
                 | Ok terminals ->
@@ -696,19 +648,19 @@ let private parseRegistrySnapshot (manifest: DiscoveryManifest) (text: string) =
     | :? OverflowException ->
         Error "TerminalHost registry response is malformed"
 
-let private listTerminals config connection =
+let private listTerminals config manifest =
     async {
         match!
             request
                 config
-                connection
+                manifest
                 HttpMethod.Get
                 "/api/v1/terminals"
                 None
         with
         | Error error -> return Error error
         | Ok content ->
-            return parseRegistrySnapshot connection.Manifest content
+            return parseRegistrySnapshot manifest content
     }
 
 let private launchDetached (startInfo: ProcessStartInfo) =
@@ -797,22 +749,19 @@ let private defaultStateDirectory () =
 
     let root =
         if String.IsNullOrWhiteSpace localApplicationData then
-            Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".treemon"
-            )
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".treemon")
         else
             Path.Combine(localApplicationData, "Treemon")
 
     Path.Combine(root, "TerminalHost")
 
-let private defaultHostExecutable () =
-    let executableName =
-        if OperatingSystem.IsWindows() then
-            "TerminalHost.exe"
-        else
-            "TerminalHost"
+let private hostExecutableName =
+    if OperatingSystem.IsWindows() then
+        "TerminalHost.exe"
+    else
+        "TerminalHost"
 
+let private defaultHostExecutable () =
     match
         Environment.GetEnvironmentVariable("TREEMON_TERMINAL_HOST_EXECUTABLE")
         |> Option.ofObj
@@ -820,36 +769,14 @@ let private defaultHostExecutable () =
     with
     | Some configured -> Path.GetFullPath configured
     | None ->
-        [ Path.Combine(AppContext.BaseDirectory, "terminal-host", executableName)
-          Path.Combine(AppContext.BaseDirectory, executableName)
-          Path.Combine(
-              __SOURCE_DIRECTORY__,
-              "..",
-              "TerminalHost",
-              "bin",
-              "Debug",
-              "net10.0",
-              executableName
-          )
-          Path.Combine(
-              __SOURCE_DIRECTORY__,
-              "..",
-              "TerminalHost",
-              "bin",
-              "Release",
-              "net10.0",
-              executableName
-          ) ]
+        [ Path.Combine(AppContext.BaseDirectory, "terminal-host", hostExecutableName)
+          Path.Combine(AppContext.BaseDirectory, hostExecutableName)
+          Path.Combine([| __SOURCE_DIRECTORY__; ".."; "TerminalHost"; "bin"; "Debug"; "net10.0"; hostExecutableName |])
+          Path.Combine([| __SOURCE_DIRECTORY__; ".."; "TerminalHost"; "bin"; "Release"; "net10.0"; hostExecutableName |]) ]
         |> List.map Path.GetFullPath
         |> List.tryFind File.Exists
         |> Option.defaultWith (fun () ->
-            Path.Combine(AppContext.BaseDirectory, "terminal-host", executableName))
-
-let private distinctOrigins (origins: string list) =
-    origins
-    |> List.fold (fun seen origin -> Map.add (origin.ToUpperInvariant()) origin seen) Map.empty
-    |> Map.values
-    |> Seq.toList
+            Path.Combine(AppContext.BaseDirectory, "terminal-host", hostExecutableName))
 
 let private originsFor (serverOrigin: string) =
     try
@@ -863,7 +790,7 @@ let private originsFor (serverOrigin: string) =
           if port = 5001 then
               "http://localhost:5174"
               "http://127.0.0.1:5174" ]
-        |> distinctOrigins
+        |> List.distinctBy _.ToUpperInvariant()
     with _ ->
         [ serverOrigin ]
 
@@ -909,20 +836,20 @@ let internal preflightDeployment () =
         | MissingHost
         | DeadHost _ -> return Ok None
         | UnusableHost error -> return Error error
-        | HealthyHost connection ->
+        | HealthyHost manifest ->
             return!
                 asyncResult {
-                    let! registry = listTerminals config connection
+                    let! registry = listTerminals config manifest
                     let! executablePath =
-                        resolveProcessExecutable config connection.Manifest
+                        resolveProcessExecutable config manifest
 
                     return
                         Some
-                            { HostPid = connection.Manifest.Pid
-                              HostProcessStartTimeUtcTicks =
-                                connection.Manifest.ProcessStartTimeUtcTicks
-                              RunningExecutablePath = executablePath
-                              TerminalCount = registry.Terminals.Length }
+                            {| HostPid = manifest.Pid
+                               HostProcessStartTimeUtcTicks =
+                                manifest.ProcessStartTimeUtcTicks
+                               RunningExecutablePath = executablePath
+                               TerminalCount = registry.Terminals.Length |}
                 }
     }
 
@@ -942,10 +869,7 @@ let private hostStartInfo config =
             CreateNoWindow = true
         )
 
-    [ "--state-dir"
-      config.HostStateDirectory
-      "--shell"
-      config.ShellCommand
+    [ "--state-dir"; config.HostStateDirectory; "--shell"; config.ShellCommand
       match config.TtydExecutablePath with
       | Some path ->
           "--ttyd"
@@ -1100,21 +1024,21 @@ let private reconcileSnapshot previousHost currentHost records snapshot =
 
 let private applyRegistry
     (state: ManagerState)
-    (connection: HostConnection)
+    (manifest: DiscoveryManifest)
     (registry: RegistrySnapshot)
     =
     { LastSnapshot =
         reconcileSnapshot
             state.LastHost
-            connection.Manifest
+            manifest
             registry.Terminals
             state.LastSnapshot
-      LastHost = Some connection.Manifest }
+      LastHost = Some manifest }
 
 let private applyRegistryAfterClose
     path
     (state: ManagerState)
-    (connection: HostConnection)
+    (manifest: DiscoveryManifest)
     (registry: RegistrySnapshot)
     =
     let withoutClosed =
@@ -1123,10 +1047,10 @@ let private applyRegistryAfterClose
     { LastSnapshot =
         reconcileSnapshot
             state.LastHost
-            connection.Manifest
+            manifest
             registry.Terminals
             withoutClosed
-      LastHost = Some connection.Manifest }
+      LastHost = Some manifest }
 
 let private withHostFailure error state =
     { state with
@@ -1157,7 +1081,7 @@ let private getTerminals config state =
 
 let private startTerminalOnHost
     (config: Config)
-    (connection: HostConnection)
+    (manifest: DiscoveryManifest)
     (path: string)
     =
     async {
@@ -1169,12 +1093,12 @@ let private startTerminalOnHost
         let! startResult =
             request
                 config
-                connection
+                manifest
                 HttpMethod.Post
                 "/api/v1/terminals"
                 (Some body)
 
-        match! listTerminals config connection with
+        match! listTerminals config manifest with
         | Error listError ->
             return
                 Error(
@@ -1329,50 +1253,6 @@ let private closeTerminal config state worktreePath =
                 return next, Ok next.LastSnapshot
     }
 
-let private shutdown config state =
-    async {
-        match! discoverHost config with
-        | MissingHost
-        | DeadHost _ ->
-            return state, Ok()
-        | UnusableHost error ->
-            return withHostFailure error state, Error error
-        | HealthyHost connection ->
-            match!
-                request
-                    config
-                    connection
-                    HttpMethod.Post
-                    "/api/v1/shutdown"
-                    None
-            with
-            | Error error ->
-                match processIdentityMatches config connection.Manifest with
-                | Ok false ->
-                    let next =
-                        withHostFailure
-                            "TerminalHost stopped; its terminals were interrupted."
-                            state
-
-                    return next, Ok()
-                | Ok true
-                | Error _ ->
-                    return withHostFailure error state, Error error
-            | Ok _ ->
-                let next =
-                    withHostFailure
-                        "TerminalHost was shut down; its terminals were interrupted."
-                        state
-
-                return next, Ok()
-    }
-
-let private hostExecutableName =
-    if OperatingSystem.IsWindows() then
-        "TerminalHost.exe"
-    else
-        "TerminalHost"
-
 let private stagedExecutablePath config version =
     try
         let stagingRoot =
@@ -1400,7 +1280,7 @@ let private stagedExecutablePath config version =
         let executableInfo = FileInfo executable
 
         if
-            not (validStagedVersion version)
+            not (validVersion false version)
             || directory.Name <> version
             || not hasExactParent
         then
@@ -1422,7 +1302,7 @@ let private stagedExecutablePath config version =
         Error $"Could not validate the staged TerminalHost executable: {error.Message}"
 
 let private hasNonIdleOwnedSession
-    (snapshot: ReplacementActivitySnapshot)
+    (snapshot: SessionActivity.OwnedSessionSnapshot)
     =
     snapshot.OpenSessions
     |> List.exists (fun session ->
@@ -1431,17 +1311,15 @@ let private hasNonIdleOwnedSession
         | SessionActivity.SessionLevelStatus.WaitingForUser -> true
         | SessionActivity.SessionLevelStatus.Idle -> false)
 
-let private terminalSessionIds (terminals: TerminalRecord list) =
-    terminals
-    |> List.map (_.SessionId >> SessionActivity.TerminalSessionId)
-    |> Set.ofList
-
 let private queryReplacementActivity
     (query: ReplacementActivityQuery)
     (terminals: TerminalRecord list)
-    : Result<ReplacementActivitySnapshot, string> =
+    : Result<SessionActivity.OwnedSessionSnapshot, string> =
     try
-        query DateTimeOffset.UtcNow (terminalSessionIds terminals)
+        terminals
+        |> List.map (_.SessionId >> SessionActivity.TerminalSessionId)
+        |> Set.ofList
+        |> query DateTimeOffset.UtcNow
     with error ->
         Error $"Could not query terminal-owned Copilot activity: {error.Message}"
 
@@ -1474,7 +1352,7 @@ let private shutdownAndWait config connection =
                 "/api/v1/shutdown"
                 None
 
-        match! waitForHostExit config connection.Manifest with
+        match! waitForHostExit config connection with
         | Ok() -> return Ok()
         | Error waitError ->
             return
@@ -1516,7 +1394,7 @@ let private launchHostAt config =
 
 let private recreateTerminals
     (config: Config)
-    (connection: HostConnection)
+    (connection: DiscoveryManifest)
     (terminals: TerminalRecord list)
     (resumableSessionIds:
         Map<SessionActivity.TerminalSessionId, SessionActivity.SessionId>)
@@ -1604,7 +1482,7 @@ let private recoverOldHost
             let recover =
                 asyncResult {
                     let! executablePath =
-                        resolveProcessExecutable config connection.Manifest
+                        resolveProcessExecutable config connection
                         |> Result.mapError (fun error ->
                             $"The restarted previous host could not be verified: {error}")
 
@@ -1644,8 +1522,8 @@ let private recheckReplacement
     async {
         match! discoverHost config with
         | HealthyHost connection
-            when hostIdentityMatches connection.Manifest plan.OldHost
-                 && connection.Manifest.StagedExecutableVersion = Some plan.StagedVersion ->
+            when hostIdentityMatches connection plan.OldHost
+                 && connection.StagedExecutableVersion = Some plan.StagedVersion ->
             match! listTerminals config connection with
             | Error error ->
                 return
@@ -1663,7 +1541,7 @@ let private recheckReplacement
                          || hasNonIdleOwnedSession activity ->
                     return RecheckChanged
                 | Ok activity ->
-                    match resolveProcessExecutable config connection.Manifest with
+                    match resolveProcessExecutable config connection with
                     | Error error -> return RecheckFailed error
                     | Ok executablePath
                         when samePath executablePath plan.OldExecutablePath ->
@@ -1724,7 +1602,7 @@ let private commitReplacement
                         let activate =
                             asyncResult {
                                 let! executablePath =
-                                    resolveProcessExecutable config replacement.Manifest
+                                    resolveProcessExecutable config replacement
                                     |> Result.mapError (fun error ->
                                         $"The staged host identity could not be verified: {error}")
 
@@ -1815,10 +1693,6 @@ let internal createWithConfig config =
 
                         reply.Reply outcome
                         return! loop next
-                    | ShutdownHost reply ->
-                        let! next, result = shutdown config state
-                        reply.Reply result
-                        return! loop next
                 }
 
             loop
@@ -1840,7 +1714,7 @@ let private tryReplaceHostIgnoring
     async {
         match! discoverHost config with
         | HealthyHost connection ->
-            match connection.Manifest.StagedExecutableVersion with
+            match connection.StagedExecutableVersion with
             | None -> return ReplacementOutcome.NoCandidate
             | Some stagedVersion when ignoredStagedVersion = Some stagedVersion ->
                 return ReplacementOutcome.NoCandidate
@@ -1851,7 +1725,7 @@ let private tryReplaceHostIgnoring
                             stagedExecutablePath config stagedVersion
 
                         let! oldExecutable =
-                            resolveProcessExecutable config connection.Manifest
+                            resolveProcessExecutable config connection
 
                         return stagedExecutable, oldExecutable
                     }
@@ -1877,7 +1751,7 @@ let private tryReplaceHostIgnoring
                             return ReplacementOutcome.WaitingForIdle
                         | Ok activity ->
                             let plan: ReplacementPlan =
-                                { OldHost = connection.Manifest
+                                { OldHost = connection
                                   OldExecutablePath = oldExecutable
                                   StagedVersion = stagedVersion
                                   StagedExecutablePath = stagedExecutable
@@ -1990,6 +1864,3 @@ let internal closeStrict (Manager(_, agent)) worktreePath =
         (fun reply -> CloseStrict(worktreePath, reply)),
         timeout = 60_000
     )
-
-let internal shutdownHost (Manager(_, agent)) =
-    agent.PostAndAsyncReply(ShutdownHost, timeout = 60_000)

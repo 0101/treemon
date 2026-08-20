@@ -13,11 +13,15 @@ type TerminalLaunchConfig =
 
 [<RequireQualifiedAccess>]
 module TerminalLauncher =
-    let private freeLoopbackPort () =
+    let rec private freeLoopbackPort () =
         use listener = new TcpListener(IPAddress.Loopback, 0)
         listener.Start()
         let endpoint = listener.LocalEndpoint :?> IPEndPoint
-        endpoint.Port
+
+        if endpoint.Port = 5000 then
+            freeLoopbackPort ()
+        else
+            endpoint.Port
 
     let internal startSpecification config sessionId worktree port =
         let path = CanonicalWorktree.path worktree
@@ -28,23 +32,10 @@ module TerminalLauncher =
             [ "TREEMON_TERMINAL_SESSION_ID", sessionId
               "TREEMON_TERMINAL_WORKTREE", path ]
           Arguments =
-            [ "-p"
-              string port
-              "-i"
-              "127.0.0.1"
-              "-W"
-              "-O"
-              "-o"
-              "-t"
-              "fontSize=16"
-              "-t"
-              "disableLeaveAlert=true"
-              "-w"
-              path
-              config.ShellCommand
-              "-WorkingDirectory"
-              "."
-              "-NoExit" ] }
+            [ "-p"; string port; "-i"; "127.0.0.1"; "-W"; "-O"; "-o"
+              "-t"; "fontSize=16"; "-t"; "disableLeaveAlert=true"
+              "-w"; path; config.ShellCommand; "-WorkingDirectory"; "."; "-NoExit"; "-Command"
+              "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE" ] }
 
     let private canConnect port =
         task {

@@ -41,7 +41,7 @@ jobs:
       - name: Test .NET
         run: dotnet test src/Tests/Tests.fsproj --filter "Category!=Local" --no-build --verbosity normal
 
-  durable-terminal-windows:
+  terminal-windows:
     runs-on: windows-latest
 
     steps:
@@ -72,20 +72,17 @@ jobs:
       - name: Build Release
         run: dotnet build treemon.slnx --configuration Release
 
-      - name: Test durable Node runtime
-        run: npm run test:durable-terminal-host && npm run test:durable-terminal-observation && npm run test:durable-terminal-verifier-env && npm run test:ttyd-runtime-unit
+      - name: Test ttyd verifier
+        run: npm run test:ttyd-runtime-unit
 
-      - name: Test durable F# runtime
+      - name: Test terminal runtime
         run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=Unit&FullyQualifiedName~EmbeddedTerminal" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "TestCategory=TerminalHost" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "FullyQualifiedName~WorktreePathResolutionTests" --verbosity normal
 
       - name: Test Treemon deployment preflight
         run: npm run test:treemon-deployment
 
-      - name: Test previous-binary rollback
-        run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=DurableRollback" --verbosity normal
-
       - name: Publish runtime layout
         run: dotnet publish src/Server/Server.fsproj --configuration Release --no-build --output .agents/ci-publish
 
-      - name: Verify isolated durable runtime
-        run: npm run test:ttyd-runtime && npm run test:durable-terminal-runtime && npm run test:durable-terminal-treemon
+      - name: Verify pinned ttyd runtime
+        run: npm run test:ttyd-runtime

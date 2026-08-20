@@ -284,16 +284,6 @@ let internal retentionPeriod = TimeSpan.FromDays 60.0
 /// How often the retention timer fires.
 let internal pruneInterval = TimeSpan.FromHours 1.0
 
-type OwnedSessionState =
-    { TerminalSessionId: TerminalSessionId
-      CopilotSessionId: SessionId
-      Status: SessionLevelStatus }
-
-type OwnedSessionSnapshot =
-    { ActivityEpoch: int64
-      OpenSessions: OwnedSessionState list
-      ResumableSessionIds: Map<TerminalSessionId, SessionId> }
-
 let internal joinOwnedSessions
     (terminalSessionIds: Set<TerminalSessionId>)
     (sessions: StoredStatus seq)

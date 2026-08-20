@@ -145,6 +145,9 @@ Windows process creation uses `CREATE_SUSPENDED`, immediate `AssignProcessToJobO
 host loss and explicit close have the same exact ownership boundary. No supervisor script or
 descendant enumeration participates.
 
+PowerShell explicitly sets its location from `TREEMON_TERMINAL_WORKTREE` at startup because ttyd's
+Windows working-directory option alone does not establish the child shell's location.
+
 The host serves the small control API and the terminal attachment proxy on authenticated loopback
 endpoints. Control DTOs and limits are versioned. Path canonicalization, known-worktree validation,
 endpoint validation, request-size bounds, bearer authentication, and exact `Host`/`Origin` checks

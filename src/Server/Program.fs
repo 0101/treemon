@@ -448,23 +448,6 @@ let main args =
     let sessionActivityService =
         activityRuntime |> Option.map _.Components.Service
 
-    let replacementActivityQuery
-        (service: SessionActivityService.SessionActivityService)
-        now
-        terminalSessionIds
-        : Result<EmbeddedTerminal.ReplacementActivitySnapshot, string> =
-        service.QueryOwnedSessions(now, terminalSessionIds)
-        |> Result.map (fun snapshot ->
-            { ActivityEpoch = snapshot.ActivityEpoch
-              OpenSessions =
-                snapshot.OpenSessions
-                |> List.map (fun session ->
-                    { TerminalSessionId = session.TerminalSessionId
-                      CopilotSessionId = session.CopilotSessionId
-                      Status = session.Status }
-                    : EmbeddedTerminal.ReplacementOwnedSession)
-              ResumableSessionIds = snapshot.ResumableSessionIds })
-
     let capture =
         activityRuntime
         |> Option.map _.Capture.Run
@@ -521,7 +504,8 @@ let main args =
             | Some manager, Some service ->
                 EmbeddedTerminal.runReplacementCoordinator
                     manager
-                    (replacementActivityQuery service)
+                    (fun now terminalSessionIds ->
+                        service.QueryOwnedSessions(now, terminalSessionIds))
                 |> BackgroundLoop.start
                 |> Some
             | _ -> None

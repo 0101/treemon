@@ -76,61 +76,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="..\..\scripts\durable-terminal-host.mjs"
-          Link="scripts\durable-terminal-host.mjs"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\scripts\terminal-job-supervisor.ps1"
-          Link="scripts\terminal-job-supervisor.ps1"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\scripts\terminate-owned-process.ps1"
-          Link="scripts\terminate-owned-process.ps1"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\scripts\terminal-runtime-lock.ps1"
-          Link="scripts\terminal-runtime-lock.ps1"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\node_modules\ws\LICENSE"
-          Link="scripts\node_modules\ws\LICENSE"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\node_modules\ws\package.json"
-          Link="scripts\node_modules\ws\package.json"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\node_modules\ws\wrapper.mjs"
-          Link="scripts\node_modules\ws\wrapper.mjs"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\node_modules\ws\lib\*.js"
-          Link="scripts\node_modules\ws\lib\%(Filename)%(Extension)"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\.tools\ttyd\1.7.7\ttyd.exe"
-          Condition="'$(OS)' == 'Windows_NT'"
-          Link="scripts\ttyd.exe"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-    <None Include="..\..\.tools\ttyd\1.7.7\LICENSE.txt"
-          Condition="'$(OS)' == 'Windows_NT'"
-          Link="scripts\ttyd-LICENSE.txt"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest" />
-  </ItemGroup>
-
-  <Target Name="ValidateDurableTerminalRuntimeDependencies"
-          BeforeTargets="Build;Publish">
-    <Error Condition="!Exists('..\..\node_modules\ws\wrapper.mjs')"
-           Text="The locked ws runtime is missing. Run npm install before building Treemon." />
-    <Error Condition="!Exists('..\..\scripts\terminal-runtime-lock.ps1')"
-           Text="The durable terminal runtime lock helper is missing." />
-    <Error Condition="'$(OS)' == 'Windows_NT' and !Exists('..\..\.tools\ttyd\1.7.7\ttyd.exe')"
-           Text="The pinned ttyd runtime is missing. Run .\treemon.ps1 setup-ttyd before building Treemon." />
-  </Target>
-
-  <ItemGroup>
     <!-- Single source of truth for the Beadspace dashboard HTML. Embedded so the
          runtime (BeadspaceTemplate.fs) reads the same definition the E2E tests load
          from disk; the two cannot drift. -->

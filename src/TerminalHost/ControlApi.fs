@@ -24,15 +24,6 @@ type RunningControlApi =
         { Application: WebApplication
           Endpoint: string }
 
-type HealthResponse =
-    { Pid: int
-      ProcessStartTimeUtcTicks: int64
-      HostVersion: string
-      ControlApiVersion: int }
-
-type ErrorResponse = { Error: string }
-type ShutdownResponse = { Accepted: bool }
-
 [<RequireQualifiedAccess>]
 module ControlApi =
     let private jsonOptions = JsonSerializerOptions(JsonSerializerDefaults.Web)
@@ -52,7 +43,7 @@ module ControlApi =
         }
 
     let private writeError statusCode message context =
-        writeJson statusCode { Error = message } context
+        writeJson statusCode {| Error = message |} context
 
     let private reject rejection context =
         match rejection with
@@ -131,10 +122,10 @@ module ControlApi =
                 return!
                     writeJson
                         StatusCodes.Status200OK
-                        { Pid = hostPid
-                          ProcessStartTimeUtcTicks = processStartTimeUtcTicks
-                          HostVersion = hostVersion
-                          ControlApiVersion = Protocol.ControlApiVersion }
+                        {| Pid = hostPid
+                           ProcessStartTimeUtcTicks = processStartTimeUtcTicks
+                           HostVersion = hostVersion
+                           ControlApiVersion = Protocol.ControlApiVersion |}
                         context
             | "GET", "/api/v1/terminals" ->
                 let! snapshot = TerminalRegistry.list registry |> Async.StartAsTask
@@ -177,7 +168,7 @@ module ControlApi =
                 return!
                     writeJson
                         StatusCodes.Status202Accepted
-                        { Accepted = true }
+                        {| Accepted = true |}
                         context
             | "DELETE", closePath
                 when closePath.StartsWith("/api/v1/terminals/", StringComparison.Ordinal) ->

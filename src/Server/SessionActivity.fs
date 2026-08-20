@@ -92,6 +92,16 @@ type SessionLevelStatus =
     | WaitingForUser
     | Idle
 
+type OwnedSessionState =
+    { TerminalSessionId: TerminalSessionId
+      CopilotSessionId: SessionId
+      Status: SessionLevelStatus }
+
+type OwnedSessionSnapshot =
+    { ActivityEpoch: int64
+      OpenSessions: OwnedSessionState list
+      ResumableSessionIds: Map<TerminalSessionId, SessionId> }
+
 /// Per-tool ordering clocks retained for the lifetime of the server process.
 type BackgroundAgentLifecycle =
     { StartedAt: DateTimeOffset option

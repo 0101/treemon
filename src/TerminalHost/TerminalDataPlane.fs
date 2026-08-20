@@ -155,7 +155,7 @@ module TerminalDataPlane =
 
     let private initializeAttachment upstream state attachment frame =
         async {
-            match TerminalProtocol.parseInitialHandshake frame with
+            match TerminalProtocol.parseHandshakeSize frame with
             | Error error -> return state, Error error
             | Ok terminalSize ->
                 let! replaySent =
@@ -613,11 +613,7 @@ module TerminalDataPlane =
         }
 
     let private copyRequestHeaders (context: HttpContext) (request: HttpRequestMessage) =
-        [ "Accept"
-          "Accept-Language"
-          "If-Modified-Since"
-          "If-None-Match"
-          "Range" ]
+        [ "Accept"; "Accept-Language"; "If-Modified-Since"; "If-None-Match"; "Range" ]
         |> List.iter (fun name ->
             let values = context.Request.Headers[name] |> Seq.toArray
 
@@ -626,19 +622,9 @@ module TerminalDataPlane =
 
     let private hopByHopHeaders =
         set
-            [ "connection"
-              "cache-control"
-              "keep-alive"
-              "pragma"
-              "proxy-authenticate"
-              "proxy-authorization"
-              "referrer-policy"
-              "server"
-              "set-cookie"
-              "te"
-              "trailer"
-              "transfer-encoding"
-              "upgrade" ]
+            [ "connection"; "cache-control"; "keep-alive"; "pragma"
+              "proxy-authenticate"; "proxy-authorization"; "referrer-policy"
+              "server"; "set-cookie"; "te"; "trailer"; "transfer-encoding"; "upgrade" ]
 
     let private copyResponseHeaders
         (response: HttpResponseMessage)

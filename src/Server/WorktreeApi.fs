@@ -586,6 +586,10 @@ let internal deleteWorktreeWith
             do! removeWorktreeState ctx.Worktree.Path
     }
 
+let private closeEmbeddedTerminal embeddedTerminal worktreePath =
+    EmbeddedTerminal.closeStrict embeddedTerminal worktreePath
+    |> AsyncResult.ignore
+
 let private deleteWorktree
     agent
     embeddedTerminal
@@ -602,9 +606,7 @@ let private deleteWorktree
 
     deleteWorktreeWith
         GitWorktree.removeWorktree
-        (fun worktreePath ->
-            EmbeddedTerminal.closeStrict embeddedTerminal worktreePath
-            |> AsyncResult.ignore)
+        (closeEmbeddedTerminal embeddedTerminal)
         removeWorktreeState
         agent
         rootPaths
@@ -872,9 +874,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
               updateArchivedBranchesWith
                   agent
                   rootPaths
-                  (fun worktreePath ->
-                      EmbeddedTerminal.closeStrict embeddedTerminal worktreePath
-                      |> AsyncResult.ignore)
+                  (closeEmbeddedTerminal embeddedTerminal)
                   Set.add
           unarchiveWorktree =
               updateArchivedBranchesWith

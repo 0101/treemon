@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { basename, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { chromium } from "playwright";
-import { createTerminalJobSupervisor } from "./durable-terminal-host.mjs";
 
 const repo = resolve(import.meta.dirname, "..");
 const ttyd = join(repo, ".tools", "ttyd", "1.7.7", "ttyd.exe");
@@ -33,34 +33,151 @@ async function waitForUrl(url) {
   while (Date.now() < deadline) {
     try {
       const response = await fetch(url);
-      if (response.status < 500) return;
+      if (response.ok) return;
     } catch {}
     await delay(100);
   }
-  throw new Error(`Timed out waiting for ${url}`);
+  throw new Error("Timed out waiting for the isolated terminal endpoint");
 }
 
-export async function cleanupRuntimeResources({ supervisor, browser }) {
+async function waitForProcessExit(closed, timeoutMs) {
+  return await new Promise((resolveExit) => {
+    const timeout = setTimeout(() => resolveExit(false), timeoutMs);
+    closed.then(() => {
+      clearTimeout(timeout);
+      resolveExit(true);
+    });
+  });
+}
+
+async function waitForManifest(stateDirectory, child, processError) {
+  const path = join(stateDirectory, "host.json");
+  const deadline = Date.now() + 10_000;
+
+  while (Date.now() < deadline) {
+    if (existsSync(path)) {
+      try {
+        return JSON.parse(readFileSync(path, "utf8"));
+      } catch {}
+    }
+    if (processError.value) {
+      throw processError.value;
+    }
+    if (child.exitCode !== null) {
+      throw new Error(`TerminalHost exited with code ${child.exitCode}`);
+    }
+    await delay(50);
+  }
+
+  throw new Error("Timed out waiting for the isolated TerminalHost manifest");
+}
+
+async function launchTerminalHost(executable, stateDirectory, worktreePath, port) {
+  const child = spawn(
+    executable,
+    [
+      "--port",
+      String(port),
+      "--state-dir",
+      stateDirectory,
+      "--ttyd",
+      ttyd,
+      "--shell",
+      "pwsh",
+    ],
+    {
+      cwd: worktreePath,
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
+  const closed = new Promise((resolveClosed) => child.once("close", resolveClosed));
+  const processError = { value: undefined };
+  let standardError = "";
+
+  child.once("error", (error) => {
+    processError.value = error;
+  });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    standardError = `${standardError}${chunk}`.slice(-4096);
+  });
+
+  try {
+    const manifest = await waitForManifest(stateDirectory, child, processError);
+
+    return {
+      manifest,
+      terminate: async (timeoutMs) => {
+        let shutdownError;
+
+        try {
+          const response = await fetch(
+            new URL("/api/v1/shutdown", manifest.endpoint),
+            {
+              method: "POST",
+              headers: { Authorization: "Bearer " + manifest.bearerToken },
+            },
+          );
+
+          if (!response.ok) {
+            shutdownError = new Error(
+              `TerminalHost shutdown returned HTTP ${response.status}`,
+            );
+          }
+        } catch (error) {
+          shutdownError = error;
+        }
+
+        if (!(await waitForProcessExit(closed, timeoutMs))) {
+          child.kill();
+
+          if (!(await waitForProcessExit(closed, timeoutMs))) {
+            throw new Error("The isolated TerminalHost did not exit");
+          }
+
+          shutdownError ??= new Error(
+            "The isolated TerminalHost did not stop through its control API",
+          );
+        }
+
+        if (shutdownError) throw shutdownError;
+      },
+    };
+  } catch (error) {
+    child.kill();
+    const stopped = await waitForProcessExit(closed, 10_000);
+    const detail = standardError.trim();
+    const cleanupDetail = stopped ? "" : "; the isolated TerminalHost did not exit";
+    throw new Error(
+      detail
+        ? `Could not start the isolated TerminalHost: ${error.message}; ${detail}${cleanupDetail}`
+        : `Could not start the isolated TerminalHost: ${error.message}${cleanupDetail}`,
+    );
+  }
+}
+
+export async function cleanupRuntimeResources({ host, browser }) {
   let browserError;
-  let processError;
+  let hostError;
   try {
     if (browser) await browser.close();
   } catch (error) {
     browserError = error;
   }
   try {
-    if (supervisor) await supervisor.terminate(10_000);
+    if (host) await host.terminate(10_000);
   } catch (error) {
-    processError = error;
+    hostError = error;
   }
 
-  if (browserError && processError) {
+  if (browserError && hostError) {
     throw new Error(
-      `Browser cleanup failed: ${browserError.message}; process cleanup failed: ${processError.message}`,
+      `Browser cleanup failed: ${browserError.message}; host cleanup failed: ${hostError.message}`,
     );
   }
   if (browserError) throw browserError;
-  if (processError) throw processError;
+  if (hostError) throw hostError;
 }
 
 function terminalText() {
@@ -78,61 +195,91 @@ export async function runTtydRuntimeVerification() {
     "ttyd-runtime-verification",
     randomUUID(),
   );
-  let supervisor;
+  let host;
   let browser;
 
   try {
+    assert(process.platform === "win32", "The pinned ttyd runtime requires Windows");
     assert(existsSync(ttyd), `Missing ${ttyd}. Run '.\\treemon.ps1 setup-ttyd'.`);
     mkdirSync(fixture, { recursive: true });
-    const port = await freePort();
-    assert(port !== 5000, "Runtime check selected production port 5000");
-
-    const script = "Set-Location -LiteralPath $env:TREEMON_TERMINAL_WORKTREE";
-    const shellArgs = [
-      "pwsh",
-      "-WorkingDirectory",
-      ".",
-      "-NoExit",
-      "-Command",
-      script,
-    ];
+    const initialized = spawnSync("git", ["-C", fixture, "init", "--quiet"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
     assert(
-      Buffer.byteLength(shellArgs.join(" "), "utf8") < 256,
-      "ttyd child command exceeds the stock 1.7.7 Windows buffer",
+      initialized.status === 0,
+      `Could not initialize the isolated worktree: ${initialized.stderr}`,
     );
 
-    supervisor = createTerminalJobSupervisor();
-    const sessionId = randomUUID();
-    const ownership = await supervisor.start({
-      sessionId,
-      generation: "ttyd-runtime-verification",
-      worktreePath: fixture,
-      witnessRoot: fixture,
-      witnessPath: join(fixture, `${sessionId}.json`),
-      witnessNonce: randomUUID().replaceAll("-", ""),
-      fileName: ttyd,
-      argumentsList: [
-        "-p",
-        String(port),
-        "-i",
-        "127.0.0.1",
-        "-W",
-        "-O",
-        "-w",
-        fixture,
-        ...shellArgs,
-      ],
-      workingDirectory: fixture,
-      environment: {
-        TREEMON_TERMINAL_WORKTREE: fixture,
+    const hostExecutable = [
+      join(repo, ".agents", "ci-publish", "terminal-host", "TerminalHost.exe"),
+      join(
+        repo,
+        "src",
+        "TerminalHost",
+        "bin",
+        "Release",
+        "net10.0",
+        "TerminalHost.exe",
+      ),
+      join(
+        repo,
+        "src",
+        "TerminalHost",
+        "bin",
+        "Debug",
+        "net10.0",
+        "TerminalHost.exe",
+      ),
+    ].find(existsSync);
+    assert(
+      hostExecutable,
+      "Missing TerminalHost.exe. Run 'dotnet build treemon.slnx --configuration Release'.",
+    );
+
+    const controlPort = await freePort();
+    assert(controlPort !== 5000, "Runtime check selected production port 5000");
+    const stateDirectory = join(fixture, "terminal-host-state");
+    host = await launchTerminalHost(
+      hostExecutable,
+      stateDirectory,
+      fixture,
+      controlPort,
+    );
+    assert(
+      new URL(host.manifest.endpoint).port !== "5000",
+      "TerminalHost bound production port 5000",
+    );
+
+    const response = await fetch(
+      new URL("/api/v1/terminals", host.manifest.endpoint),
+      {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + host.manifest.bearerToken,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ worktreePath: fixture }),
       },
-      timeoutMs: 10_000,
-    });
-    await waitForUrl(`http://127.0.0.1:${port}/`);
+    );
+    if (!response.ok) {
+      throw new Error(
+        `TerminalHost start returned HTTP ${response.status}: ${await response.text()}`,
+      );
+    }
+    const snapshot = await response.json();
+    assert(snapshot.terminals.length === 1, "TerminalHost did not start one terminal");
+    const terminal = snapshot.terminals[0];
+    assert(
+      new URL(terminal.attachmentEndpoint).port !== "5000",
+      "ttyd bound production port 5000",
+    );
+
+    await waitForUrl(terminal.attachmentEndpoint);
 
     browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
-    await page.goto(`http://127.0.0.1:${port}/`);
+    await page.goto(terminal.attachmentEndpoint);
     await page.waitForFunction(
       () => Boolean(window.term && document.querySelector(".xterm-helper-textarea")),
     );
@@ -163,12 +310,20 @@ export async function runTtydRuntimeVerification() {
       text.includes(basename(fixture)),
       `Terminal cwd was not ${fixture}: ${text}`,
     );
-    assert(!supervisor.exited, "Terminal Job Object supervisor exited early");
-    console.log(`PASS: stock ttyd ${ownership.ttydPid} accepted input in ${fixture}`);
+    console.log(
+      `PASS: stock ttyd accepted input through TerminalHost session ${terminal.sessionId} in ${fixture}`,
+    );
+  } catch (error) {
+    const bearerToken = host?.manifest?.bearerToken;
+    const message = error instanceof Error ? error.message : String(error);
+
+    throw new Error(
+      bearerToken ? message.replaceAll(bearerToken, "[redacted]") : message,
+    );
   } finally {
     let cleanupError;
     try {
-      await cleanupRuntimeResources({ supervisor, browser });
+      await cleanupRuntimeResources({ host, browser });
     } catch (error) {
       cleanupError = error;
     }
