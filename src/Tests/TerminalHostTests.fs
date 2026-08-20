@@ -55,6 +55,13 @@ let private requireOk result =
         Assert.Fail(error)
         Unchecked.defaultof<_>
 
+let private requireSome message value =
+    match value with
+    | Some result -> result
+    | None ->
+        Assert.Fail(message)
+        Unchecked.defaultof<_>
+
 let private executableOnPath name =
     Environment.GetEnvironmentVariable("PATH")
     |> Option.ofObj
@@ -76,6 +83,91 @@ let private terminalIds (document: JsonDocument) =
     |> Seq.map (fun terminal -> terminal.GetProperty("sessionId").GetString())
     |> Seq.choose Option.ofObj
     |> Seq.toList
+
+let private terminalEndpoints (document: JsonDocument) =
+    document.RootElement.GetProperty("terminals").EnumerateArray()
+    |> Seq.map (fun terminal ->
+        terminal.GetProperty("attachmentEndpoint").GetString())
+    |> Seq.choose Option.ofObj
+    |> Seq.toList
+
+type private TestWebSocket() =
+    inherit System.Net.WebSockets.WebSocket()
+
+    let sent = ConcurrentQueue<byte array>()
+
+    let receiveCompletion =
+        TaskCompletionSource<System.Net.WebSockets.WebSocketReceiveResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        )
+
+    // WebSocket is an inherently stateful test boundary; mutation is confined to this fake.
+    let mutable state = System.Net.WebSockets.WebSocketState.Open
+    let mutable closeStatus = Nullable<System.Net.WebSockets.WebSocketCloseStatus>()
+    let mutable closeDescription: string option = None
+
+    let completeReceive status description =
+        receiveCompletion.TrySetResult(
+            System.Net.WebSockets.WebSocketReceiveResult(
+                0,
+                System.Net.WebSockets.WebSocketMessageType.Close,
+                true,
+                Nullable status,
+                description
+            )
+        )
+        |> ignore
+
+    let close status description =
+        closeStatus <- Nullable status
+        closeDescription <- Some description
+        state <- System.Net.WebSockets.WebSocketState.CloseSent
+        completeReceive status description
+        Task.CompletedTask
+
+    member _.Sent = sent.ToArray() |> Array.toList
+    member _.CloseDescription = closeDescription
+
+    override _.Abort() =
+        state <- System.Net.WebSockets.WebSocketState.Aborted
+
+        completeReceive
+            System.Net.WebSockets.WebSocketCloseStatus.EndpointUnavailable
+            "aborted"
+
+    override _.CloseAsync(status, description, _) =
+        close status description
+
+    override _.CloseOutputAsync(status, description, _) =
+        close status description
+
+    override _.CloseStatus = closeStatus
+    override _.CloseStatusDescription = closeDescription |> Option.toObj
+
+    override _.Dispose() =
+        state <- System.Net.WebSockets.WebSocketState.Closed
+
+        completeReceive
+            System.Net.WebSockets.WebSocketCloseStatus.NormalClosure
+            "disposed"
+
+    override _.ReceiveAsync(
+        _: ArraySegment<byte>,
+        _: CancellationToken
+    ) : Task<System.Net.WebSockets.WebSocketReceiveResult> =
+        receiveCompletion.Task
+
+    override _.SendAsync(
+        buffer: ArraySegment<byte>,
+        _: System.Net.WebSockets.WebSocketMessageType,
+        _: bool,
+        _: CancellationToken
+    ) : Task =
+        sent.Enqueue(buffer.ToArray())
+        Task.CompletedTask
+
+    override _.State = state
+    override _.SubProtocol = "tty"
 
 type private ApiFixture() =
     let root = uniquePath "terminal-host-api"
@@ -101,7 +193,21 @@ type private ApiFixture() =
                       Close = fun () -> closes.Enqueue sessionId }
         }
 
-    let registry = TerminalRegistry.create starter
+    let dataPlaneStarter sessionId _ =
+        async {
+            return
+                Ok
+                    { AttachmentEndpoint =
+                        $"http://127.0.0.1:41000/_treemon/{sessionId}/{token}/"
+                      AttachSocket = fun _ -> async.Return None
+                      AcceptBrowserFrame = fun _ _ -> async.Return(Ok())
+                      DetachSocket = fun _ -> async.Return()
+                      AcceptUpstreamFrame = fun _ -> async.Return()
+                      UpstreamEnded = fun () -> async.Return()
+                      Stop = fun () -> async.Return() }
+        }
+
+    let registry = TerminalRegistry.create starter dataPlaneStarter
 
     let running =
         ControlApi.start
@@ -189,6 +295,12 @@ type TerminalHostControlApiTests() =
             Assert.Multiple(fun () ->
                 Assert.That(reused.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                 Assert.That(terminalIds reusedDocument, Is.EqualTo([ sessionId ]))
+                Assert.That(
+                    terminalEndpoints reusedDocument,
+                    Is.EqualTo(
+                        [ $"http://127.0.0.1:41000/_treemon/{sessionId}/{fixture.Token}/" ]
+                    )
+                )
                 Assert.That(fixture.StartCount, Is.EqualTo(1)))
 
             use! listed = fixture.Client.GetAsync("/api/v1/terminals")
@@ -287,6 +399,257 @@ type TerminalHostControlApiTests() =
             Assert.That(completed, Is.SameAs(shutdown))
         }
         :> Task
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<Category("TerminalHost")>]
+type TerminalHostDataPlaneTests() =
+    let frame (value: string) = Encoding.UTF8.GetBytes value
+
+    [<Test>]
+    member _.``one upstream survives browser replacement and attachment loss``() =
+        let starts = ConcurrentQueue<string>()
+        let closes = ConcurrentQueue<string>()
+        let planes = ConcurrentQueue<TerminalDataPlane>()
+
+        let starter sessionId _ =
+            async {
+                starts.Enqueue sessionId
+
+                return
+                    Ok
+                        { ProcessId = 21_000
+                          ProcessStartTimeUtcTicks = 31_000L
+                          TtydPort = 41_000
+                          HasExited = fun () -> false
+                          Close = fun () -> closes.Enqueue sessionId }
+            }
+
+        let dataPlaneStarter sessionId _ =
+            async {
+                let upstream = new TestWebSocket()
+
+                let plane =
+                    TerminalDataPlane.createCore
+                        Protocol.MaximumReplayBytes
+                        upstream
+                        ignore
+
+                let running =
+                    { plane with
+                        AttachmentEndpoint =
+                            $"http://127.0.0.1:42000/_treemon/{sessionId}/test-token/" }
+
+                planes.Enqueue running
+                return Ok running
+            }
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        let worktree =
+            CanonicalWorktree.create
+                (Path.GetFullPath(Path.Combine(Path.GetTempPath(), "data-plane-worktree")))
+                "data-plane-worktree"
+
+        try
+            TerminalRegistry.start registry worktree
+            |> Async.RunSynchronously
+            |> requireOk
+            |> ignore
+
+            TerminalRegistry.start registry worktree
+            |> Async.RunSynchronously
+            |> requireOk
+            |> ignore
+
+            let plane = planes.ToArray() |> Array.exactlyOne
+            let first = new TestWebSocket()
+            let firstId =
+                plane.AttachSocket first
+                |> Async.RunSynchronously
+                |> requireSome "first browser was not attached"
+
+            plane.AcceptBrowserFrame
+                firstId
+                (frame """{"AuthToken":"","columns":100,"rows":40}""")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            let second = new TestWebSocket()
+            let secondId =
+                plane.AttachSocket second
+                |> Async.RunSynchronously
+                |> requireSome "second browser was not attached"
+            plane.DetachSocket firstId |> Async.RunSynchronously
+            plane.DetachSocket secondId |> Async.RunSynchronously
+
+            let snapshot =
+                TerminalRegistry.list registry
+                |> Async.RunSynchronously
+
+            Assert.Multiple(fun () ->
+                Assert.That(starts.Count, Is.EqualTo(1), "ttyd was started more than once")
+                Assert.That(planes.Count, Is.EqualTo(1), "more than one upstream was created")
+                Assert.That(
+                    first.CloseDescription,
+                    Is.EqualTo(Some "Replaced by a new attachment")
+                )
+
+                Assert.That(List.length snapshot.Terminals, Is.EqualTo(1))
+                Assert.That(closes.Count, Is.Zero, "attachment loss closed ttyd"))
+        finally
+            TerminalRegistry.shutdown registry
+            |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``new attachment receives bounded replay and ttyd receives its resize``() =
+        let upstream = new TestWebSocket()
+
+        let plane =
+            TerminalDataPlane.createCore 14 upstream ignore
+
+        try
+            [ "0first"; "0second"; "0third" ]
+            |> List.iter (fun value ->
+                plane.AcceptUpstreamFrame(frame value)
+                |> Async.RunSynchronously)
+
+            let browser = new TestWebSocket()
+            let attachmentId =
+                plane.AttachSocket browser
+                |> Async.RunSynchronously
+                |> requireSome "browser was not attached"
+
+            plane.AcceptBrowserFrame
+                attachmentId
+                (frame """{"AuthToken":"","columns":220,"rows":70}""")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            let browserFrames =
+                browser.Sent
+                |> List.map Encoding.UTF8.GetString
+
+            let resize =
+                upstream.Sent
+                |> List.exactlyOne
+                |> TerminalProtocol.parseResizeFrame
+                |> requireOk
+
+            Assert.Multiple(fun () ->
+                Assert.That(browserFrames, Is.EqualTo([ "0second"; "0third" ]))
+                Assert.That(resize.Columns, Is.EqualTo(220))
+                Assert.That(resize.Rows, Is.EqualTo(70)))
+        finally
+            plane.Stop() |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``replay drops output older than its byte bound``() =
+        let replay =
+            [ "0first"; "0second"; "0third" ]
+            |> List.map frame
+            |> List.fold (fun state data -> ReplayBuffer.append 14 data state) ReplayBuffer.empty
+
+        let retained =
+            replay
+            |> ReplayBuffer.frames
+            |> List.map (fun replayFrame ->
+                Encoding.UTF8.GetString replayFrame.Data)
+
+        Assert.Multiple(fun () ->
+            Assert.That(retained, Is.EqualTo([ "0second"; "0third" ]))
+            Assert.That(ReplayBuffer.bytes replay, Is.EqualTo(13))
+            Assert.That(ReplayBuffer.droppedBytes replay, Is.EqualTo(6L)))
+
+    [<Test>]
+    member _.``attachment endpoint rejects invalid bearer origin and oversized requests``() =
+        let upstream = new TestWebSocket()
+        let processCloses = ConcurrentQueue<unit>()
+        let connectorCalls = ConcurrentQueue<int>()
+        let token = "shared-control-bearer"
+
+        let terminalProcess =
+            { ProcessId = 22_000
+              ProcessStartTimeUtcTicks = 32_000L
+              TtydPort = 1
+              HasExited = fun () -> false
+              Close = fun () -> processCloses.Enqueue() }
+
+        let connector port =
+            connectorCalls.Enqueue port
+            async.Return(Ok(upstream :> System.Net.WebSockets.WebSocket))
+
+        let plane =
+            TerminalDataPlane.startWithConnector
+                connector
+                [ "http://localhost:5174" ]
+                token
+                "security-session"
+                terminalProcess
+            |> Async.RunSynchronously
+            |> requireOk
+
+        try
+            use client = new HttpClient()
+            let endpoint = Uri plane.AttachmentEndpoint
+            let authority = endpoint.GetLeftPart(UriPartial.Authority)
+            let cleanEndpoint = Uri($"{authority}/")
+            let wrongToken = Uri($"{authority}/_treemon/security-session/wrong/")
+
+            use missingToken =
+                client.GetAsync(cleanEndpoint)
+                |> getTask
+
+            use invalidToken =
+                client.GetAsync(wrongToken)
+                |> getTask
+
+            use validToken =
+                client.GetAsync(endpoint)
+                |> getTask
+
+            use wrongOriginRequest =
+                new HttpRequestMessage(HttpMethod.Get, endpoint)
+
+            wrongOriginRequest.Headers.Add("Origin", "http://attacker.example")
+
+            use wrongOrigin =
+                client.SendAsync wrongOriginRequest
+                |> getTask
+
+            use oversizedRequest =
+                new HttpRequestMessage(HttpMethod.Get, cleanEndpoint)
+
+            oversizedRequest.Headers.Authorization <-
+                AuthenticationHeaderValue("Bearer", token)
+
+            oversizedRequest.Content <-
+                new StringContent(
+                    String('x', int Protocol.MaximumRequestBodyBytes + 1),
+                    Encoding.UTF8,
+                    "text/plain"
+                )
+
+            use oversized =
+                client.SendAsync oversizedRequest
+                |> getTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(missingToken.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized))
+                Assert.That(invalidToken.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized))
+                Assert.That(validToken.StatusCode, Is.EqualTo(HttpStatusCode.BadGateway))
+                Assert.That(wrongOrigin.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden))
+
+                Assert.That(
+                    oversized.StatusCode,
+                    Is.EqualTo(HttpStatusCode.RequestEntityTooLarge)
+                )
+
+                Assert.That(connectorCalls.Count, Is.EqualTo(1))
+                Assert.That(processCloses.Count, Is.Zero))
+        finally
+            plane.Stop() |> Async.RunSynchronously
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -496,6 +859,8 @@ type TerminalHostJobObjectTests() =
                 JobProcess.close owned
 
                 Assert.Multiple(fun () ->
+                    Assert.That(JobProcess.hasExited owned, Is.True)
+
                     Assert.That(child.WaitForExit 5_000, Is.True, "Job Object close did not kill ttyd")
 
                     Assert.That(

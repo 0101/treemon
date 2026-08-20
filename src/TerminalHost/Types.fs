@@ -10,6 +10,12 @@ module Protocol =
     [<Literal>]
     let MaximumRequestBodyBytes = 16_384L
 
+    [<Literal>]
+    let MaximumReplayBytes = 1_048_576
+
+    [<Literal>]
+    let MaximumAttachmentMessageBytes = 16_384
+
 type CanonicalWorktree =
     private
         { Path: string
@@ -22,14 +28,10 @@ type TerminalProcess =
       HasExited: unit -> bool
       Close: unit -> unit }
 
-type TerminalDataPlane =
-    { Upstream: System.Net.WebSockets.ClientWebSocket option
-      Attachment: System.Net.WebSockets.WebSocket option
-      Replay: byte array }
-
 type TerminalRecord =
     { SessionId: string
-      WorktreePath: string }
+      WorktreePath: string
+      AttachmentEndpoint: string }
 
 type RegistrySnapshot =
     { Revision: int64
@@ -52,10 +54,3 @@ module CanonicalWorktree =
     let internal create path key = { Path = path; Key = key }
     let path worktree = worktree.Path
     let internal key worktree = worktree.Key
-
-[<RequireQualifiedAccess>]
-module TerminalDataPlane =
-    let empty =
-        { Upstream = None
-          Attachment = None
-          Replay = Array.empty }

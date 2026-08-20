@@ -5,6 +5,9 @@ open System
 type TerminalStarter =
     string -> CanonicalWorktree -> Async<Result<TerminalProcess, string>>
 
+type TerminalDataPlaneStarter =
+    string -> TerminalProcess -> Async<Result<TerminalDataPlane, string>>
+
 type private HostedTerminal =
     { Record: TerminalRecord
       Process: TerminalProcess
@@ -40,34 +43,50 @@ module TerminalRegistry =
             |> Seq.map _.Record
             |> Seq.toList }
 
+    let private closeHosted terminal =
+        async {
+            try
+                do! terminal.DataPlane.Stop()
+            finally
+                terminal.Process.Close()
+        }
+
     let private pruneExited state =
-        let exited, live =
-            state.Entries
-            |> Map.partition (fun _ terminal -> terminal.Process.HasExited())
+        async {
+            let exited, live =
+                state.Entries
+                |> Map.partition (fun _ terminal -> terminal.Process.HasExited())
 
-        exited
-        |> Map.values
-        |> Seq.iter _.Process.Close()
+            do!
+                exited
+                |> Map.values
+                |> Seq.map closeHosted
+                |> Async.Sequential
+                |> Async.Ignore
 
-        if Map.isEmpty exited then
-            state
-        else
-            { state with
-                Entries = live
-                Revision = state.Revision + 1L }
+            if Map.isEmpty exited then
+                return state
+            else
+                return
+                    { state with
+                        Entries = live
+                        Revision = state.Revision + 1L }
+        }
 
     let private closeAll entries =
         entries
         |> Map.values
-        |> Seq.iter _.Process.Close()
+        |> Seq.map closeHosted
+        |> Async.Sequential
+        |> Async.Ignore
 
-    let create starter =
+    let create starter dataPlaneStarter =
         let mailbox =
             MailboxProcessor.Start(fun inbox ->
                 let rec loop state =
                     async {
                         let! message = inbox.Receive()
-                        let current = pruneExited state
+                        let! current = pruneExited state
 
                         match message with
                         | Start(worktree, reply) when current.Stopped ->
@@ -93,22 +112,36 @@ module TerminalRegistry =
                                     reply.Reply(Error "ttyd exited during terminal startup")
                                     return! loop current
                                 | Ok terminalProcess ->
-                                    let terminal =
-                                        { Record =
-                                            { SessionId = sessionId
-                                              WorktreePath = CanonicalWorktree.path worktree }
-                                          Process = terminalProcess
-                                          DataPlane = TerminalDataPlane.empty
-                                          OpenedOrder = current.NextOpenedOrder }
+                                    match! dataPlaneStarter sessionId terminalProcess with
+                                    | Error error ->
+                                        terminalProcess.Close()
+                                        reply.Reply(Error error)
+                                        return! loop current
+                                    | Ok dataPlane when terminalProcess.HasExited() ->
+                                        do! dataPlane.Stop()
+                                        terminalProcess.Close()
+                                        reply.Reply(Error "ttyd exited during terminal startup")
+                                        return! loop current
+                                    | Ok dataPlane ->
+                                        let terminal =
+                                            { Record =
+                                                { SessionId = sessionId
+                                                  WorktreePath =
+                                                    CanonicalWorktree.path worktree
+                                                  AttachmentEndpoint =
+                                                    dataPlane.AttachmentEndpoint }
+                                              Process = terminalProcess
+                                              DataPlane = dataPlane
+                                              OpenedOrder = current.NextOpenedOrder }
 
-                                    let updated =
-                                        { current with
-                                            Entries = Map.add key terminal current.Entries
-                                            Revision = current.Revision + 1L
-                                            NextOpenedOrder = current.NextOpenedOrder + 1L }
+                                        let updated =
+                                            { current with
+                                                Entries = Map.add key terminal current.Entries
+                                                Revision = current.Revision + 1L
+                                                NextOpenedOrder = current.NextOpenedOrder + 1L }
 
-                                    reply.Reply(Ok(snapshot updated))
-                                    return! loop updated
+                                        reply.Reply(Ok(snapshot updated))
+                                        return! loop updated
                         | List reply ->
                             reply.Reply(snapshot current)
                             return! loop current
@@ -128,7 +161,7 @@ module TerminalRegistry =
                                 reply.Reply(snapshot current)
                                 return! loop current
                             | Some(key, terminal) ->
-                                terminal.Process.Close()
+                                do! closeHosted terminal
 
                                 let updated =
                                     { current with
@@ -138,7 +171,7 @@ module TerminalRegistry =
                                 reply.Reply(snapshot updated)
                                 return! loop updated
                         | Shutdown reply ->
-                            closeAll current.Entries
+                            do! closeAll current.Entries
 
                             let updated =
                                 if Map.isEmpty current.Entries && current.Stopped then

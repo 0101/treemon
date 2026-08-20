@@ -160,9 +160,9 @@ Control API version 1 is exactly:
 
 Health returns the host PID, process-start ticks, host version, and control API version. List, start,
 and close return the same authoritative `{ revision, terminals }` snapshot, where each terminal has
-only its stable `sessionId` and canonical `worktreePath` until the data-plane task adds the attachment
-endpoint. A path is a known worktree only when it is an existing, fully-qualified directory with a
-`.git` marker and `git rev-parse --show-toplevel` resolves to that exact canonical directory.
+only its stable `sessionId`, canonical `worktreePath`, and live `attachmentEndpoint`. A path is a
+known worktree only when it is an existing, fully-qualified directory with a `.git` marker and
+`git rev-parse --show-toplevel` resolves to that exact canonical directory.
 
 The machine discovery file is `%LOCALAPPDATA%\Treemon\TerminalHost\host.json` by default (tests and
 isolated hosts override the state directory). Its exact fields are `pid`,
@@ -172,10 +172,16 @@ optional `stagedExecutableVersion`. Plain staged executables live at
 last-write time is reported, and the running host refreshes the manifest when staging changes.
 Treemon publish output carries the independent host under `terminal-host\`.
 
-The replay buffer is raw and bounded in memory. Terminal bytes, prompts, environment contents, and
-attachment credentials are never persisted or written to diagnostics. The control bearer exists
-only in host memory and the required discovery manifest; it is never copied into other state or
-written to diagnostics.
+The replay buffer is raw and capped at 1 MiB in memory. Terminal bytes, prompts, environment
+contents, and attachment credentials are never persisted or written to diagnostics. The control
+bearer exists only in host memory, the required discovery manifest, and live attachment URLs
+returned from the registry; it is never copied into durable state or written to diagnostics.
+
+Each terminal record carries an `attachmentEndpoint` on a dedicated dynamic loopback port. Its path
+contains the terminal session ID and the existing host bearer, so ttyd's relative HTTP `/token` and
+WebSocket `/ws` requests remain authenticated without creating a browser cookie or another
+credential. The host validates the prefix, strips it before proxying to ttyd, and applies the same
+loopback, exact Host/Origin, bearer, and request-size checks as the control API.
 
 ### Treemon integration
 
@@ -215,6 +221,9 @@ PowerShell lifecycle helpers, or compatibility shims.
   without defining multi-writer input semantics.
 - **Raw bounded replay:** reconnect gets useful recent output without persisting terminal content or
   introducing a terminal-state serializer.
+- **Bearer in the in-memory attachment URL:** a path-scoped copy of the existing host bearer lets
+  ttyd's unmodified iframe client authenticate every relative HTTP and WebSocket request without a
+  persistent cookie or a second capability.
 - **Exact session-origin gating:** only Copilot activity attributed to a current terminal can delay
   replacement; worktree co-location and non-Copilot process activity are irrelevant.
 - **Opportunistic replacement, not draining:** normal work is never rejected in anticipation of an

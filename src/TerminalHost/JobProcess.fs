@@ -356,9 +356,15 @@ module JobProcess =
     let processStartTimeUtcTicks owned = owned.StartTimeUtcTicks
 
     let hasExited owned =
-        match WaitForSingleObject(owned.ProcessHandle, 0u) with
-        | status when status = WaitTimeout -> false
-        | status when status = WaitObject0 -> true
-        | _ -> true
+        try
+            if owned.ProcessHandle.IsClosed || owned.ProcessHandle.IsInvalid then
+                true
+            else
+                match WaitForSingleObject(owned.ProcessHandle, 0u) with
+                | status when status = WaitTimeout -> false
+                | status when status = WaitObject0 -> true
+                | _ -> true
+        with :? ObjectDisposedException ->
+            true
 
     let close owned = closeHandles owned

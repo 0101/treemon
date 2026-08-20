@@ -4,8 +4,6 @@ open System
 open System.IO
 open System.Net
 open System.Net.Http.Headers
-open System.Security.Cryptography
-open System.Text
 open System.Text.Json
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
@@ -21,21 +19,6 @@ type ControlApiConfig =
     { Port: int
       AllowedOrigins: string list }
 
-type RequestMetadata =
-    { RemoteAddress: IPAddress option
-      LocalAddress: IPAddress option
-      LocalPort: int
-      HostHeaders: string list
-      OriginHeaders: string list
-      AuthorizationHeaders: string list
-      ContentLength: int64 option }
-
-[<RequireQualifiedAccess>]
-type RequestRejection =
-    | Forbidden
-    | Unauthorized
-    | TooLarge
-
 type RunningControlApi =
     internal
         { Application: WebApplication
@@ -49,57 +32,6 @@ type HealthResponse =
 
 type ErrorResponse = { Error: string }
 type ShutdownResponse = { Accepted: bool }
-
-[<RequireQualifiedAccess>]
-module RequestSecurity =
-    let private fixedTimeEquals (expected: string) (actual: string) =
-        let expectedBytes = Encoding.UTF8.GetBytes expected
-        let actualBytes = Encoding.UTF8.GetBytes actual
-
-        expectedBytes.Length = actualBytes.Length
-        && CryptographicOperations.FixedTimeEquals(expectedBytes, actualBytes)
-
-    let private validAuthorization (bearerToken: string) (values: string list) =
-        match values with
-        | [ value ] when value.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ->
-            let supplied = value.Substring("Bearer ".Length)
-            fixedTimeEquals bearerToken supplied
-        | _ -> false
-
-    let private matchesOne (expected: string) (values: string list) =
-        match values with
-        | [ value ] -> String.Equals(value, expected, StringComparison.OrdinalIgnoreCase)
-        | _ -> false
-
-    let validate (allowedOrigins: string list) (bearerToken: string) (metadata: RequestMetadata) =
-        let controlOrigin = $"http://127.0.0.1:{metadata.LocalPort}"
-
-        let validOrigin =
-            match metadata.OriginHeaders with
-            | [] -> true
-            | [ origin ] ->
-                controlOrigin :: allowedOrigins
-                |> List.exists (fun allowed ->
-                    String.Equals(origin, allowed, StringComparison.OrdinalIgnoreCase))
-            | _ -> false
-
-        match metadata.RemoteAddress, metadata.LocalAddress with
-        | Some remoteAddress, Some localAddress
-            when IPAddress.IsLoopback remoteAddress && IPAddress.IsLoopback localAddress ->
-            let expectedHost = $"127.0.0.1:{metadata.LocalPort}"
-
-            if not (matchesOne expectedHost metadata.HostHeaders) then
-                Error RequestRejection.Forbidden
-            elif not validOrigin then
-                Error RequestRejection.Forbidden
-            elif metadata.ContentLength |> Option.exists (fun length -> length > Protocol.MaximumRequestBodyBytes) then
-                Error RequestRejection.TooLarge
-            elif not (validAuthorization bearerToken metadata.AuthorizationHeaders) then
-                Error RequestRejection.Unauthorized
-            else
-                Ok()
-        | _ ->
-            Error RequestRejection.Forbidden
 
 [<RequireQualifiedAccess>]
 module ControlApi =
@@ -121,15 +53,6 @@ module ControlApi =
 
     let private writeError statusCode message context =
         writeJson statusCode { Error = message } context
-
-    let private requestMetadata (context: HttpContext) =
-        { RemoteAddress = context.Connection.RemoteIpAddress |> Option.ofObj
-          LocalAddress = context.Connection.LocalIpAddress |> Option.ofObj
-          LocalPort = context.Connection.LocalPort
-          HostHeaders = context.Request.Headers.Host |> Seq.toList
-          OriginHeaders = context.Request.Headers.Origin |> Seq.toList
-          AuthorizationHeaders = context.Request.Headers.Authorization |> Seq.toList
-          ContentLength = context.Request.ContentLength |> Option.ofNullable }
 
     let private reject rejection context =
         match rejection with
@@ -288,10 +211,19 @@ module ControlApi =
         hostVersion
         registry
         lifetime
-        context
+        (context: HttpContext)
         =
         task {
-            match RequestSecurity.validate config.AllowedOrigins bearerToken (requestMetadata context) with
+            let authorizationHeaders =
+                context.Request.Headers.Authorization
+                |> Seq.toList
+
+            match
+                RequestSecurity.validate
+                    config.AllowedOrigins
+                    bearerToken
+                    (RequestSecurity.metadata authorizationHeaders context)
+            with
             | Error rejection ->
                 return! reject rejection context
             | Ok() ->

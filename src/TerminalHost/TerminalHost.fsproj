@@ -18,6 +18,9 @@
     <Compile Include="Types.fs" />
     <Compile Include="PathValidation.fs" />
     <Compile Include="JobProcess.fs" />
+    <Compile Include="TerminalProtocol.fs" />
+    <Compile Include="RequestSecurity.fs" />
+    <Compile Include="TerminalDataPlane.fs" />
     <Compile Include="TerminalLauncher.fs" />
     <Compile Include="TerminalRegistry.fs" />
     <Compile Include="Manifest.fs" />

@@ -145,9 +145,9 @@ module private HostRuntime =
             let token = Manifest.generateBearerToken ()
 
             let registry =
-                TerminalRegistry.create (
-                    TerminalLauncher.start config.TerminalLaunch
-                )
+                TerminalRegistry.create
+                    (TerminalLauncher.start config.TerminalLaunch)
+                    (TerminalDataPlane.start config.Control.AllowedOrigins token)
 
             let! control =
                 ControlApi.start
