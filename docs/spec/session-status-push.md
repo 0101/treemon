@@ -15,6 +15,7 @@ titles, context usage, and session resume all use this shared state; no session-
 - Support multiple concurrent sessions in one worktree without losing per-session activity.
 - Keep a parent session Working while any reported background agent is still active.
 - Keep liveness independent from representative-session selection.
+- Retain an optional exact terminal origin for sessions launched inside a host-owned terminal.
 - Let auto-sync target an existing session through `SessionBridge` before launching another CLI.
 - Filter synthetic user-channel content before it can change durable session state.
 - Bound untrusted input and durable storage while keeping the fold deterministic.
@@ -78,6 +79,19 @@ titles, context usage, and session resume all use this shared state; no session-
   and only then a retained identity when no session is open. That ordering keeps any fallback prompt
   on an existing bridge rather than launching a second CLI.
 
+### Terminal origin
+
+- Activity reports carry an optional `TerminalSessionId` sourced from the reporting process's
+  inherited `TREEMON_TERMINAL_SESSION_ID`. TerminalHost injects that value into each owned
+  terminal, so it is present only for Copilot sessions launched inside that terminal; sessions
+  launched elsewhere omit it.
+- The origin is stored with the per-session row and lets terminal lifecycle code join a Copilot
+  `SessionId` to one exact host-owned terminal. Treemon never infers terminal ownership from the
+  worktree path, so unrelated Copilot sessions in the same worktree remain unrelated.
+- `TerminalSessionId` is attribution metadata for exact host-terminal joins. It does not participate
+  in status folding, ordering, liveness, representative selection, or the existing worktree
+  projection, and it does not change worktree-level resume behavior.
+
 ### Context usage, resume, and restart
 
 - `session.usage_info` updates a durable per-session context gauge without changing status. Its
@@ -111,6 +125,8 @@ background-agent, and usage events onto the closed wire contract. Background rep
 `background_agent_started` / `background_agent_finished` with an opaque `toolCallId` of at most 512
 UTF-16 code units. It forwards ask-user request, completion, and idle events as facts; the server's
 persisted request/completion clocks resolve their effective status independently of delivery order.
+Every report also carries the optional inherited `TREEMON_TERMINAL_SESSION_ID` as
+`TerminalSessionId`.
 
 After subscriptions and replay are active, the extension reads
 `session.rpc.metadata.snapshot().summary` in a non-blocking background task and emits
@@ -168,7 +184,8 @@ gap, the service clears its old process-local background clocks.
 `SessionActivityStore` uses SQLite WAL with short-lived connections:
 
 - `session_status` stores the latest folded status, messages, intent, title, context gauge,
-  independent clocks, and session identity for live rebuild, footer data, and resume.
+  independent clocks, session identity, and optional terminal origin for live rebuild, footer data,
+  resume, and exact host-terminal attribution.
 - `activity_events` retains accepted history-bearing events under unique event IDs so duplicate
   reports remain full no-ops. Canonical Overview history uses direct 30-second snapshots and never
   reads this table.
@@ -207,6 +224,9 @@ session for status/context rendering. Overview snapshot capture uses the same li
 projection but persists the complete count-only aggregate independently; see
 `docs/spec/overview-activity-history.md`.
 
+Terminal origin remains on the per-session record for exact terminal joins and is not folded into
+card or Overview status.
+
 ## Decisions
 
 | Decision | Choice |
@@ -226,6 +246,7 @@ projection but persists the complete count-only aggregate independently; see
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Resume | Query durable most-recent activity identity, not the bounded live cache or heartbeat recency. |
+| Terminal origin | Persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; never infer it from worktree or use it in status folding. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 
@@ -233,13 +254,13 @@ projection but persists the complete count-only aggregate independently; see
 
 | File | Role |
 |---|---|
-| `src/Extension/reporting/extension.mjs` | SDK filtering, wire mapping, replay, metadata bootstrap, usage, and heartbeat. |
+| `src/Extension/reporting/extension.mjs` | SDK filtering, wire mapping, terminal-origin reporting, replay, metadata bootstrap, usage, and heartbeat. |
 | `src/Extension/reporting/reporting-core.mjs` | Pure message, usage, and background-lifecycle wire mapping. |
 | `src/Server/SessionActivity.fs` | Event domain, pure fold, background lifecycle, effective activity/status, freshness, and active selection. |
 | `src/Server/SessionActivityService.fs` | Request validation, synthetic filtering, independent ordering paths, mailbox ingestion, and lifecycle. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
-| `src/Server/SessionActivityStore.fs` | Session persistence, additive migration, idempotent event append, representative queries, and retention. |
+| `src/Server/SessionActivityStore.fs` | Session persistence including optional terminal origin, additive migration, idempotent event append, representative queries, and retention. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
 | `src/Server/SchedulerState.fs` | Live session state and `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |

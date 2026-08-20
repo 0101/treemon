@@ -76,7 +76,7 @@ jobs:
         run: npm run test:durable-terminal-host && npm run test:durable-terminal-observation && npm run test:durable-terminal-verifier-env && npm run test:ttyd-runtime-unit
 
       - name: Test durable F# runtime
-        run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=Unit&FullyQualifiedName~EmbeddedTerminal" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "FullyQualifiedName~WorktreePathResolutionTests" --verbosity normal
+        run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=Unit&FullyQualifiedName~EmbeddedTerminal" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "TestCategory=TerminalHost" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "FullyQualifiedName~WorktreePathResolutionTests" --verbosity normal
 
       - name: Test previous-binary rollback
         run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=DurableRollback" --verbosity normal

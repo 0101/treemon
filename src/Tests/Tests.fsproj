@@ -14,6 +14,7 @@
     <Compile Include="TerminalSessionFixtureTests.fs" />
     <Compile Include="ProcessRunnerTests.fs" />
     <Compile Include="EmbeddedTerminalTests.fs" />
+    <Compile Include="TerminalHostTests.fs" />
     <Compile Include="TerminalPaneTests.fs" />
     <Compile Include="DiffCategoriesTests.fs" />
     <Compile Include="WorktreeDiffTests.fs" />
@@ -119,6 +120,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Server\Server.fsproj" />
+    <ProjectReference Include="..\TerminalHost\TerminalHost.fsproj" />
     <ProjectReference Include="..\Client\Client.fsproj" />
     <ProjectReference Include="..\Cli\Cli.fsproj" />
   </ItemGroup>

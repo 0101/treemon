@@ -195,6 +195,19 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Shared\Shared.fsproj" />
+    <ProjectReference Include="..\TerminalHost\TerminalHost.fsproj"
+                      ReferenceOutputAssembly="false"
+                      Private="false" />
   </ItemGroup>
+
+  <Target Name="PublishTerminalHost"
+          AfterTargets="Publish">
+    <PropertyGroup>
+      <_TerminalHostPublishDir>$([System.IO.Path]::Combine('$(PublishDir)', 'terminal-host'))</_TerminalHostPublishDir>
+    </PropertyGroup>
+    <MSBuild Projects="..\TerminalHost\TerminalHost.fsproj"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);PublishDir=$(_TerminalHostPublishDir);SelfContained=false" />
+  </Target>
 
 </Project>
