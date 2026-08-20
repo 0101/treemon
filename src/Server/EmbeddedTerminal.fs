@@ -699,12 +699,12 @@ let private terminalWebSocketEndpoint (attachmentEndpoint: string) =
     with _ ->
         Error "TerminalHost returned an invalid command attachment endpoint"
 
-let private sendTerminalCommandDefault attachmentEndpoint command =
+let internal sendTerminalCommandDefault attachmentEndpoint command =
     async {
         if
             String.IsNullOrWhiteSpace command
             || command.Length > 65_000
-            || command.IndexOf('\u0000') >= 0
+            || (command |> Seq.exists Char.IsControl)
         then
             return Error "The terminal resume command is invalid"
         else

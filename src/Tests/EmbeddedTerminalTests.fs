@@ -5,6 +5,7 @@ open System.Collections.Concurrent
 open System.Diagnostics
 open System.IO
 open System.Net
+open System.Net.Sockets
 open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading.Tasks
@@ -560,6 +561,44 @@ let private populateAgent
 [<Category("Unit")>]
 [<Category("Fast")>]
 type EmbeddedTerminalControlClientTests() =
+    [<Test>]
+    member _.``resume commands containing control characters are rejected before terminal input``() =
+        task {
+            use listener = new TcpListener(IPAddress.Loopback, 0)
+            listener.Start()
+
+            let port =
+                (listener.LocalEndpoint :?> IPEndPoint).Port
+
+            let command =
+                CodingToolCli.build
+                    (Some CopilotCli)
+                    (CodingToolCli.Resume(
+                        Some "owned-session\rWrite-Output injected"
+                    ))
+
+            let! result =
+                EmbeddedTerminal.sendTerminalCommandDefault
+                    $"http://127.0.0.1:{port}/terminal/"
+                    command.AsShellString
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    result,
+                    Is.EqualTo(
+                        Error "The terminal resume command is invalid"
+                        : Result<unit, string>
+                    )
+                )
+
+                Assert.That(
+                    listener.Pending(),
+                    Is.False,
+                    "invalid resume input must not connect to the terminal"
+                ))
+        }
+
     [<Test>]
     member _.``starts lazily and resolves ambiguous start and close by authoritative relist``() =
         task {
