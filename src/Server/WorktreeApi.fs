@@ -551,10 +551,7 @@ let private openTerminal
 
 let internal deleteWorktreeWith
     (removeGitWorktree: string -> string -> string option -> Async<Result<unit, string>>)
-    (withTerminalCleanup:
-        WorktreePath ->
-        (unit -> Async<Result<unit, string>>) ->
-        Async<Result<unit, string>>)
+    (closeTerminal: WorktreePath -> Async<Result<unit, string>>)
     (removeWorktreeState: string -> Async<unit>)
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
@@ -569,26 +566,24 @@ let internal deleteWorktreeWith
         | Some ctx when Directory.Exists(Path.Combine(ctx.Worktree.Path, ".git")) ->
             return! Error "Cannot delete the main worktree"
         | Some ctx ->
-            return!
-                withTerminalCleanup
+            do!
+                closeTerminal
                     (PathUtils.toWorktreePath ctx.Worktree.Path)
-                    (fun () ->
-                        asyncResult {
-                            do!
-                                removeGitWorktree
-                                    ctx.RepoRoot
-                                    ctx.Worktree.Path
-                                    ctx.Worktree.Branch
 
-                            agent.Post(
-                                SchedulerState.StateMsg.RemoveWorktree(
-                                    ctx.RepoId,
-                                    ctx.Worktree.Path
-                                )
-                            )
+            do!
+                removeGitWorktree
+                    ctx.RepoRoot
+                    ctx.Worktree.Path
+                    ctx.Worktree.Branch
 
-                            do! removeWorktreeState ctx.Worktree.Path
-                        })
+            agent.Post(
+                SchedulerState.StateMsg.RemoveWorktree(
+                    ctx.RepoId,
+                    ctx.Worktree.Path
+                )
+            )
+
+            do! removeWorktreeState ctx.Worktree.Path
     }
 
 let private deleteWorktree
@@ -607,7 +602,9 @@ let private deleteWorktree
 
     deleteWorktreeWith
         GitWorktree.removeWorktree
-        (EmbeddedTerminal.withReservedCleanup embeddedTerminal)
+        (fun worktreePath ->
+            EmbeddedTerminal.closeStrict embeddedTerminal worktreePath
+            |> AsyncResult.ignore)
         removeWorktreeState
         agent
         rootPaths
@@ -616,10 +613,7 @@ let private deleteWorktree
 let internal updateArchivedBranchesWith
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     (rootPaths: Map<RepoId, string>)
-    (withTerminalCleanup:
-        WorktreePath ->
-        (unit -> Async<Result<unit, string>>) ->
-        Async<Result<unit, string>>)
+    (closeTerminal: WorktreePath -> Async<Result<unit, string>>)
     (setOp: string -> Set<string> -> Set<string>)
     (wtPath: WorktreePath)
     =
@@ -640,31 +634,29 @@ let internal updateArchivedBranchesWith
                 |> Option.map (fun repo -> repo.WorktreeList |> List.choose _.Branch |> Set.ofList)
                 |> Option.defaultValue Set.empty
 
-            return!
-                withTerminalCleanup
+            do!
+                closeTerminal
                     (PathUtils.toWorktreePath ctx.Worktree.Path)
-                    (fun () ->
-                        async {
-                            try
-                                TreemonConfig.modifyArchivedBranches
-                                    ctx.RepoRoot
-                                    (fun existing ->
-                                        existing
-                                        |> Set.ofList
-                                        |> setOp branch
-                                        |> Set.intersect liveBranches
-                                        |> Set.toList)
 
-                                agent.Post(
-                                    SchedulerState.StateMsg.ExpediteRefresh ctx.RepoId
-                                )
+            try
+                TreemonConfig.modifyArchivedBranches
+                    ctx.RepoRoot
+                    (fun existing ->
+                        existing
+                        |> Set.ofList
+                        |> setOp branch
+                        |> Set.intersect liveBranches
+                        |> Set.toList)
 
-                                return Ok ()
-                            with ex ->
-                                return
-                                    Error
-                                        $"Could not update archived worktrees: {ex.Message}"
-                        })
+                agent.Post(
+                    SchedulerState.StateMsg.ExpediteRefresh ctx.RepoId
+                )
+
+                return ()
+            with ex ->
+                return!
+                    Error
+                        $"Could not update archived worktrees: {ex.Message}"
     }
 
 /// What one repository's declared diff categories do to its tracked files. Only a `Configured`
@@ -880,13 +872,15 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
               updateArchivedBranchesWith
                   agent
                   rootPaths
-                  (EmbeddedTerminal.withReservedCleanup embeddedTerminal)
+                  (fun worktreePath ->
+                      EmbeddedTerminal.closeStrict embeddedTerminal worktreePath
+                      |> AsyncResult.ignore)
                   Set.add
           unarchiveWorktree =
               updateArchivedBranchesWith
                   agent
                   rootPaths
-                  (fun _ operation -> operation ())
+                  (fun _ -> async { return Ok() })
                   Set.remove
           getBranches = fun repoIdStr ->
               async {

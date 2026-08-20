@@ -317,7 +317,7 @@ let main args =
 
     let embeddedTerminal =
         if config.Demo then None
-        else Some(EmbeddedTerminal.create ())
+        else Some(EmbeddedTerminal.create serverUrl)
 
     let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, runtimeStoreFlushes =
         if config.Demo then

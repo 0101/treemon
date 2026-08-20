@@ -234,6 +234,10 @@ PowerShell lifecycle helpers, or compatibility shims.
   waits until no terminals exist instead of carrying old protocol clients or migrating live state.
 - **Truthful failure:** host loss kills owned trees and becomes an interruption, never a claimed
   reconnect to an unproven process.
+- **Fail closed on unverified live discovery:** a malformed manifest or an exact live process that
+  fails health validation blocks lifecycle requests rather than starting a competing host. Lazy
+  startup is limited to a missing manifest with no previously verified live identity, or a
+  manifest whose exact process identity is dead.
 - **Exact Git top-level validation:** the bearer authorizes a lifecycle request, but it does not turn
   an arbitrary directory into a known worktree; the requested canonical path must be Git's exact
   top-level path before the registry is touched.
