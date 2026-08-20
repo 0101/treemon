@@ -256,22 +256,19 @@ let private parseTerminal manifest (element: JsonElement) =
     else
         try
             let sessionId = element.GetProperty("sessionId").GetString()
-            let worktreePath = element.GetProperty("worktreePath").GetString()
-            let attachmentEndpoint =
-                element.GetProperty("attachmentEndpoint").GetString()
+            let worktreePath = element.GetProperty("worktreePath").GetString() |> Option.ofObj
+            let attachmentEndpoint = element.GetProperty("attachmentEndpoint").GetString() |> Option.ofObj
 
             if sessionId |> Option.ofObj |> Option.exists validSessionId |> not then
                 Error "TerminalHost returned an invalid terminal session ID"
             elif
                 worktreePath
-                |> Option.ofObj
                 |> Option.exists validCanonicalWorktreePath
                 |> not
             then
                 Error "TerminalHost returned an invalid worktree path"
             elif
                 attachmentEndpoint
-                |> Option.ofObj
                 |> Option.exists (validAttachmentEndpoint manifest sessionId)
                 |> not
             then
@@ -279,8 +276,8 @@ let private parseTerminal manifest (element: JsonElement) =
             else
                 Ok
                     { SessionId = sessionId.ToLowerInvariant()
-                      WorktreePath = worktreePath
-                      AttachmentEndpoint = attachmentEndpoint }
+                      WorktreePath = worktreePath |> Option.get
+                      AttachmentEndpoint = attachmentEndpoint |> Option.get }
         with
         | :? InvalidOperationException ->
             Error "TerminalHost terminal record is malformed"

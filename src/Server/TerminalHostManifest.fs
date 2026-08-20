@@ -134,9 +134,9 @@ let private parseManifest (text: string) =
             let pid = root.GetProperty("pid").GetInt32()
             let processStartTimeUtcTicks =
                 root.GetProperty("processStartTimeUtcTicks").GetInt64()
-            let endpoint = root.GetProperty("endpoint").GetString()
-            let bearerToken = root.GetProperty("bearerToken").GetString()
-            let hostVersion = root.GetProperty("hostVersion").GetString()
+            let endpoint = root.GetProperty("endpoint").GetString() |> Option.ofObj
+            let bearerToken = root.GetProperty("bearerToken").GetString() |> Option.ofObj
+            let hostVersion = root.GetProperty("hostVersion").GetString() |> Option.ofObj
             let apiVersion = root.GetProperty("controlApiVersion").GetInt32()
 
             match optionalString "stagedExecutableVersion" root with
@@ -145,13 +145,12 @@ let private parseManifest (text: string) =
             | Ok stagedVersion ->
                 if pid <= 0 || processStartTimeUtcTicks <= 0L then
                     Error "TerminalHost discovery manifest has an invalid process identity"
-                elif endpoint |> Option.ofObj |> Option.exists validControlEndpoint |> not then
+                elif endpoint |> Option.exists validControlEndpoint |> not then
                     Error "TerminalHost discovery manifest has an invalid control endpoint"
-                elif bearerToken |> Option.ofObj |> Option.exists validBearerToken |> not then
+                elif bearerToken |> Option.exists validBearerToken |> not then
                     Error "TerminalHost discovery manifest has an invalid bearer token"
                 elif
                     hostVersion
-                    |> Option.ofObj
                     |> Option.exists (validVersion true)
                     |> not
                 then
@@ -165,9 +164,9 @@ let private parseManifest (text: string) =
                     Ok
                         { Pid = pid
                           ProcessStartTimeUtcTicks = processStartTimeUtcTicks
-                          Endpoint = endpoint
-                          BearerToken = bearerToken
-                          HostVersion = hostVersion
+                          Endpoint = endpoint |> Option.get
+                          BearerToken = bearerToken |> Option.get
+                          HostVersion = hostVersion |> Option.get
                           ControlApiVersion = apiVersion
                           StagedExecutableVersion = stagedVersion }
     with

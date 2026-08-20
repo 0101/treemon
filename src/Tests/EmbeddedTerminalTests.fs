@@ -69,6 +69,7 @@ type private FakeControlHost() =
     let mutable hostVersion = "1.0.0-test"
     let mutable stagedVersion: string option = None
     let mutable currentExecutable = oldExecutable
+    let mutable registryJsonOverride: string option = None
     let listRequests = ConcurrentQueue<unit>()
     let startRequests = ConcurrentQueue<string>()
     let closeRequests = ConcurrentQueue<string>()
@@ -209,7 +210,14 @@ type private FakeControlHost() =
                             context
                 | "GET", "/api/v1/terminals" ->
                     listRequests.Enqueue()
-                    return! writeJson StatusCodes.Status200OK (snapshot ()) context
+
+                    match lock gate (fun () -> registryJsonOverride) with
+                    | None ->
+                        return! writeJson StatusCodes.Status200OK (snapshot ()) context
+                    | Some content ->
+                        context.Response.StatusCode <- StatusCodes.Status200OK
+                        context.Response.ContentType <- "application/json; charset=utf-8"
+                        return! context.Response.WriteAsync content
                 | "POST", "/api/v1/terminals" ->
                     let! requested = readWorktreePath context
 
@@ -320,20 +328,7 @@ type private FakeControlHost() =
 
     let manifestPath = Path.Combine(stateDirectory, "host.json")
 
-    member _.Root = root
-    member _.StateDirectory = stateDirectory
-    member _.Endpoint = endpoint
-    member _.Token = token
-    member _.ListRequestCount = listRequests.Count
-    member _.StartRequestCount = startRequests.Count
-    member _.CloseRequestCount = closeRequests.Count
-    member _.ShutdownRequestCount = shutdownRequests.Count
-    member _.OldExecutable = oldExecutable
-    member _.CurrentExecutable = lock gate (fun () -> currentExecutable)
-    member _.CurrentHostVersion = lock gate (fun () -> hostVersion)
-    member _.IsOnline = lock gate (fun () -> online)
-
-    member _.PublishManifest() =
+    let createManifest () =
         let version, staged =
             lock gate (fun () -> hostVersion, stagedVersion)
 
@@ -350,7 +345,44 @@ type private FakeControlHost() =
             manifest["stagedExecutableVersion"] <-
                 JsonValue.Create candidate)
 
+        manifest
+
+    member _.Root = root
+    member _.StateDirectory = stateDirectory
+    member _.Endpoint = endpoint
+    member _.Token = token
+    member _.ListRequestCount = listRequests.Count
+    member _.StartRequestCount = startRequests.Count
+    member _.CloseRequestCount = closeRequests.Count
+    member _.ShutdownRequestCount = shutdownRequests.Count
+    member _.OldExecutable = oldExecutable
+    member _.CurrentExecutable = lock gate (fun () -> currentExecutable)
+    member _.CurrentHostVersion = lock gate (fun () -> hostVersion)
+    member _.IsOnline = lock gate (fun () -> online)
+
+    member _.PublishManifest() =
+        let manifest = createManifest ()
         File.WriteAllText(manifestPath, manifest.ToJsonString())
+
+    member _.PublishManifestWithJsonField(fieldName: string, jsonValue: string) =
+        let manifest = createManifest ()
+        manifest[fieldName] <- JsonNode.Parse jsonValue
+        File.WriteAllText(manifestPath, manifest.ToJsonString())
+
+    member _.ReturnRegistryWithJsonField(fieldName: string, jsonValue: string) =
+        let registry =
+            JsonNode.Parse(
+                JsonSerializer.Serialize(snapshot (), jsonOptions)
+            )
+            |> _.AsObject()
+
+        let terminals = registry["terminals"].AsArray()
+        let terminal = terminals[0].AsObject()
+
+        terminal[fieldName] <- JsonNode.Parse jsonValue
+
+        lock gate (fun () ->
+            registryJsonOverride <- Some(registry.ToJsonString()))
 
     member this.Stage(version: string) =
         let directory =
@@ -597,6 +629,126 @@ type EmbeddedTerminalControlClientTests() =
                     Is.False,
                     "invalid resume input must not connect to the terminal"
                 ))
+        }
+
+    [<TestCase(
+        "endpoint",
+        "null",
+        "TerminalHost discovery manifest has an invalid control endpoint"
+    )>]
+    [<TestCase(
+        "endpoint",
+        "42",
+        "TerminalHost discovery manifest is malformed"
+    )>]
+    [<TestCase(
+        "bearerToken",
+        "null",
+        "TerminalHost discovery manifest has an invalid bearer token"
+    )>]
+    [<TestCase(
+        "bearerToken",
+        "42",
+        "TerminalHost discovery manifest is malformed"
+    )>]
+    [<TestCase(
+        "hostVersion",
+        "null",
+        "TerminalHost discovery manifest has an invalid host version"
+    )>]
+    [<TestCase(
+        "hostVersion",
+        "42",
+        "TerminalHost discovery manifest is malformed"
+    )>]
+    [<TestCase(
+        "unexpected",
+        "true",
+        "TerminalHost discovery manifest has an invalid shape"
+    )>]
+    member _.``mandatory manifest strings reject null and malformed JSON while properties stay exact``
+        (
+            fieldName: string,
+            jsonValue: string,
+            expectedError: string
+        ) =
+        use host = new FakeControlHost()
+        let config = managerConfig host noLaunch
+        host.PublishManifestWithJsonField(fieldName, jsonValue)
+
+        let error =
+            match TerminalHostManifest.readManifest config with
+            | Error error -> error
+            | Ok manifest ->
+                Assert.Fail($"Expected manifest rejection, got {manifest}")
+                ""
+
+        Assert.That(error, Is.EqualTo expectedError)
+
+    [<TestCase(
+        "worktreePath",
+        "null",
+        "TerminalHost returned an invalid worktree path"
+    )>]
+    [<TestCase(
+        "worktreePath",
+        "42",
+        "TerminalHost terminal record is malformed"
+    )>]
+    [<TestCase(
+        "attachmentEndpoint",
+        "null",
+        "TerminalHost returned an invalid attachment endpoint"
+    )>]
+    [<TestCase(
+        "attachmentEndpoint",
+        "42",
+        "TerminalHost terminal record is malformed"
+    )>]
+    [<TestCase(
+        "unexpected",
+        "true",
+        "TerminalHost terminal record has an invalid shape"
+    )>]
+    member _.``mandatory terminal strings reject null and malformed JSON while properties stay exact``
+        (
+            fieldName: string,
+            jsonValue: string,
+            expectedError: string
+        ) =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let config = managerConfig host noLaunch
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "terminal-wire"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+            host.ReturnRegistryWithJsonField(fieldName, jsonValue)
+
+            let manifest =
+                match TerminalHostManifest.readManifest config with
+                | Ok(Some manifest) -> manifest
+                | result ->
+                    Assert.Fail($"Expected a valid manifest, got {result}")
+                    Unchecked.defaultof<_>
+
+            let! listed =
+                TerminalHostClient.listTerminals config manifest
+                |> Async.StartAsTask
+
+            let error =
+                match listed with
+                | Error error -> error
+                | Ok registry ->
+                    Assert.Fail($"Expected terminal rejection, got {registry}")
+                    ""
+
+            Assert.That(error, Is.EqualTo expectedError)
         }
 
     [<Test>]
