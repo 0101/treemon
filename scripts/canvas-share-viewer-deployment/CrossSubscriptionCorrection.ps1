@@ -176,7 +176,43 @@ function Set-CrossSubscriptionReplacementIdentity {
         [Parameter(Mandatory)][string] $SubscriptionId
     )
 
-    Write-Step 'Replacing the moved App Service identity attachment'
+    $preparedClientId = [string] $ManagedIdentity.clientId
+    if ([string]::IsNullOrWhiteSpace($preparedClientId)) {
+        throw 'The prepared destination identity has no client ID. No App Service change was made.'
+    }
+
+    $preparedClientIdLiteral =
+        ConvertTo-Json -InputObject $preparedClientId -Compress
+    $identitySummaryQuery =
+        '{{identityType:identity.type,userAssignedIdentityCount:length(values(identity.userAssignedIdentities || `{{}}`)),preparedIdentityAttached:contains(values(identity.userAssignedIdentities || `{{}}`)[].clientId, `{0}`)}}' `
+            -f $preparedClientIdLiteral
+    $identitySummary = Invoke-AzJson -Arguments @(
+        'rest',
+        '--method', 'get',
+        '--uri', "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Web/sites/${appName}?api-version=2023-12-01",
+        '--query', $identitySummaryQuery,
+        '--subscription', $SubscriptionId)
+
+    if ($null -eq $identitySummary -or
+        $null -eq $identitySummary.PSObject.Properties['identityType'] -or
+        $null -eq $identitySummary.PSObject.Properties['userAssignedIdentityCount'] -or
+        $null -eq $identitySummary.PSObject.Properties['preparedIdentityAttached']) {
+        throw 'The moved App Service identity attachment could not be verified. No App Service change was made.'
+    }
+
+    $expectedIdentityCount =
+        if ([bool] $identitySummary.preparedIdentityAttached) {
+            1
+        } else {
+            0
+        }
+
+    if ([string] $identitySummary.identityType -match 'SystemAssigned' -or
+        [int] $identitySummary.userAssignedIdentityCount -ne $expectedIdentityCount) {
+        throw 'The moved App Service still has an identity attachment other than the prepared destination identity. In the Azure portal, detach every other user-assigned identity and turn off its system-assigned identity, then rerun reconciliation. No App Service change was made.'
+    }
+
+    Write-Step 'Attaching the prepared identity to the moved App Service'
     Invoke-AzNone -Arguments @(
         'webapp', 'identity', 'assign',
         '--name', $appName,
@@ -188,10 +224,12 @@ function Set-CrossSubscriptionReplacementIdentity {
 function Write-CrossSubscriptionMoveChecklist {
     Write-Host ''
     Write-Host 'Destination preparation complete. No source-subscription operation was issued.'
-    Write-Host "1. In the Azure portal, move the canonical App Service '$appName' and App Service plan '$Plan' together."
-    Write-Host '2. Select the approved destination subscription and the prepared destination resource group used for this run.'
-    Write-Host '3. Leave source-side identities, role assignments, storage, and resource groups unchanged for rollback.'
-    Write-Host '4. Wait for the portal move to succeed, seed an isolated TREEMON_CONFIG_DIR, then rerun the same command with -ReconcileCrossSubscriptionMove -ConfirmPortalMoveCompleted.'
+    Write-Host "1. In the Azure portal, open the canonical App Service '$appName', detach its user-assigned identity attachment, and confirm that System assigned is Off."
+    Write-Host '2. Leave the detached identity resource, role assignments, storage, and resource groups unchanged for rollback.'
+    Write-Host "3. Move the canonical App Service '$appName' and App Service plan '$Plan' together."
+    Write-Host '4. Select the approved destination subscription and the prepared destination resource group used for this run.'
+    Write-Host '5. Wait for the portal move to succeed, seed an isolated TREEMON_CONFIG_DIR, then rerun the same command with -ReconcileCrossSubscriptionMove -ConfirmPortalMoveCompleted.'
+    Write-Host 'The viewer is expected to be unavailable after identity detachment until reconciliation finishes. If the move fails, reattach the preserved identity in the portal before retrying.'
     Write-Host 'The automation does not accept or print a source subscription, tenant, resource group, or resource ID.'
 }
 

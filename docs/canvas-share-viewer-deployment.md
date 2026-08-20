@@ -104,11 +104,15 @@ Reader` assignment. It does not check global availability of `treemon`, create o
 Service or plan, mutate the app registration, change storage configuration, build or deploy the
 viewer, or write Treemon configuration. It finishes by printing a redacted portal checklist.
 
-Follow that checklist in the Azure portal: move the canonical `treemon` App Service and its App
-Service plan together into the prepared destination. Leave source-side identities, role
-assignments, storage, and resource groups in place for rollback. Do not substitute an ordinary
-`-ValidateOnly` or apply run for preparation; before the portal move those modes correctly stop
-because the existing app still owns the global name.
+Follow that checklist in the Azure portal. First detach the App Service's current user-assigned
+identity attachment and confirm that its system-assigned identity is off; leave the detached
+identity resource, its role assignments, storage, and resource groups in place for rollback. Then
+move the canonical `treemon` App Service and its App Service plan together into the prepared
+destination. Do not substitute an ordinary `-ValidateOnly` or apply run for preparation; before
+the portal move those modes correctly stop because the existing app still owns the global name.
+The viewer is expected to be unavailable from detachment until reconciliation finishes. If the
+portal move fails before the app reaches the destination, manually reattach the preserved former
+identity before retrying or restoring service.
 
 After the portal reports success, use an isolated `TREEMON_CONFIG_DIR` seeded with the approved
 subscription, storage account, and container from the private machine configuration, then run:
@@ -127,10 +131,17 @@ subscription, storage account, and container from the private machine configurat
 
 The confirmation switch is mandatory and is checked before local tools or Azure are consulted.
 Reconciliation requires the moved canonical app, its plan, the prepared identity, and the retained
-registration to exist. It replaces the app's identity attachment with the destination identity,
-then reconciles federation, private-container RBAC, settings, lifecycle policy, package, Easy Auth,
-and deployed state through approved-subscription-only calls. The isolated config receives the
-canonical `viewerBaseUrl`; the production config remains unchanged.
+registration to exist. Before changing the app, it reads only a sanitized count and
+prepared-identity match from the moved app's destination-side identity state. Any other
+user-assigned attachment or a system-assigned identity stops reconciliation with portal guidance
+and no App Service mutation; detach it in the portal and rerun. Once that preflight passes,
+reconciliation attaches the prepared destination identity, then reconciles federation,
+private-container RBAC, settings, lifecycle policy, package, Easy Auth, and deployed state through
+approved-subscription-only calls. The isolated config receives the canonical `viewerBaseUrl`; the
+production config remains unchanged.
+
+If the app must be moved back for rollback, move the app and plan together and manually reattach
+the preserved former identity afterwards.
 
 ## Provision and deploy
 

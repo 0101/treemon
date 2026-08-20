@@ -172,6 +172,12 @@ $script:correctionWebApp =
         appServicePlanId = $script:planResourceId
         httpsOnly = $true
     }
+$script:correctionIdentityAttachmentSummary =
+    [pscustomobject]@{
+        identityType = $null
+        userAssignedIdentityCount = 0
+        preparedIdentityAttached = $false
+    }
 $script:webAppResult =
     [pscustomobject]@{
         appServicePlanId = $script:planResourceId
@@ -286,6 +292,13 @@ function Invoke-AzJson {
         $command = $Arguments[0..2] -join ' '
 
         switch ($command) {
+            'rest --method get' {
+                if (($Arguments -join ' ') -match '/sites/treemon\?api-version=') {
+                    return $script:correctionIdentityAttachmentSummary
+                }
+
+                throw 'Unexpected destination REST read in correction test.'
+            }
             'ad app list' {
                 return @($script:registrationResult)
             }
@@ -429,6 +442,12 @@ function Reset-CorrectionMocks {
     $script:azTryCalls = @()
     $script:blobAccessAudits = @()
     $script:nameAvailabilityCallCount = 0
+    $script:correctionIdentityAttachmentSummary =
+        [pscustomobject]@{
+            identityType = $null
+            userAssignedIdentityCount = 0
+            preparedIdentityAttached = $false
+        }
 }
 
 function New-SyntheticAccount {
@@ -847,8 +866,9 @@ Invoke-TestCase 'pre-move preparation bypasses the unavailable global app name s
         -Because 'the newly prepared identity must be audited after its reader grant'
     Assert-True `
         -Condition ($outputText -match 'Destination preparation complete' -and
+            $outputText -match 'detach its user-assigned identity attachment' -and
             $outputText -match 'ConfirmPortalMoveCompleted') `
-        -Because 'preparation must emit the portal handoff and the explicit reconciliation command'
+        -Because 'preparation must emit the identity-detachment handoff and the explicit reconciliation command'
     Assert-True `
         -Condition ($outputText -notmatch '(?i)/subscriptions/|tenant-id|source-rg|source-identity|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}') `
         -Because 'the emitted checklist must not contain source subscription, tenant, group, identity, or resource IDs'
@@ -962,7 +982,7 @@ Invoke-TestCase 'post-move reconciliation requires explicit operator confirmatio
         -Because 'the entry point must enforce confirmation before local tools or Azure are consulted'
 }
 
-Invoke-TestCase 'post-move discovery and identity replacement use approved destination state only' {
+Invoke-TestCase 'post-move discovery and identity attachment use approved destination state only' {
     Reset-CorrectionMocks -Scenario 'correction-destination'
     $resources =
         Get-CrossSubscriptionMoveDestinationResources `
@@ -1012,15 +1032,74 @@ Invoke-TestCase 'post-move discovery and identity replacement use approved desti
         -ManagedIdentity $script:correctionIdentity `
         -SubscriptionId $script:correctionSubscriptionId
 
+    $identitySummaryCall =
+        @(
+            $script:azJsonCalls
+            | Where-Object {
+                ($_.Arguments[0..2] -join ' ') -eq 'rest --method get' -and
+                    ($_.Arguments -join ' ') -match '/sites/treemon\?api-version='
+            }
+        )[-1]
+    $identitySummaryQueryIndex =
+        [Array]::IndexOf($identitySummaryCall.Arguments, '--query')
+    $identitySummaryQuery =
+        [string] $identitySummaryCall.Arguments[$identitySummaryQueryIndex + 1]
+    Assert-True `
+        -Condition ($identitySummaryQueryIndex -ge 0 -and
+            $identitySummaryQuery -match 'userAssignedIdentityCount' -and
+            $identitySummaryQuery -match 'preparedIdentityAttached' -and
+            $identitySummaryQuery -notmatch '(?i)tenantId|/subscriptions/') `
+        -Because 'the preflight may return only a sanitized attachment count and prepared-identity match'
+
     $assignmentCall = @($script:azNoneCalls)[0]
     $identitiesIndex = [Array]::IndexOf($assignmentCall.Arguments, '--identities')
     Assert-Equal `
         -Actual ([string] $assignmentCall.Arguments[$identitiesIndex + 1]) `
         -Expected ([string] $script:correctionIdentity.id) `
-        -Because 'the moved app identity set must be replaced with the prepared destination identity'
+        -Because 'the prepared destination identity must be attached after the preflight passes'
     Assert-True `
         -Condition (($assignmentCall.Arguments -join ' ') -notmatch 'source-subscription|source-rg|source-identity') `
         -Because 'the identity assignment must not carry a source resource identifier'
+}
+
+Invoke-TestCase 'post-move reconciliation rejects a foreign identity before mutating the app' {
+    Reset-CorrectionMocks -Scenario 'correction-destination'
+    $script:correctionIdentityAttachmentSummary =
+        [pscustomobject]@{
+            identityType = 'UserAssigned'
+            userAssignedIdentityCount = 1
+            preparedIdentityAttached = $false
+        }
+    $message = ''
+
+    try {
+        Set-CrossSubscriptionReplacementIdentity `
+            -ManagedIdentity $script:correctionIdentity `
+            -SubscriptionId $script:correctionSubscriptionId
+    } catch {
+        $message = $_.Exception.Message
+    }
+
+    Assert-True `
+        -Condition ($message -match 'detach every other user-assigned identity' -and
+            $message -match 'No App Service change was made') `
+        -Because 'a foreign attachment must fail with actionable portal guidance'
+    Assert-Equal `
+        -Actual $script:azNoneCalls.Count `
+        -Expected 0 `
+        -Because 'the stale attachment must be detected before identity assignment mutates the app'
+    Assert-Equal `
+        -Actual $script:azJsonCalls.Count `
+        -Expected 1 `
+        -Because 'the rejection may perform only the sanitized destination-side attachment read'
+
+    $summaryCall = $script:azJsonCalls[0]
+    $subscriptionIndex =
+        [Array]::IndexOf($summaryCall.Arguments, '--subscription')
+    Assert-Equal `
+        -Actual ([string] $summaryCall.Arguments[$subscriptionIndex + 1]) `
+        -Expected $script:correctionSubscriptionId `
+        -Because 'the attachment preflight must stay within the approved destination'
 }
 
 Invoke-TestCase 'every Azure resource-plane call selects its subscription explicitly' {
