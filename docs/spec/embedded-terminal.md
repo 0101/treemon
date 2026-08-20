@@ -284,6 +284,7 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `treemon.ps1` | Published host staging and deployment compatibility preflight |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` | Isolated host, replacement race, restart, resume, crash, security, and cleanup coverage |
+| `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, and candidate-first deployment ordering coverage |
 
 ## Related Specs
 
