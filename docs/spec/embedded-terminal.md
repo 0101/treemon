@@ -244,6 +244,14 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Plain machine discovery and staging:** one bounded manifest and direct version directories are
   sufficient. Registry state stays in the live host, and no generation journal or bundle store is
   recreated.
+- **Resume without widening control API:** after each replacement terminal is recreated, Treemon
+  briefly attaches through the existing authenticated ttyd protocol and submits the
+  `CodingToolCli Resume` command. A terminal without an exact resumable session receives no input
+  and remains a plain PowerShell shell.
+- **Executable-path replacement identity:** Treemon captures the exact running executable path
+  before commit, waits for that exact process identity to exit, and verifies the replacement is
+  running from the selected direct staging directory. The captured path is also the rollback target
+  when the staged process cannot be launched.
 
 ## Key Files
 
@@ -256,7 +264,7 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `src/Server/SessionActivityStore.fs` | Durable Copilot session state and optional terminal origin |
 | `src/Extension/reporting/extension.mjs` | Passive activity reports sourced from `TREEMON_TERMINAL_SESSION_ID` |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
-| `src/Server/Program.fs` | Host client lifecycle without terminal shutdown on server stop |
+| `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |
 | `treemon.ps1` | Published host staging and deployment compatibility preflight |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` | Isolated host, replacement race, restart, resume, crash, security, and cleanup coverage |

@@ -70,7 +70,19 @@ let private createApi agent roots =
               LaunchHost =
                 fun _ ->
                     Error
-                        "This path-resolution test did not expect to launch TerminalHost" }
+                        "This path-resolution test did not expect to launch TerminalHost"
+              ProcessIdentityMatches = fun _ _ -> Ok false
+              ResolveProcessExecutable =
+                fun _ _ ->
+                    Error
+                        "This path-resolution test did not expect to resolve TerminalHost"
+              SendTerminalCommand =
+                fun _ _ ->
+                    async {
+                        return
+                            Error
+                                "This path-resolution test did not expect a terminal command"
+                    } }
 
     createApiWithTerminal agent roots manager, manager
 

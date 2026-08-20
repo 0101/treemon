@@ -5,9 +5,12 @@ open System.Diagnostics
 open System.IO
 open System.Net.Http
 open System.Net.Http.Headers
+open System.Net.WebSockets
 open System.Text
 open System.Text.Json
 open System.Threading
+open System.Threading.Tasks
+open FsToolkit.ErrorHandling
 open Shared
 
 [<Literal>]
@@ -49,7 +52,34 @@ type internal Config =
       StartupTimeout: TimeSpan
       ControlRequestTimeout: TimeSpan
       ProbeInterval: TimeSpan
-      LaunchHost: ProcessStartInfo -> Result<unit, string> }
+      LaunchHost: ProcessStartInfo -> Result<unit, string>
+      ProcessIdentityMatches: int -> int64 -> Result<bool, string>
+      ResolveProcessExecutable: int -> int64 -> Result<string, string>
+      SendTerminalCommand: string -> string -> Async<Result<unit, string>> }
+
+type internal ReplacementOwnedSession =
+    { TerminalSessionId: SessionActivity.TerminalSessionId
+      CopilotSessionId: SessionActivity.SessionId
+      Status: SessionActivity.SessionLevelStatus }
+
+type internal ReplacementActivitySnapshot =
+    { ActivityEpoch: int64
+      OpenSessions: ReplacementOwnedSession list
+      ResumableSessionIds:
+        Map<SessionActivity.TerminalSessionId, SessionActivity.SessionId> }
+
+type internal ReplacementActivityQuery =
+    DateTimeOffset
+        -> Set<SessionActivity.TerminalSessionId>
+        -> Result<ReplacementActivitySnapshot, string>
+
+[<RequireQualifiedAccess>]
+type internal ReplacementOutcome =
+    | NoCandidate
+    | WaitingForIdle
+    | RaceLost
+    | Replaced of stagedVersion: string
+    | Failed of stagedVersion: string * error: string
 
 type private HostDiscovery =
     | MissingHost
@@ -61,6 +91,25 @@ type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
       LastHost: DiscoveryManifest option }
 
+type private ReplacementPlan =
+    { OldHost: DiscoveryManifest
+      OldExecutablePath: string
+      StagedVersion: string
+      StagedExecutablePath: string
+      RegistryRevision: int64
+      Terminals: TerminalRecord list
+      ActivityEpoch: int64 }
+
+type private HostLaunchOutcome =
+    | LaunchRejected of string
+    | LaunchStartedButUnhealthy of string
+    | HostLaunched of HostConnection
+
+type private ReplacementRecheck =
+    | ReadyToCommit of HostConnection * ReplacementActivitySnapshot
+    | RecheckChanged
+    | RecheckFailed of string
+
 type private Message =
     | Start of
         WorktreePath *
@@ -71,8 +120,14 @@ type private Message =
         WorktreePath *
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | ShutdownHost of AsyncReplyChannel<Result<unit, string>>
+    | TryCommitReplacement of
+        ReplacementPlan *
+        ReplacementActivityQuery *
+        AsyncReplyChannel<ReplacementOutcome>
 
-type Manager = private Manager of MailboxProcessor<Message>
+type Manager =
+    private
+        | Manager of Config * MailboxProcessor<Message>
 
 let private pathComparison =
     if OperatingSystem.IsWindows() then
@@ -272,9 +327,9 @@ let private readManifest config =
     | error ->
         Error $"Could not read the TerminalHost discovery manifest: {error.Message}"
 
-let private processIdentityMatches (manifest: DiscoveryManifest) =
+let private processIdentityMatchesDefault pid processStartTimeUtcTicks =
     try
-        use child = Process.GetProcessById manifest.Pid
+        use child = Process.GetProcessById pid
 
         if child.HasExited then
             Ok false
@@ -282,12 +337,43 @@ let private processIdentityMatches (manifest: DiscoveryManifest) =
             let startTicks =
                 child.StartTime.ToUniversalTime().Ticks
 
-            Ok(startTicks = manifest.ProcessStartTimeUtcTicks)
+            Ok(startTicks = processStartTimeUtcTicks)
     with
     | :? ArgumentException -> Ok false
     | :? InvalidOperationException -> Ok false
     | error ->
         Error $"Could not verify TerminalHost process identity: {error.Message}"
+
+let private resolveProcessExecutableDefault pid processStartTimeUtcTicks =
+    try
+        use child = Process.GetProcessById pid
+
+        if child.HasExited then
+            Error "The recorded TerminalHost process has exited"
+        elif child.StartTime.ToUniversalTime().Ticks <> processStartTimeUtcTicks then
+            Error "The recorded TerminalHost process identity no longer matches"
+        else
+            match child.MainModule |> Option.ofObj with
+            | Some mainModule when not (String.IsNullOrWhiteSpace mainModule.FileName) ->
+                Ok(Path.GetFullPath mainModule.FileName)
+            | _ ->
+                Error "Could not resolve the exact TerminalHost executable path"
+    with
+    | :? ArgumentException
+    | :? InvalidOperationException as error ->
+        Error $"Could not resolve the exact TerminalHost executable path: {error.Message}"
+    | error ->
+        Error $"Could not resolve the exact TerminalHost executable path: {error.Message}"
+
+let private processIdentityMatches config (manifest: DiscoveryManifest) =
+    config.ProcessIdentityMatches
+        manifest.Pid
+        manifest.ProcessStartTimeUtcTicks
+
+let private resolveProcessExecutable config (manifest: DiscoveryManifest) =
+    config.ResolveProcessExecutable
+        manifest.Pid
+        manifest.ProcessStartTimeUtcTicks
 
 let private httpClient =
     let handler =
@@ -450,7 +536,7 @@ let private discoverHost config =
         | Error error -> return UnusableHost error
         | Ok None -> return MissingHost
         | Ok(Some manifest) ->
-            match processIdentityMatches manifest with
+            match processIdentityMatches config manifest with
             | Error error -> return UnusableHost error
             | Ok false ->
                 return
@@ -460,7 +546,7 @@ let private discoverHost config =
                 match! probe config manifest with
                 | Ok connection -> return HealthyHost connection
                 | Error probeError ->
-                    match processIdentityMatches manifest with
+                    match processIdentityMatches config manifest with
                     | Ok false ->
                         return
                             DeadHost
@@ -632,6 +718,73 @@ let private launchDetached (startInfo: ProcessStartInfo) =
     with error ->
         Error $"Could not start TerminalHost: {error.Message}"
 
+let private terminalWebSocketEndpoint (attachmentEndpoint: string) =
+    try
+        let endpoint = Uri(attachmentEndpoint, UriKind.Absolute)
+
+        if
+            endpoint.Scheme <> Uri.UriSchemeHttp
+            || endpoint.Host <> "127.0.0.1"
+            || not (endpoint.AbsolutePath.EndsWith("/", StringComparison.Ordinal))
+        then
+            Error "TerminalHost returned an invalid command attachment endpoint"
+        else
+            let builder = UriBuilder(endpoint)
+            builder.Scheme <- "ws"
+            builder.Path <- $"{endpoint.AbsolutePath}ws"
+            Ok builder.Uri
+    with _ ->
+        Error "TerminalHost returned an invalid command attachment endpoint"
+
+let private sendTerminalCommandDefault attachmentEndpoint command =
+    async {
+        if
+            String.IsNullOrWhiteSpace command
+            || command.Length > 65_000
+            || command.IndexOf('\u0000') >= 0
+        then
+            return Error "The terminal resume command is invalid"
+        else
+            match terminalWebSocketEndpoint attachmentEndpoint with
+            | Error error -> return Error error
+            | Ok endpoint ->
+                use socket = new ClientWebSocket()
+                socket.Options.AddSubProtocol("tty")
+
+                use cancellation =
+                    new CancellationTokenSource(TimeSpan.FromSeconds 5.0)
+
+                let send bytes =
+                    socket.SendAsync(
+                        ArraySegment<byte> bytes,
+                        WebSocketMessageType.Binary, true, cancellation.Token
+                    )
+                    |> Async.AwaitTask
+
+                try
+                    do! socket.ConnectAsync(endpoint, cancellation.Token) |> Async.AwaitTask
+                    do! Encoding.UTF8.GetBytes("""{"AuthToken":"","columns":120,"rows":30}""") |> send
+                    do! Encoding.UTF8.GetBytes($"0{command}\r") |> send
+
+                    let! _ =
+                        socket.CloseOutputAsync(
+                            WebSocketCloseStatus.NormalClosure,
+                            "Resume command submitted",
+                            cancellation.Token
+                        )
+                        |> Async.AwaitTask
+                        |> Async.Catch
+
+                    return Ok()
+                with
+                | :? OperationCanceledException ->
+                    return Error "Timed out submitting the Copilot resume command"
+                | _ ->
+                    // A ClientWebSocket exception can include its request URI. The attachment URI
+                    // carries the host bearer, so never copy transport exception text to diagnostics.
+                    return Error "Could not submit the Copilot resume command"
+    }
+
 let private defaultStateDirectory () =
     let localApplicationData =
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
@@ -709,15 +862,31 @@ let private defaultConfig allowedOrigins =
         |> Option.defaultWith defaultStateDirectory
         |> Path.GetFullPath
 
-    { HostExecutablePath = defaultHostExecutable ()
+    let hostExecutable = defaultHostExecutable ()
+    let adjacentTtyd =
+        Path.Combine(
+            hostExecutable
+            |> Path.GetDirectoryName
+            |> Option.ofObj
+            |> Option.defaultValue AppContext.BaseDirectory,
+            "ttyd.exe"
+        )
+
+    { HostExecutablePath = hostExecutable
       HostStateDirectory = stateDirectory
-      TtydExecutablePath = None
+      TtydExecutablePath =
+        adjacentTtyd
+        |> Option.ofObj
+        |> Option.filter File.Exists
       ShellCommand = "pwsh"
       AllowedOrigins = allowedOrigins
       StartupTimeout = TimeSpan.FromSeconds 30.0
       ControlRequestTimeout = TimeSpan.FromSeconds 10.0
       ProbeInterval = TimeSpan.FromMilliseconds 100.0
-      LaunchHost = launchDetached }
+      LaunchHost = launchDetached
+      ProcessIdentityMatches = processIdentityMatchesDefault
+      ResolveProcessExecutable = resolveProcessExecutableDefault
+      SendTerminalCommand = sendTerminalCommandDefault }
 
 let private hostStartInfo config =
     let workingDirectory =
@@ -792,10 +961,10 @@ let private waitForHealthyHost config =
 
     wait None
 
-let private knownHostIsStillLive lastHost =
+let private knownHostIsStillLive config lastHost =
     match lastHost with
     | None -> Ok false
-    | Some host -> processIdentityMatches host
+    | Some host -> processIdentityMatches config host
 
 let private launchAndDiscover config =
     async {
@@ -811,7 +980,7 @@ let private ensureHost config lastHost =
         | DeadHost _ -> return! launchAndDiscover config
         | UnusableHost error -> return Error error
         | MissingHost ->
-            match knownHostIsStillLive lastHost with
+            match knownHostIsStillLive config lastHost with
             | Error error -> return Error error
             | Ok true ->
                 return
@@ -891,7 +1060,11 @@ let private reconcileSnapshot previousHost currentHost records snapshot =
 
     { Tabs = retained @ appended }
 
-let private applyRegistry state connection registry =
+let private applyRegistry
+    (state: ManagerState)
+    (connection: HostConnection)
+    (registry: RegistrySnapshot)
+    =
     { LastSnapshot =
         reconcileSnapshot
             state.LastHost
@@ -900,7 +1073,12 @@ let private applyRegistry state connection registry =
             state.LastSnapshot
       LastHost = Some connection.Manifest }
 
-let private applyRegistryAfterClose path state connection registry =
+let private applyRegistryAfterClose
+    path
+    (state: ManagerState)
+    (connection: HostConnection)
+    (registry: RegistrySnapshot)
+    =
     let withoutClosed =
         withoutPath path state.LastSnapshot
 
@@ -939,57 +1117,69 @@ let private getTerminals config state =
             return withHostFailure error state
     }
 
+let private startTerminalOnHost
+    (config: Config)
+    (connection: HostConnection)
+    (path: string)
+    =
+    async {
+        let body =
+            JsonSerializer.Serialize(
+                {| worktreePath = path |}
+            )
+
+        let! startResult =
+            request
+                config
+                connection
+                HttpMethod.Post
+                "/api/v1/terminals"
+                (Some body)
+
+        match! listTerminals config connection with
+        | Error listError ->
+            return
+                Error(
+                    match startResult with
+                    | Error startError ->
+                        $"{startError}; authoritative relist failed: {listError}"
+                    | Ok _ ->
+                        $"TerminalHost accepted the start request but its authoritative registry could not be read: {listError}"
+                )
+        | Ok registry ->
+            match terminalForPath path registry.Terminals with
+            | Some terminal -> return Ok(registry, terminal)
+            | None ->
+                return
+                    Error(
+                        match startResult with
+                        | Error startError -> startError
+                        | Ok _ ->
+                            "TerminalHost did not include the requested terminal in its authoritative registry"
+                    )
+    }
+
 let private startTerminal config state worktreePath =
     async {
         match! ensureHost config state.LastHost with
         | Error error ->
             return withHostFailure error state, Error error
         | Ok connection ->
-            let body =
-                JsonSerializer.Serialize(
-                    {| worktreePath =
-                        WorktreePath.value worktreePath |}
-                )
+            let path = WorktreePath.value worktreePath
 
-            let! startResult =
-                request
-                    config
-                    connection
-                    HttpMethod.Post
-                    "/api/v1/terminals"
-                    (Some body)
-
-            match! listTerminals config connection with
-            | Error listError ->
-                let error =
-                    match startResult with
-                    | Error startError ->
-                        $"{startError}; authoritative relist failed: {listError}"
-                    | Ok _ ->
-                        $"TerminalHost accepted the start request but its authoritative registry could not be read: {listError}"
-
+            match! startTerminalOnHost config connection path with
+            | Error error ->
                 return withHostFailure error state, Error error
-            | Ok registry ->
+            | Ok(registry, _) ->
                 let next = applyRegistry state connection registry
-                let path = WorktreePath.value worktreePath
-
-                match terminalForPath path registry.Terminals with
-                | Some _ -> return next, Ok next.LastSnapshot
-                | None ->
-                    let error =
-                        match startResult with
-                        | Error startError -> startError
-                        | Ok _ ->
-                            "TerminalHost did not include the requested terminal in its authoritative registry"
-
-                    return next, Error error
+                return next, Ok next.LastSnapshot
     }
 
-let private safeWithoutHealthyHost state discovery =
+let private safeWithoutHealthyHost config state discovery =
     match discovery with
     | DeadHost _ -> Ok()
     | MissingHost ->
-        match knownHostIsStillLive state.LastHost with
+        match knownHostIsStillLive config state.LastHost with
         | Ok false -> Ok()
         | Ok true ->
             Error
@@ -1079,7 +1269,7 @@ let private closeTerminal config state worktreePath =
                     connection
                     worktreePath
         | discovery ->
-            match safeWithoutHealthyHost state discovery with
+            match safeWithoutHealthyHost config state discovery with
             | Error error ->
                 return withHostFailure error state, Error error
             | Ok() ->
@@ -1119,7 +1309,7 @@ let private shutdown config state =
                     None
             with
             | Error error ->
-                match processIdentityMatches connection.Manifest with
+                match processIdentityMatches config connection.Manifest with
                 | Ok false ->
                     let next =
                         withHostFailure
@@ -1137,6 +1327,401 @@ let private shutdown config state =
                         state
 
                 return next, Ok()
+    }
+
+let private hostExecutableName =
+    if OperatingSystem.IsWindows() then
+        "TerminalHost.exe"
+    else
+        "TerminalHost"
+
+let private stagedExecutablePath config version =
+    try
+        let stagingRoot =
+            Path.Combine(config.HostStateDirectory, "staged")
+            |> Path.GetFullPath
+            |> Path.TrimEndingDirectorySeparator
+
+        let directory =
+            Path.Combine(stagingRoot, version)
+            |> Path.GetFullPath
+            |> Path.TrimEndingDirectorySeparator
+            |> DirectoryInfo
+
+        let hasExactParent =
+            directory.Parent
+            |> Option.ofObj
+            |> Option.exists (fun parent ->
+                samePath
+                    (parent.FullName
+                     |> Path.GetFullPath
+                     |> Path.TrimEndingDirectorySeparator)
+                    stagingRoot)
+
+        let executable = Path.Combine(directory.FullName, hostExecutableName)
+        let executableInfo = FileInfo executable
+
+        if
+            not (validStagedVersion version)
+            || directory.Name <> version
+            || not hasExactParent
+        then
+            Error "The staged TerminalHost version is not a direct version directory"
+        elif
+            not directory.Exists
+            || (directory.Attributes &&& FileAttributes.ReparsePoint) <> enum 0
+        then
+            Error "The staged TerminalHost version directory is missing or unsafe"
+        elif
+            not executableInfo.Exists
+            || (executableInfo.Attributes &&& FileAttributes.ReparsePoint) <> enum 0
+        then
+            Error
+                $"The staged TerminalHost executable was not found at '{executableInfo.FullName}'"
+        else
+            Ok executableInfo.FullName
+    with error ->
+        Error $"Could not validate the staged TerminalHost executable: {error.Message}"
+
+let private hasNonIdleOwnedSession
+    (snapshot: ReplacementActivitySnapshot)
+    =
+    snapshot.OpenSessions
+    |> List.exists (fun session ->
+        match session.Status with
+        | SessionActivity.SessionLevelStatus.Working
+        | SessionActivity.SessionLevelStatus.WaitingForUser -> true
+        | SessionActivity.SessionLevelStatus.Idle -> false)
+
+let private terminalSessionIds (terminals: TerminalRecord list) =
+    terminals
+    |> List.map (_.SessionId >> SessionActivity.TerminalSessionId)
+    |> Set.ofList
+
+let private queryReplacementActivity
+    (query: ReplacementActivityQuery)
+    (terminals: TerminalRecord list)
+    : Result<ReplacementActivitySnapshot, string> =
+    try
+        query DateTimeOffset.UtcNow (terminalSessionIds terminals)
+    with error ->
+        Error $"Could not query terminal-owned Copilot activity: {error.Message}"
+
+let private waitForHostExit config manifest =
+    let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
+
+    let rec wait () =
+        async {
+            match processIdentityMatches config manifest with
+            | Error error -> return Error error
+            | Ok false -> return Ok()
+            | Ok true when DateTimeOffset.UtcNow >= deadline ->
+                return
+                    Error
+                        $"TerminalHost PID {manifest.Pid} did not exit within {config.StartupTimeout.TotalSeconds:g} seconds"
+            | Ok true ->
+                do! Async.Sleep(probeDelayMilliseconds config)
+                return! wait ()
+        }
+
+    wait ()
+
+let private shutdownAndWait config connection =
+    async {
+        let! shutdownResult =
+            request
+                config
+                connection
+                HttpMethod.Post
+                "/api/v1/shutdown"
+                None
+
+        match! waitForHostExit config connection.Manifest with
+        | Ok() -> return Ok()
+        | Error waitError ->
+            return
+                Error(
+                    match shutdownResult with
+                    | Ok _ -> waitError
+                    | Error requestError ->
+                        $"{requestError}; exact host shutdown could not be confirmed: {waitError}"
+                )
+    }
+
+let private replacementTtydPath
+    (config: Config)
+    (oldExecutablePath: string)
+    =
+    match config.TtydExecutablePath with
+    | Some path -> Some path
+    | None ->
+        oldExecutablePath
+        |> Path.GetDirectoryName
+        |> Option.ofObj
+        |> Option.map (fun directory -> Path.Combine(directory, "ttyd.exe"))
+        |> Option.filter File.Exists
+
+let private configForExecutable config ttydExecutablePath executablePath =
+    { config with
+        HostExecutablePath = executablePath
+        TtydExecutablePath = ttydExecutablePath }
+
+let private launchHostAt config =
+    async {
+        match startHostProcess config with
+        | Error error -> return LaunchRejected error
+        | Ok() ->
+            match! waitForHealthyHost config with
+            | Ok connection -> return HostLaunched connection
+            | Error error -> return LaunchStartedButUnhealthy error
+    }
+
+let private recreateTerminals
+    (config: Config)
+    (connection: HostConnection)
+    (terminals: TerminalRecord list)
+    (resumableSessionIds:
+        Map<SessionActivity.TerminalSessionId, SessionActivity.SessionId>)
+    =
+    let rec recreate registry remaining =
+        asyncResult {
+            match remaining with
+            | [] -> return registry
+            | previous :: tail ->
+                let! nextRegistry, recreated =
+                    startTerminalOnHost config connection previous.WorktreePath
+                    |> AsyncResult.mapError (fun error ->
+                        $"Could not recreate the terminal for '{previous.WorktreePath}': {error}")
+
+                match
+                    resumableSessionIds
+                    |> Map.tryFind (
+                        SessionActivity.TerminalSessionId previous.SessionId
+                    )
+                with
+                | None -> ()
+                | Some(SessionActivity.SessionId sessionId) ->
+                    let provider =
+                        CodingToolStatus.readConfiguredProvider previous.WorktreePath
+
+                    let command =
+                        CodingToolCli.build provider (CodingToolCli.Resume(Some sessionId))
+
+                    do!
+                        config.SendTerminalCommand
+                            recreated.AttachmentEndpoint
+                            command.AsShellString
+                        |> AsyncResult.mapError (fun error ->
+                            $"Could not resume the terminal-owned Copilot session for '{previous.WorktreePath}': {error}")
+
+                return! recreate nextRegistry tail
+        }
+
+    asyncResult {
+        let! initial = listTerminals config connection
+
+        if not (List.isEmpty initial.Terminals) then
+            return!
+                Error
+                    "The replacement TerminalHost did not start with an empty terminal registry"
+
+        return! recreate initial terminals
+    }
+
+let private replacementFailure
+    stageVersion
+    error
+    (state: ManagerState)
+    =
+    let message = $"TerminalHost replacement failed: {error}"
+
+    withHostFailure message state,
+    ReplacementOutcome.Failed(stageVersion, error)
+
+let private recoverOldHost
+    (config: Config)
+    (state: ManagerState)
+    (plan: ReplacementPlan)
+    resumableSessionIds
+    failure
+    =
+    async {
+        let oldConfig =
+            configForExecutable
+                config
+                (replacementTtydPath config plan.OldExecutablePath)
+                plan.OldExecutablePath
+
+        let failed detail =
+            replacementFailure
+                plan.StagedVersion
+                $"{failure}. {detail}"
+                state
+
+        match! launchHostAt oldConfig with
+        | LaunchRejected recoveryError
+        | LaunchStartedButUnhealthy recoveryError ->
+            return failed $"The previous host could not be restarted: {recoveryError}"
+        | HostLaunched connection ->
+            let recover =
+                asyncResult {
+                    let! executablePath =
+                        resolveProcessExecutable config connection.Manifest
+                        |> Result.mapError (fun error ->
+                            $"The restarted previous host could not be verified: {error}")
+
+                    if not (samePath executablePath plan.OldExecutablePath) then
+                        return!
+                            Error
+                                "Recovery started an unexpected TerminalHost executable."
+
+                    let! registry =
+                        recreateTerminals
+                            oldConfig
+                            connection
+                            plan.Terminals
+                            resumableSessionIds
+                        |> AsyncResult.mapError (fun error ->
+                            $"The previous host restarted, but its terminals could not be recovered: {error}")
+
+                    return applyRegistry state connection registry
+                }
+
+            match! recover with
+            | Error recoveryError -> return failed recoveryError
+            | Ok recovered ->
+                return
+                    recovered,
+                    ReplacementOutcome.Failed(
+                        plan.StagedVersion,
+                        $"{failure}. The previous host and its terminals were recovered."
+                    )
+    }
+
+let private recheckReplacement
+    (config: Config)
+    (plan: ReplacementPlan)
+    (query: ReplacementActivityQuery)
+    =
+    async {
+        match! discoverHost config with
+        | HealthyHost connection
+            when hostIdentityMatches connection.Manifest plan.OldHost
+                 && connection.Manifest.StagedExecutableVersion = Some plan.StagedVersion ->
+            match! listTerminals config connection with
+            | Error error ->
+                return
+                    RecheckFailed
+                        $"Could not recheck the authoritative terminal registry: {error}"
+            | Ok registry
+                when registry.Revision <> plan.RegistryRevision
+                     || registry.Terminals <> plan.Terminals ->
+                return RecheckChanged
+            | Ok registry ->
+                match queryReplacementActivity query registry.Terminals with
+                | Error error -> return RecheckFailed error
+                | Ok activity
+                    when activity.ActivityEpoch <> plan.ActivityEpoch
+                         || hasNonIdleOwnedSession activity ->
+                    return RecheckChanged
+                | Ok activity ->
+                    match resolveProcessExecutable config connection.Manifest with
+                    | Error error -> return RecheckFailed error
+                    | Ok executablePath
+                        when samePath executablePath plan.OldExecutablePath ->
+                        return ReadyToCommit(connection, activity)
+                    | Ok _ -> return RecheckChanged
+        | HealthyHost _
+        | MissingHost
+        | DeadHost _ ->
+            return RecheckChanged
+        | UnusableHost error ->
+            return RecheckFailed $"Could not recheck the exact TerminalHost: {error}"
+    }
+
+let private commitReplacement
+    (config: Config)
+    (state: ManagerState)
+    (plan: ReplacementPlan)
+    (query: ReplacementActivityQuery)
+    =
+    async {
+        let failed error =
+            state,
+            ReplacementOutcome.Failed(plan.StagedVersion, error)
+
+        try
+            match! recheckReplacement config plan query with
+            | RecheckChanged -> return state, ReplacementOutcome.RaceLost
+            | RecheckFailed error -> return failed error
+            | ReadyToCommit(connection, activity) ->
+                match! shutdownAndWait config connection with
+                | Error error ->
+                    return
+                        failed
+                            $"The previous TerminalHost was retained because shutdown did not complete: {error}"
+                | Ok() ->
+                    let stagedConfig =
+                        configForExecutable
+                            config
+                            (replacementTtydPath config plan.OldExecutablePath)
+                            plan.StagedExecutablePath
+
+                    match! launchHostAt stagedConfig with
+                    | LaunchRejected error ->
+                        return!
+                            recoverOldHost
+                                config
+                                state
+                                plan
+                                activity.ResumableSessionIds
+                                $"The staged host could not be launched: {error}"
+                    | LaunchStartedButUnhealthy error ->
+                        return
+                            replacementFailure
+                                plan.StagedVersion
+                                $"The staged host process started but did not become healthy; the previous host was not restarted because the staged process could not be proven stopped: {error}"
+                                state
+                    | HostLaunched replacement ->
+                        let activate =
+                            asyncResult {
+                                let! executablePath =
+                                    resolveProcessExecutable config replacement.Manifest
+                                    |> Result.mapError (fun error ->
+                                        $"The staged host identity could not be verified: {error}")
+
+                                if not (samePath executablePath plan.StagedExecutablePath) then
+                                    return!
+                                        Error
+                                            "The staged launch published an unexpected TerminalHost executable"
+
+                                let! registry =
+                                    recreateTerminals
+                                        stagedConfig
+                                        replacement
+                                        plan.Terminals
+                                        activity.ResumableSessionIds
+
+                                return applyRegistry state replacement registry
+                            }
+
+                        match! activate with
+                        | Error error ->
+                            return
+                                replacementFailure
+                                    plan.StagedVersion
+                                    error
+                                    state
+                        | Ok next ->
+                            return
+                                next,
+                                ReplacementOutcome.Replaced plan.StagedVersion
+        with error ->
+            return
+                replacementFailure
+                    plan.StagedVersion
+                    $"Unexpected replacement error: {error.Message}"
+                    state
     }
 
 let internal createWithConfig config =
@@ -1182,6 +1767,16 @@ let internal createWithConfig config =
 
                         reply.Reply result
                         return! loop next
+                    | TryCommitReplacement(plan, query, reply) ->
+                        let! next, outcome =
+                            commitReplacement
+                                config
+                                state
+                                plan
+                                query
+
+                        reply.Reply outcome
+                        return! loop next
                     | ShutdownHost reply ->
                         let! next, result = shutdown config state
                         reply.Reply result
@@ -1192,32 +1787,171 @@ let internal createWithConfig config =
                 { LastSnapshot = EmbeddedTerminalSnapshot.empty
                   LastHost = None })
 
-    Manager agent
+    Manager(config, agent)
 
 let create serverOrigin =
     defaultConfig (originsFor serverOrigin)
     |> createWithConfig
 
-let start (Manager agent) worktreePath =
+let private tryReplaceHostIgnoring
+    ignoredStagedVersion
+    beforeRecheck
+    query
+    (Manager(config, agent))
+    =
+    async {
+        match! discoverHost config with
+        | HealthyHost connection ->
+            match connection.Manifest.StagedExecutableVersion with
+            | None -> return ReplacementOutcome.NoCandidate
+            | Some stagedVersion when ignoredStagedVersion = Some stagedVersion ->
+                return ReplacementOutcome.NoCandidate
+            | Some stagedVersion ->
+                let candidate =
+                    result {
+                        let! stagedExecutable =
+                            stagedExecutablePath config stagedVersion
+
+                        let! oldExecutable =
+                            resolveProcessExecutable config connection.Manifest
+
+                        return stagedExecutable, oldExecutable
+                    }
+
+                match candidate with
+                | Error error -> return ReplacementOutcome.Failed(stagedVersion, error)
+                | Ok(stagedExecutable, oldExecutable)
+                    when samePath oldExecutable stagedExecutable ->
+                    return ReplacementOutcome.NoCandidate
+                | Ok(stagedExecutable, oldExecutable) ->
+                    match! listTerminals config connection with
+                    | Error error ->
+                        return
+                            ReplacementOutcome.Failed(
+                                stagedVersion,
+                                $"Could not capture the authoritative terminal registry: {error}"
+                            )
+                    | Ok registry ->
+                        match queryReplacementActivity query registry.Terminals with
+                        | Error error ->
+                            return ReplacementOutcome.Failed(stagedVersion, error)
+                        | Ok activity when hasNonIdleOwnedSession activity ->
+                            return ReplacementOutcome.WaitingForIdle
+                        | Ok activity ->
+                            let plan: ReplacementPlan =
+                                { OldHost = connection.Manifest
+                                  OldExecutablePath = oldExecutable
+                                  StagedVersion = stagedVersion
+                                  StagedExecutablePath = stagedExecutable
+                                  RegistryRevision = registry.Revision
+                                  Terminals = registry.Terminals
+                                  ActivityEpoch = activity.ActivityEpoch }
+
+                            try
+                                do! beforeRecheck ()
+
+                                return!
+                                    agent.PostAndAsyncReply(
+                                        (fun reply ->
+                                            TryCommitReplacement(plan, query, reply)),
+                                        timeout = 300_000
+                                    )
+                            with error ->
+                                return
+                                    ReplacementOutcome.Failed(
+                                        stagedVersion,
+                                        $"Could not coordinate TerminalHost replacement: {error.Message}"
+                                    )
+        | MissingHost
+        | DeadHost _
+        | UnusableHost _ ->
+            return ReplacementOutcome.NoCandidate
+    }
+
+let internal tryReplaceHostWith beforeRecheck query manager =
+    tryReplaceHostIgnoring
+        None
+        beforeRecheck
+        query
+        manager
+
+let internal tryReplaceHost query manager =
+    tryReplaceHostWith
+        (fun () -> async.Return())
+        query
+        manager
+
+let internal runReplacementCoordinator
+    manager
+    query
+    (cancellationToken: CancellationToken)
+    =
+    let rec loop ignoredStagedVersion =
+        async {
+            if cancellationToken.IsCancellationRequested then
+                return ()
+            else
+                let! outcome =
+                    tryReplaceHostIgnoring
+                        ignoredStagedVersion
+                        (fun () -> async.Return())
+                        query
+                        manager
+
+                let nextIgnored =
+                    match outcome with
+                    | ReplacementOutcome.Replaced stagedVersion ->
+                        Log.log
+                            "TerminalHost"
+                            $"Replaced the host with staged version {stagedVersion} at a natural Copilot-idle window"
+
+                        None
+                    | ReplacementOutcome.Failed(stagedVersion, error) ->
+                        Log.log
+                            "TerminalHost"
+                            $"Replacement of staged version {stagedVersion} failed: {error}"
+
+                        Some stagedVersion
+                    | ReplacementOutcome.NoCandidate
+                    | ReplacementOutcome.WaitingForIdle
+                    | ReplacementOutcome.RaceLost ->
+                        ignoredStagedVersion
+
+                try
+                    do!
+                        Task.Delay(
+                            TimeSpan.FromSeconds 1.0,
+                            cancellationToken
+                        )
+                        |> Async.AwaitTask
+
+                    return! loop nextIgnored
+                with :? OperationCanceledException ->
+                    return ()
+        }
+
+    loop None
+
+let start (Manager(_, agent)) worktreePath =
     agent.PostAndAsyncReply(
         (fun reply -> Start(worktreePath, reply)),
         timeout = 60_000
     )
 
-let get (Manager agent) =
+let get (Manager(_, agent)) =
     agent.PostAndAsyncReply(Get, timeout = 60_000)
 
-let close (Manager agent) worktreePath =
+let close (Manager(_, agent)) worktreePath =
     agent.PostAndAsyncReply(
         (fun reply -> Close(worktreePath, reply)),
         timeout = 60_000
     )
 
-let internal closeStrict (Manager agent) worktreePath =
+let internal closeStrict (Manager(_, agent)) worktreePath =
     agent.PostAndAsyncReply(
         (fun reply -> CloseStrict(worktreePath, reply)),
         timeout = 60_000
     )
 
-let internal shutdownHost (Manager agent) =
+let internal shutdownHost (Manager(_, agent)) =
     agent.PostAndAsyncReply(ShutdownHost, timeout = 60_000)

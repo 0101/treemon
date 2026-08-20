@@ -49,8 +49,8 @@ type private FakeControlHost() =
     let root = uniquePath "embedded-terminal-client"
     let stateDirectory = Path.Combine(root, "state")
     let token = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
-    let hostVersion = "1.0.0-test"
     let gate = obj()
+    let oldExecutable = Path.Combine(root, "old", "TerminalHost.exe")
 
     let currentPid, currentStartTicks =
         use current = Process.GetCurrentProcess()
@@ -62,13 +62,22 @@ type private FakeControlHost() =
     let mutable failNextStartResponse = false
     let mutable failNextCloseResponse = false
     let mutable stopped = false
+    let mutable logicalShutdown = false
+    let mutable online = true
+    let mutable hostVersion = "1.0.0-test"
+    let mutable stagedVersion: string option = None
+    let mutable currentExecutable = oldExecutable
     let listRequests = ConcurrentQueue<unit>()
     let startRequests = ConcurrentQueue<string>()
     let closeRequests = ConcurrentQueue<string>()
+    let shutdownRequests = ConcurrentQueue<unit>()
     let jsonOptions = JsonSerializerOptions(JsonSerializerDefaults.Web)
 
     do
         Directory.CreateDirectory stateDirectory |> ignore
+        Directory.CreateDirectory(Path.GetDirectoryName oldExecutable)
+        |> ignore
+        File.WriteAllText(oldExecutable, "fake old TerminalHost")
 
     let snapshot () =
         lock gate (fun () ->
@@ -174,18 +183,26 @@ type private FakeControlHost() =
                         StatusCodes.Status401Unauthorized
                         { Error = "Authentication required" }
                         context
+            elif not (lock gate (fun () -> online)) then
+                return!
+                    writeJson
+                        StatusCodes.Status503ServiceUnavailable
+                        { Error = "Host is not running" }
+                        context
             else
                 let method = context.Request.Method
                 let path = context.Request.Path.Value |> Option.ofObj |> Option.defaultValue ""
 
                 match method, path with
                 | "GET", "/api/v1/health" ->
+                    let version = lock gate (fun () -> hostVersion)
+
                     return!
                         writeJson
                             StatusCodes.Status200OK
                             { Pid = currentPid
                               ProcessStartTimeUtcTicks = currentStartTicks
-                              HostVersion = hostVersion
+                              HostVersion = version
                               ControlApiVersion = 1 }
                             context
                 | "GET", "/api/v1/terminals" ->
@@ -233,11 +250,31 @@ type private FakeControlHost() =
                     else
                         return! writeJson StatusCodes.Status200OK (snapshot ()) context
                 | "POST", "/api/v1/shutdown" ->
-                    context.Response.OnCompleted(
-                        Func<Task>(fun () ->
-                            lifetime.StopApplication()
-                            Task.CompletedTask)
-                    )
+                    shutdownRequests.Enqueue()
+
+                    let stopApi =
+                        lock gate (fun () ->
+                            if logicalShutdown then
+                                online <- false
+                                terminals <- []
+                                revision <- 0L
+                                false
+                            else
+                                true)
+
+                    if stopApi then
+                        context.Response.OnCompleted(
+                            Func<Task>(fun () ->
+                                lifetime.StopApplication()
+                                Task.CompletedTask)
+                        )
+                    else
+                        let path = Path.Combine(stateDirectory, "host.json")
+
+                        try
+                            File.Delete path
+                        with _ ->
+                            ()
 
                     return!
                         writeJson
@@ -275,16 +312,71 @@ type private FakeControlHost() =
     member _.ListRequestCount = listRequests.Count
     member _.StartRequestCount = startRequests.Count
     member _.CloseRequestCount = closeRequests.Count
+    member _.ShutdownRequestCount = shutdownRequests.Count
+    member _.OldExecutable = oldExecutable
+    member _.CurrentExecutable = lock gate (fun () -> currentExecutable)
+    member _.CurrentHostVersion = lock gate (fun () -> hostVersion)
+    member _.IsOnline = lock gate (fun () -> online)
 
     member _.PublishManifest() =
+        let version, staged =
+            lock gate (fun () -> hostVersion, stagedVersion)
+
         let manifest = JsonObject()
         manifest["pid"] <- JsonValue.Create currentPid
         manifest["processStartTimeUtcTicks"] <- JsonValue.Create currentStartTicks
         manifest["endpoint"] <- JsonValue.Create endpoint
         manifest["bearerToken"] <- JsonValue.Create token
-        manifest["hostVersion"] <- JsonValue.Create hostVersion
+        manifest["hostVersion"] <- JsonValue.Create version
         manifest["controlApiVersion"] <- JsonValue.Create 1
+
+        staged
+        |> Option.iter (fun candidate ->
+            manifest["stagedExecutableVersion"] <-
+                JsonValue.Create candidate)
+
         File.WriteAllText(manifestPath, manifest.ToJsonString())
+
+    member this.Stage(version: string) =
+        let directory =
+            Path.Combine(stateDirectory, "staged", version)
+
+        Directory.CreateDirectory directory |> ignore
+        let executable = Path.Combine(directory, "TerminalHost.exe")
+        File.WriteAllText(executable, $"fake staged TerminalHost {version}")
+        lock gate (fun () -> stagedVersion <- Some version)
+        this.PublishManifest()
+        executable
+
+    member _.EnableLogicalReplacement() =
+        lock gate (fun () -> logicalShutdown <- true)
+
+    member this.Activate(executablePath: string, version: string) =
+        lock gate (fun () ->
+            currentExecutable <- Path.GetFullPath executablePath
+            hostVersion <- version
+            online <- true
+            terminals <- []
+            revision <- 0L)
+
+        this.PublishManifest()
+
+    member _.ExactProcessIsLive(pid: int, startTicks: int64) =
+        Ok(
+            pid = currentPid
+            && startTicks = currentStartTicks
+            && lock gate (fun () -> online)
+        )
+
+    member _.ResolveExactProcessExecutable(pid: int, startTicks: int64) =
+        if
+            pid = currentPid
+            && startTicks = currentStartTicks
+            && lock gate (fun () -> online)
+        then
+            Ok(lock gate (fun () -> currentExecutable))
+        else
+            Error "Fake TerminalHost identity is not live"
 
     member _.PublishMalformedManifest() =
         File.WriteAllText(
@@ -321,7 +413,21 @@ let private managerConfig
     (host: FakeControlHost)
     (launchHost: ProcessStartInfo -> Result<unit, string>)
     : EmbeddedTerminal.Config =
-    { HostExecutablePath = Path.Combine(host.Root, "TerminalHost.exe")
+    let processIdentityMatches pid startTicks =
+        try
+            use child = Process.GetProcessById pid
+
+            Ok(
+                not child.HasExited
+                && child.StartTime.ToUniversalTime().Ticks = startTicks
+            )
+        with
+        | :? ArgumentException
+        | :? InvalidOperationException ->
+            Ok false
+        | error -> Error error.Message
+
+    { HostExecutablePath = host.OldExecutable
       HostStateDirectory = host.StateDirectory
       TtydExecutablePath = None
       ShellCommand = "pwsh"
@@ -329,10 +435,70 @@ let private managerConfig
       StartupTimeout = TimeSpan.FromSeconds 2.0
       ControlRequestTimeout = TimeSpan.FromMilliseconds 500.0
       ProbeInterval = TimeSpan.FromMilliseconds 20.0
-      LaunchHost = launchHost }
+      LaunchHost = launchHost
+      ProcessIdentityMatches = processIdentityMatches
+      ResolveProcessExecutable =
+        fun pid startTicks ->
+            match processIdentityMatches pid startTicks with
+            | Ok true -> Ok host.OldExecutable
+            | Ok false -> Error "Fake TerminalHost identity is not live"
+            | Error error -> Error error
+      SendTerminalCommand =
+        fun _ _ ->
+            async {
+                return
+                    Error
+                        "The test did not expect a terminal command"
+            } }
 
 let private noLaunch (_: ProcessStartInfo) =
     Error "The test did not expect TerminalHost to be launched"
+
+let private replacementManagerConfig
+    (host: FakeControlHost)
+    launchHost
+    sendTerminalCommand
+    =
+    { managerConfig host launchHost with
+        StartupTimeout = TimeSpan.FromSeconds 1.0
+        ProcessIdentityMatches =
+            fun pid startTicks ->
+                host.ExactProcessIsLive(pid, startTicks)
+        ResolveProcessExecutable =
+            fun pid startTicks ->
+                host.ResolveExactProcessExecutable(pid, startTicks)
+        SendTerminalCommand = sendTerminalCommand }
+
+let private asReplacementActivitySnapshot
+    (snapshot: SessionActivityService.OwnedSessionSnapshot)
+    : EmbeddedTerminal.ReplacementActivitySnapshot =
+    { ActivityEpoch = snapshot.ActivityEpoch
+      OpenSessions =
+        snapshot.OpenSessions
+        |> List.map (fun session ->
+            { TerminalSessionId = session.TerminalSessionId
+              CopilotSessionId = session.CopilotSessionId
+              Status = session.Status }
+            : EmbeddedTerminal.ReplacementOwnedSession)
+      ResumableSessionIds = snapshot.ResumableSessionIds }
+
+let private replacementStoredStatus
+    sessionId
+    terminalSessionId
+    worktreePath
+    status
+    at
+    : SessionActivityStore.StoredStatus =
+    { SessionId = SessionActivity.SessionId sessionId
+      TerminalSessionId = terminalSessionId
+      WorktreePath = worktreePath
+      Provider = CopilotCli
+      Status =
+        { SessionActivity.emptyStatus with
+            Status = status }
+      UpdatedAt = at
+      LastSeen = at
+      ContextUsageAt = None }
 
 let private worktree (root: string) (name: string) =
     let path = Path.Combine(root, name)
@@ -565,6 +731,377 @@ type EmbeddedTerminalControlClientTests() =
             Assert.Multiple(fun () ->
                 Assert.That(restartAttempt |> Result.isError, Is.True)
                 Assert.That(launches.Count, Is.Zero))
+        }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type EmbeddedTerminalReplacementTests() =
+    [<Test>]
+    member _.``registry race between snapshot and recheck aborts without side effects``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-race"
+            let stagedExecutable = host.Stage stagedVersion
+            let launches = ConcurrentQueue<string>()
+
+            let config =
+                replacementManagerConfig
+                    host
+                    (fun startInfo ->
+                        launches.Enqueue startInfo.FileName
+                        host.Activate(startInfo.FileName, stagedVersion)
+                        Ok())
+                    (fun _ _ -> async { return Ok() })
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let first = worktree host.Root "race-first"
+            let raced = worktree host.Root "race-winner"
+
+            let! firstStarted =
+                EmbeddedTerminal.start manager first
+                |> Async.StartAsTask
+
+            requireOk firstStarted |> ignore
+
+            let query _ _ : Result<EmbeddedTerminal.ReplacementActivitySnapshot, string> =
+                Ok
+                    { ActivityEpoch = 4L
+                      OpenSessions = []
+                      ResumableSessionIds = Map.empty }
+
+            let beforeRecheck () =
+                async {
+                    let! started = EmbeddedTerminal.start manager raced
+                    requireOk started |> ignore
+                }
+
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHostWith
+                    beforeRecheck
+                    query
+                    manager
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    outcome,
+                    Is.EqualTo EmbeddedTerminal.ReplacementOutcome.RaceLost
+                )
+
+                Assert.That(host.ShutdownRequestCount, Is.Zero)
+                Assert.That(launches, Is.Empty)
+                Assert.That(host.IsOnline, Is.True)
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EqualTo(
+                        [ WorktreePath.value first
+                          WorktreePath.value raced ]
+                    )
+                )
+                Assert.That(File.Exists stagedExecutable, Is.True))
+        }
+
+    [<Test>]
+    member _.``WaitingForUser on an exact owned session gates without timeout or launch``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            host.Stage "2.0.0-waiting" |> ignore
+            let launches = ConcurrentQueue<string>()
+
+            let manager =
+                replacementManagerConfig
+                    host
+                    (fun startInfo ->
+                        launches.Enqueue startInfo.FileName
+                        Error "WaitingForUser must prevent launch")
+                    (fun _ _ -> async { return Ok() })
+                |> EmbeddedTerminal.createWithConfig
+
+            let target = worktree host.Root "waiting"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let terminal =
+                host.CurrentTerminals |> List.exactlyOne
+
+            let query _ _ : Result<EmbeddedTerminal.ReplacementActivitySnapshot, string> =
+                Ok
+                    { ActivityEpoch = 9L
+                      OpenSessions =
+                        [ { TerminalSessionId =
+                                SessionActivity.TerminalSessionId
+                                    terminal.SessionId
+                            CopilotSessionId =
+                                SessionActivity.SessionId "waiting-session"
+                            Status =
+                                SessionActivity.SessionLevelStatus.WaitingForUser } ]
+                      ResumableSessionIds = Map.empty }
+
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHost query manager
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    outcome,
+                    Is.EqualTo
+                        EmbeddedTerminal.ReplacementOutcome.WaitingForIdle
+                )
+
+                Assert.That(host.ShutdownRequestCount, Is.Zero)
+                Assert.That(launches, Is.Empty)
+                Assert.That(host.IsOnline, Is.True))
+        }
+
+    [<Test>]
+    member _.``replacement ignores unrelated Working sessions and resumes only the exact terminal``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-resume"
+            let stagedExecutable = host.Stage stagedVersion
+            let launches = ConcurrentQueue<string>()
+            let submitted = ConcurrentQueue<string * string>()
+
+            let config =
+                replacementManagerConfig
+                    host
+                    (fun startInfo ->
+                        launches.Enqueue startInfo.FileName
+                        host.Activate(startInfo.FileName, stagedVersion)
+                        Ok())
+                    (fun endpoint command ->
+                        async {
+                            submitted.Enqueue(endpoint, command)
+                            return Ok()
+                        })
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let resumedPath = worktree host.Root "resume-owned"
+            let plainPath = worktree host.Root "plain-shell"
+
+            for path in [ resumedPath; plainPath ] do
+                let! started =
+                    EmbeddedTerminal.start manager path
+                    |> Async.StartAsTask
+
+                requireOk started |> ignore
+
+            let before = host.CurrentTerminals
+            let resumedTerminal = before[0]
+            let ownedIds =
+                before
+                |> List.map (_.SessionId >> SessionActivity.TerminalSessionId)
+                |> Set.ofList
+
+            let queryTime = DateTimeOffset.UtcNow
+            let resumedSessionId = "copilot-owned-resume"
+            let wrongTerminalId =
+                [ "ffffffffffffffffffffffffffffffff"
+                  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" ]
+                |> List.map SessionActivity.TerminalSessionId
+                |> List.find (ownedIds.Contains >> not)
+
+            let statuses =
+                [ replacementStoredStatus
+                      resumedSessionId
+                      (Some(
+                          SessionActivity.TerminalSessionId
+                              resumedTerminal.SessionId
+                      ))
+                      (PathUtils.toWorktreePath resumedTerminal.WorktreePath)
+                      SessionActivity.SessionLevelStatus.Idle
+                      queryTime
+                  // Same-worktree activity without the exact terminal origin must not gate.
+                  replacementStoredStatus
+                      "same-worktree-unowned"
+                      None
+                      (PathUtils.toWorktreePath resumedTerminal.WorktreePath)
+                      SessionActivity.SessionLevelStatus.Working
+                      queryTime
+                  // Nor may activity attributed to a terminal absent from the current registry.
+                  replacementStoredStatus
+                      "other-terminal"
+                      (Some wrongTerminalId)
+                      (PathUtils.toWorktreePath resumedTerminal.WorktreePath)
+                      SessionActivity.SessionLevelStatus.Working
+                      queryTime ]
+
+            let queriedIds =
+                ConcurrentQueue<Set<SessionActivity.TerminalSessionId>>()
+
+            let query now terminalIds =
+                queriedIds.Enqueue terminalIds
+
+                SessionActivityService.queryOwnedSessions
+                    now
+                    terminalIds
+                    Map.empty
+                    statuses
+                |> asReplacementActivitySnapshot
+                |> Ok
+
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHost query manager
+                |> Async.StartAsTask
+
+            let submittedEndpoint, command =
+                submitted.ToArray() |> Array.exactlyOne
+
+            let resumedAfter =
+                host.CurrentTerminals
+                |> List.find (fun terminal ->
+                    terminal.AttachmentEndpoint = submittedEndpoint)
+
+            let! snapshot =
+                EmbeddedTerminal.get manager
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    outcome,
+                    Is.EqualTo(
+                        EmbeddedTerminal.ReplacementOutcome.Replaced
+                            stagedVersion
+                    )
+                )
+
+                Assert.That(
+                    launches.ToArray(),
+                    Is.EqualTo [| stagedExecutable |]
+                )
+
+                Assert.That(host.ShutdownRequestCount, Is.EqualTo(1))
+                Assert.That(submitted.Count, Is.EqualTo(1))
+                Assert.That(
+                    resumedAfter.WorktreePath,
+                    Is.EqualTo(WorktreePath.value resumedPath)
+                )
+                Assert.That(
+                    command,
+                    Is.EqualTo(
+                        $"copilot --yolo --resume '{resumedSessionId}'"
+                    )
+                )
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EqualTo(
+                        [ WorktreePath.value resumedPath
+                          WorktreePath.value plainPath ]
+                    ),
+                    "tab order and the plain shell must both be recreated"
+                )
+                Assert.That(
+                    queriedIds.ToArray(),
+                    Has.All.EqualTo(ownedIds)
+                )
+                Assert.That(
+                    snapshot.Tabs |> List.map _.Worktree,
+                    Is.EqualTo([ resumedPath; plainPath ])
+                ))
+        }
+
+    [<Test>]
+    member _.``staged launch failure explicitly reports failure and recovers the old host``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-fails"
+            let stagedExecutable = host.Stage stagedVersion
+            let launches = ConcurrentQueue<string>()
+
+            let launch (startInfo: ProcessStartInfo) =
+                launches.Enqueue startInfo.FileName
+
+                if
+                    Shared.PathUtils.pathEquals
+                        startInfo.FileName
+                        stagedExecutable
+                then
+                    Error "simulated staged launch failure"
+                else
+                    host.Activate(
+                        startInfo.FileName,
+                        "1.0.0-test"
+                    )
+
+                    Ok()
+
+            let manager =
+                replacementManagerConfig
+                    host
+                    launch
+                    (fun _ _ -> async { return Ok() })
+                |> EmbeddedTerminal.createWithConfig
+
+            let target = worktree host.Root "recover-old"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let query _ _ : Result<EmbeddedTerminal.ReplacementActivitySnapshot, string> =
+                Ok
+                    { ActivityEpoch = 12L
+                      OpenSessions = []
+                      ResumableSessionIds = Map.empty }
+
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHost query manager
+                |> Async.StartAsTask
+
+            let! recovered =
+                EmbeddedTerminal.get manager
+                |> Async.StartAsTask
+
+            let failure =
+                match outcome with
+                | EmbeddedTerminal.ReplacementOutcome.Failed(
+                    version,
+                    error
+                  ) ->
+                    Assert.That(version, Is.EqualTo stagedVersion)
+                    error
+                | other ->
+                    Assert.Fail($"Expected explicit replacement failure, got {other}")
+                    ""
+
+            Assert.Multiple(fun () ->
+                Assert.That(failure, Does.Contain("recovered"))
+                Assert.That(
+                    launches.ToArray(),
+                    Is.EqualTo(
+                        [| stagedExecutable
+                           host.OldExecutable |]
+                    )
+                )
+                Assert.That(host.ShutdownRequestCount, Is.EqualTo(1))
+                Assert.That(host.IsOnline, Is.True)
+                Assert.That(
+                    host.CurrentExecutable,
+                    Is.EqualTo host.OldExecutable
+                )
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EqualTo([ WorktreePath.value target ])
+                )
+                Assert.That(recovered.Tabs.Length, Is.EqualTo(1))
+
+                match recovered.Tabs[0].Lifecycle with
+                | EmbeddedTerminalLifecycle.Running _ -> ()
+                | lifecycle ->
+                    Assert.Fail(
+                        $"Expected the recoverably restarted old host, got {lifecycle}"
+                    ))
         }
 
 [<TestFixture>]

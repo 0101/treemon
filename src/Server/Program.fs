@@ -426,6 +426,23 @@ let main args =
     let sessionActivityService =
         activityRuntime |> Option.map _.Components.Service
 
+    let replacementActivityQuery
+        (service: SessionActivityService.SessionActivityService)
+        now
+        terminalSessionIds
+        : Result<EmbeddedTerminal.ReplacementActivitySnapshot, string> =
+        service.QueryOwnedSessions(now, terminalSessionIds)
+        |> Result.map (fun snapshot ->
+            { ActivityEpoch = snapshot.ActivityEpoch
+              OpenSessions =
+                snapshot.OpenSessions
+                |> List.map (fun session ->
+                    { TerminalSessionId = session.TerminalSessionId
+                      CopilotSessionId = session.CopilotSessionId
+                      Status = session.Status }
+                    : EmbeddedTerminal.ReplacementOwnedSession)
+              ResumableSessionIds = snapshot.ResumableSessionIds })
+
     let capture =
         activityRuntime
         |> Option.map _.Capture.Run
@@ -477,29 +494,43 @@ let main args =
         }
 
     try
-        let canvasHost =
-            match schedulerAgent, config.CanvasPort with
-            | Some agent, Some canvasPort -> Some(CanvasDocServer.start agent canvasPort)
+        let replacementLoop =
+            match embeddedTerminal, sessionActivityService with
+            | Some manager, Some service ->
+                EmbeddedTerminal.runReplacementCoordinator
+                    manager
+                    (replacementActivityQuery service)
+                |> BackgroundLoop.start
+                |> Some
             | _ -> None
 
         try
-            use host = app.Build()
-            let applicationLifetime =
-                host.Services.GetService(typeof<IHostApplicationLifetime>)
-                :?> IHostApplicationLifetime
+            let canvasHost =
+                match schedulerAgent, config.CanvasPort with
+                | Some agent, Some canvasPort -> Some(CanvasDocServer.start agent canvasPort)
+                | _ -> None
 
-            runHostWithCapture
-                (fun () -> host.Start())
-                (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
-                applicationLifetime.ApplicationStopping
-                capture
+            try
+                use host = app.Build()
+                let applicationLifetime =
+                    host.Services.GetService(typeof<IHostApplicationLifetime>)
+                    :?> IHostApplicationLifetime
+
+                runHostWithCapture
+                    (fun () -> host.Start())
+                    (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
+                    applicationLifetime.ApplicationStopping
+                    capture
+            finally
+                canvasHost
+                |> Option.iter (fun host ->
+                    try
+                        host.StopAsync().GetAwaiter().GetResult()
+                    finally
+                        host.DisposeAsync().GetAwaiter().GetResult())
         finally
-            canvasHost
-            |> Option.iter (fun host ->
-                try
-                    host.StopAsync().GetAwaiter().GetResult()
-                finally
-                    host.DisposeAsync().GetAwaiter().GetResult())
+            replacementLoop
+            |> Option.iter (BackgroundLoop.stop "TerminalHost replacement coordinator")
     finally
         activityRuntime
         |> Option.iter (fun runtime ->
