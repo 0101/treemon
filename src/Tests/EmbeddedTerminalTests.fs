@@ -60,6 +60,7 @@ type private FakeControlHost() =
     let mutable terminals: FakeTerminal list = []
     let mutable revision = 0L
     let mutable failNextStartResponse = false
+    let mutable rejectNextStartResponse = false
     let mutable failNextCloseResponse = false
     let mutable stopped = false
     let mutable logicalShutdown = false
@@ -220,16 +221,29 @@ type private FakeControlHost() =
                                 context
                     | Some worktreePath ->
                         startRequests.Enqueue worktreePath
-                        let fail = startTerminal worktreePath
+                        let reject =
+                            lock gate (fun () ->
+                                let reject = rejectNextStartResponse
+                                rejectNextStartResponse <- false
+                                reject)
 
-                        if fail then
+                        if reject then
                             return!
                                 writeJson
-                                    StatusCodes.Status503ServiceUnavailable
-                                    { Error = "Simulated ambiguous start response" }
+                                    StatusCodes.Status400BadRequest
+                                    { Error = "Unknown worktree path" }
                                     context
                         else
-                            return! writeJson StatusCodes.Status200OK (snapshot ()) context
+                            let fail = startTerminal worktreePath
+
+                            if fail then
+                                return!
+                                    writeJson
+                                        StatusCodes.Status503ServiceUnavailable
+                                        { Error = "Simulated ambiguous start response" }
+                                        context
+                            else
+                                return! writeJson StatusCodes.Status200OK (snapshot ()) context
                 | "DELETE", closePath
                     when closePath.StartsWith(
                         "/api/v1/terminals/",
@@ -386,6 +400,9 @@ type private FakeControlHost() =
 
     member _.FailNextStartResponse() =
         lock gate (fun () -> failNextStartResponse <- true)
+
+    member _.RejectNextStartResponse() =
+        lock gate (fun () -> rejectNextStartResponse <- true)
 
     member _.FailNextCloseResponse() =
         lock gate (fun () -> failNextCloseResponse <- true)
@@ -591,6 +608,52 @@ type EmbeddedTerminalControlClientTests() =
                 Assert.That(closed, Is.EqualTo EmbeddedTerminalSnapshot.empty)
                 Assert.That(host.CloseRequestCount, Is.EqualTo(1))
                 Assert.That(host.ListRequestCount, Is.GreaterThanOrEqualTo(3)))
+        }
+
+    [<Test>]
+    member _.``a rejected terminal start leaves other tabs running``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+
+            let running = worktree host.Root "running"
+            let rejected = worktree host.Root "rejected"
+
+            let! started =
+                EmbeddedTerminal.start manager running
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+            host.RejectNextStartResponse()
+
+            let! rejection =
+                EmbeddedTerminal.start manager rejected
+                |> Async.StartAsTask
+
+            let! cached =
+                EmbeddedTerminal.getCached manager
+                |> Async.StartAsTask
+
+            let rejectionError =
+                match rejection with
+                | Error error -> error
+                | Ok snapshot ->
+                    Assert.Fail($"Expected the start to be rejected, got {snapshot}")
+                    ""
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    rejectionError,
+                    Is.EqualTo(
+                        "TerminalHost returned HTTP 400: Unknown worktree path"
+                    )
+                )
+
+                Assert.That(cached.Tabs.Length, Is.EqualTo(1))
+                assertRunningFor running cached |> ignore)
         }
 
     [<Test>]
@@ -1088,6 +1151,77 @@ type EmbeddedTerminalReplacementTests() =
                     Assert.Fail(
                         $"Expected the recoverably restarted old host, got {lifecycle}"
                     ))
+        }
+
+    [<Test>]
+    member _.``replacement shutdown wait failure interrupts running tabs``() =
+        task {
+            use host = new FakeControlHost()
+            let stagedVersion = "2.0.0-shutdown-wait"
+            host.Stage stagedVersion |> ignore
+            let launches = ConcurrentQueue<unit>()
+
+            let config =
+                replacementManagerConfig
+                    host
+                    (fun _ ->
+                        launches.Enqueue()
+                        Error "Replacement must not launch")
+                    (fun _ _ -> async { return Ok() })
+
+            let manager =
+                { config with
+                    StartupTimeout = TimeSpan.FromMilliseconds 100.0 }
+                |> EmbeddedTerminal.createWithConfig
+
+            let target = worktree host.Root "shutdown-wait"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
+                Ok
+                    { ActivityEpoch = 15L
+                      OpenSessions = []
+                      ResumableSessionIds = Map.empty }
+
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHost query manager
+                |> Async.StartAsTask
+
+            let! cached =
+                EmbeddedTerminal.getCached manager
+                |> Async.StartAsTask
+
+            let failure =
+                match outcome with
+                | EmbeddedTerminal.ReplacementOutcome.Failed(
+                    version,
+                    error
+                  ) ->
+                    Assert.That(version, Is.EqualTo stagedVersion)
+                    error
+                | other ->
+                    Assert.Fail($"Expected explicit replacement failure, got {other}")
+                    ""
+
+            let lifecycle =
+                cached.Tabs |> List.exactlyOne |> _.Lifecycle
+
+            Assert.Multiple(fun () ->
+                Assert.That(host.ShutdownRequestCount, Is.EqualTo(1))
+                Assert.That(launches, Is.Empty)
+                Assert.That(failure, Does.Contain("could not be confirmed stopped"))
+                Assert.That(failure, Does.Not.Contain("retained"))
+
+                match lifecycle with
+                | EmbeddedTerminalLifecycle.Interrupted error ->
+                    Assert.That(error, Does.Contain(failure))
+                | other ->
+                    Assert.Fail($"Expected interrupted terminal, got {other}"))
         }
 
 [<TestFixture>]

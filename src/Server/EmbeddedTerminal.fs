@@ -88,6 +88,10 @@ type private HostLaunchOutcome =
     | LaunchStartedButUnhealthy of string
     | HostLaunched of DiscoveryManifest
 
+type private StartTerminalFailure =
+    | StartRejected of registry: RegistrySnapshot * reason: string
+    | StartUnverified of reason: string
+
 type private ReplacementRecheck =
     | ReadyToCommit of DiscoveryManifest * SessionActivity.OwnedSessionSnapshot
     | RecheckChanged
@@ -98,6 +102,7 @@ type private Message =
         WorktreePath *
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
+    | GetCached of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | Close of WorktreePath * AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | CloseStrict of
         WorktreePath *
@@ -1100,25 +1105,25 @@ let private startTerminalOnHost
 
         match! listTerminals config manifest with
         | Error listError ->
-            return
-                Error(
-                    match startResult with
-                    | Error startError ->
-                        $"{startError}; authoritative relist failed: {listError}"
-                    | Ok _ ->
-                        $"TerminalHost accepted the start request but its authoritative registry could not be read: {listError}"
-                )
+            let error =
+                match startResult with
+                | Error startError ->
+                    $"{startError}; authoritative relist failed: {listError}"
+                | Ok _ ->
+                    $"TerminalHost accepted the start request but its authoritative registry could not be read: {listError}"
+
+            return Error(StartUnverified error)
         | Ok registry ->
             match terminalForPath path registry.Terminals with
             | Some terminal -> return Ok(registry, terminal)
             | None ->
-                return
-                    Error(
-                        match startResult with
-                        | Error startError -> startError
-                        | Ok _ ->
-                            "TerminalHost did not include the requested terminal in its authoritative registry"
-                    )
+                let error =
+                    match startResult with
+                    | Error startError -> startError
+                    | Ok _ ->
+                        "TerminalHost did not include the requested terminal in its authoritative registry"
+
+                return Error(StartRejected(registry, error))
     }
 
 let private startTerminal config state worktreePath =
@@ -1130,8 +1135,11 @@ let private startTerminal config state worktreePath =
             let path = WorktreePath.value worktreePath
 
             match! startTerminalOnHost config connection path with
-            | Error error ->
+            | Error(StartUnverified error) ->
                 return withHostFailure error state, Error error
+            | Error(StartRejected(registry, error)) ->
+                let next = applyRegistry state connection registry
+                return next, Error error
             | Ok(registry, _) ->
                 let next = applyRegistry state connection registry
                 return next, Ok next.LastSnapshot
@@ -1406,7 +1414,12 @@ let private recreateTerminals
             | previous :: tail ->
                 let! nextRegistry, recreated =
                     startTerminalOnHost config connection previous.WorktreePath
-                    |> AsyncResult.mapError (fun error ->
+                    |> AsyncResult.mapError (fun failure ->
+                        let error =
+                            match failure with
+                            | StartRejected(_, reason)
+                            | StartUnverified reason -> reason
+
                         $"Could not recreate the terminal for '{previous.WorktreePath}': {error}")
 
                 match
@@ -1574,8 +1587,10 @@ let private commitReplacement
                 match! shutdownAndWait config connection with
                 | Error error ->
                     return
-                        failed
-                            $"The previous TerminalHost was retained because shutdown did not complete: {error}"
+                        replacementFailure
+                            plan.StagedVersion
+                            $"The previous TerminalHost could not be confirmed stopped: {error}"
+                            state
                 | Ok() ->
                     let stagedConfig =
                         configForExecutable
@@ -1652,6 +1667,9 @@ let internal createWithConfig config =
                         let! next = getTerminals config state
                         reply.Reply next.LastSnapshot
                         return! loop next
+                    | GetCached reply ->
+                        reply.Reply state.LastSnapshot
+                        return! loop state
                     | Start(worktreePath, reply) ->
                         let! next, result =
                             startTerminal
@@ -1852,6 +1870,10 @@ let start (Manager(_, agent)) worktreePath =
 
 let get (Manager(_, agent)) =
     agent.PostAndAsyncReply(Get, timeout = 60_000)
+
+/// The current manager snapshot without host I/O (test seam for lifecycle transitions).
+let internal getCached (Manager(_, agent)) =
+    agent.PostAndAsyncReply(GetCached, timeout = 60_000)
 
 let close (Manager(_, agent)) worktreePath =
     agent.PostAndAsyncReply(
