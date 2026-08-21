@@ -392,7 +392,10 @@ type TerminalHostControlApiTests() =
             use allowedOrigin = new HttpRequestMessage(HttpMethod.Get, "/api/v1/health")
             allowedOrigin.Headers.Add("Origin", "http://localhost:5174")
             use! originAccepted = fixture.Client.SendAsync allowedOrigin
-            Assert.That(originAccepted.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+
+            Assert.Multiple(fun () ->
+                Assert.That(originAccepted.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                Assert.That(originAccepted.Headers.Server, Is.Empty))
 
             use malformed =
                 new StringContent("{\"worktreePath\":", Encoding.UTF8, "application/json")
@@ -590,6 +593,68 @@ type TerminalHostDataPlaneTests() =
             plane.Stop() |> Async.RunSynchronously
 
     [<Test>]
+    member _.``resume replays paused output and restores the latest browser resize``() =
+        let upstream = new TestWebSocket()
+        let plane = TerminalDataPlane.createCore 1_024 upstream ignore
+
+        try
+            let browser = new TestWebSocket()
+
+            let attachmentId =
+                plane.AttachSocket browser
+                |> Async.RunSynchronously
+                |> requireSome "browser was not attached"
+
+            plane.AcceptBrowserFrame
+                attachmentId
+                (frame """{"AuthToken":"","columns":100,"rows":40}""")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            plane.AcceptBrowserFrame
+                attachmentId
+                (frame """1{"columns":160,"rows":55}""")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            plane.AcceptBrowserFrame attachmentId (frame "2")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            [ "0paused-first"; "0paused-second" ]
+            |> List.iter (fun value ->
+                plane.AcceptUpstreamFrame(frame value)
+                |> Async.RunSynchronously)
+
+            Assert.That(browser.Sent, Is.Empty, "paused output was sent live")
+
+            plane.AcceptBrowserFrame attachmentId (frame "3")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            let browserFrames =
+                browser.Sent
+                |> List.map Encoding.UTF8.GetString
+
+            let resizeFrames =
+                upstream.Sent
+                |> List.map (TerminalProtocol.parseResizeFrame >> requireOk)
+                |> List.map (fun size -> size.Columns, size.Rows)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    browserFrames,
+                    Is.EqualTo([ "0paused-first"; "0paused-second" ])
+                )
+
+                Assert.That(
+                    resizeFrames,
+                    Is.EqualTo([ (100, 40); (160, 55); (160, 55) ])
+                ))
+        finally
+            plane.Stop() |> Async.RunSynchronously
+
+    [<Test>]
     member _.``replay drops output older than its byte bound``() =
         let replay =
             [ "0first"; "0second"; "0third" ]
@@ -611,6 +676,11 @@ type TerminalHostDataPlaneTests() =
                 Is.EqualTo(13)
             ))
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<Category("TerminalHost")>]
+type TerminalHostProxyTests() =
     [<Test>]
     member _.``attachment endpoint rejects invalid bearer origin and oversized requests``() =
         let upstream = new TestWebSocket()
@@ -630,7 +700,7 @@ type TerminalHostDataPlaneTests() =
             async.Return(Ok(upstream :> System.Net.WebSockets.WebSocket))
 
         let plane =
-            TerminalDataPlane.startWithConnector
+            TerminalProxy.startWithConnector
                 connector
                 [ "http://localhost:5174" ]
                 token
@@ -688,6 +758,7 @@ type TerminalHostDataPlaneTests() =
                 Assert.That(missingToken.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized))
                 Assert.That(invalidToken.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized))
                 Assert.That(validToken.StatusCode, Is.EqualTo(HttpStatusCode.BadGateway))
+                Assert.That(validToken.Headers.Server, Is.Empty)
                 Assert.That(wrongOrigin.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden))
 
                 Assert.That(

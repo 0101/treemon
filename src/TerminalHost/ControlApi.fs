@@ -2,18 +2,13 @@ namespace TerminalHost
 
 open System
 open System.IO
-open System.Net
 open System.Net.Http.Headers
 open System.Text.Json
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
-open Microsoft.AspNetCore.Hosting
 open Microsoft.AspNetCore.Http
-open Microsoft.AspNetCore.Hosting.Server
-open Microsoft.AspNetCore.Hosting.Server.Features
 open Microsoft.Extensions.DependencyInjection
 open Microsoft.Extensions.Hosting
-open Microsoft.Extensions.Logging
 
 type ControlApiConfig =
     { Port: int
@@ -238,19 +233,10 @@ module ControlApi =
 
     let start config bearerToken hostPid processStartTimeUtcTicks hostVersion registry =
         task {
-            let builder = WebApplication.CreateSlimBuilder()
-            builder.Logging.ClearProviders() |> ignore
+            let buildPipeline (application: WebApplication) =
+                let lifetime =
+                    application.Services.GetRequiredService<IHostApplicationLifetime>()
 
-            builder.WebHost.ConfigureKestrel(fun options ->
-                options.Limits.MaxRequestBodySize <- Protocol.MaximumRequestBodyBytes
-                options.AddServerHeader <- false
-                options.Listen(IPAddress.Loopback, config.Port))
-            |> ignore
-
-            let application = builder.Build()
-            let lifetime = application.Services.GetRequiredService<IHostApplicationLifetime>()
-
-            application.Run(
                 RequestDelegate(fun context ->
                     handle
                         config
@@ -262,14 +248,11 @@ module ControlApi =
                         lifetime
                         context
                     :> Task)
-            )
 
-            do! application.StartAsync()
+            let! application, boundPort =
+                LoopbackHost.start config.Port buildPipeline
 
-            let server = application.Services.GetRequiredService<IServer>()
-            let addresses = server.Features.Get<IServerAddressesFeature>().Addresses
-            let bound = addresses |> Seq.exactlyOne |> Uri
-            let endpoint = $"http://127.0.0.1:{bound.Port}"
+            let endpoint = $"http://127.0.0.1:{boundPort}"
 
             return
                 { Application = application

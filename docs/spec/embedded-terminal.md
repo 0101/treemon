@@ -156,6 +156,11 @@ independent process. Its in-memory registry is keyed by canonical worktree path 
 session ID, ttyd Job Object and process handles, sole upstream WebSocket, one browser attachment, and
 bounded replay bytes.
 
+`TerminalDataPlane` owns only the replay and attachment mailbox, with `createCore` as its focused
+state-machine seam. `TerminalProxy` owns the ttyd/browser WebSocket pumps, HTTP forwarding, and
+attachment endpoint. It and `ControlApi` use one `LoopbackHost` bootstrap for the shared Kestrel
+loopback binding, request-size limit, server-header policy, and dynamic-port discovery.
+
 Windows process creation uses `CREATE_SUSPENDED`, immediate `AssignProcessToJobObject`, and
 `ResumeThread` in the host process. The Job Object uses kill-on-close without a breakaway policy, so
 host loss and explicit close have the same exact ownership boundary. No supervisor script or
@@ -282,6 +287,9 @@ PowerShell lifecycle helpers, or compatibility shims.
   terminal-tree ownership authority.
 - **One upstream and one browser writer:** the host preserves the shell across browser reconnects
   without defining multi-writer input semantics.
+- **Separate state from proxy hosting:** the replay/attachment mailbox remains independently
+  testable while HTTP/WebSocket hosting shares one loopback-only Kestrel bootstrap with the control
+  API, preventing security-sensitive host configuration from drifting.
 - **Raw bounded replay:** reconnect gets useful recent output without persisting terminal content or
   introducing a terminal-state serializer.
 - **Bearer in the in-memory attachment URL:** a path-scoped copy of the existing host bearer lets

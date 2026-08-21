@@ -124,7 +124,7 @@ module private HostRuntime =
             let registry =
                 TerminalRegistry.create
                     (TerminalLauncher.start config.TerminalLaunch)
-                    (TerminalDataPlane.start config.Control.AllowedOrigins token)
+                    (TerminalProxy.start config.Control.AllowedOrigins token)
 
             let! control =
                 ControlApi.start
