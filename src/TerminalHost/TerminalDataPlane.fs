@@ -2,6 +2,7 @@ namespace TerminalHost
 
 open System
 open System.Net.WebSockets
+open System.Text
 open System.Threading
 
 type private BrowserAttachment =
@@ -43,6 +44,11 @@ type TerminalDataPlane =
 [<RequireQualifiedAccess>]
 module TerminalDataPlane =
     let private socketOperationTimeout = TimeSpan.FromSeconds 2.0
+
+    let private replayGapFrame =
+        Encoding.UTF8.GetBytes(
+            "0\u001bc\u001b[2J\u001b[H[treemon] Earlier terminal output was omitted because the 1 MiB replay buffer was exceeded while this view was paused.\r\n"
+        )
 
     let private socketIsOpen (socket: WebSocket) =
         try
@@ -179,9 +185,13 @@ module TerminalDataPlane =
     let private resumeAttachment upstream state attachment =
         async {
             let frames =
-                state.Replay
-                |> ReplayBuffer.framesFrom attachment.NextSequence
-                |> List.map _.Data
+                match
+                    state.Replay
+                    |> ReplayBuffer.framesFrom attachment.NextSequence
+                with
+                | ReplaySlice.Complete frames -> frames |> List.map _.Data
+                | ReplaySlice.Gap frames ->
+                    replayGapFrame :: (frames |> List.map _.Data)
 
             match! sendReplay attachment frames with
             | Error error ->

@@ -19,6 +19,11 @@ type internal ReplayBuffer =
           NextSequence: int64 }
 
 [<RequireQualifiedAccess>]
+type internal ReplaySlice =
+    | Complete of ReplayFrame list
+    | Gap of ReplayFrame list
+
+[<RequireQualifiedAccess>]
 module internal TerminalProtocol =
     [<Literal>]
     let private DefaultColumns = 120
@@ -143,7 +148,19 @@ module internal ReplayBuffer =
     let frames replay = replay.Frames
 
     let framesFrom sequence replay =
-        replay.Frames
-        |> List.filter (fun frame -> frame.Sequence >= sequence)
+        let frames =
+            replay.Frames
+            |> List.filter (fun frame -> frame.Sequence >= sequence)
+
+        let oldestRetainedSequence =
+            replay.Frames
+            |> List.tryHead
+            |> Option.map _.Sequence
+            |> Option.defaultValue replay.NextSequence
+
+        if sequence < oldestRetainedSequence then
+            ReplaySlice.Gap frames
+        else
+            ReplaySlice.Complete frames
 
     let nextSequence replay = replay.NextSequence

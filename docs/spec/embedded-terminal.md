@@ -38,6 +38,9 @@ attachment. Replacing or losing the browser attachment does not replace the shel
 receives the bounded replay and a resize so full-screen applications can redraw. Attachment routing
 is data-plane behavior, not an additional lifecycle state. Output older than the buffer, terminal
 scrollback, and browser-rendered state are not durable.
+If a paused attachment falls behind the replay window, resume resets and clears the emulator, shows
+a visible omission notice, and then sends the surviving frames instead of silently splicing
+discontinuous output into the existing state.
 
 The client keeps running terminal iframes mounted while tabs are hidden, preserving normal tab
 switching behavior. Tab order is opening order, tab labels are worktree display names, and selection
@@ -295,6 +298,9 @@ PowerShell lifecycle helpers, or compatibility shims.
   API, preventing security-sensitive host configuration from drifting.
 - **Raw bounded replay:** reconnect gets useful recent output without persisting terminal content or
   introducing a terminal-state serializer.
+- **Explicit replay discontinuities:** replay reads distinguish a complete suffix from one whose
+  requested prefix was evicted. Resuming across that gap resets and clears the emulator and shows an
+  omission notice before the retained output.
 - **Bearer in the in-memory attachment URL:** a path-scoped copy of the existing host bearer lets
   ttyd's unmodified iframe client authenticate every relative HTTP and WebSocket request without a
   persistent cookie or a second capability.

@@ -659,6 +659,76 @@ type TerminalHostDataPlaneTests() =
             plane.Stop() |> Async.RunSynchronously
 
     [<Test>]
+    member _.``resume resets and reports output evicted beyond the one MiB replay boundary``() =
+        let upstream = new TestWebSocket()
+
+        let plane =
+            TerminalDataPlane.createCore
+                Protocol.MaximumReplayBytes
+                upstream
+                ignore
+
+        try
+            let browser = new TestWebSocket()
+
+            let attachmentId =
+                plane.AttachSocket browser
+                |> Async.RunSynchronously
+                |> requireSome "browser was not attached"
+
+            plane.AcceptBrowserFrame
+                attachmentId
+                (frame """{"AuthToken":"","columns":100,"rows":40}""")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            plane.AcceptBrowserFrame attachmentId (frame "2")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            let retained =
+                Array.append
+                    [| byte '0' |]
+                    (Array.create
+                        (Protocol.MaximumReplayBytes - 1)
+                        (byte 'x'))
+
+            plane.AcceptUpstreamFrame(frame "0evicted")
+            |> Async.RunSynchronously
+
+            plane.AcceptUpstreamFrame retained
+            |> Async.RunSynchronously
+
+            Assert.That(browser.Sent, Is.Empty, "paused output was sent live")
+
+            plane.AcceptBrowserFrame attachmentId (frame "3")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            let browserFrames = browser.Sent
+            Assert.That(browserFrames |> List.length, Is.EqualTo(2))
+
+            let gapNotice = browserFrames |> List.head |> Encoding.UTF8.GetString
+            let survivingFrame = browserFrames |> List.last
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    gapNotice,
+                    Does.StartWith("0\u001bc\u001b[2J\u001b[H")
+                )
+
+                Assert.That(gapNotice, Does.Contain("output was omitted"))
+
+                Assert.That(
+                    survivingFrame.Length = retained.Length
+                    && Array.forall2 (=) survivingFrame retained,
+                    Is.True,
+                    "surviving replay bytes changed"
+                ))
+        finally
+            plane.Stop() |> Async.RunSynchronously
+
+    [<Test>]
     member _.``replay drops output older than its byte bound``() =
         let replay =
             [ "0first"; "0second"; "0third" ]
@@ -679,6 +749,34 @@ type TerminalHostDataPlaneTests() =
                 |> List.sumBy _.Data.Length,
                 Is.EqualTo(13)
             ))
+
+        match ReplayBuffer.framesFrom 0L replay with
+        | ReplaySlice.Gap frames ->
+            Assert.That(
+                frames |> List.map (fun replayFrame -> Encoding.UTF8.GetString replayFrame.Data),
+                Is.EqualTo([ "0second"; "0third" ])
+            )
+        | ReplaySlice.Complete _ ->
+            Assert.Fail("an evicted replay prefix was reported as complete")
+
+        match ReplayBuffer.framesFrom 1L replay with
+        | ReplaySlice.Complete _ -> ()
+        | ReplaySlice.Gap _ ->
+            Assert.Fail("the oldest retained sequence was reported as a gap")
+
+        match ReplayBuffer.framesFrom 3L replay with
+        | ReplaySlice.Complete [] -> ()
+        | ReplaySlice.Complete _ ->
+            Assert.Fail("a replay tail with no new frames was not empty")
+        | ReplaySlice.Gap _ ->
+            Assert.Fail("a replay tail with no new frames was reported as a gap")
+
+        match ReplayBuffer.framesFrom 0L ReplayBuffer.empty with
+        | ReplaySlice.Complete [] -> ()
+        | ReplaySlice.Complete _ ->
+            Assert.Fail("a never-written replay buffer was not empty")
+        | ReplaySlice.Gap _ ->
+            Assert.Fail("a never-written replay buffer was reported as a gap")
 
 [<TestFixture>]
 [<Category("Unit")>]
