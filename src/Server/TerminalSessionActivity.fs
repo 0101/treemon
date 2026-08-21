@@ -33,11 +33,27 @@ let internal effectiveOwnedSessionStates
     (ownedSessions: (TerminalSessionId * StoredStatus) list)
     : OwnedSessionState list =
     ownedSessions
-    |> List.filter (fun (_, session) -> now - session.LastSeen < openWindow)
-    |> List.map (fun (terminalId, session) ->
-        { TerminalSessionId = terminalId
-          CopilotSessionId = session.SessionId
-          Status = session.Status |> freshnessAdjusted now session.LastSeen |> effectiveStatus })
+    |> List.choose (fun (terminalId, session) ->
+        let status = effectiveStatus session.Status
+
+        // Generic openness and crash-freshness windows are display/liveness heuristics. An exact
+        // ask_user wait is a durable replacement gate until its request/completion clocks say that
+        // input completed, even when heartbeats stop updating LastSeen.
+        let replacementStatus =
+            match status with
+            | SessionLevelStatus.WaitingForUser -> Some status
+            | _ when now - session.LastSeen < openWindow ->
+                session.Status
+                |> freshnessAdjusted now session.LastSeen
+                |> effectiveStatus
+                |> Some
+            | _ -> None
+
+        replacementStatus
+        |> Option.map (fun status ->
+            { TerminalSessionId = terminalId
+              CopilotSessionId = session.SessionId
+              Status = status }))
     |> List.sortBy (fun session ->
         TerminalSessionId.value session.TerminalSessionId, SessionId.value session.CopilotSessionId)
 
@@ -105,8 +121,8 @@ let internal replacementSessionPlan
         TerminalHostReplacement.ReplacementSessionPlan.Ready(snapshot.ActivityEpoch, resumeCommands)
 
 /// Adapt the session-activity service's narrow raw query into the opaque policy consumed by
-/// TerminalHost replacement. All exact ownership, openness, resume selection, and provider command
-/// construction stays in this terminal-focused module.
+/// TerminalHost replacement. All exact ownership, terminal-specific gating, resume selection, and
+/// provider command construction stays in this terminal-focused module.
 let internal queryReplacementPlan
     resolveProvider
     (queryActivity: ActivityQuery)

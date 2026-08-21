@@ -20,7 +20,10 @@ open Microsoft.Extensions.Logging
 open NUnit.Framework
 open global.Server
 open global.Server.GitWorktree
+open global.Server.SessionActivity
+open global.Server.SessionActivityStore
 open global.Server.SchedulerState
+open global.Server.TerminalSessionActivity
 open Shared
 open Tests.TestUtils
 open Treemon.TerminalHosting
@@ -1902,7 +1905,7 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
-    member _.``WaitingForUser on an exact owned session gates without timeout or launch``() =
+    member _.``aged WaitingForUser on an exact owned session prevents replacement commit``() =
         task {
             use host = new FakeControlHost()
             host.EnableLogicalReplacement()
@@ -1926,8 +1929,45 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk started |> ignore
 
-            let query _ _ =
-                Ok TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+            let terminal = host.CurrentTerminals |> List.exactlyOne
+            let awaitingAt = DateTimeOffset.UtcNow
+            let backdatedLastSeen = awaitingAt - TimeSpan.FromMinutes 15.0
+            let waitingSession: StoredStatus =
+                { SessionId = SessionId "exact-owned-waiting-session"
+                  TerminalSessionId =
+                    Some(TerminalSessionId terminal.SessionId)
+                  WorktreePath = target
+                  Provider = CopilotCli
+                  Status =
+                    { emptyStatus with
+                        Status = SessionLevelStatus.Working
+                        AwaitingUserSince = Some awaitingAt }
+                  UpdatedAt = awaitingAt
+                  LastSeen = backdatedLastSeen
+                  ContextUsageAt = None }
+
+            let query now terminals =
+                Assert.That(
+                    now - waitingSession.LastSeen,
+                    Is.GreaterThan stalenessTimeout,
+                    "the regression must exercise both generic openness and freshness decay"
+                )
+
+                queryReplacementPlan
+                    (fun _ -> Some CopilotCli)
+                    (fun terminalSessionIds ->
+                        Assert.That(
+                            terminalSessionIds,
+                            Is.EqualTo(
+                                Set.singleton(
+                                    TerminalSessionId terminal.SessionId
+                                )
+                            )
+                        )
+
+                        Ok(1L, [ waitingSession ]))
+                    now
+                    terminals
 
             let! outcome =
                 EmbeddedTerminal.tryReplaceHost query manager

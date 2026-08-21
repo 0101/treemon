@@ -2012,6 +2012,73 @@ type TerminalOwnershipQueryTests() =
             ))
 
     [<Test>]
+    member _.``every exact waiting session gates past freshness until input completes``() =
+        let terminalSessionId =
+            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let worktreePath = "C:/wt/a"
+        let awaitingAt = ts "2026-03-01T10:00:00Z"
+        let completedAt = ts "2026-03-01T10:01:00Z"
+        let now = ts "2026-03-01T10:20:00Z"
+        let waiting =
+            { ownedStored terminalSessionId "waiting" awaitingAt with
+                Status =
+                    fold
+                        emptyStatus
+                        (AwaitingUserInput(None, awaitingAt)) }
+
+        let newerIdle =
+            ownedStored
+                terminalSessionId
+                "newer-idle"
+                (ts "2026-03-01T10:02:00Z")
+
+        let snapshot sessions =
+            ownedSessionSnapshot
+                now
+                (Set.singleton terminalSessionId)
+                (31L, sessions)
+
+        let waitingSnapshot = snapshot [ waiting; newerIdle ]
+
+        Assert.That(
+            replacementSessionPlan
+                (fun _ -> Some CopilotCli)
+                [ replacementTerminal terminalSessionId worktreePath ]
+                waitingSnapshot,
+            Is.EqualTo
+                TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle,
+            "most-recent selection applies to resume identity, not to the all-session idle gate"
+        )
+
+        let completed =
+            { waiting with
+                Status =
+                    fold
+                        waiting.Status
+                        (UserInputCompleted completedAt)
+                UpdatedAt = completedAt
+                LastSeen = completedAt }
+
+        let completedSnapshot = snapshot [ completed; newerIdle ]
+        let epoch, resumeCommands =
+            replacementSessionPlan
+                (fun _ -> Some CopilotCli)
+                [ replacementTerminal terminalSessionId worktreePath ]
+                completedSnapshot
+            |> requireReplacementReady
+
+        Assert.Multiple(fun () ->
+            Assert.That(epoch, Is.EqualTo completedSnapshot.ActivityEpoch)
+            Assert.That(
+                resumeCommands,
+                Is.EqualTo(
+                    Map.ofList
+                        [ TerminalSessionId.value terminalSessionId,
+                          "copilot --yolo --resume 'newer-idle'" ]
+                )
+            ))
+
+    [<Test>]
     member _.``only exact current terminal origins join and advance their activity epoch``() =
         let terminalA =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

@@ -269,11 +269,13 @@ terminal query filters the live cache to the caller's complete authoritative ter
 overlaying indexed durable rows, and returns only those raw rows plus their maximum epoch.
 `TerminalSessionActivity` owns the terminal-specific projection and returns an opaque replacement
 policy: wait, or proceed with the epoch and optional shell command keyed by exact terminal session
-ID. It owns provider selection and `CodingToolCli` command construction; terminal replacement only
-rechecks the epoch, recreates terminals, and delivers supplied commands. Hourly retention prunes
-live status and origin epochs, retaining epochs only for durable origins or the latest authoritative
-host registry; observing a registry immediately discards epochs for terminals no longer in it while
-the global counter remains monotonic.
+ID. It applies generic openness and freshness decay only to non-waiting states; an effective
+`WaitingForUser` remains non-idle from its request/completion clocks regardless of `last_seen`, while
+exact terminal-ID filtering keeps the query bounded. It owns provider selection and `CodingToolCli`
+command construction; terminal replacement only rechecks the epoch, recreates terminals, and
+delivers supplied commands. Hourly retention prunes live status and origin epochs, retaining epochs
+only for durable origins or the latest authoritative host registry; observing a registry immediately
+discards epochs for terminals no longer in it while the global counter remains monotonic.
 Once a session has an exact terminal origin, a later report that omits the optional origin retains
 the known value in memory and durable storage; there is no implicit clear operation.
 Activity ingestion accepts a Copilot `SessionId` only when it is 1–128 ASCII characters from
@@ -323,7 +325,8 @@ PowerShell lifecycle helpers, or compatibility shims.
   resetting the global sequence, and SQLite uses the terminal-origin/activity-order index.
 - **Opportunistic replacement, not draining:** normal work is never rejected in anticipation of an
   update. A race cancels the attempt rather than delaying the work.
-- **No replacement escape hatches:** `WaitingForUser` gates indefinitely, while non-Copilot work is
+- **No replacement escape hatches:** `WaitingForUser` gates indefinitely for every session owned by
+  a current terminal; most-recent selection applies only to the resume identity. Non-Copilot work is
   deliberately ignored and may be terminated without warning once the Copilot gate is idle.
 - **Stable API over compatibility layers:** compatible servers reconnect; an incompatible deploy
   waits until no terminals exist instead of carrying old protocol clients or migrating live state.
