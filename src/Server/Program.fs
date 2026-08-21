@@ -44,50 +44,62 @@ type ServerConfig =
     { WorktreeRoots: string list
       Port: int
       CanvasPort: int option
+      DashboardPort: int option
       TestFixtures: string option
       Demo: bool }
 
 let private defaultCanvasPort = 5002
 
 let parseArgs (args: string array) =
-    let rec parse roots port canvasPort testFixtures demo remaining =
+    let rec parse roots port canvasPort dashboardPort testFixtures demo remaining =
         match remaining with
         | "--port" :: portStr :: rest ->
             match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots p canvasPort testFixtures demo rest
+            | true, p -> parse roots p canvasPort dashboardPort testFixtures demo rest
             | false, _ ->
                 eprintfn $"Invalid port number: {portStr}"
                 exit 1
         | "--canvas-port" :: portStr :: rest ->
             match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots port (Some p) testFixtures demo rest
+            | true, p -> parse roots port (Some p) dashboardPort testFixtures demo rest
             | false, _ ->
                 eprintfn $"Invalid canvas port number: {portStr}"
                 exit 1
+        | "--dashboard-port" :: portStr :: rest ->
+            match System.Int32.TryParse(portStr) with
+            | true, p -> parse roots port canvasPort (Some p) testFixtures demo rest
+            | false, _ ->
+                eprintfn $"Invalid dashboard port number: {portStr}"
+                exit 1
         | "--no-canvas" :: rest ->
-            parse roots port None testFixtures demo rest
+            parse roots port None dashboardPort testFixtures demo rest
         | "--test-fixtures" :: path :: rest ->
-            parse roots port canvasPort (Some path) demo rest
+            parse roots port canvasPort dashboardPort (Some path) demo rest
         | "--demo" :: rest ->
-            parse roots port canvasPort testFixtures true rest
+            parse roots port canvasPort dashboardPort testFixtures true rest
         | path :: rest when not (path.StartsWith("--")) ->
-            parse (roots @ [ path ]) port canvasPort testFixtures demo rest
-        | [] -> roots, port, canvasPort, testFixtures, demo
+            parse (roots @ [ path ]) port canvasPort dashboardPort testFixtures demo rest
+        | [] -> roots, port, canvasPort, dashboardPort, testFixtures, demo
         | unexpected :: _ ->
             eprintfn $"Unexpected argument: {unexpected}"
             exit 1
 
-    match args |> Array.toList |> parse [] 5000 (Some defaultCanvasPort) None false with
-    | _, _, _, Some _, true ->
+    match
+        args
+        |> Array.toList
+        |> parse [] 5000 (Some defaultCanvasPort) None None false
+    with
+    | _, _, _, _, Some _, true ->
         eprintfn "--demo and --test-fixtures are mutually exclusive"
         exit 1
-    | _, port, _, _, true ->
+    | _, port, _, dashboardPort, _, true ->
         { WorktreeRoots = []
           Port = port
           CanvasPort = None
+          DashboardPort = dashboardPort
           TestFixtures = None
           Demo = true }
-    | roots, port, canvasPort, testFixtures, _ ->
+    | roots, port, canvasPort, dashboardPort, testFixtures, _ ->
         // Zero positional roots is valid in normal mode: `start`/`dev` no longer require a path.
         // When no roots are passed the server resolves them from global config (or migrates a
         // legacy/orphan set) at startup — see resolveWorktreeRoots in main.
@@ -99,8 +111,16 @@ let parseArgs (args: string array) =
             { WorktreeRoots = roots |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
               Port = port
               CanvasPort = canvasPort
+              DashboardPort = dashboardPort
               TestFixtures = testFixtures
               Demo = false }
+
+let internal dashboardOrigins (config: ServerConfig) =
+    match config.DashboardPort with
+    | Some port ->
+        [ $"http://localhost:{port}"
+          $"http://127.0.0.1:{port}" ]
+    | None -> []
 
 let private populateAgentFromFixtures (agent: MailboxProcessor<SchedulerState.StateMsg>) (fixtures: FixtureData) =
     fixtures.Worktrees.Repos
@@ -339,7 +359,10 @@ let main args =
 
     let embeddedTerminal =
         if config.Demo then None
-        else Some(EmbeddedTerminal.create serverUrl)
+        else
+            dashboardOrigins config
+            |> EmbeddedTerminal.create serverUrl
+            |> Some
 
     let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, runtimeStoreFlushes =
         if config.Demo then

@@ -99,21 +99,20 @@ let private defaultHostExecutable () =
     |> Option.ofObj
     |> resolveHostExecutable AppContext.BaseDirectory
 
-let internal originsFor (serverOrigin: string) =
+let internal originsFor (serverOrigin: string) configuredOrigins =
     try
         let origin = Uri(serverOrigin, UriKind.Absolute)
         let scheme = origin.Scheme
         let port = origin.Port
 
-        [ origin.GetLeftPart(UriPartial.Authority)
-          $"{scheme}://localhost:{port}"
-          $"{scheme}://127.0.0.1:{port}"
-          if port = 5001 then
-              "http://localhost:5174"
-              "http://127.0.0.1:5174" ]
+        ([ origin.GetLeftPart(UriPartial.Authority)
+           $"{scheme}://localhost:{port}"
+           $"{scheme}://127.0.0.1:{port}" ]
+         @ configuredOrigins)
         |> List.distinctBy _.ToUpperInvariant()
     with _ ->
-        [ serverOrigin ]
+        serverOrigin :: configuredOrigins
+        |> List.distinctBy _.ToUpperInvariant()
 
 let internal hostStartInfo config =
     let workingDirectory =

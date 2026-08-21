@@ -353,8 +353,8 @@ let internal createWithConfig config =
 
     Manager(config, agent)
 
-let create serverOrigin =
-    originsFor serverOrigin
+let create serverOrigin configuredOrigins =
+    originsFor serverOrigin configuredOrigins
     |> TerminalHostClient.defaultConfig
     |> createWithConfig
 

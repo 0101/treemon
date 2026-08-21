@@ -19,6 +19,11 @@ let private writeOrphan (configDir: string) (roots: string list) =
     root["WorktreeRoots"] <- arr
     File.WriteAllText(Path.Combine(configDir, "roots.json"), root.ToJsonString())
 
+let private terminalOrigins (config: ServerConfig) =
+    Server.TerminalHostProcess.originsFor
+        $"http://localhost:{config.Port}"
+        (dashboardOrigins config)
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -35,6 +40,16 @@ type ServerStartupResolutionTests() =
         Assert.That(config.WorktreeRoots, Is.Empty)
         Assert.That(config.Demo, Is.False)
         Assert.That(config.Port, Is.EqualTo(5000))
+        Assert.That(config.DashboardPort, Is.EqualTo None)
+        Assert.That(dashboardOrigins config, Is.Empty)
+
+        Assert.That(
+            terminalOrigins config,
+            Is.EqualTo(
+                [ "http://localhost:5000"
+                  "http://127.0.0.1:5000" ]
+            )
+        )
 
     [<Test>]
     member _.``parseArgs with only --port yields empty roots and the chosen port``() =
@@ -42,6 +57,51 @@ type ServerStartupResolutionTests() =
         Assert.That(config.WorktreeRoots, Is.Empty)
         Assert.That(config.Demo, Is.False)
         Assert.That(config.Port, Is.EqualTo(5050))
+
+    [<Test>]
+    member _.``default dual-process ports produce the configured dashboard origins``() =
+        let config =
+            parseArgs
+                [| "--port"
+                   "5001"
+                   "--dashboard-port"
+                   "5174" |]
+
+        let allowedOrigins = terminalOrigins config
+
+        Assert.That(
+            allowedOrigins,
+            Is.EqualTo(
+                [ "http://localhost:5001"
+                  "http://127.0.0.1:5001"
+                  "http://localhost:5174"
+                  "http://127.0.0.1:5174" ]
+            )
+        )
+
+    [<Test>]
+    member _.``non-default dual-process ports do not fall back to default topology``() =
+        let config =
+            parseArgs
+                [| "--port"
+                   "45101"
+                   "--dashboard-port"
+                   "45174" |]
+
+        let allowedOrigins = terminalOrigins config
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                allowedOrigins,
+                Is.EqualTo(
+                    [ "http://localhost:45101"
+                      "http://127.0.0.1:45101"
+                      "http://localhost:45174"
+                      "http://127.0.0.1:45174" ]
+                )
+            )
+
+            Assert.That(allowedOrigins, Does.Not.Contain("http://localhost:5174")))
 
     [<Test>]
     member _.``parseArgs with a single root keeps that root``() =

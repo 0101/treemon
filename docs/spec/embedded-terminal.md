@@ -195,6 +195,10 @@ authenticated control and attachment requests; and `TerminalHostReplacement` coo
 replacement. `Server.EmbeddedTerminal` retains only the mailbox, authoritative snapshot
 reconciliation, and public terminal lifecycle surface. It lazily starts a host only when none is
 healthy, and ambiguous start or close responses are resolved by listing the registry again.
+Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
+port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
+option and allows only the configured server origin aliases, so the terminal client never infers a
+dashboard port from a server-port convention.
 
 `treemon.ps1` publishes the host and stages a changed executable in a plain versioned directory. It
 preflights control-API compatibility before replacing the Treemon server; a deployment that cannot
@@ -267,6 +271,9 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Deployment-owned executable selection:** production resolves only an explicit deployment input
   or the published `terminal-host` layout. The development script supplies its source build path
   explicitly, so the shipped assembly contains no build-machine checkout fallback.
+- **Startup-owned dashboard topology:** development passes the Vite port that it actually launches
+  into `Program`, which derives both loopback dashboard origins. The terminal client has no
+  dev-port convention, and production supplies no additional dashboard origin.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the
   `CodingToolCli Resume` command. A terminal without an exact resumable session receives no input

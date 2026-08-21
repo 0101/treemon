@@ -877,7 +877,7 @@ function Start-DualProcess(
 
     try {
         $serverProcess = Start-Process -FilePath "dotnet" `
-            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- $ServerArgs --port $devApiPort" `
+            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- $ServerArgs --port $devApiPort --dashboard-port $devVitePort" `
             -WorkingDirectory $ScriptDir `
             -PassThru `
             -NoNewWindow
