@@ -916,6 +916,16 @@ type EmbeddedTerminalControlClientTests() =
         Assert.That(error, Is.EqualTo expectedError)
 
     [<TestCase(
+        "sessionId",
+        "null",
+        "TerminalHost returned an invalid terminal session ID"
+    )>]
+    [<TestCase(
+        "sessionId",
+        "42",
+        "TerminalHost terminal record is malformed"
+    )>]
+    [<TestCase(
         "worktreePath",
         "null",
         "TerminalHost returned an invalid worktree path"
