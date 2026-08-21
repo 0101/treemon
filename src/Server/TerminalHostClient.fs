@@ -9,6 +9,7 @@ open System.Text
 open System.Text.Json
 open System.Threading
 open FsToolkit.ErrorHandling
+open Server.TerminalHostEndpoint
 open Server.TerminalHostManifest
 open Server.TerminalHostProcess
 
@@ -232,15 +233,9 @@ let private validAttachmentEndpoint manifest sessionId value =
         let expectedPath =
             $"/_treemon/{sessionId}/{manifest.BearerToken}/"
 
-        endpoint.Scheme = Uri.UriSchemeHttp
-        && endpoint.Host = "127.0.0.1"
-        && endpoint.Port > 0
-        && endpoint.Port <= 65_535
+        isLoopbackHttpUri endpoint
         && endpoint.Port <> 5000
         && endpoint.AbsolutePath = expectedPath
-        && String.IsNullOrEmpty endpoint.Query
-        && String.IsNullOrEmpty endpoint.Fragment
-        && String.IsNullOrEmpty endpoint.UserInfo
     with _ ->
         false
 
@@ -364,8 +359,7 @@ let private terminalWebSocketEndpoint (attachmentEndpoint: string) =
         let endpoint = Uri(attachmentEndpoint, UriKind.Absolute)
 
         if
-            endpoint.Scheme <> Uri.UriSchemeHttp
-            || endpoint.Host <> "127.0.0.1"
+            not (isLoopbackHttpUri endpoint)
             || not (endpoint.AbsolutePath.EndsWith("/", StringComparison.Ordinal))
         then
             Error "TerminalHost returned an invalid command attachment endpoint"

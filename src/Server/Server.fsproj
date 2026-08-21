@@ -62,6 +62,7 @@
     <Compile Include="CardEventLog.fs" />
     <Compile Include="DemoFixture.fs" />
     <Compile Include="TerminalHostProcess.fs" />
+    <Compile Include="TerminalHostEndpoint.fs" />
     <Compile Include="TerminalHostManifest.fs" />
     <Compile Include="TerminalHostClient.fs" />
     <Compile Include="TerminalHostReplacement.fs" />

@@ -4,6 +4,7 @@ open System
 open System.IO
 open System.Text
 open System.Text.Json
+open Server.TerminalHostEndpoint
 open Server.TerminalHostProcess
 
 type internal DiscoveryManifest =
@@ -96,14 +97,8 @@ let private validControlEndpoint (value: string) =
     try
         let endpoint = Uri(value, UriKind.Absolute)
 
-        endpoint.Scheme = Uri.UriSchemeHttp
-        && endpoint.Host = "127.0.0.1"
-        && endpoint.Port > 0
-        && endpoint.Port <= 65_535
+        isLoopbackHttpUri endpoint
         && endpoint.AbsolutePath = "/"
-        && String.IsNullOrEmpty endpoint.Query
-        && String.IsNullOrEmpty endpoint.Fragment
-        && String.IsNullOrEmpty endpoint.UserInfo
     with _ ->
         false
 

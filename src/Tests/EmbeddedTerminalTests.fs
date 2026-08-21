@@ -593,6 +593,27 @@ let private populateAgent
 [<Category("Unit")>]
 [<Category("Fast")>]
 type EmbeddedTerminalControlClientTests() =
+    [<TestCase("http://127.0.0.1:41001/", true)>]
+    [<TestCase("http://127.0.0.1:41001/terminal/session/", true)>]
+    [<TestCase("http://127.0.0.1:5000/terminal/session/", true)>]
+    [<TestCase("https://127.0.0.1:41001/", false)>]
+    [<TestCase("http://localhost:41001/", false)>]
+    [<TestCase("http://127.0.0.1:0/", false)>]
+    [<TestCase("http://127.0.0.1:41001/?token=value", false)>]
+    [<TestCase("http://127.0.0.1:41001/#fragment", false)>]
+    [<TestCase("http://user@127.0.0.1:41001/", false)>]
+    member _.``loopback HTTP validation centralizes the common endpoint shape``
+        (
+            value: string,
+            expected: bool
+        ) =
+        let endpoint = Uri(value, UriKind.Absolute)
+
+        Assert.That(
+            TerminalHostEndpoint.isLoopbackHttpUri endpoint,
+            Is.EqualTo expected
+        )
+
     [<Test>]
     member _.``resume commands containing control characters are rejected before terminal input``() =
         task {
@@ -629,6 +650,107 @@ type EmbeddedTerminalControlClientTests() =
                     Is.False,
                     "invalid resume input must not connect to the terminal"
                 ))
+        }
+
+    [<Test>]
+    member _.``command attachment conversion revalidates the common endpoint shape``() =
+        task {
+            use listener = new TcpListener(IPAddress.Loopback, 0)
+            listener.Start()
+
+            let port =
+                (listener.LocalEndpoint :?> IPEndPoint).Port
+
+            let! result =
+                TerminalHostClient.sendTerminalCommandDefault
+                    $"http://127.0.0.1:{port}/terminal/?unexpected=true"
+                    "Write-Output safe"
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    result,
+                    Is.EqualTo(
+                        Error "TerminalHost returned an invalid command attachment endpoint"
+                        : Result<unit, string>
+                    )
+                )
+
+                Assert.That(
+                    listener.Pending(),
+                    Is.False,
+                    "an invalid attachment endpoint must not be contacted"
+                ))
+        }
+
+    [<Test>]
+    member _.``control and attachment endpoints retain their caller-specific path and port rules``() =
+        task {
+            use host = new FakeControlHost()
+            let config = managerConfig host noLaunch
+
+            host.PublishManifestWithJsonField(
+                "endpoint",
+                JsonSerializer.Serialize($"{host.Endpoint}/unexpected")
+            )
+
+            match TerminalHostManifest.readManifest config with
+            | Error error ->
+                Assert.That(
+                    error,
+                    Is.EqualTo "TerminalHost discovery manifest has an invalid control endpoint"
+                )
+            | Ok manifest ->
+                Assert.Fail($"Expected control endpoint rejection, got {manifest}")
+
+            host.PublishManifest()
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "endpoint-rules"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+            let terminal = host.CurrentTerminals |> List.exactlyOne
+            let expectedPath =
+                $"/_treemon/{terminal.SessionId}/{host.Token}/"
+
+            let manifest =
+                match TerminalHostManifest.readManifest config with
+                | Ok(Some manifest) -> manifest
+                | result ->
+                    Assert.Fail($"Expected a valid manifest, got {result}")
+                    Unchecked.defaultof<_>
+
+            let assertAttachmentRejected endpoint =
+                async {
+                    host.ReturnRegistryWithJsonField(
+                        "attachmentEndpoint",
+                        JsonSerializer.Serialize endpoint
+                    )
+
+                    let! listed =
+                        TerminalHostClient.listTerminals config manifest
+
+                    Assert.That(
+                        listed,
+                        Is.EqualTo(
+                            Error "TerminalHost returned an invalid attachment endpoint"
+                            : Result<TerminalHostClient.RegistrySnapshot, string>
+                        )
+                    )
+                }
+
+            do!
+                assertAttachmentRejected
+                    $"http://127.0.0.1:41001/unexpected/"
+                |> Async.StartAsTask
+
+            do!
+                assertAttachmentRejected
+                    $"http://127.0.0.1:5000{expectedPath}"
+                |> Async.StartAsTask
         }
 
     [<TestCase(

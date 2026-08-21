@@ -189,12 +189,12 @@ loopback, exact Host/Origin, bearer, and request-size checks as the control API.
 ### Treemon integration
 
 The server terminal runtime has one-way module boundaries: `TerminalHostProcess` owns process
-configuration, launch, and exact identity defaults; `TerminalHostManifest` validates discovery;
-`TerminalHostClient` owns authenticated control and attachment requests; and
-`TerminalHostReplacement` coordinates replacement. `Server.EmbeddedTerminal` retains only the
-mailbox, authoritative snapshot reconciliation, and public terminal lifecycle surface. It lazily
-starts a host only when none is healthy, and ambiguous start or close responses are resolved by
-listing the registry again.
+configuration, launch, and exact identity defaults; `TerminalHostEndpoint` owns the common
+loopback-HTTP endpoint shape; `TerminalHostManifest` validates discovery; `TerminalHostClient` owns
+authenticated control and attachment requests; and `TerminalHostReplacement` coordinates
+replacement. `Server.EmbeddedTerminal` retains only the mailbox, authoritative snapshot
+reconciliation, and public terminal lifecycle surface. It lazily starts a host only when none is
+healthy, and ambiguous start or close responses are resolved by listing the registry again.
 
 `treemon.ps1` publishes the host and stages a changed executable in a plain versioned directory. It
 preflights control-API compatibility before replacing the Treemon server; a deployment that cannot
@@ -281,7 +281,7 @@ PowerShell lifecycle helpers, or compatibility shims.
 | File | Purpose |
 |---|---|
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
-| `src/Server/TerminalHostProcess.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, discovery validation, authenticated control client and compatibility preflight, and replacement coordination |
+| `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, and replacement coordination |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, authoritative snapshot reconciliation, and public start/get/close surface |
 | `src/Server/SessionActivity.fs` | Effective per-session state used by the idle gate |
 | `src/Server/SessionActivityService.fs` | Activity ingestion, terminal-origin validation, and owned-session activity epoch |
