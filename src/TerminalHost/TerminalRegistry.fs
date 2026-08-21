@@ -15,9 +15,7 @@ type private RegistryState =
       Stopped: bool }
 
 type private RegistryMessage =
-    | Start of
-        CanonicalWorktree *
-        AsyncReplyChannel<Result<RegistrySnapshot, string>>
+    | Start of CanonicalWorktree * AsyncReplyChannel<Result<RegistrySnapshot, string>>
     | List of AsyncReplyChannel<RegistrySnapshot>
     | Close of string * AsyncReplyChannel<RegistrySnapshot>
     | Shutdown of AsyncReplyChannel<unit>
@@ -38,8 +36,7 @@ module TerminalRegistry =
     let private snapshot state =
         { Revision = state.Revision
           Terminals =
-            state.Entries
-            |> Map.values
+            state.Entries |> Map.values
             |> Seq.sortBy _.OpenedOrder
             |> Seq.map _.Record
             |> Seq.toList }
@@ -64,22 +61,17 @@ module TerminalRegistry =
 
     let private findBySessionId sessionId entries =
         entries
-        |> Map.toList
-        |> List.tryFind (fun (_, terminal) ->
-            String.Equals(
-                terminal.Record.SessionId,
-                sessionId,
-                StringComparison.Ordinal
-            ))
+        |> Map.tryPick (fun key terminal ->
+            if String.Equals(terminal.Record.SessionId, sessionId, StringComparison.Ordinal) then
+                Some(key, terminal)
+            else
+                None)
 
     let private removeAfterClose state (key, terminal) =
         async {
             do! closeHosted terminal
 
-            return
-                { state with
-                    Entries = Map.remove key state.Entries
-                    Revision = state.Revision + 1L }
+            return { state with Entries = Map.remove key state.Entries; Revision = state.Revision + 1L }
         }
 
     let private pruneExited state =
@@ -93,195 +85,134 @@ module TerminalRegistry =
             if Map.isEmpty exited then
                 return state
             else
-                return
-                    { state with
-                        Entries = live
-                        Revision = state.Revision + 1L }
+                return { state with Entries = live; Revision = state.Revision + 1L }
         }
 
-    let private logMailboxFailure scope (error: exn) =
-        try
-            Console.Error.WriteLine(
-                $"TerminalRegistry {scope} failed ({error.GetType().Name})"
-            )
-        with _ ->
-            ()
+    let private respond (channel: AsyncReplyChannel<'value>) value state =
+        channel.Reply value
+        state
 
-    let private replyAfterFailure state message =
-        try
-            match message with
-            | Start(_, reply) ->
-                reply.Reply(Error "Terminal registry operation failed")
-            | List reply
-            | Close(_, reply) -> reply.Reply(snapshot state)
-            | Shutdown reply -> reply.Reply()
-            | UpstreamExited _ -> ()
-        with _ ->
-            ()
+    let private recoverMessage state message =
+        async {
+            try
+                match message with
+                | Start(_, reply) ->
+                    return respond reply (Error "Terminal registry operation failed") state
+                | List reply
+                | Close(_, reply) -> return respond reply (snapshot state) state
+                | Shutdown reply -> return respond reply () state
+                | UpstreamExited _ -> return state
+            with _ ->
+                return state
+        }
+
+    let private startHosted starter dataPlaneStarter notify worktree openedOrder =
+        async {
+            let sessionId = Guid.NewGuid().ToString("N")
+
+            match! starter sessionId worktree with
+            | Error error -> return Error error
+            | Ok terminalProcess when terminalProcess.HasExited() ->
+                terminalProcess.Close()
+                return Error "ttyd exited during terminal startup"
+            | Ok terminalProcess ->
+                let! dataPlaneResult =
+                    async {
+                        try
+                            return! dataPlaneStarter sessionId terminalProcess.TtydPort (fun () -> notify sessionId)
+                        with error ->
+                            terminalProcess.Close()
+                            return raise error
+                    }
+
+                match dataPlaneResult with
+                | Error error ->
+                    terminalProcess.Close()
+                    return Error error
+                | Ok dataPlane when terminalProcess.HasExited() ->
+                    do! stopAndClose dataPlane terminalProcess
+                    return Error "ttyd exited during terminal startup"
+                | Ok dataPlane ->
+                    return
+                        Ok
+                            { Record =
+                                { SessionId = sessionId
+                                  WorktreePath = CanonicalWorktree.path worktree
+                                  AttachmentEndpoint = dataPlane.AttachmentEndpoint }
+                              Process = terminalProcess; DataPlane = dataPlane
+                              OpenedOrder = openedOrder }
+        }
 
     let create starter dataPlaneStarter =
-        let mailbox =
-            MailboxProcessor.Start(fun inbox ->
-                let processMessage state message =
-                    async {
-                        let! current = pruneExited state
+        let initial =
+            { Entries = Map.empty; Revision = 0L
+              NextOpenedOrder = 0L; Stopped = false }
 
-                        match message with
-                        | Start(worktree, reply) when current.Stopped ->
-                            reply.Reply(Error "Terminal host is shutting down")
-                            return current
-                        | Start(worktree, reply) ->
-                            let key = CanonicalWorktree.key worktree
+        let processMessage (inbox: MailboxProcessor<RegistryMessage>) state message =
+            async {
+                let! current = pruneExited state
 
-                            match Map.tryFind key current.Entries with
-                            | Some _ ->
-                                reply.Reply(Ok(snapshot current))
-                                return current
-                            | None ->
-                                let sessionId = Guid.NewGuid().ToString("N")
-                                let! started = starter sessionId worktree
+                match message with
+                | Start(_, reply) when current.Stopped ->
+                    return respond reply (Error "Terminal host is shutting down") current
+                | Start(worktree, reply) ->
+                    let key = CanonicalWorktree.key worktree
 
-                                match started with
-                                | Error error ->
-                                    reply.Reply(Error error)
-                                    return current
-                                | Ok terminalProcess when terminalProcess.HasExited() ->
-                                    terminalProcess.Close()
-                                    reply.Reply(Error "ttyd exited during terminal startup")
-                                    return current
-                                | Ok terminalProcess ->
-                                    let notifyUpstreamExited () =
-                                        inbox.Post(UpstreamExited sessionId)
-
-                                    let! dataPlaneResult =
-                                        async {
-                                            try
-                                                return!
-                                                    dataPlaneStarter
-                                                        sessionId
-                                                        terminalProcess.TtydPort
-                                                        notifyUpstreamExited
-                                            with error ->
-                                                try
-                                                    terminalProcess.Close()
-                                                with cleanupError ->
-                                                    logMailboxFailure
-                                                        "startup cleanup"
-                                                        cleanupError
-
-                                                return raise error
-                                        }
-
-                                    match dataPlaneResult with
-                                    | Error error ->
-                                        terminalProcess.Close()
-                                        reply.Reply(Error error)
-                                        return current
-                                    | Ok dataPlane when terminalProcess.HasExited() ->
-                                        do! stopAndClose dataPlane terminalProcess
-                                        reply.Reply(Error "ttyd exited during terminal startup")
-                                        return current
-                                    | Ok dataPlane ->
-                                        let terminal =
-                                            { Record =
-                                                { SessionId = sessionId
-                                                  WorktreePath =
-                                                    CanonicalWorktree.path worktree
-                                                  AttachmentEndpoint =
-                                                    dataPlane.AttachmentEndpoint }
-                                              Process = terminalProcess
-                                              DataPlane = dataPlane
-                                              OpenedOrder = current.NextOpenedOrder }
-
-                                        let updated =
-                                            { current with
-                                                Entries = Map.add key terminal current.Entries
-                                                Revision = current.Revision + 1L
-                                                NextOpenedOrder = current.NextOpenedOrder + 1L }
-
-                                        reply.Reply(Ok(snapshot updated))
-                                        return updated
-                        | List reply ->
-                            reply.Reply(snapshot current)
-                            return current
-                        | Close(sessionId, reply) ->
-                            match findBySessionId sessionId current.Entries with
-                            | None ->
-                                reply.Reply(snapshot current)
-                                return current
-                            | Some matched ->
-                                let! updated = removeAfterClose current matched
-                                reply.Reply(snapshot updated)
-                                return updated
-                        | Shutdown reply ->
-                            do! closeAll current.Entries
-
+                    match Map.tryFind key current.Entries with
+                    | Some _ -> return respond reply (Ok(snapshot current)) current
+                    | None ->
+                        match!
+                            startHosted
+                                starter
+                                dataPlaneStarter
+                                (UpstreamExited >> inbox.Post)
+                                worktree
+                                current.NextOpenedOrder
+                        with
+                        | Error error -> return respond reply (Error error) current
+                        | Ok terminal ->
                             let updated =
-                                if Map.isEmpty current.Entries && current.Stopped then
-                                    current
-                                else
-                                    { current with
-                                        Entries = Map.empty
-                                        Revision =
-                                            if Map.isEmpty current.Entries then
-                                                current.Revision
-                                            else
-                                                current.Revision + 1L
-                                        Stopped = true }
+                                { current with
+                                    Entries = Map.add key terminal current.Entries
+                                    Revision = current.Revision + 1L
+                                    NextOpenedOrder = current.NextOpenedOrder + 1L }
 
-                            reply.Reply()
-                            return updated
-                        | UpstreamExited sessionId ->
-                            match findBySessionId sessionId current.Entries with
-                            | None -> return current
-                            | Some matched ->
-                                return! removeAfterClose current matched
-                    }
+                            return respond reply (Ok(snapshot updated)) updated
+                | List reply -> return respond reply (snapshot current) current
+                | Close(sessionId, reply) ->
+                    match findBySessionId sessionId current.Entries with
+                    | None -> return respond reply (snapshot current) current
+                    | Some matched ->
+                        let! updated = removeAfterClose current matched
+                        return respond reply (snapshot updated) updated
+                | Shutdown reply ->
+                    do! closeAll current.Entries
 
-                let rec loop state =
-                    async {
-                        let! message = inbox.Receive()
-                        let! next =
-                            async {
-                                try
-                                    return! processMessage state message
-                                with error ->
-                                    logMailboxFailure "message" error
-                                    replyAfterFailure state message
-                                    return state
-                            }
+                    let updated =
+                        { current with
+                            Entries = Map.empty
+                            Revision = current.Revision + if Map.isEmpty current.Entries then 0L else 1L
+                            Stopped = true }
 
-                        return! loop next
-                    }
+                    return respond reply () updated
+                | UpstreamExited sessionId ->
+                    match findBySessionId sessionId current.Entries with
+                    | None -> return current
+                    | Some matched -> return! removeAfterClose current matched
+            }
 
-                loop
-                    { Entries = Map.empty
-                      Revision = 0L
-                      NextOpenedOrder = 0L
-                      Stopped = false })
-
-        mailbox.Error.Add(fun error ->
-            logMailboxFailure "mailbox" error)
+        let mailbox = ResilientMailbox.start "TerminalRegistry" initial recoverMessage processMessage
 
         TerminalRegistry mailbox
 
     let start (TerminalRegistry mailbox) worktree =
-        mailbox.PostAndAsyncReply(
-            (fun reply -> Start(worktree, reply)),
-            timeout = ReplyTimeoutMilliseconds
-        )
+        ResilientMailbox.ask ReplyTimeoutMilliseconds (fun reply -> Start(worktree, reply)) mailbox
 
     let list (TerminalRegistry mailbox) =
-        mailbox.PostAndAsyncReply(List, timeout = ReplyTimeoutMilliseconds)
+        ResilientMailbox.ask ReplyTimeoutMilliseconds List mailbox
 
     let close (TerminalRegistry mailbox) sessionId =
-        mailbox.PostAndAsyncReply(
-            (fun reply -> Close(sessionId, reply)),
-            timeout = ReplyTimeoutMilliseconds
-        )
+        ResilientMailbox.ask ReplyTimeoutMilliseconds (fun reply -> Close(sessionId, reply)) mailbox
 
     let shutdown (TerminalRegistry mailbox) =
-        mailbox.PostAndAsyncReply(
-            Shutdown,
-            timeout = ShutdownReplyTimeoutMilliseconds
-        )
+        ResilientMailbox.ask ShutdownReplyTimeoutMilliseconds Shutdown mailbox

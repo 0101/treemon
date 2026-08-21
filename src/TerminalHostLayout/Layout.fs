@@ -93,8 +93,35 @@ module TerminalHostLayout =
     let versionDirectory layout version =
         Path.Combine(layout.StagingDirectory, version)
 
-    let stagedHostExecutablePath layout version =
-        Path.Combine(versionDirectory layout version, layout.HostExecutableName)
+    let validateStagedVersion layout version =
+        try
+            if not (isValidVersionDirectoryName version) then
+                Error "The staged TerminalHost version is not a direct version directory"
+            else
+                let directory = DirectoryInfo(versionDirectory layout version)
+
+                if
+                    not directory.Exists
+                    || (directory.Attributes &&& FileAttributes.ReparsePoint) <> enum 0
+                then
+                    Error "The staged TerminalHost version directory is missing or unsafe"
+                else
+                    let invalidMember =
+                        layout.RequiredBundleFileNames
+                        |> List.map (fun name ->
+                            FileInfo(Path.Combine(directory.FullName, name)))
+                        |> List.tryFind (fun info ->
+                            not info.Exists
+                            || (info.Attributes &&& FileAttributes.ReparsePoint) <> enum 0)
+
+                    match invalidMember with
+                    | Some info ->
+                        Error
+                            $"The staged TerminalHost bundle member is missing or unsafe at '{info.FullName}'"
+                    | None ->
+                        Ok(Path.Combine(directory.FullName, layout.HostExecutableName))
+        with error ->
+            Error $"Could not validate the staged TerminalHost executable: {error.Message}"
 
     let adjacentTtydExecutablePath (hostExecutablePath: string) =
         hostExecutablePath

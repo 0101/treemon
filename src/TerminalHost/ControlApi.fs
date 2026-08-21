@@ -65,6 +65,9 @@ module ControlApi =
         MediaTypeHeaderValue.TryParse(context.Request.ContentType, &parsed)
         && String.Equals(parsed.MediaType, "application/json", StringComparison.OrdinalIgnoreCase)
 
+    let private malformedStartRequest =
+        Error(StatusCodes.Status400BadRequest, "Malformed start request")
+
     let private readWorktreePath (context: HttpContext) =
         task {
             if not (hasJsonContentType context) then
@@ -81,7 +84,7 @@ module ControlApi =
                     let root = document.RootElement
 
                     if root.ValueKind <> JsonValueKind.Object then
-                        return Error(StatusCodes.Status400BadRequest, "Malformed start request")
+                        return malformedStartRequest
                     else
                         let properties = root.EnumerateObject() |> Seq.toList
 
@@ -92,17 +95,14 @@ module ControlApi =
                             match property.Value.GetString() |> Option.ofObj with
                             | Some path when not (String.IsNullOrWhiteSpace path) ->
                                 return Ok path
-                            | _ ->
-                                return Error(StatusCodes.Status400BadRequest, "Malformed start request")
-                        | _ ->
-                            return Error(StatusCodes.Status400BadRequest, "Malformed start request")
+                            | _ -> return malformedStartRequest
+                        | _ -> return malformedStartRequest
                 with
                 | :? BadHttpRequestException as error
                     when error.StatusCode = StatusCodes.Status413PayloadTooLarge ->
                     return Error(StatusCodes.Status413PayloadTooLarge, "Request body too large")
                 | :? JsonException
-                | :? IOException ->
-                    return Error(StatusCodes.Status400BadRequest, "Malformed start request")
+                | :? IOException -> return malformedStartRequest
         }
 
     let private validSessionId (value: string) =
@@ -135,54 +135,31 @@ module ControlApi =
                 return! writeJson StatusCodes.Status200OK (registryResponseV1 snapshot) context
             | "POST", "/api/v1/terminals" ->
                 match! readWorktreePath context with
-                | Error(status, message) ->
-                    return! writeError status message context
+                | Error(status, message) -> return! writeError status message context
                 | Ok path ->
                     match PathValidation.validate path with
                     | Error WorktreeValidationError.InvalidPath ->
-                        return!
-                            writeError
-                                StatusCodes.Status400BadRequest
-                                "Invalid worktree path"
-                                context
+                        return! writeError StatusCodes.Status400BadRequest "Invalid worktree path" context
                     | Error WorktreeValidationError.UnknownWorktree ->
-                        return!
-                            writeError
-                                StatusCodes.Status404NotFound
-                                "Unknown worktree path"
-                                context
+                        return! writeError StatusCodes.Status404NotFound "Unknown worktree path" context
                     | Ok worktree ->
                         match! TerminalRegistry.start registry worktree |> Async.StartAsTask with
                         | Ok snapshot ->
                             return! writeJson StatusCodes.Status200OK (registryResponseV1 snapshot) context
                         | Error error ->
-                            return!
-                                writeError
-                                    StatusCodes.Status500InternalServerError
-                                    error
-                                    context
+                            return! writeError StatusCodes.Status500InternalServerError error context
             | "POST", "/api/v1/shutdown" ->
                 context.Response.OnCompleted(
-                    Func<Task>(fun () ->
-                        lifetime.StopApplication()
-                        Task.CompletedTask)
+                    Func<Task>(fun () -> lifetime.StopApplication(); Task.CompletedTask)
                 )
 
-                return!
-                    writeJson
-                        StatusCodes.Status202Accepted
-                        {| Accepted = true |}
-                        context
+                return! writeJson StatusCodes.Status202Accepted {| Accepted = true |} context
             | "DELETE", closePath
                 when closePath.StartsWith("/api/v1/terminals/", StringComparison.Ordinal) ->
                 let sessionId = closePath.Substring("/api/v1/terminals/".Length)
 
                 if not (validSessionId sessionId) then
-                    return!
-                        writeError
-                            StatusCodes.Status400BadRequest
-                            "Invalid terminal session ID"
-                            context
+                    return! writeError StatusCodes.Status400BadRequest "Invalid terminal session ID" context
                 else
                     let! snapshot =
                         TerminalRegistry.close registry (sessionId.ToLowerInvariant())
@@ -190,11 +167,7 @@ module ControlApi =
 
                     return! writeJson StatusCodes.Status200OK (registryResponseV1 snapshot) context
             | _ ->
-                return!
-                    writeError
-                        StatusCodes.Status404NotFound
-                        "Control endpoint not found"
-                        context
+                return! writeError StatusCodes.Status404NotFound "Control endpoint not found" context
         }
 
     let private handle
@@ -209,8 +182,7 @@ module ControlApi =
         =
         task {
             let authorizationHeaders =
-                context.Request.Headers.Authorization
-                |> Seq.toList
+                context.Request.Headers.Authorization |> Seq.toList
 
             match
                 RequestSecurity.validate
@@ -222,13 +194,7 @@ module ControlApi =
                 return! reject rejection context
             | Ok() ->
                 return!
-                    route
-                        hostPid
-                        processStartTimeUtcTicks
-                        hostVersion
-                        registry
-                        lifetime
-                        context
+                    route hostPid processStartTimeUtcTicks hostVersion registry lifetime context
         }
 
     let start config bearerToken hostPid processStartTimeUtcTicks hostVersion registry =
@@ -238,15 +204,7 @@ module ControlApi =
                     application.Services.GetRequiredService<IHostApplicationLifetime>()
 
                 RequestDelegate(fun context ->
-                    handle
-                        config
-                        bearerToken
-                        hostPid
-                        processStartTimeUtcTicks
-                        hostVersion
-                        registry
-                        lifetime
-                        context
+                    handle config bearerToken hostPid processStartTimeUtcTicks hostVersion registry lifetime context
                     :> Task)
 
             let! application, boundPort =
@@ -254,9 +212,7 @@ module ControlApi =
 
             let endpoint = $"http://127.0.0.1:{boundPort}"
 
-            return
-                { Application = application
-                  Endpoint = endpoint }
+            return { Application = application; Endpoint = endpoint }
         }
 
     let waitForShutdown running =

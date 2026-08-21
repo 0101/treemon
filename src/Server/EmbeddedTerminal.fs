@@ -20,15 +20,18 @@ type private ManagerState =
 type private CleanupReservation =
     | CleanupReservation of pathKey: string * token: System.Guid
 
+[<RequireQualifiedAccess>]
+type private TerminalMutation =
+    | Start
+    | Close
+
 type private Message =
-    | Start of
+    | Mutate of
+        TerminalMutation *
         WorktreePath *
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | GetCached of AsyncReplyChannel<EmbeddedTerminalSnapshot>
-    | Close of
-        WorktreePath *
-        AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | ReserveCleanup of
         WorktreePath *
         CleanupReservation *
@@ -124,29 +127,7 @@ let private applyRegistry
     =
     { state with
         LastSnapshot =
-            reconcileSnapshot
-                state.LastHost
-                manifest
-                registry.Terminals
-                state.LastSnapshot
-        LastHost = Some manifest }
-
-let private applyRegistryAfterClose
-    path
-    (state: ManagerState)
-    (manifest: DiscoveryManifest)
-    (registry: RegistrySnapshot)
-    =
-    let withoutClosed =
-        withoutPath path state.LastSnapshot
-
-    { state with
-        LastSnapshot =
-            reconcileSnapshot
-                state.LastHost
-                manifest
-                registry.Terminals
-                withoutClosed
+            reconcileSnapshot state.LastHost manifest registry.Terminals state.LastSnapshot
         LastHost = Some manifest }
 
 let private withHostFailure error state =
@@ -158,42 +139,40 @@ let private getTerminals config state =
         match! discoverHost config with
         | HealthyHost connection ->
             match! listTerminals config connection with
-            | Ok registry ->
-                return applyRegistry state connection registry
-            | Error error ->
-                return withHostFailure error state
+            | Ok registry -> return applyRegistry state connection registry
+            | Error error -> return withHostFailure error state
         | MissingHost ->
-            return
-                withHostFailure
-                    "TerminalHost discovery is missing; running terminals can no longer be verified."
-                    state
+            return withHostFailure "TerminalHost discovery is missing; running terminals can no longer be verified." state
         | DeadHost error ->
-            return
-                withHostFailure
-                    $"{error}. Its terminals were interrupted."
-                    state
+            return withHostFailure $"{error}. Its terminals were interrupted." state
         | IncompatibleHost(_, error)
         | UnusableHost error ->
             return withHostFailure error state
     }
 
+let private mutationResult prepare state connection = function
+    | Error(MutationUnverified(lastRegistry, error)) ->
+        let current =
+            lastRegistry
+            |> Option.map (applyRegistry state connection)
+            |> Option.defaultValue state
+
+        withHostFailure error current, Error error
+    | Error(MutationRejected(registry, error)) ->
+        applyRegistry state connection registry, Error error
+    | Ok registry ->
+        let next = applyRegistry (prepare state) connection registry
+        next, Ok next.LastSnapshot
+
 let private startTerminal config state worktreePath =
     async {
         match! ensureHost config state.LastHost with
-        | Error error ->
-            return withHostFailure error state, Error error
+        | Error error -> return withHostFailure error state, Error error
         | Ok connection ->
-            let path = WorktreePath.value worktreePath
+            let! result =
+                startTerminalOnHost config connection (WorktreePath.value worktreePath)
 
-            match! startTerminalOnHost config connection path with
-            | Error(StartUnverified error) ->
-                return withHostFailure error state, Error error
-            | Error(StartRejected(registry, error)) ->
-                let next = applyRegistry state connection registry
-                return next, Error error
-            | Ok(registry, _) ->
-                let next = applyRegistry state connection registry
-                return next, Ok next.LastSnapshot
+            return result |> Result.map fst |> mutationResult id state connection
     }
 
 let private safeWithoutHealthyHost config state discovery =
@@ -210,85 +189,18 @@ let private safeWithoutHealthyHost config state discovery =
     | UnusableHost error -> Error error
     | HealthyHost _ -> failwith "unreachable"
 
-let private closeOnHost config state connection worktreePath =
-    async {
-        let path = WorktreePath.value worktreePath
-
-        match! listTerminals config connection with
-        | Error error ->
-            return
-                withHostFailure error state,
-                Error error
-        | Ok before ->
-            let listed = applyRegistry state connection before
-
-            match findTerminalByPath path before.Terminals with
-            | None ->
-                let next =
-                    applyRegistryAfterClose
-                        path
-                        listed
-                        connection
-                        before
-
-                return next, Ok next.LastSnapshot
-            | Some terminal ->
-                let! closeResult =
-                    requestTerminalClose
-                        config
-                        connection
-                        terminal.SessionId
-
-                match! listTerminals config connection with
-                | Error listError ->
-                    let error =
-                        match closeResult with
-                        | Error closeError ->
-                            $"{closeError}; authoritative relist failed: {listError}"
-                        | Ok _ ->
-                            $"TerminalHost accepted the close request but its authoritative registry could not be read: {listError}"
-
-                    return
-                        withHostFailure error listed,
-                        Error error
-                | Ok after ->
-                    match findTerminalByPath path after.Terminals with
-                    | None ->
-                        let next =
-                            applyRegistryAfterClose
-                                path
-                                listed
-                                connection
-                                after
-
-                        return next, Ok next.LastSnapshot
-                    | Some _ ->
-                        let next =
-                            applyRegistry listed connection after
-
-                        let error =
-                            match closeResult with
-                            | Error closeError -> closeError
-                            | Ok _ ->
-                                "TerminalHost still lists the terminal after its close request"
-
-                        return next, Error error
-    }
-
 let private closeTerminal config state worktreePath =
     async {
         match! discoverHost config with
         | HealthyHost connection ->
-            return!
-                closeOnHost
-                    config
-                    state
-                    connection
-                    worktreePath
+            let path = WorktreePath.value worktreePath
+            let! result = closeTerminalOnHost config connection path
+
+            return result |> mutationResult (fun current ->
+                { current with LastSnapshot = withoutPath path current.LastSnapshot }) state connection
         | discovery ->
             match safeWithoutHealthyHost config state discovery with
-            | Error error ->
-                return withHostFailure error state, Error error
+            | Error error -> return withHostFailure error state, Error error
             | Ok() ->
                 let reason =
                     match discovery with
@@ -302,8 +214,7 @@ let private closeTerminal config state worktreePath =
                 let next =
                     { state with
                         LastSnapshot =
-                            state.LastSnapshot
-                            |> interruptSnapshot reason
+                            state.LastSnapshot |> interruptSnapshot reason
                             |> withoutPath (WorktreePath.value worktreePath) }
 
                 return next, Ok next.LastSnapshot
@@ -340,6 +251,15 @@ let private cleanupPathKey worktreePath =
     with _ ->
         pathKey path
 
+let private respond (channel: AsyncReplyChannel<'value>) value state =
+    channel.Reply value
+    state
+
+let private mutate config mutation state worktreePath =
+    match mutation with
+    | TerminalMutation.Start -> startTerminal config state worktreePath
+    | TerminalMutation.Close -> closeTerminal config state worktreePath
+
 let internal createWithConfig config =
     let agent =
         MailboxProcessor.Start(fun inbox ->
@@ -349,133 +269,75 @@ let internal createWithConfig config =
 
                     match message with
                     | Get reply when state.Phase = ManagerPhase.Replacing ->
-                        reply.Reply state.LastSnapshot
-                        return! loop state
+                        return! loop (respond reply state.LastSnapshot state)
                     | Get reply ->
                         let! next = getTerminals config state
-                        reply.Reply next.LastSnapshot
-                        return! loop next
+                        return! loop (respond reply next.LastSnapshot next)
                     | GetCached reply ->
-                        reply.Reply state.LastSnapshot
-                        return! loop state
-                    | Start(_, reply) when state.Phase = ManagerPhase.Replacing ->
-                        reply.Reply(Error replacementInProgressError)
-                        return! loop state
-                    | Start(worktreePath, reply)
+                        return! loop (respond reply state.LastSnapshot state)
+                    | Mutate(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
+                        return! loop (respond reply (Error replacementInProgressError) state)
+                    | Mutate(_, worktreePath, reply)
                         when state.CleanupReservations
                              |> Map.containsKey (cleanupPathKey worktreePath) ->
-                        reply.Reply(Error cleanupInProgressError)
-                        return! loop state
-                    | Start(worktreePath, reply) ->
-                        let! next, result =
-                            startTerminal
-                                config
-                                state
-                                worktreePath
+                        return! loop (respond reply (Error cleanupInProgressError) state)
+                    | Mutate(mutation, worktreePath, reply) ->
+                        let! next, result = mutate config mutation state worktreePath
 
-                        reply.Reply result
-                        return! loop next
-                    | Close(_, reply) when state.Phase = ManagerPhase.Replacing ->
-                        reply.Reply(Error replacementInProgressError)
-                        return! loop state
-                    | Close(worktreePath, reply)
-                        when state.CleanupReservations
-                             |> Map.containsKey (cleanupPathKey worktreePath) ->
-                        reply.Reply(Error cleanupInProgressError)
-                        return! loop state
-                    | Close(worktreePath, reply) ->
-                        let! next, result =
-                            closeTerminal
-                                config
-                                state
-                                worktreePath
-
-                        reply.Reply result
-                        return! loop next
+                        return! loop (respond reply result next)
                     | ReserveCleanup(_, _, reply)
                         when state.Phase = ManagerPhase.Replacing ->
-                        reply.Reply(Error replacementInProgressError)
-                        return! loop state
-                    | ReserveCleanup(
-                        worktreePath,
-                        (CleanupReservation(key, token) as reservation),
-                        reply
-                      ) ->
+                        return! loop (respond reply (Error replacementInProgressError) state)
+                    | ReserveCleanup(worktreePath, (CleanupReservation(key, token) as reservation), reply) ->
                         match state.CleanupReservations |> Map.tryFind key with
                         | Some _ ->
-                            reply.Reply(Error cleanupInProgressError)
-                            return! loop state
+                            return! loop (respond reply (Error cleanupInProgressError) state)
                         | None ->
                             let reserved =
                                 { state with
                                     CleanupReservations =
-                                        state.CleanupReservations
-                                        |> Map.add key token }
+                                        state.CleanupReservations |> Map.add key token }
 
-                            let! next, result =
-                                closeTerminal
-                                    config
-                                    reserved
-                                    worktreePath
+                            let! next, result = closeTerminal config reserved worktreePath
 
                             match result with
                             | Error error ->
-                                reply.Reply(Error error)
+                                let released =
+                                    { next with CleanupReservations = next.CleanupReservations |> Map.remove key }
 
-                                return!
-                                    loop
-                                        { next with
-                                            CleanupReservations =
-                                                next.CleanupReservations
-                                                |> Map.remove key }
-                            | Ok _ ->
-                                reply.Reply(Ok reservation)
-                                return! loop next
+                                return! loop (respond reply (Error error) released)
+                            | Ok _ -> return! loop (respond reply (Ok reservation) next)
                     | ReleaseCleanup(CleanupReservation(key, token)) ->
                         let reservations =
                             match state.CleanupReservations |> Map.tryFind key with
                             | Some current when current = token ->
-                                state.CleanupReservations
-                                |> Map.remove key
+                                state.CleanupReservations |> Map.remove key
                             | _ -> state.CleanupReservations
 
-                        return!
-                            loop
-                                { state with
-                                    CleanupReservations = reservations }
+                        return! loop { state with CleanupReservations = reservations }
                     | BeginReplacement(_, _, reply)
                         when state.Phase = ManagerPhase.Replacing ->
-                        reply.Reply ReplacementOutcome.RaceLost
-                        return! loop state
+                        return! loop (respond reply ReplacementOutcome.RaceLost state)
                     | BeginReplacement(plan, query, reply) ->
                         async {
-                            let! commit =
-                                commitReplacement config plan query
-
+                            let! commit = commitReplacement config plan query
                             inbox.Post(FinishReplacement(commit, reply))
                         }
                         |> Async.Start
 
-                        return!
-                            loop
-                                { state with
-                                    Phase = ManagerPhase.Replacing }
+                        return! loop { state with Phase = ManagerPhase.Replacing }
                     | FinishReplacement(commit, reply) ->
-                        let next, outcome =
-                            applyReplacementCommit state commit
+                        let next, outcome = applyReplacementCommit state commit
 
-                        reply.Reply outcome
                         return!
-                            loop
-                                { next with
-                                    Phase = ManagerPhase.Steady }
+                            { next with Phase = ManagerPhase.Steady }
+                            |> respond reply outcome
+                            |> loop
                 }
 
             loop
-                { LastSnapshot = EmbeddedTerminalSnapshot.empty
-                  LastHost = None
-                  Phase = ManagerPhase.Steady
-                  CleanupReservations = Map.empty })
+                { LastSnapshot = EmbeddedTerminalSnapshot.empty; LastHost = None
+                  Phase = ManagerPhase.Steady; CleanupReservations = Map.empty })
 
     Manager(config, agent)
 
@@ -492,30 +354,17 @@ let private tryReplaceHostIgnoring
     =
     let commit plan activityQuery =
         agent.PostAndAsyncReply(
-            (fun reply ->
-                BeginReplacement(plan, activityQuery, reply)),
+            (fun reply -> BeginReplacement(plan, activityQuery, reply)),
             timeout = 300_000
         )
 
-    TerminalHostReplacement.tryReplaceHostIgnoring
-        ignoredStagedVersion
-        beforeRecheck
-        query
-        config
-        commit
+    TerminalHostReplacement.tryReplaceHostIgnoring ignoredStagedVersion beforeRecheck query config commit
 
 let internal tryReplaceHostWith beforeRecheck query manager =
-    tryReplaceHostIgnoring
-        None
-        beforeRecheck
-        query
-        manager
+    tryReplaceHostIgnoring None beforeRecheck query manager
 
 let internal tryReplaceHost query manager =
-    tryReplaceHostWith
-        (fun () -> async.Return())
-        query
-        manager
+    tryReplaceHostWith (fun () -> async.Return()) query manager
 
 let internal runReplacementCoordinator
     manager
@@ -524,31 +373,27 @@ let internal runReplacementCoordinator
     =
     TerminalHostReplacement.runCoordinator
         (fun ignoredStagedVersion ->
-            tryReplaceHostIgnoring
-                ignoredStagedVersion
-                (fun () -> async.Return())
-                query
-                manager)
+            tryReplaceHostIgnoring ignoredStagedVersion (fun () -> async.Return()) query manager)
         cancellationToken
 
+let private ask (agent: MailboxProcessor<Message>) build =
+    agent.PostAndAsyncReply(build, timeout = 60_000)
+
 let start (Manager(_, agent)) worktreePath =
-    agent.PostAndAsyncReply(
-        (fun reply -> Start(worktreePath, reply)),
-        timeout = 60_000
-    )
+    ask agent (fun reply -> Mutate(TerminalMutation.Start, worktreePath, reply))
 
 let get (Manager(_, agent)) =
-    agent.PostAndAsyncReply(Get, timeout = 60_000)
+    ask agent Get
 
 /// The current manager snapshot without host I/O (test seam for lifecycle transitions).
 let internal getCached (Manager(_, agent)) =
-    agent.PostAndAsyncReply(GetCached, timeout = 60_000)
+    ask agent GetCached
 
 let close (Manager(_, agent)) worktreePath =
-    agent.PostAndAsyncReply(
-        (fun reply -> Close(worktreePath, reply)),
-        timeout = 60_000
-    )
+    ask agent (fun reply -> Mutate(TerminalMutation.Close, worktreePath, reply))
+
+let private asTask cancellation workflow =
+    Async.StartAsTask(workflow, cancellationToken = cancellation)
 
 let internal withReservedCleanup
     (Manager(_, agent))
@@ -558,51 +403,29 @@ let internal withReservedCleanup
     async {
         let! callerCancellation = Async.CancellationToken
         let requested =
-            CleanupReservation(
-                cleanupPathKey worktreePath,
-                System.Guid.NewGuid()
-            )
+            CleanupReservation(cleanupPathKey worktreePath, System.Guid.NewGuid())
 
-        let bracket =
+        let reservation =
+            async {
+                try
+                    return! ask agent (fun reply -> ReserveCleanup(worktreePath, requested, reply))
+                with _ ->
+                    agent.Post(ReleaseCleanup requested)
+                    return Error cleanupRequestTimeoutError
+            }
+            |> asTask System.Threading.CancellationToken.None
+
+        return!
             task {
-                let! reservation =
-                    task {
-                        try
-                            return!
-                                agent.PostAndAsyncReply(
-                                    (fun reply ->
-                                        ReserveCleanup(
-                                            worktreePath,
-                                            requested,
-                                            reply
-                                        )),
-                                    timeout = 60_000
-                                )
-                                |> fun workflow ->
-                                    Async.StartAsTask(
-                                        workflow,
-                                        cancellationToken =
-                                            System.Threading.CancellationToken.None
-                                    )
-                        with _ ->
-                            agent.Post(ReleaseCleanup requested)
-                            return Error cleanupRequestTimeoutError
-                    }
+                let! reservation = reservation
 
                 match reservation with
                 | Error error -> return Error error
                 | Ok acquired ->
                     try
-                        return!
-                            operation ()
-                            |> fun workflow ->
-                                Async.StartAsTask(
-                                    workflow,
-                                    cancellationToken = callerCancellation
-                                )
+                        return! operation () |> asTask callerCancellation
                     finally
                         agent.Post(ReleaseCleanup acquired)
             }
-
-        return! bracket |> Async.AwaitTask
+            |> Async.AwaitTask
     }

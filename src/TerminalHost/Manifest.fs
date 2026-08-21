@@ -11,9 +11,6 @@ open Treemon.TerminalHosting
 
 [<RequireQualifiedAccess>]
 module Manifest =
-    [<Literal>]
-    let FileName = TerminalHostLayout.ManifestFileName
-
     let path stateDirectory =
         TerminalHostLayout.forStateDirectory stateDirectory
         |> _.ManifestPath
@@ -32,24 +29,10 @@ module Manifest =
                 |> Seq.choose (fun directory ->
                     let info = DirectoryInfo directory
 
-                    let hasCompleteBundle =
-                        layout.RequiredBundleFileNames
-                        |> List.forall (fun name ->
-                            let memberInfo =
-                                FileInfo(Path.Combine(directory, name))
-
-                            memberInfo.Exists
-                            && (memberInfo.Attributes
-                                &&& FileAttributes.ReparsePoint) = enum 0)
-
-                    if
-                        TerminalHostLayout.isValidVersionDirectoryName info.Name
-                        && (info.Attributes &&& FileAttributes.ReparsePoint) = enum 0
-                        && hasCompleteBundle
-                    then
+                    match TerminalHostLayout.validateStagedVersion layout info.Name with
+                    | Ok _ ->
                         Some(info.LastWriteTimeUtc, info.Name)
-                    else
-                        None)
+                    | Error _ -> None)
                 |> Seq.sortByDescending id
                 |> Seq.tryHead
                 |> Option.map snd

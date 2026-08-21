@@ -95,24 +95,22 @@ module TerminalDataPlane =
 
         send frames
 
-    let private sendReplay attachment frames =
+    let private requireSent error workflow =
         async {
-            match! sendFrames attachment.Socket frames with
+            match! workflow with
             | true -> return Ok()
-            | false ->
-                return Error "Browser attachment closed during replay"
+            | false -> return Error error
         }
 
+    let private sendReplay attachment frames =
+        sendFrames attachment.Socket frames
+        |> requireSent "Browser attachment closed during replay"
+
     let private sendResize upstream terminalSize =
-        async {
-            match!
-                terminalSize
-                |> TerminalProtocol.resizeFrame
-                |> sendFrame upstream
-            with
-            | true -> return Ok()
-            | false -> return Error "ttyd WebSocket is not open"
-        }
+        terminalSize
+        |> TerminalProtocol.resizeFrame
+        |> sendFrame upstream
+        |> requireSent "ttyd WebSocket is not open"
 
     let internal closeSocket status reason (socket: WebSocket) =
         async {
@@ -145,44 +143,38 @@ module TerminalDataPlane =
         }
 
     let private initialBrowserFrames state =
-        let controlFrames =
-            [ state.TitleFrame; state.PreferencesFrame ]
-            |> List.choose id
+        List.append
+            ([ state.TitleFrame; state.PreferencesFrame ] |> List.choose id)
+            (state.Replay |> ReplayBuffer.frames |> List.map _.Data)
 
-        let replayFrames =
-            state.Replay
-            |> ReplayBuffer.frames
-            |> List.map _.Data
+    let private activateAttachment upstream state attachment terminalSize frames =
+        async {
+            match! sendReplay attachment frames with
+            | Error error ->
+                return { state with Attachment = None }, Error error
+            | Ok() ->
+                match! sendResize upstream terminalSize with
+                | Error error -> return state, Error error
+                | Ok() ->
+                    let active =
+                        { attachment with
+                            Initialized = true
+                            Paused = false
+                            NextSequence = ReplayBuffer.nextSequence state.Replay }
 
-        controlFrames @ replayFrames
+                    return
+                        { state with
+                            Attachment = Some active
+                            TerminalSize = terminalSize },
+                        Ok()
+        }
 
     let private initializeAttachment upstream state attachment frame =
         async {
             match TerminalProtocol.parseHandshakeSize frame with
             | Error error -> return state, Error error
             | Ok terminalSize ->
-                match!
-                    initialBrowserFrames state
-                    |> sendReplay attachment
-                with
-                | Error error ->
-                    return
-                        { state with Attachment = None },
-                        Error error
-                | Ok() ->
-                    match! sendResize upstream terminalSize with
-                    | Error error -> return state, Error error
-                    | Ok() ->
-                        let initialized =
-                            { attachment with
-                                Initialized = true
-                                NextSequence = ReplayBuffer.nextSequence state.Replay }
-
-                        return
-                            { state with
-                                Attachment = Some initialized
-                                TerminalSize = terminalSize },
-                            Ok()
+                return! activateAttachment upstream state attachment terminalSize (initialBrowserFrames state)
         }
 
     let private resumeAttachment upstream state attachment =
@@ -196,21 +188,7 @@ module TerminalDataPlane =
                 | ReplaySlice.Gap frames ->
                     replayGapFrame :: (frames |> List.map _.Data)
 
-            match! sendReplay attachment frames with
-            | Error error ->
-                return
-                    { state with Attachment = None },
-                    Error error
-            | Ok() ->
-                match! sendResize upstream state.TerminalSize with
-                | Error error -> return state, Error error
-                | Ok() ->
-                    let resumed =
-                        { attachment with
-                            Paused = false
-                            NextSequence = ReplayBuffer.nextSequence state.Replay }
-
-                    return { state with Attachment = Some resumed }, Ok()
+            return! activateAttachment upstream state attachment state.TerminalSize frames
         }
 
     let private handleInitializedBrowserFrame upstream state attachment (frame: byte array) =
@@ -220,9 +198,11 @@ module TerminalDataPlane =
             else
                 match char frame[0] with
                 | '0' ->
-                    match! sendFrame upstream frame with
-                    | true -> return state, Ok()
-                    | false -> return state, Error "ttyd WebSocket is not open"
+                    let! result =
+                        sendFrame upstream frame
+                        |> requireSent "ttyd WebSocket is not open"
+
+                    return state, result
                 | '1' ->
                     match TerminalProtocol.parseResizeFrame frame with
                     | Error error -> return state, Error error
@@ -259,19 +239,14 @@ module TerminalDataPlane =
             | Some attachment when attachment.Initialized && not attachment.Paused ->
                 match! sendFrame attachment.Socket frame with
                 | false ->
-                    do!
-                        closeSocket
-                            WebSocketCloseStatus.EndpointUnavailable
-                            "Terminal attachment closed"
-                            attachment.Socket
+                    do! closeSocket WebSocketCloseStatus.EndpointUnavailable "Terminal attachment closed" attachment.Socket
 
                     return { state with Attachment = None }
                 | true ->
                     let delivered =
-                        match sequence with
-                        | Some nextSequence ->
-                            { attachment with NextSequence = nextSequence }
-                        | None -> attachment
+                        sequence
+                        |> Option.map (fun next -> { attachment with NextSequence = next })
+                        |> Option.defaultValue attachment
 
                     return { state with Attachment = Some delivered }
             | Some _
@@ -282,24 +257,18 @@ module TerminalDataPlane =
         async {
             if frame.Length = 0 then
                 return state
-            elif frame[0] = byte '0' then
-                let replay =
-                    state.Replay
-                    |> ReplayBuffer.append replayCapacity frame
-
-                let updated = { state with Replay = replay }
-
-                return!
-                    sendLiveFrame
-                        updated
-                        (Some(ReplayBuffer.nextSequence replay))
-                        frame
             else
-                return!
-                    sendLiveFrame
-                        (updatedControlFrame state frame)
-                        None
-                        frame
+                let updated, sequence =
+                    if frame[0] = byte '0' then
+                        let replay =
+                            state.Replay |> ReplayBuffer.append replayCapacity frame
+
+                        { state with Replay = replay },
+                        Some(ReplayBuffer.nextSequence replay)
+                    else
+                        updatedControlFrame state frame, None
+
+                return! sendLiveFrame updated sequence frame
         }
 
     let private notifyUpstreamEnded onUpstreamEnded =
@@ -308,220 +277,140 @@ module TerminalDataPlane =
         with _ ->
             ()
 
-    let private logMailboxFailure scope (error: exn) =
-        try
-            Console.Error.WriteLine(
-                $"TerminalDataPlane {scope} failed ({error.GetType().Name})"
-            )
-        with _ ->
-            ()
+    let private respond (channel: AsyncReplyChannel<'value>) value state =
+        channel.Reply value
+        state
+
+    let private closeAttachment status reason state =
+        async {
+            match state.Attachment with
+            | Some attachment -> do! closeSocket status reason attachment.Socket
+            | None -> ()
+
+            return { state with Attachment = None }
+        }
+
+    let private stopPlane upstream attachmentStatus attachmentReason upstreamReason notify state =
+        async {
+            let! detached = closeAttachment attachmentStatus attachmentReason state
+            do! closeSocket WebSocketCloseStatus.NormalClosure upstreamReason upstream
+            notify ()
+            return { detached with Stopped = true }
+        }
 
     let private recoverMessage state message =
         async {
             try
                 match message with
                 | Attach(socket, reply) ->
-                    do!
-                        closeSocket
-                            WebSocketCloseStatus.EndpointUnavailable
-                            "Terminal data plane unavailable"
-                            socket
+                    do! closeSocket WebSocketCloseStatus.EndpointUnavailable "Terminal data plane unavailable" socket
 
-                    reply.Reply None
+                    return respond reply None state
                 | BrowserFrame(_, _, reply) ->
-                    reply.Reply(Error "Terminal data plane operation failed")
+                    return respond reply (Error "Terminal data plane operation failed") state
                 | Detach(_, reply)
                 | UpstreamFrame(_, reply)
                 | UpstreamClosed reply
-                | Stop reply -> reply.Reply()
+                | Stop reply -> return respond reply () state
             with _ ->
-                ()
-
-            return state
+                return state
         }
 
     let internal createCore replayCapacity upstream onUpstreamEnded =
-        let mailbox =
-            MailboxProcessor.Start(fun inbox ->
-                let processMessage state message =
-                    async {
-                        match message with
-                        | Attach(socket, reply) when state.Stopped ->
-                            do!
-                                closeSocket
-                                    WebSocketCloseStatus.EndpointUnavailable
-                                    "Terminal session closed"
-                                    socket
+        let initial =
+            { Replay = ReplayBuffer.empty
+              Attachment = None
+              TerminalSize = TerminalProtocol.defaultSize
+              TitleFrame = None
+              PreferencesFrame = None
+              Stopped = false }
 
-                            reply.Reply None
-                            return state
-                        | Attach(socket, reply) ->
-                            match state.Attachment with
-                            | Some previous ->
-                                do!
-                                    closeSocket
-                                        WebSocketCloseStatus.NormalClosure
-                                        "Replaced by a new attachment"
-                                        previous.Socket
-                            | None -> ()
+        let upstreamStopped state =
+            stopPlane
+                upstream
+                WebSocketCloseStatus.EndpointUnavailable
+                "Terminal session interrupted"
+                "Terminal upstream closed"
+                (fun () -> notifyUpstreamEnded onUpstreamEnded)
+                state
 
-                            let attachment =
-                                { Id = Guid.NewGuid()
-                                  Socket = socket
-                                  Initialized = false
-                                  Paused = false
-                                  NextSequence = ReplayBuffer.nextSequence state.Replay }
+        let explicitlyStopped state =
+            stopPlane
+                upstream
+                WebSocketCloseStatus.NormalClosure
+                "Terminal session closed"
+                "Terminal session closed"
+                ignore
+                state
 
-                            reply.Reply(Some attachment.Id)
+        let processMessage _ state message =
+            async {
+                match message with
+                | Attach(socket, reply) when state.Stopped ->
+                    do! closeSocket WebSocketCloseStatus.EndpointUnavailable "Terminal session closed" socket
 
-                            return
-                                { state with
-                                    Attachment = Some attachment }
-                        | BrowserFrame(attachmentId, frame, reply) ->
-                            match state.Attachment with
-                            | Some attachment when attachment.Id = attachmentId ->
-                                let! updated, result =
-                                    handleBrowserFrame upstream state attachment frame
+                    return respond reply None state
+                | Attach(socket, reply) ->
+                    match state.Attachment with
+                    | Some previous ->
+                        do! closeSocket WebSocketCloseStatus.NormalClosure "Replaced by a new attachment" previous.Socket
+                    | None -> ()
 
-                                reply.Reply result
-                                return updated
-                            | Some _
-                            | None ->
-                                reply.Reply(Error "Browser attachment was replaced")
-                                return state
-                        | Detach(attachmentId, reply) ->
-                            let updated =
-                                match state.Attachment with
-                                | Some attachment when attachment.Id = attachmentId ->
-                                    { state with Attachment = None }
-                                | Some _
-                                | None -> state
+                    let attachment =
+                        { Id = Guid.NewGuid()
+                          Socket = socket
+                          Initialized = false
+                          Paused = false
+                          NextSequence = ReplayBuffer.nextSequence state.Replay }
 
-                            reply.Reply()
-                            return updated
-                        | UpstreamFrame(frame, reply) when state.Stopped ->
-                            reply.Reply()
-                            return state
-                        | UpstreamFrame(frame, reply) ->
-                            let! updated =
-                                handleUpstreamFrame replayCapacity state frame
+                    return
+                        { state with Attachment = Some attachment }
+                        |> respond reply (Some attachment.Id)
+                | BrowserFrame(attachmentId, frame, reply) ->
+                    match state.Attachment with
+                    | Some attachment when attachment.Id = attachmentId ->
+                        let! updated, result = handleBrowserFrame upstream state attachment frame
+                        return respond reply result updated
+                    | Some _
+                    | None ->
+                        return respond reply (Error "Browser attachment was replaced") state
+                | Detach(attachmentId, reply) ->
+                    let updated =
+                        match state.Attachment with
+                        | Some attachment when attachment.Id = attachmentId ->
+                            { state with Attachment = None }
+                        | Some _
+                        | None -> state
 
-                            reply.Reply()
-                            return updated
-                        | UpstreamClosed reply when state.Stopped ->
-                            reply.Reply()
-                            return state
-                        | UpstreamClosed reply ->
-                            match state.Attachment with
-                            | Some attachment ->
-                                do!
-                                    closeSocket
-                                        WebSocketCloseStatus.EndpointUnavailable
-                                        "Terminal session interrupted"
-                                        attachment.Socket
-                            | None -> ()
+                    return respond reply () updated
+                | UpstreamFrame(_, reply)
+                | UpstreamClosed reply
+                | Stop reply when state.Stopped ->
+                    return respond reply () state
+                | UpstreamFrame(frame, reply) ->
+                    let! updated = handleUpstreamFrame replayCapacity state frame
+                    return respond reply () updated
+                | UpstreamClosed reply ->
+                    let! stopped = upstreamStopped state
+                    return respond reply () stopped
+                | Stop reply ->
+                    let! stopped = explicitlyStopped state
+                    return respond reply () stopped
+            }
 
-                            do!
-                                closeSocket
-                                    WebSocketCloseStatus.NormalClosure
-                                    "Terminal upstream closed"
-                                    upstream
+        let mailbox = ResilientMailbox.start "TerminalDataPlane" initial recoverMessage processMessage
 
-                            notifyUpstreamEnded onUpstreamEnded
-                            reply.Reply()
-
-                            return
-                                { state with
-                                    Attachment = None
-                                    Stopped = true }
-                        | Stop reply when state.Stopped ->
-                            reply.Reply()
-                            return state
-                        | Stop reply ->
-                            match state.Attachment with
-                            | Some attachment ->
-                                do!
-                                    closeSocket
-                                        WebSocketCloseStatus.NormalClosure
-                                        "Terminal session closed"
-                                        attachment.Socket
-                            | None -> ()
-
-                            do!
-                                closeSocket
-                                    WebSocketCloseStatus.NormalClosure
-                                    "Terminal session closed"
-                                    upstream
-
-                            reply.Reply()
-
-                            return
-                                { state with
-                                    Attachment = None
-                                    Stopped = true }
-                    }
-
-                let rec loop state =
-                    async {
-                        let! message = inbox.Receive()
-                        let! next =
-                            async {
-                                try
-                                    return! processMessage state message
-                                with error ->
-                                    logMailboxFailure "message" error
-                                    return! recoverMessage state message
-                            }
-
-                        return! loop next
-                    }
-
-                loop
-                    { Replay = ReplayBuffer.empty
-                      Attachment = None
-                      TerminalSize = TerminalProtocol.defaultSize
-                      TitleFrame = None
-                      PreferencesFrame = None
-                      Stopped = false })
-
-        mailbox.Error.Add(fun error ->
-            logMailboxFailure "mailbox" error)
+        let ask build =
+            ResilientMailbox.ask ReplyTimeoutMilliseconds build mailbox
 
         { AttachmentEndpoint = ""
-          AttachSocket =
-            fun socket ->
-                mailbox.PostAndAsyncReply(
-                    (fun reply -> Attach(socket, reply)),
-                    timeout = ReplyTimeoutMilliseconds
-                )
+          AttachSocket = fun socket -> ask (fun reply -> Attach(socket, reply))
           AcceptBrowserFrame =
             fun attachmentId frame ->
-                mailbox.PostAndAsyncReply(
-                    (fun reply ->
-                        BrowserFrame(attachmentId, Array.copy frame, reply)),
-                    timeout = ReplyTimeoutMilliseconds
-                )
+                ask (fun reply -> BrowserFrame(attachmentId, Array.copy frame, reply))
           DetachSocket =
-            fun attachmentId ->
-                mailbox.PostAndAsyncReply(
-                    (fun reply -> Detach(attachmentId, reply)),
-                    timeout = ReplyTimeoutMilliseconds
-                )
+            fun attachmentId -> ask (fun reply -> Detach(attachmentId, reply))
           AcceptUpstreamFrame =
-            fun frame ->
-                mailbox.PostAndAsyncReply(
-                    (fun reply -> UpstreamFrame(Array.copy frame, reply)),
-                    timeout = ReplyTimeoutMilliseconds
-                )
-          UpstreamEnded =
-            fun () ->
-                mailbox.PostAndAsyncReply(
-                    UpstreamClosed,
-                    timeout = ReplyTimeoutMilliseconds
-                )
-          Stop =
-            fun () ->
-                mailbox.PostAndAsyncReply(
-                    Stop,
-                    timeout = ReplyTimeoutMilliseconds
-                ) }
+            fun frame -> ask (fun reply -> UpstreamFrame(Array.copy frame, reply))
+          UpstreamEnded = fun () -> ask UpstreamClosed
+          Stop = fun () -> ask Stop }

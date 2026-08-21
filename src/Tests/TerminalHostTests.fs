@@ -294,6 +294,73 @@ type private ApiFixture() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 [<Category("TerminalHost")>]
+type TerminalRuntimeBudgetTests() =
+    let rec findRepositoryRoot directory =
+        let candidate = DirectoryInfo directory
+
+        if File.Exists(Path.Combine(candidate.FullName, "treemon.slnx")) then
+            candidate.FullName
+        elif isNull candidate.Parent then
+            failwith "Could not locate the Treemon repository root"
+        else
+            findRepositoryRoot candidate.Parent.FullName
+
+    let sourceFiles root relativePath pattern =
+        Directory.EnumerateFiles(
+            Path.Combine(root, relativePath),
+            pattern,
+            SearchOption.AllDirectories
+        )
+        |> Seq.filter (fun path ->
+            let segments =
+                Path.GetRelativePath(root, path)
+                    .Split(
+                        [| Path.DirectorySeparatorChar
+                           Path.AltDirectorySeparatorChar |],
+                        StringSplitOptions.RemoveEmptyEntries
+                    )
+
+            segments |> Array.exists (fun segment -> segment = "bin" || segment = "obj") |> not)
+
+    let runtimeScripts root =
+        Directory.EnumerateFiles(Path.Combine(root, "scripts"), "*", SearchOption.TopDirectoryOnly)
+        |> Seq.filter (fun path ->
+            let name = Path.GetFileName path
+            name.StartsWith("durable-terminal-", StringComparison.Ordinal)
+            || name.StartsWith("terminal-", StringComparison.Ordinal))
+
+    [<Test>]
+    member _.``complete terminal runtime stays within its simplicity budget``() =
+        let root = findRepositoryRoot AppContext.BaseDirectory
+
+        let files =
+            seq {
+                yield! sourceFiles root "src/TerminalHost" "*.fs"
+                yield! sourceFiles root "src/TerminalHostLayout" "*.fs"
+                yield! sourceFiles root "src/Server" "TerminalHost*.fs"
+                yield Path.Combine(root, "src/Server/TerminalSessionActivity.fs")
+                yield Path.Combine(root, "src/Server/EmbeddedTerminal.fs")
+                yield! runtimeScripts root
+            }
+            |> Seq.distinct
+            |> Seq.map (fun path ->
+                Path.GetRelativePath(root, path),
+                File.ReadLines path |> Seq.filter (String.IsNullOrWhiteSpace >> not) |> Seq.length)
+            |> Seq.sortBy fst
+            |> Seq.toList
+
+        let total = files |> List.sumBy snd
+        let detail =
+            files
+            |> List.map (fun (path, lines) -> $"{path}: {lines}")
+            |> String.concat Environment.NewLine
+
+        Assert.That(total, Is.LessThanOrEqualTo(4_000), $"Terminal runtime has {total} nonblank lines:{Environment.NewLine}{detail}")
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<Category("TerminalHost")>]
 type TerminalRegistryResilienceTests() =
     let timeout = TimeSpan.FromSeconds 2.0
 

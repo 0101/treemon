@@ -37,16 +37,12 @@ type internal HostDiscovery =
 [<RequireQualifiedAccess>]
 type private ControlCompatibility = Compatible | Incompatible of reason: string
 
-type internal StartTerminalFailure =
-    | StartRejected of registry: RegistrySnapshot * reason: string
-    | StartUnverified of reason: string
+type internal TerminalMutationFailure =
+    | MutationRejected of registry: RegistrySnapshot * reason: string
+    | MutationUnverified of lastRegistry: RegistrySnapshot option * reason: string
 
 let private httpClient =
-    let handler =
-        new SocketsHttpHandler(
-            UseProxy = false,
-            AllowAutoRedirect = false
-        )
+    let handler = new SocketsHttpHandler(UseProxy = false, AllowAutoRedirect = false)
 
     new HttpClient(handler, disposeHandler = true, Timeout = Timeout.InfiniteTimeSpan)
 
@@ -93,23 +89,14 @@ let private request
             let endpoint = Uri(manifest.Endpoint)
             use message = new HttpRequestMessage(method, Uri(endpoint, path))
 
-            message.Headers.Authorization <-
-                AuthenticationHeaderValue(
-                    "Bearer",
-                    manifest.BearerToken
-                )
+            message.Headers.Authorization <- AuthenticationHeaderValue("Bearer", manifest.BearerToken)
 
             body
             |> Option.iter (fun json ->
-                message.Content <-
-                    new StringContent(json, Encoding.UTF8, "application/json"))
+                message.Content <- new StringContent(json, Encoding.UTF8, "application/json"))
 
             use! response =
-                httpClient.SendAsync(
-                    message,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    timeout.Token
-                )
+                httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, timeout.Token)
                 |> Async.AwaitTask
 
             match response.Content.Headers.ContentLength |> Option.ofNullable with
@@ -129,17 +116,10 @@ let private request
                         return Ok content
                     else
                         return
-                            Error(
-                                responseError
-                                    (int response.StatusCode)
-                                    response.ReasonPhrase
-                                    content
-                            )
+                            Error(responseError (int response.StatusCode) response.ReasonPhrase content)
         with
         | :? OperationCanceledException ->
-            return
-                Error
-                    $"TerminalHost request timed out after {config.ControlRequestTimeout.TotalSeconds:g} seconds"
+            return Error $"TerminalHost request timed out after {config.ControlRequestTimeout.TotalSeconds:g} seconds"
         | error ->
             return Error $"TerminalHost request failed: {error.Message}"
     }
@@ -168,10 +148,7 @@ let private parseHealth (manifest: DiscoveryManifest) (text: string) =
             then
                 Error "TerminalHost health identity does not match its discovery manifest"
             elif apiVersion <> controlApiVersion then
-                let error =
-                    $"TerminalHost control API version {apiVersion} is not supported (expected {controlApiVersion})"
-
-                Ok(ControlCompatibility.Incompatible error)
+                Ok(ControlCompatibility.Incompatible $"TerminalHost control API version {apiVersion} is not supported (expected {controlApiVersion})")
             else
                 Ok ControlCompatibility.Compatible
     with
@@ -196,10 +173,7 @@ let internal discoverHost config =
             match processIdentityMatches config manifest with
             | Error error -> return UnusableHost error
             | Ok false ->
-                let error =
-                    $"Recorded TerminalHost PID {manifest.Pid} is no longer the exact live process"
-
-                return DeadHost error
+                return DeadHost $"Recorded TerminalHost PID {manifest.Pid} is no longer the exact live process"
             | Ok true ->
                 match! probe config manifest with
                 | Ok ControlCompatibility.Compatible -> return HealthyHost manifest
@@ -208,10 +182,7 @@ let internal discoverHost config =
                 | Error probeError ->
                     match processIdentityMatches config manifest with
                     | Ok false ->
-                        let error =
-                            $"TerminalHost PID {manifest.Pid} exited while it was being checked"
-
-                        return DeadHost error
+                        return DeadHost $"TerminalHost PID {manifest.Pid} exited while it was being checked"
                     | Ok true -> return UnusableHost probeError
                     | Error identityError -> return UnusableHost identityError
     }
@@ -242,11 +213,7 @@ let private validAttachmentEndpoint manifest sessionId value =
         false
 
 let private parseTerminal manifest (element: JsonElement) =
-    let fields =
-        set
-            [ "sessionId"
-              "worktreePath"
-              "attachmentEndpoint" ]
+    let fields = set [ "sessionId"; "worktreePath"; "attachmentEndpoint" ]
 
     if not (exactProperties fields Set.empty element) then
         Error "TerminalHost terminal record has an invalid shape"
@@ -258,11 +225,7 @@ let private parseTerminal manifest (element: JsonElement) =
 
             if sessionId |> Option.ofObj |> Option.exists validSessionId |> not then
                 Error "TerminalHost returned an invalid terminal session ID"
-            elif
-                worktreePath
-                |> Option.exists validCanonicalWorktreePath
-                |> not
-            then
+            elif worktreePath |> Option.exists validCanonicalWorktreePath |> not then
                 Error "TerminalHost returned an invalid worktree path"
             elif
                 attachmentEndpoint
@@ -297,32 +260,25 @@ let private parseRegistrySnapshot (manifest: DiscoveryManifest) (text: string) =
             then
                 Error "TerminalHost registry response is malformed"
             else
-                match
-                    terminalsElement.EnumerateArray()
-                    |> Seq.toList
-                    |> List.traverseResultM (parseTerminal manifest)
-                with
-                | Error error -> Error error
-                | Ok terminals ->
-                    let sessionIds =
+                terminalsElement.EnumerateArray()
+                |> Seq.toList
+                |> List.traverseResultM (parseTerminal manifest)
+                |> Result.bind (fun terminals ->
+                    let distinct selector =
                         terminals
-                        |> List.map _.SessionId
+                        |> List.map selector
                         |> Set.ofList
-
-                    let worktreeKeys =
-                        terminals
-                        |> List.map (_.WorktreePath >> pathKey)
-                        |> Set.ofList
+                        |> _.Count
 
                     if
-                        sessionIds.Count <> terminals.Length
-                        || worktreeKeys.Count <> terminals.Length
+                        distinct _.SessionId <> terminals.Length
+                        || distinct (_.WorktreePath >> pathKey) <> terminals.Length
                     then
                         Error "TerminalHost registry contains duplicate terminals"
                     else
                         Ok
                             { Revision = revision
-                              Terminals = terminals }
+                              Terminals = terminals })
     with
     | :? JsonException
     | :? InvalidOperationException
@@ -339,11 +295,20 @@ let internal listTerminals config manifest =
 let internal findTerminalByPath path records =
     records |> List.tryFind (fun terminal -> samePath terminal.WorktreePath path)
 
-let internal requestTerminalClose config manifest sessionId =
-    request config manifest HttpMethod.Delete $"/api/v1/terminals/{sessionId}" None
+let private authoritativeRelist action lastRegistry config manifest requestResult =
+    async {
+        match! listTerminals config manifest with
+        | Ok registry -> return Ok registry
+        | Error listError ->
+            let error =
+                match requestResult with
+                | Error requestError ->
+                    $"{requestError}; authoritative relist failed: {listError}"
+                | Ok _ ->
+                    $"TerminalHost accepted the {action} request but its authoritative registry could not be read: {listError}"
 
-let internal requestHostShutdown config manifest =
-    request config manifest HttpMethod.Post "/api/v1/shutdown" None
+            return Error(MutationUnverified(lastRegistry, error))
+    }
 
 let internal waitForHostExit config manifest =
     let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
@@ -356,17 +321,14 @@ let internal waitForHostExit config manifest =
             | Ok true when DateTimeOffset.UtcNow < deadline ->
                 do! Async.Sleep(probeDelayMilliseconds config)
                 return! wait ()
-            | Ok true ->
-                return
-                    Error
-                        $"TerminalHost PID {manifest.Pid} did not exit within {config.StartupTimeout.TotalSeconds:g} seconds"
+            | Ok true -> return Error $"TerminalHost PID {manifest.Pid} did not exit within {config.StartupTimeout.TotalSeconds:g} seconds"
         }
 
     wait ()
 
 let internal shutdownAndWait config manifest =
     async {
-        let! shutdownResult = requestHostShutdown config manifest
+        let! shutdownResult = request config manifest HttpMethod.Post "/api/v1/shutdown" None
         let! waitResult = waitForHostExit config manifest
 
         return
@@ -374,8 +336,7 @@ let internal shutdownAndWait config manifest =
             | _, Ok() -> Ok()
             | Ok _, Error waitError -> Error waitError
             | Error requestError, Error waitError ->
-                Error
-                    $"{requestError}; exact host shutdown could not be confirmed: {waitError}"
+                Error $"{requestError}; exact host shutdown could not be confirmed: {waitError}"
     }
 
 let private terminalWebSocketEndpoint (attachmentEndpoint: string) =
@@ -414,10 +375,7 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
                     new CancellationTokenSource(TimeSpan.FromSeconds 5.0)
 
                 let send bytes =
-                    socket.SendAsync(
-                        ArraySegment<byte> bytes,
-                        WebSocketMessageType.Binary, true, cancellation.Token
-                    )
+                    socket.SendAsync(ArraySegment<byte> bytes, WebSocketMessageType.Binary, true, cancellation.Token)
                     |> Async.AwaitTask
 
                 try
@@ -426,11 +384,7 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
                     do! Encoding.UTF8.GetBytes($"0{command}\r") |> send
 
                     let! _ =
-                        socket.CloseOutputAsync(
-                            WebSocketCloseStatus.NormalClosure,
-                            "Terminal command submitted",
-                            cancellation.Token
-                        )
+                        socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Terminal command submitted", cancellation.Token)
                         |> Async.AwaitTask
                         |> Async.Catch
 
@@ -487,8 +441,7 @@ let internal preflightDeploymentWith config =
         | HealthyHost manifest ->
             match! listTerminals config manifest with
             | Error error -> return Error error
-            | Ok registry ->
-                return deploymentPreflightResult config manifest registry
+            | Ok registry -> return deploymentPreflightResult config manifest registry
     }
 
 let internal waitForHealthyHost config =
@@ -508,9 +461,7 @@ let internal waitForHealthyHost config =
                     | HealthyHost _ -> failwith "unreachable"
 
                 if DateTimeOffset.UtcNow >= deadline then
-                    return
-                        Error
-                            $"TerminalHost did not become healthy within {config.StartupTimeout.TotalSeconds:g} seconds: {lastError |> Option.defaultValue currentError}"
+                    return Error $"TerminalHost did not become healthy within {config.StartupTimeout.TotalSeconds:g} seconds: {lastError |> Option.defaultValue currentError}"
                 else
                     do! Async.Sleep(probeDelayMilliseconds config)
                     return! wait (Some currentError)
@@ -539,9 +490,7 @@ let internal ensureHost config lastHost =
             match knownHostIsStillLive config lastHost with
             | Error error -> return Error error
             | Ok true ->
-                return
-                    Error
-                        "The TerminalHost discovery manifest disappeared while the exact recorded host is still running"
+                return Error "The TerminalHost discovery manifest disappeared while the exact recorded host is still running"
             | Ok false -> return! launchAndDiscover config
     }
 
@@ -551,29 +500,13 @@ let internal startTerminalOnHost
     (path: string)
     =
     async {
-        let body =
-            JsonSerializer.Serialize(
-                {| worktreePath = path |}
-            )
+        let body = JsonSerializer.Serialize({| worktreePath = path |})
 
         let! startResult =
-            request
-                config
-                manifest
-                HttpMethod.Post
-                "/api/v1/terminals"
-                (Some body)
+            request config manifest HttpMethod.Post "/api/v1/terminals" (Some body)
 
-        match! listTerminals config manifest with
-        | Error listError ->
-            let error =
-                match startResult with
-                | Error startError ->
-                    $"{startError}; authoritative relist failed: {listError}"
-                | Ok _ ->
-                    $"TerminalHost accepted the start request but its authoritative registry could not be read: {listError}"
-
-            return Error(StartUnverified error)
+        match! authoritativeRelist "start" None config manifest startResult with
+        | Error error -> return Error error
         | Ok registry ->
             match findTerminalByPath path registry.Terminals with
             | Some terminal -> return Ok(registry, terminal)
@@ -584,5 +517,31 @@ let internal startTerminalOnHost
                     | Ok _ ->
                         "TerminalHost did not include the requested terminal in its authoritative registry"
 
-                return Error(StartRejected(registry, error))
+                return Error(MutationRejected(registry, error))
+    }
+
+let internal closeTerminalOnHost config manifest path =
+    async {
+        match! listTerminals config manifest with
+        | Error error -> return Error(MutationUnverified(None, error))
+        | Ok before ->
+            match findTerminalByPath path before.Terminals with
+            | None -> return Ok before
+            | Some terminal ->
+                let! closeResult =
+                    request config manifest HttpMethod.Delete $"/api/v1/terminals/{terminal.SessionId}" None
+
+                match! authoritativeRelist "close" (Some before) config manifest closeResult with
+                | Error error -> return Error error
+                | Ok after ->
+                    match findTerminalByPath path after.Terminals with
+                    | None -> return Ok after
+                    | Some _ ->
+                        let error =
+                            match closeResult with
+                            | Error closeError -> closeError
+                            | Ok _ ->
+                                "TerminalHost still lists the terminal after its close request"
+
+                        return Error(MutationRejected(after, error))
     }

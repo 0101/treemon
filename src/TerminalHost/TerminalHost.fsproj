@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <Compile Include="Types.fs" />
+    <Compile Include="ResilientMailbox.fs" />
     <Compile Include="LoopbackHost.fs" />
     <Compile Include="PathValidation.fs" />
     <Compile Include="JobProcess.fs" />

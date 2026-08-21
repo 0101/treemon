@@ -49,20 +49,11 @@ module internal TerminalProxy =
                         elif total + result.Count > maximumBytes then
                             return MessageTooLarge
                         else
-                            let chunk =
-                                if result.Count = 0 then
-                                    Array.empty
-                                else
-                                    buffer[0 .. result.Count - 1]
-
+                            let chunk = buffer.AsSpan(0, result.Count).ToArray()
                             let updated = chunk :: chunks
 
                             if result.EndOfMessage then
-                                return
-                                    updated
-                                    |> List.rev
-                                    |> Array.concat
-                                    |> Frame
+                                return updated |> List.rev |> Array.concat |> Frame
                             else
                                 return!
                                     receive
@@ -101,17 +92,9 @@ module internal TerminalProxy =
                     match! plane.AcceptBrowserFrame attachmentId frame with
                     | Ok() -> return! receive ()
                     | Error _ ->
-                        do!
-                            TerminalDataPlane.closeSocket
-                                WebSocketCloseStatus.PolicyViolation
-                                "Invalid terminal protocol frame"
-                                socket
+                        do! TerminalDataPlane.closeSocket WebSocketCloseStatus.PolicyViolation "Invalid terminal protocol frame" socket
                 | MessageTooLarge ->
-                    do!
-                        TerminalDataPlane.closeSocket
-                            WebSocketCloseStatus.MessageTooBig
-                            "Terminal frame too large"
-                            socket
+                    do! TerminalDataPlane.closeSocket WebSocketCloseStatus.MessageTooBig "Terminal frame too large" socket
                 | PeerClosed
                 | ReceiveFailed -> ()
             }
@@ -121,37 +104,27 @@ module internal TerminalProxy =
             do! plane.DetachSocket attachmentId
         }
 
-    let private pathAuthorization attachmentPathPrefix (context: HttpContext) =
+    let private authorization attachmentPathPrefix (context: HttpContext) =
+        let headers = context.Request.Headers.Authorization |> Seq.toList
         let path =
             context.Request.Path.Value
             |> Option.ofObj
             |> Option.defaultValue "/"
 
-        if not (path.StartsWith(attachmentPathPrefix, StringComparison.Ordinal)) then
-            [], path
-        else
-            let afterPrefix = path.Substring(attachmentPathPrefix.Length)
-            let separator = afterPrefix.IndexOf('/')
-
-            if separator < 0 then
-                [ $"Bearer {afterPrefix}" ], "/"
+        let pathHeaders, targetPath =
+            if not (path.StartsWith(attachmentPathPrefix, StringComparison.Ordinal)) then
+                [], path
             else
-                let token = afterPrefix.Substring(0, separator)
-                let targetPath = afterPrefix.Substring(separator)
-                [ $"Bearer {token}" ], targetPath
+                let afterPrefix = path.Substring(attachmentPathPrefix.Length)
+                let separator = afterPrefix.IndexOf('/')
 
-    let private authorization attachmentPathPrefix (context: HttpContext) =
-        let headerValues =
-            context.Request.Headers.Authorization
-            |> Seq.toList
+                if separator < 0 then
+                    [ $"Bearer {afterPrefix}" ], "/"
+                else
+                    let token = afterPrefix.Substring(0, separator)
+                    [ $"Bearer {token}" ], afterPrefix.Substring(separator)
 
-        let pathValues, targetPath =
-            pathAuthorization attachmentPathPrefix context
-
-        if not (List.isEmpty headerValues) then
-            headerValues, targetPath
-        else
-            pathValues, targetPath
+        if List.isEmpty headers then pathHeaders, targetPath else headers, targetPath
 
     let private reject rejection (context: HttpContext) =
         task {
@@ -191,9 +164,7 @@ module internal TerminalProxy =
             |> not)
         |> Seq.iter (fun pair ->
             context.Response.Headers[pair.Key] <-
-                pair.Value
-                |> Seq.toArray
-                |> StringValues)
+                pair.Value |> Seq.toArray |> StringValues)
 
     let private protectAttachmentResponse allowedOrigins (context: HttpContext) =
         let frameAncestors =
@@ -201,9 +172,7 @@ module internal TerminalProxy =
             | [] -> "frame-ancestors 'none'"
             | origins -> "frame-ancestors " + String.concat " " origins
 
-        context.Response.Headers["Content-Security-Policy"] <-
-            StringValues frameAncestors
-
+        context.Response.Headers["Content-Security-Policy"] <- StringValues frameAncestors
         context.Response.Headers["Referrer-Policy"] <- "no-referrer"
         context.Response.Headers.CacheControl <- "no-store"
         context.Response.Headers.Pragma <- "no-cache"
@@ -218,10 +187,7 @@ module internal TerminalProxy =
             match context.Request.Method with
             | "GET"
             | "HEAD" ->
-                let target =
-                    Uri(
-                        $"http://127.0.0.1:{ttydPort}{targetPath}{context.Request.QueryString}"
-                    )
+                let target = Uri($"http://127.0.0.1:{ttydPort}{targetPath}{context.Request.QueryString}")
 
                 use request = new HttpRequestMessage(HttpMethod(context.Request.Method), target)
                 copyRequestHeaders context request
@@ -239,10 +205,7 @@ module internal TerminalProxy =
 
                     if context.Request.Method <> "HEAD" then
                         do!
-                            response.Content.CopyToAsync(
-                                context.Response.Body,
-                                context.RequestAborted
-                            )
+                            response.Content.CopyToAsync(context.Response.Body, context.RequestAborted)
                 with
                 | :? OperationCanceledException when context.RequestAborted.IsCancellationRequested ->
                     ()
@@ -270,8 +233,7 @@ module internal TerminalProxy =
 
             match
                 RequestSecurity.validate
-                    allowedOrigins
-                    bearerToken
+                    allowedOrigins bearerToken
                     (RequestSecurity.metadata authorizationHeaders context)
             with
             | Error rejection -> return! reject rejection context
@@ -280,11 +242,7 @@ module internal TerminalProxy =
                     let supportsTty =
                         context.WebSockets.WebSocketRequestedProtocols
                         |> Seq.exists (fun protocol ->
-                            String.Equals(
-                                protocol,
-                                TtySubprotocol,
-                                StringComparison.Ordinal
-                            ))
+                            String.Equals(protocol, TtySubprotocol, StringComparison.Ordinal))
 
                     if not context.WebSockets.IsWebSocketRequest || not supportsTty then
                         context.Response.StatusCode <- StatusCodes.Status400BadRequest
@@ -293,14 +251,35 @@ module internal TerminalProxy =
                             context.WebSockets.AcceptWebSocketAsync(TtySubprotocol)
 
                         match! plane.AttachSocket socket |> Async.StartAsTask with
-                        | None ->
-                            context.Abort()
+                        | None -> context.Abort()
                         | Some attachmentId ->
-                            do!
-                                runBrowser plane attachmentId socket
-                                |> Async.StartAsTask
+                            do! runBrowser plane attachmentId socket |> Async.StartAsTask
                 else
                     return! proxyHttp ttydPort targetPath client context
+        }
+
+    let private ignoreTaskFailure (operation: unit -> Task) =
+        task {
+            try
+                do! operation ()
+            with _ ->
+                ()
+        }
+
+    let private stopProxy plane (application: WebApplication) (client: HttpClient) =
+        task {
+            do! plane.Stop() |> Async.StartAsTask
+            use cancellation = new CancellationTokenSource(proxyShutdownTimeout)
+
+            do!
+                ignoreTaskFailure (fun () ->
+                    application.StopAsync(cancellation.Token))
+
+            do!
+                ignoreTaskFailure (fun () ->
+                    application.DisposeAsync().AsTask().WaitAsync(proxyShutdownTimeout))
+
+            client.Dispose()
         }
 
     let private startProxy
@@ -311,32 +290,19 @@ module internal TerminalProxy =
         plane
         =
         task {
-            let handler =
-                new SocketsHttpHandler(
-                    UseProxy = false,
-                    AllowAutoRedirect = false
-                )
-
-            let client = new HttpClient(handler, disposeHandler = true)
+            let handler = new SocketsHttpHandler(UseProxy = false, AllowAutoRedirect = false)
+            let client = new HttpClient(handler, true)
             let attachmentPathPrefix = $"{AttachmentPathRoot}{sessionId}/"
 
             let buildPipeline (application: WebApplication) =
                 application.UseWebSockets() |> ignore
 
                 RequestDelegate(fun context ->
-                    handleAttachment
-                        allowedOrigins
-                        bearerToken
-                        attachmentPathPrefix
-                        ttydPort
-                        client
-                        plane
-                        context
+                    handleAttachment allowedOrigins bearerToken attachmentPathPrefix ttydPort client plane context
                     :> Task)
 
             try
-                let! application, boundPort =
-                    LoopbackHost.start 0 buildPipeline
+                let! application, boundPort = LoopbackHost.start 0 buildPipeline
 
                 let endpoint =
                     $"http://127.0.0.1:{boundPort}{attachmentPathPrefix}{Uri.EscapeDataString bearerToken}/"
@@ -352,21 +318,13 @@ module internal TerminalProxy =
             let socket = new ClientWebSocket()
             socket.Options.AddSubProtocol TtySubprotocol
 
-            socket.Options.SetRequestHeader(
-                "Origin",
-                $"http://127.0.0.1:{ttydPort}"
-            )
+            socket.Options.SetRequestHeader("Origin", $"http://127.0.0.1:{ttydPort}")
 
             use cancellation =
                 new CancellationTokenSource(TimeSpan.FromSeconds 5.0)
 
             try
-                do!
-                    socket.ConnectAsync(
-                        Uri($"ws://127.0.0.1:{ttydPort}/ws"),
-                        cancellation.Token
-                    )
-                    |> Async.AwaitTask
+                do! socket.ConnectAsync(Uri($"ws://127.0.0.1:{ttydPort}/ws"), cancellation.Token) |> Async.AwaitTask
 
                 return Ok(socket :> WebSocket)
             with _ ->
@@ -410,41 +368,14 @@ module internal TerminalProxy =
                     startUpstreamPump core upstream
 
                     match!
-                        startProxy
-                            allowedOrigins
-                            bearerToken
-                            sessionId
-                            ttydPort
-                            core
+                        startProxy allowedOrigins bearerToken sessionId ttydPort core
                         |> Async.AwaitTask
                     with
                     | Error error ->
                         do! core.Stop()
                         return Error error
                     | Ok(application, client, endpoint) ->
-                        let stopWorkflow =
-                            lazy
-                                (task {
-                                    do! core.Stop() |> Async.StartAsTask
-
-                                    use stopCancellation =
-                                        new CancellationTokenSource(proxyShutdownTimeout)
-
-                                    try
-                                        do! application.StopAsync(stopCancellation.Token)
-                                    with _ ->
-                                        ()
-
-                                    try
-                                        do!
-                                            application.DisposeAsync().AsTask().WaitAsync(
-                                                proxyShutdownTimeout
-                                            )
-                                    with _ ->
-                                        ()
-
-                                    client.Dispose()
-                                })
+                        let stopWorkflow = lazy (stopProxy core application client)
 
                         return
                             Ok
@@ -463,10 +394,4 @@ module internal TerminalProxy =
         ttydPort
         onUpstreamEnded
         =
-        startWithConnector
-            openUpstream
-            allowedOrigins
-            bearerToken
-            sessionId
-            ttydPort
-            onUpstreamEnded
+        startWithConnector openUpstream allowedOrigins bearerToken sessionId ttydPort onUpstreamEnded

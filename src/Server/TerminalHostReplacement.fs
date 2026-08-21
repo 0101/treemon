@@ -1,7 +1,6 @@
 module Server.TerminalHostReplacement
 
 open System
-open System.IO
 open FsToolkit.ErrorHandling
 open Server.TerminalHostClient
 open Server.TerminalHostManifest
@@ -60,61 +59,9 @@ type internal ReplacementCommit =
     | ApplyRegistry of DiscoveryManifest * RegistrySnapshot * ReplacementOutcome
 
 let private stagedExecutablePath config version =
-    try
-        let layout =
-            TerminalHostLayout.forStateDirectory config.HostStateDirectory
-
-        let stagingRoot =
-            layout.StagingDirectory
-            |> Path.TrimEndingDirectorySeparator
-
-        let directory =
-            TerminalHostLayout.versionDirectory layout version
-            |> Path.GetFullPath
-            |> Path.TrimEndingDirectorySeparator
-            |> DirectoryInfo
-
-        let hasExactParent =
-            directory.Parent
-            |> Option.ofObj
-            |> Option.exists (fun parent ->
-                samePath
-                    (parent.FullName
-                     |> Path.GetFullPath
-                     |> Path.TrimEndingDirectorySeparator)
-                    stagingRoot)
-
-        let executable =
-            Path.Combine(directory.FullName, layout.HostExecutableName)
-
-        let executableInfo = FileInfo executable
-        let invalidBundleMember =
-            layout.RequiredBundleFileNames
-            |> List.map (fun name -> FileInfo(Path.Combine(directory.FullName, name)))
-            |> List.tryFind (fun info ->
-                not info.Exists
-                || (info.Attributes &&& FileAttributes.ReparsePoint) <> enum 0)
-
-        if
-            not (TerminalHostLayout.isValidVersionDirectoryName version)
-            || directory.Name <> version
-            || not hasExactParent
-        then
-            Error "The staged TerminalHost version is not a direct version directory"
-        elif
-            not directory.Exists
-            || (directory.Attributes &&& FileAttributes.ReparsePoint) <> enum 0
-        then
-            Error "The staged TerminalHost version directory is missing or unsafe"
-        elif invalidBundleMember.IsSome then
-            let memberInfo = invalidBundleMember |> Option.get
-
-            Error
-                $"The staged TerminalHost bundle member is missing or unsafe at '{memberInfo.FullName}'"
-        else
-            Ok executableInfo.FullName
-    with error ->
-        Error $"Could not validate the staged TerminalHost executable: {error.Message}"
+    config.HostStateDirectory
+    |> TerminalHostLayout.forStateDirectory
+    |> fun layout -> TerminalHostLayout.validateStagedVersion layout version
 
 let private queryReplacementPolicy
     (query: ReplacementPolicyQuery)
@@ -123,8 +70,7 @@ let private queryReplacementPolicy
     try
         terminals
         |> List.map (fun terminal ->
-            { TerminalSessionId = terminal.SessionId
-              WorktreePath = terminal.WorktreePath })
+            { TerminalSessionId = terminal.SessionId; WorktreePath = terminal.WorktreePath })
         |> query DateTimeOffset.UtcNow
     with error ->
         Error $"Could not query the terminal replacement policy: {error.Message}"
@@ -159,10 +105,7 @@ let private recreateTerminals
                 let! nextRegistry, recreated =
                     startTerminalOnHost config connection previous.WorktreePath
                     |> AsyncResult.mapError (fun failure ->
-                        let error =
-                            match failure with
-                            | StartRejected(_, reason)
-                            | StartUnverified reason -> reason
+                        let error = match failure with MutationRejected(_, reason) | MutationUnverified(_, reason) -> reason
 
                         $"Could not recreate the terminal for '{previous.WorktreePath}': {error}")
 
@@ -170,9 +113,7 @@ let private recreateTerminals
                 | None -> ()
                 | Some command ->
                     do!
-                        config.SendTerminalCommand
-                            recreated.AttachmentEndpoint
-                            command
+                        config.SendTerminalCommand recreated.AttachmentEndpoint command
                         |> AsyncResult.mapError (fun error ->
                             $"Could not deliver the replacement command for '{previous.WorktreePath}': {error}")
 
@@ -183,9 +124,7 @@ let private recreateTerminals
         let! initial = listTerminals config connection
 
         if not (List.isEmpty initial.Terminals) then
-            return!
-                Error
-                    "The replacement TerminalHost did not start with an empty terminal registry"
+            return! Error "The replacement TerminalHost did not start with an empty terminal registry"
 
         return! recreate initial terminals
     }
@@ -196,6 +135,20 @@ let private replacementFailure stageVersion error =
         ReplacementOutcome.Failed(stageVersion, error)
     )
 
+let private activateHost config expectedExecutable connection terminals resumeCommands =
+    asyncResult {
+        let! executable =
+            resolveProcessExecutable config connection
+            |> Result.mapError (fun error ->
+                $"The launched TerminalHost identity could not be verified: {error}")
+
+        if not (samePath executable expectedExecutable) then
+            return! Error "The launch published an unexpected TerminalHost executable"
+
+        let! registry = recreateTerminals config connection terminals resumeCommands
+        return connection, registry
+    }
+
 let private recoverOldHost
     (config: Config)
     (plan: ReplacementPlan)
@@ -203,45 +156,21 @@ let private recoverOldHost
     failure
     =
     async {
-        let oldConfig =
-            configForExecutable config plan.OldExecutablePath
+        let oldConfig = configForExecutable config plan.OldExecutablePath
 
         let failed detail =
-            replacementFailure
-                plan.StagedVersion
-                $"{failure}. {detail}"
+            replacementFailure plan.StagedVersion $"{failure}. {detail}"
 
         match! launchHostAt oldConfig with
         | LaunchRejected recoveryError
         | LaunchStartedButUnhealthy recoveryError ->
             return failed $"The previous host could not be restarted: {recoveryError}"
         | HostLaunched connection ->
-            let recover =
-                asyncResult {
-                    let! executablePath =
-                        resolveProcessExecutable config connection
-                        |> Result.mapError (fun error ->
-                            $"The restarted previous host could not be verified: {error}")
-
-                    if not (samePath executablePath plan.OldExecutablePath) then
-                        return!
-                            Error
-                                "Recovery started an unexpected TerminalHost executable."
-
-                    let! registry =
-                        recreateTerminals
-                            oldConfig
-                            connection
-                            plan.Terminals
-                            resumeCommands
-                        |> AsyncResult.mapError (fun error ->
-                            $"The previous host restarted, but its terminals could not be recovered: {error}")
-
-                    return connection, registry
-                }
-
-            match! recover with
-            | Error recoveryError -> return failed recoveryError
+            match!
+                activateHost oldConfig plan.OldExecutablePath connection plan.Terminals resumeCommands
+            with
+            | Error recoveryError ->
+                return failed $"The previous host restarted, but recovery failed: {recoveryError}"
             | Ok(recoveredHost, registry) ->
                 let recovered =
                     $"{failure}. The previous host and its terminals were recovered."
@@ -266,9 +195,7 @@ let private recheckReplacement
                  && connection.StagedExecutableVersion = Some plan.StagedVersion ->
             match! listTerminals config connection with
             | Error error ->
-                return
-                    RecheckFailed
-                        $"Could not recheck the authoritative terminal registry: {error}"
+                return RecheckFailed $"Could not recheck the authoritative terminal registry: {error}"
             | Ok registry
                 when registry.Revision <> plan.RegistryRevision
                      || registry.Terminals <> plan.Terminals ->
@@ -276,8 +203,7 @@ let private recheckReplacement
             | Ok registry ->
                 match queryReplacementPolicy query registry.Terminals with
                 | Error error -> return RecheckFailed error
-                | Ok ReplacementSessionPlan.WaitingForIdle ->
-                    return RecheckChanged
+                | Ok ReplacementSessionPlan.WaitingForIdle -> return RecheckChanged
                 | Ok(ReplacementSessionPlan.Ready(activityEpoch, _))
                     when activityEpoch <> plan.ActivityEpoch ->
                     return RecheckChanged
@@ -290,8 +216,7 @@ let private recheckReplacement
                     | Ok _ -> return RecheckChanged
         | HealthyHost _
         | MissingHost
-        | DeadHost _ ->
-            return RecheckChanged
+        | DeadHost _ -> return RecheckChanged
         | IncompatibleHost(_, error)
         | UnusableHost error ->
             return RecheckFailed $"Could not recheck the exact TerminalHost: {error}"
@@ -309,62 +234,32 @@ let internal commitReplacement
 
         try
             match! recheckReplacement config plan query with
-            | RecheckChanged ->
-                return ReplacementCommit.KeepState ReplacementOutcome.RaceLost
+            | RecheckChanged -> return ReplacementCommit.KeepState ReplacementOutcome.RaceLost
             | RecheckFailed error -> return failed error
             | ReadyToCommit(connection, resumeCommands) ->
                 match! shutdownAndWait config connection with
                 | Error error ->
                     return
-                        replacementFailure
-                            plan.StagedVersion
+                        replacementFailure plan.StagedVersion
                             $"The previous TerminalHost could not be confirmed stopped: {error}"
                 | Ok() ->
-                    let stagedConfig =
-                        configForExecutable config plan.StagedExecutablePath
+                    let stagedConfig = configForExecutable config plan.StagedExecutablePath
 
                     match! launchHostAt stagedConfig with
                     | LaunchRejected error ->
                         return!
-                            recoverOldHost
-                                config
-                                plan
-                                resumeCommands
+                            recoverOldHost config plan resumeCommands
                                 $"The staged host could not be launched: {error}"
                     | LaunchStartedButUnhealthy error ->
                         return
-                            replacementFailure
-                                plan.StagedVersion
+                            replacementFailure plan.StagedVersion
                                 $"The staged host process started but did not become healthy; the previous host was not restarted because the staged process could not be proven stopped: {error}"
                     | HostLaunched replacement ->
-                        let activate =
-                            asyncResult {
-                                let! executablePath =
-                                    resolveProcessExecutable config replacement
-                                    |> Result.mapError (fun error ->
-                                        $"The staged host identity could not be verified: {error}")
-
-                                if not (samePath executablePath plan.StagedExecutablePath) then
-                                    return!
-                                        Error
-                                            "The staged launch published an unexpected TerminalHost executable"
-
-                                let! registry =
-                                    recreateTerminals
-                                        stagedConfig
-                                        replacement
-                                        plan.Terminals
-                                        resumeCommands
-
-                                return replacement, registry
-                            }
-
-                        match! activate with
+                        match!
+                            activateHost stagedConfig plan.StagedExecutablePath replacement plan.Terminals resumeCommands
+                        with
                         | Error error ->
-                            return
-                                replacementFailure
-                                    plan.StagedVersion
-                                    error
+                            return replacementFailure plan.StagedVersion error
                         | Ok(replacementHost, registry) ->
                             return
                                 ReplacementCommit.ApplyRegistry(
@@ -374,8 +269,7 @@ let internal commitReplacement
                                 )
         with error ->
             return
-                replacementFailure
-                    plan.StagedVersion
+                replacementFailure plan.StagedVersion
                     $"Unexpected replacement error: {error.Message}"
     }
 
@@ -396,11 +290,8 @@ let internal tryReplaceHostIgnoring
             | Some stagedVersion ->
                 let candidate =
                     result {
-                        let! stagedExecutable =
-                            stagedExecutablePath config stagedVersion
-
-                        let! oldExecutable =
-                            resolveProcessExecutable config connection
+                        let! stagedExecutable = stagedExecutablePath config stagedVersion
+                        let! oldExecutable = resolveProcessExecutable config connection
 
                         return stagedExecutable, oldExecutable
                     }
@@ -414,10 +305,7 @@ let internal tryReplaceHostIgnoring
                     match! listTerminals config connection with
                     | Error error ->
                         return
-                            ReplacementOutcome.Failed(
-                                stagedVersion,
-                                $"Could not capture the authoritative terminal registry: {error}"
-                            )
+                            ReplacementOutcome.Failed(stagedVersion, $"Could not capture the authoritative terminal registry: {error}")
                     | Ok registry ->
                         match queryReplacementPolicy query registry.Terminals with
                         | Error error ->
@@ -443,10 +331,7 @@ let internal tryReplaceHostIgnoring
                                     return ReplacementOutcome.RaceLost
                             with error ->
                                 return
-                                    ReplacementOutcome.Failed(
-                                        stagedVersion,
-                                        $"Could not coordinate TerminalHost replacement: {error.Message}"
-                                    )
+                                    ReplacementOutcome.Failed(stagedVersion, $"Could not coordinate TerminalHost replacement: {error.Message}")
         | MissingHost
         | DeadHost _
         | IncompatibleHost _
@@ -466,9 +351,7 @@ let private nextCooldown now outcome current =
     match outcome with
     | ReplacementOutcome.Replaced _ -> None
     | ReplacementOutcome.Failed(stagedVersion, _) ->
-        Some
-            { StagedVersion = stagedVersion
-              RetryAfter = now + failureRetryCooldown }
+        Some { StagedVersion = stagedVersion; RetryAfter = now + failureRetryCooldown }
     | ReplacementOutcome.NoCandidate
     | ReplacementOutcome.WaitingForIdle
     | ReplacementOutcome.RaceLost ->
@@ -478,13 +361,9 @@ let private nextCooldown now outcome current =
 let private logOutcome outcome =
     match outcome with
     | ReplacementOutcome.Replaced stagedVersion ->
-        Log.log
-            "TerminalHost"
-            $"Replaced the host with staged version {stagedVersion} at a natural idle window"
+        Log.log "TerminalHost" $"Replaced the host with staged version {stagedVersion} at a natural idle window"
     | ReplacementOutcome.Failed(stagedVersion, error) ->
-        Log.log
-            "TerminalHost"
-            $"Replacement of staged version {stagedVersion} failed: {error}"
+        Log.log "TerminalHost" $"Replacement of staged version {stagedVersion} failed: {error}"
     | ReplacementOutcome.NoCandidate
     | ReplacementOutcome.WaitingForIdle
     | ReplacementOutcome.RaceLost ->
@@ -501,21 +380,15 @@ let internal runCoordinatorWith
             if cancellationToken.IsCancellationRequested then
                 return ()
             else
-                let ignoredStagedVersion =
-                    cooldown
-                    |> activeIgnoredVersion (utcNow ())
+                let ignoredStagedVersion = cooldown |> activeIgnoredVersion (utcNow ())
 
                 let! outcome = tryReplace ignoredStagedVersion
                 logOutcome outcome
 
-                let next =
-                    cooldown
-                    |> nextCooldown (utcNow ()) outcome
-
+                let next = cooldown |> nextCooldown (utcNow ()) outcome
                 let! keepGoing = waitForNextPoll cancellationToken
 
-                if keepGoing then
-                    return! loop next
+                if keepGoing then return! loop next
         }
 
     loop None
@@ -525,12 +398,7 @@ let private waitForNextPoll
     =
     async {
         try
-            do!
-                System.Threading.Tasks.Task.Delay(
-                    TimeSpan.FromSeconds 1.0,
-                    cancellationToken
-                )
-                |> Async.AwaitTask
+            do! System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds 1.0, cancellationToken) |> Async.AwaitTask
 
             return true
         with :? OperationCanceledException ->
@@ -538,8 +406,4 @@ let private waitForNextPoll
     }
 
 let internal runCoordinator tryReplace cancellationToken =
-    runCoordinatorWith
-        (fun () -> DateTimeOffset.UtcNow)
-        waitForNextPoll
-        tryReplace
-        cancellationToken
+    runCoordinatorWith (fun () -> DateTimeOffset.UtcNow) waitForNextPoll tryReplace cancellationToken
