@@ -1146,6 +1146,17 @@ type CanvasDocPathCopyResultTests() =
         Assert.That(updated.Canvas.PathCopyState, Is.EqualTo(CanvasPathCopyState.Idle 0))
         Assert.That(cmd, Is.Empty)
 
+    [<Test>]
+    member _.``Path copy is rejected while Canvas Share owns the clipboard workflow``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc filename "h" ] ] ]
+                Canvas.ShareState = CanvasShareState.Publishing (scopedKey, filename) }
+        let updated, cmd = update (CopyCanvasDocPath (scopedKey, filename)) model
+
+        Assert.That(updated, Is.EqualTo(model))
+        Assert.That(cmd, Is.Empty)
+
 // ── ShareCanvasDoc state machine + result banners (client share feature) ─────────────────────
 // A successful share does NOT immediately claim "link copied": the Ok arm clears a stale Failed
 // send-state (so the red delivery-error and green success banners never stack) plus any stale notice,
@@ -1213,6 +1224,17 @@ type ShareCanvasDocResultTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "other.html" "h" ] ] ]
                 Canvas.ShareState = CanvasShareState.Publishing ("r/feat", "status.html") }
         let updated, cmd = update (ShareCanvasDoc ("r/feat", "other.html")) model
+        Assert.That(updated, Is.EqualTo(model))
+        Assert.That(cmd, Is.Empty)
+
+    [<Test>]
+    member _.``share is rejected while path copy owns the clipboard workflow``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "status.html" "h" ] ] ]
+                Canvas.PathCopyState = CanvasPathCopyState.Copying ("r/feat", "status.html", 1) }
+        let updated, cmd = update (ShareCanvasDoc ("r/feat", "status.html")) model
+
         Assert.That(updated, Is.EqualTo(model))
         Assert.That(cmd, Is.Empty)
 

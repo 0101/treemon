@@ -934,7 +934,6 @@
             position: relative; display: inline-flex; flex-shrink: 0;
         }
         .canvas-tab {
-            display: flex; align-items: center;
             background: #313244; border: 1px solid #45475a; border-radius: 4px;
             padding: 2px 10px; font-size: var(--fs-base); cursor: pointer; color: #bac2de;
             font-family: inherit; transition: background 0.15s, border-color 0.15s;
@@ -944,8 +943,8 @@
         .canvas-tab.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
         .canvas-tab-viewed { opacity: 0.5; }
         .canvas-tab-meta {
-            position: relative; width: 18px; height: 18px; margin-left: 6px;
-            flex: 0 0 18px;
+            position: relative; display: inline-block;
+            width: 18px; height: 18px; margin-left: 6px; vertical-align: middle;
         }
         .canvas-tab-age {
             position: absolute; inset: 0; display: grid; place-items: center;
@@ -965,6 +964,7 @@
         .canvas-tab-shell:hover .canvas-tab-age { opacity: 0; }
         .canvas-tab-shell:hover .canvas-tab-copy { opacity: 1; pointer-events: auto; }
         .canvas-tab-copy:hover { color: #89b4fa; border-color: #89b4fa; }
+        .canvas-tab-copy:disabled { color: #585b70; border-color: #45475a; cursor: default; }
         .canvas-tab-copy.copied,
         .canvas-tab-copy.copied:hover { color: #a6e3a1; border-color: #a6e3a1; }
         .canvas-tab-copy:focus-visible {

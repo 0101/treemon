@@ -294,8 +294,9 @@ let buildClipboardPayload (result: CanvasShareResult) : ClipboardPayload =
 
 let canvasDocDiskPath (worktreePath: WorktreePath) (filename: string) =
     let rawRoot = WorktreePath.value worktreePath
-    let separator = if rawRoot.Contains("\\") then "\\" else "/"
-    let root = rawRoot.TrimEnd([| '/'; '\\' |])
+    let isPosix = rawRoot.StartsWith("/")
+    let separator = if isPosix || not (rawRoot.Contains("\\")) then "/" else "\\"
+    let root = if isPosix then rawRoot.TrimEnd('/') else rawRoot.TrimEnd([| '/'; '\\' |])
     $"{root}{separator}.agents{separator}canvas{separator}{filename}"
 
 /// Effect that writes BOTH clipboard formats at once via the async Clipboard API — one `ClipboardItem`
@@ -336,21 +337,24 @@ let preserveWaitingOnFailure (sendState: CanvasSendState) (message: string) : Ca
     | _ -> CanvasSendState.Failed message
 
 let copyCanvasDocPath (scopedKey: string) (filename: string) (model: Model) =
-    match findWorktree scopedKey model with
-    | Some wt when wt.CanvasDocs |> List.exists (fun doc -> doc.Filename = filename) ->
+    match model.Canvas.ShareState, model.Canvas.PathCopyState, findWorktree scopedKey model with
+    | CanvasShareState.Idle, pathCopyState, Some wt
+        when not (CanvasPathCopyState.isCopying pathCopyState)
+             && (wt.CanvasDocs |> List.exists (fun doc -> doc.Filename = filename)) ->
         let path = canvasDocDiskPath wt.Path filename
-        let revision = CanvasPathCopyState.revision model.Canvas.PathCopyState + 1
+        let revision = CanvasPathCopyState.revision pathCopyState + 1
         { model with
             Canvas.ClipboardNotice = None
             Canvas.PathCopyState = CanvasPathCopyState.Copying (scopedKey, filename, revision) },
         writeCanvasDocPathCmd scopedKey filename revision path
-    | _ ->
+    | CanvasShareState.Idle, pathCopyState, _ when not (CanvasPathCopyState.isCopying pathCopyState) ->
         let message = "Could not copy the canvas doc path because the document is no longer available."
         { model with
             Canvas.CanvasSendState = preserveWaitingOnFailure model.Canvas.CanvasSendState message
             Canvas.ClipboardNotice = None
-            Canvas.PathCopyState = CanvasPathCopyState.Idle (CanvasPathCopyState.revision model.Canvas.PathCopyState) },
+            Canvas.PathCopyState = CanvasPathCopyState.Idle (CanvasPathCopyState.revision pathCopyState) },
         Cmd.none
+    | _ -> model, Cmd.none
 
 let canvasDocPathCopyResult (scopedKey: string) (filename: string) (revision: int) (path: string) (outcome: Result<unit, string>) (model: Model) =
     match model.Canvas.PathCopyState, outcome with
@@ -382,8 +386,8 @@ let clearCanvasDocPathCopied (scopedKey: string) (filename: string) (revision: i
     | _ -> model, Cmd.none
 
 let shareCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
-    match model.Canvas.ShareState, findWorktree scopedKey model with
-    | CanvasShareState.Idle, Some wt ->
+    match model.Canvas.ShareState, model.Canvas.PathCopyState, findWorktree scopedKey model with
+    | CanvasShareState.Idle, pathCopyState, Some wt when not (CanvasPathCopyState.isCopying pathCopyState) ->
         let request: ShareCanvasDocRequest = { WorktreePath = wt.Path; Filename = filename }
         { model with Canvas.ShareState = CanvasShareState.Publishing (scopedKey, filename) },
         Cmd.OfAsync.either worktreeApi.Value.shareCanvasDoc request (fun r -> ShareCanvasDocResult (scopedKey, filename, r)) (_.Message >> Error >> fun r -> ShareCanvasDocResult (scopedKey, filename, r))
@@ -447,7 +451,7 @@ let clipboardWriteResult (scopedKey: string) (filename: string) (url: string) (o
     | _ -> model, Cmd.none
 
 let dismissClipboardNotice (model: Model) =
-    { model with Canvas = { model.Canvas with ClipboardNotice = None } }, Cmd.none
+    { model with Canvas.ClipboardNotice = None }, Cmd.none
 
 let navigateCanvasDoc (filename: string) (model: Model) =
     match CanvasState.activeCanvasWorktree model.FocusedElement model.Canvas.TargetWorktree with

@@ -26,6 +26,9 @@
   matching scoped doc shows the spinner, and the reducer rejects another launch. Results transition
   or clear only the matching operation, so navigation and stale async completions cannot unlock or
   overwrite a newer share (locked by `ShareCanvasDocResultTests`).
+- Share and canvas-path copy are mutually exclusive clipboard workflows. The reducer rejects either
+  action while the other owns the clipboard, and both controls are disabled until that workflow
+  settles, so their async results cannot overwrite the pane-global error or clipboard notice state.
 - The action operates on a **single, self-contained doc**. Docs that link to sibling `.html` tabs
   are shared as just the focused file; sibling links are inert in the export. Multi-doc bundles are
   out of scope.
@@ -193,7 +196,8 @@ banner never claims a copy that did not happen (Decision #10).
   `ClipboardWriteResult` from its `then`/`catch` (and a synchronous `try/catch` for an unavailable API)
   so the success banner reflects the write's real outcome — copied vs. "copy it manually: `<url>`"
   (F6) — instead of unconditionally claiming a copy; on `Error`, reuse the error banner. Button styling
-  in `index.html`.
+  in `index.html`. Share and path-copy controls also gate each other while either clipboard workflow
+  is pending.
 
 ## Storage Account Setup
 

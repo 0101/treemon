@@ -749,22 +749,17 @@ type CanvasPaneTests() =
             do! shell.WaitForAsync()
 
             let! beforeHover = shell.BoundingBoxAsync()
-            let! initialOpacity =
-                copyButton.EvaluateAsync<string>("button => getComputedStyle(button).opacity")
+            do! Assertions.Expect(copyButton).ToHaveCSSAsync("opacity", "0")
 
             do! shell.Locator(".canvas-tab").ClickAsync()
             do! this.Page.Mouse.MoveAsync(0.0f, 0.0f)
-            do! Assertions.Expect(copyButton).ToBeHiddenAsync()
-            let! focusedTabOpacity =
-                copyButton.EvaluateAsync<string>("button => getComputedStyle(button).opacity")
+            do! Assertions.Expect(copyButton).ToHaveCSSAsync("opacity", "0")
 
             do! shell.HoverAsync()
-            do! Assertions.Expect(copyButton).ToBeVisibleAsync()
+            do! Assertions.Expect(copyButton).ToHaveCSSAsync("opacity", "1")
             let! afterHover = shell.BoundingBoxAsync()
 
             Assert.Multiple(fun () ->
-                Assert.That(initialOpacity, Is.EqualTo("0"), "The path copy action should be hidden until hover")
-                Assert.That(focusedTabOpacity, Is.EqualTo("0"), "Tab focus must not keep the path copy action visible")
                 Assert.That(afterHover.Width, Is.EqualTo(beforeHover.Width).Within(0.01), "Hover must not change the tab width")
                 Assert.That(afterHover.Height, Is.EqualTo(beforeHover.Height).Within(0.01), "Hover must not change the tab height"))
 

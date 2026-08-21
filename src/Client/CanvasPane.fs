@@ -273,6 +273,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
     let { UnviewedByScopedKey = unviewedByScopedKey
           UnviewedFilenames = unviewedFilenames
           VisitedDocs = visitedDocs } = awareness
+    let isPathCopying = CanvasPathCopyState.isCopying pathCopyState
     let toggleButton (baseClass: string) (isActive: bool) (onClick: unit -> unit) (label: string) (title: string) =
         Html.button [
             prop.className (if isActive then $"{baseClass} active" else baseClass)
@@ -329,14 +330,16 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                         | Some d when d.Kind = AgentDoc ->
                             let shareActive, isSharing =
                                 CanvasShareState.buttonFlags activeScopedKey d.Filename shareState
+                            let shareDisabled = shareActive || isPathCopying
                             Html.button [
                                 prop.className (if isSharing then "canvas-share-btn sharing" else "canvas-share-btn")
-                                prop.disabled shareActive
+                                prop.disabled shareDisabled
                                 prop.onClick (fun _ -> shareDoc d.Filename)
                                 prop.title (
-                                    match isSharing, shareActive with
-                                    | true, _ -> "Sharing this doc…"
-                                    | false, true -> "Another canvas doc is being shared"
+                                    match isSharing, shareActive, isPathCopying with
+                                    | true, _, _ -> "Sharing this doc…"
+                                    | false, _, true -> "Wait for the canvas path copy to finish"
+                                    | false, true, false -> "Another canvas doc is being shared"
                                     | _ -> "Share this doc — copies a rich link to the clipboard")
                                 prop.children [
                                     if isSharing then Html.span [ prop.className "share-spinner" ] else shareIcon
@@ -445,6 +448,13 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                 let isActive = d.Filename = doc.Filename
                 let isViewed = not (Set.contains d.Filename unviewedFilenames)
                 let isCopied = CanvasPathCopyState.isCopied activeScopedKey d.Filename pathCopyState
+                let isShareActive = shareState <> CanvasShareState.Idle
+                let copyDisabled = isShareActive || isPathCopying
+                let copyTitle =
+                    if isShareActive then "Wait for Canvas Share to finish"
+                    elif isPathCopying then "Copying canvas path…"
+                    elif isCopied then "Path copied"
+                    else $"Copy full path to {d.Filename}"
                 let cls =
                     [ "canvas-tab"
                       if isActive then "active"
@@ -474,9 +484,10 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                         ]
                         Html.button [
                             prop.className (if isCopied then "canvas-tab-copy copied" else "canvas-tab-copy")
+                            prop.disabled copyDisabled
                             prop.onClick (fun _ -> copyDocPath d.Filename)
-                            prop.title (if isCopied then "Path copied" else $"Copy full path to {d.Filename}")
-                            prop.custom ("aria-label", if isCopied then "Path copied" else $"Copy full path to {d.Filename}")
+                            prop.title copyTitle
+                            prop.custom ("aria-label", copyTitle)
                             prop.children [ if isCopied then checkIcon else copyIcon ]
                         ]
                     ]

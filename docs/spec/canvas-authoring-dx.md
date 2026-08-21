@@ -151,8 +151,12 @@ Copy dispatches an Elmish message and writes the full on-disk
 `{worktree}/.agents/canvas/{filename}` path with the worktree path's native separator. A landed write
 replaces the rectangles with a green checkmark for 1.2 seconds; a rejected write surfaces the full
 path for manual copying. Scoped revision state prevents an older result or reset timer from
-overwriting newer feedback. The age and copy action are scoped to `AgentDoc` tabs. A `SystemView`
-entry remains data-driven and has neither authored-file freshness nor this action.
+overwriting newer feedback. POSIX absolute paths are identified by their leading `/`, so a legal
+backslash inside a POSIX filename cannot switch the appended segments to Windows separators. Path
+copy and Canvas Share are mutually exclusive clipboard workflows in both the reducer and controls,
+preventing either async result from overwriting the other's feedback. The age and copy action are
+scoped to `AgentDoc` tabs. A `SystemView` entry remains data-driven and has neither authored-file
+freshness nor this action.
 
 ## Technical Approach
 

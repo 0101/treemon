@@ -13,6 +13,7 @@ type CanvasPathCopyTests() =
     [<TestCase(@"Q:\code\demo\", "report.html", @"Q:\code\demo\.agents\canvas\report.html")>]
     [<TestCase("Q:/code/demo", "report.html", "Q:/code/demo/.agents/canvas/report.html")>]
     [<TestCase("/work/demo/", "report.html", "/work/demo/.agents/canvas/report.html")>]
+    [<TestCase(@"/work/demo\copy", "report.html", @"/work/demo\copy/.agents/canvas/report.html")>]
     member _.``Canvas doc disk path preserves the worktree separator``
         (worktreePath: string, filename: string, expected: string) =
         Assert.That(
