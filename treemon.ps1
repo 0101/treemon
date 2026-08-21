@@ -568,7 +568,6 @@ function Install-CopilotExtension(
     $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
     if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
     Get-ChildItem -Path $SrcDir -Filter "*.mjs" -File |
-        Where-Object { $_.Name -notlike "*.test.mjs" } |
         Copy-Item -Destination $dest -Force
     $RequiredFiles | ForEach-Object { Copy-Item (Join-Path $SrcDir $_) $dest -Force }
     Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green

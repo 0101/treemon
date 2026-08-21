@@ -5,7 +5,7 @@ import {
   MAX_CANVAS_MESSAGE_CHARS,
   promptForCanvasMessage,
   promptForSession,
-} from "./session-prompt.mjs";
+} from "../../Extension/session-prompt.mjs";
 
 test("canvas transport preserves the existing canvas prompt prefix", () => {
   assert.deepEqual(
@@ -88,7 +88,8 @@ test("browser messages enforce the pane's serialized UTF-16 cap", () => {
 });
 
 test("inject delivery uses the existing serialized enqueueSend path", () => {
-  const extension = readFileSync(new URL("./extension.mjs", import.meta.url), "utf8");
+  const extension =
+    readFileSync(new URL("../../Extension/extension.mjs", import.meta.url), "utf8");
   assert.match(extension, /promptForSession\(body\)/);
   assert.match(extension, /enqueueSend\(session, kind, prompt\)/);
   assert.match(extension, /promptForCanvasMessage\(body\)/);
