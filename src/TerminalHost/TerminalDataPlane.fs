@@ -45,6 +45,9 @@ type TerminalDataPlane =
 module TerminalDataPlane =
     let private socketOperationTimeout = TimeSpan.FromSeconds 2.0
 
+    [<Literal>]
+    let private ReplyTimeoutMilliseconds = 60_000
+
     let private replayGapFrame =
         Encoding.UTF8.GetBytes(
             "0\u001bc\u001b[2J\u001b[H[treemon] Earlier terminal output was omitted because the 1 MiB replay buffer was exceeded while this view was paused.\r\n"
@@ -305,13 +308,43 @@ module TerminalDataPlane =
         with _ ->
             ()
 
+    let private logMailboxFailure scope (error: exn) =
+        try
+            Console.Error.WriteLine(
+                $"TerminalDataPlane {scope} failed ({error.GetType().Name})"
+            )
+        with _ ->
+            ()
+
+    let private recoverMessage state message =
+        async {
+            try
+                match message with
+                | Attach(socket, reply) ->
+                    do!
+                        closeSocket
+                            WebSocketCloseStatus.EndpointUnavailable
+                            "Terminal data plane unavailable"
+                            socket
+
+                    reply.Reply None
+                | BrowserFrame(_, _, reply) ->
+                    reply.Reply(Error "Terminal data plane operation failed")
+                | Detach(_, reply)
+                | UpstreamFrame(_, reply)
+                | UpstreamClosed reply
+                | Stop reply -> reply.Reply()
+            with _ ->
+                ()
+
+            return state
+        }
+
     let internal createCore replayCapacity upstream onUpstreamEnded =
         let mailbox =
             MailboxProcessor.Start(fun inbox ->
-                let rec loop state =
+                let processMessage state message =
                     async {
-                        let! message = inbox.Receive()
-
                         match message with
                         | Attach(socket, reply) when state.Stopped ->
                             do!
@@ -321,7 +354,7 @@ module TerminalDataPlane =
                                     socket
 
                             reply.Reply None
-                            return! loop state
+                            return state
                         | Attach(socket, reply) ->
                             match state.Attachment with
                             | Some previous ->
@@ -341,10 +374,9 @@ module TerminalDataPlane =
 
                             reply.Reply(Some attachment.Id)
 
-                            return!
-                                loop
-                                    { state with
-                                        Attachment = Some attachment }
+                            return
+                                { state with
+                                    Attachment = Some attachment }
                         | BrowserFrame(attachmentId, frame, reply) ->
                             match state.Attachment with
                             | Some attachment when attachment.Id = attachmentId ->
@@ -352,11 +384,11 @@ module TerminalDataPlane =
                                     handleBrowserFrame upstream state attachment frame
 
                                 reply.Reply result
-                                return! loop updated
+                                return updated
                             | Some _
                             | None ->
                                 reply.Reply(Error "Browser attachment was replaced")
-                                return! loop state
+                                return state
                         | Detach(attachmentId, reply) ->
                             let updated =
                                 match state.Attachment with
@@ -366,19 +398,19 @@ module TerminalDataPlane =
                                 | None -> state
 
                             reply.Reply()
-                            return! loop updated
+                            return updated
                         | UpstreamFrame(frame, reply) when state.Stopped ->
                             reply.Reply()
-                            return! loop state
+                            return state
                         | UpstreamFrame(frame, reply) ->
                             let! updated =
                                 handleUpstreamFrame replayCapacity state frame
 
                             reply.Reply()
-                            return! loop updated
+                            return updated
                         | UpstreamClosed reply when state.Stopped ->
                             reply.Reply()
-                            return! loop state
+                            return state
                         | UpstreamClosed reply ->
                             match state.Attachment with
                             | Some attachment ->
@@ -398,14 +430,13 @@ module TerminalDataPlane =
                             notifyUpstreamEnded onUpstreamEnded
                             reply.Reply()
 
-                            return!
-                                loop
-                                    { state with
-                                        Attachment = None
-                                        Stopped = true }
+                            return
+                                { state with
+                                    Attachment = None
+                                    Stopped = true }
                         | Stop reply when state.Stopped ->
                             reply.Reply()
-                            return! loop state
+                            return state
                         | Stop reply ->
                             match state.Attachment with
                             | Some attachment ->
@@ -424,11 +455,25 @@ module TerminalDataPlane =
 
                             reply.Reply()
 
-                            return!
-                                loop
-                                    { state with
-                                        Attachment = None
-                                        Stopped = true }
+                            return
+                                { state with
+                                    Attachment = None
+                                    Stopped = true }
+                    }
+
+                let rec loop state =
+                    async {
+                        let! message = inbox.Receive()
+                        let! next =
+                            async {
+                                try
+                                    return! processMessage state message
+                                with error ->
+                                    logMailboxFailure "message" error
+                                    return! recoverMessage state message
+                            }
+
+                        return! loop next
                     }
 
                 loop
@@ -439,19 +484,44 @@ module TerminalDataPlane =
                       PreferencesFrame = None
                       Stopped = false })
 
+        mailbox.Error.Add(fun error ->
+            logMailboxFailure "mailbox" error)
+
         { AttachmentEndpoint = ""
-          AttachSocket = fun socket -> mailbox.PostAndAsyncReply(fun reply -> Attach(socket, reply))
+          AttachSocket =
+            fun socket ->
+                mailbox.PostAndAsyncReply(
+                    (fun reply -> Attach(socket, reply)),
+                    timeout = ReplyTimeoutMilliseconds
+                )
           AcceptBrowserFrame =
             fun attachmentId frame ->
-                mailbox.PostAndAsyncReply(fun reply ->
-                    BrowserFrame(attachmentId, Array.copy frame, reply))
+                mailbox.PostAndAsyncReply(
+                    (fun reply ->
+                        BrowserFrame(attachmentId, Array.copy frame, reply)),
+                    timeout = ReplyTimeoutMilliseconds
+                )
           DetachSocket =
             fun attachmentId ->
-                mailbox.PostAndAsyncReply(fun reply -> Detach(attachmentId, reply))
+                mailbox.PostAndAsyncReply(
+                    (fun reply -> Detach(attachmentId, reply)),
+                    timeout = ReplyTimeoutMilliseconds
+                )
           AcceptUpstreamFrame =
             fun frame ->
-                mailbox.PostAndAsyncReply(fun reply ->
-                    UpstreamFrame(Array.copy frame, reply))
+                mailbox.PostAndAsyncReply(
+                    (fun reply -> UpstreamFrame(Array.copy frame, reply)),
+                    timeout = ReplyTimeoutMilliseconds
+                )
           UpstreamEnded =
-            fun () -> mailbox.PostAndAsyncReply UpstreamClosed
-          Stop = fun () -> mailbox.PostAndAsyncReply Stop }
+            fun () ->
+                mailbox.PostAndAsyncReply(
+                    UpstreamClosed,
+                    timeout = ReplyTimeoutMilliseconds
+                )
+          Stop =
+            fun () ->
+                mailbox.PostAndAsyncReply(
+                    Stop,
+                    timeout = ReplyTimeoutMilliseconds
+                ) }

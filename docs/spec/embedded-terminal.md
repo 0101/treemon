@@ -31,6 +31,9 @@ The host owns one ttyd process tree per worktree. It creates ttyd suspended, ass
 in-process Windows Job Object configured to kill its members when the owning handle closes, and only
 then resumes ttyd. Process ownership comes only from that Job Object and retained exact handles;
 process names and ancestry are never discovery or cleanup authority.
+The registry mailbox is the sole owner that closes retained process and Job Object handles.
+An upstream exit posts its exact terminal session ID back to that mailbox, so pruning, explicit
+close, shutdown, and stale upstream notices are serialized and cannot close one handle concurrently.
 
 For each terminal, the host is ttyd's sole upstream WebSocket client for the terminal lifetime. It
 continuously drains ttyd into a small bounded raw replay buffer and accepts one replaceable browser
@@ -60,6 +63,10 @@ lifecycle surface is:
 Start, close, and list return or reconcile against the authoritative registry rather than asking the
 server to merge lifecycle fragments. Browser attachment endpoints ride terminal data returned by
 that registry; there is no separate attach/detach lifecycle API.
+Registry and data-plane mailbox calls have bounded replies. Each message failure is contained before
+the next message is processed, so a cleanup failure cannot wedge later list, close, or shutdown
+requests. Mailbox diagnostics identify only the mailbox and exception type, never terminal content,
+paths, environment values, or credentials.
 
 A machine-level discovery manifest contains only the exact host identity (PID and process start
 identity), loopback endpoint and bearer token, host version, control API version, and the version of
@@ -291,6 +298,10 @@ PowerShell lifecycle helpers, or compatibility shims.
   the implementation has one language, one process owner, and no script/runtime handoff.
 - **Job Object before execution:** kernel membership established before ttyd resumes is the only
   terminal-tree ownership authority.
+- **One serialized cleanup owner:** only the registry closes retained process and Job Object handles.
+  Data-plane upstream exit is a fire-and-forget exact-session notice, avoiding a mailbox dependency
+  cycle while making stale notices harmless. Per-message recovery and bounded replies keep both
+  mailboxes responsive; type-only diagnostics preserve the no-terminal-content logging boundary.
 - **One upstream and one browser writer:** the host preserves the shell across browser reconnects
   without defining multi-writer input semantics.
 - **Separate state from proxy hosting:** the replay/attachment mailbox remains independently

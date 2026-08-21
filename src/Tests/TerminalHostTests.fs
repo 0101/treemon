@@ -21,6 +21,12 @@ open Treemon.TerminalHosting
 let private getTask (task: Task<'a>) =
     task.GetAwaiter().GetResult()
 
+let private runWithin (timeout: TimeSpan) workflow =
+    workflow
+    |> Async.StartAsTask
+    |> _.WaitAsync(timeout)
+    |> getTask
+
 let private waitUntil timeout predicate =
     let deadline = DateTimeOffset.UtcNow + timeout
 
@@ -119,6 +125,15 @@ let private assertRegistryResponseV1Shape (document: JsonDocument) =
               "worktreePath"
               "attachmentEndpoint" ]
     )
+
+let private inertDataPlane endpoint =
+    { AttachmentEndpoint = endpoint
+      AttachSocket = fun _ -> async.Return None
+      AcceptBrowserFrame = fun _ _ -> async.Return(Ok())
+      DetachSocket = fun _ -> async.Return()
+      AcceptUpstreamFrame = fun _ -> async.Return()
+      UpstreamEnded = fun () -> async.Return()
+      Stop = fun () -> async.Return() }
 
 type private TestWebSocket() =
     inherit System.Net.WebSockets.WebSocket()
@@ -222,7 +237,7 @@ type private ApiFixture() =
                       Close = fun () -> closes.Enqueue sessionId }
         }
 
-    let dataPlaneStarter sessionId _ =
+    let dataPlaneStarter sessionId _ _ =
         async {
             return
                 Ok
@@ -273,6 +288,258 @@ type private ApiFixture() =
 
             try
                 Directory.Delete(root, recursive = true)
+            with _ ->
+                ()
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<Category("TerminalHost")>]
+type TerminalRegistryResilienceTests() =
+    let timeout = TimeSpan.FromSeconds 2.0
+
+    let worktree name =
+        let path =
+            Path.GetFullPath(
+                Path.Combine(Path.GetTempPath(), $"{name}-{Guid.NewGuid():N}")
+            )
+
+        CanonicalWorktree.create path path
+
+    [<Test>]
+    member _.``upstream exit racing prune has one cleanup owner and ignores stale notices``() =
+        use pruneArmed = new ManualResetEventSlim()
+        use pruneEntered = new ManualResetEventSlim()
+        use releasePrune = new ManualResetEventSlim()
+        let closes = ConcurrentQueue<string>()
+        let dataPlanes = ConcurrentQueue<TerminalDataPlane>()
+        let upstreamExitNotices = ConcurrentQueue<(unit -> unit)>()
+
+        let starter sessionId _ =
+            async {
+                return
+                    Ok
+                        { ProcessId = 23_000 + closes.Count
+                          ProcessStartTimeUtcTicks = 33_000L + int64 closes.Count
+                          TtydPort = 43_000 + closes.Count
+                          HasExited =
+                            fun () ->
+                                if pruneArmed.IsSet then
+                                    pruneEntered.Set()
+
+                                    if not (releasePrune.Wait timeout) then
+                                        failwith "Timed out coordinating registry prune"
+
+                                    true
+                                else
+                                    false
+                          Close = fun () -> closes.Enqueue sessionId }
+            }
+
+        let dataPlaneStarter sessionId _ notifyUpstreamExited =
+            async {
+                let core =
+                    TerminalDataPlane.createCore
+                        Protocol.MaximumReplayBytes
+                        (new TestWebSocket())
+                        notifyUpstreamExited
+
+                let running =
+                    { core with
+                        AttachmentEndpoint =
+                            $"http://127.0.0.1:43000/_treemon/{sessionId}/test-token/" }
+
+                dataPlanes.Enqueue running
+                upstreamExitNotices.Enqueue notifyUpstreamExited
+                return Ok running
+            }
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+        let canonicalWorktree = worktree "terminal-registry-prune-race"
+
+        try
+            let first =
+                TerminalRegistry.start registry canonicalWorktree
+                |> runWithin timeout
+                |> requireOk
+
+            let firstSessionId =
+                first.Terminals
+                |> List.exactlyOne
+                |> _.SessionId
+
+            let firstUpstreamExit =
+                upstreamExitNotices.ToArray()
+                |> Array.exactlyOne
+
+            let firstDataPlane =
+                dataPlanes.ToArray()
+                |> Array.exactlyOne
+
+            pruneArmed.Set()
+            let pendingList =
+                TerminalRegistry.list registry
+                |> Async.StartAsTask
+
+            Assert.That(
+                pruneEntered.Wait timeout,
+                Is.True,
+                "registry did not enter the deterministic prune window"
+            )
+
+            firstDataPlane.UpstreamEnded()
+            |> runWithin timeout
+
+            releasePrune.Set()
+
+            let pruned =
+                pendingList.WaitAsync(timeout)
+                |> getTask
+
+            let afterExitNotice =
+                TerminalRegistry.list registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(pruned.Terminals, Is.Empty)
+                Assert.That(afterExitNotice.Terminals, Is.Empty)
+                Assert.That(closes.ToArray(), Is.EqualTo([| firstSessionId |])))
+
+            pruneArmed.Reset()
+
+            let restarted =
+                TerminalRegistry.start registry canonicalWorktree
+                |> runWithin timeout
+                |> requireOk
+
+            let restartedSessionId =
+                restarted.Terminals
+                |> List.exactlyOne
+                |> _.SessionId
+
+            firstUpstreamExit ()
+
+            let afterStaleNotice =
+                TerminalRegistry.list registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(restartedSessionId, Is.Not.EqualTo(firstSessionId))
+
+                Assert.That(
+                    afterStaleNotice.Terminals |> List.map _.SessionId,
+                    Is.EqualTo([ restartedSessionId ])
+                )
+
+                Assert.That(closes.Count, Is.EqualTo(1)))
+
+            let closed =
+                TerminalRegistry.close registry restartedSessionId
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(closed.Terminals, Is.Empty)
+                Assert.That(closes.Count, Is.EqualTo(2)))
+
+            TerminalRegistry.shutdown registry
+            |> runWithin timeout
+        finally
+            releasePrune.Set()
+
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+            with _ ->
+                ()
+
+    [<Test>]
+    member _.``cleanup failures do not wedge list close or shutdown``() =
+        use exited = new ManualResetEventSlim()
+        use cleanupFails = new ManualResetEventSlim(true)
+        let closes = ConcurrentQueue<unit>()
+
+        let starter _ _ =
+            async {
+                return
+                    Ok
+                        { ProcessId = 23_100
+                          ProcessStartTimeUtcTicks = 33_100L
+                          TtydPort = 43_100
+                          HasExited = fun () -> exited.IsSet
+                          Close =
+                            fun () ->
+                                closes.Enqueue()
+
+                                if cleanupFails.IsSet then
+                                    raise (
+                                        InvalidOperationException(
+                                            "deterministic cleanup failure"
+                                        )
+                                    ) }
+            }
+
+        let dataPlaneStarter sessionId _ _ =
+            async {
+                return
+                    Ok(
+                        inertDataPlane
+                            $"http://127.0.0.1:43100/_treemon/{sessionId}/test-token/"
+                    )
+            }
+
+        let registry =
+            TerminalRegistry.create
+                starter
+                dataPlaneStarter
+
+        try
+            let started =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-cleanup-failure")
+                |> runWithin timeout
+                |> requireOk
+
+            let sessionId =
+                started.Terminals
+                |> List.exactlyOne
+                |> _.SessionId
+
+            exited.Set()
+
+            let listed =
+                TerminalRegistry.list registry
+                |> runWithin timeout
+
+            let closed =
+                TerminalRegistry.close registry sessionId
+                |> runWithin timeout
+
+            TerminalRegistry.shutdown registry
+            |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    listed.Terminals |> List.map _.SessionId,
+                    Is.EqualTo([ sessionId ])
+                )
+
+                Assert.That(
+                    closed.Terminals |> List.map _.SessionId,
+                    Is.EqualTo([ sessionId ])
+                )
+
+                Assert.That(
+                    closes.Count,
+                    Is.EqualTo(3),
+                    "each message should reach cleanup and recover"
+                ))
+        finally
+            cleanupFails.Reset()
+
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
             with _ ->
                 ()
 
@@ -460,6 +727,37 @@ type TerminalHostDataPlaneTests() =
     let frame (value: string) = Encoding.UTF8.GetBytes value
 
     [<Test>]
+    member _.``message failure does not wedge the data plane``() =
+        let upstream = new TestWebSocket()
+
+        let plane =
+            TerminalDataPlane.createCore
+                0
+                upstream
+                ignore
+
+        try
+            plane.AcceptUpstreamFrame(frame "0deterministic failure")
+            |> runWithin (TimeSpan.FromSeconds 2.0)
+
+            plane.DetachSocket(Guid.NewGuid())
+            |> runWithin (TimeSpan.FromSeconds 2.0)
+
+            plane.Stop()
+            |> runWithin (TimeSpan.FromSeconds 2.0)
+
+            Assert.That(
+                upstream.CloseDescription,
+                Is.EqualTo(Some "Terminal session closed")
+            )
+        finally
+            try
+                plane.Stop()
+                |> runWithin (TimeSpan.FromSeconds 2.0)
+            with _ ->
+                ()
+
+    [<Test>]
     member _.``one upstream survives browser replacement and attachment loss``() =
         let starts = ConcurrentQueue<string>()
         let closes = ConcurrentQueue<string>()
@@ -478,7 +776,7 @@ type TerminalHostDataPlaneTests() =
                           Close = fun () -> closes.Enqueue sessionId }
             }
 
-        let dataPlaneStarter sessionId _ =
+        let dataPlaneStarter sessionId _ _ =
             async {
                 let upstream = new TestWebSocket()
 
@@ -786,7 +1084,6 @@ type TerminalHostProxyTests() =
     [<Test>]
     member _.``attachment endpoint rejects invalid bearer origin and oversized requests``() =
         let upstream = new TestWebSocket()
-        let processCloses = ConcurrentQueue<unit>()
         let connectorCalls = ConcurrentQueue<int>()
         let token = "shared-control-bearer"
         let dashboardOrigin = "http://localhost:5174"
@@ -796,13 +1093,6 @@ type TerminalHostProxyTests() =
 
         let expectedFrameAncestors =
             "frame-ancestors " + String.concat " " allowedOrigins
-
-        let terminalProcess =
-            { ProcessId = 22_000
-              ProcessStartTimeUtcTicks = 32_000L
-              TtydPort = 1
-              HasExited = fun () -> false
-              Close = fun () -> processCloses.Enqueue() }
 
         let connector port =
             connectorCalls.Enqueue port
@@ -814,7 +1104,8 @@ type TerminalHostProxyTests() =
                 allowedOrigins
                 token
                 "security-session"
-                terminalProcess
+                1
+                ignore
             |> Async.RunSynchronously
             |> requireOk
 
@@ -900,21 +1191,13 @@ type TerminalHostProxyTests() =
                     Is.EqualTo(expectedFrameAncestors)
                 )
 
-                Assert.That(connectorCalls.Count, Is.EqualTo(1))
-                Assert.That(processCloses.Count, Is.Zero))
+                Assert.That(connectorCalls.Count, Is.EqualTo(1)))
         finally
             plane.Stop() |> Async.RunSynchronously
 
     [<Test>]
     member _.``attachment response denies framing when no dashboard origin is configured``() =
         let upstream = new TestWebSocket()
-
-        let terminalProcess =
-            { ProcessId = 22_001
-              ProcessStartTimeUtcTicks = 32_001L
-              TtydPort = 1
-              HasExited = fun () -> false
-              Close = ignore }
 
         let connector _ =
             async.Return(Ok(upstream :> System.Net.WebSockets.WebSocket))
@@ -925,7 +1208,8 @@ type TerminalHostProxyTests() =
                 []
                 "shared-control-bearer"
                 "no-origin-session"
-                terminalProcess
+                1
+                ignore
             |> Async.RunSynchronously
             |> requireOk
 

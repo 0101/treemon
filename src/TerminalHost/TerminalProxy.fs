@@ -380,10 +380,11 @@ module internal TerminalProxy =
         allowedOrigins
         bearerToken
         sessionId
-        (terminalProcess: TerminalProcess)
+        ttydPort
+        onUpstreamEnded
         =
         async {
-            match! connector terminalProcess.TtydPort with
+            match! connector ttydPort with
             | Error error -> return Error error
             | Ok upstream ->
                 let! initialized =
@@ -404,7 +405,7 @@ module internal TerminalProxy =
                         TerminalDataPlane.createCore
                             Protocol.MaximumReplayBytes
                             upstream
-                            terminalProcess.Close
+                            onUpstreamEnded
 
                     startUpstreamPump core upstream
 
@@ -413,7 +414,7 @@ module internal TerminalProxy =
                             allowedOrigins
                             bearerToken
                             sessionId
-                            terminalProcess.TtydPort
+                            ttydPort
                             core
                         |> Async.AwaitTask
                     with
@@ -455,10 +456,17 @@ module internal TerminalProxy =
                                             |> Async.AwaitTask }
         }
 
-    let start allowedOrigins bearerToken sessionId terminalProcess =
+    let start
+        allowedOrigins
+        bearerToken
+        sessionId
+        ttydPort
+        onUpstreamEnded
+        =
         startWithConnector
             openUpstream
             allowedOrigins
             bearerToken
             sessionId
-            terminalProcess
+            ttydPort
+            onUpstreamEnded
