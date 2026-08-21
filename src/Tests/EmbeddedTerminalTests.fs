@@ -614,8 +614,16 @@ type EmbeddedTerminalControlClientTests() =
             Is.EqualTo expected
         )
 
-    [<Test>]
-    member _.``resume commands containing control characters are rejected before terminal input``() =
+    [<TestCase(0x00)>]
+    [<TestCase(0x03)>]
+    [<TestCase(0x0A)>]
+    [<TestCase(0x0D)>]
+    [<TestCase(0x15)>]
+    [<TestCase(0x1B)>]
+    [<TestCase(0x85)>]
+    member _.``resume commands containing control characters are rejected before terminal input``
+        (characterCode: int)
+        =
         task {
             use listener = new TcpListener(IPAddress.Loopback, 0)
             listener.Start()
@@ -627,7 +635,7 @@ type EmbeddedTerminalControlClientTests() =
                 CodingToolCli.build
                     (Some CopilotCli)
                     (CodingToolCli.Resume(
-                        Some "owned-session\rWrite-Output injected"
+                        Some $"owned-session{string (char characterCode)}Write-Output injected"
                     ))
 
             let! result =

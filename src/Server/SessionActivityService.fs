@@ -68,6 +68,19 @@ let private parseTerminalSessionId (value: string) : Result<TerminalSessionId op
         | false, _ ->
             Error "terminalSessionId must be a 32-character hexadecimal TerminalHost session id"
 
+let internal maxSessionIdLength = 128
+
+let private validSessionId (value: string) =
+    not (String.IsNullOrEmpty value)
+    && value.Length <= maxSessionIdLength
+    && value
+       |> Seq.forall (fun character ->
+           Char.IsAsciiLetterOrDigit character
+           || character = '.'
+           || character = '_'
+           || character = ':'
+           || character = '-')
+
 let private tryParseTimestamp (s: string) : Result<DateTimeOffset, string> =
     match DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind) with
     | true, dto -> Ok dto
@@ -206,6 +219,8 @@ let private withMessageTimestamp at =
 let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<SessionActivityReport, string> =
     if obj.ReferenceEquals(box req, null) then Error "missing body"
     elif String.IsNullOrWhiteSpace req.sessionId then Error "missing sessionId"
+    elif not (validSessionId req.sessionId) then
+        Error $"sessionId must be 1-{maxSessionIdLength} characters from [A-Za-z0-9._:-]"
     elif String.IsNullOrWhiteSpace req.worktreePath then Error "missing worktreePath"
     elif String.IsNullOrWhiteSpace req.eventId then Error "missing eventId"
     elif String.IsNullOrWhiteSpace req.occurredAt then Error "missing occurredAt"

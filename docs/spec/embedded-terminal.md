@@ -207,7 +207,9 @@ The reporting extension reads `TREEMON_TERMINAL_SESSION_ID` and adds it as optio
 `SessionActivityService` and `SessionActivityStore` retain that value without changing status
 folding, representative selection, liveness, or worktree projection. The replacement coordinator
 uses the current host registry plus the existing effective per-session state and a monotonic
-owned-session activity epoch for its compare-and-commit check.
+owned-session activity epoch for its compare-and-commit check. Activity ingestion accepts a Copilot
+`SessionId` only when it is 1–128 ASCII characters from `[A-Za-z0-9._:-]`, so the persisted resume
+identity is bounded and cannot carry terminal control input.
 
 Replacement snapshots terminal presentation and exact resumable Copilot ownership before stopping
 the old host. Recreated terminals use `CodingToolCli` for provider-specific resume commands and the

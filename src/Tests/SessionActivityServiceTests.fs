@@ -439,6 +439,68 @@ type ParseReportTests() =
     member _.``a blank sessionId is rejected``() =
         Assert.That(parseErr { baseReq "turn_started" with sessionId = "  " }, Does.Contain "sessionId")
 
+    [<TestCase("session-123")>]
+    [<TestCase("018F7E43-251D-7DD2-BB7D-8949D7A5688A")>]
+    [<TestCase("copilot.session_42:resume")>]
+    member _.``a supported resume sessionId is preserved``(sessionId: string) =
+        let report =
+            parseOk
+                { baseReq "turn_started" with
+                    sessionId = sessionId }
+
+        Assert.That(report.SessionId, Is.EqualTo(SessionId sessionId))
+
+    [<Test>]
+    member _.``a sessionId at the bounded identifier limit is preserved``() =
+        let sessionId = String('a', maxSessionIdLength)
+
+        let report =
+            parseOk
+                { baseReq "turn_started" with
+                    sessionId = sessionId }
+
+        Assert.That(report.SessionId, Is.EqualTo(SessionId sessionId))
+
+    [<Test>]
+    member _.``an oversized sessionId is rejected``() =
+        let sessionId = String('a', maxSessionIdLength + 1)
+
+        Assert.That(
+            parseErr
+                { baseReq "turn_started" with
+                    sessionId = sessionId },
+            Does.Contain(string maxSessionIdLength)
+        )
+
+    [<TestCase("session/id")>]
+    [<TestCase("session id")>]
+    [<TestCase("session'id")>]
+    [<TestCase("session;id")>]
+    member _.``a sessionId outside the supported identifier alphabet is rejected``(sessionId: string) =
+        Assert.That(
+            parseErr
+                { baseReq "turn_started" with
+                    sessionId = sessionId },
+            Does.Contain("[A-Za-z0-9._:-]")
+        )
+
+    [<TestCase(0x00)>]
+    [<TestCase(0x03)>]
+    [<TestCase(0x0A)>]
+    [<TestCase(0x0D)>]
+    [<TestCase(0x15)>]
+    [<TestCase(0x1B)>]
+    [<TestCase(0x85)>]
+    member _.``a sessionId containing a terminal control character is rejected``(characterCode: int) =
+        let sessionId = $"safe{string (char characterCode)}injected"
+
+        Assert.That(
+            parseErr
+                { baseReq "turn_started" with
+                    sessionId = sessionId },
+            Does.Contain("[A-Za-z0-9._:-]")
+        )
+
     [<Test>]
     member _.``a blank eventId is rejected``() =
         Assert.That(parseErr { baseReq "turn_started" with eventId = "" }, Does.Contain "eventId")
