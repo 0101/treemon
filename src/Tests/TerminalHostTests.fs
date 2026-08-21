@@ -91,14 +91,13 @@ let private responseHeader name (response: HttpResponseMessage) =
 
 let private terminalIds (document: JsonDocument) =
     document.RootElement.GetProperty("terminals").EnumerateArray()
-    |> Seq.map (fun terminal -> terminal.GetProperty("sessionId").GetString())
+    |> Seq.map _.GetProperty("sessionId").GetString()
     |> Seq.choose Option.ofObj
     |> Seq.toList
 
 let private terminalEndpoints (document: JsonDocument) =
     document.RootElement.GetProperty("terminals").EnumerateArray()
-    |> Seq.map (fun terminal ->
-        terminal.GetProperty("attachmentEndpoint").GetString())
+    |> Seq.map _.GetProperty("attachmentEndpoint").GetString()
     |> Seq.choose Option.ofObj
     |> Seq.toList
 

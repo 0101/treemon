@@ -460,19 +460,16 @@ type private FakeControlHost
 
         this.PublishManifest()
 
-    member _.ExactProcessIsLive(pid: int, startTicks: int64) =
-        Ok(
-            pid = currentPid
-            && startTicks = currentStartTicks
-            && lock gate (fun () -> online)
-        )
+    member private _.IsCurrentProcessLive(pid: int, startTicks: int64) =
+        pid = currentPid
+        && startTicks = currentStartTicks
+        && lock gate (fun () -> online)
 
-    member _.ResolveExactProcessExecutable(pid: int, startTicks: int64) =
-        if
-            pid = currentPid
-            && startTicks = currentStartTicks
-            && lock gate (fun () -> online)
-        then
+    member this.ExactProcessIsLive(pid: int, startTicks: int64) =
+        Ok(this.IsCurrentProcessLive(pid, startTicks))
+
+    member this.ResolveExactProcessExecutable(pid: int, startTicks: int64) =
+        if this.IsCurrentProcessLive(pid, startTicks) then
             Ok(lock gate (fun () -> currentExecutable))
         else
             Error "Fake TerminalHost identity is not live"
@@ -530,20 +527,6 @@ let private managerConfig
     (host: FakeControlHost)
     (launchHost: ProcessStartInfo -> Result<unit, string>)
     : TerminalHostProcess.Config =
-    let processIdentityMatches pid startTicks =
-        try
-            use child = Process.GetProcessById pid
-
-            Ok(
-                not child.HasExited
-                && child.StartTime.ToUniversalTime().Ticks = startTicks
-            )
-        with
-        | :? ArgumentException
-        | :? InvalidOperationException ->
-            Ok false
-        | error -> Error error.Message
-
     { HostExecutablePath = host.OldExecutable
       HostStateDirectory = host.StateDirectory
       TtydExecutablePath = None
@@ -553,10 +536,15 @@ let private managerConfig
       ControlRequestTimeout = TimeSpan.FromMilliseconds 500.0
       ProbeInterval = TimeSpan.FromMilliseconds 20.0
       LaunchHost = launchHost
-      ProcessIdentityMatches = processIdentityMatches
+      ProcessIdentityMatches =
+        TerminalHostProcess.processIdentityMatchesDefault
       ResolveProcessExecutable =
         fun pid startTicks ->
-            match processIdentityMatches pid startTicks with
+            match
+                TerminalHostProcess.processIdentityMatchesDefault
+                    pid
+                    startTicks
+            with
             | Ok true -> Ok host.OldExecutable
             | Ok false -> Error "Fake TerminalHost identity is not live"
             | Error error -> Error error
@@ -599,6 +587,13 @@ let private requireError result =
         Assert.Fail("Expected an error")
         ""
 
+let private runningEndpoint (tab: EmbeddedTerminalTab) =
+    match tab.Lifecycle with
+    | EmbeddedTerminalLifecycle.Running endpoint -> endpoint
+    | lifecycle ->
+        Assert.Fail($"Expected running terminal, got {lifecycle}")
+        ""
+
 let private assertRunningFor
     (expectedPath: WorktreePath)
     (snapshot: EmbeddedTerminalSnapshot)
@@ -610,13 +605,9 @@ let private assertRunningFor
                 (WorktreePath.value tab.Worktree)
                 (WorktreePath.value expectedPath))
 
-    match tab.Lifecycle with
-    | EmbeddedTerminalLifecycle.Running endpoint ->
-        Assert.That(endpoint, Does.StartWith("http://127.0.0.1:41001/_treemon/"))
-        endpoint
-    | lifecycle ->
-        Assert.Fail($"Expected a running terminal, got {lifecycle}")
-        ""
+    let endpoint = runningEndpoint tab
+    Assert.That(endpoint, Does.StartWith("http://127.0.0.1:41001/_treemon/"))
+    endpoint
 
 let private populateAgent
     (agent: MailboxProcessor<StateMsg>)
@@ -1302,12 +1293,7 @@ type EmbeddedTerminalControlClientTests() =
             let beforeRestart = requireOk secondStarted
             let endpointsBefore =
                 beforeRestart.Tabs
-                |> List.map (fun tab ->
-                    match tab.Lifecycle with
-                    | EmbeddedTerminalLifecycle.Running endpoint -> endpoint
-                    | lifecycle ->
-                        Assert.Fail($"Expected running terminal, got {lifecycle}")
-                        "")
+                |> List.map runningEndpoint
 
             let restartedManager =
                 EmbeddedTerminal.createWithConfig config
@@ -1318,12 +1304,7 @@ type EmbeddedTerminalControlClientTests() =
 
             let endpointsAfter =
                 rediscovered.Tabs
-                |> List.map (fun tab ->
-                    match tab.Lifecycle with
-                    | EmbeddedTerminalLifecycle.Running endpoint -> endpoint
-                    | lifecycle ->
-                        Assert.Fail($"Expected running terminal, got {lifecycle}")
-                        "")
+                |> List.map runningEndpoint
 
             Assert.Multiple(fun () ->
                 Assert.That(
