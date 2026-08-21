@@ -592,6 +592,79 @@ let private populateAgent
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type TerminalHostProcessConfigurationTests() =
+    [<TestCase("Debug")>]
+    [<TestCase("Release")>]
+    member _.``source-tree host binaries are selected only when explicitly configured``
+        (configuration: string)
+        =
+        withTempDir "terminal-host-resolution" (fun root ->
+            let baseDirectory = Path.Combine(root, "app")
+            let publishedExecutable =
+                Path.Combine(
+                    baseDirectory,
+                    "terminal-host",
+                    TerminalHostProcess.hostExecutableName
+                )
+                |> Path.GetFullPath
+
+            let directExecutable =
+                Path.Combine(
+                    baseDirectory,
+                    TerminalHostProcess.hostExecutableName
+                )
+
+            let sourceTreeExecutable =
+                Path.Combine(
+                    root,
+                    "src",
+                    "TerminalHost",
+                    "bin",
+                    configuration,
+                    "net10.0",
+                    TerminalHostProcess.hostExecutableName
+                )
+                |> Path.GetFullPath
+
+            [ directExecutable; sourceTreeExecutable ]
+            |> List.iter (fun path ->
+                Directory.CreateDirectory(Path.GetDirectoryName path)
+                |> ignore
+
+                File.WriteAllText(path, "fixture"))
+
+            let implicitlyResolved =
+                TerminalHostProcess.resolveHostExecutable
+                    baseDirectory
+                    None
+
+            let explicitlyResolved =
+                TerminalHostProcess.resolveHostExecutable
+                    baseDirectory
+                    (Some sourceTreeExecutable)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    implicitlyResolved,
+                    Is.EqualTo publishedExecutable,
+                    "Missing published layout must fail closed at its deployment path"
+                )
+
+                Assert.That(
+                    File.Exists implicitlyResolved,
+                    Is.False,
+                    "An existing direct or source-tree binary must not become an implicit fallback"
+                )
+
+                Assert.That(
+                    explicitlyResolved,
+                    Is.EqualTo sourceTreeExecutable,
+                    "Development may select a source-tree build only through explicit startup configuration"
+                )))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type EmbeddedTerminalControlClientTests() =
     [<TestCase("http://127.0.0.1:41001/", true)>]
     [<TestCase("http://127.0.0.1:41001/terminal/session/", true)>]

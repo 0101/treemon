@@ -87,22 +87,17 @@ let internal hostExecutableName =
     else
         "TerminalHost"
 
-let private defaultHostExecutable () =
-    match
-        Environment.GetEnvironmentVariable("TREEMON_TERMINAL_HOST_EXECUTABLE")
-        |> Option.ofObj
-        |> Option.filter (String.IsNullOrWhiteSpace >> not)
-    with
+let internal resolveHostExecutable baseDirectory configuredPath =
+    match configuredPath |> Option.filter (String.IsNullOrWhiteSpace >> not) with
     | Some configured -> Path.GetFullPath configured
     | None ->
-        [ Path.Combine(AppContext.BaseDirectory, "terminal-host", hostExecutableName)
-          Path.Combine(AppContext.BaseDirectory, hostExecutableName)
-          Path.Combine([| __SOURCE_DIRECTORY__; ".."; "TerminalHost"; "bin"; "Debug"; "net10.0"; hostExecutableName |])
-          Path.Combine([| __SOURCE_DIRECTORY__; ".."; "TerminalHost"; "bin"; "Release"; "net10.0"; hostExecutableName |]) ]
-        |> List.map Path.GetFullPath
-        |> List.tryFind File.Exists
-        |> Option.defaultWith (fun () ->
-            Path.Combine(AppContext.BaseDirectory, "terminal-host", hostExecutableName))
+        Path.Combine(baseDirectory, "terminal-host", hostExecutableName)
+        |> Path.GetFullPath
+
+let private defaultHostExecutable () =
+    Environment.GetEnvironmentVariable("TREEMON_TERMINAL_HOST_EXECUTABLE")
+    |> Option.ofObj
+    |> resolveHostExecutable AppContext.BaseDirectory
 
 let internal originsFor (serverOrigin: string) =
     try

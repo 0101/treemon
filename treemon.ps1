@@ -827,7 +827,33 @@ function Show-Log {
     Get-Content $logToTail -Tail 50 -Wait
 }
 
-function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$ServerLabel, [string[]]$MonitorPaths) {
+function Resolve-DevelopmentTerminalHostExecutable {
+    if (-not [string]::IsNullOrWhiteSpace($env:TREEMON_TERMINAL_HOST_EXECUTABLE)) {
+        $configured = $env:TREEMON_TERMINAL_HOST_EXECUTABLE
+        if (-not [IO.Path]::IsPathRooted($configured)) {
+            $configured = Join-Path $ScriptDir $configured
+        }
+        return [IO.Path]::GetFullPath($configured)
+    }
+
+    $candidates = @(
+        (Join-Path $ScriptDir "src\TerminalHost\bin\Debug\net10.0\TerminalHost.exe"),
+        (Join-Path $ScriptDir "src\TerminalHost\bin\Release\net10.0\TerminalHost.exe")
+    )
+    $existing = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+
+    # dotnet watch builds the Debug project reference before starting Treemon on a clean checkout.
+    $selected = if ($existing) { $existing } else { $candidates[0] }
+    return [IO.Path]::GetFullPath($selected)
+}
+
+function Start-DualProcess(
+    [string]$ServerArgs,
+    [string]$ModeName,
+    [string]$ServerLabel,
+    [string[]]$MonitorPaths,
+    [string]$TerminalHostExecutable
+) {
     $devApiPort = 5001
     $devVitePort = 5174
 
@@ -842,6 +868,9 @@ function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$Serv
 
     $env:VITE_PORT = $devVitePort
     $env:API_PORT = $devApiPort
+    $hadHostOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_EXECUTABLE
+    $previousHostOverride = $env:TREEMON_TERMINAL_HOST_EXECUTABLE
+    $env:TREEMON_TERMINAL_HOST_EXECUTABLE = $TerminalHostExecutable
 
     $serverProcess = $null
     $viteProcess = $null
@@ -877,6 +906,11 @@ function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$Serv
 
         Remove-Item Env:\VITE_PORT -ErrorAction SilentlyContinue
         Remove-Item Env:\API_PORT -ErrorAction SilentlyContinue
+        if ($hadHostOverride) {
+            $env:TREEMON_TERMINAL_HOST_EXECUTABLE = $previousHostOverride
+        } else {
+            Remove-Item Env:\TREEMON_TERMINAL_HOST_EXECUTABLE -ErrorAction SilentlyContinue
+        }
 
         Write-Host "$ModeName mode stopped" -ForegroundColor Green
     }
@@ -887,11 +921,22 @@ function Start-DevMode([string[]]$Roots) {
     # @($null) is a 1-element array that would call .TrimEnd() on $null below.
     $cleanRoots = @($Roots | Where-Object { $_ })
     $rootArgs = ($cleanRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
-    Start-DualProcess -ServerArgs $rootArgs -ModeName "Dev" -ServerLabel "dotnet watch" -MonitorPaths $cleanRoots
+    $terminalHostExecutable = Resolve-DevelopmentTerminalHostExecutable
+    Start-DualProcess `
+        -ServerArgs $rootArgs `
+        -ModeName "Dev" `
+        -ServerLabel "dotnet watch" `
+        -MonitorPaths $cleanRoots `
+        -TerminalHostExecutable $terminalHostExecutable
 }
 
 function Start-DemoMode {
-    Start-DualProcess -ServerArgs "--demo" -ModeName "Demo" -ServerLabel "demo data"
+    $terminalHostExecutable = Resolve-DevelopmentTerminalHostExecutable
+    Start-DualProcess `
+        -ServerArgs "--demo" `
+        -ModeName "Demo" `
+        -ServerLabel "demo data" `
+        -TerminalHostExecutable $terminalHostExecutable
 }
 
 function Set-UpstreamRemote([string]$RepoRoot, [string]$RemoteName) {

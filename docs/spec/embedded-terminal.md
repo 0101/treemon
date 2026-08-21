@@ -202,6 +202,11 @@ control a live host is refused while terminals remain. Server, frontend, and hos
 built outside their active destinations, and the candidate Treemon's own compiled control client
 probes the exact live host before any active file or process is replaced. The staged directory
 carries the complete framework-dependent host publication alongside `TerminalHost.exe`.
+Lazy host startup accepts only the explicit `TREEMON_TERMINAL_HOST_EXECUTABLE` deployment input or
+the `terminal-host` directory beside the published Treemon executable. Development startup sets the
+explicit input to its local TerminalHost build; shipped server code never probes source-tree
+Debug/Release output, and a missing published host fails at the deployment path without another
+fallback.
 
 The reporting extension reads `TREEMON_TERMINAL_SESSION_ID` and adds it as optional origin metadata.
 `SessionActivityService` and `SessionActivityStore` retain that value without changing status
@@ -259,6 +264,9 @@ PowerShell lifecycle helpers, or compatibility shims.
   stage the complete host publication before swapping server files. Treemon receives that stable
   staged executable as its lazy-start path; if an exact live host still runs from an older publish
   directory, those files are preserved until that process exits rather than overwritten in place.
+- **Deployment-owned executable selection:** production resolves only an explicit deployment input
+  or the published `terminal-host` layout. The development script supplies its source build path
+  explicitly, so the shipped assembly contains no build-machine checkout fallback.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the
   `CodingToolCli Resume` command. A terminal without an exact resumable session receives no input
