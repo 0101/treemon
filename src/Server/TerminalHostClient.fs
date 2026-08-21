@@ -219,23 +219,23 @@ let private parseTerminal manifest (element: JsonElement) =
         Error "TerminalHost terminal record has an invalid shape"
     else
         try
-            let sessionId = element.GetProperty("sessionId").GetString()
+            let sessionId = element.GetProperty("sessionId").GetString() |> Option.ofObj
             let worktreePath = element.GetProperty("worktreePath").GetString() |> Option.ofObj
             let attachmentEndpoint = element.GetProperty("attachmentEndpoint").GetString() |> Option.ofObj
 
-            if sessionId |> Option.ofObj |> Option.exists validSessionId |> not then
+            if sessionId |> Option.exists validSessionId |> not then
                 Error "TerminalHost returned an invalid terminal session ID"
             elif worktreePath |> Option.exists validCanonicalWorktreePath |> not then
                 Error "TerminalHost returned an invalid worktree path"
             elif
-                attachmentEndpoint
-                |> Option.exists (validAttachmentEndpoint manifest sessionId)
+                Option.map2 (validAttachmentEndpoint manifest) sessionId attachmentEndpoint
+                |> Option.defaultValue false
                 |> not
             then
                 Error "TerminalHost returned an invalid attachment endpoint"
             else
                 Ok
-                    { SessionId = sessionId.ToLowerInvariant()
+                    { SessionId = (sessionId |> Option.get).ToLowerInvariant()
                       WorktreePath = worktreePath |> Option.get
                       AttachmentEndpoint = attachmentEndpoint |> Option.get }
         with
