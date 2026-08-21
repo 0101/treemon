@@ -382,7 +382,7 @@ PowerShell lifecycle helpers, or compatibility shims.
   avoids timeout mismatches and stale lifecycle requests without allowing a registry race during
   replacement.
 - **Exact in-memory cleanup exclusion:** delete/archive uses a mailbox-owned canonical-path
-  reservation around strict terminal close plus mutation. Same-path lifecycle mutations fail
+  reservation around terminal close plus mutation. Same-path lifecycle mutations fail
   retryably until a `finally` release, while unrelated worktrees stay concurrent; no persistent
   lease, supervisor, or cross-process cleanup protocol is required.
 
