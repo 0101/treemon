@@ -86,10 +86,17 @@ let private createApi agent roots =
 
     createApiWithTerminal agent roots manager, manager
 
+let private closeThen closeTerminal path operation =
+    async {
+        match! closeTerminal path with
+        | Error error -> return Error error
+        | Ok () -> return! operation ()
+    }
+
 let private deleteWorktree agent worktreeRoots wtPath =
     WorktreeApi.deleteWorktreeWith
         (fun _ _ _ -> async { return Ok () })
-        (fun _ -> async { return Ok() })
+        (closeThen (fun _ -> async { return Ok() }))
         (fun _ -> async { return () })
         agent
         (RefreshScheduler.buildRootPaths worktreeRoots)
@@ -253,11 +260,11 @@ type DeleteWorktreeResolutionTests() =
                             calls.Add("remove")
                             return Ok ()
                         })
-                    (fun _ ->
+                    (closeThen (fun _ ->
                         async {
                             calls.Add("close")
                             return Ok()
-                        })
+                        }))
                     (fun _ ->
                         async {
                             calls.Add("state")
@@ -301,13 +308,13 @@ type DeleteWorktreeResolutionTests() =
                             calls.Add("remove")
                             return Ok ()
                         })
-                    (fun _ ->
+                    (closeThen (fun _ ->
                         async {
                             calls.Add("close")
                             return
                                 Error
                                     "terminal cleanup was not confirmed"
-                        })
+                        }))
                     (fun _ ->
                         async {
                             calls.Add("state")
@@ -360,11 +367,11 @@ type DeleteWorktreeResolutionTests() =
                             calls.Add("remove")
                             return Error "Git removal failed"
                         })
-                    (fun _ ->
+                    (closeThen (fun _ ->
                         async {
                             calls.Add("close")
                             return Ok()
-                        })
+                        }))
                     (fun _ ->
                         async {
                             calls.Add("state")
@@ -553,12 +560,12 @@ type ArchiveWorktreeResolutionTests() =
                 WorktreeApi.updateArchivedBranchesWith
                     agent
                     (RefreshScheduler.buildRootPaths [ tempDirA ])
-                    (fun _ ->
+                    (closeThen (fun _ ->
                         async {
                             return
                                 Error
                                     "terminal cleanup was not confirmed"
-                        })
+                        }))
                     Set.add
                     target
 

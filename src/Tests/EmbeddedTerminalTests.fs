@@ -52,11 +52,17 @@ type private ReplacementCommitMessage =
         * TerminalHostReplacement.ReplacementPolicyQuery
         * AsyncReplyChannel<TerminalHostReplacement.ReplacementOutcome>
 
-type private FakeControlHost() =
+type private FakeControlHost
+    (
+        ?onTerminalStarted: string -> unit,
+        ?onTerminalClosing: string -> unit
+    ) =
     let root = uniquePath "embedded-terminal-client"
     let stateDirectory = Path.Combine(root, "state")
     let token = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
     let gate = obj()
+    let terminalStarted = defaultArg onTerminalStarted ignore
+    let terminalClosing = defaultArg onTerminalClosing ignore
     let oldDirectory = Path.Combine(root, "old")
     let oldExecutable =
         Path.Combine(oldDirectory, TerminalHostLayout.HostExecutableName)
@@ -143,33 +149,51 @@ type private FakeControlHost() =
         }
 
     let startTerminal path =
-        lock gate (fun () ->
-            let existing =
-                terminals
-                |> List.tryFind (fun terminal ->
-                    Shared.PathUtils.pathEquals
-                        terminal.WorktreePath
-                        path)
-
-            match existing with
-            | Some _ -> ()
-            | None ->
-                let sessionId = Guid.NewGuid().ToString("N")
-
-                terminals <-
+        let startedPath, fail =
+            lock gate (fun () ->
+                let existing =
                     terminals
-                    @ [ { SessionId = sessionId
-                          WorktreePath = Path.GetFullPath path |> Path.TrimEndingDirectorySeparator
-                          AttachmentEndpoint =
-                            $"http://127.0.0.1:41001/_treemon/{sessionId}/{token}/" } ]
+                    |> List.tryFind (fun terminal ->
+                        Shared.PathUtils.pathEquals
+                            terminal.WorktreePath
+                            path)
 
-                revision <- revision + 1L
+                let startedPath =
+                    match existing with
+                    | Some _ -> None
+                    | None ->
+                        let sessionId = Guid.NewGuid().ToString("N")
+                        let canonical =
+                            Path.GetFullPath path
+                            |> Path.TrimEndingDirectorySeparator
 
-            let fail = failNextStartResponse
-            failNextStartResponse <- false
-            fail)
+                        terminals <-
+                            terminals
+                            @ [ { SessionId = sessionId
+                                  WorktreePath = canonical
+                                  AttachmentEndpoint =
+                                    $"http://127.0.0.1:41001/_treemon/{sessionId}/{token}/" } ]
+
+                        revision <- revision + 1L
+                        Some canonical
+
+                let fail = failNextStartResponse
+                failNextStartResponse <- false
+                startedPath, fail)
+
+        startedPath |> Option.iter terminalStarted
+        fail
 
     let closeTerminal sessionId =
+        let closingPath =
+            lock gate (fun () ->
+                terminals
+                |> List.tryFind (fun terminal ->
+                    terminal.SessionId = sessionId)
+                |> Option.map _.WorktreePath)
+
+        closingPath |> Option.iter terminalClosing
+
         lock gate (fun () ->
             let remaining =
                 terminals
@@ -593,16 +617,6 @@ let private assertRunningFor
     | lifecycle ->
         Assert.Fail($"Expected a running terminal, got {lifecycle}")
         ""
-
-let private closeForCleanup
-    (manager: EmbeddedTerminal.Manager)
-    (path: WorktreePath)
-    =
-    async {
-        match! EmbeddedTerminal.closeStrict manager path with
-        | Ok _ -> return Ok()
-        | Error error -> return Error error
-    }
 
 let private populateAgent
     (agent: MailboxProcessor<StateMsg>)
@@ -2319,6 +2333,486 @@ type EmbeddedTerminalReplacementTests() =
 [<Category("Fast")>]
 type EmbeddedTerminalWorktreeCleanupTests() =
     [<Test>]
+    member _.``cleanup reservation rejects the same canonical path while unrelated starts remain available``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+
+            let target = worktree host.Root "reserved-target"
+            let unrelated = worktree host.Root "reserved-unrelated"
+
+            let! initial =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk initial |> ignore
+
+            let operationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let releaseOperation =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let firstCleanup =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    target
+                    (fun () ->
+                        async {
+                            operationEntered.TrySetResult() |> ignore
+                            do! releaseOperation.Task |> Async.AwaitTask
+                            return Ok()
+                        })
+                |> Async.StartAsTask
+
+            do!
+                operationEntered.Task.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            let alias =
+                WorktreePath(
+                    WorktreePath.value target
+                    + string Path.DirectorySeparatorChar
+                )
+
+            let secondOperationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let! secondCleanup =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    alias
+                    (fun () ->
+                        async {
+                            secondOperationEntered.TrySetResult()
+                            |> ignore
+
+                            return Ok()
+                        })
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            let! samePathStart =
+                EmbeddedTerminal.start manager alias
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            let! unrelatedStart =
+                EmbeddedTerminal.start manager unrelated
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            releaseOperation.TrySetResult() |> ignore
+
+            let! firstResult =
+                firstCleanup.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            let! restarted =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    requireError secondCleanup,
+                    Does.Contain("cleanup is in progress")
+                )
+
+                Assert.That(
+                    secondOperationEntered.Task.IsCompleted,
+                    Is.False,
+                    "a rejected cleanup must not run its mutation"
+                )
+
+                Assert.That(
+                    requireError samePathStart,
+                    Does.Contain("cleanup is in progress")
+                )
+
+                requireOk unrelatedStart |> ignore
+                requireOk firstResult |> ignore
+                requireOk restarted |> ignore
+
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EquivalentTo(
+                        [ WorktreePath.value target
+                          WorktreePath.value unrelated ]
+                    )
+                ))
+        }
+
+    [<Test>]
+    member _.``failed cleanup releases its canonical path reservation``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+            let target = worktree host.Root "failed-cleanup"
+
+            let! initial =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk initial |> ignore
+
+            let! failed =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    target
+                    (fun () ->
+                        async {
+                            return Error "mutation failed"
+                        })
+                |> Async.StartAsTask
+
+            let! restarted =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    requireError failed,
+                    Is.EqualTo("mutation failed")
+                )
+
+                requireOk restarted |> ignore
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EqualTo [ WorktreePath.value target ]
+                ))
+        }
+
+    [<Test>]
+    member _.``cancelled cleanup releases its canonical path reservation``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+            let target = worktree host.Root "cancelled-cleanup"
+
+            let! initial =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk initial |> ignore
+
+            let operationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            use cancellation = new System.Threading.CancellationTokenSource()
+
+            let cleanup =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    target
+                    (fun () ->
+                        async {
+                            operationEntered.TrySetResult() |> ignore
+                            do! Async.Sleep(TimeSpan.FromMinutes 5.0)
+                            return Ok()
+                        })
+                |> fun workflow ->
+                    Async.StartAsTask(
+                        workflow,
+                        cancellationToken = cancellation.Token
+                    )
+
+            do!
+                operationEntered.Task.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            cancellation.Cancel()
+
+            try
+                let! result =
+                    cleanup.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+                Assert.Fail(
+                    $"Expected cleanup cancellation, got {result}"
+                )
+            with :? OperationCanceledException ->
+                ()
+
+            let! restarted =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            requireOk restarted |> ignore
+        }
+
+    [<Test>]
+    member _.``strict close failure releases its canonical path reservation``() =
+        task {
+            use host =
+                new FakeControlHost(
+                    onTerminalClosing = fun _ ->
+                        raise (
+                            InvalidOperationException(
+                                "simulated terminal close failure"
+                            )
+                        )
+                )
+
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+            let target = worktree host.Root "failed-close"
+
+            let! initial =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk initial |> ignore
+
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let! failed =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    target
+                    (fun () ->
+                        async {
+                            mutationEntered.TrySetResult() |> ignore
+                            return Ok()
+                        })
+                |> Async.StartAsTask
+
+            let! reused =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            Assert.Multiple(fun () ->
+                Assert.That(requireError failed, Is.Not.Empty)
+
+                Assert.That(
+                    mutationEntered.Task.IsCompleted,
+                    Is.False,
+                    "a failed strict close must not run the mutation"
+                )
+
+                requireOk reused |> ignore)
+        }
+
+    [<Test>]
+    member _.``malformed close path does not stop the lifecycle mailbox``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+
+            let! malformedClose =
+                EmbeddedTerminal.close manager (WorktreePath "\u0000")
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            let target = worktree host.Root "after-malformed-close"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            Assert.Multiple(fun () ->
+                requireOk malformedClose |> ignore
+                requireOk started |> ignore)
+        }
+
+    [<Test>]
+    [<Platform("Win")>]
+    member _.``cleanup blocks a replacement terminal process whose CWD is inside the worktree``() =
+        task {
+            let targetDirectory =
+                uniquePath "terminal-cleanup-cwd"
+
+            Directory.CreateDirectory targetDirectory |> ignore
+            let target = PathUtils.toWorktreePath targetDirectory
+            let processGate = obj()
+            // Kestrel callbacks own this one fixture process, so mutation stays at the fake-host boundary.
+            let mutable terminalProcess: Process option = None
+
+            let matchingTarget path =
+                Shared.PathUtils.pathEquals
+                    (PathUtils.normalizePath path)
+                    (WorktreePath.value target)
+
+            let startTerminalProcess path =
+                if matchingTarget path then
+                    let startInfo =
+                        ProcessStartInfo(
+                            FileName = "pwsh.exe",
+                            WorkingDirectory = targetDirectory,
+                            UseShellExecute = false,
+                            CreateNoWindow = true
+                        )
+
+                    [ "-NoLogo"
+                      "-NoProfile"
+                      "-NonInteractive"
+                      "-Command"
+                      "Start-Sleep -Seconds 300" ]
+                    |> List.iter startInfo.ArgumentList.Add
+
+                    let started = Process.Start startInfo
+
+                    if isNull started then
+                        failwith "The fixture terminal process did not start"
+
+                    lock processGate (fun () ->
+                        terminalProcess <- Some started)
+
+            let closeTerminalProcess path =
+                if matchingTarget path then
+                    let current =
+                        lock processGate (fun () ->
+                            terminalProcess)
+
+                    match current with
+                    | None -> ()
+                    | Some running ->
+                        if not running.HasExited then
+                            running.Kill(entireProcessTree = true)
+
+                        if not (running.WaitForExit 5_000) then
+                            failwith
+                                "The fixture terminal process did not exit"
+
+                        running.Dispose()
+
+                        lock processGate (fun () ->
+                            terminalProcess <- None)
+
+            try
+                use host =
+                    new FakeControlHost(
+                        onTerminalStarted = startTerminalProcess,
+                        onTerminalClosing = closeTerminalProcess
+                    )
+
+                host.PublishManifest()
+                let manager =
+                    EmbeddedTerminal.createWithConfig(
+                        managerConfig host noLaunch
+                    )
+
+                let! initial =
+                    EmbeddedTerminal.start manager target
+                    |> Async.StartAsTask
+
+                requireOk initial |> ignore
+
+                let operationEntered =
+                    TaskCompletionSource<unit>(
+                        TaskCreationOptions.RunContinuationsAsynchronously
+                    )
+
+                let releaseOperation =
+                    TaskCompletionSource<unit>(
+                        TaskCreationOptions.RunContinuationsAsynchronously
+                    )
+
+                let cleanup =
+                    EmbeddedTerminal.withReservedCleanup
+                        manager
+                        target
+                        (fun () ->
+                            async {
+                                operationEntered.TrySetResult()
+                                |> ignore
+
+                                do!
+                                    releaseOperation.Task
+                                    |> Async.AwaitTask
+
+                                try
+                                    Directory.Delete(
+                                        targetDirectory,
+                                        recursive = true
+                                    )
+
+                                    return Ok()
+                                with ex ->
+                                    return Error ex.Message
+                            })
+                    |> Async.StartAsTask
+
+                do!
+                    operationEntered.Task.WaitAsync(
+                        TimeSpan.FromSeconds 5.0
+                    )
+
+                let alias =
+                    WorktreePath(
+                        targetDirectory
+                        + string Path.DirectorySeparatorChar
+                    )
+
+                let! concurrentStart =
+                    EmbeddedTerminal.start manager alias
+                    |> Async.StartAsTask
+                    |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+                releaseOperation.TrySetResult() |> ignore
+
+                let! cleanupResult =
+                    cleanup.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        requireError concurrentStart,
+                        Does.Contain("cleanup is in progress")
+                    )
+
+                    requireOk cleanupResult |> ignore
+
+                    Assert.That(
+                        Directory.Exists targetDirectory,
+                        Is.False,
+                        "the closed terminal must not retain its worktree CWD"
+                    ))
+            finally
+                let remaining =
+                    lock processGate (fun () ->
+                        terminalProcess)
+
+                match remaining with
+                | Some running ->
+                    if not running.HasExited then
+                        running.Kill(entireProcessTree = true)
+
+                    running.WaitForExit 5_000 |> ignore
+                    running.Dispose()
+                | None -> ()
+
+                if Directory.Exists targetDirectory then
+                    Directory.Delete(
+                        targetDirectory,
+                        recursive = true
+                    )
+        }
+
+    [<Test>]
     member _.``delete and archive fail cleanly during replacement and succeed when retried``() =
         task {
             use host = new FakeControlHost()
@@ -2387,7 +2881,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                             removeCalls.Enqueue path
                             return Ok()
                         })
-                    (closeForCleanup manager)
+                    (EmbeddedTerminal.withReservedCleanup manager)
                     (fun path ->
                         async {
                             stateCleanupCalls.Enqueue path
@@ -2400,7 +2894,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 WorktreeApi.updateArchivedBranchesWith
                     agent
                     (Map.ofList [ repoId, repoRoot ])
-                    (closeForCleanup manager)
+                    (EmbeddedTerminal.withReservedCleanup manager)
                     Set.add
                     archiveTarget
 
@@ -2582,11 +3076,15 @@ type EmbeddedTerminalWorktreeCleanupTests() =
 
                             return Ok()
                         })
-                    (fun path ->
-                        async {
-                            calls.Enqueue "close"
-                            return! closeForCleanup manager path
-                        })
+                    (fun path operation ->
+                        EmbeddedTerminal.withReservedCleanup
+                            manager
+                            path
+                            (fun () ->
+                                async {
+                                    calls.Enqueue "close"
+                                    return! operation ()
+                                }))
                     (fun _ ->
                         async {
                             calls.Enqueue "state"
@@ -2647,7 +3145,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 WorktreeApi.updateArchivedBranchesWith
                     agent
                     (Map.ofList [ repoId, repoRoot ])
-                    (closeForCleanup manager)
+                    (EmbeddedTerminal.withReservedCleanup manager)
                     Set.add
                     target
                 |> Async.StartAsTask

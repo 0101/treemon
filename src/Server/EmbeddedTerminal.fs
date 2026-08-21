@@ -14,7 +14,11 @@ type private ManagerPhase =
 type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
       LastHost: DiscoveryManifest option
-      Phase: ManagerPhase }
+      Phase: ManagerPhase
+      CleanupReservations: Map<string, System.Guid> }
+
+type private CleanupReservation =
+    | CleanupReservation of pathKey: string * token: System.Guid
 
 type private Message =
     | Start of
@@ -25,6 +29,11 @@ type private Message =
     | Close of
         WorktreePath *
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
+    | ReserveCleanup of
+        WorktreePath *
+        CleanupReservation *
+        AsyncReplyChannel<Result<CleanupReservation, string>>
+    | ReleaseCleanup of CleanupReservation
     | BeginReplacement of
         ReplacementPlan *
         ReplacementPolicyQuery *
@@ -311,6 +320,26 @@ let private applyReplacementCommit state commit =
 let private replacementInProgressError =
     "TerminalHost replacement is in progress; try again when it completes."
 
+let private cleanupInProgressError =
+    "Terminal cleanup is in progress for this worktree; try again when it completes."
+
+let private cleanupRequestTimeoutError =
+    "Terminal cleanup could not start within 60 seconds; try again."
+
+let private cleanupPathKey worktreePath =
+    let path =
+        worktreePath
+        |> WorktreePath.value
+        |> Option.ofObj
+        |> Option.defaultValue ""
+
+    try
+        path
+        |> PathUtils.normalizePath
+        |> pathKey
+    with _ ->
+        pathKey path
+
 let internal createWithConfig config =
     let agent =
         MailboxProcessor.Start(fun inbox ->
@@ -332,6 +361,11 @@ let internal createWithConfig config =
                     | Start(_, reply) when state.Phase = ManagerPhase.Replacing ->
                         reply.Reply(Error replacementInProgressError)
                         return! loop state
+                    | Start(worktreePath, reply)
+                        when state.CleanupReservations
+                             |> Map.containsKey (cleanupPathKey worktreePath) ->
+                        reply.Reply(Error cleanupInProgressError)
+                        return! loop state
                     | Start(worktreePath, reply) ->
                         let! next, result =
                             startTerminal
@@ -344,6 +378,11 @@ let internal createWithConfig config =
                     | Close(_, reply) when state.Phase = ManagerPhase.Replacing ->
                         reply.Reply(Error replacementInProgressError)
                         return! loop state
+                    | Close(worktreePath, reply)
+                        when state.CleanupReservations
+                             |> Map.containsKey (cleanupPathKey worktreePath) ->
+                        reply.Reply(Error cleanupInProgressError)
+                        return! loop state
                     | Close(worktreePath, reply) ->
                         let! next, result =
                             closeTerminal
@@ -353,6 +392,57 @@ let internal createWithConfig config =
 
                         reply.Reply result
                         return! loop next
+                    | ReserveCleanup(_, _, reply)
+                        when state.Phase = ManagerPhase.Replacing ->
+                        reply.Reply(Error replacementInProgressError)
+                        return! loop state
+                    | ReserveCleanup(
+                        worktreePath,
+                        (CleanupReservation(key, token) as reservation),
+                        reply
+                      ) ->
+                        match state.CleanupReservations |> Map.tryFind key with
+                        | Some _ ->
+                            reply.Reply(Error cleanupInProgressError)
+                            return! loop state
+                        | None ->
+                            let reserved =
+                                { state with
+                                    CleanupReservations =
+                                        state.CleanupReservations
+                                        |> Map.add key token }
+
+                            let! next, result =
+                                closeTerminal
+                                    config
+                                    reserved
+                                    worktreePath
+
+                            match result with
+                            | Error error ->
+                                reply.Reply(Error error)
+
+                                return!
+                                    loop
+                                        { next with
+                                            CleanupReservations =
+                                                next.CleanupReservations
+                                                |> Map.remove key }
+                            | Ok _ ->
+                                reply.Reply(Ok reservation)
+                                return! loop next
+                    | ReleaseCleanup(CleanupReservation(key, token)) ->
+                        let reservations =
+                            match state.CleanupReservations |> Map.tryFind key with
+                            | Some current when current = token ->
+                                state.CleanupReservations
+                                |> Map.remove key
+                            | _ -> state.CleanupReservations
+
+                        return!
+                            loop
+                                { state with
+                                    CleanupReservations = reservations }
                     | BeginReplacement(_, _, reply)
                         when state.Phase = ManagerPhase.Replacing ->
                         reply.Reply ReplacementOutcome.RaceLost
@@ -384,7 +474,8 @@ let internal createWithConfig config =
             loop
                 { LastSnapshot = EmbeddedTerminalSnapshot.empty
                   LastHost = None
-                  Phase = ManagerPhase.Steady })
+                  Phase = ManagerPhase.Steady
+                  CleanupReservations = Map.empty })
 
     Manager(config, agent)
 
@@ -459,5 +550,59 @@ let close (Manager(_, agent)) worktreePath =
         timeout = 60_000
     )
 
-let internal closeStrict manager worktreePath =
-    close manager worktreePath
+let internal withReservedCleanup
+    (Manager(_, agent))
+    worktreePath
+    operation
+    =
+    async {
+        let! callerCancellation = Async.CancellationToken
+        let requested =
+            CleanupReservation(
+                cleanupPathKey worktreePath,
+                System.Guid.NewGuid()
+            )
+
+        let bracket =
+            task {
+                let! reservation =
+                    task {
+                        try
+                            return!
+                                agent.PostAndAsyncReply(
+                                    (fun reply ->
+                                        ReserveCleanup(
+                                            worktreePath,
+                                            requested,
+                                            reply
+                                        )),
+                                    timeout = 60_000
+                                )
+                                |> fun workflow ->
+                                    Async.StartAsTask(
+                                        workflow,
+                                        cancellationToken =
+                                            System.Threading.CancellationToken.None
+                                    )
+                        with _ ->
+                            agent.Post(ReleaseCleanup requested)
+                            return Error cleanupRequestTimeoutError
+                    }
+
+                match reservation with
+                | Error error -> return Error error
+                | Ok acquired ->
+                    try
+                        return!
+                            operation ()
+                            |> fun workflow ->
+                                Async.StartAsTask(
+                                    workflow,
+                                    cancellationToken = callerCancellation
+                                )
+                    finally
+                        agent.Post(ReleaseCleanup acquired)
+            }
+
+        return! bracket |> Async.AwaitTask
+    }

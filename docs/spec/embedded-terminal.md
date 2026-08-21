@@ -126,6 +126,10 @@ deliberately stable.
 
 Deleting or archiving a worktree first closes that exact worktree's terminal through the
 authoritative host API and proceeds only after successful cleanup. Other worktrees are unaffected.
+The lifecycle mailbox holds a short-lived in-memory reservation for the canonical worktree path
+from before terminal close through the delete/archive mutation. Another cleanup or terminal start
+for that path receives a retryable busy error, while unrelated worktrees remain available; the
+reservation is released after both successful and failed mutations.
 An attempt made during committed host replacement fails without mutating the worktree or archive
 state; the client reconciles from the authoritative worktree snapshot and leaves the action
 available to retry after replacement.
@@ -212,6 +216,9 @@ and `TerminalSessionActivity` derives the exact owned-session replacement policy
 facts. `Server.EmbeddedTerminal` retains only the mailbox, authoritative snapshot
 reconciliation, and public terminal lifecycle surface. It lazily starts a host only when none is
 healthy, and ambiguous start or close responses are resolved by listing the registry again.
+Its cleanup bracket records only exact canonical paths and opaque operation tokens in mailbox state;
+the delete/archive operation runs outside the mailbox so unrelated paths remain concurrent, and a
+`finally` release prevents failed or cancelled mutations from leaving a path busy.
 The mailbox grants one replacement phase, keeps serving cached reads and bounded rejection replies
 while replacement runs asynchronously, then alone applies the replacement's registry transition.
 Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
@@ -343,6 +350,10 @@ PowerShell lifecycle helpers, or compatibility shims.
   receive an immediate retryable error, and only the mailbox applies the final transition. This
   avoids timeout mismatches and stale lifecycle requests without allowing a registry race during
   replacement.
+- **Exact in-memory cleanup exclusion:** delete/archive uses a mailbox-owned canonical-path
+  reservation around strict terminal close plus mutation. Same-path lifecycle mutations fail
+  retryably until a `finally` release, while unrelated worktrees stay concurrent; no persistent
+  lease, supervisor, or cross-process cleanup protocol is required.
 
 ## Key Files
 
