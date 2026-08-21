@@ -19,20 +19,23 @@ let private controlApiVersion = 1
 [<Literal>]
 let private maximumResponseBytes = 1_048_576L
 
-type internal TerminalRecord =
-    { SessionId: string
-      WorktreePath: string
-      AttachmentEndpoint: string }
+type internal TerminalRecord = { SessionId: string; WorktreePath: string; AttachmentEndpoint: string }
 
-type internal RegistrySnapshot =
-    { Revision: int64
-      Terminals: TerminalRecord list }
+type internal RegistrySnapshot = { Revision: int64; Terminals: TerminalRecord list }
+
+type internal DeploymentPreflightResult =
+    { Pid: int; ProcessStartTimeUtcTicks: int64
+      ExecutablePath: string; TerminalCount: int }
 
 type internal HostDiscovery =
     | MissingHost
     | HealthyHost of DiscoveryManifest
+    | IncompatibleHost of manifest: DiscoveryManifest * reason: string
     | DeadHost of reason: string
     | UnusableHost of reason: string
+
+[<RequireQualifiedAccess>]
+type private ControlCompatibility = Compatible | Incompatible of reason: string
 
 type internal StartTerminalFailure =
     | StartRejected of registry: RegistrySnapshot * reason: string
@@ -147,16 +150,13 @@ let private parseHealth (manifest: DiscoveryManifest) (text: string) =
         let root = document.RootElement
 
         let fields =
-            set
-                [ "pid"; "processStartTimeUtcTicks"
-                  "hostVersion"; "controlApiVersion" ]
+            set [ "pid"; "processStartTimeUtcTicks"; "hostVersion"; "controlApiVersion" ]
 
         if not (exactProperties fields Set.empty root) then
             Error "TerminalHost health response has an invalid shape"
         else
             let pid = root.GetProperty("pid").GetInt32()
-            let startTicks =
-                root.GetProperty("processStartTimeUtcTicks").GetInt64()
+            let startTicks = root.GetProperty("processStartTimeUtcTicks").GetInt64()
             let hostVersion = root.GetProperty("hostVersion").GetString()
             let apiVersion = root.GetProperty("controlApiVersion").GetInt32()
 
@@ -168,10 +168,12 @@ let private parseHealth (manifest: DiscoveryManifest) (text: string) =
             then
                 Error "TerminalHost health identity does not match its discovery manifest"
             elif apiVersion <> controlApiVersion then
-                Error
+                let error =
                     $"TerminalHost control API version {apiVersion} is not supported (expected {controlApiVersion})"
+
+                Ok(ControlCompatibility.Incompatible error)
             else
-                Ok()
+                Ok ControlCompatibility.Compatible
     with
     | :? JsonException
     | :? InvalidOperationException
@@ -181,12 +183,8 @@ let private parseHealth (manifest: DiscoveryManifest) (text: string) =
 
 let private probe config manifest =
     async {
-        match! request config manifest HttpMethod.Get "/api/v1/health" None with
-        | Error error -> return Error error
-        | Ok content ->
-            return
-                parseHealth manifest content
-                |> Result.map (fun () -> manifest)
+        let! response = request config manifest HttpMethod.Get "/api/v1/health" None
+        return response |> Result.bind (parseHealth manifest)
     }
 
 let internal discoverHost config =
@@ -198,18 +196,22 @@ let internal discoverHost config =
             match processIdentityMatches config manifest with
             | Error error -> return UnusableHost error
             | Ok false ->
-                return
-                    DeadHost
-                        $"Recorded TerminalHost PID {manifest.Pid} is no longer the exact live process"
+                let error =
+                    $"Recorded TerminalHost PID {manifest.Pid} is no longer the exact live process"
+
+                return DeadHost error
             | Ok true ->
                 match! probe config manifest with
-                | Ok connection -> return HealthyHost connection
+                | Ok ControlCompatibility.Compatible -> return HealthyHost manifest
+                | Ok(ControlCompatibility.Incompatible error) ->
+                    return IncompatibleHost(manifest, error)
                 | Error probeError ->
                     match processIdentityMatches config manifest with
                     | Ok false ->
-                        return
-                            DeadHost
-                                $"TerminalHost PID {manifest.Pid} exited while it was being checked"
+                        let error =
+                            $"TerminalHost PID {manifest.Pid} exited while it was being checked"
+
+                        return DeadHost error
                     | Ok true -> return UnusableHost probeError
                     | Error identityError -> return UnusableHost identityError
     }
@@ -330,29 +332,51 @@ let private parseRegistrySnapshot (manifest: DiscoveryManifest) (text: string) =
 
 let internal listTerminals config manifest =
     async {
-        match!
-            request
-                config
-                manifest
-                HttpMethod.Get
-                "/api/v1/terminals"
-                None
-        with
-        | Error error -> return Error error
-        | Ok content ->
-            return parseRegistrySnapshot manifest content
+        let! response = request config manifest HttpMethod.Get "/api/v1/terminals" None
+        return response |> Result.bind (parseRegistrySnapshot manifest)
     }
 
 let internal findTerminalByPath path records =
-    records
-    |> List.tryFind (fun terminal ->
-        samePath terminal.WorktreePath path)
+    records |> List.tryFind (fun terminal -> samePath terminal.WorktreePath path)
 
 let internal requestTerminalClose config manifest sessionId =
     request config manifest HttpMethod.Delete $"/api/v1/terminals/{sessionId}" None
 
 let internal requestHostShutdown config manifest =
     request config manifest HttpMethod.Post "/api/v1/shutdown" None
+
+let internal waitForHostExit config manifest =
+    let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
+
+    let rec wait () =
+        async {
+            match processIdentityMatches config manifest with
+            | Error error -> return Error error
+            | Ok false -> return Ok()
+            | Ok true when DateTimeOffset.UtcNow < deadline ->
+                do! Async.Sleep(probeDelayMilliseconds config)
+                return! wait ()
+            | Ok true ->
+                return
+                    Error
+                        $"TerminalHost PID {manifest.Pid} did not exit within {config.StartupTimeout.TotalSeconds:g} seconds"
+        }
+
+    wait ()
+
+let internal shutdownAndWait config manifest =
+    async {
+        let! shutdownResult = requestHostShutdown config manifest
+        let! waitResult = waitForHostExit config manifest
+
+        return
+            match shutdownResult, waitResult with
+            | _, Ok() -> Ok()
+            | Ok _, Error waitError -> Error waitError
+            | Error requestError, Error waitError ->
+                Error
+                    $"{requestError}; exact host shutdown could not be confirmed: {waitError}"
+    }
 
 let private terminalWebSocketEndpoint (attachmentEndpoint: string) =
     try
@@ -420,33 +444,54 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
                     return Error "Could not submit the Copilot resume command"
     }
 
-let internal defaultConfig allowedOrigins =
-    TerminalHostProcess.defaultConfig allowedOrigins sendTerminalCommandDefault
+let internal defaultConfig allowedOrigins = TerminalHostProcess.defaultConfig allowedOrigins sendTerminalCommandDefault
 
-let internal preflightDeployment () =
+let private deploymentPreflightResult config manifest registry =
+    resolveProcessExecutable config manifest
+    |> Result.map (fun executablePath ->
+            Some
+                { Pid = manifest.Pid
+                  ProcessStartTimeUtcTicks =
+                    manifest.ProcessStartTimeUtcTicks
+                  ExecutablePath = executablePath
+                  TerminalCount = registry.Terminals.Length })
+
+let private preflightIncompatibleHost config manifest incompatibility =
     async {
-        let config = defaultConfig []
+        match! listTerminals config manifest with
+        | Error listError ->
+            return Error $"{incompatibility}; authoritative terminal list failed: {listError}"
+        | Ok registry when not registry.Terminals.IsEmpty ->
+            return Error incompatibility
+        | Ok _ ->
+            match processIdentityMatches config manifest with
+            | Error error -> return Error error
+            | Ok false -> return Ok None
+            | Ok true ->
+                let! stopped = shutdownAndWait config manifest
+                return
+                    stopped
+                    |> Result.map (fun () -> None)
+                    |> Result.mapError (fun error ->
+                        $"The incompatible empty TerminalHost could not be stopped: {error}")
+    }
 
+let internal preflightDeploymentWith config =
+    async {
         match! discoverHost config with
         | MissingHost
         | DeadHost _ -> return Ok None
         | UnusableHost error -> return Error error
+        | IncompatibleHost(manifest, error) ->
+            return! preflightIncompatibleHost config manifest error
         | HealthyHost manifest ->
-            return!
-                asyncResult {
-                    let! registry = listTerminals config manifest
-                    let! executablePath =
-                        resolveProcessExecutable config manifest
-
-                    return
-                        Some
-                            {| HostPid = manifest.Pid
-                               HostProcessStartTimeUtcTicks =
-                                manifest.ProcessStartTimeUtcTicks
-                               RunningExecutablePath = executablePath
-                               TerminalCount = registry.Terminals.Length |}
-                }
+            match! listTerminals config manifest with
+            | Error error -> return Error error
+            | Ok registry ->
+                return deploymentPreflightResult config manifest registry
     }
+
+let internal preflightDeployment () = preflightDeploymentWith (defaultConfig [])
 
 let internal waitForHealthyHost config =
     let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
@@ -461,6 +506,7 @@ let internal waitForHealthyHost config =
                     | MissingHost -> "TerminalHost has not published its discovery manifest"
                     | DeadHost error
                     | UnusableHost error -> error
+                    | IncompatibleHost(_, error) -> error
                     | HealthyHost _ -> failwith "unreachable"
 
                 if DateTimeOffset.UtcNow >= deadline then
@@ -474,16 +520,14 @@ let internal waitForHealthyHost config =
 
     wait None
 
-let internal knownHostIsStillLive config lastHost =
-    match lastHost with
+let internal knownHostIsStillLive config = function
     | None -> Ok false
     | Some host -> processIdentityMatches config host
 
 let private launchAndDiscover config =
-    async {
-        match startHostProcess config with
-        | Error error -> return Error error
-        | Ok() -> return! waitForHealthyHost config
+    asyncResult {
+        do! startHostProcess config
+        return! waitForHealthyHost config
     }
 
 let internal ensureHost config lastHost =
@@ -491,6 +535,7 @@ let internal ensureHost config lastHost =
         match! discoverHost config with
         | HealthyHost connection -> return Ok connection
         | DeadHost _ -> return! launchAndDiscover config
+        | IncompatibleHost(_, error)
         | UnusableHost error -> return Error error
         | MissingHost ->
             match knownHostIsStillLive config lastHost with

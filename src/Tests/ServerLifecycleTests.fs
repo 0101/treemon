@@ -16,6 +16,13 @@ open Tests.SqliteTestDatabase
 let private withDbPath =
     SqliteTestDatabase.withDbPath "treemon-server-lifecycle"
 
+let private serverConfig arguments =
+    match parseArgs arguments with
+    | RunMode.Server config -> config
+    | RunMode.TerminalHostDeploymentPreflight ->
+        Assert.Fail("Expected server run mode")
+        Unchecked.defaultof<_>
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -57,9 +64,13 @@ type ServerLifecycleTests() =
 
     [<Test>]
     member _.``demo and fixture modes do not create the durable activity runtime``() =
-        let real = parseArgs [| "--no-canvas" |]
-        let demo = parseArgs [| "--demo" |]
-        let fixture = parseArgs [| "--test-fixtures"; "worktrees.json"; "--no-canvas" |]
+        let real = serverConfig [| "--no-canvas" |]
+        let demo = serverConfig [| "--demo" |]
+        let fixture =
+            serverConfig
+                [| "--test-fixtures"
+                   "worktrees.json"
+                   "--no-canvas" |]
 
         Assert.Multiple(fun () ->
             Assert.That(usesSessionActivity real, Is.True)

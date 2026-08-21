@@ -115,41 +115,6 @@ let private queryReplacementActivity
     with error ->
         Error $"Could not query terminal-owned Copilot activity: {error.Message}"
 
-let private waitForHostExit config manifest =
-    let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
-
-    let rec wait () =
-        async {
-            match processIdentityMatches config manifest with
-            | Error error -> return Error error
-            | Ok false -> return Ok()
-            | Ok true when DateTimeOffset.UtcNow >= deadline ->
-                return
-                    Error
-                        $"TerminalHost PID {manifest.Pid} did not exit within {config.StartupTimeout.TotalSeconds:g} seconds"
-            | Ok true ->
-                do! Async.Sleep(probeDelayMilliseconds config)
-                return! wait ()
-        }
-
-    wait ()
-
-let private shutdownAndWait config connection =
-    async {
-        let! shutdownResult = requestHostShutdown config connection
-
-        match! waitForHostExit config connection with
-        | Ok() -> return Ok()
-        | Error waitError ->
-            return
-                Error(
-                    match shutdownResult with
-                    | Ok _ -> waitError
-                    | Error requestError ->
-                        $"{requestError}; exact host shutdown could not be confirmed: {waitError}"
-                )
-    }
-
 let private replacementTtydPath
     (config: Config)
     (oldExecutablePath: string)
@@ -339,6 +304,7 @@ let private recheckReplacement
         | MissingHost
         | DeadHost _ ->
             return RecheckChanged
+        | IncompatibleHost(_, error)
         | UnusableHost error ->
             return RecheckFailed $"Could not recheck the exact TerminalHost: {error}"
     }
@@ -494,6 +460,7 @@ let internal tryReplaceHostIgnoring
                                     )
         | MissingHost
         | DeadHost _
+        | IncompatibleHost _
         | UnusableHost _ ->
             return ReplacementOutcome.NoCandidate
     }

@@ -91,6 +91,30 @@ let private terminalEndpoints (document: JsonDocument) =
     |> Seq.choose Option.ofObj
     |> Seq.toList
 
+let private propertyNames (element: JsonElement) =
+    element.EnumerateObject()
+    |> Seq.map _.Name
+    |> Set.ofSeq
+
+let private assertExactProperties expected element =
+    Assert.That(
+        propertyNames element |> Set.toList,
+        Is.EquivalentTo(expected)
+    )
+
+let private assertRegistryResponseV1Shape (document: JsonDocument) =
+    assertExactProperties
+        [ "revision"; "terminals" ]
+        document.RootElement
+
+    document.RootElement.GetProperty("terminals").EnumerateArray()
+    |> Seq.iter (
+        assertExactProperties
+            [ "sessionId"
+              "worktreePath"
+              "attachmentEndpoint" ]
+    )
+
 type private TestWebSocket() =
     inherit System.Net.WebSockets.WebSocket()
 
@@ -262,6 +286,13 @@ type TerminalHostControlApiTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(health.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                assertExactProperties
+                    [ "pid"
+                      "processStartTimeUtcTicks"
+                      "hostVersion"
+                      "controlApiVersion" ]
+                    healthDocument.RootElement
+
                 Assert.That(
                     healthDocument.RootElement.GetProperty("pid").GetInt32(),
                     Is.EqualTo(12_345)
@@ -280,6 +311,7 @@ type TerminalHostControlApiTests() =
 
             Assert.That(first.StatusCode, Is.EqualTo(HttpStatusCode.OK))
             use firstDocument = responseDocument first
+            assertRegistryResponseV1Shape firstDocument
             let firstIds = terminalIds firstDocument
             Assert.That(List.length firstIds, Is.EqualTo(1))
             let sessionId = firstIds.Head
@@ -291,6 +323,7 @@ type TerminalHostControlApiTests() =
                 )
 
             use reusedDocument = responseDocument reused
+            assertRegistryResponseV1Shape reusedDocument
 
             Assert.Multiple(fun () ->
                 Assert.That(reused.StatusCode, Is.EqualTo(HttpStatusCode.OK))
@@ -305,15 +338,26 @@ type TerminalHostControlApiTests() =
 
             use! listed = fixture.Client.GetAsync("/api/v1/terminals")
             use listDocument = responseDocument listed
+            assertRegistryResponseV1Shape listDocument
 
             Assert.Multiple(fun () ->
                 Assert.That(listed.StatusCode, Is.EqualTo(HttpStatusCode.OK))
                 Assert.That(terminalIds listDocument, Is.EqualTo([ sessionId ])))
 
+            use! unchanged =
+                fixture.Client.DeleteAsync(
+                    "/api/v1/terminals/00000000000000000000000000000000"
+                )
+
+            use unchangedDocument = responseDocument unchanged
+            assertRegistryResponseV1Shape unchangedDocument
+            Assert.That(terminalIds unchangedDocument, Is.EqualTo([ sessionId ]))
+
             use! closed =
                 fixture.Client.DeleteAsync($"/api/v1/terminals/{sessionId}")
 
             use closeDocument = responseDocument closed
+            assertRegistryResponseV1Shape closeDocument
 
             Assert.Multiple(fun () ->
                 Assert.That(closed.StatusCode, Is.EqualTo(HttpStatusCode.OK))

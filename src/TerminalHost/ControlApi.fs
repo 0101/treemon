@@ -28,6 +28,14 @@ type RunningControlApi =
 module ControlApi =
     let private jsonOptions = JsonSerializerOptions(JsonSerializerDefaults.Web)
 
+    let private terminalResponseV1 (terminal: TerminalRecord) =
+        {| SessionId = terminal.SessionId; WorktreePath = terminal.WorktreePath
+           AttachmentEndpoint = terminal.AttachmentEndpoint |}
+
+    let private registryResponseV1 (snapshot: RegistrySnapshot) =
+        {| Revision = snapshot.Revision
+           Terminals = snapshot.Terminals |> List.map terminalResponseV1 |}
+
     let private writeJson statusCode payload (context: HttpContext) =
         task {
             context.Response.StatusCode <- statusCode
@@ -129,7 +137,7 @@ module ControlApi =
                         context
             | "GET", "/api/v1/terminals" ->
                 let! snapshot = TerminalRegistry.list registry |> Async.StartAsTask
-                return! writeJson StatusCodes.Status200OK snapshot context
+                return! writeJson StatusCodes.Status200OK (registryResponseV1 snapshot) context
             | "POST", "/api/v1/terminals" ->
                 match! readWorktreePath context with
                 | Error(status, message) ->
@@ -151,7 +159,7 @@ module ControlApi =
                     | Ok worktree ->
                         match! TerminalRegistry.start registry worktree |> Async.StartAsTask with
                         | Ok snapshot ->
-                            return! writeJson StatusCodes.Status200OK snapshot context
+                            return! writeJson StatusCodes.Status200OK (registryResponseV1 snapshot) context
                         | Error error ->
                             return!
                                 writeError
@@ -185,7 +193,7 @@ module ControlApi =
                         TerminalRegistry.close registry (sessionId.ToLowerInvariant())
                         |> Async.StartAsTask
 
-                    return! writeJson StatusCodes.Status200OK snapshot context
+                    return! writeJson StatusCodes.Status200OK (registryResponseV1 snapshot) context
             | _ ->
                 return!
                     writeError

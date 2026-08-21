@@ -48,72 +48,93 @@ type ServerConfig =
       TestFixtures: string option
       Demo: bool }
 
+[<RequireQualifiedAccess>]
+type RunMode =
+    | Server of ServerConfig
+    | TerminalHostDeploymentPreflight
+
+/// JSON contract consumed by Test-TerminalHostDeployment in treemon.ps1. Host fields are absent
+/// when HasLiveHost is false.
+type TerminalHostDeploymentPreflightResponse =
+    { HasLiveHost: bool
+      Pid: int option
+      ProcessStartTimeUtcTicks: int64 option
+      ExecutablePath: string option
+      TerminalCount: int option }
+
 let private defaultCanvasPort = 5002
 
 let parseArgs (args: string array) =
-    let rec parse roots port canvasPort dashboardPort testFixtures demo remaining =
-        match remaining with
-        | "--port" :: portStr :: rest ->
-            match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots p canvasPort dashboardPort testFixtures demo rest
-            | false, _ ->
-                eprintfn $"Invalid port number: {portStr}"
+    match args |> Array.toList with
+    | [ "--terminal-host-deployment-preflight" ] ->
+        RunMode.TerminalHostDeploymentPreflight
+    | serverArguments ->
+        let rec parse roots port canvasPort dashboardPort testFixtures demo remaining =
+            match remaining with
+            | "--port" :: portStr :: rest ->
+                match System.Int32.TryParse(portStr) with
+                | true, p -> parse roots p canvasPort dashboardPort testFixtures demo rest
+                | false, _ ->
+                    eprintfn $"Invalid port number: {portStr}"
+                    exit 1
+            | "--canvas-port" :: portStr :: rest ->
+                match System.Int32.TryParse(portStr) with
+                | true, p -> parse roots port (Some p) dashboardPort testFixtures demo rest
+                | false, _ ->
+                    eprintfn $"Invalid canvas port number: {portStr}"
+                    exit 1
+            | "--dashboard-port" :: portStr :: rest ->
+                match System.Int32.TryParse(portStr) with
+                | true, p -> parse roots port canvasPort (Some p) testFixtures demo rest
+                | false, _ ->
+                    eprintfn $"Invalid dashboard port number: {portStr}"
+                    exit 1
+            | "--no-canvas" :: rest ->
+                parse roots port None dashboardPort testFixtures demo rest
+            | "--test-fixtures" :: path :: rest ->
+                parse roots port canvasPort dashboardPort (Some path) demo rest
+            | "--demo" :: rest ->
+                parse roots port canvasPort dashboardPort testFixtures true rest
+            | path :: rest when not (path.StartsWith("--")) ->
+                parse (roots @ [ path ]) port canvasPort dashboardPort testFixtures demo rest
+            | [] -> roots, port, canvasPort, dashboardPort, testFixtures, demo
+            | unexpected :: _ ->
+                eprintfn $"Unexpected argument: {unexpected}"
                 exit 1
-        | "--canvas-port" :: portStr :: rest ->
-            match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots port (Some p) dashboardPort testFixtures demo rest
-            | false, _ ->
-                eprintfn $"Invalid canvas port number: {portStr}"
-                exit 1
-        | "--dashboard-port" :: portStr :: rest ->
-            match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots port canvasPort (Some p) testFixtures demo rest
-            | false, _ ->
-                eprintfn $"Invalid dashboard port number: {portStr}"
-                exit 1
-        | "--no-canvas" :: rest ->
-            parse roots port None dashboardPort testFixtures demo rest
-        | "--test-fixtures" :: path :: rest ->
-            parse roots port canvasPort dashboardPort (Some path) demo rest
-        | "--demo" :: rest ->
-            parse roots port canvasPort dashboardPort testFixtures true rest
-        | path :: rest when not (path.StartsWith("--")) ->
-            parse (roots @ [ path ]) port canvasPort dashboardPort testFixtures demo rest
-        | [] -> roots, port, canvasPort, dashboardPort, testFixtures, demo
-        | unexpected :: _ ->
-            eprintfn $"Unexpected argument: {unexpected}"
-            exit 1
 
-    match
-        args
-        |> Array.toList
-        |> parse [] 5000 (Some defaultCanvasPort) None None false
-    with
-    | _, _, _, _, Some _, true ->
-        eprintfn "--demo and --test-fixtures are mutually exclusive"
-        exit 1
-    | _, port, _, dashboardPort, _, true ->
-        { WorktreeRoots = []
-          Port = port
-          CanvasPort = None
-          DashboardPort = dashboardPort
-          TestFixtures = None
-          Demo = true }
-    | roots, port, canvasPort, dashboardPort, testFixtures, _ ->
-        // Zero positional roots is valid in normal mode: `start`/`dev` no longer require a path.
-        // When no roots are passed the server resolves them from global config (or migrates a
-        // legacy/orphan set) at startup — see resolveWorktreeRoots in main.
-        match canvasPort with
-        | Some cp when cp = port ->
-            eprintfn $"--canvas-port ({cp}) must differ from the main --port ({port})"
+        match
+            serverArguments
+            |> parse [] 5000 (Some defaultCanvasPort) None None false
+        with
+        | _, _, _, _, Some _, true ->
+            eprintfn "--demo and --test-fixtures are mutually exclusive"
             exit 1
-        | _ ->
-            { WorktreeRoots = roots |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
-              Port = port
-              CanvasPort = canvasPort
-              DashboardPort = dashboardPort
-              TestFixtures = testFixtures
-              Demo = false }
+        | _, port, _, dashboardPort, _, true ->
+            RunMode.Server
+                { WorktreeRoots = []
+                  Port = port
+                  CanvasPort = None
+                  DashboardPort = dashboardPort
+                  TestFixtures = None
+                  Demo = true }
+        | roots, port, canvasPort, dashboardPort, testFixtures, _ ->
+            // Zero positional roots is valid in normal mode: `start`/`dev` no longer require a path.
+            // When no roots are passed the server resolves them from global config (or migrates a
+            // legacy/orphan set) at startup — see resolveWorktreeRoots in main.
+            match canvasPort with
+            | Some cp when cp = port ->
+                eprintfn $"--canvas-port ({cp}) must differ from the main --port ({port})"
+                exit 1
+            | _ ->
+                RunMode.Server
+                    { WorktreeRoots =
+                        roots
+                        |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
+                      Port = port
+                      CanvasPort = canvasPort
+                      DashboardPort = dashboardPort
+                      TestFixtures = testFixtures
+                      Demo = false }
 
 let internal dashboardOrigins (config: ServerConfig) =
     match config.DashboardPort with
@@ -301,31 +322,50 @@ let internal runHostWithCapture
             stoppingRegistration.Dispose()
             BackgroundLoop.stop "Overview snapshot capture" loop
 
+let private deploymentPreflightResponse
+    (result: TerminalHostClient.DeploymentPreflightResult option)
+    =
+    match result with
+    | None ->
+        { HasLiveHost = false
+          Pid = None
+          ProcessStartTimeUtcTicks = None
+          ExecutablePath = None
+          TerminalCount = None }
+    | Some host ->
+        { HasLiveHost = true
+          Pid = Some host.Pid
+          ProcessStartTimeUtcTicks =
+            Some host.ProcessStartTimeUtcTicks
+          ExecutablePath = Some host.ExecutablePath
+          TerminalCount = Some host.TerminalCount }
+
 let private runTerminalHostDeploymentPreflight () =
     match TerminalHostClient.preflightDeployment () |> Async.RunSynchronously with
     | Error error ->
         Console.Error.WriteLine($"TerminalHost deployment preflight failed: {error}")
         2
-    | Ok None ->
-        Console.Out.WriteLine("""{"hasLiveHost":false}""")
-        0
-    | Ok(Some preflight) ->
-        {| hasLiveHost = true
-           pid = preflight.HostPid
-           processStartTimeUtcTicks = preflight.HostProcessStartTimeUtcTicks
-           executablePath = preflight.RunningExecutablePath
-           terminalCount = preflight.TerminalCount |}
-        |> System.Text.Json.JsonSerializer.Serialize
-        |> Console.Out.WriteLine
+    | Ok result ->
+        let response = deploymentPreflightResponse result
 
+        let jsonOptions =
+            System.Text.Json.JsonSerializerOptions(
+                System.Text.Json.JsonSerializerDefaults.Web,
+                DefaultIgnoreCondition =
+                    System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+            )
+
+        System.Text.Json.JsonSerializer.Serialize(response, jsonOptions)
+        |> Console.Out.WriteLine
         0
 
 [<EntryPoint>]
 let main args =
-    if args = [| "--terminal-host-deployment-preflight" |] then
-        runTerminalHostDeploymentPreflight () |> exit
-
-    let config = parseArgs args
+    let config =
+        match parseArgs args with
+        | RunMode.TerminalHostDeploymentPreflight ->
+            runTerminalHostDeploymentPreflight () |> exit
+        | RunMode.Server config -> config
 
     let serverUrl = $"http://localhost:{config.Port}"
 

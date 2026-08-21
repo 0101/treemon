@@ -202,10 +202,12 @@ dashboard port from a server-port convention.
 
 `treemon.ps1` publishes the host and stages a changed executable in a plain versioned directory. It
 preflights control-API compatibility before replacing the Treemon server; a deployment that cannot
-control a live host is refused while terminals remain. Server, frontend, and host candidates are
-built outside their active destinations, and the candidate Treemon's own compiled control client
-probes the exact live host before any active file or process is replaced. The staged directory
-carries the complete framework-dependent host publication alongside `TerminalHost.exe`.
+control a live host is refused while terminals remain. When an exact incompatible host proves its
+authoritative registry is empty, the candidate shuts it down and confirms that exact process
+identity exited before allowing deployment. Server, frontend, and host candidates are built outside
+their active destinations, and the candidate Treemon's own compiled control client probes the exact
+live host before any active server files or processes are replaced. The staged directory carries the
+complete framework-dependent host publication alongside `TerminalHost.exe`.
 Lazy host startup accepts only the explicit `TREEMON_TERMINAL_HOST_EXECUTABLE` deployment input or
 the `terminal-host` directory beside the published Treemon executable. Development startup sets the
 explicit input to its local TerminalHost build; shipped server code never probes source-tree
@@ -252,6 +254,10 @@ PowerShell lifecycle helpers, or compatibility shims.
   deliberately ignored and may be terminated without warning once the Copilot gate is idle.
 - **Stable API over compatibility layers:** compatible servers reconnect; an incompatible deploy
   waits until no terminals exist instead of carrying old protocol clients or migrating live state.
+- **Explicit versioned wire contracts:** the candidate deployment preflight is a parsed server run
+  mode with a named JSON result, and the host maps registry domain records to dedicated control API
+  v1 response property sets. Exact-property regression tests prevent internal fields from leaking
+  onto either wire contract.
 - **Truthful failure:** host loss kills owned trees and becomes an interruption, never a claimed
   reconnect to an unproven process.
 - **Fail closed on unverified live discovery:** a malformed manifest or an exact live process that

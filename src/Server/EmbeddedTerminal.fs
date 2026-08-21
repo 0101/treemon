@@ -148,6 +148,7 @@ let private getTerminals config state =
                 withHostFailure
                     $"{error}. Its terminals were interrupted."
                     state
+        | IncompatibleHost(_, error)
         | UnusableHost error ->
             return withHostFailure error state
     }
@@ -181,6 +182,7 @@ let private safeWithoutHealthyHost config state discovery =
             Error
                 "The TerminalHost manifest is missing while the exact recorded host is still running"
         | Error error -> Error error
+    | IncompatibleHost(_, error)
     | UnusableHost error -> Error error
     | HealthyHost _ -> failwith "unreachable"
 
@@ -269,6 +271,7 @@ let private closeTerminal config state worktreePath =
                     | DeadHost error -> $"{error}. Its terminals were interrupted."
                     | MissingHost ->
                         "TerminalHost is not running; no live terminal remains to close."
+                    | IncompatibleHost _
                     | UnusableHost _
                     | HealthyHost _ -> failwith "unreachable"
 

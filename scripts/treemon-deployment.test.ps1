@@ -254,9 +254,11 @@ try {
     Write-Host "PASS: compatible deployment reuses the exact host"
 
     $manifestPath = Join-Path $state "host.json"
-    $incompatibleManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $incompatibleManifest.controlApiVersion = 2
-    $incompatibleManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
+    # Corrupting only the manifest exercises fail-closed identity handling. The genuine compatible
+    # / incompatible and empty / non-empty matrix is covered by EmbeddedTerminalControlClientTests.
+    $mismatchedManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $mismatchedManifest.controlApiVersion = 2
+    $mismatchedManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
     $beforeRefusal = Get-DirectorySnapshot $root
     $refused = $false
     try {
@@ -264,18 +266,43 @@ try {
     } catch {
         $refused = $_.Exception.Message -like "Deployment refused:*"
     }
-    Assert-True $refused "Incompatible control API deployment was not refused"
+    Assert-True $refused "Mismatched host identity was not refused"
     Assert-True (
         (Get-DirectorySnapshot $root) -ceq $beforeRefusal
-    ) "Incompatible preflight changed deployment files"
-    Assert-True (-not $hostProcess.HasExited) "Incompatible preflight stopped the live host"
+    ) "Mismatched-identity preflight changed deployment files"
+    Assert-True (-not $hostProcess.HasExited) "Mismatched-identity preflight stopped the live host"
     Assert-True (
         @((Invoke-TestHostRequest $manifest "GET" "/api/v1/terminals").terminals)[0].sessionId -ceq
         $terminalSessionId
-    ) "Incompatible preflight changed the terminal"
-    $incompatibleManifest.controlApiVersion = 1
-    $incompatibleManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
-    Write-Host "PASS: incompatible deployment is refused without side effects"
+    ) "Mismatched-identity preflight changed the terminal"
+    $mismatchedManifest.controlApiVersion = 1
+    $mismatchedManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
+    Write-Host "PASS: manifest and health identity mismatch is refused without side effects"
+
+    $closed = Invoke-TestHostRequest $manifest "DELETE" "/api/v1/terminals/$terminalSessionId"
+    Assert-True (@($closed.terminals).Count -eq 0) "Fixture terminal did not close"
+
+    $compatibleEmpty = Test-TerminalHostDeployment $candidateServer
+    Assert-True $compatibleEmpty.HasLiveHost "Compatible empty preflight lost the live host"
+    Assert-True ($compatibleEmpty.TerminalCount -eq 0) "Compatible empty preflight reported terminals"
+    Assert-True (
+        "$($compatibleEmpty.Pid):$($compatibleEmpty.ProcessStartTimeUtcTicks)" -ceq
+        $hostIdentity
+    ) "Compatible empty preflight changed the host identity"
+
+    $mismatchedManifest.controlApiVersion = 2
+    $mismatchedManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
+    $unverifiedEmptyRefused = $false
+    try {
+        Test-TerminalHostDeployment $candidateServer | Out-Null
+    } catch {
+        $unverifiedEmptyRefused = $_.Exception.Message -like "Deployment refused:*"
+    }
+    Assert-True $unverifiedEmptyRefused "Unverified empty-host identity was not refused"
+    Assert-True (-not $hostProcess.HasExited) "Unverified preflight stopped the live host"
+    $mismatchedManifest.controlApiVersion = 1
+    $mismatchedManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
+    Write-Host "PASS: compatible empty host proceeds and unverified identity fails closed"
 
     $env:TREEMON_TERMINAL_HOST_STATE_DIR = $emptyState
     $noHost = Test-TerminalHostDeployment $candidateServer

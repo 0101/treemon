@@ -67,6 +67,7 @@ type private FakeControlHost() =
     let mutable logicalShutdown = false
     let mutable online = true
     let mutable hostVersion = "1.0.0-test"
+    let mutable controlApiVersion = 1
     let mutable stagedVersion: string option = None
     let mutable currentExecutable = oldExecutable
     let mutable registryJsonOverride: string option = None
@@ -198,7 +199,9 @@ type private FakeControlHost() =
 
                 match method, path with
                 | "GET", "/api/v1/health" ->
-                    let version = lock gate (fun () -> hostVersion)
+                    let version, apiVersion =
+                        lock gate (fun () ->
+                            hostVersion, controlApiVersion)
 
                     return!
                         writeJson
@@ -206,7 +209,7 @@ type private FakeControlHost() =
                             { Pid = currentPid
                               ProcessStartTimeUtcTicks = currentStartTicks
                               HostVersion = version
-                              ControlApiVersion = 1 }
+                              ControlApiVersion = apiVersion }
                             context
                 | "GET", "/api/v1/terminals" ->
                     listRequests.Enqueue()
@@ -329,8 +332,9 @@ type private FakeControlHost() =
     let manifestPath = Path.Combine(stateDirectory, "host.json")
 
     let createManifest () =
-        let version, staged =
-            lock gate (fun () -> hostVersion, stagedVersion)
+        let version, apiVersion, staged =
+            lock gate (fun () ->
+                hostVersion, controlApiVersion, stagedVersion)
 
         let manifest = JsonObject()
         manifest["pid"] <- JsonValue.Create currentPid
@@ -338,7 +342,7 @@ type private FakeControlHost() =
         manifest["endpoint"] <- JsonValue.Create endpoint
         manifest["bearerToken"] <- JsonValue.Create token
         manifest["hostVersion"] <- JsonValue.Create version
-        manifest["controlApiVersion"] <- JsonValue.Create 1
+        manifest["controlApiVersion"] <- JsonValue.Create apiVersion
 
         staged
         |> Option.iter (fun candidate ->
@@ -397,6 +401,10 @@ type private FakeControlHost() =
 
     member _.EnableLogicalReplacement() =
         lock gate (fun () -> logicalShutdown <- true)
+
+    member _.SetControlApiVersion(version: int) =
+        lock gate (fun () ->
+            controlApiVersion <- version)
 
     member this.Activate(executablePath: string, version: string) =
         lock gate (fun () ->
@@ -459,6 +467,13 @@ type private FakeControlHost() =
             with _ ->
                 ()
 
+let private noTerminalCommand _ _ =
+    async {
+        return
+            Error
+                "The test did not expect a terminal command"
+    }
+
 let private managerConfig
     (host: FakeControlHost)
     (launchHost: ProcessStartInfo -> Result<unit, string>)
@@ -493,13 +508,7 @@ let private managerConfig
             | Ok true -> Ok host.OldExecutable
             | Ok false -> Error "Fake TerminalHost identity is not live"
             | Error error -> Error error
-      SendTerminalCommand =
-        fun _ _ ->
-            async {
-                return
-                    Error
-                        "The test did not expect a terminal command"
-            } }
+      SendTerminalCommand = noTerminalCommand }
 
 let private noLaunch (_: ProcessStartInfo) =
     Error "The test did not expect TerminalHost to be launched"
@@ -952,6 +961,170 @@ type EmbeddedTerminalControlClientTests() =
                     ""
 
             Assert.That(error, Is.EqualTo expectedError)
+        }
+
+    [<TestCase(false, false)>]
+    [<TestCase(false, true)>]
+    [<TestCase(true, false)>]
+    [<TestCase(true, true)>]
+    member _.``deployment preflight covers compatible and incompatible hosts with empty and nonempty registries``
+        (
+            incompatible: bool,
+            hasTerminal: bool
+        ) =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+
+            let config =
+                replacementManagerConfig
+                    host
+                    noLaunch
+                    noTerminalCommand
+
+            if hasTerminal then
+                let manager =
+                    EmbeddedTerminal.createWithConfig config
+
+                let target =
+                    worktree host.Root "preflight-terminal"
+
+                let! started =
+                    EmbeddedTerminal.start manager target
+                    |> Async.StartAsTask
+
+                requireOk started |> ignore
+
+            if incompatible then
+                host.SetControlApiVersion 2
+
+                if not hasTerminal then
+                    host.EnableLogicalReplacement()
+
+                host.PublishManifest()
+
+            let listRequestsBefore = host.ListRequestCount
+
+            let! result =
+                TerminalHostClient.preflightDeploymentWith config
+                |> Async.StartAsTask
+
+            Assert.That(
+                host.ListRequestCount,
+                Is.EqualTo(listRequestsBefore + 1),
+                "Preflight must read the authoritative registry"
+            )
+
+            match incompatible, hasTerminal, result with
+            | true, true, Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        error,
+                        Is.EqualTo(
+                            "TerminalHost control API version 2 is not supported (expected 1)"
+                        )
+                    )
+
+                    Assert.That(host.IsOnline, Is.True)
+                    Assert.That(host.ShutdownRequestCount, Is.Zero))
+            | true, true, Ok preflight ->
+                Assert.Fail(
+                    $"An incompatible host with terminals must fail closed, got {preflight}"
+                )
+            | true, false, Ok None ->
+                Assert.Multiple(fun () ->
+                    Assert.That(host.IsOnline, Is.False)
+                    Assert.That(host.ShutdownRequestCount, Is.EqualTo(1)))
+            | true, false, result ->
+                Assert.Fail(
+                    $"An incompatible empty host should stop cleanly, got {result}"
+                )
+            | _, _, Error error ->
+                Assert.Fail($"Expected deployment preflight success, got {error}")
+            | _, _, Ok None ->
+                Assert.Fail("The exact fixture host should remain live")
+            | _, _, Ok(Some liveHost) ->
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        liveHost.ExecutablePath,
+                        Is.EqualTo host.OldExecutable
+                    )
+
+                    Assert.That(
+                        liveHost.TerminalCount,
+                        Is.EqualTo(if hasTerminal then 1 else 0)
+                    )
+
+                    Assert.That(liveHost.Pid, Is.GreaterThan(0))
+                    Assert.That(
+                        liveHost.ProcessStartTimeUtcTicks,
+                        Is.GreaterThan(0L)
+                    ))
+        }
+
+    [<Test>]
+    member _.``incompatible empty host fails closed when exact shutdown is not confirmed``() =
+        task {
+            use host = new FakeControlHost()
+            host.SetControlApiVersion 2
+            host.PublishManifest()
+
+            let config =
+                { replacementManagerConfig
+                    host
+                    noLaunch
+                    noTerminalCommand with
+                    StartupTimeout = TimeSpan.FromMilliseconds 100.0 }
+
+            let! result =
+                TerminalHostClient.preflightDeploymentWith config
+                |> Async.StartAsTask
+
+            match result with
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        error,
+                        Does.StartWith(
+                            "The incompatible empty TerminalHost could not be stopped:"
+                        )
+                    )
+
+                    Assert.That(host.ShutdownRequestCount, Is.EqualTo(1)))
+            | Ok preflight ->
+                Assert.Fail(
+                    $"Unconfirmed incompatible-host shutdown must fail, got {preflight}"
+                )
+        }
+
+    [<Test>]
+    member _.``deployment preflight does not trust a registry after health identity mismatch``() =
+        task {
+            use host = new FakeControlHost()
+
+            host.PublishManifestWithJsonField(
+                "controlApiVersion",
+                "2"
+            )
+
+            let! result =
+                TerminalHostClient.preflightDeploymentWith(
+                    managerConfig host noLaunch
+                )
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    result,
+                    Is.EqualTo(
+                        Error
+                            "TerminalHost health identity does not match its discovery manifest"
+                        : Result<TerminalHostClient.DeploymentPreflightResult option, string>
+                    )
+                )
+
+                Assert.That(host.ListRequestCount, Is.Zero)
+                Assert.That(host.ShutdownRequestCount, Is.Zero))
         }
 
     [<Test>]
