@@ -73,6 +73,7 @@
     <Compile Include="CanvasTestHelpers.fs" />
     <Compile Include="CanvasPromptTests.fs" />
     <Compile Include="WorkspaceLayoutTests.fs" />
+    <Compile Include="CanvasPathCopyTests.fs" />
     <Compile Include="CanvasPaneTests.fs" />
     <Compile Include="CanvasAuthoringDxE2ETests.fs" />
     <Compile Include="CanvasPhase4Tests.fs" />

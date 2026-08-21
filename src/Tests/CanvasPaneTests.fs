@@ -737,6 +737,53 @@ type CanvasPaneTests() =
             Assert.That(ageText, Does.Match("^(now|\\d+[mhd])$"), $"Age '{ageText}' should be a compact relative time (now/Nm/Nh/Nd)")
         }
 
+    [<Test>]
+    member this.``Hovering a doc tab replaces its age with a path copy action without resizing``() =
+        task {
+            do! this.Context.GrantPermissionsAsync([| "clipboard-read"; "clipboard-write" |])
+            do! focusCanvasCard this.Page FixtureCanvasBranch
+            do! ensureCanvasPaneOpen this.Page
+
+            let shell = this.Page.Locator(".canvas-pane .canvas-tab-shell").First
+            let copyButton = shell.Locator(".canvas-tab-copy")
+            do! shell.WaitForAsync()
+
+            let! beforeHover = shell.BoundingBoxAsync()
+            do! Assertions.Expect(copyButton).ToHaveCSSAsync("opacity", "0")
+
+            do! shell.Locator(".canvas-tab").ClickAsync()
+            do! this.Page.Mouse.MoveAsync(0.0f, 0.0f)
+            do! Assertions.Expect(copyButton).ToHaveCSSAsync("opacity", "0")
+
+            do! shell.HoverAsync()
+            do! Assertions.Expect(copyButton).ToHaveCSSAsync("opacity", "1")
+            let! afterHover = shell.BoundingBoxAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(afterHover.Width, Is.EqualTo(beforeHover.Width).Within(0.01), "Hover must not change the tab width")
+                Assert.That(afterHover.Height, Is.EqualTo(beforeHover.Height).Within(0.01), "Hover must not change the tab height"))
+
+            do! copyButton.ClickAsync()
+            let copiedButton = shell.Locator(".canvas-tab-copy.copied")
+            do! Assertions.Expect(copiedButton).ToBeVisibleAsync()
+            let! checkIconCount = copiedButton.Locator(".check-icon").CountAsync()
+            let! pathCopiedBannerCount =
+                this.Page.Locator(".canvas-clipboard-banner", PageLocatorOptions(HasText = "Path copied")).CountAsync()
+            let! copiedPath = this.Page.EvaluateAsync<string>("() => navigator.clipboard.readText()")
+
+            Assert.Multiple(fun () ->
+                Assert.That(checkIconCount, Is.EqualTo(1), "A landed path copy should replace the rectangles with a checkmark")
+                Assert.That(pathCopiedBannerCount, Is.EqualTo(0), "An instant path copy should not add a success banner")
+                Assert.That(
+                    copiedPath,
+                    Is.EqualTo("Q:/code/TestProject/feature-active/.agents/canvas/e2e-test.html")))
+
+            do! copiedButton.WaitForAsync(
+                LocatorWaitForOptions(State = WaitForSelectorState.Detached, Timeout = 3000.0f))
+            let! restoredCopyIconCount = copyButton.Locator("svg:not(.check-icon)").CountAsync()
+            Assert.That(restoredCopyIconCount, Is.EqualTo(1), "The copy icon should return after the feedback interval")
+        }
+
     // ── Empty Canvas Overview ───────────────────────────────────────────
 
     [<Test>]

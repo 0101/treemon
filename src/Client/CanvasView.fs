@@ -52,6 +52,11 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
         | Some scopedKey -> dispatch (ShareCanvasDoc (scopedKey, filename))
         | _ -> ()
 
+    let copyCanvasDocPath filename =
+        match activeCanvasScopedKey with
+        | Some scopedKey -> dispatch (CopyCanvasDocPath (scopedKey, filename))
+        | _ -> ()
+
     let launchCanvasSession () =
         match activeCanvasScopedKey with
         | Some scopedKey -> dispatch (LaunchCanvasSession scopedKey)
@@ -89,9 +94,10 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveCanvasDoc
           ShareDoc = shareCanvasDoc
+          CopyDocPath = copyCanvasDocPath
           DismissError = (fun () -> dispatch DismissCanvasMessageError)
           DismissDocError = (fun () -> dispatch DismissCanvasDocError)
-          DismissShareNotice = (fun () -> dispatch DismissShareNotice)
+          DismissClipboardNotice = (fun () -> dispatch DismissClipboardNotice)
           LaunchSession = launchCanvasSession }
 
     let canvasState: CanvasPane.CanvasPaneState =
@@ -103,7 +109,8 @@ let view (model: Model) (dispatch: Dispatch<Msg>) =
           Width = model.Canvas.WorkspaceWidth
           SendState = model.Canvas.CanvasSendState
           DocError = model.Canvas.DocError
-          ShareNotice = model.Canvas.ShareNotice
+          ClipboardNotice = model.Canvas.ClipboardNotice
+          PathCopyState = model.Canvas.PathCopyState
           ActiveScopedKey = activeCanvasScopedKey
           ShareState = model.Canvas.ShareState
           BridgeLiveness = model.Canvas.BridgeLiveness }

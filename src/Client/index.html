@@ -1032,20 +1032,16 @@
             font-size: var(--fs-base); padding: 0 4px; opacity: 0.6;
         }
         .canvas-waiting-dismiss:hover { opacity: 1; }
-        /* Share success banner ("Shared — link copied"). Green signals success and keeps it distinct
-           from the red delivery-error banner (a share failure reuses that one) and the blue waiting
-           banner. Like them it is a normal flex child of the column-layout pane, so it pushes the
-           iframe down rather than overlaying it. */
-        .canvas-share-banner {
+        .canvas-clipboard-banner {
             display: flex; align-items: center; justify-content: space-between;
             background: #1e3a2a; color: #a6e3a1; padding: 4px 12px;
             font-size: var(--fs-base); line-height: 1.4;
         }
-        .canvas-share-dismiss {
+        .canvas-clipboard-dismiss {
             background: none; border: none; color: #a6e3a1; cursor: pointer;
             font-size: var(--fs-base); padding: 0 4px; opacity: 0.6;
         }
-        .canvas-share-dismiss:hover { opacity: 1; }
+        .canvas-clipboard-dismiss:hover { opacity: 1; }
         /* Doc-side JS error banner. Amber accent keeps it visually distinct from the red
            message-delivery failure banner (.canvas-error-banner) and the blue waiting banner.
            As a normal flex child of the column-layout .canvas-pane it pushes the iframe down
@@ -1082,6 +1078,9 @@
             font-size: var(--fs-lg);
             font-weight: 200;
         }
+        .canvas-tab-shell {
+            position: relative; display: inline-flex; flex-shrink: 0;
+        }
         .canvas-tab {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;
             padding: 2px 10px; font-size: var(--fs-base); cursor: pointer; color: #bac2de;
@@ -1091,11 +1090,35 @@
         .canvas-tab:hover { background: #45475a; border-color: #585b70; }
         .canvas-tab.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
         .canvas-tab-viewed { opacity: 0.5; }
+        .canvas-tab-meta {
+            position: relative; display: inline-block;
+            width: 18px; height: 18px; margin-left: 6px; vertical-align: middle;
+        }
         .canvas-tab-age {
-            margin-left: 6px; font-size: var(--fs-sm); color: #6c7086;
-            font-variant-numeric: tabular-nums;
+            position: absolute; inset: 0; display: grid; place-items: center;
+            font-size: var(--fs-sm); color: #9399b2; font-variant-numeric: tabular-nums;
+            transition: opacity 0.15s;
         }
         .canvas-tab.active .canvas-tab-age { color: #7f9bd6; }
+        .canvas-tab-copy {
+            position: absolute; top: 50%; right: 10px; transform: translateY(-50%);
+            width: 18px; height: 18px; padding: 2px; box-sizing: border-box;
+            display: grid; place-items: center;
+            background: #313244; border: 1px solid #45475a; border-radius: 4px;
+            color: #a6adc8; cursor: pointer; opacity: 0; pointer-events: none;
+            transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+        }
+        .canvas-tab-copy .btn-icon { width: 12px; height: 12px; }
+        .canvas-tab-shell:hover .canvas-tab-age { opacity: 0; }
+        .canvas-tab-shell:hover .canvas-tab-copy { opacity: 1; pointer-events: auto; }
+        .canvas-tab-copy:hover { color: #89b4fa; border-color: #89b4fa; }
+        .canvas-tab-copy:disabled { color: #585b70; border-color: #45475a; cursor: default; }
+        .canvas-tab-copy.copied,
+        .canvas-tab-copy.copied:hover { color: #a6e3a1; border-color: #a6e3a1; }
+        .canvas-tab-copy:focus-visible {
+            opacity: 1; pointer-events: auto;
+            outline: 2px solid #89b4fa; outline-offset: 1px;
+        }
         .canvas-system-tab {
             display: flex; align-items: center; gap: 5px;
             flex-shrink: 0; margin-right: 6px;

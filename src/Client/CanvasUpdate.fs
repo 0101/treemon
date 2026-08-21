@@ -308,6 +308,13 @@ let buildClipboardPayload (result: CanvasShareResult) : ClipboardPayload =
     { Html = $"<a href=\"{htmlEscape result.Url}\">{htmlEscape result.Title}</a>"
       Text = result.Url }
 
+let canvasDocDiskPath (worktreePath: WorktreePath) (filename: string) =
+    let rawRoot = WorktreePath.value worktreePath
+    let isPosix = rawRoot.StartsWith("/")
+    let separator = if isPosix || not (rawRoot.Contains("\\")) then "/" else "\\"
+    let root = if isPosix then rawRoot.TrimEnd('/') else rawRoot.TrimEnd([| '/'; '\\' |])
+    $"{root}{separator}.agents{separator}canvas{separator}{filename}"
+
 /// Effect that writes BOTH clipboard formats at once via the async Clipboard API — one `ClipboardItem`
 /// carrying a `text/html` and a `text/plain` Blob so every paste target self-selects the format it
 /// understands — and routes the write's *actual* outcome back into the update as `ClipboardWriteResult`.
@@ -325,24 +332,82 @@ let private writeClipboardCmd (scopedKey: string) (filename: string) (payload: C
         Fable.Core.JsInterop.emitJsExpr (payload.Html, payload.Text, onCopied, onFailed)
             "try{navigator.clipboard.write([new ClipboardItem({'text/html': new Blob([$0], {type: 'text/html'}), 'text/plain': new Blob([$1], {type: 'text/plain'})})]).then(function(){ $2() }).catch(function(e){ console.error('[canvas] clipboard write failed', e); $3(String(e)) })}catch(e){ console.error('[canvas] clipboard write failed', e); $3(String(e)) }")
 
+let private writeCanvasDocPathCmd (scopedKey: string) (filename: string) (revision: int) (path: string) : Cmd<Msg> =
+    Cmd.ofEffect (fun dispatch ->
+        let onCopied () = dispatch (CanvasDocPathCopyResult (scopedKey, filename, revision, path, Ok ()))
+        let onFailed (e: string) = dispatch (CanvasDocPathCopyResult (scopedKey, filename, revision, path, Error e))
+        Fable.Core.JsInterop.emitJsExpr (path, onCopied, onFailed)
+            "try{navigator.clipboard.writeText($0).then(function(){ $1() }).catch(function(e){ console.error('[canvas] path clipboard write failed', e); $2(String(e)) })}catch(e){ console.error('[canvas] path clipboard write failed', e); $2(String(e)) }")
+
+let private clearCanvasDocPathCopiedCmd (scopedKey: string) (filename: string) (revision: int) =
+    Cmd.ofEffect (fun dispatch ->
+        Fable.Core.JS.setTimeout
+            (fun () -> dispatch (ClearCanvasDocPathCopied (scopedKey, filename, revision)))
+            1_200
+        |> ignore)
+
+/// Keep an independent queued-message wait visible when another canvas action fails.
+let preserveWaitingOnFailure (sendState: CanvasSendState) (message: string) : CanvasSendState =
+    match sendState with
+    | CanvasSendState.Waiting _ -> sendState
+    | _ -> CanvasSendState.Failed message
+
+let copyCanvasDocPath (scopedKey: string) (filename: string) (model: Model) =
+    match model.Canvas.ShareState, model.Canvas.PathCopyState, findWorktree scopedKey model with
+    | CanvasShareState.Idle, pathCopyState, Some wt
+        when not (CanvasPathCopyState.isCopying pathCopyState)
+             && (wt.CanvasDocs |> List.exists (fun doc -> doc.Filename = filename)) ->
+        let path = canvasDocDiskPath wt.Path filename
+        let revision = CanvasPathCopyState.revision pathCopyState + 1
+        { model with
+            Canvas.ClipboardNotice = None
+            Canvas.PathCopyState = CanvasPathCopyState.Copying (scopedKey, filename, revision) },
+        writeCanvasDocPathCmd scopedKey filename revision path
+    | CanvasShareState.Idle, pathCopyState, _ when not (CanvasPathCopyState.isCopying pathCopyState) ->
+        let message = "Could not copy the canvas doc path because the document is no longer available."
+        { model with
+            Canvas.CanvasSendState = preserveWaitingOnFailure model.Canvas.CanvasSendState message
+            Canvas.ClipboardNotice = None
+            Canvas.PathCopyState = CanvasPathCopyState.Idle (CanvasPathCopyState.revision pathCopyState) },
+        Cmd.none
+    | _ -> model, Cmd.none
+
+let canvasDocPathCopyResult (scopedKey: string) (filename: string) (revision: int) (path: string) (outcome: Result<unit, string>) (model: Model) =
+    match model.Canvas.PathCopyState, outcome with
+    | CanvasPathCopyState.Copying (activeScopedKey, activeFilename, activeRevision), Ok ()
+        when (activeScopedKey, activeFilename, activeRevision) = (scopedKey, filename, revision) ->
+        let sendState =
+            match model.Canvas.CanvasSendState with
+            | CanvasSendState.Failed _ -> CanvasSendState.Idle
+            | other -> other
+        { model with
+            Canvas.CanvasSendState = sendState
+            Canvas.PathCopyState = CanvasPathCopyState.Copied (scopedKey, filename, revision) },
+        clearCanvasDocPathCopiedCmd scopedKey filename revision
+    | CanvasPathCopyState.Copying (activeScopedKey, activeFilename, activeRevision), Error _
+        when (activeScopedKey, activeFilename, activeRevision) = (scopedKey, filename, revision) ->
+        let message = $"Could not copy the path. Copy it manually: {path}"
+        { model with
+            Canvas.CanvasSendState = preserveWaitingOnFailure model.Canvas.CanvasSendState message
+            Canvas.ClipboardNotice = None
+            Canvas.PathCopyState = CanvasPathCopyState.Idle revision },
+        Cmd.none
+    | _ -> model, Cmd.none
+
+let clearCanvasDocPathCopied (scopedKey: string) (filename: string) (revision: int) (model: Model) =
+    match model.Canvas.PathCopyState with
+    | CanvasPathCopyState.Copied (activeScopedKey, activeFilename, activeRevision)
+        when (activeScopedKey, activeFilename, activeRevision) = (scopedKey, filename, revision) ->
+        { model with Canvas.PathCopyState = CanvasPathCopyState.Idle revision }, Cmd.none
+    | _ -> model, Cmd.none
+
 let shareCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
-    match model.Canvas.ShareState, findWorktree scopedKey model with
-    | CanvasShareState.Idle, Some wt ->
+    match model.Canvas.ShareState, model.Canvas.PathCopyState, findWorktree scopedKey model with
+    | CanvasShareState.Idle, pathCopyState, Some wt when not (CanvasPathCopyState.isCopying pathCopyState) ->
         let request: ShareCanvasDocRequest = { WorktreePath = wt.Path; Filename = filename }
         { model with Canvas.ShareState = CanvasShareState.Publishing (scopedKey, filename) },
         Cmd.OfAsync.either worktreeApi.Value.shareCanvasDoc request (fun r -> ShareCanvasDocResult (scopedKey, filename, r)) (_.Message >> Error >> fun r -> ShareCanvasDocResult (scopedKey, filename, r))
     | _ -> model, Cmd.none
-
-/// Send-state transition for a *failed* share. Mirrors the Ok arm's guard and the banner-XOR model
-/// in Decision #10 (docs/spec/canvas-sharing.md): a share failure raises the red delivery-error
-/// banner (`Failed`), but a live `Waiting` banner is independent — its queued message may still be
-/// delivered (see `clearWaitingOnDelivery`), so Waiting must never be reported as a failure and is
-/// preserved. Pure so the invariant is unit-testable without driving the `Error` update arm, whose
-/// direct `Fable.Core.JS.console.error` call throws under .NET.
-let preserveWaitingOnShareFailure (sendState: CanvasSendState) (message: string) : CanvasSendState =
-    match sendState with
-    | CanvasSendState.Waiting _ -> sendState
-    | _ -> CanvasSendState.Failed message
 
 let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<CanvasShareResult, string>) (model: Model) =
     match model.Canvas.ShareState, result with
@@ -353,7 +418,7 @@ let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<
         // round-trip), so DON'T claim "link copied" here: that would lie if the write later fails.
         // Clear any stale delivery *error* (from a prior failed share or message send) so the red error
         // banner can't linger beside the coming success banner — mirroring how the Error arm clears a
-        // stale success notice — and clear any stale ShareNotice; the real banner (copied vs "copy it
+        // stale success notice — and clear any stale ClipboardNotice; the real banner (copied vs "copy it
         // manually") is raised by ClipboardWriteResult once the write settles (F6). A live Waiting
         // banner is an independent fact and is left untouched.
         let clearedSendState =
@@ -362,18 +427,18 @@ let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<
             | other -> other
         { model with
             Canvas.CanvasSendState = clearedSendState
-            Canvas.ShareNotice = None
+            Canvas.ClipboardNotice = None
             Canvas.ShareState = CanvasShareState.WritingClipboard (scopedKey, filename) },
         writeClipboardCmd scopedKey filename (buildClipboardPayload shareResult)
     | CanvasShareState.Publishing (activeScopedKey, activeFilename), Error msg
         when activeScopedKey = scopedKey && activeFilename = filename ->
         // Raise the existing dismissible delivery-error banner and clear any stale success notice so
         // the two never show together. A live Waiting banner is an independent fact and is preserved
-        // (see preserveWaitingOnShareFailure) — its queued message may still be delivered, so Waiting
+        // (see preserveWaitingOnFailure) — its queued message may still be delivered, so Waiting
         // must never be reported as a share failure (Decision #10 banner-XOR model).
         { model with
-            Canvas.CanvasSendState = preserveWaitingOnShareFailure model.Canvas.CanvasSendState msg
-            Canvas.ShareNotice = None
+            Canvas.CanvasSendState = preserveWaitingOnFailure model.Canvas.CanvasSendState msg
+            Canvas.ClipboardNotice = None
             Canvas.ShareState = CanvasShareState.Idle },
         Cmd.ofEffect (fun _ -> Fable.Core.JS.console.error ($"Share canvas doc error ({scopedKey}/{filename}):", msg))
     | _ -> model, Cmd.none
@@ -396,13 +461,13 @@ let clipboardWriteResult (scopedKey: string) (filename: string) (url: string) (o
     | CanvasShareState.WritingClipboard (activeScopedKey, activeFilename)
         when activeScopedKey = scopedKey && activeFilename = filename ->
         { model with
-            Canvas.ShareNotice = Some (clipboardResultNotice url outcome)
+            Canvas.ClipboardNotice = Some (clipboardResultNotice url outcome)
             Canvas.ShareState = CanvasShareState.Idle },
         Cmd.none
     | _ -> model, Cmd.none
 
-let dismissShareNotice (model: Model) =
-    { model with Canvas = { model.Canvas with ShareNotice = None } }, Cmd.none
+let dismissClipboardNotice (model: Model) =
+    { model with Canvas.ClipboardNotice = None }, Cmd.none
 
 let navigateCanvasDoc (filename: string) (model: Model) =
     match CanvasState.activeCanvasWorktree model.FocusedElement model.Canvas.TargetWorktree with
