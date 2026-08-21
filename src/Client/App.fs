@@ -25,6 +25,13 @@ let fetchWorktrees () =
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
+let deleteWorktreeCmd (api: Lazy<IWorktreeApi>) path =
+    Cmd.OfAsync.either
+        (fun path -> api.Value.deleteWorktree path)
+        path
+        DeleteCompleted
+        (fun error -> DeleteCompleted(Error error.Message))
+
 let fetchOverviewHistory request =
     let loaded response = OverviewHistoryLoaded(request, Some response)
     Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory request.Window loaded (fun _ -> OverviewHistoryLoaded(request, None))
@@ -454,7 +461,9 @@ let update msg model =
         Cmd.OfAsync.either
             worktreeApi.Value.closeEmbeddedTerminal
             path
-            (fun snapshot -> EmbeddedTerminalClosed(path, before, snapshot))
+            (function
+            | Ok snapshot -> EmbeddedTerminalClosed(path, before, snapshot)
+            | Error _ -> EmbeddedTerminalCloseFailed path)
             (fun _ -> EmbeddedTerminalCloseFailed path)
     | EmbeddedTerminalCloseFailed path ->
         { model with
@@ -603,7 +612,7 @@ let update msg model =
             model, focusDashboard
         | ConfirmModal.Delete path ->
             removeWorktreeByPath path model,
-            Cmd.OfAsync.perform (fun path -> worktreeApi.Value.deleteWorktree path) path DeleteCompleted
+            deleteWorktreeCmd worktreeApi path
         | ConfirmModal.DeleteAfterKillSession path ->
             model,
             Cmd.OfAsync.perform
@@ -631,7 +640,7 @@ let update msg model =
 
     | SessionKilledForDelete path ->
         removeWorktreeByPath path model,
-        Cmd.OfAsync.perform (fun path -> worktreeApi.Value.deleteWorktree path) path DeleteCompleted
+        deleteWorktreeCmd worktreeApi path
 
     | SessionKilledForArchive path ->
         model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))

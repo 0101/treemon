@@ -568,6 +568,13 @@ let private requireOk result =
         Assert.Fail(error)
         Unchecked.defaultof<_>
 
+let private requireError result =
+    match result with
+    | Error error -> error
+    | Ok _ ->
+        Assert.Fail("Expected an error")
+        ""
+
 let private assertRunningFor
     (expectedPath: WorktreePath)
     (snapshot: EmbeddedTerminalSnapshot)
@@ -1178,7 +1185,10 @@ type EmbeddedTerminalControlClientTests() =
                 |> Async.StartAsTask
 
             Assert.Multiple(fun () ->
-                Assert.That(closed, Is.EqualTo EmbeddedTerminalSnapshot.empty)
+                Assert.That(
+                    requireOk closed,
+                    Is.EqualTo EmbeddedTerminalSnapshot.empty
+                )
                 Assert.That(host.CloseRequestCount, Is.EqualTo(1))
                 Assert.That(host.ListRequestCount, Is.GreaterThanOrEqualTo(3)))
         }
@@ -1652,6 +1662,178 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
+    member _.``manager stays responsive and rejects lifecycle mutations during replacement``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-held-lifecycle"
+            let stagedExecutable = host.Stage stagedVersion
+
+            let launchStarted =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            use releaseLaunch =
+                new System.Threading.ManualResetEventSlim(false)
+
+            let config =
+                replacementManagerConfig
+                    host
+                    (fun startInfo ->
+                        launchStarted.TrySetResult() |> ignore
+
+                        if releaseLaunch.Wait(TimeSpan.FromSeconds 5.0) then
+                            host.Activate(startInfo.FileName, stagedVersion)
+                            Ok()
+                        else
+                            Error "Timed out waiting to release the staged host launch")
+                    (fun _ _ -> async { return Ok() })
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let running = worktree host.Root "held-running"
+            let rejectedStart = worktree host.Root "held-start"
+
+            let! started =
+                EmbeddedTerminal.start manager running
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        31L,
+                        Map.empty
+                    )
+                )
+
+            let replacement =
+                EmbeddedTerminal.tryReplaceHost query manager
+                |> Async.StartAsTask
+
+            do!
+                launchStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            let listRequestsDuringHold = host.ListRequestCount
+            let startRequestsDuringHold = host.StartRequestCount
+            let closeRequestsDuringHold = host.CloseRequestCount
+
+            let!
+                (listed,
+                 rejectedStartResult,
+                 rejectedCloseResult,
+                 listRequestsAfterCalls,
+                 startRequestsAfterCalls,
+                 closeRequestsAfterCalls) =
+                task {
+                    try
+                        let getTask =
+                            EmbeddedTerminal.get manager
+                            |> Async.StartAsTask
+
+                        let startTask =
+                            EmbeddedTerminal.start manager rejectedStart
+                            |> Async.StartAsTask
+
+                        let closeTask =
+                            EmbeddedTerminal.close manager running
+                            |> Async.StartAsTask
+
+                        let! snapshot =
+                            getTask.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+                        let! startResult =
+                            startTask.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+                        let! closeResult =
+                            closeTask.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+                        return
+                            snapshot,
+                            startResult,
+                            closeResult,
+                            host.ListRequestCount,
+                            host.StartRequestCount,
+                            host.CloseRequestCount
+                    finally
+                        releaseLaunch.Set()
+                }
+
+            let! outcome =
+                replacement.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    listed.Tabs |> List.map _.Worktree,
+                    Is.EqualTo [ running ],
+                    "polls must use the last authoritative snapshot while replacement owns the host"
+                )
+
+                Assert.That(
+                    requireError rejectedStartResult,
+                    Does.Contain("replacement is in progress")
+                )
+
+                Assert.That(
+                    requireError rejectedCloseResult,
+                    Does.Contain("replacement is in progress")
+                )
+
+                Assert.That(
+                    listRequestsAfterCalls,
+                    Is.EqualTo listRequestsDuringHold,
+                    "the held poll must not contact a host that is between generations"
+                )
+
+                Assert.That(
+                    startRequestsAfterCalls,
+                    Is.EqualTo startRequestsDuringHold,
+                    "the rejected start must not reach the old host"
+                )
+
+                Assert.That(
+                    closeRequestsAfterCalls,
+                    Is.EqualTo closeRequestsDuringHold,
+                    "the rejected close must not reach the old host"
+                )
+
+                Assert.That(
+                    outcome,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementOutcome.Replaced
+                            stagedVersion
+                    )
+                )
+
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EqualTo [ WorktreePath.value running ],
+                    "rejected operations must not remain queued after replacement"
+                )
+
+                Assert.That(host.CurrentExecutable, Is.EqualTo stagedExecutable))
+
+            let! retriedStart =
+                EmbeddedTerminal.start manager rejectedStart
+                |> Async.StartAsTask
+
+            requireOk retriedStart |> ignore
+
+            let! retriedClose =
+                EmbeddedTerminal.close manager running
+                |> Async.StartAsTask
+
+            requireOk retriedClose |> ignore
+
+            Assert.That(
+                host.CurrentTerminals |> List.map _.WorktreePath,
+                Is.EqualTo [ WorktreePath.value rejectedStart ],
+                "lifecycle requests must recover after replacement completes"
+            )
+        }
+
+    [<Test>]
     member _.``WaitingForUser on an exact owned session gates without timeout or launch``() =
         task {
             use host = new FakeControlHost()
@@ -2073,6 +2255,217 @@ type EmbeddedTerminalReplacementTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type EmbeddedTerminalWorktreeCleanupTests() =
+    [<Test>]
+    member _.``delete and archive fail cleanly during replacement and succeed when retried``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-held-cleanup"
+            host.Stage stagedVersion |> ignore
+
+            let launchStarted =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            use releaseLaunch =
+                new System.Threading.ManualResetEventSlim(false)
+
+            let manager =
+                replacementManagerConfig
+                    host
+                    (fun startInfo ->
+                        launchStarted.TrySetResult() |> ignore
+
+                        if releaseLaunch.Wait(TimeSpan.FromSeconds 5.0) then
+                            host.Activate(startInfo.FileName, stagedVersion)
+                            Ok()
+                        else
+                            Error "Timed out waiting to release the staged host launch")
+                    (fun _ _ -> async { return Ok() })
+                |> EmbeddedTerminal.createWithConfig
+
+            let repoRoot = Path.Combine(host.Root, "held-cleanup-repo")
+            Directory.CreateDirectory repoRoot |> ignore
+            let deleteTarget = worktree repoRoot "delete-target"
+            let archiveTarget = worktree repoRoot "archive-target"
+            let untouched = worktree repoRoot "untouched"
+
+            for path in [ deleteTarget; archiveTarget; untouched ] do
+                let! started =
+                    EmbeddedTerminal.start manager path
+                    |> Async.StartAsTask
+
+                requireOk started |> ignore
+
+            let agent = SchedulerState.createAgent()
+            let repoId = PathUtils.toRepoId repoRoot
+
+            let worktrees =
+                [ { Path = WorktreePath.value deleteTarget
+                    Head = "delete-head"
+                    Branch = Some "delete-target" }
+                  { Path = WorktreePath.value archiveTarget
+                    Head = "archive-head"
+                    Branch = Some "archive-target" }
+                  { Path = WorktreePath.value untouched
+                    Head = "untouched-head"
+                    Branch = Some "untouched" } ]
+
+            do! populateAgent agent repoId worktrees
+
+            let removeCalls = ConcurrentQueue<string>()
+            let stateCleanupCalls = ConcurrentQueue<string>()
+
+            let delete () =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ path _ ->
+                        async {
+                            removeCalls.Enqueue path
+                            return Ok()
+                        })
+                    (closeForCleanup manager)
+                    (fun path ->
+                        async {
+                            stateCleanupCalls.Enqueue path
+                        })
+                    agent
+                    (Map.ofList [ repoId, repoRoot ])
+                    deleteTarget
+
+            let archive () =
+                WorktreeApi.updateArchivedBranchesWith
+                    agent
+                    (Map.ofList [ repoId, repoRoot ])
+                    (closeForCleanup manager)
+                    Set.add
+                    archiveTarget
+
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        32L,
+                        Map.empty
+                    )
+                )
+
+            let replacement =
+                EmbeddedTerminal.tryReplaceHost query manager
+                |> Async.StartAsTask
+
+            do!
+                launchStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            let! rejectedDelete, rejectedArchive, retainedBeforeRetry =
+                task {
+                    try
+                        let! deleteResult =
+                            delete ()
+                            |> Async.StartAsTask
+                            |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+                        let! archiveResult =
+                            archive ()
+                            |> Async.StartAsTask
+                            |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+                        let! state =
+                            agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                            |> Async.StartAsTask
+
+                        let retained =
+                            state.Repos[repoId].WorktreeList
+                            |> List.map _.Path
+
+                        return deleteResult, archiveResult, retained
+                    finally
+                        releaseLaunch.Set()
+                }
+
+            let! outcome =
+                replacement.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    requireError rejectedDelete,
+                    Does.Contain("replacement is in progress")
+                )
+
+                Assert.That(
+                    requireError rejectedArchive,
+                    Does.Contain("replacement is in progress")
+                )
+
+                Assert.That(
+                    retainedBeforeRetry,
+                    Is.EquivalentTo(worktrees |> List.map _.Path),
+                    "a rejected delete must leave scheduler state visible to the client"
+                )
+
+                Assert.That(removeCalls, Is.Empty)
+                Assert.That(stateCleanupCalls, Is.Empty)
+                Assert.That(
+                    TreemonConfig.readArchivedBranches repoRoot,
+                    Does.Not.Contain("archive-target")
+                )
+
+                Assert.That(
+                    outcome,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementOutcome.Replaced
+                            stagedVersion
+                    )
+                )
+
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EquivalentTo(worktrees |> List.map _.Path),
+                    "rejected cleanup requests must not execute after replacement"
+                ))
+
+            let! retriedDelete =
+                delete ()
+                |> Async.StartAsTask
+
+            let! retriedArchive =
+                archive ()
+                |> Async.StartAsTask
+
+            requireOk retriedDelete |> ignore
+            requireOk retriedArchive |> ignore
+
+            let! stateAfterRetry =
+                agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    stateAfterRetry.Repos[repoId].WorktreeList
+                    |> List.map _.Path,
+                    Does.Not.Contain(WorktreePath.value deleteTarget)
+                )
+
+                Assert.That(
+                    TreemonConfig.readArchivedBranches repoRoot,
+                    Does.Contain("archive-target")
+                )
+
+                Assert.That(
+                    removeCalls.ToArray(),
+                    Is.EqualTo [| WorktreePath.value deleteTarget |]
+                )
+
+                Assert.That(
+                    stateCleanupCalls.ToArray(),
+                    Is.EqualTo [| WorktreePath.value deleteTarget |]
+                )
+
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EqualTo [ WorktreePath.value untouched ]
+                ))
+        }
+
     [<Test>]
     member _.``delete closes only the exact terminal before removing the worktree``() =
         task {

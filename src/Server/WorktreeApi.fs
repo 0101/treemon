@@ -52,7 +52,7 @@ let readOnlyApi
       startEmbeddedTerminal =
         fun _ -> async { return Error $"Embedded terminal is not available in {modeName}" }
       getEmbeddedTerminals = fun () -> async { return EmbeddedTerminalSnapshot.empty }
-      closeEmbeddedTerminal = fun _ -> async { return EmbeddedTerminalSnapshot.empty }
+      closeEmbeddedTerminal = fun _ -> async { return Ok EmbeddedTerminalSnapshot.empty }
       openEditor = fun _ -> async { return () }
       toggleAutoSync = fun _ _ -> async { return Error $"Auto-sync is not available in {modeName}" }
       deleteWorktree = fun _ -> async { return Error $"Delete is not available in {modeName}" }

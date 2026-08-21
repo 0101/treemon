@@ -356,7 +356,10 @@ type TerminalPaneDomTests() =
                         route.FulfillAsync(
                             RouteFulfillOptions(
                                 ContentType = "application/json",
-                                Body = serialize registry)))
+                                Body =
+                                    serialize
+                                        (Ok registry:
+                                            Result<EmbeddedTerminalSnapshot, string>))))
 
             for port, marker in
                 [ 61234, "first"

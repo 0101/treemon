@@ -109,6 +109,71 @@ type DeleteWithSessionSequencingTests() =
             "Confirming deletion should dismiss the modal")
 
     [<Test>]
+    member _.``failed delete clears ghost suppression and requests authoritative refresh``() =
+        let pending =
+            updateModel
+                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
+                modelWithConfirmDelete
+
+        let recovered, refresh =
+            update
+                (DeleteCompleted(Error "TerminalHost replacement is in progress"))
+                pending
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                recovered.DeletedPaths,
+                Is.Empty,
+                "the next server snapshot must be allowed to restore the worktree"
+            )
+
+            Assert.That(
+                refresh,
+                Is.Not.Empty,
+                "failure must request the authoritative worktree snapshot"
+            ))
+
+    [<Test>]
+    member _.``delete transport failure is dispatched as an explicit result``() =
+        task {
+            let api =
+                { Server.WorktreeApi.readOnlyApi
+                      "test"
+                      (fun () -> failwith "unused")
+                      (fun () -> failwith "unused") with
+                    deleteWorktree =
+                        fun _ ->
+                            async {
+                                return
+                                    raise (
+                                        InvalidOperationException(
+                                            "simulated transport failure"
+                                        )
+                                    )
+                            } }
+
+            let dispatched =
+                System.Threading.Tasks.TaskCompletionSource<Msg>(
+                    System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            deleteWorktreeCmd (lazy api) testPath
+            |> List.iter (fun effect ->
+                effect (fun message ->
+                    dispatched.TrySetResult message |> ignore))
+
+            let! message =
+                dispatched.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            Assert.That(
+                message,
+                Is.EqualTo(
+                    DeleteCompleted(Error "simulated transport failure")
+                )
+            )
+        }
+
+    [<Test>]
     member _.``ConfirmMsg DeleteAfterKillSession does NOT remove worktree from model``() =
         let model = updateModel (ConfirmMsg (ConfirmModal.DeleteAndCloseSession testPath)) modelWithConfirmDelete
 

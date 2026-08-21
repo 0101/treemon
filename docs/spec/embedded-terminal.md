@@ -100,6 +100,10 @@ terminal outage is the replacement itself; no pre-commit drain period exists.
 A failed staged version is suppressed for one minute to avoid a hot replacement loop, then becomes
 eligible for retry. A timed-out mailbox reply is inconclusive because the commit may still finish;
 the next poll rediscovers authoritative host state instead of suppressing that staged version.
+Replacement I/O runs outside the lifecycle mailbox after the mailbox enters a replacing phase.
+During that phase registry reads return the last authoritative snapshot without contacting a host
+between generations, while start and close requests fail immediately with a retryable error rather
+than waiting or remaining queued after their caller has gone away.
 
 Before committing replacement, Treemon captures for every terminal the latest open or resumable
 Copilot `SessionId` whose stored `TerminalSessionId` exactly matches that terminal. It then shuts
@@ -121,6 +125,9 @@ deliberately stable.
 
 Deleting or archiving a worktree first closes that exact worktree's terminal through the
 authoritative host API and proceeds only after successful cleanup. Other worktrees are unaffected.
+An attempt made during committed host replacement fails without mutating the worktree or archive
+state; the client reconciles from the authoritative worktree snapshot and leaves the action
+available to retry after replacement.
 
 If the host crashes, closing its Job Object handles kills every owned ttyd tree. Treemon keeps the
 affected tabs visible as interrupted, reports the loss, and can start fresh terminals. It does not
@@ -203,6 +210,8 @@ authenticated control and attachment requests; and `TerminalHostReplacement` coo
 replacement. `Server.EmbeddedTerminal` retains only the mailbox, authoritative snapshot
 reconciliation, and public terminal lifecycle surface. It lazily starts a host only when none is
 healthy, and ambiguous start or close responses are resolved by listing the registry again.
+The mailbox grants one replacement phase, keeps serving cached reads and bounded rejection replies
+while replacement runs asynchronously, then alone applies the replacement's registry transition.
 Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
 port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
 option and allows only the configured server origin aliases, so the terminal client never infers a
@@ -315,6 +324,11 @@ PowerShell lifecycle helpers, or compatibility shims.
   then mailbox form a strict dependency chain. Replacement returns a commit transition for the
   mailbox to apply, so only `EmbeddedTerminal` reconciles `ManagerState` and no module cycle is
   required.
+- **Non-blocking replacement phase:** the mailbox grants the commit boundary but does not perform
+  replacement I/O inline. Reads use its last authoritative snapshot until completion, mutations
+  receive an immediate retryable error, and only the mailbox applies the final transition. This
+  avoids timeout mismatches and stale lifecycle requests without allowing a registry race during
+  replacement.
 
 ## Key Files
 

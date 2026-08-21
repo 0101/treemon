@@ -12,6 +12,75 @@ open Shared
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type ArchiveUpdateTests() =
+    [<Test>]
+    member _.``archive transport failure is dispatched as an explicit result``() =
+        task {
+            let api =
+                { Server.WorktreeApi.readOnlyApi
+                      "test"
+                      (fun () -> failwith "unused")
+                      (fun () -> failwith "unused") with
+                    archiveWorktree =
+                        fun _ ->
+                            async {
+                                return
+                                    raise (
+                                        InvalidOperationException(
+                                            "simulated transport failure"
+                                        )
+                                    )
+                            } }
+
+            let _, command =
+                ArchiveViews.update
+                    (lazy api)
+                    (ArchiveViews.Archive(
+                        WorktreePath "/repo/archive-target"
+                    ))
+
+            let dispatched =
+                System.Threading.Tasks.TaskCompletionSource<ArchiveViews.Msg>(
+                    System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            command
+            |> List.iter (fun effect ->
+                effect (fun message ->
+                    dispatched.TrySetResult message |> ignore))
+
+            let! message =
+                dispatched.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            Assert.That(
+                message,
+                Is.EqualTo(
+                    ArchiveViews.OpCompleted(
+                        Error "simulated transport failure"
+                    )
+                )
+            )
+        }
+
+    [<Test>]
+    member _.``failed archive requests authoritative client refresh``() =
+        let unusedApi =
+            lazy (Unchecked.defaultof<IWorktreeApi>)
+
+        let result, command =
+            ArchiveViews.update
+                unusedApi
+                (ArchiveViews.OpCompleted(
+                    Error "TerminalHost replacement is in progress"
+                ))
+
+        Assert.Multiple(fun () ->
+            Assert.That(result.RefreshWorktrees, Is.True)
+            Assert.That(command, Is.Empty))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type TreemonConfigReadTests() =
 
     let mutable tempDir = ""

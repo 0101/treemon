@@ -6,9 +6,15 @@ open Server.TerminalHostManifest
 open Server.TerminalHostProcess
 open Server.TerminalHostReplacement
 
+[<RequireQualifiedAccess>]
+type private ManagerPhase =
+    | Steady
+    | Replacing
+
 type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
-      LastHost: DiscoveryManifest option }
+      LastHost: DiscoveryManifest option
+      Phase: ManagerPhase }
 
 type private Message =
     | Start of
@@ -16,13 +22,15 @@ type private Message =
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | GetCached of AsyncReplyChannel<EmbeddedTerminalSnapshot>
-    | Close of WorktreePath * AsyncReplyChannel<EmbeddedTerminalSnapshot>
-    | CloseStrict of
+    | Close of
         WorktreePath *
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
-    | TryCommitReplacement of
+    | BeginReplacement of
         ReplacementPlan *
         ReplacementPolicyQuery *
+        AsyncReplyChannel<ReplacementOutcome>
+    | FinishReplacement of
+        ReplacementCommit *
         AsyncReplyChannel<ReplacementOutcome>
 
 type Manager =
@@ -105,13 +113,14 @@ let private applyRegistry
     (manifest: DiscoveryManifest)
     (registry: RegistrySnapshot)
     =
-    { LastSnapshot =
-        reconcileSnapshot
-            state.LastHost
-            manifest
-            registry.Terminals
-            state.LastSnapshot
-      LastHost = Some manifest }
+    { state with
+        LastSnapshot =
+            reconcileSnapshot
+                state.LastHost
+                manifest
+                registry.Terminals
+                state.LastSnapshot
+        LastHost = Some manifest }
 
 let private applyRegistryAfterClose
     path
@@ -122,13 +131,14 @@ let private applyRegistryAfterClose
     let withoutClosed =
         withoutPath path state.LastSnapshot
 
-    { LastSnapshot =
-        reconcileSnapshot
-            state.LastHost
-            manifest
-            registry.Terminals
-            withoutClosed
-      LastHost = Some manifest }
+    { state with
+        LastSnapshot =
+            reconcileSnapshot
+                state.LastHost
+                manifest
+                registry.Terminals
+                withoutClosed
+        LastHost = Some manifest }
 
 let private withHostFailure error state =
     { state with
@@ -298,6 +308,9 @@ let private applyReplacementCommit state commit =
     | ReplacementCommit.ApplyRegistry(manifest, registry, outcome) ->
         applyRegistry state manifest registry, outcome
 
+let private replacementInProgressError =
+    "TerminalHost replacement is in progress; try again when it completes."
+
 let internal createWithConfig config =
     let agent =
         MailboxProcessor.Start(fun inbox ->
@@ -306,12 +319,18 @@ let internal createWithConfig config =
                     let! message = inbox.Receive()
 
                     match message with
+                    | Get reply when state.Phase = ManagerPhase.Replacing ->
+                        reply.Reply state.LastSnapshot
+                        return! loop state
                     | Get reply ->
                         let! next = getTerminals config state
                         reply.Reply next.LastSnapshot
                         return! loop next
                     | GetCached reply ->
                         reply.Reply state.LastSnapshot
+                        return! loop state
+                    | Start(_, reply) when state.Phase = ManagerPhase.Replacing ->
+                        reply.Reply(Error replacementInProgressError)
                         return! loop state
                     | Start(worktreePath, reply) ->
                         let! next, result =
@@ -322,20 +341,10 @@ let internal createWithConfig config =
 
                         reply.Reply result
                         return! loop next
+                    | Close(_, reply) when state.Phase = ManagerPhase.Replacing ->
+                        reply.Reply(Error replacementInProgressError)
+                        return! loop state
                     | Close(worktreePath, reply) ->
-                        let! next, result =
-                            closeTerminal
-                                config
-                                state
-                                worktreePath
-
-                        reply.Reply(
-                            result
-                            |> Result.defaultValue next.LastSnapshot
-                        )
-
-                        return! loop next
-                    | CloseStrict(worktreePath, reply) ->
                         let! next, result =
                             closeTerminal
                                 config
@@ -344,20 +353,38 @@ let internal createWithConfig config =
 
                         reply.Reply result
                         return! loop next
-                    | TryCommitReplacement(plan, query, reply) ->
-                        let! commit =
-                            commitReplacement config plan query
+                    | BeginReplacement(_, _, reply)
+                        when state.Phase = ManagerPhase.Replacing ->
+                        reply.Reply ReplacementOutcome.RaceLost
+                        return! loop state
+                    | BeginReplacement(plan, query, reply) ->
+                        async {
+                            let! commit =
+                                commitReplacement config plan query
 
+                            inbox.Post(FinishReplacement(commit, reply))
+                        }
+                        |> Async.Start
+
+                        return!
+                            loop
+                                { state with
+                                    Phase = ManagerPhase.Replacing }
+                    | FinishReplacement(commit, reply) ->
                         let next, outcome =
                             applyReplacementCommit state commit
 
                         reply.Reply outcome
-                        return! loop next
+                        return!
+                            loop
+                                { next with
+                                    Phase = ManagerPhase.Steady }
                 }
 
             loop
                 { LastSnapshot = EmbeddedTerminalSnapshot.empty
-                  LastHost = None })
+                  LastHost = None
+                  Phase = ManagerPhase.Steady })
 
     Manager(config, agent)
 
@@ -375,7 +402,7 @@ let private tryReplaceHostIgnoring
     let commit plan activityQuery =
         agent.PostAndAsyncReply(
             (fun reply ->
-                TryCommitReplacement(plan, activityQuery, reply)),
+                BeginReplacement(plan, activityQuery, reply)),
             timeout = 300_000
         )
 
@@ -432,8 +459,5 @@ let close (Manager(_, agent)) worktreePath =
         timeout = 60_000
     )
 
-let internal closeStrict (Manager(_, agent)) worktreePath =
-    agent.PostAndAsyncReply(
-        (fun reply -> CloseStrict(worktreePath, reply)),
-        timeout = 60_000
-    )
+let internal closeStrict manager worktreePath =
+    close manager worktreePath
