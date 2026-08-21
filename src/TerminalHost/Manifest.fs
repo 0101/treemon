@@ -138,7 +138,8 @@ module Manifest =
         with _ ->
             ()
 
-    let monitor
+    let internal monitorWithDelay
+        waitForNextPoll
         stateDirectory
         layout
         identity
@@ -148,11 +149,9 @@ module Manifest =
         =
         let rec loop currentVersion =
             async {
-                try
-                    do!
-                        Task.Delay(TimeSpan.FromSeconds 1.0, cancellationToken)
-                        |> Async.AwaitTask
+                let! keepGoing = waitForNextPoll cancellationToken
 
+                if keepGoing then
                     let discovered = readStagedExecutableVersion layout
 
                     let nextVersion =
@@ -170,8 +169,36 @@ module Manifest =
                             | Error _ -> currentVersion
 
                     return! loop nextVersion
-                with :? OperationCanceledException ->
-                    return ()
             }
 
-        loop initialVersion |> Async.StartAsTask
+        loop initialVersion
+
+    let private waitForNextPoll (cancellationToken: CancellationToken) =
+        async {
+            try
+                do!
+                    Task.Delay(TimeSpan.FromSeconds 1.0, cancellationToken)
+                    |> Async.AwaitTask
+
+                return true
+            with :? OperationCanceledException ->
+                return false
+        }
+
+    let monitor
+        stateDirectory
+        layout
+        identity
+        bearerToken
+        initialVersion
+        cancellationToken
+        =
+        monitorWithDelay
+            waitForNextPoll
+            stateDirectory
+            layout
+            identity
+            bearerToken
+            initialVersion
+            cancellationToken
+        |> Async.StartAsTask

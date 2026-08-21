@@ -47,6 +47,11 @@ type RegistryDto =
 
 type ErrorDto = { Error: string }
 
+type private ReplacementCommitMessage =
+    TerminalHostReplacement.ReplacementPlan
+        * TerminalHostReplacement.ReplacementPolicyQuery
+        * AsyncReplyChannel<TerminalHostReplacement.ReplacementOutcome>
+
 type private FakeControlHost() =
     let root = uniquePath "embedded-terminal-client"
     let stateDirectory = Path.Combine(root, "state")
@@ -1356,6 +1361,76 @@ type EmbeddedTerminalControlClientTests() =
 [<Category("Fast")>]
 type EmbeddedTerminalReplacementTests() =
     [<Test>]
+    member _.``coordinator keeps polling and retries a failed version after its cooldown``() =
+        task {
+            let stagedVersion = "2.0.0-retry"
+
+            let startedAt =
+                DateTimeOffset(2026, 8, 21, 5, 0, 0, TimeSpan.Zero)
+
+            // Mutation models the externally advancing clock at this test boundary.
+            let mutable timestamps =
+                [ startedAt
+                  startedAt
+                  startedAt.AddSeconds 30.0
+                  startedAt.AddSeconds 30.0
+                  startedAt.AddMinutes 2.0
+                  startedAt.AddMinutes 2.0 ]
+
+            let utcNow () =
+                match timestamps with
+                | timestamp :: remaining ->
+                    timestamps <- remaining
+                    timestamp
+                | [] -> failwith "The coordinator read the clock too many times"
+
+            let observedIgnoredVersions = ConcurrentQueue<string option>()
+
+            let tryReplace ignoredStagedVersion =
+                async {
+                    observedIgnoredVersions.Enqueue ignoredStagedVersion
+
+                    return
+                        match observedIgnoredVersions.Count with
+                        | 1 ->
+                            TerminalHostReplacement.ReplacementOutcome.Failed(
+                                stagedVersion,
+                                "transient failure"
+                            )
+                        | 2 ->
+                            TerminalHostReplacement.ReplacementOutcome.NoCandidate
+                        | 3 ->
+                            TerminalHostReplacement.ReplacementOutcome.Replaced
+                                stagedVersion
+                        | count ->
+                            failwith
+                                $"The coordinator performed unexpected replacement attempt {count}"
+                }
+
+            let waitForNextPoll _ =
+                async {
+                    return observedIgnoredVersions.Count < 3
+                }
+
+            do!
+                TerminalHostReplacement.runCoordinatorWith
+                    utcNow
+                    waitForNextPoll
+                    tryReplace
+                    System.Threading.CancellationToken.None
+                |> Async.StartAsTask
+
+            Assert.That(
+                observedIgnoredVersions.ToArray(),
+                Is.EqualTo(
+                    [| None
+                       Some stagedVersion
+                       None |]
+                )
+            )
+        }
+
+    [<Test>]
     member _.``registry race between snapshot and recheck aborts without side effects``() =
         task {
             use host = new FakeControlHost()
@@ -1421,6 +1496,159 @@ type EmbeddedTerminalReplacementTests() =
                     )
                 )
                 Assert.That(File.Exists stagedExecutable, Is.True))
+        }
+
+    [<Test>]
+    member _.``timed out mailbox commit is rechecked after its late completion``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-late-reply"
+            let stagedExecutable = host.Stage stagedVersion
+            let launches = ConcurrentQueue<string>()
+
+            let config =
+                replacementManagerConfig
+                    host
+                    (fun startInfo ->
+                        launches.Enqueue startInfo.FileName
+                        host.Activate(startInfo.FileName, stagedVersion)
+                        Ok())
+                    (fun _ _ -> async { return Ok() })
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "late-mailbox-reply"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        5L,
+                        Map.empty
+                    )
+                )
+
+            let commitStarted =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let releaseCommit =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let commitCompleted =
+                TaskCompletionSource<TerminalHostReplacement.ReplacementOutcome>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let commitAgent =
+                MailboxProcessor.Start(fun (inbox: MailboxProcessor<ReplacementCommitMessage>) ->
+                    async {
+                        let! plan, activityQuery, reply = inbox.Receive()
+                        commitStarted.TrySetResult() |> ignore
+                        do! releaseCommit.Task |> Async.AwaitTask
+
+                        let! commit =
+                            TerminalHostReplacement.commitReplacement
+                                config
+                                plan
+                                activityQuery
+
+                        let outcome =
+                            match commit with
+                            | TerminalHostReplacement.ReplacementCommit.KeepState value
+                            | TerminalHostReplacement.ReplacementCommit.InterruptState(
+                                _,
+                                value
+                              )
+                            | TerminalHostReplacement.ReplacementCommit.ApplyRegistry(
+                                _,
+                                _,
+                                value
+                              ) ->
+                                value
+
+                        reply.Reply outcome
+                        commitCompleted.TrySetResult outcome |> ignore
+                    })
+
+            let postCommit plan activityQuery =
+                commitAgent.PostAndAsyncReply(
+                    (fun reply -> plan, activityQuery, reply),
+                    timeout = 20
+                )
+
+            let replacementAttempt =
+                TerminalHostReplacement.tryReplaceHostIgnoring
+                    None
+                    (fun () -> async.Return())
+                    query
+                    config
+                    postCommit
+                |> Async.StartAsTask
+
+            do!
+                commitStarted.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            let! timedOut = replacementAttempt
+            releaseCommit.TrySetResult() |> ignore
+
+            let! lateOutcome =
+                commitCompleted.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            let duplicateCommits = ConcurrentQueue<unit>()
+
+            let rejectDuplicateCommit _ _ =
+                async {
+                    duplicateCommits.Enqueue()
+
+                    return
+                        TerminalHostReplacement.ReplacementOutcome.Failed(
+                            stagedVersion,
+                            "A completed replacement must not be repeated"
+                        )
+                }
+
+            let! rechecked =
+                TerminalHostReplacement.tryReplaceHostIgnoring
+                    None
+                    (fun () -> async.Return())
+                    query
+                    config
+                    rejectDuplicateCommit
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    timedOut,
+                    Is.EqualTo TerminalHostReplacement.ReplacementOutcome.RaceLost
+                )
+
+                Assert.That(
+                    lateOutcome,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementOutcome.Replaced
+                            stagedVersion
+                    )
+                )
+
+                Assert.That(
+                    rechecked,
+                    Is.EqualTo TerminalHostReplacement.ReplacementOutcome.NoCandidate
+                )
+
+                Assert.That(duplicateCommits, Is.Empty)
+                Assert.That(host.ShutdownRequestCount, Is.EqualTo(1))
+                Assert.That(launches.ToArray(), Is.EqualTo [| stagedExecutable |])
+                Assert.That(host.CurrentExecutable, Is.EqualTo stagedExecutable)
+                Assert.That(host.CurrentTerminals.Length, Is.EqualTo(1)))
         }
 
     [<Test>]

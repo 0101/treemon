@@ -766,6 +766,101 @@ type TerminalHostSecurityTests() =
 [<Category("TerminalHost")>]
 type TerminalHostManifestTests() =
     [<Test>]
+    member _.``manifest monitor continues across multiple staged version polls``() =
+        withTempDir "terminal-host-manifest-polls" (fun root ->
+            let layout = TerminalHostLayout.forStateDirectory root
+
+            let identity =
+                { Pid = 12_345
+                  ProcessStartTimeUtcTicks = 638_900_000_000_000_000L
+                  Endpoint = "http://127.0.0.1:32123"
+                  HostVersion = "1.2.3"
+                  ControlApiVersion = 1 }
+
+            let stage version =
+                let directory =
+                    TerminalHostLayout.versionDirectory layout version
+
+                Directory.CreateDirectory directory |> ignore
+
+                layout.RequiredBundleFileNames
+                |> List.iter (fun name ->
+                    File.WriteAllText(
+                        Path.Combine(directory, name),
+                        "fixture"
+                    ))
+
+                directory
+
+            let observedVersions = ConcurrentQueue<string option>()
+            // Mutation models successive timer callbacks at this injected test boundary.
+            let mutable poll = 0
+
+            let waitForNextPoll _ =
+                async {
+                    poll <- poll + 1
+
+                    match poll with
+                    | 1 ->
+                        stage "2.4.6" |> ignore
+                        return true
+                    | 2 ->
+                        observedVersions.Enqueue(
+                            Manifest.readStagedExecutableVersion layout
+                        )
+
+                        Directory.Delete(
+                            TerminalHostLayout.versionDirectory layout "2.4.6",
+                            recursive = true
+                        )
+
+                        stage "2.5.0" |> ignore
+                        return true
+                    | 3 ->
+                        observedVersions.Enqueue(
+                            Manifest.readStagedExecutableVersion layout
+                        )
+
+                        return false
+                    | _ ->
+                        return
+                            failwith
+                                $"The manifest monitor performed unexpected poll {poll}"
+                }
+
+            Manifest.monitorWithDelay
+                waitForNextPoll
+                root
+                layout
+                identity
+                "secret-token"
+                None
+                CancellationToken.None
+            |> Async.StartAsTask
+            |> getTask
+
+            use document =
+                JsonDocument.Parse(File.ReadAllBytes(Manifest.path root))
+
+            Assert.Multiple(fun () ->
+                Assert.That(poll, Is.EqualTo(3))
+
+                Assert.That(
+                    observedVersions.ToArray(),
+                    Is.EqualTo(
+                        [| Some "2.4.6"
+                           Some "2.5.0" |]
+                    )
+                )
+
+                Assert.That(
+                    document.RootElement
+                        .GetProperty("stagedExecutableVersion")
+                        .GetString(),
+                    Is.EqualTo("2.5.0")
+                )))
+
+    [<Test>]
     member _.``manifest contains only discovery identity token versions and staged executable``() =
         withTempDir "terminal-host-manifest" (fun root ->
             let layout = TerminalHostLayout.forStateDirectory root

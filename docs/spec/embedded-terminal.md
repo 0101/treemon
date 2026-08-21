@@ -97,6 +97,10 @@ non-idle. If a terminal or activity report wins the race before commit, the atte
 without side effects and waits for the next natural idle window. Once commit begins, the brief
 terminal outage is the replacement itself; no pre-commit drain period exists.
 
+A failed staged version is suppressed for one minute to avoid a hot replacement loop, then becomes
+eligible for retry. A timed-out mailbox reply is inconclusive because the commit may still finish;
+the next poll rediscovers authoritative host state instead of suppressing that staged version.
+
 Before committing replacement, Treemon captures for every terminal the latest open or resumable
 Copilot `SessionId` whose stored `TerminalSessionId` exactly matches that terminal. It then shuts
 down the old host, starts the staged host, and recreates terminals in their worktree directories.

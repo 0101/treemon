@@ -39,6 +39,10 @@ type internal ReplacementPlan =
       Terminals: TerminalRecord list
       ActivityEpoch: int64 }
 
+type private FailedVersionCooldown =
+    { StagedVersion: string
+      RetryAfter: DateTimeOffset }
+
 type private HostLaunchOutcome =
     | LaunchRejected of string
     | LaunchStartedButUnhealthy of string
@@ -432,7 +436,11 @@ let internal tryReplaceHostIgnoring
 
                             try
                                 do! beforeRecheck ()
-                                return! commit plan query
+
+                                try
+                                    return! commit plan query
+                                with :? TimeoutException ->
+                                    return ReplacementOutcome.RaceLost
                             with error ->
                                 return
                                     ReplacementOutcome.Failed(
@@ -446,44 +454,92 @@ let internal tryReplaceHostIgnoring
             return ReplacementOutcome.NoCandidate
     }
 
-let internal runCoordinator tryReplace (cancellationToken: System.Threading.CancellationToken) =
-    let rec loop ignoredStagedVersion =
+let private failureRetryCooldown =
+    TimeSpan.FromMinutes 1.0
+
+let private activeIgnoredVersion now cooldown =
+    cooldown
+    |> Option.filter (fun failed -> now < failed.RetryAfter)
+    |> Option.map _.StagedVersion
+
+let private nextCooldown now outcome current =
+    match outcome with
+    | ReplacementOutcome.Replaced _ -> None
+    | ReplacementOutcome.Failed(stagedVersion, _) ->
+        Some
+            { StagedVersion = stagedVersion
+              RetryAfter = now + failureRetryCooldown }
+    | ReplacementOutcome.NoCandidate
+    | ReplacementOutcome.WaitingForIdle
+    | ReplacementOutcome.RaceLost ->
+        current
+        |> Option.filter (fun failed -> now < failed.RetryAfter)
+
+let private logOutcome outcome =
+    match outcome with
+    | ReplacementOutcome.Replaced stagedVersion ->
+        Log.log
+            "TerminalHost"
+            $"Replaced the host with staged version {stagedVersion} at a natural idle window"
+    | ReplacementOutcome.Failed(stagedVersion, error) ->
+        Log.log
+            "TerminalHost"
+            $"Replacement of staged version {stagedVersion} failed: {error}"
+    | ReplacementOutcome.NoCandidate
+    | ReplacementOutcome.WaitingForIdle
+    | ReplacementOutcome.RaceLost ->
+        ()
+
+let internal runCoordinatorWith
+    utcNow
+    waitForNextPoll
+    tryReplace
+    (cancellationToken: System.Threading.CancellationToken)
+    =
+    let rec loop cooldown =
         async {
             if cancellationToken.IsCancellationRequested then
                 return ()
             else
+                let ignoredStagedVersion =
+                    cooldown
+                    |> activeIgnoredVersion (utcNow ())
+
                 let! outcome = tryReplace ignoredStagedVersion
+                logOutcome outcome
 
-                let nextIgnored =
-                    match outcome with
-                    | ReplacementOutcome.Replaced stagedVersion ->
-                        Log.log
-                            "TerminalHost"
-                            $"Replaced the host with staged version {stagedVersion} at a natural idle window"
+                let next =
+                    cooldown
+                    |> nextCooldown (utcNow ()) outcome
 
-                        None
-                    | ReplacementOutcome.Failed(stagedVersion, error) ->
-                        Log.log
-                            "TerminalHost"
-                            $"Replacement of staged version {stagedVersion} failed: {error}"
+                let! keepGoing = waitForNextPoll cancellationToken
 
-                        Some stagedVersion
-                    | ReplacementOutcome.NoCandidate
-                    | ReplacementOutcome.WaitingForIdle
-                    | ReplacementOutcome.RaceLost ->
-                        ignoredStagedVersion
-
-                try
-                    do!
-                        System.Threading.Tasks.Task.Delay(
-                            TimeSpan.FromSeconds 1.0,
-                            cancellationToken
-                        )
-                        |> Async.AwaitTask
-
-                    return! loop nextIgnored
-                with :? OperationCanceledException ->
-                    return ()
+                if keepGoing then
+                    return! loop next
         }
 
     loop None
+
+let private waitForNextPoll
+    (cancellationToken: System.Threading.CancellationToken)
+    =
+    async {
+        try
+            do!
+                System.Threading.Tasks.Task.Delay(
+                    TimeSpan.FromSeconds 1.0,
+                    cancellationToken
+                )
+                |> Async.AwaitTask
+
+            return true
+        with :? OperationCanceledException ->
+            return false
+    }
+
+let internal runCoordinator tryReplace cancellationToken =
+    runCoordinatorWith
+        (fun () -> DateTimeOffset.UtcNow)
+        waitForNextPoll
+        tryReplace
+        cancellationToken
