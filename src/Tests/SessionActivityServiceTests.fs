@@ -1355,6 +1355,51 @@ type IngestTests() =
             Assert.That(stored.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
 
     [<Test>]
+    member _.``omitted origins preserve initial terminal attribution across every report path``() =
+        withService "C:/wt/a" (fun (svc, _, store) ->
+            let terminalSessionId =
+                TerminalSessionId "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            let withOrigin (report: SessionActivityReport) =
+                { report with TerminalSessionId = Some terminalSessionId }
+            let submitAndAssertOrigin report =
+                svc.Submit report
+                let live = svc.LiveSnapshot() |> Map.find (SessionId "s1")
+                let persisted = store.StatusBySession(SessionId "s1") |> Option.get
+
+                Assert.Multiple(fun () ->
+                    Assert.That(live.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
+                    Assert.That(persisted.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
+
+            mkReport "s1" "C:/wt/a" "started" "2026-03-01T10:00:00Z" TurnStarted
+            |> withOrigin
+            |> submitAndAssertOrigin
+
+            mkReport "s1" "C:/wt/a" "heartbeat" "2026-03-01T10:01:00Z" Heartbeat
+            |> submitAndAssertOrigin
+
+            mkReport "s1" "C:/wt/a" "usage" "2026-03-01T10:02:00Z" (UsageInfo(1000, 2000))
+            |> submitAndAssertOrigin
+
+            mkReport
+                "s1"
+                "C:/wt/a"
+                "bootstrap"
+                "2026-03-01T10:03:00Z"
+                (TitleBootstrap(msg "Terminal session" "2026-03-01T10:03:00Z"))
+            |> submitAndAssertOrigin
+
+            mkReport
+                "s1"
+                "C:/wt/a"
+                "intent"
+                "2026-03-01T10:04:00Z"
+                (IntentReported(msg "Preserve ownership" "2026-03-01T10:04:00Z"))
+            |> submitAndAssertOrigin
+
+            mkReport "s1" "C:/wt/a" "ended" "2026-03-01T10:05:00Z" TurnEnded
+            |> submitAndAssertOrigin)
+
+    [<Test>]
     member _.``a heartbeat rehydrates a retained durable session after restart``() =
         let retained =
             { SessionId = SessionId "s1"
@@ -1885,21 +1930,39 @@ type TerminalOwnershipQueryTests() =
                     Is.EqualTo None
                 ))
 
-            mkReport "owned" "C:/wt/a" "origin-cleared" "2026-03-01T10:00:20Z" WentIdle
+            mkReport "owned" "C:/wt/a" "origin-omitted" "2026-03-01T10:00:20Z" WentIdle
             |> service.Submit
 
-            let cleared =
+            let retained =
                 queryOwnedOk service now (Set.singleton terminalA)
-            let clearedEpoch, clearedCommands =
+            let retainedEpoch, retainedCommands =
                 queryReplacementPlanOk service now [ replacementTarget ]
                 |> requireReplacementReady
 
             Assert.Multiple(fun () ->
-                Assert.That(cleared.ActivityEpoch, Is.GreaterThan idle.ActivityEpoch)
-                Assert.That(cleared.OpenSessions, Is.Empty)
-                Assert.That(cleared.ResumableSessionIds, Is.Empty)
-                Assert.That(clearedEpoch, Is.EqualTo cleared.ActivityEpoch)
-                Assert.That(clearedCommands, Is.Empty)))
+                Assert.That(retained.ActivityEpoch, Is.GreaterThan idle.ActivityEpoch)
+                Assert.That(
+                    retained.OpenSessions,
+                    Is.EqualTo(
+                        [ { TerminalSessionId = terminalA
+                            CopilotSessionId = SessionId "owned"
+                            Status = SessionLevelStatus.Idle } ]
+                    ),
+                    "an omitted origin keeps the session attached to its exact terminal"
+                )
+                Assert.That(
+                    retained.ResumableSessionIds,
+                    Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
+                )
+                Assert.That(retainedEpoch, Is.EqualTo retained.ActivityEpoch)
+                Assert.That(
+                    retainedCommands,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ TerminalSessionId.value terminalA,
+                              "copilot --yolo --resume 'owned'" ]
+                    )
+                )))
 
     [<Test>]
     member _.``retained owned session remains resumable after restart without becoming open``() =

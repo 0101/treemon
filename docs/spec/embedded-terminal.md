@@ -241,6 +241,8 @@ the current host registry to effective per-session state and returns an opaque r
 wait, or proceed with a monotonic owned-session activity epoch and optional shell command keyed by
 exact terminal session ID. It owns provider selection and `CodingToolCli` command construction;
 terminal replacement only rechecks the epoch, recreates terminals, and delivers supplied commands.
+Once a session has an exact terminal origin, a later report that omits the optional origin retains
+the known value in memory and durable storage; there is no implicit clear operation.
 Activity ingestion accepts a Copilot `SessionId` only when it is 1–128 ASCII characters from
 `[A-Za-z0-9._:-]`, so the persisted resume identity is bounded and cannot carry terminal control
 input.

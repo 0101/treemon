@@ -359,6 +359,63 @@ type LoadLiveStatusesTests() =
             Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
 
     [<Test>]
+    member _.``Omitted origin updates preserve terminal attribution across restart``() =
+        withDbPath (fun dbPath ->
+            let terminalSessionId =
+                TerminalSessionId "fedcba9876543210fedcba9876543210"
+            let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+
+            (use store = new SessionActivityStore(dbPath)
+             let attributed =
+                 storedOf
+                     "s1"
+                     "C:/wt/a"
+                     { emptyStatus with Status = SessionLevelStatus.Working }
+                     "2026-03-01T11:30:00Z"
+                     "2026-03-01T11:30:00Z"
+                 |> withTerminalOrigin terminalSessionId
+
+             store.UpsertStatus attributed
+             store.RecordLiveness(SessionId "s1", ts "2026-03-01T11:31:00Z", None)
+
+             let afterUsage =
+                 { attributed with TerminalSessionId = None }
+                 |> withUsage usage (ts "2026-03-01T11:32:00Z") (ts "2026-03-01T11:32:00Z")
+                 |> store.UpsertContextUsage
+
+             let afterEvent =
+                 { afterUsage with
+                     TerminalSessionId = None
+                     Status.Status = SessionLevelStatus.Idle
+                     UpdatedAt = ts "2026-03-01T11:33:00Z"
+                     LastSeen = ts "2026-03-01T11:33:00Z" }
+
+             let persisted =
+                 store.AppendAndUpsert(
+                     eventOf
+                         "ended"
+                         "s1"
+                         "turn_ended"
+                         SessionLevelStatus.Idle
+                         None
+                         "2026-03-01T11:33:00Z",
+                     afterEvent
+                 )
+                 |> Option.get
+
+             Assert.Multiple(fun () ->
+                 Assert.That(afterUsage.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
+                 Assert.That(persisted.TerminalSessionId, Is.EqualTo(Some terminalSessionId))))
+
+            use reopened = new SessionActivityStore(dbPath)
+            let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
+
+            Assert.Multiple(fun () ->
+                Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
+                Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(row.Status.ContextUsage, Is.EqualTo(Some usage))))
+
+    [<Test>]
     member _.``Context usage survives a restart with its ordering timestamp``() =
         withDbPath (fun dbPath ->
             let usage = { CurrentTokens = 120000; TokenLimit = 200000 }

@@ -58,10 +58,10 @@ let private parseProvider (s: string) : Result<CodingToolProvider, string> =
     | "copilot_cli" -> Ok CopilotCli
     | other -> Error $"unknown provider '{other}'"
 
-let private parseTerminalSessionId (value: string) : Result<TerminalSessionId option, string> =
-    if String.IsNullOrWhiteSpace value then
-        Ok None
-    else
+let private parseTerminalSessionId (value: string option) : Result<TerminalSessionId option, string> =
+    match value |> Option.filter (String.IsNullOrWhiteSpace >> not) with
+    | None -> Ok None
+    | Some value ->
         match Guid.TryParseExact(value.Trim(), "N") with
         | true, terminalSessionId ->
             Ok(Some(TerminalSessionId(terminalSessionId.ToString("N"))))
@@ -228,7 +228,7 @@ let parseReport (now: DateTimeOffset) (req: SessionActivityRequest) : Result<Ses
     else
         parseProvider req.provider
         |> Result.bind (fun provider ->
-            parseTerminalSessionId req.terminalSessionId
+            parseTerminalSessionId (Option.ofObj req.terminalSessionId)
             |> Result.bind (fun terminalSessionId ->
                 tryParseTimestamp req.occurredAt
                 |> Result.bind (fun rawOccurredAt ->
@@ -485,6 +485,10 @@ type SessionActivityService internal
                 store.StatusBySession report.SessionId
                 |> Option.map preparePrior)
 
+        let terminalSessionIdForReport prior =
+            report.TerminalSessionId
+            |> Option.orElse (prior |> Option.bind _.TerminalSessionId)
+
         let foldReportState () =
             let prior = priorForFold ()
             let status =
@@ -496,7 +500,7 @@ type SessionActivityService internal
                 match prior with
                 | Some existing ->
                     { existing with
-                        TerminalSessionId = report.TerminalSessionId
+                        TerminalSessionId = terminalSessionIdForReport prior
                         Status = status
                         LastSeen = max existing.LastSeen report.OccurredAt }
                 | None ->
@@ -538,7 +542,7 @@ type SessionActivityService internal
             | Some prior ->
                 let bumped =
                     { prior with
-                        TerminalSessionId = report.TerminalSessionId
+                        TerminalSessionId = terminalSessionIdForReport (Some prior)
                         LastSeen = max prior.LastSeen report.OccurredAt }
 
                 store.RecordLiveness(
@@ -573,7 +577,7 @@ type SessionActivityService internal
                     let usage = { CurrentTokens = currentTokens; TokenLimit = tokenLimit }
                     let bumped =
                         { prior with
-                            TerminalSessionId = report.TerminalSessionId
+                            TerminalSessionId = terminalSessionIdForReport (Some prior)
                             Status.ContextUsage = Some usage
                             ContextUsageAt = Some report.OccurredAt
                             LastSeen = max prior.LastSeen report.OccurredAt }
@@ -673,7 +677,7 @@ type SessionActivityService internal
 
             let stored =
                 { SessionId = report.SessionId
-                  TerminalSessionId = report.TerminalSessionId
+                  TerminalSessionId = terminalSessionIdForReport prior
                   WorktreePath = report.WorktreePath
                   Provider = report.Provider
                   Status = newStatus

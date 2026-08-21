@@ -284,7 +284,7 @@ ON CONFLICT(session_id) DO UPDATE SET
     last_seen     = excluded.last_seen,
     awaiting_user_since = excluded.awaiting_user_since,
     user_input_completed_at = excluded.user_input_completed_at,
-    terminal_session_id = excluded.terminal_session_id
+    terminal_session_id = COALESCE(excluded.terminal_session_id, session_status.terminal_session_id)
 WHERE excluded.updated_at >= session_status.updated_at;
 """
 
@@ -299,7 +299,8 @@ VALUES ($eid, $sid, $wt, $prov, $kind, $status, $skill, $ts);
 
 // Liveness-only bump: advance a session's last_seen (openness) without touching updated_at, status,
 // or any message/skill field, and only ever forward. Heartbeats take this path instead of
-// upsert+append, so they refresh openness without moving the last-write-wins clock.
+// upsert+append, so they refresh openness without moving the last-write-wins clock. An omitted
+// terminal origin retains existing attribution; there is no implicit clear operation.
 let private touchSql =
     """
 UPDATE session_status
@@ -307,7 +308,7 @@ SET last_seen = CASE
         WHEN last_seen < $seen THEN $seen
         ELSE last_seen
     END,
-    terminal_session_id = $terminalSessionId
+    terminal_session_id = COALESCE($terminalSessionId, terminal_session_id)
 WHERE session_id = $sid;
 """
 
@@ -327,7 +328,7 @@ ON CONFLICT(session_id) DO UPDATE SET
     context_current_tokens = excluded.context_current_tokens,
     context_token_limit = excluded.context_token_limit,
     context_usage_at = excluded.context_usage_at,
-    terminal_session_id = excluded.terminal_session_id,
+    terminal_session_id = COALESCE(excluded.terminal_session_id, session_status.terminal_session_id),
     last_seen = CASE
         WHEN session_status.last_seen < excluded.last_seen THEN excluded.last_seen
         ELSE session_status.last_seen
@@ -578,8 +579,9 @@ type SessionActivityStore
         tx.Commit()
         persisted
 
-    /// Advance `last_seen` for openness without moving the lifecycle ordering clock. The origin
-    /// follows the reporting process even when the heartbeat timestamp does not advance liveness.
+    /// Advance `last_seen` for openness without moving the lifecycle ordering clock. A supplied
+    /// origin follows the reporting process even when the heartbeat timestamp does not advance
+    /// liveness; an omitted origin retains existing attribution.
     member _.RecordLiveness
         (
             sessionId: SessionId,
