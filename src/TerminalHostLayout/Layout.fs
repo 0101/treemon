@@ -99,8 +99,30 @@ module TerminalHostLayout =
                 Error "The staged TerminalHost version is not a direct version directory"
             else
                 let directory = DirectoryInfo(versionDirectory layout version)
+                let stagingDirectory = DirectoryInfo layout.StagingDirectory
+
+                let pathComparison =
+                    if OperatingSystem.IsWindows() then
+                        StringComparison.OrdinalIgnoreCase
+                    else
+                        StringComparison.Ordinal
+
+                let hasExactParent =
+                    directory.Parent
+                    |> Option.ofObj
+                    |> Option.exists (fun parent ->
+                        String.Equals(
+                            parent.FullName,
+                            stagingDirectory.FullName,
+                            pathComparison
+                        ))
 
                 if
+                    directory.Name <> version
+                    || not hasExactParent
+                then
+                    Error "The staged TerminalHost version is not a direct version directory"
+                elif
                     not directory.Exists
                     || (directory.Attributes &&& FileAttributes.ReparsePoint) <> enum 0
                 then

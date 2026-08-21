@@ -1563,6 +1563,8 @@ type TerminalHostManifestTests() =
                 [ ""; " "; "1.2.3+metadata"; "../escape"; "nested/version"; "valid\n"
                   String.replicate 129 "a" ]
 
+            let nonDirectVersions = [ "."; ".." ]
+
             Assert.Multiple(fun () ->
                 Assert.That(layout.StateDirectory, Is.EqualTo(Path.GetFullPath stateDirectory))
                 Assert.That(
@@ -1588,7 +1590,20 @@ type TerminalHostManifestTests() =
                         TerminalHostLayout.isValidVersionDirectoryName version,
                         Is.False,
                         version
-                    ))))
+                    ))
+
+                nonDirectVersions
+                |> List.iter (fun version ->
+                    match TerminalHostLayout.validateStagedVersion layout version with
+                    | Error error ->
+                        Assert.That(
+                            error,
+                            Is.EqualTo(
+                                "The staged TerminalHost version is not a direct version directory"
+                            ),
+                            version
+                        )
+                    | Ok path -> Assert.Fail($"{version} escaped staging at {path}"))))
 
     [<Test>]
     member _.``staged discovery ignores invalid and incomplete bundles``() =
