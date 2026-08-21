@@ -7,30 +7,15 @@ open System.Net
 open System.Reflection
 open System.Threading
 open System.Threading.Tasks
+open Treemon.TerminalHosting
 
 type private HostConfig =
     { Control: ControlApiConfig
-      StateDirectory: string
-      StagingDirectory: string
+      Layout: TerminalHostLayout
       TerminalLaunch: TerminalLaunchConfig }
 
 [<RequireQualifiedAccess>]
 module private HostConfig =
-    let private defaultStateDirectory () =
-        let localApplicationData =
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
-
-        let root =
-            if String.IsNullOrWhiteSpace localApplicationData then
-                Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                    ".treemon"
-                )
-            else
-                Path.Combine(localApplicationData, "Treemon")
-
-        Path.Combine(root, "TerminalHost")
-
     let private parseOrigin value =
         // Uri.TryCreate is a byref-only framework parser; mutation stays at this boundary.
         let mutable uri = Unchecked.defaultof<Uri>
@@ -58,21 +43,17 @@ module private HostConfig =
             Error $"Invalid allowed origin '{value}'"
 
     let parse arguments =
-        let stateDirectory =
-            Environment.GetEnvironmentVariable("TREEMON_TERMINAL_HOST_STATE_DIR")
-            |> Option.ofObj
-            |> Option.filter (String.IsNullOrWhiteSpace >> not)
-            |> Option.defaultWith defaultStateDirectory
-            |> Path.GetFullPath
-
         let initial =
             { Control =
                 { Port = 0
                   AllowedOrigins = [] }
-              StateDirectory = stateDirectory
-              StagingDirectory = Path.Combine(stateDirectory, "staged")
+              Layout = TerminalHostLayout.current ()
               TerminalLaunch =
-                { TtydExecutable = Path.Combine(AppContext.BaseDirectory, "ttyd.exe")
+                { TtydExecutable =
+                    Path.Combine(
+                        AppContext.BaseDirectory,
+                        TerminalHostLayout.TtydExecutableName
+                    )
                   ShellCommand = "pwsh"
                   StartupTimeout = TimeSpan.FromSeconds 10.0 } }
 
@@ -85,15 +66,11 @@ module private HostConfig =
                     collect { config with Control.Port = port } tail
                 | _ -> Error $"Invalid control port '{value}'"
             | "--state-dir" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
-                let directory = Path.GetFullPath value
-
                 collect
                     { config with
-                        StateDirectory = directory
-                        StagingDirectory = Path.Combine(directory, "staged") }
+                        Layout =
+                            TerminalHostLayout.forStateDirectory value }
                     tail
-            | "--staging-dir" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
-                collect { config with StagingDirectory = Path.GetFullPath value } tail
             | "--ttyd" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
                 collect
                     { config with
@@ -169,9 +146,9 @@ module private HostRuntime =
                 { Identity = identity
                   BearerToken = token
                   StagedExecutableVersion =
-                    Manifest.readStagedExecutableVersion config.StagingDirectory }
+                        Manifest.readStagedExecutableVersion config.Layout }
 
-            match Manifest.write config.StateDirectory manifest with
+            match Manifest.write config.Layout.StateDirectory manifest with
             | Error error ->
                 do! TerminalRegistry.shutdown registry |> Async.StartAsTask
                 do! ControlApi.stop control
@@ -181,8 +158,8 @@ module private HostRuntime =
 
                 let monitor =
                     Manifest.monitor
-                        config.StateDirectory
-                        config.StagingDirectory
+                        config.Layout.StateDirectory
+                        config.Layout
                         identity
                         token
                         manifest.StagedExecutableVersion
@@ -201,7 +178,7 @@ module private HostRuntime =
                 do! monitor
                 do! TerminalRegistry.shutdown registry |> Async.StartAsTask
                 do! ControlApi.stop control
-                Manifest.removeIfOwned config.StateDirectory identity
+                Manifest.removeIfOwned config.Layout.StateDirectory identity
                 return outcome
         }
 

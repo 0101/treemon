@@ -172,19 +172,73 @@ function Ensure-WwwRoot {
     Write-Host "Frontend built and copied to wwwroot/" -ForegroundColor Green
 }
 
-function Get-TerminalHostStateDirectory {
-    if (-not [string]::IsNullOrWhiteSpace($env:TREEMON_TERMINAL_HOST_STATE_DIR)) {
-        return [IO.Path]::GetFullPath($env:TREEMON_TERMINAL_HOST_STATE_DIR)
+function New-TerminalHostVersionMatcher([string]$Pattern) {
+    return [Text.RegularExpressions.Regex]::new(
+        $Pattern,
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant,
+        [TimeSpan]::FromSeconds(1))
+}
+
+function ConvertFrom-TerminalHostDeploymentLayout($Value) {
+    $pathValues = @(
+        $Value.stateDirectory,
+        $Value.stagingDirectory,
+        $Value.manifestPath)
+    $fileNames = @(
+        $Value.hostExecutableName,
+        $Value.ttydExecutableName)
+    $requiredBundleFileNames = @($Value.requiredBundleFileNames)
+
+    if ($null -eq $Value -or
+        @($pathValues | Where-Object {
+            $_ -isnot [string] -or
+            -not [IO.Path]::IsPathFullyQualified($_)
+        }).Count -gt 0 -or
+        @($fileNames | Where-Object {
+            $_ -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($_) -or
+            [IO.Path]::GetFileName($_) -cne $_
+        }).Count -gt 0 -or
+        $Value.versionDirectoryPattern -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Value.versionDirectoryPattern) -or
+        $Value.versionDirectoryPattern.Length -gt 512 -or
+        $requiredBundleFileNames.Count -eq 0 -or
+        @($requiredBundleFileNames | Where-Object {
+            $_ -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($_) -or
+            [IO.Path]::GetFileName($_) -cne $_
+        }).Count -gt 0 -or
+        @($requiredBundleFileNames | Sort-Object -Unique).Count -ne
+            $requiredBundleFileNames.Count -or
+        $Value.hostExecutableName -notin $requiredBundleFileNames -or
+        $Value.ttydExecutableName -notin $requiredBundleFileNames) {
+        throw "Candidate Treemon returned an invalid TerminalHost layout"
     }
 
-    $localData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-    if (-not $localData) {
-        return [IO.Path]::Combine(
-            [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile),
-            ".treemon",
-            "TerminalHost")
+    try {
+        New-TerminalHostVersionMatcher $Value.versionDirectoryPattern | Out-Null
+    } catch {
+        throw "Candidate Treemon returned an invalid TerminalHost version grammar"
     }
-    return [IO.Path]::Combine($localData, "Treemon", "TerminalHost")
+
+    return [pscustomobject]@{
+        StateDirectory = [IO.Path]::GetFullPath($Value.stateDirectory)
+        StagingDirectory = [IO.Path]::GetFullPath($Value.stagingDirectory)
+        ManifestPath = [IO.Path]::GetFullPath($Value.manifestPath)
+        HostExecutableName = $Value.hostExecutableName
+        TtydExecutableName = $Value.ttydExecutableName
+        VersionDirectoryPattern = $Value.versionDirectoryPattern
+        RequiredBundleFileNames = $requiredBundleFileNames
+    }
+}
+
+function Get-TerminalHostStateDirectory($Layout) {
+    if ($null -eq $Layout -or
+        [string]::IsNullOrWhiteSpace($Layout.StateDirectory)) {
+        throw "TerminalHost layout did not provide a state directory"
+    }
+
+    return $Layout.StateDirectory
 }
 
 function Test-TerminalHostDeployment([string]$PublishedServerDirectory) {
@@ -205,6 +259,7 @@ function Test-TerminalHostDeployment([string]$PublishedServerDirectory) {
 
     try {
         $result = $output -join [Environment]::NewLine | ConvertFrom-Json -Depth 4
+        $layout = ConvertFrom-TerminalHostDeploymentLayout $result.layout
     } catch {
         throw "Deployment refused: candidate Treemon returned an invalid preflight result"
     }
@@ -216,6 +271,7 @@ function Test-TerminalHostDeployment([string]$PublishedServerDirectory) {
             ProcessStartTimeUtcTicks = $null
             TerminalCount = 0
             ExecutablePath = $null
+            Layout = $layout
         }
     }
 
@@ -239,6 +295,7 @@ function Test-TerminalHostDeployment([string]$PublishedServerDirectory) {
         ProcessStartTimeUtcTicks = $result.processStartTimeUtcTicks
         TerminalCount = [int]$result.terminalCount
         ExecutablePath = [IO.Path]::GetFullPath($result.executablePath)
+        Layout = $layout
     }
 }
 
@@ -259,20 +316,14 @@ function Get-FileFingerprintEntries(
     )
 }
 
-function Get-TerminalHostBundleDigest([string]$Directory) {
+function Get-TerminalHostBundleDigest([string]$Directory, $Layout) {
     $root = [IO.Path]::GetFullPath($Directory)
     $rootInfo = Get-Item -LiteralPath $root -Force
     if (-not $rootInfo.PSIsContainer -or
         ($rootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw "Published TerminalHost directory is unsafe at '$root'"
     }
-    $required = @(
-        "TerminalHost.exe",
-        "TerminalHost.dll",
-        "TerminalHost.deps.json",
-        "TerminalHost.runtimeconfig.json",
-        "FSharp.Core.dll")
-    if ([OperatingSystem]::IsWindows()) { $required += "ttyd.exe" }
+    $required = @($Layout.RequiredBundleFileNames)
     if (@($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $root $_) -PathType Leaf) }).Count -gt 0) {
         throw "Published TerminalHost output is incomplete at '$root'"
     }
@@ -290,31 +341,36 @@ function Get-TerminalHostBundleDigest([string]$Directory) {
     return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
 }
 
-function Get-TerminalHostStageVersion([string]$PublishedHostDirectory, [string]$Digest) {
-    $executable = Get-Item -LiteralPath (Join-Path $PublishedHostDirectory "TerminalHost.exe")
+function Get-TerminalHostStageVersion(
+    [string]$PublishedHostDirectory,
+    [string]$Digest,
+    $Layout
+) {
+    $executable = Get-Item -LiteralPath (
+        Join-Path $PublishedHostDirectory $Layout.HostExecutableName)
     $baseVersion = $executable.VersionInfo.ProductVersion
-    if (-not $baseVersion) { $baseVersion = "host" }
-    $baseVersion = ($baseVersion -replace '\+', '-' -replace '[^A-Za-z0-9._-]', '-').
-        Trim([char[]]".-_")
-    if (-not $baseVersion) { $baseVersion = "host" }
-
     $suffix = $Digest.Substring(0, 16)
-    $maximumBaseLength = 128 - $suffix.Length - 1
-    if ($baseVersion.Length -gt $maximumBaseLength) {
-        $baseVersion = $baseVersion.Substring(0, $maximumBaseLength).TrimEnd([char[]]".-_")
+    $matcher = New-TerminalHostVersionMatcher $Layout.VersionDirectoryPattern
+
+    while (-not [string]::IsNullOrEmpty($baseVersion)) {
+        $candidate = "$baseVersion-$suffix"
+        if ($matcher.IsMatch($candidate)) { return $candidate }
+        $baseVersion = $baseVersion.Substring(0, $baseVersion.Length - 1)
     }
-    return "$baseVersion-$suffix"
+
+    if ($matcher.IsMatch($suffix)) { return $suffix }
+    throw "Candidate TerminalHost layout cannot represent a staged bundle version"
 }
 
 function Wait-TerminalHostStageReport(
     $LiveHost,
-    [string]$StateDirectory,
+    $Layout,
     [string]$Version,
     [int]$TimeoutSeconds = 15
 ) {
     if (-not $LiveHost.HasLiveHost) { return }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $manifestPath = Join-Path $StateDirectory "host.json"
+    $manifestPath = $Layout.ManifestPath
 
     while ([DateTime]::UtcNow -lt $deadline) {
         try {
@@ -350,16 +406,17 @@ function Wait-TerminalHostStageReport(
 function Stage-TerminalHost(
     [string]$PublishedHostDirectory,
     $LiveHost,
-    [string]$StateDirectory = (Get-TerminalHostStateDirectory),
     [string]$Version = ""
 ) {
+    $layout = $LiveHost.Layout
+    $stateDirectory = Get-TerminalHostStateDirectory $layout
     $source = [IO.Path]::GetFullPath($PublishedHostDirectory)
-    $digest = Get-TerminalHostBundleDigest $source
+    $digest = Get-TerminalHostBundleDigest $source $layout
 
     if ($LiveHost.HasLiveHost) {
         try {
             $liveDirectory = Split-Path -Parent $LiveHost.ExecutablePath
-            if ((Get-TerminalHostBundleDigest $liveDirectory) -ceq $digest) {
+            if ((Get-TerminalHostBundleDigest $liveDirectory $layout) -ceq $digest) {
                 return [pscustomobject]@{
                     Changed = $false
                     Version = $null
@@ -371,30 +428,47 @@ function Stage-TerminalHost(
         }
     }
 
-    if (-not $Version) { $Version = Get-TerminalHostStageVersion $source $digest }
-    if ($Version -notmatch '^[A-Za-z0-9._-]{1,128}$') {
+    if (-not $Version) {
+        $Version = Get-TerminalHostStageVersion $source $digest $layout
+    }
+    $versionGrammar =
+        New-TerminalHostVersionMatcher $layout.VersionDirectoryPattern
+    if (-not $versionGrammar.IsMatch($Version)) {
         throw "TerminalHost staged executable version '$Version' is invalid"
     }
 
-    $stagingRoot = Join-Path $StateDirectory "staged"
+    $stagingRoot = $layout.StagingDirectory
     New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
-    $destination = Join-Path $stagingRoot $Version
+    $destination = [IO.Path]::GetFullPath((Join-Path $stagingRoot $Version))
+    $destinationParent = [IO.Path]::GetDirectoryName($destination).
+        TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $normalizedStagingRoot = [IO.Path]::GetFullPath($stagingRoot).
+        TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $pathComparison = if ([OperatingSystem]::IsWindows()) {
+        [StringComparison]::OrdinalIgnoreCase
+    } else {
+        [StringComparison]::Ordinal
+    }
+    if (-not [string]::Equals($destinationParent, $normalizedStagingRoot, $pathComparison) -or
+        [IO.Path]::GetFileName($destination) -cne $Version) {
+        throw "TerminalHost staged executable version '$Version' is not a direct version directory"
+    }
     $temporary =
-        Join-Path $StateDirectory ".terminal-host-stage-$([Guid]::NewGuid().ToString('N'))"
+        Join-Path $stateDirectory ".terminal-host-stage-$([Guid]::NewGuid().ToString('N'))"
 
     try {
         if (Test-Path -LiteralPath $destination) {
             $destinationInfo = Get-Item -LiteralPath $destination -Force
             if (-not $destinationInfo.PSIsContainer -or
                 ($destinationInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
-                (Get-TerminalHostBundleDigest $destination) -cne $digest) {
+                (Get-TerminalHostBundleDigest $destination $layout) -cne $digest) {
                 throw "Existing TerminalHost stage '$destination' does not match the candidate"
             }
         } else {
             New-Item -ItemType Directory -Path $temporary | Out-Null
             Get-ChildItem -LiteralPath $source -Force |
                 Copy-Item -Destination $temporary -Recurse -Force
-            if ((Get-TerminalHostBundleDigest $temporary) -cne $digest) {
+            if ((Get-TerminalHostBundleDigest $temporary $layout) -cne $digest) {
                 throw "TerminalHost stage verification failed"
             }
 
@@ -402,18 +476,18 @@ function Stage-TerminalHost(
                 [IO.Directory]::Move($temporary, $destination)
             } catch {
                 if (-not (Test-Path -LiteralPath $destination) -or
-                    (Get-TerminalHostBundleDigest $destination) -cne $digest) {
+                    (Get-TerminalHostBundleDigest $destination $layout) -cne $digest) {
                     throw
                 }
             }
         }
 
         (Get-Item -LiteralPath $destination).LastWriteTimeUtc = [DateTime]::UtcNow
-        Wait-TerminalHostStageReport $LiveHost $StateDirectory $Version
+        Wait-TerminalHostStageReport $LiveHost $layout $Version
         return [pscustomobject]@{
             Changed = $true
             Version = $Version
-            ExecutablePath = Join-Path $destination "TerminalHost.exe"
+            ExecutablePath = Join-Path $destination $layout.HostExecutableName
         }
     } finally {
         if (Test-Path -LiteralPath $temporary) {
@@ -482,12 +556,8 @@ function Publish-ServerCandidate {
             Out-Host
         if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
 
-        $required = @(
-            (Join-Path $candidate "Treemon.exe"),
-            (Join-Path $candidate "terminal-host\TerminalHost.exe"),
-            (Join-Path $candidate "terminal-host\TerminalHost.dll"))
-        if (@($required | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count -gt 0) {
-            throw "Published server candidate is missing TerminalHost artifacts"
+        if (-not (Test-Path -LiteralPath (Join-Path $candidate "Treemon.exe") -PathType Leaf)) {
+            throw "Published server candidate is missing Treemon.exe"
         }
         return $candidate
     } catch {
@@ -607,7 +677,9 @@ function Install-ServerDeployment(
         if ($staged.Changed) {
             return $staged.ExecutablePath
         }
-        return Join-Path $PublishDir "terminal-host\TerminalHost.exe"
+        return Join-Path (
+            Join-Path $PublishDir "terminal-host"
+        ) $preflight.Layout.HostExecutableName
     } finally {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) {
             Remove-Item -LiteralPath $candidate -Recurse -Force

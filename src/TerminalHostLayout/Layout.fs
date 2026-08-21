@@ -1,0 +1,104 @@
+namespace Treemon.TerminalHosting
+
+open System
+open System.IO
+open System.Text.RegularExpressions
+
+type TerminalHostLayout =
+    { StateDirectory: string
+      StagingDirectory: string
+      ManifestPath: string
+      HostExecutableName: string
+      TtydExecutableName: string
+      VersionDirectoryPattern: string
+      RequiredBundleFileNames: string list }
+
+[<RequireQualifiedAccess>]
+module TerminalHostLayout =
+    [<Literal>]
+    let StateDirectoryEnvironmentVariable = "TREEMON_TERMINAL_HOST_STATE_DIR"
+
+    [<Literal>]
+    let ManifestFileName = "host.json"
+
+    [<Literal>]
+    let StagingDirectoryName = "staged"
+
+    [<Literal>]
+    let TtydExecutableName = "ttyd.exe"
+
+    [<Literal>]
+    let VersionDirectoryPattern = @"\A[A-Za-z0-9._-]{1,128}\z"
+
+    let HostExecutableName =
+        if OperatingSystem.IsWindows() then
+            "TerminalHost.exe"
+        else
+            "TerminalHost"
+
+    let RequiredBundleFileNames =
+        [ HostExecutableName
+          "TerminalHost.dll"
+          "TerminalHost.deps.json"
+          "TerminalHost.runtimeconfig.json"
+          "TerminalHostLayout.dll"
+          "FSharp.Core.dll"
+          TtydExecutableName ]
+
+    let private versionDirectoryRegex =
+        Regex(
+            VersionDirectoryPattern,
+            RegexOptions.CultureInvariant
+            ||| RegexOptions.NonBacktracking,
+            TimeSpan.FromSeconds 1.0
+        )
+
+    let defaultStateDirectory () =
+        let localApplicationData =
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+
+        let root =
+            if String.IsNullOrWhiteSpace localApplicationData then
+                Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".treemon"
+                )
+            else
+                Path.Combine(localApplicationData, "Treemon")
+
+        Path.Combine(root, "TerminalHost")
+
+    let forStateDirectory stateDirectory =
+        let state = Path.GetFullPath stateDirectory
+
+        { StateDirectory = state
+          StagingDirectory = Path.Combine(state, StagingDirectoryName)
+          ManifestPath = Path.Combine(state, ManifestFileName)
+          HostExecutableName = HostExecutableName
+          TtydExecutableName = TtydExecutableName
+          VersionDirectoryPattern = VersionDirectoryPattern
+          RequiredBundleFileNames = RequiredBundleFileNames }
+
+    let current () =
+        Environment.GetEnvironmentVariable(StateDirectoryEnvironmentVariable)
+        |> Option.ofObj
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        |> Option.defaultWith defaultStateDirectory
+        |> forStateDirectory
+
+    let isValidVersionDirectoryName value =
+        not (String.IsNullOrWhiteSpace value)
+        && versionDirectoryRegex.IsMatch value
+
+    let versionDirectory layout version =
+        Path.Combine(layout.StagingDirectory, version)
+
+    let stagedHostExecutablePath layout version =
+        Path.Combine(versionDirectory layout version, layout.HostExecutableName)
+
+    let adjacentTtydExecutablePath (hostExecutablePath: string) =
+        hostExecutablePath
+        |> Path.GetDirectoryName
+        |> Option.ofObj
+        |> Option.filter (String.IsNullOrWhiteSpace >> not)
+        |> Option.map (fun directory -> Path.Combine(directory, TtydExecutableName))

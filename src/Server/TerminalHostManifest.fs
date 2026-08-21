@@ -6,6 +6,7 @@ open System.Text
 open System.Text.Json
 open Server.TerminalHostEndpoint
 open Server.TerminalHostProcess
+open Treemon.TerminalHosting
 
 type internal DiscoveryManifest =
     { Pid: int
@@ -42,7 +43,7 @@ let internal validBoundedText maximum (value: string) =
        |> Seq.forall (fun character ->
            not (Char.IsControl character))
 
-let internal validVersion allowBuildMetadata (value: string) =
+let private validHostVersion (value: string) =
     validBoundedText 128 value
     && value
        |> Seq.forall (fun character ->
@@ -50,7 +51,7 @@ let internal validVersion allowBuildMetadata (value: string) =
            || character = '.'
            || character = '-'
            || character = '_'
-           || (allowBuildMetadata && character = '+'))
+           || character = '+')
 
 let private validBearerToken (value: string) =
     value.Length >= 32
@@ -146,13 +147,16 @@ let private parseManifest (text: string) =
                     Error "TerminalHost discovery manifest has an invalid bearer token"
                 elif
                     hostVersion
-                    |> Option.exists (validVersion true)
+                    |> Option.exists validHostVersion
                     |> not
                 then
                     Error "TerminalHost discovery manifest has an invalid host version"
                 elif
                     stagedVersion
-                    |> Option.exists (validVersion false >> not)
+                    |> Option.exists (
+                        TerminalHostLayout.isValidVersionDirectoryName
+                        >> not
+                    )
                 then
                     Error "TerminalHost discovery manifest has an invalid staged executable version"
                 else
@@ -172,7 +176,8 @@ let private parseManifest (text: string) =
         Error "TerminalHost discovery manifest is malformed"
 
 let private manifestPath config =
-    Path.Combine(config.HostStateDirectory, "host.json")
+    TerminalHostLayout.forStateDirectory config.HostStateDirectory
+    |> _.ManifestPath
 
 let internal readManifest config =
     let path = manifestPath config

@@ -33,6 +33,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\TerminalHostLayout\TerminalHostLayout.fsproj" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Include="..\..\.tools\ttyd\1.7.7\ttyd.exe"
           Condition="'$(OS)' == 'Windows_NT'"
           Link="ttyd.exe"

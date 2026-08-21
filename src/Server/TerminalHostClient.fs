@@ -491,8 +491,6 @@ let internal preflightDeploymentWith config =
                 return deploymentPreflightResult config manifest registry
     }
 
-let internal preflightDeployment () = preflightDeploymentWith (defaultConfig [])
-
 let internal waitForHealthyHost config =
     let deadline = DateTimeOffset.UtcNow + config.StartupTimeout
 

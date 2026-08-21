@@ -3,6 +3,7 @@ module Server.TerminalHostProcess
 open System
 open System.Diagnostics
 open System.IO
+open Treemon.TerminalHosting
 
 type internal Config =
     { HostExecutablePath: string
@@ -69,23 +70,7 @@ let internal launchDetached (startInfo: ProcessStartInfo) =
     with error ->
         Error $"Could not start TerminalHost: {error.Message}"
 
-let private defaultStateDirectory () =
-    let localApplicationData =
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
-
-    let root =
-        if String.IsNullOrWhiteSpace localApplicationData then
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".treemon")
-        else
-            Path.Combine(localApplicationData, "Treemon")
-
-    Path.Combine(root, "TerminalHost")
-
-let internal hostExecutableName =
-    if OperatingSystem.IsWindows() then
-        "TerminalHost.exe"
-    else
-        "TerminalHost"
+let internal hostExecutableName = TerminalHostLayout.HostExecutableName
 
 let internal resolveHostExecutable baseDirectory configuredPath =
     match configuredPath |> Option.filter (String.IsNullOrWhiteSpace >> not) with
@@ -145,10 +130,14 @@ let internal hostStartInfo config =
 
 let internal startHostProcess config =
     try
-        Directory.CreateDirectory config.HostStateDirectory
-        |> ignore
+        match config.TtydExecutablePath with
+        | Some path when not (File.Exists path) ->
+            Error $"ttyd was not found beside TerminalHost at '{path}'"
+        | _ ->
+            Directory.CreateDirectory config.HostStateDirectory
+            |> ignore
 
-        config.LaunchHost(hostStartInfo config)
+            config.LaunchHost(hostStartInfo config)
     with error ->
         Error $"Could not prepare TerminalHost startup: {error.Message}"
 
@@ -159,29 +148,13 @@ let internal probeDelayMilliseconds config =
     |> int
 
 let internal defaultConfig allowedOrigins sendTerminalCommand =
-    let stateDirectory =
-        Environment.GetEnvironmentVariable("TREEMON_TERMINAL_HOST_STATE_DIR")
-        |> Option.ofObj
-        |> Option.filter (String.IsNullOrWhiteSpace >> not)
-        |> Option.defaultWith defaultStateDirectory
-        |> Path.GetFullPath
-
+    let layout = TerminalHostLayout.current ()
     let hostExecutable = defaultHostExecutable ()
-    let adjacentTtyd =
-        Path.Combine(
-            hostExecutable
-            |> Path.GetDirectoryName
-            |> Option.ofObj
-            |> Option.defaultValue AppContext.BaseDirectory,
-            "ttyd.exe"
-        )
 
     { HostExecutablePath = hostExecutable
-      HostStateDirectory = stateDirectory
+      HostStateDirectory = layout.StateDirectory
       TtydExecutablePath =
-        adjacentTtyd
-        |> Option.ofObj
-        |> Option.filter File.Exists
+        TerminalHostLayout.adjacentTtydExecutablePath hostExecutable
       ShellCommand = "pwsh"
       AllowedOrigins = allowedOrigins
       StartupTimeout = TimeSpan.FromSeconds 30.0

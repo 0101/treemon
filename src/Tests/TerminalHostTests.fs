@@ -16,6 +16,7 @@ open NUnit.Framework
 open TerminalHost
 open Tests.GitTestHelpers
 open Tests.TestUtils
+open Treemon.TerminalHosting
 
 let private getTask (task: Task<'a>) =
     task.GetAwaiter().GetResult()
@@ -767,17 +768,14 @@ type TerminalHostManifestTests() =
     [<Test>]
     member _.``manifest contains only discovery identity token versions and staged executable``() =
         withTempDir "terminal-host-manifest" (fun root ->
-            let staging = Path.Combine(root, "staged")
+            let layout = TerminalHostLayout.forStateDirectory root
+            let staging = layout.StagingDirectory
             let staged = Path.Combine(staging, "2.4.6")
             Directory.CreateDirectory staged |> ignore
 
-            let executableName =
-                if OperatingSystem.IsWindows() then
-                    "TerminalHost.exe"
-                else
-                    "TerminalHost"
-
-            File.WriteAllText(Path.Combine(staged, executableName), "fixture")
+            layout.RequiredBundleFileNames
+            |> List.iter (fun name ->
+                File.WriteAllText(Path.Combine(staged, name), "fixture"))
 
             let identity =
                 { Pid = 12_345
@@ -787,7 +785,7 @@ type TerminalHostManifestTests() =
                   ControlApiVersion = 1 }
 
             let stagedVersion =
-                Manifest.readStagedExecutableVersion staging
+                Manifest.readStagedExecutableVersion layout
 
             Manifest.write
                 root
@@ -833,7 +831,7 @@ type TerminalHostManifestTests() =
             let monitor =
                 Manifest.monitor
                     root
-                    staging
+                    layout
                     identity
                     "secret-token"
                     stagedVersion
@@ -860,6 +858,89 @@ type TerminalHostManifestTests() =
 
             Manifest.removeIfOwned root identity
             Assert.That(File.Exists(Manifest.path root), Is.False))
+
+    [<Test>]
+    member _.``layout applies one non-default state root and one version grammar``() =
+        withTempDir "terminal-host-layout" (fun root ->
+            let stateDirectory = Path.Combine(root, "custom-state")
+            let layout = TerminalHostLayout.forStateDirectory stateDirectory
+
+            let validVersions =
+                [ "1"; "1.2.3"; "host-build_42"; String.replicate 128 "a" ]
+
+            let invalidVersions =
+                [ ""; " "; "1.2.3+metadata"; "../escape"; "nested/version"; "valid\n"
+                  String.replicate 129 "a" ]
+
+            Assert.Multiple(fun () ->
+                Assert.That(layout.StateDirectory, Is.EqualTo(Path.GetFullPath stateDirectory))
+                Assert.That(
+                    layout.StagingDirectory,
+                    Is.EqualTo(Path.Combine(Path.GetFullPath stateDirectory, "staged"))
+                )
+                Assert.That(
+                    layout.ManifestPath,
+                    Is.EqualTo(Path.Combine(Path.GetFullPath stateDirectory, "host.json"))
+                )
+
+                validVersions
+                |> List.iter (fun version ->
+                    Assert.That(
+                        TerminalHostLayout.isValidVersionDirectoryName version,
+                        Is.True,
+                        version
+                    ))
+
+                invalidVersions
+                |> List.iter (fun version ->
+                    Assert.That(
+                        TerminalHostLayout.isValidVersionDirectoryName version,
+                        Is.False,
+                        version
+                    ))))
+
+    [<Test>]
+    member _.``staged discovery ignores invalid and incomplete bundles``() =
+        withTempDir "terminal-host-staged-bundles" (fun root ->
+            let layout = TerminalHostLayout.forStateDirectory root
+
+            let createBundle version excludedFiles lastWrite =
+                let directory =
+                    TerminalHostLayout.versionDirectory layout version
+
+                Directory.CreateDirectory directory |> ignore
+
+                layout.RequiredBundleFileNames
+                |> List.filter (fun name ->
+                    excludedFiles |> Set.contains name |> not)
+                |> List.iter (fun name ->
+                    File.WriteAllText(Path.Combine(directory, name), "fixture"))
+
+                Directory.SetLastWriteTimeUtc(directory, lastWrite)
+
+            let baseline = DateTime.UtcNow.AddMinutes(-10.0)
+
+            createBundle "2.0.0-valid" Set.empty baseline
+
+            createBundle
+                "3.0.0-missing-ttyd"
+                (Set.singleton layout.TtydExecutableName)
+                (baseline.AddMinutes 1.0)
+
+            createBundle
+                "4.0.0-missing-host"
+                (Set.singleton layout.HostExecutableName)
+                (baseline.AddMinutes 2.0)
+
+            createBundle
+                "5.0.0+invalid"
+                Set.empty
+                (baseline.AddMinutes 3.0)
+
+            Assert.That(
+                Manifest.readStagedExecutableVersion layout,
+                Is.EqualTo(Some "2.0.0-valid")
+            ))
 
 [<TestFixture>]
 [<Category("Unit")>]

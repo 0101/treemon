@@ -135,17 +135,38 @@ $manifest = $null
 
 try {
     New-Item -ItemType Directory -Path $root | Out-Null
+    Publish-TestProject (
+        Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
+    ) $baseline "1.0.0-deployment-test"
+    $PublishDir = Join-Path $root "candidate-active"
+    $candidateServer = Publish-ServerCandidate
+    Assert-True ($candidateServer -is [string]) "Server candidate path was not scalar"
+    $candidateHost = Join-Path $candidateServer "terminal-host"
+
+    $env:TREEMON_TERMINAL_HOST_STATE_DIR = $emptyState
+    $layoutProbe = Test-TerminalHostDeployment $candidateServer
+    Assert-True (-not $layoutProbe.HasLiveHost) "Layout preflight unexpectedly found a live host"
+    Assert-True (
+        $layoutProbe.Layout.StateDirectory -ceq [IO.Path]::GetFullPath($emptyState)
+    ) "Candidate layout ignored the non-default state directory"
+    Assert-True (
+        $layoutProbe.Layout.StagingDirectory -ceq
+        [IO.Path]::Combine([IO.Path]::GetFullPath($emptyState), "staged")
+    ) "Candidate layout did not derive staging from the non-default state directory"
+    Assert-True (
+        $layoutProbe.Layout.ManifestPath -ceq
+        [IO.Path]::Combine([IO.Path]::GetFullPath($emptyState), "host.json")
+    ) "Candidate layout did not derive the manifest from the non-default state directory"
+    Assert-True (
+        (Get-TerminalHostStateDirectory $layoutProbe.Layout) -ceq
+        [IO.Path]::GetFullPath($emptyState)
+    ) "PowerShell did not consume the candidate's state-directory authority"
+    Write-Host "PASS: candidate layout owns the non-default state and staging paths"
+
     $fingerprintDirectory = Join-Path $root "fingerprints"
     $fingerprintNestedDirectory = Join-Path $fingerprintDirectory "nested"
     New-Item -ItemType Directory -Path $fingerprintNestedDirectory -Force | Out-Null
-    @(
-        "TerminalHost.exe",
-        "TerminalHost.dll",
-        "TerminalHost.deps.json",
-        "TerminalHost.runtimeconfig.json",
-        "FSharp.Core.dll",
-        "ttyd.exe"
-    ) | ForEach-Object {
+    $layoutProbe.Layout.RequiredBundleFileNames | ForEach-Object {
         Set-Content -LiteralPath (Join-Path $fingerprintDirectory $_) -Value $_ -NoNewline
     }
     $fingerprintPdb = Join-Path $fingerprintNestedDirectory "TerminalHost.PDB"
@@ -171,11 +192,12 @@ try {
         $allFingerprintEntries.Count -eq ($bundleFingerprintEntries.Count + 1)
     ) "PDB fingerprint mode did not exclude exactly the fixture PDB"
 
-    $bundleDigestBeforePdbChange = Get-TerminalHostBundleDigest $fingerprintDirectory
+    $bundleDigestBeforePdbChange =
+        Get-TerminalHostBundleDigest $fingerprintDirectory $layoutProbe.Layout
     $directorySnapshotBeforePdbChange = Get-DirectorySnapshot $fingerprintDirectory
     Set-Content -LiteralPath $fingerprintPdb -Value "symbols-v2" -NoNewline
     Assert-True (
-        (Get-TerminalHostBundleDigest $fingerprintDirectory) -ceq
+        (Get-TerminalHostBundleDigest $fingerprintDirectory $layoutProbe.Layout) -ceq
         $bundleDigestBeforePdbChange
     ) "TerminalHost bundle digest included a PDB"
     Assert-True (
@@ -184,16 +206,23 @@ try {
     ) "Directory snapshot excluded a PDB"
     Write-Host "PASS: shared fingerprint entries support bundle and snapshot modes"
 
-    Publish-TestProject (
-        Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
-    ) $baseline "1.0.0-deployment-test"
-    $PublishDir = Join-Path $root "candidate-active"
-    $candidateServer = Publish-ServerCandidate
-    Assert-True ($candidateServer -is [string]) "Server candidate path was not scalar"
-    $candidateHost = Join-Path $candidateServer "terminal-host"
+    $missingBundleMember =
+        Join-Path $fingerprintDirectory $layoutProbe.Layout.TtydExecutableName
+    Remove-Item -LiteralPath $missingBundleMember
+    $missingBundleRejected = $false
+    try {
+        Get-TerminalHostBundleDigest $fingerprintDirectory $layoutProbe.Layout | Out-Null
+    } catch {
+        $missingBundleRejected = $_.Exception.Message -like
+            "Published TerminalHost output is incomplete*"
+    }
+    Assert-True $missingBundleRejected "A missing authoritative bundle member was accepted"
+    Set-Content -LiteralPath $missingBundleMember -Value "restored" -NoNewline
+    Write-Host "PASS: authoritative bundle membership rejects missing binaries"
+
     Assert-True (
-        (Get-TerminalHostBundleDigest $baseline) -cne
-        (Get-TerminalHostBundleDigest $candidateHost)
+        (Get-TerminalHostBundleDigest $baseline $layoutProbe.Layout) -cne
+        (Get-TerminalHostBundleDigest $candidateHost $layoutProbe.Layout)
     ) "The test host publications must differ"
 
     New-Item -ItemType Directory -Path $worktree | Out-Null
@@ -217,10 +246,13 @@ try {
         "$($compatible.Pid):$($compatible.ProcessStartTimeUtcTicks)" -ceq
         $hostIdentity
     ) "Compatible preflight changed the host identity"
-    $unchanged = Stage-TerminalHost $baseline $compatible $state
+    Assert-True (
+        $compatible.Layout.StateDirectory -ceq [IO.Path]::GetFullPath($state)
+    ) "Live-host preflight did not report the configured state directory"
+    $unchanged = Stage-TerminalHost $baseline $compatible
     Assert-True (-not $unchanged.Changed) "Unchanged live host was staged for replacement"
 
-    $staged = Stage-TerminalHost $candidateHost $compatible $state
+    $staged = Stage-TerminalHost $candidateHost $compatible
     Assert-True $staged.Changed "Changed TerminalHost publication was not staged"
     Assert-True (Test-Path -LiteralPath $staged.ExecutablePath) "Staged executable is missing"
     Assert-True (
@@ -307,7 +339,40 @@ try {
     $env:TREEMON_TERMINAL_HOST_STATE_DIR = $emptyState
     $noHost = Test-TerminalHostDeployment $candidateServer
     Assert-True (-not $noHost.HasLiveHost) "Empty state unexpectedly reported a live host"
-    $noHostStage = Stage-TerminalHost $candidateHost $noHost $emptyState
+
+    @("../escape", "invalid+metadata", ("x" * 129)) | ForEach-Object {
+        $invalidVersionRejected = $false
+        try {
+            Stage-TerminalHost $candidateHost $noHost $_ | Out-Null
+        } catch {
+            $invalidVersionRejected = $_.Exception.Message -like
+                "TerminalHost staged executable version*"
+        }
+        Assert-True $invalidVersionRejected "Invalid staged version '$_' was accepted"
+    }
+    Write-Host "PASS: candidate version grammar rejects invalid direct directories"
+
+    $mismatchedVersion = "mismatched-bundle"
+    $mismatchedStage = Join-Path $noHost.Layout.StagingDirectory $mismatchedVersion
+    New-Item -ItemType Directory -Path $mismatchedStage -Force | Out-Null
+    Get-ChildItem -LiteralPath $candidateHost -Force |
+        Copy-Item -Destination $mismatchedStage -Recurse -Force
+    Set-Content -LiteralPath (
+        Join-Path $mismatchedStage $noHost.Layout.TtydExecutableName
+    ) -Value "mismatched ttyd" -NoNewline
+
+    $mismatchedBundleRejected = $false
+    try {
+        Stage-TerminalHost $candidateHost $noHost $mismatchedVersion | Out-Null
+    } catch {
+        $mismatchedBundleRejected = $_.Exception.Message -like
+            "Existing TerminalHost stage*does not match the candidate"
+    }
+    Assert-True $mismatchedBundleRejected "A mismatched staged bundle member was accepted"
+    Remove-Item -LiteralPath $mismatchedStage -Recurse -Force
+    Write-Host "PASS: mismatched staged bundle members fail closed"
+
+    $noHostStage = Stage-TerminalHost $candidateHost $noHost
     $PublishDir = Join-Path $root "no-host-active"
     $noHostServer = Join-Path $root "no-host-server"
     New-Item -ItemType Directory -Path $noHostServer | Out-Null
@@ -324,6 +389,15 @@ try {
     $script:startedRoots = @()
     $script:mockStagedExecutable = Join-Path $root "staged\TerminalHost.exe"
     $script:mockLiveExecutable = Join-Path $root "live\TerminalHost.exe"
+    $script:mockDeploymentLayout = [pscustomobject]@{
+        StateDirectory = Join-Path $root "mock-state"
+        StagingDirectory = Join-Path $root "mock-state\staged"
+        ManifestPath = Join-Path $root "mock-state\host.json"
+        HostExecutableName = "TerminalHost.exe"
+        TtydExecutableName = "ttyd.exe"
+        VersionDirectoryPattern = "\A[A-Za-z0-9._-]{1,128}\z"
+        RequiredBundleFileNames = @("TerminalHost.exe", "ttyd.exe")
+    }
     $PidFile = Join-Path $root "workflow\.treemon.pid"
     $WwwRoot = Join-Path $root "workflow-wwwroot"
     $LogDir = Join-Path $root "workflow-logs"
@@ -355,6 +429,7 @@ try {
                 ProcessStartTimeUtcTicks = 456L
                 TerminalCount = 2
                 ExecutablePath = $script:mockLiveExecutable
+                Layout = $script:mockDeploymentLayout
             }
         }
         return [pscustomobject]@{
@@ -363,6 +438,7 @@ try {
             ProcessStartTimeUtcTicks = $null
             TerminalCount = 0
             ExecutablePath = $null
+            Layout = $script:mockDeploymentLayout
         }
     }
     function Stop-ProductionPortListeners {

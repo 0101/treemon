@@ -145,6 +145,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Shared\Shared.fsproj" />
+    <ProjectReference Include="..\TerminalHostLayout\TerminalHostLayout.fsproj" />
     <ProjectReference Include="..\TerminalHost\TerminalHost.fsproj"
                       ReferenceOutputAssembly="false"
                       Private="false" />

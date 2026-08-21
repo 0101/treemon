@@ -23,6 +23,7 @@ open global.Server.GitWorktree
 open global.Server.SchedulerState
 open Shared
 open Tests.TestUtils
+open Treemon.TerminalHosting
 
 type private FakeTerminal =
     { SessionId: string
@@ -51,7 +52,21 @@ type private FakeControlHost() =
     let stateDirectory = Path.Combine(root, "state")
     let token = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
     let gate = obj()
-    let oldExecutable = Path.Combine(root, "old", "TerminalHost.exe")
+    let oldDirectory = Path.Combine(root, "old")
+    let oldExecutable =
+        Path.Combine(oldDirectory, TerminalHostLayout.HostExecutableName)
+
+    let writeBundle directory content =
+        Directory.CreateDirectory directory |> ignore
+
+        TerminalHostLayout.RequiredBundleFileNames
+        |> List.iter (fun name ->
+            File.WriteAllText(
+                Path.Combine(directory, name),
+                $"{content}: {name}"
+            ))
+
+        Path.Combine(directory, TerminalHostLayout.HostExecutableName)
 
     let currentPid, currentStartTicks =
         use current = Process.GetCurrentProcess()
@@ -79,9 +94,7 @@ type private FakeControlHost() =
 
     do
         Directory.CreateDirectory stateDirectory |> ignore
-        Directory.CreateDirectory(Path.GetDirectoryName oldExecutable)
-        |> ignore
-        File.WriteAllText(oldExecutable, "fake old TerminalHost")
+        writeBundle oldDirectory "fake old TerminalHost" |> ignore
 
     let snapshot () =
         lock gate (fun () ->
@@ -390,11 +403,13 @@ type private FakeControlHost() =
 
     member this.Stage(version: string) =
         let directory =
-            Path.Combine(stateDirectory, "staged", version)
+            TerminalHostLayout.forStateDirectory stateDirectory
+            |> fun layout ->
+                TerminalHostLayout.versionDirectory layout version
 
-        Directory.CreateDirectory directory |> ignore
-        let executable = Path.Combine(directory, "TerminalHost.exe")
-        File.WriteAllText(executable, $"fake staged TerminalHost {version}")
+        let executable =
+            writeBundle directory $"fake staged TerminalHost {version}"
+
         lock gate (fun () -> stagedVersion <- Some version)
         this.PublishManifest()
         executable
@@ -473,6 +488,14 @@ let private noTerminalCommand _ _ =
             Error
                 "The test did not expect a terminal command"
     }
+
+let private argumentValue name (startInfo: ProcessStartInfo) =
+    startInfo.ArgumentList
+    |> Seq.toList
+    |> List.windowed 2
+    |> List.tryPick (function
+        | [ option; value ] when option = name -> Some value
+        | _ -> None)
 
 let private managerConfig
     (host: FakeControlHost)
@@ -1484,21 +1507,27 @@ type EmbeddedTerminalReplacementTests() =
             host.EnableLogicalReplacement()
             let stagedVersion = "2.0.0-resume"
             let stagedExecutable = host.Stage stagedVersion
-            let launches = ConcurrentQueue<string>()
+            let launches = ConcurrentQueue<string * string option>()
             let submitted = ConcurrentQueue<string * string>()
+            let staleTtyd = Path.Combine(host.Root, "stale", "ttyd.exe")
 
             let config =
-                replacementManagerConfig
-                    host
-                    (fun startInfo ->
-                        launches.Enqueue startInfo.FileName
-                        host.Activate(startInfo.FileName, stagedVersion)
-                        Ok())
-                    (fun endpoint command ->
-                        async {
-                            submitted.Enqueue(endpoint, command)
-                            return Ok()
-                        })
+                { replacementManagerConfig
+                      host
+                      (fun startInfo ->
+                          launches.Enqueue(
+                              startInfo.FileName,
+                              argumentValue "--ttyd" startInfo
+                          )
+
+                          host.Activate(startInfo.FileName, stagedVersion)
+                          Ok())
+                      (fun endpoint command ->
+                          async {
+                              submitted.Enqueue(endpoint, command)
+                              return Ok()
+                          }) with
+                    TtydExecutablePath = Some staleTtyd }
 
             let manager = EmbeddedTerminal.createWithConfig config
             let resumedPath = worktree host.Root "resume-owned"
@@ -1591,7 +1620,12 @@ type EmbeddedTerminalReplacementTests() =
 
                 Assert.That(
                     launches.ToArray(),
-                    Is.EqualTo [| stagedExecutable |]
+                    Is.EqualTo(
+                        [| (stagedExecutable,
+                            TerminalHostLayout.adjacentTtydExecutablePath
+                                stagedExecutable) |]
+                    ),
+                    "the staged host must use ttyd from its own bundle"
                 )
 
                 Assert.That(host.ShutdownRequestCount, Is.EqualTo(1))
@@ -1631,10 +1665,14 @@ type EmbeddedTerminalReplacementTests() =
             host.EnableLogicalReplacement()
             let stagedVersion = "2.0.0-fails"
             let stagedExecutable = host.Stage stagedVersion
-            let launches = ConcurrentQueue<string>()
+            let launches = ConcurrentQueue<string * string option>()
+            let staleTtyd = Path.Combine(host.Root, "stale", "ttyd.exe")
 
             let launch (startInfo: ProcessStartInfo) =
-                launches.Enqueue startInfo.FileName
+                launches.Enqueue(
+                    startInfo.FileName,
+                    argumentValue "--ttyd" startInfo
+                )
 
                 if
                     Shared.PathUtils.pathEquals
@@ -1651,10 +1689,11 @@ type EmbeddedTerminalReplacementTests() =
                     Ok()
 
             let manager =
-                replacementManagerConfig
-                    host
-                    launch
-                    (fun _ _ -> async { return Ok() })
+                { replacementManagerConfig
+                      host
+                      launch
+                      (fun _ _ -> async { return Ok() }) with
+                    TtydExecutablePath = Some staleTtyd }
                 |> EmbeddedTerminal.createWithConfig
 
             let target = worktree host.Root "recover-old"
@@ -1696,9 +1735,14 @@ type EmbeddedTerminalReplacementTests() =
                 Assert.That(
                     launches.ToArray(),
                     Is.EqualTo(
-                        [| stagedExecutable
-                           host.OldExecutable |]
-                    )
+                        [| (stagedExecutable,
+                            TerminalHostLayout.adjacentTtydExecutablePath
+                                stagedExecutable)
+                           (host.OldExecutable,
+                            TerminalHostLayout.adjacentTtydExecutablePath
+                                host.OldExecutable) |]
+                    ),
+                    "staged launch and rollback must each use their own sibling ttyd"
                 )
                 Assert.That(host.ShutdownRequestCount, Is.EqualTo(1))
                 Assert.That(host.IsOnline, Is.True)
@@ -1718,6 +1762,70 @@ type EmbeddedTerminalReplacementTests() =
                     Assert.Fail(
                         $"Expected the recoverably restarted old host, got {lifecycle}"
                     ))
+        }
+
+    [<Test>]
+    member _.``incomplete staged bundle is rejected before the live host is stopped``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-incomplete"
+            let stagedExecutable = host.Stage stagedVersion
+
+            stagedExecutable
+            |> TerminalHostLayout.adjacentTtydExecutablePath
+            |> Option.iter File.Delete
+
+            let launches = ConcurrentQueue<unit>()
+
+            let manager =
+                replacementManagerConfig
+                    host
+                    (fun _ ->
+                        launches.Enqueue()
+                        Error "An incomplete bundle must not launch")
+                    (fun _ _ -> async { return Ok() })
+                |> EmbeddedTerminal.createWithConfig
+
+            let target = worktree host.Root "incomplete-stage"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
+                Ok
+                    { ActivityEpoch = 13L
+                      OpenSessions = []
+                      ResumableSessionIds = Map.empty }
+
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHost query manager
+                |> Async.StartAsTask
+
+            let failure =
+                match outcome with
+                | TerminalHostReplacement.ReplacementOutcome.Failed(
+                    version,
+                    error
+                  ) ->
+                    Assert.That(version, Is.EqualTo stagedVersion)
+                    error
+                | other ->
+                    Assert.Fail($"Expected incomplete bundle failure, got {other}")
+                    ""
+
+            Assert.Multiple(fun () ->
+                Assert.That(failure, Does.Contain("bundle member"))
+                Assert.That(
+                    failure,
+                    Does.Contain(TerminalHostLayout.TtydExecutableName)
+                )
+                Assert.That(host.ShutdownRequestCount, Is.Zero)
+                Assert.That(launches, Is.Empty)
+                Assert.That(host.IsOnline, Is.True))
         }
 
     [<Test>]

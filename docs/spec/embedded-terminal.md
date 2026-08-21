@@ -172,8 +172,12 @@ isolated hosts override the state directory). Its exact fields are `pid`,
 `processStartTimeUtcTicks`, `endpoint`, `bearerToken`, `hostVersion`, `controlApiVersion`, and the
 optional `stagedExecutableVersion`. Plain staged executables live at
 `<state>\staged\<version>\TerminalHost.exe`; the valid direct version directory with the newest
-last-write time is reported, and the running host refreshes the manifest when staging changes.
-Treemon publish output carries the independent host under `terminal-host\`.
+last-write time and every required bundle member is reported, and the running host refreshes the
+manifest when staging changes. `TerminalHostLayout` is the single authority for the default state
+directory, manifest and staging paths, executable names, direct-version grammar, and required
+bundle members. Server and host reference that contract directly; deployment PowerShell consumes
+the candidate server's serialized layout rather than reconstructing it. Treemon publish output
+carries the independent host under `terminal-host\`.
 
 The replay buffer is raw and capped at 1 MiB in memory. Terminal bytes, prompts, environment
 contents, and attachment credentials are never persisted or written to diagnostics. The control
@@ -208,6 +212,9 @@ identity exited before allowing deployment. Server, frontend, and host candidate
 their active destinations, and the candidate Treemon's own compiled control client probes the exact
 live host before any active server files or processes are replaced. The staged directory carries the
 complete framework-dependent host publication alongside `TerminalHost.exe`.
+Replacement always derives `ttyd.exe` from the exact host executable being launched: a staged host
+uses its staged sibling and rollback uses the old host's sibling. A configured path from another
+bundle generation can never override that pairing.
 Lazy host startup accepts only the explicit `TREEMON_TERMINAL_HOST_EXECUTABLE` deployment input or
 the `terminal-host` directory beside the published Treemon executable. Development startup sets the
 explicit input to its local TerminalHost build; shipped server code never probes source-tree
@@ -269,7 +276,9 @@ PowerShell lifecycle helpers, or compatibility shims.
   top-level path before the registry is touched.
 - **Plain machine discovery and staging:** one bounded manifest and direct version directories are
   sufficient. Registry state stays in the live host, and no generation journal or bundle store is
-  recreated.
+  recreated. One compiled layout contract defines the state and staging paths, accepted version
+  names, executable names, and complete bundle membership for the host, server, and deployment
+  script.
 - **Candidate-first deployment:** publish and preflight in inactive directories, then atomically
   stage the complete host publication before swapping server files. Treemon receives that stable
   staged executable as its lazy-start path; if an exact live host still runs from an older publish
@@ -303,6 +312,7 @@ PowerShell lifecycle helpers, or compatibility shims.
 
 | File | Purpose |
 |---|---|
+| `src/TerminalHostLayout/Layout.fs` | Shared state/staging paths, version-directory grammar, executable names, and required host bundle members |
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
 | `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, and replacement coordination |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, authoritative snapshot reconciliation, and public start/get/close surface |

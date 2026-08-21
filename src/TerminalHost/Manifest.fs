@@ -7,54 +7,45 @@ open System.Text.Json
 open System.Text.Json.Nodes
 open System.Threading
 open System.Threading.Tasks
+open Treemon.TerminalHosting
 
 [<RequireQualifiedAccess>]
 module Manifest =
     [<Literal>]
-    let FileName = "host.json"
+    let FileName = TerminalHostLayout.ManifestFileName
 
     let path stateDirectory =
-        Path.Combine(stateDirectory, FileName)
+        TerminalHostLayout.forStateDirectory stateDirectory
+        |> _.ManifestPath
 
     let generateBearerToken () =
         RandomNumberGenerator.GetBytes 32
         |> Convert.ToBase64String
         |> _.TrimEnd('=').Replace('+', '-').Replace('/', '_')
 
-    let private validVersionDirectoryName (name: string) =
-        name.Length > 0
-        && name.Length <= 128
-        && (name
-            |> Seq.forall (fun character ->
-                Char.IsAsciiLetterOrDigit character
-                || character = '.'
-                || character = '-'
-                || character = '_'))
-
-    let private stagedExecutablePath directory =
-        let name =
-            if OperatingSystem.IsWindows() then
-                "TerminalHost.exe"
-            else
-                "TerminalHost"
-
-        Path.Combine(directory, name)
-
-    let readStagedExecutableVersion stagingDirectory =
+    let readStagedExecutableVersion layout =
         try
-            if not (Directory.Exists stagingDirectory) then
+            if not (Directory.Exists layout.StagingDirectory) then
                 None
             else
-                Directory.EnumerateDirectories stagingDirectory
+                Directory.EnumerateDirectories layout.StagingDirectory
                 |> Seq.choose (fun directory ->
                     let info = DirectoryInfo directory
-                    let executable = stagedExecutablePath directory
+
+                    let hasCompleteBundle =
+                        layout.RequiredBundleFileNames
+                        |> List.forall (fun name ->
+                            let memberInfo =
+                                FileInfo(Path.Combine(directory, name))
+
+                            memberInfo.Exists
+                            && (memberInfo.Attributes
+                                &&& FileAttributes.ReparsePoint) = enum 0)
 
                     if
-                        validVersionDirectoryName info.Name
+                        TerminalHostLayout.isValidVersionDirectoryName info.Name
                         && (info.Attributes &&& FileAttributes.ReparsePoint) = enum 0
-                        && File.Exists executable
-                        && (File.GetAttributes(executable) &&& FileAttributes.ReparsePoint) = enum 0
+                        && hasCompleteBundle
                     then
                         Some(info.LastWriteTimeUtc, info.Name)
                     else
@@ -149,7 +140,7 @@ module Manifest =
 
     let monitor
         stateDirectory
-        stagingDirectory
+        layout
         identity
         bearerToken
         initialVersion
@@ -162,7 +153,7 @@ module Manifest =
                         Task.Delay(TimeSpan.FromSeconds 1.0, cancellationToken)
                         |> Async.AwaitTask
 
-                    let discovered = readStagedExecutableVersion stagingDirectory
+                    let discovered = readStagedExecutableVersion layout
 
                     let nextVersion =
                         if discovered = currentVersion then

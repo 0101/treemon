@@ -7,6 +7,7 @@ open System.Threading
 open Microsoft.Extensions.Hosting
 open Shared
 open Server
+open Treemon.TerminalHosting
 
 let readDeployBranch () =
     ProcessRunner.text
@@ -56,7 +57,8 @@ type RunMode =
 /// JSON contract consumed by Test-TerminalHostDeployment in treemon.ps1. Host fields are absent
 /// when HasLiveHost is false.
 type TerminalHostDeploymentPreflightResponse =
-    { HasLiveHost: bool
+    { Layout: TerminalHostLayout
+      HasLiveHost: bool
       Pid: int option
       ProcessStartTimeUtcTicks: int64 option
       ExecutablePath: string option
@@ -323,17 +325,20 @@ let internal runHostWithCapture
             BackgroundLoop.stop "Overview snapshot capture" loop
 
 let private deploymentPreflightResponse
+    (layout: TerminalHostLayout)
     (result: TerminalHostClient.DeploymentPreflightResult option)
     =
     match result with
     | None ->
-        { HasLiveHost = false
+        { Layout = layout
+          HasLiveHost = false
           Pid = None
           ProcessStartTimeUtcTicks = None
           ExecutablePath = None
           TerminalCount = None }
     | Some host ->
-        { HasLiveHost = true
+        { Layout = layout
+          HasLiveHost = true
           Pid = Some host.Pid
           ProcessStartTimeUtcTicks =
             Some host.ProcessStartTimeUtcTicks
@@ -341,12 +346,20 @@ let private deploymentPreflightResponse
           TerminalCount = Some host.TerminalCount }
 
 let private runTerminalHostDeploymentPreflight () =
-    match TerminalHostClient.preflightDeployment () |> Async.RunSynchronously with
+    let config = TerminalHostClient.defaultConfig []
+
+    match
+        TerminalHostClient.preflightDeploymentWith config
+        |> Async.RunSynchronously
+    with
     | Error error ->
         Console.Error.WriteLine($"TerminalHost deployment preflight failed: {error}")
         2
     | Ok result ->
-        let response = deploymentPreflightResponse result
+        let layout =
+            TerminalHostLayout.forStateDirectory config.HostStateDirectory
+
+        let response = deploymentPreflightResponse layout result
 
         let jsonOptions =
             System.Text.Json.JsonSerializerOptions(

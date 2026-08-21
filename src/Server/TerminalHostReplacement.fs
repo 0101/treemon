@@ -6,6 +6,7 @@ open FsToolkit.ErrorHandling
 open Server.TerminalHostClient
 open Server.TerminalHostManifest
 open Server.TerminalHostProcess
+open Treemon.TerminalHosting
 
 type internal ReplacementActivityQuery =
     DateTimeOffset
@@ -47,13 +48,15 @@ type internal ReplacementCommit =
 
 let private stagedExecutablePath config version =
     try
+        let layout =
+            TerminalHostLayout.forStateDirectory config.HostStateDirectory
+
         let stagingRoot =
-            Path.Combine(config.HostStateDirectory, "staged")
-            |> Path.GetFullPath
+            layout.StagingDirectory
             |> Path.TrimEndingDirectorySeparator
 
         let directory =
-            Path.Combine(stagingRoot, version)
+            TerminalHostLayout.versionDirectory layout version
             |> Path.GetFullPath
             |> Path.TrimEndingDirectorySeparator
             |> DirectoryInfo
@@ -68,11 +71,19 @@ let private stagedExecutablePath config version =
                      |> Path.TrimEndingDirectorySeparator)
                     stagingRoot)
 
-        let executable = Path.Combine(directory.FullName, hostExecutableName)
+        let executable =
+            Path.Combine(directory.FullName, layout.HostExecutableName)
+
         let executableInfo = FileInfo executable
+        let invalidBundleMember =
+            layout.RequiredBundleFileNames
+            |> List.map (fun name -> FileInfo(Path.Combine(directory.FullName, name)))
+            |> List.tryFind (fun info ->
+                not info.Exists
+                || (info.Attributes &&& FileAttributes.ReparsePoint) <> enum 0)
 
         if
-            not (validVersion false version)
+            not (TerminalHostLayout.isValidVersionDirectoryName version)
             || directory.Name <> version
             || not hasExactParent
         then
@@ -82,12 +93,11 @@ let private stagedExecutablePath config version =
             || (directory.Attributes &&& FileAttributes.ReparsePoint) <> enum 0
         then
             Error "The staged TerminalHost version directory is missing or unsafe"
-        elif
-            not executableInfo.Exists
-            || (executableInfo.Attributes &&& FileAttributes.ReparsePoint) <> enum 0
-        then
+        elif invalidBundleMember.IsSome then
+            let memberInfo = invalidBundleMember |> Option.get
+
             Error
-                $"The staged TerminalHost executable was not found at '{executableInfo.FullName}'"
+                $"The staged TerminalHost bundle member is missing or unsafe at '{memberInfo.FullName}'"
         else
             Ok executableInfo.FullName
     with error ->
@@ -115,23 +125,11 @@ let private queryReplacementActivity
     with error ->
         Error $"Could not query terminal-owned Copilot activity: {error.Message}"
 
-let private replacementTtydPath
-    (config: Config)
-    (oldExecutablePath: string)
-    =
-    match config.TtydExecutablePath with
-    | Some path -> Some path
-    | None ->
-        oldExecutablePath
-        |> Path.GetDirectoryName
-        |> Option.ofObj
-        |> Option.map (fun directory -> Path.Combine(directory, "ttyd.exe"))
-        |> Option.filter File.Exists
-
-let private configForExecutable config ttydExecutablePath executablePath =
+let private configForExecutable config executablePath =
     { config with
         HostExecutablePath = executablePath
-        TtydExecutablePath = ttydExecutablePath }
+        TtydExecutablePath =
+            TerminalHostLayout.adjacentTtydExecutablePath executablePath }
 
 let private launchHostAt config =
     async {
@@ -214,10 +212,7 @@ let private recoverOldHost
     =
     async {
         let oldConfig =
-            configForExecutable
-                config
-                (replacementTtydPath config plan.OldExecutablePath)
-                plan.OldExecutablePath
+            configForExecutable config plan.OldExecutablePath
 
         let failed detail =
             replacementFailure
@@ -333,10 +328,7 @@ let internal commitReplacement
                             $"The previous TerminalHost could not be confirmed stopped: {error}"
                 | Ok() ->
                     let stagedConfig =
-                        configForExecutable
-                            config
-                            (replacementTtydPath config plan.OldExecutablePath)
-                            plan.StagedExecutablePath
+                        configForExecutable config plan.StagedExecutablePath
 
                     match! launchHostAt stagedConfig with
                     | LaunchRejected error ->
