@@ -222,7 +222,7 @@ module JobProcess =
             if SetInformationJobObject(job, JobObjectExtendedLimitInformationClass, pointer, uint32 size) then
                 Ok()
             else
-                Error(win32Error "SetInformationJobObject")
+                Error(win32Error (nameof SetInformationJobObject))
         finally
             Marshal.FreeHGlobal pointer
 
@@ -237,7 +237,7 @@ module JobProcess =
             let fileTime = (int64 creation.HighDateTime <<< 32) ||| int64 creation.LowDateTime
             Ok(DateTime.FromFileTimeUtc(fileTime).Ticks)
         else
-            Error(win32Error "GetProcessTimes")
+            Error(win32Error (nameof GetProcessTimes))
 
     let private closeHandles owned =
         if not owned.JobHandle.IsClosed then
@@ -286,7 +286,7 @@ module JobProcess =
             use job = CreateJobObject(0n, 0n)
 
             if job.IsInvalid then
-                Error(win32Error "CreateJobObject")
+                Error(win32Error (nameof CreateJobObject))
             else
                 match configureKillOnClose job with
                 | Error error -> Error error
@@ -317,14 +317,14 @@ module JobProcess =
                                 )
                             )
                         then
-                            Error(win32Error "CreateProcess")
+                            Error(win32Error (nameof CreateProcess))
                         else
                             let processHandle = new SafeFileHandle(processInformation.ProcessHandle, true)
                             let thread = new SafeFileHandle(processInformation.ThreadHandle, true)
 
                             if not (AssignProcessToJobObject(job, processHandle)) then
                                 failCreatedProcess
-                                    (win32Error "AssignProcessToJobObject")
+                                    (win32Error (nameof AssignProcessToJobObject))
                                     job
                                     processHandle
                                     thread
@@ -335,7 +335,7 @@ module JobProcess =
                                 | Ok startTime ->
                                     if ResumeThread(thread) = UInt32.MaxValue then
                                         failCreatedProcess
-                                            (win32Error "ResumeThread")
+                                            (win32Error (nameof ResumeThread))
                                             job
                                             processHandle
                                             thread
