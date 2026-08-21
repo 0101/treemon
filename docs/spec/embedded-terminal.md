@@ -6,8 +6,8 @@
 - Keep terminals alive across browser attachment changes and ordinary Treemon server restarts.
 - Run the terminal on one small, separately running F#/.NET `TerminalHost` executable with no Node
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
-  `src/Server/TerminalHost*.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific runtime
-  script) stays at or below 4,000 nonblank production lines.
+  `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`, `src/Server/EmbeddedTerminal.fs`, and any
+  terminal-specific runtime script) stays at or below 4,000 nonblank production lines.
 - Give every terminal an exact kernel-owned process boundary established before ttyd executes.
 - Keep lifecycle control loopback-only, authenticated, versioned, and limited to the five endpoints
   listed below.
