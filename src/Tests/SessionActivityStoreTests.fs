@@ -621,6 +621,130 @@ END;
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type TerminalSessionQueryIndexTests() =
+
+    let insertLargeUnrelatedFixture dbPath terminalSessionId =
+        use connection = SqliteTestDatabase.openConnection dbPath
+        use command = connection.CreateCommand()
+        command.CommandText <-
+            """
+WITH digits(n) AS (
+    VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+),
+numbers(n) AS (
+    SELECT ones.n + (10 * tens.n) + (100 * hundreds.n) + (1000 * thousands.n)
+    FROM digits AS ones
+    CROSS JOIN digits AS tens
+    CROSS JOIN digits AS hundreds
+    CROSS JOIN digits AS thousands
+)
+INSERT INTO session_status
+    (session_id, worktree_path, provider, status, updated_at, last_seen, terminal_session_id)
+SELECT
+    'unrelated-' || printf('%04d', n),
+    'C:/wt/unrelated',
+    'copilot_cli',
+    'idle',
+    $timestamp,
+    $timestamp,
+    $terminalSessionId
+FROM numbers;
+"""
+        command.Parameters.AddWithValue(
+            "$timestamp",
+            (ts "2026-03-01T10:00:00Z").ToUniversalTime().ToString("O")
+        )
+        |> ignore
+        command.Parameters.AddWithValue(
+            "$terminalSessionId",
+            TerminalSessionId.value terminalSessionId
+        )
+        |> ignore
+        Assert.That(command.ExecuteNonQuery(), Is.EqualTo 10000)
+
+    let queryPlan dbPath terminalSessionIds =
+        use connection = SqliteTestDatabase.openConnection dbPath
+        use command = connection.CreateCommand()
+
+        let parameters =
+            terminalSessionIds
+            |> Set.toList
+            |> List.mapi (fun index terminalSessionId ->
+                $"$terminalSessionId{index}", TerminalSessionId.value terminalSessionId)
+
+        let parameterNames =
+            parameters |> List.map fst |> String.concat ", "
+
+        command.CommandText <-
+            "EXPLAIN QUERY PLAN "
+            + statusesByTerminalSessionIdsSql parameterNames
+
+        parameters
+        |> List.iter (fun (name, value) ->
+            command.Parameters.AddWithValue(name, value) |> ignore)
+
+        use reader = command.ExecuteReader()
+
+        let rec read details =
+            if reader.Read() then
+                read (reader.GetString 3 :: details)
+            else
+                details |> List.rev
+
+        read []
+
+    [<Test>]
+    member _.``terminal-origin lookup uses the ordered index with a large unrelated fixture``() =
+        withStoreAndPath (fun dbPath store ->
+            let requestedA =
+                TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+            let requestedB =
+                TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+            let unrelated =
+                TerminalSessionId "ffffffffffffffffffffffffffffffff"
+
+            insertLargeUnrelatedFixture dbPath unrelated
+
+            storedOf
+                "owned-a"
+                "C:/wt/a"
+                { emptyStatus with Status = SessionLevelStatus.Idle }
+                "2026-03-01T10:02:00Z"
+                "2026-03-01T10:02:00Z"
+            |> withTerminalOrigin requestedA
+            |> store.UpsertStatus
+
+            storedOf
+                "owned-b"
+                "C:/wt/b"
+                { emptyStatus with Status = SessionLevelStatus.Working }
+                "2026-03-01T10:03:00Z"
+                "2026-03-01T10:03:00Z"
+            |> withTerminalOrigin requestedB
+            |> store.UpsertStatus
+
+            let requested = Set.ofList [ requestedA; requestedB ]
+            let rows = store.StatusesByTerminalSessionIds requested
+            let plan = queryPlan dbPath requested |> String.concat Environment.NewLine
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    rows |> List.map _.SessionId |> Set.ofList,
+                    Is.EqualTo(Set.ofList [ SessionId "owned-a"; SessionId "owned-b" ])
+                )
+                Assert.That(
+                    plan,
+                    Does.Contain("USING INDEX ix_status_terminal_activity")
+                )
+                Assert.That(plan, Does.Not.Contain("SCAN session_status"))
+                Assert.That(plan, Does.Not.Contain("USE TEMP B-TREE FOR ORDER BY"))))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type LegacyDoneStatusTests() =
 
     // Pre-idle-only builds persisted the retired "done" status; live DBs still hold such rows. The
@@ -723,6 +847,21 @@ VALUES
         cmd.Parameters.AddWithValue("$ts", (ts "2026-03-01T11:30:00Z").ToUniversalTime().ToString("O")) |> ignore
         cmd.ExecuteNonQuery() |> ignore
 
+    let indexColumns dbPath indexName =
+        use conn = new SqliteConnection(connStr dbPath)
+        conn.Open()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- $"PRAGMA index_info('{indexName}');"
+        use reader = cmd.ExecuteReader()
+
+        let rec read columns =
+            if reader.Read() then
+                read (reader.GetString 2 :: columns)
+            else
+                columns |> List.rev
+
+        read []
+
     [<Test>]
     member _.``Construction adds metadata columns idempotently and preserves legacy rows``() =
         withDbPath (fun dbPath ->
@@ -750,9 +889,19 @@ VALUES
 
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
-            Assert.That(row.Status.Intent, Is.EqualTo(Some(msg "investigating the fold" "2026-03-01T11:45:00Z")))
-            Assert.That(row.Status.Title, Is.EqualTo(Some(msg "Investigate the fold" "2026-03-01T11:46:00Z")))
-            Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
+            Assert.Multiple(fun () ->
+                Assert.That(row.Status.Intent, Is.EqualTo(Some(msg "investigating the fold" "2026-03-01T11:45:00Z")))
+                Assert.That(row.Status.Title, Is.EqualTo(Some(msg "Investigate the fold" "2026-03-01T11:46:00Z")))
+                Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
+                Assert.That(
+                    indexColumns dbPath "ix_status_terminal_activity",
+                    Is.EqualTo(
+                        [ "terminal_session_id"
+                          "updated_at"
+                          "session_id" ]
+                    ),
+                    "the terminal index must be created after the additive column migration"
+                )))
 
     [<Test>]
     member _.``Construction adds context columns idempotently and preserves legacy rows``() =

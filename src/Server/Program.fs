@@ -580,8 +580,10 @@ let main args =
             | Some manager, Some service ->
                 EmbeddedTerminal.runReplacementCoordinator
                     manager
-                    (fun now terminals ->
-                        service.QueryReplacementPlan(now, terminals))
+                    (TerminalSessionActivity.queryReplacementPlan
+                        CodingToolStatus.readConfiguredProvider
+                        (fun terminalSessionIds ->
+                            service.QueryTerminalActivity terminalSessionIds))
                 |> BackgroundLoop.start
                 |> Some
             | _ -> None

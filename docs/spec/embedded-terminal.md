@@ -6,8 +6,9 @@
 - Keep terminals alive across browser attachment changes and ordinary Treemon server restarts.
 - Run the terminal on one small, separately running F#/.NET `TerminalHost` executable with no Node
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
-  `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`, `src/Server/EmbeddedTerminal.fs`, and any
-  terminal-specific runtime script) stays at or below 4,000 nonblank production lines.
+  `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`,
+  `src/Server/TerminalSessionActivity.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific
+  runtime script) stays at or below 4,000 nonblank production lines.
 - Give every terminal an exact kernel-owned process boundary established before ttyd executes.
 - Keep lifecycle control loopback-only, authenticated, versioned, and limited to the five endpoints
   listed below.
@@ -206,8 +207,9 @@ loopback, exact Host/Origin, bearer, and request-size checks as the control API.
 The server terminal runtime has one-way module boundaries: `TerminalHostProcess` owns process
 configuration, launch, and exact identity defaults; `TerminalHostEndpoint` owns the common
 loopback-HTTP endpoint shape; `TerminalHostManifest` validates discovery; `TerminalHostClient` owns
-authenticated control and attachment requests; and `TerminalHostReplacement` coordinates
-replacement. `Server.EmbeddedTerminal` retains only the mailbox, authoritative snapshot
+authenticated control and attachment requests; `TerminalHostReplacement` coordinates replacement;
+and `TerminalSessionActivity` derives the exact owned-session replacement policy from raw activity
+facts. `Server.EmbeddedTerminal` retains only the mailbox, authoritative snapshot
 reconciliation, and public terminal lifecycle surface. It lazily starts a host only when none is
 healthy, and ambiguous start or close responses are resolved by listing the registry again.
 The mailbox grants one replacement phase, keeps serving cached reads and bounded rejection replies
@@ -236,11 +238,17 @@ fallback.
 
 The reporting extension reads `TREEMON_TERMINAL_SESSION_ID` and adds it as optional origin metadata.
 `SessionActivityService` and `SessionActivityStore` retain that value without changing status
-folding, representative selection, liveness, or worktree projection. `SessionActivityService` joins
-the current host registry to effective per-session state and returns an opaque replacement policy:
-wait, or proceed with a monotonic owned-session activity epoch and optional shell command keyed by
-exact terminal session ID. It owns provider selection and `CodingToolCli` command construction;
-terminal replacement only rechecks the epoch, recreates terminals, and delivers supplied commands.
+folding, representative selection, liveness, or worktree projection. The activity mailbox maintains
+a bounded live-status cache and a process-local monotonic counter per terminal origin. Its narrow
+terminal query filters the live cache to the caller's complete authoritative terminal-ID set before
+overlaying indexed durable rows, and returns only those raw rows plus their maximum epoch.
+`TerminalSessionActivity` owns the terminal-specific projection and returns an opaque replacement
+policy: wait, or proceed with the epoch and optional shell command keyed by exact terminal session
+ID. It owns provider selection and `CodingToolCli` command construction; terminal replacement only
+rechecks the epoch, recreates terminals, and delivers supplied commands. Hourly retention prunes
+live status and origin epochs, retaining epochs only for durable origins or the latest authoritative
+host registry; observing a registry immediately discards epochs for terminals no longer in it while
+the global counter remains monotonic.
 Once a session has an exact terminal origin, a later report that omits the optional origin retains
 the known value in memory and durable storage; there is no implicit clear operation.
 Activity ingestion accepts a Copilot `SessionId` only when it is 1–128 ASCII characters from
@@ -248,7 +256,7 @@ Activity ingestion accepts a Copilot `SessionId` only when it is 1–128 ASCII c
 input.
 
 Replacement snapshots terminal presentation and exact resumable Copilot ownership before stopping
-the old host. `SessionActivityService` uses `CodingToolCli` to prepare provider-specific commands;
+the old host. `TerminalSessionActivity` uses `CodingToolCli` to prepare provider-specific commands;
 terminal replacement delivers those opaque commands while preserving the same terminal-pane
 ordering and selection model already used during normal polling.
 
@@ -274,6 +282,10 @@ PowerShell lifecycle helpers, or compatibility shims.
   persistent cookie or a second capability.
 - **Exact session-origin gating:** only Copilot activity attributed to a current terminal can delay
   replacement; worktree co-location and non-Copilot process activity are irrelevant.
+- **Bounded ownership-query state:** terminal replacement consumes a focused projection over only
+  current authoritative terminal IDs. Live status follows the existing idle-window bound,
+  per-origin epochs are pruned by durable retention and current registry membership without
+  resetting the global sequence, and SQLite uses the terminal-origin/activity-order index.
 - **Opportunistic replacement, not draining:** normal work is never rejected in anticipation of an
   update. A race cancels the attempt rather than delaying the work.
 - **No replacement escape hatches:** `WaitingForUser` gates indefinitely, while non-Copilot work is
@@ -310,7 +322,7 @@ PowerShell lifecycle helpers, or compatibility shims.
   dev-port convention, and production supplies no additional dashboard origin.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the opaque command
-  selected by `SessionActivityService`. A terminal without an exact resumable session receives no
+  selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
   input and remains a plain PowerShell shell. Submitted terminal input is a shell boundary: a
   command carrying a control character is rejected rather than written, so a stored Copilot
   `SessionId` can never inject an extra command line into a recreated shell.
@@ -323,9 +335,9 @@ PowerShell lifecycle helpers, or compatibility shims.
   running from the selected direct staging directory. The captured path is also the rollback target
   when the staged process cannot be launched.
 - **One-way server terminal modules:** process/configuration, manifest, control client, replacement,
-  then mailbox form a strict dependency chain. Replacement returns a commit transition for the
-  mailbox to apply, so only `EmbeddedTerminal` reconciles `ManagerState` and no module cycle is
-  required.
+  focused session-policy projection, and mailbox form an acyclic dependency graph. Replacement
+  returns a commit transition for the mailbox to apply, so only `EmbeddedTerminal` reconciles
+  `ManagerState` and no module cycle is required.
 - **Non-blocking replacement phase:** the mailbox grants the commit boundary but does not perform
   replacement I/O inline. Reads use its last authoritative snapshot until completion, mutations
   receive an immediate retryable error, and only the mailbox applies the final transition. This
@@ -341,8 +353,9 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, and replacement coordination |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, authoritative snapshot reconciliation, and public start/get/close surface |
 | `src/Server/SessionActivity.fs` | Effective per-session state used by the idle gate |
-| `src/Server/SessionActivityService.fs` | Activity ingestion, terminal-origin validation, owned-session activity epoch, and opaque replacement policy |
-| `src/Server/SessionActivityStore.fs` | Durable Copilot session state and optional terminal origin |
+| `src/Server/SessionActivityService.fs` | Activity ingestion, terminal-origin validation, bounded live state, pruned raw origin epochs, and mailbox-serialized terminal activity queries |
+| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection, idle gate, and opaque resume policy |
+| `src/Server/SessionActivityStore.fs` | Durable Copilot session state, optional terminal origin, and indexed exact-origin queries |
 | `src/Extension/reporting/extension.mjs` | Passive activity reports sourced from `TREEMON_TERMINAL_SESSION_ID` |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
 | `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |

@@ -214,6 +214,15 @@ let private additiveColumnMigrations =
       "user_input_completed_at", "TEXT"
       "terminal_session_id", "TEXT" ]
 
+// This index must be created only after ensureAdditiveColumns: existing databases gain
+// terminal_session_id through that migration, so putting it in schemaSql would fail startup before
+// the column exists. The key order matches the exact-origin lookup and its deterministic ordering.
+let private terminalSessionIndexSql =
+    """
+CREATE INDEX IF NOT EXISTS ix_status_terminal_activity
+ON session_status(terminal_session_id, updated_at DESC, session_id DESC);
+"""
+
 let rec private readColumnNames (reader: SqliteDataReader) names =
     if reader.Read() then
         readColumnNames reader (Set.add (reader.GetString 1) names)
@@ -415,6 +424,21 @@ WHERE session_id = $sid
 LIMIT 1;
 """
 
+let private retainedTerminalSessionIdsSql =
+    """
+SELECT DISTINCT terminal_session_id
+FROM session_status
+WHERE terminal_session_id IS NOT NULL;
+"""
+
+let internal statusesByTerminalSessionIdsSql parameterNames =
+    $"""
+SELECT {storedStatusColumns}
+FROM session_status
+WHERE terminal_session_id IN ({parameterNames})
+ORDER BY terminal_session_id, updated_at DESC, session_id DESC;
+"""
+
 // --- Reader / binder helpers ------------------------------------------------------------------
 
 // Bind an activity_events row's parameters for the transactional AppendAndUpsert path.
@@ -540,6 +564,8 @@ type SessionActivityStore
         cmd.CommandText <- schemaSql
         cmd.ExecuteNonQuery() |> ignore
         ensureAdditiveColumns c
+        cmd.CommandText <- terminalSessionIndexSql
+        cmd.ExecuteNonQuery() |> ignore
         cmd.CommandText <- migrateSql
         cmd.ExecuteNonQuery() |> ignore
         c
@@ -626,6 +652,17 @@ type SessionActivityStore
         use reader = cmd.ExecuteReader()
         if reader.Read() then Some(readStored reader) else None
 
+    /// Every terminal origin still backed by a retained durable session row. Used by the hourly
+    /// in-memory epoch sweep after durable retention has completed.
+    member internal _.RetainedTerminalSessionIds() : Set<TerminalSessionId> =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- retainedTerminalSessionIdsSql
+        use reader = cmd.ExecuteReader()
+
+        readRows reader (fun row -> TerminalSessionId(row.GetString 0)) []
+        |> Set.ofList
+
     /// All durable sessions attributed to one of the current authoritative TerminalHost ids.
     /// Rows outside the live window remain eligible because host replacement may resume them.
     member _.StatusesByTerminalSessionIds(terminalSessionIds: Set<TerminalSessionId>) : StoredStatus list =
@@ -641,13 +678,7 @@ type SessionActivityStore
             use conn = openConn ()
             use cmd = conn.CreateCommand()
             let parameterNames = parameters |> List.map fst |> String.concat ", "
-            cmd.CommandText <-
-                $"""
-SELECT {storedStatusColumns}
-FROM session_status
-WHERE terminal_session_id IN ({parameterNames})
-ORDER BY updated_at, session_id;
-"""
+            cmd.CommandText <- statusesByTerminalSessionIdsSql parameterNames
 
             parameters
             |> List.iter (fun (name, value) -> cmd.Parameters.AddWithValue(name, value) |> ignore)

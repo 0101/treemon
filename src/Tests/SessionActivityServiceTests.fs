@@ -8,6 +8,7 @@ open Server
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Server.SessionActivityService
+open Server.TerminalSessionActivity
 open Tests.TestUtils
 
 // Covers the ingestion layer of the push status model: the wire-contract DTO → domain parse (the
@@ -59,10 +60,25 @@ let private queryOwnedOk
     now
     terminalSessionIds
     =
-    match service.QueryOwnedSessions(now, terminalSessionIds) with
+    match
+        queryOwnedSessions
+            (fun ids -> service.QueryTerminalActivity ids)
+            now
+            terminalSessionIds
+    with
     | Ok snapshot -> snapshot
     | Error error ->
         Assert.Fail $"expected owned-session snapshot, got Error: {error}"
+        failwith "unreachable"
+
+let private queryActivityOk
+    (service: SessionActivityService)
+    terminalSessionIds
+    : int64 * StoredStatus list =
+    match service.QueryTerminalActivity terminalSessionIds with
+    | Ok snapshot -> snapshot
+    | Error error ->
+        Assert.Fail $"expected terminal activity snapshot, got Error: {error}"
         failwith "unreachable"
 
 let private replacementTerminal
@@ -77,7 +93,13 @@ let private queryReplacementPlanOk
     now
     terminals
     =
-    match service.QueryReplacementPlan(now, terminals) with
+    match
+        queryReplacementPlan
+            CodingToolStatus.readConfiguredProvider
+            (fun ids -> service.QueryTerminalActivity ids)
+            now
+            terminals
+    with
     | Ok plan -> plan
     | Error error ->
         Assert.Fail $"expected replacement session plan, got Error: {error}"
@@ -1776,6 +1798,174 @@ type RestartRebuildTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type TerminalOwnershipQueryTests() =
+
+    let ownedStored terminalSessionId sessionId lastSeen =
+        { SessionId = SessionId sessionId
+          TerminalSessionId = Some terminalSessionId
+          WorktreePath = WorktreePath "C:/wt/a"
+          Provider = CopilotCli
+          Status = { emptyStatus with Status = SessionLevelStatus.Idle }
+          UpdatedAt = lastSeen
+          LastSeen = lastSeen
+          ContextUsageAt = None }
+
+    [<Test>]
+    member _.``terminal activity merge materializes only requested origins from a large live map``() =
+        let requested =
+            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+        let unrelated =
+            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        let at = ts "2026-03-01T10:00:00Z"
+
+        let live =
+            [ 1..5000 ]
+            |> List.map (fun index ->
+                let sessionId = $"unrelated-{index}"
+                SessionId sessionId, ownedStored unrelated sessionId at)
+            |> Map.ofList
+            |> Map.add
+                (SessionId "requested")
+                (ownedStored requested "requested" at)
+
+        let merged =
+            mergeCurrentAndDurableStatuses
+                (Set.singleton requested)
+                live
+                Seq.empty
+
+        Assert.That(
+            merged |> List.map _.SessionId,
+            Is.EqualTo([ SessionId "requested" ])
+        )
+
+    [<Test>]
+    member _.``service live cache evicts sessions outside the idle window``() =
+        let oldTerminal =
+            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+        let freshTerminal =
+            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        let withOrigin terminalSessionId (report: SessionActivityReport) =
+            { report with TerminalSessionId = Some terminalSessionId }
+
+        withService "C:/wt/a" (fun (service, _, _) ->
+            mkReport "old" "C:/wt/a" "old-event" "2026-03-01T10:00:00Z" TurnStarted
+            |> withOrigin oldTerminal
+            |> service.Submit
+
+            mkReport "fresh" "C:/wt/a" "fresh-event" "2026-03-01T12:01:00Z" TurnStarted
+            |> withOrigin freshTerminal
+            |> service.Submit
+
+            let live = service.LiveSnapshot()
+            let retained =
+                queryOwnedOk
+                    service
+                    (ts "2026-03-01T12:01:00Z")
+                    (Set.singleton oldTerminal)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    live |> Map.keys |> Seq.toList,
+                    Is.EqualTo([ SessionId "fresh" ])
+                )
+                Assert.That(retained.OpenSessions, Is.Empty)
+                Assert.That(
+                    retained.ResumableSessionIds,
+                    Is.EqualTo(Map.ofList [ oldTerminal, SessionId "old" ])
+                )))
+
+    [<Test>]
+    member _.``epoch pruning keeps retained and current origins and never reuses sequence values``() =
+        let current =
+            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+        let retained =
+            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        let expired =
+            TerminalSessionId "cccccccccccccccccccccccccccccccc"
+
+        let initial =
+            emptyTerminalOriginEpochState
+            |> recordTerminalOriginActivity (Set.singleton current)
+
+        let firstCurrentEpoch, withCurrent =
+            observeCurrentTerminalOrigins (Set.singleton current) initial
+
+        let beforePrune =
+            withCurrent
+            |> recordTerminalOriginActivity (Set.ofList [ retained; expired ])
+
+        let pruned =
+            beforePrune
+            |> pruneTerminalOriginEpochs (Set.singleton retained)
+
+        let currentEpoch, _ =
+            observeCurrentTerminalOrigins (Set.singleton current) pruned
+
+        let retainedEpoch, _ =
+            observeCurrentTerminalOrigins (Set.singleton retained) pruned
+
+        let expiredEpoch, withoutExpired =
+            observeCurrentTerminalOrigins (Set.singleton expired) pruned
+
+        let reused =
+            withoutExpired
+            |> recordTerminalOriginActivity (Set.singleton current)
+
+        let nextCurrentEpoch, _ =
+            observeCurrentTerminalOrigins (Set.singleton current) reused
+
+        Assert.Multiple(fun () ->
+            Assert.That(firstCurrentEpoch, Is.GreaterThan 0L)
+            Assert.That(currentEpoch, Is.EqualTo firstCurrentEpoch)
+            Assert.That(retainedEpoch, Is.GreaterThan firstCurrentEpoch)
+            Assert.That(expiredEpoch, Is.Zero)
+            Assert.That(
+                nextCurrentEpoch,
+                Is.GreaterThan retainedEpoch,
+                "pruning an origin must not reset the monotonic global sequence"
+            ))
+
+    [<Test>]
+    member _.``retention sweep removes stale live state and inactive terminal epochs``() =
+        let current =
+            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+        let expired =
+            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        let oldAt = ts "2026-01-01T10:00:00Z"
+        let now = oldAt + retentionPeriod + TimeSpan.FromDays 1.0
+
+        withService "C:/wt/a" (fun (service, _, store) ->
+            queryActivityOk service (Set.singleton current) |> ignore
+
+            mkReport
+                "expired"
+                "C:/wt/a"
+                "expired-event"
+                "2026-01-01T10:00:00Z"
+                TurnStarted
+            |> fun report ->
+                { report with TerminalSessionId = Some expired }
+            |> service.Submit
+
+            service.LiveSnapshot() |> ignore
+            service.RunRetention now
+
+            let activityEpoch, sessions =
+                queryActivityOk service (Set.singleton expired)
+
+            Assert.Multiple(fun () ->
+                Assert.That(service.LiveSnapshot(), Is.Empty)
+                Assert.That(activityEpoch, Is.Zero)
+                Assert.That(sessions, Is.Empty)
+                Assert.That(store.StatusBySession(SessionId "expired"), Is.EqualTo None)))
 
     [<Test>]
     member _.``replacement policy binds the provider command to its exact terminal``() =

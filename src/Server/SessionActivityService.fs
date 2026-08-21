@@ -299,112 +299,28 @@ let internal retentionPeriod = TimeSpan.FromDays 60.0
 /// How often the retention timer fires.
 let internal pruneInterval = TimeSpan.FromHours 1.0
 
-let internal joinOwnedSessions
+let internal mergeCurrentAndDurableStatuses
     (terminalSessionIds: Set<TerminalSessionId>)
-    (sessions: StoredStatus seq)
-    : (TerminalSessionId * StoredStatus) list =
-    sessions
-    |> Seq.choose (fun session ->
-        session.TerminalSessionId
-        |> Option.filter terminalSessionIds.Contains
-        |> Option.map (fun terminalSessionId -> terminalSessionId, session))
-    |> Seq.toList
-
-let internal effectiveOwnedSessionStates
-    (now: DateTimeOffset)
-    (ownedSessions: (TerminalSessionId * StoredStatus) list)
-    : OwnedSessionState list =
-    ownedSessions
-    |> List.filter (fun (_, session) -> now - session.LastSeen < openWindow)
-    |> List.map (fun (terminalSessionId, session) ->
-        { TerminalSessionId = terminalSessionId
-          CopilotSessionId = session.SessionId
-          Status =
-            session.Status
-            |> freshnessAdjusted now session.LastSeen
-            |> effectiveStatus })
-    |> List.sortBy (fun session ->
-        TerminalSessionId.value session.TerminalSessionId,
-        SessionId.value session.CopilotSessionId)
-
-let internal resumableSessionIds
-    (ownedSessions: (TerminalSessionId * StoredStatus) list)
-    : Map<TerminalSessionId, SessionId> =
-    ownedSessions
-    |> List.groupBy fst
-    |> List.choose (fun (terminalSessionId, sessions) ->
-        sessions
-        |> List.map snd
-        |> StoredStatus.tryMostRecentActivity
-        |> Option.map (fun latest -> terminalSessionId, latest.SessionId))
-    |> Map.ofList
-
-let internal ownedSessionActivityEpoch
-    (terminalSessionIds: Set<TerminalSessionId>)
-    (activityEpochs: Map<TerminalSessionId, int64>)
-    : int64 =
-    terminalSessionIds
-    |> Seq.choose (fun terminalSessionId -> activityEpochs |> Map.tryFind terminalSessionId)
-    |> Seq.fold max 0L
-
-let internal queryOwnedSessions
-    (now: DateTimeOffset)
-    (terminalSessionIds: Set<TerminalSessionId>)
-    (activityEpochs: Map<TerminalSessionId, int64>)
-    (sessions: StoredStatus seq)
-    : OwnedSessionSnapshot =
-    let ownedSessions = joinOwnedSessions terminalSessionIds sessions
-
-    { ActivityEpoch = ownedSessionActivityEpoch terminalSessionIds activityEpochs
-      OpenSessions = effectiveOwnedSessionStates now ownedSessions
-      ResumableSessionIds = resumableSessionIds ownedSessions }
-
-let private hasNonIdleOwnedSession (snapshot: OwnedSessionSnapshot) =
-    snapshot.OpenSessions
-    |> List.exists (fun session ->
-        match session.Status with
-        | SessionLevelStatus.Working
-        | SessionLevelStatus.WaitingForUser -> true
-        | SessionLevelStatus.Idle -> false)
-
-let internal replacementSessionPlan
-    resolveProvider
-    (terminals: TerminalHostReplacement.ReplacementTerminal list)
-    (snapshot: OwnedSessionSnapshot)
-    =
-    if hasNonIdleOwnedSession snapshot then
-        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
-    else
-        let resumeCommands =
-            terminals
-            |> List.choose (fun terminal ->
-                snapshot.ResumableSessionIds
-                |> Map.tryFind (TerminalSessionId terminal.TerminalSessionId)
-                |> Option.map (fun sessionId ->
-                    let command =
-                        CodingToolCli.build
-                            (resolveProvider terminal.WorktreePath)
-                            (CodingToolCli.Resume(
-                                Some(SessionId.value sessionId)
-                            ))
-
-                    terminal.TerminalSessionId, command.AsShellString))
-            |> Map.ofList
-
-        TerminalHostReplacement.ReplacementSessionPlan.Ready(
-            snapshot.ActivityEpoch,
-            resumeCommands
-        )
-
-let private mergeCurrentAndDurableStatuses
     (live: Map<SessionId, StoredStatus>)
     (durable: StoredStatus seq)
-    : StoredStatus seq =
+    : StoredStatus list =
+    let requestedLive =
+        live
+        |> Map.filter (fun _ status ->
+            status.TerminalSessionId
+            |> Option.exists terminalSessionIds.Contains)
+
     durable
+    |> Seq.filter (fun status ->
+        status.TerminalSessionId
+        |> Option.exists terminalSessionIds.Contains)
     |> Seq.fold (fun sessions status -> Map.add status.SessionId status sessions) Map.empty
-    |> fun sessions -> live |> Map.fold (fun merged sessionId status -> Map.add sessionId status merged) sessions
-    |> Map.toSeq
-    |> Seq.map snd
+    |> fun sessions ->
+        requestedLive
+        |> Map.fold (fun merged sessionId status ->
+            Map.add sessionId status merged) sessions
+    |> Map.values
+    |> Seq.toList
 
 // --- Service -----------------------------------------------------------------------------------
 
@@ -412,16 +328,18 @@ type private ServiceMsg =
     | Ingest of SessionActivityReport
     | Seed of StoredStatus list
     | Snapshot of AsyncReplyChannel<Map<SessionId, StoredStatus>>
-    | QueryOwnedSessions of
+    | QueryTerminalActivity of
+        Set<TerminalSessionId> *
+        AsyncReplyChannel<Result<int64 * StoredStatus list, string>>
+    | PruneMemory of
         DateTimeOffset *
         Set<TerminalSessionId> *
-        AsyncReplyChannel<Result<OwnedSessionSnapshot, string>>
+        AsyncReplyChannel<unit>
     | Stop of AsyncReplyChannel<unit>
 
 type private ServiceState =
     { Live: Map<SessionId, StoredStatus>
-      NextActivityEpoch: int64
-      ActivityEpochs: Map<TerminalSessionId, int64> }
+      ActivityEpochState: TerminalOriginEpochState }
 
 let private historyState
     (prior: StoredStatus option)
@@ -523,7 +441,10 @@ type SessionActivityService internal
                     Status.BackgroundAgentClocks = clocks }
 
             scheduler.Post(SchedulerState.UpdateSessionStatus current)
-            live |> Map.add report.SessionId current
+
+            live
+            |> Map.add report.SessionId current
+            |> SchedulerState.evictStaleStatuses
 
         match report.Event with
         | Heartbeat ->
@@ -733,15 +654,10 @@ type SessionActivityService internal
         if Set.isEmpty activityOrigins then
             { state with Live = live }
         else
-            let epoch = state.NextActivityEpoch + 1L
-            let activityEpochs =
-                activityOrigins
-                |> Set.fold (fun epochs terminalSessionId ->
-                    Map.add terminalSessionId epoch epochs) state.ActivityEpochs
-
             { Live = live
-              NextActivityEpoch = epoch
-              ActivityEpochs = activityEpochs }
+              ActivityEpochState =
+                state.ActivityEpochState
+                |> recordTerminalOriginActivity activityOrigins }
 
     let mailbox =
         MailboxProcessor<ServiceMsg>.Start(fun inbox ->
@@ -763,35 +679,72 @@ type SessionActivityService internal
                     let seeded =
                         loaded
                         |> List.fold (fun live status -> Map.add status.SessionId status live) state.Live
+                        |> SchedulerState.evictStaleStatuses
 
                     return! loop { state with Live = seeded }
                 | Snapshot reply ->
                     reply.Reply state.Live
                     return! loop state
-                | QueryOwnedSessions(now, terminalSessionIds, reply) ->
+                | QueryTerminalActivity(terminalSessionIds, reply) ->
+                    let activityEpoch, activityEpochState =
+                        state.ActivityEpochState
+                        |> observeCurrentTerminalOrigins terminalSessionIds
+
                     let result =
                         try
-                            store.StatusesByTerminalSessionIds terminalSessionIds
-                            |> mergeCurrentAndDurableStatuses state.Live
-                            |> queryOwnedSessions now terminalSessionIds state.ActivityEpochs
-                            |> Ok
+                            let sessions =
+                                store.StatusesByTerminalSessionIds terminalSessionIds
+                                |> mergeCurrentAndDurableStatuses terminalSessionIds state.Live
+
+                            Ok(activityEpoch, sessions)
                         with ex ->
                             Error $"Could not query terminal-owned sessions: {ex.Message}"
 
                     reply.Reply result
-                    return! loop state
+                    return!
+                        loop
+                            { state with
+                                ActivityEpochState = activityEpochState }
+                | PruneMemory(now, retainedTerminalSessionIds, reply) ->
+                    // Per-report eviction is newest-observation-relative so historical replay is
+                    // deterministic. This hourly sweep deliberately uses wall clock so a quiet
+                    // process also releases rows after the live window passes.
+                    let liveCutoff = now - idleWindow
+                    let live =
+                        state.Live
+                        |> Map.filter (fun _ status ->
+                            status.LastSeen >= liveCutoff)
+
+                    let activityEpochState =
+                        state.ActivityEpochState
+                        |> pruneTerminalOriginEpochs retainedTerminalSessionIds
+
+                    reply.Reply()
+
+                    return!
+                        loop
+                            { Live = live
+                              ActivityEpochState = activityEpochState }
                 | Stop reply ->
                     reply.Reply()
             }
 
             loop
                 { Live = Map.empty
-                  NextActivityEpoch = 0L
-                  ActivityEpochs = Map.empty })
+                  ActivityEpochState = emptyTerminalOriginEpochState })
+
+    let pruneAt now =
+        let deleted = store.PruneOld(now - retentionPeriod)
+        let retainedTerminalSessionIds = store.RetainedTerminalSessionIds()
+
+        mailbox.PostAndReply(fun reply ->
+            PruneMemory(now, retainedTerminalSessionIds, reply))
+
+        deleted
 
     let prune _ =
         try
-            let deleted = store.PruneOld(DateTimeOffset.UtcNow - retentionPeriod)
+            let deleted = pruneAt DateTimeOffset.UtcNow
             if deleted > 0 then Log.log "Activity" $"Retention: pruned {deleted} old activity row(s)"
         with ex ->
             Log.log "Activity" $"Retention prune failed: {ex.Message}"
@@ -855,37 +808,21 @@ type SessionActivityService internal
         ensureActive ()
         mailbox.PostAndReply Snapshot
 
-    /// Exact TerminalHost ownership snapshot. The mailbox serializes the durable read with ingestion
-    /// so status, resume identity, and the process-local activity epoch describe one observation.
-    member internal _.QueryOwnedSessions
-        (
-            now: DateTimeOffset,
-            terminalSessionIds: Set<TerminalSessionId>
-        )
-        : Result<OwnedSessionSnapshot, string> =
+    /// Raw activity for the complete current TerminalHost registry. The mailbox serializes the
+    /// durable read with ingestion so the filtered status rows and process-local activity epoch
+    /// describe one observation; terminal-specific policy is derived by TerminalSessionActivity.
+    member internal _.QueryTerminalActivity
+        (terminalSessionIds: Set<TerminalSessionId>)
+        : Result<int64 * StoredStatus list, string> =
         ensureActive ()
         mailbox.PostAndReply(fun reply ->
-            QueryOwnedSessions(now, terminalSessionIds, reply))
+            QueryTerminalActivity(terminalSessionIds, reply))
 
-    /// Opaque replacement policy consumed by the terminal layer. Exact session
-    /// ownership, idle selection, provider lookup, and resume command construction stay here.
-    member internal this.QueryReplacementPlan
-        (
-            now: DateTimeOffset,
-            terminals: TerminalHostReplacement.ReplacementTerminal list
-        )
-        : Result<TerminalHostReplacement.ReplacementSessionPlan, string> =
-        let terminalSessionIds =
-            terminals
-            |> List.map (_.TerminalSessionId >> TerminalSessionId)
-            |> Set.ofList
-
-        this.QueryOwnedSessions(now, terminalSessionIds)
-        |> Result.map (
-            replacementSessionPlan
-                CodingToolStatus.readConfiguredProvider
-                terminals
-        )
+    /// Deterministic retention seam used by focused store/service tests. Production invokes the
+    /// same path from the hourly timer.
+    member internal _.RunRetention(now: DateTimeOffset) =
+        ensureActive ()
+        pruneAt now |> ignore
 
     member internal _.Store = store
 

@@ -1509,6 +1509,69 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
+    member _.``owned-session activity epoch race aborts before host shutdown``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-activity-race"
+            let stagedExecutable = host.Stage stagedVersion
+            let launches = ConcurrentQueue<string>()
+
+            let config =
+                replacementManagerConfig
+                    host
+                    (fun startInfo ->
+                        launches.Enqueue startInfo.FileName
+                        host.Activate(startInfo.FileName, stagedVersion)
+                        Ok())
+                    (fun _ _ -> async { return Ok() })
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "activity-race"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            // Callback invocation count is mutable fixture state around the two replacement reads.
+            let mutable queryCount = 0
+
+            let query _ _ =
+                let invocation =
+                    System.Threading.Interlocked.Increment(&queryCount)
+
+                let epoch = if invocation = 1 then 4L else 5L
+
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        epoch,
+                        Map.empty
+                    )
+                )
+
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHostWith
+                    (fun () -> async.Return())
+                    query
+                    manager
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    outcome,
+                    Is.EqualTo TerminalHostReplacement.ReplacementOutcome.RaceLost
+                )
+                Assert.That(queryCount, Is.EqualTo 2)
+                Assert.That(host.ShutdownRequestCount, Is.Zero)
+                Assert.That(launches, Is.Empty)
+                Assert.That(host.IsOnline, Is.True)
+                Assert.That(host.CurrentTerminals.Length, Is.EqualTo(1))
+                Assert.That(File.Exists stagedExecutable, Is.True))
+        }
+
+    [<Test>]
     member _.``timed out mailbox commit is rechecked after its late completion``() =
         task {
             use host = new FakeControlHost()

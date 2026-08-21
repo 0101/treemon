@@ -183,10 +183,14 @@ gap, the service clears its old process-local background clocks.
 
 The mailbox also maintains a process-local monotonic activity sequence per terminal origin. A
 report stamps both its prior and reported origins, so moving or clearing a session changes the old
-terminal's epoch as well. The pure ownership query filters only the caller's current authoritative
-terminal ids, overlays live process-local clocks on durable rows, and returns their maximum epoch,
-each open session's effective state, and the greatest-activity durable resume identity per terminal.
-Unrelated origins and sessions with no origin cannot change that query's epoch or join result.
+terminal's epoch as well. Its narrow raw query accepts the complete current authoritative terminal
+ID set, filters the bounded live cache before overlaying indexed durable rows, and returns only
+those rows plus their maximum epoch. `TerminalSessionActivity` turns that raw observation into each
+open session's effective state, the greatest-activity durable resume identity per terminal, and the
+opaque replacement policy. Unrelated origins and sessions with no origin cannot change the query's
+epoch or join result. Hourly retention removes stale live rows and epochs not backed by retained
+durable origins or the latest authoritative registry; pruning never resets the global epoch
+sequence.
 
 ### Persistence
 
@@ -202,9 +206,11 @@ Unrelated origins and sessions with no origin cannot change that query's epoch o
   `activity_events`; the table remains an idempotency record, not a status-rebuild log.
 
 Store construction creates the current schema, applies missing additive columns idempotently, then
-runs bounded legacy normalization. This order lets databases predating activity, context, or
-ask-user columns start safely. Nullable context fields make legacy rows restore a plain status dot
-until a gauge arrives.
+runs indexes that depend on those columns and bounded legacy normalization. This order lets
+databases predating activity, context, ask-user, or terminal-origin columns start safely. The
+terminal-origin index follows `(terminal_session_id, updated_at DESC, session_id DESC)` so repeated
+replacement queries seek directly to current origins in activity order. Nullable context fields
+make legacy rows restore a plain status dot until a gauge arrives.
 
 Event append/status upsert and context updates are transactional and reread the authoritative
 persisted row. Hourly retention bounds durable session and event data without coordinating with
@@ -255,7 +261,7 @@ card or Overview status.
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Resume | Query durable most-recent activity identity, not the bounded live cache or heartbeat recency. |
-| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; exact current-id queries use a process-local per-origin epoch and never infer ownership from worktree or use it in status folding. |
+| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; a focused terminal module derives exact ownership from bounded/indexed current-ID queries and a pruned process-local epoch, never from worktree or status folding. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 
@@ -265,11 +271,12 @@ card or Overview status.
 |---|---|
 | `src/Extension/reporting/extension.mjs` | SDK filtering, wire mapping, terminal-origin reporting, replay, metadata bootstrap, usage, and heartbeat. |
 | `src/Extension/reporting/reporting-core.mjs` | Pure message, usage, and background-lifecycle wire mapping. |
-| `src/Server/SessionActivity.fs` | Event domain, pure fold, background lifecycle, effective activity/status, freshness, and active selection. |
-| `src/Server/SessionActivityService.fs` | Request validation, synthetic filtering, independent ordering paths, mailbox ingestion, and lifecycle. |
+| `src/Server/SessionActivity.fs` | Event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
+| `src/Server/SessionActivityService.fs` | Request validation, synthetic filtering, independent ordering paths, bounded mailbox ingestion, and raw exact-origin queries. |
+| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection and TerminalHost replacement policy. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
-| `src/Server/SessionActivityStore.fs` | Session persistence including optional terminal origin, additive migration, idempotent event append, representative queries, and retention. |
+| `src/Server/SessionActivityStore.fs` | Session persistence including optional terminal origin, post-column query index, idempotent event append, representative queries, and retention. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
 | `src/Server/SchedulerState.fs` | Live session state and `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |
