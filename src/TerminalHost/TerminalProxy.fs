@@ -175,9 +175,10 @@ module internal TerminalProxy =
 
     let private hopByHopHeaders =
         set
-            [ "connection"; "cache-control"; "keep-alive"; "pragma"
-              "proxy-authenticate"; "proxy-authorization"; "referrer-policy"
-              "server"; "set-cookie"; "te"; "trailer"; "transfer-encoding"; "upgrade" ]
+            [ "connection"; "cache-control"; "content-security-policy"; "keep-alive"
+              "pragma"; "proxy-authenticate"; "proxy-authorization"
+              "referrer-policy"; "server"; "set-cookie"; "te"; "trailer"
+              "transfer-encoding"; "upgrade" ]
 
     let private copyResponseHeaders
         (response: HttpResponseMessage)
@@ -194,7 +195,15 @@ module internal TerminalProxy =
                 |> Seq.toArray
                 |> StringValues)
 
-    let private protectAttachmentResponse (context: HttpContext) =
+    let private protectAttachmentResponse allowedOrigins (context: HttpContext) =
+        let frameAncestors =
+            match allowedOrigins with
+            | [] -> "frame-ancestors 'none'"
+            | origins -> "frame-ancestors " + String.concat " " origins
+
+        context.Response.Headers["Content-Security-Policy"] <-
+            StringValues frameAncestors
+
         context.Response.Headers["Referrer-Policy"] <- "no-referrer"
         context.Response.Headers.CacheControl <- "no-store"
         context.Response.Headers.Pragma <- "no-cache"
@@ -254,7 +263,7 @@ module internal TerminalProxy =
         (context: HttpContext)
         =
         task {
-            protectAttachmentResponse context
+            protectAttachmentResponse allowedOrigins context
 
             let authorizationHeaders, targetPath =
                 authorization attachmentPathPrefix context

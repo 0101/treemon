@@ -79,6 +79,10 @@ let private responseDocument (response: HttpResponseMessage) =
     |> getTask
     |> JsonDocument.Parse
 
+let private responseHeader name (response: HttpResponseMessage) =
+    response.Headers.GetValues name
+    |> Seq.exactlyOne
+
 let private terminalIds (document: JsonDocument) =
     document.RootElement.GetProperty("terminals").EnumerateArray()
     |> Seq.map (fun terminal -> terminal.GetProperty("sessionId").GetString())
@@ -687,6 +691,13 @@ type TerminalHostProxyTests() =
         let processCloses = ConcurrentQueue<unit>()
         let connectorCalls = ConcurrentQueue<int>()
         let token = "shared-control-bearer"
+        let dashboardOrigin = "http://localhost:5174"
+        let allowedOrigins =
+            [ dashboardOrigin
+              "http://127.0.0.1:5174" ]
+
+        let expectedFrameAncestors =
+            "frame-ancestors " + String.concat " " allowedOrigins
 
         let terminalProcess =
             { ProcessId = 22_000
@@ -702,7 +713,7 @@ type TerminalHostProxyTests() =
         let plane =
             TerminalProxy.startWithConnector
                 connector
-                [ "http://localhost:5174" ]
+                allowedOrigins
                 token
                 "security-session"
                 terminalProcess
@@ -724,8 +735,17 @@ type TerminalHostProxyTests() =
                 client.GetAsync(wrongToken)
                 |> getTask
 
-            use validToken =
+            use missingOrigin =
                 client.GetAsync(endpoint)
+                |> getTask
+
+            use allowedOriginRequest =
+                new HttpRequestMessage(HttpMethod.Get, endpoint)
+
+            allowedOriginRequest.Headers.Add("Origin", dashboardOrigin)
+
+            use allowedOrigin =
+                client.SendAsync allowedOriginRequest
                 |> getTask
 
             use wrongOriginRequest =
@@ -757,17 +777,74 @@ type TerminalHostProxyTests() =
             Assert.Multiple(fun () ->
                 Assert.That(missingToken.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized))
                 Assert.That(invalidToken.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized))
-                Assert.That(validToken.StatusCode, Is.EqualTo(HttpStatusCode.BadGateway))
-                Assert.That(validToken.Headers.Server, Is.Empty)
+                Assert.That(missingOrigin.StatusCode, Is.EqualTo(HttpStatusCode.BadGateway))
+                Assert.That(missingOrigin.Headers.Server, Is.Empty)
+                Assert.That(allowedOrigin.StatusCode, Is.EqualTo(HttpStatusCode.BadGateway))
                 Assert.That(wrongOrigin.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden))
+
+                Assert.That(
+                    responseHeader "Content-Security-Policy" missingOrigin,
+                    Is.EqualTo(expectedFrameAncestors)
+                )
 
                 Assert.That(
                     oversized.StatusCode,
                     Is.EqualTo(HttpStatusCode.RequestEntityTooLarge)
                 )
 
+                Assert.That(
+                    responseHeader "Content-Security-Policy" allowedOrigin,
+                    Is.EqualTo(expectedFrameAncestors)
+                )
+
+                Assert.That(
+                    responseHeader "Content-Security-Policy" wrongOrigin,
+                    Is.EqualTo(expectedFrameAncestors)
+                )
+
                 Assert.That(connectorCalls.Count, Is.EqualTo(1))
                 Assert.That(processCloses.Count, Is.Zero))
+        finally
+            plane.Stop() |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``attachment response denies framing when no dashboard origin is configured``() =
+        let upstream = new TestWebSocket()
+
+        let terminalProcess =
+            { ProcessId = 22_001
+              ProcessStartTimeUtcTicks = 32_001L
+              TtydPort = 1
+              HasExited = fun () -> false
+              Close = ignore }
+
+        let connector _ =
+            async.Return(Ok(upstream :> System.Net.WebSockets.WebSocket))
+
+        let plane =
+            TerminalProxy.startWithConnector
+                connector
+                []
+                "shared-control-bearer"
+                "no-origin-session"
+                terminalProcess
+            |> Async.RunSynchronously
+            |> requireOk
+
+        try
+            use client = new HttpClient()
+
+            use response =
+                client.GetAsync(plane.AttachmentEndpoint)
+                |> getTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadGateway))
+
+                Assert.That(
+                    responseHeader "Content-Security-Policy" response,
+                    Is.EqualTo("frame-ancestors 'none'")
+                ))
         finally
             plane.Stop() |> Async.RunSynchronously
 

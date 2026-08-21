@@ -210,6 +210,9 @@ contains the terminal session ID and the existing host bearer, so ttyd's relativ
 WebSocket `/ws` requests remain authenticated without creating a browser cookie or another
 credential. The host validates the prefix, strips it before proxying to ttyd, and applies the same
 loopback, exact Host/Origin, bearer, and request-size checks as the control API.
+Every attachment HTTP response limits framing through a `Content-Security-Policy: frame-ancestors`
+directive built from the validated dashboard origins, or `'none'` when none are configured. A
+missing `Origin` remains valid for authenticated loopback non-browser protocol requests.
 
 ### Treemon integration
 
@@ -335,6 +338,9 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Startup-owned dashboard topology:** development passes the Vite port that it actually launches
   into `Program`, which derives both loopback dashboard origins. The terminal client has no
   dev-port convention, and production supplies no additional dashboard origin.
+- **Origin-scoped attachment framing:** attachment responses use CSP `frame-ancestors` with every
+  configured dashboard origin, rather than same-origin framing that would reject the legitimate
+  cross-port dashboard iframe.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the opaque command
   selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
