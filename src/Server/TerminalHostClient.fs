@@ -402,7 +402,7 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
             || command.Length > 65_000
             || (command |> Seq.exists Char.IsControl)
         then
-            return Error "The terminal resume command is invalid"
+            return Error "The terminal command is invalid"
         else
             match terminalWebSocketEndpoint attachmentEndpoint with
             | Error error -> return Error error
@@ -428,7 +428,7 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
                     let! _ =
                         socket.CloseOutputAsync(
                             WebSocketCloseStatus.NormalClosure,
-                            "Resume command submitted",
+                            "Terminal command submitted",
                             cancellation.Token
                         )
                         |> Async.AwaitTask
@@ -437,11 +437,11 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
                     return Ok()
                 with
                 | :? OperationCanceledException ->
-                    return Error "Timed out submitting the Copilot resume command"
+                    return Error "Timed out submitting the terminal command"
                 | _ ->
                     // A ClientWebSocket exception can include its request URI. The attachment URI
                     // carries the host bearer, so never copy transport exception text to diagnostics.
-                    return Error "Could not submit the Copilot resume command"
+                    return Error "Could not submit the terminal command"
     }
 
 let internal defaultConfig allowedOrigins = TerminalHostProcess.defaultConfig allowedOrigins sendTerminalCommandDefault

@@ -65,6 +65,32 @@ let private queryOwnedOk
         Assert.Fail $"expected owned-session snapshot, got Error: {error}"
         failwith "unreachable"
 
+let private replacementTerminal
+    (TerminalSessionId terminalSessionId)
+    worktreePath
+    : TerminalHostReplacement.ReplacementTerminal =
+    { TerminalSessionId = terminalSessionId
+      WorktreePath = worktreePath }
+
+let private queryReplacementPlanOk
+    (service: SessionActivityService)
+    now
+    terminals
+    =
+    match service.QueryReplacementPlan(now, terminals) with
+    | Ok plan -> plan
+    | Error error ->
+        Assert.Fail $"expected replacement session plan, got Error: {error}"
+        failwith "unreachable"
+
+let private requireReplacementReady =
+    function
+    | TerminalHostReplacement.ReplacementSessionPlan.Ready(epoch, commands) ->
+        epoch, commands
+    | TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle ->
+        Assert.Fail "expected a ready replacement session plan"
+        failwith "unreachable"
+
 // --- Service / store fixture -------------------------------------------------------------------
 
 let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
@@ -1707,12 +1733,58 @@ type RestartRebuildTests() =
 type TerminalOwnershipQueryTests() =
 
     [<Test>]
+    member _.``replacement policy binds the provider command to its exact terminal``() =
+        let ownedTerminal =
+            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let plainTerminal =
+            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let ownedPath = "C:/wt/owned"
+        let terminals =
+            [ replacementTerminal ownedTerminal ownedPath
+              replacementTerminal plainTerminal "C:/wt/plain" ]
+
+        let snapshot: OwnedSessionSnapshot =
+            { ActivityEpoch = 17L
+              OpenSessions = []
+              ResumableSessionIds =
+                Map.ofList
+                    [ ownedTerminal,
+                      SessionId "provider-owned-session" ] }
+
+        let resolveProvider (path: string) =
+            Assert.That(
+                path,
+                Is.EqualTo ownedPath,
+                "only the resumable terminal selects a provider from its own worktree"
+            )
+
+            Some CopilotCli
+
+        let epoch, commands =
+            replacementSessionPlan resolveProvider terminals snapshot
+            |> requireReplacementReady
+
+        Assert.Multiple(fun () ->
+            Assert.That(epoch, Is.EqualTo snapshot.ActivityEpoch)
+            Assert.That(
+                commands,
+                Is.EqualTo(
+                    Map.ofList
+                        [ TerminalSessionId.value ownedTerminal,
+                          "copilot --yolo --resume 'provider-owned-session'" ]
+                ),
+                "the unrelated terminal remains a plain shell"
+            ))
+
+    [<Test>]
     member _.``only exact current terminal origins join and advance their activity epoch``() =
         let terminalA =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         let terminalB =
             TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         let now = ts "2026-03-01T10:00:30Z"
+        let replacementTarget =
+            replacementTerminal terminalA "C:/wt/a"
         let withOrigin
             terminalSessionId
             (report: SessionActivityReport)
@@ -1749,6 +1821,11 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(
                     working.ResumableSessionIds,
                     Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
+                )
+                Assert.That(
+                    queryReplacementPlanOk service now [ replacementTarget ],
+                    Is.EqualTo
+                        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
                 ))
 
             mkReport "same-worktree-unowned" "C:/wt/a" "unowned" "2026-03-01T10:00:10Z" TurnStarted
@@ -1766,6 +1843,12 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(
                     afterUnrelated.OpenSessions |> List.map _.CopilotSessionId,
                     Is.EqualTo([ SessionId "owned" ])
+                )
+                Assert.That(
+                    queryReplacementPlanOk service now [ replacementTarget ],
+                    Is.EqualTo
+                        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle,
+                    "unowned same-worktree and other-terminal sessions cannot change the exact terminal policy"
                 ))
 
             mkReport
@@ -1779,10 +1862,23 @@ type TerminalOwnershipQueryTests() =
 
             let idle =
                 queryOwnedOk service now (Set.singleton terminalA)
+            let policyEpoch, resumeCommands =
+                queryReplacementPlanOk service now [ replacementTarget ]
+                |> requireReplacementReady
 
             Assert.Multiple(fun () ->
                 Assert.That(idle.ActivityEpoch, Is.GreaterThan afterUnrelated.ActivityEpoch)
                 Assert.That(idle.OpenSessions |> List.map _.Status, Is.EqualTo([ SessionLevelStatus.Idle ]))
+                Assert.That(policyEpoch, Is.EqualTo idle.ActivityEpoch)
+                Assert.That(
+                    resumeCommands,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ TerminalSessionId.value terminalA,
+                              "copilot --yolo --resume 'owned'" ]
+                    ),
+                    "the session orchestration layer selects the provider-specific resume command"
+                )
                 Assert.That(
                     store.StatusBySession(SessionId "same-worktree-unowned")
                     |> Option.bind _.TerminalSessionId,
@@ -1794,11 +1890,16 @@ type TerminalOwnershipQueryTests() =
 
             let cleared =
                 queryOwnedOk service now (Set.singleton terminalA)
+            let clearedEpoch, clearedCommands =
+                queryReplacementPlanOk service now [ replacementTarget ]
+                |> requireReplacementReady
 
             Assert.Multiple(fun () ->
                 Assert.That(cleared.ActivityEpoch, Is.GreaterThan idle.ActivityEpoch)
                 Assert.That(cleared.OpenSessions, Is.Empty)
-                Assert.That(cleared.ResumableSessionIds, Is.Empty)))
+                Assert.That(cleared.ResumableSessionIds, Is.Empty)
+                Assert.That(clearedEpoch, Is.EqualTo cleared.ActivityEpoch)
+                Assert.That(clearedCommands, Is.Empty)))
 
     [<Test>]
     member _.``retained owned session remains resumable after restart without becoming open``() =
@@ -1826,6 +1927,12 @@ type TerminalOwnershipQueryTests() =
 
             let snapshot =
                 queryOwnedOk service now (Set.singleton terminalSessionId)
+            let policyEpoch, resumeCommands =
+                queryReplacementPlanOk
+                    service
+                    now
+                    [ replacementTerminal terminalSessionId worktree ]
+                |> requireReplacementReady
 
             Assert.Multiple(fun () ->
                 Assert.That(snapshot.ActivityEpoch, Is.Zero)
@@ -1833,4 +1940,13 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(
                     snapshot.ResumableSessionIds,
                     Is.EqualTo(Map.ofList [ terminalSessionId, SessionId "latest" ])
+                )
+                Assert.That(policyEpoch, Is.Zero)
+                Assert.That(
+                    resumeCommands,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ TerminalSessionId.value terminalSessionId,
+                              "copilot --yolo --resume 'latest'" ]
+                    )
                 )))

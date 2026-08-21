@@ -22,7 +22,7 @@ type private Message =
         AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | TryCommitReplacement of
         ReplacementPlan *
-        ReplacementActivityQuery *
+        ReplacementPolicyQuery *
         AsyncReplyChannel<ReplacementOutcome>
 
 type Manager =
@@ -48,12 +48,17 @@ let private interrupted error tab =
 let private interruptSnapshot error snapshot =
     { Tabs = snapshot.Tabs |> List.map (interrupted error) }
 
-let private tabForRecord terminal =
+let private tabForRecord (terminal: TerminalRecord) =
     { Worktree = PathUtils.toWorktreePath terminal.WorktreePath
       Lifecycle =
         EmbeddedTerminalLifecycle.Running terminal.AttachmentEndpoint }
 
-let private reconcileSnapshot previousHost currentHost records snapshot =
+let private reconcileSnapshot
+    previousHost
+    currentHost
+    (records: TerminalRecord list)
+    snapshot
+    =
     let recordsByPath =
         records
         |> List.map (fun terminal ->

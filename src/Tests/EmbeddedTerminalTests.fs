@@ -551,24 +551,6 @@ let private replacementManagerConfig
                 host.ResolveExactProcessExecutable(pid, startTicks)
         SendTerminalCommand = sendTerminalCommand }
 
-let private replacementStoredStatus
-    sessionId
-    terminalSessionId
-    worktreePath
-    status
-    at
-    : SessionActivityStore.StoredStatus =
-    { SessionId = SessionActivity.SessionId sessionId
-      TerminalSessionId = terminalSessionId
-      WorktreePath = worktreePath
-      Provider = CopilotCli
-      Status =
-        { SessionActivity.emptyStatus with
-            Status = status }
-      UpdatedAt = at
-      LastSeen = at
-      ContextUsageAt = None }
-
 let private worktree (root: string) (name: string) =
     let path = Path.Combine(root, name)
     Directory.CreateDirectory path |> ignore
@@ -726,7 +708,7 @@ type EmbeddedTerminalControlClientTests() =
     [<TestCase(0x15)>]
     [<TestCase(0x1B)>]
     [<TestCase(0x85)>]
-    member _.``resume commands containing control characters are rejected before terminal input``
+    member _.``commands containing control characters are rejected before terminal input``
         (characterCode: int)
         =
         task {
@@ -737,23 +719,19 @@ type EmbeddedTerminalControlClientTests() =
                 (listener.LocalEndpoint :?> IPEndPoint).Port
 
             let command =
-                CodingToolCli.build
-                    (Some CopilotCli)
-                    (CodingToolCli.Resume(
-                        Some $"owned-session{string (char characterCode)}Write-Output injected"
-                    ))
+                $"opaque-command{string (char characterCode)}Write-Output injected"
 
             let! result =
                 TerminalHostClient.sendTerminalCommandDefault
                     $"http://127.0.0.1:{port}/terminal/"
-                    command.AsShellString
+                    command
                 |> Async.StartAsTask
 
             Assert.Multiple(fun () ->
                 Assert.That(
                     result,
                     Is.EqualTo(
-                        Error "The terminal resume command is invalid"
+                        Error "The terminal command is invalid"
                         : Result<unit, string>
                     )
                 )
@@ -761,7 +739,7 @@ type EmbeddedTerminalControlClientTests() =
                 Assert.That(
                     listener.Pending(),
                     Is.False,
-                    "invalid resume input must not connect to the terminal"
+                    "invalid command input must not connect to the terminal"
                 ))
         }
 
@@ -1405,11 +1383,13 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk firstStarted |> ignore
 
-            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
-                Ok
-                    { ActivityEpoch = 4L
-                      OpenSessions = []
-                      ResumableSessionIds = Map.empty }
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        4L,
+                        Map.empty
+                    )
+                )
 
             let beforeRecheck () =
                 async {
@@ -1468,21 +1448,8 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk started |> ignore
 
-            let terminal =
-                host.CurrentTerminals |> List.exactlyOne
-
-            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
-                Ok
-                    { ActivityEpoch = 9L
-                      OpenSessions =
-                        [ { TerminalSessionId =
-                                SessionActivity.TerminalSessionId
-                                    terminal.SessionId
-                            CopilotSessionId =
-                                SessionActivity.SessionId "waiting-session"
-                            Status =
-                                SessionActivity.SessionLevelStatus.WaitingForUser } ]
-                      ResumableSessionIds = Map.empty }
+            let query _ _ =
+                Ok TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
 
             let! outcome =
                 EmbeddedTerminal.tryReplaceHost query manager
@@ -1501,7 +1468,7 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
-    member _.``replacement ignores unrelated Working sessions and resumes only the exact terminal``() =
+    member _.``replacement delivers only the policy command and recreates a plain shell``() =
         task {
             use host = new FakeControlHost()
             host.EnableLogicalReplacement()
@@ -1542,56 +1509,27 @@ type EmbeddedTerminalReplacementTests() =
 
             let before = host.CurrentTerminals
             let resumedTerminal = before[0]
-            let ownedIds =
+            let policyTerminals:
+                TerminalHostReplacement.ReplacementTerminal list =
                 before
-                |> List.map (_.SessionId >> SessionActivity.TerminalSessionId)
-                |> Set.ofList
+                |> List.map (fun terminal ->
+                    { TerminalSessionId = terminal.SessionId
+                      WorktreePath = terminal.WorktreePath })
 
-            let queryTime = DateTimeOffset.UtcNow
-            let resumedSessionId = "copilot-owned-resume"
-            let wrongTerminalId =
-                [ "ffffffffffffffffffffffffffffffff"
-                  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" ]
-                |> List.map SessionActivity.TerminalSessionId
-                |> List.find (ownedIds.Contains >> not)
+            let replacementCommand = "opaque replacement command"
+            let queriedTerminals =
+                ConcurrentQueue<TerminalHostReplacement.ReplacementTerminal list>()
 
-            let statuses =
-                [ replacementStoredStatus
-                      resumedSessionId
-                      (Some(
-                          SessionActivity.TerminalSessionId
-                              resumedTerminal.SessionId
-                      ))
-                      (PathUtils.toWorktreePath resumedTerminal.WorktreePath)
-                      SessionActivity.SessionLevelStatus.Idle
-                      queryTime
-                  // Same-worktree activity without the exact terminal origin must not gate.
-                  replacementStoredStatus
-                      "same-worktree-unowned"
-                      None
-                      (PathUtils.toWorktreePath resumedTerminal.WorktreePath)
-                      SessionActivity.SessionLevelStatus.Working
-                      queryTime
-                  // Nor may activity attributed to a terminal absent from the current registry.
-                  replacementStoredStatus
-                      "other-terminal"
-                      (Some wrongTerminalId)
-                      (PathUtils.toWorktreePath resumedTerminal.WorktreePath)
-                      SessionActivity.SessionLevelStatus.Working
-                      queryTime ]
+            let query _ terminals =
+                queriedTerminals.Enqueue terminals
 
-            let queriedIds =
-                ConcurrentQueue<Set<SessionActivity.TerminalSessionId>>()
-
-            let query now terminalIds =
-                queriedIds.Enqueue terminalIds
-
-                SessionActivityService.queryOwnedSessions
-                    now
-                    terminalIds
-                    Map.empty
-                    statuses
-                |> Ok
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        21L,
+                        Map.ofList
+                            [ resumedTerminal.SessionId, replacementCommand ]
+                    )
+                )
 
             let! outcome =
                 EmbeddedTerminal.tryReplaceHost query manager
@@ -1636,9 +1574,7 @@ type EmbeddedTerminalReplacementTests() =
                 )
                 Assert.That(
                     command,
-                    Is.EqualTo(
-                        $"copilot --yolo --resume '{resumedSessionId}'"
-                    )
+                    Is.EqualTo replacementCommand
                 )
                 Assert.That(
                     host.CurrentTerminals |> List.map _.WorktreePath,
@@ -1649,8 +1585,8 @@ type EmbeddedTerminalReplacementTests() =
                     "tab order and the plain shell must both be recreated"
                 )
                 Assert.That(
-                    queriedIds.ToArray(),
-                    Has.All.EqualTo(ownedIds)
+                    queriedTerminals.ToArray(),
+                    Has.All.EqualTo(policyTerminals)
                 )
                 Assert.That(
                     snapshot.Tabs |> List.map _.Worktree,
@@ -1704,11 +1640,13 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk started |> ignore
 
-            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
-                Ok
-                    { ActivityEpoch = 12L
-                      OpenSessions = []
-                      ResumableSessionIds = Map.empty }
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        12L,
+                        Map.empty
+                    )
+                )
 
             let! outcome =
                 EmbeddedTerminal.tryReplaceHost query manager
@@ -1795,11 +1733,13 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk started |> ignore
 
-            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
-                Ok
-                    { ActivityEpoch = 13L
-                      OpenSessions = []
-                      ResumableSessionIds = Map.empty }
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        13L,
+                        Map.empty
+                    )
+                )
 
             let! outcome =
                 EmbeddedTerminal.tryReplaceHost query manager
@@ -1857,11 +1797,13 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk started |> ignore
 
-            let query _ _ : Result<SessionActivity.OwnedSessionSnapshot, string> =
-                Ok
-                    { ActivityEpoch = 15L
-                      OpenSessions = []
-                      ResumableSessionIds = Map.empty }
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        15L,
+                        Map.empty
+                    )
+                )
 
             let! outcome =
                 EmbeddedTerminal.tryReplaceHost query manager

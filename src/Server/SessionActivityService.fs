@@ -359,6 +359,43 @@ let internal queryOwnedSessions
       OpenSessions = effectiveOwnedSessionStates now ownedSessions
       ResumableSessionIds = resumableSessionIds ownedSessions }
 
+let private hasNonIdleOwnedSession (snapshot: OwnedSessionSnapshot) =
+    snapshot.OpenSessions
+    |> List.exists (fun session ->
+        match session.Status with
+        | SessionLevelStatus.Working
+        | SessionLevelStatus.WaitingForUser -> true
+        | SessionLevelStatus.Idle -> false)
+
+let internal replacementSessionPlan
+    resolveProvider
+    (terminals: TerminalHostReplacement.ReplacementTerminal list)
+    (snapshot: OwnedSessionSnapshot)
+    =
+    if hasNonIdleOwnedSession snapshot then
+        TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+    else
+        let resumeCommands =
+            terminals
+            |> List.choose (fun terminal ->
+                snapshot.ResumableSessionIds
+                |> Map.tryFind (TerminalSessionId terminal.TerminalSessionId)
+                |> Option.map (fun sessionId ->
+                    let command =
+                        CodingToolCli.build
+                            (resolveProvider terminal.WorktreePath)
+                            (CodingToolCli.Resume(
+                                Some(SessionId.value sessionId)
+                            ))
+
+                    terminal.TerminalSessionId, command.AsShellString))
+            |> Map.ofList
+
+        TerminalHostReplacement.ReplacementSessionPlan.Ready(
+            snapshot.ActivityEpoch,
+            resumeCommands
+        )
+
 let private mergeCurrentAndDurableStatuses
     (live: Map<SessionId, StoredStatus>)
     (durable: StoredStatus seq)
@@ -816,7 +853,7 @@ type SessionActivityService internal
 
     /// Exact TerminalHost ownership snapshot. The mailbox serializes the durable read with ingestion
     /// so status, resume identity, and the process-local activity epoch describe one observation.
-    member _.QueryOwnedSessions
+    member internal _.QueryOwnedSessions
         (
             now: DateTimeOffset,
             terminalSessionIds: Set<TerminalSessionId>
@@ -825,6 +862,26 @@ type SessionActivityService internal
         ensureActive ()
         mailbox.PostAndReply(fun reply ->
             QueryOwnedSessions(now, terminalSessionIds, reply))
+
+    /// Opaque replacement policy consumed by the terminal layer. Exact session
+    /// ownership, idle selection, provider lookup, and resume command construction stay here.
+    member internal this.QueryReplacementPlan
+        (
+            now: DateTimeOffset,
+            terminals: TerminalHostReplacement.ReplacementTerminal list
+        )
+        : Result<TerminalHostReplacement.ReplacementSessionPlan, string> =
+        let terminalSessionIds =
+            terminals
+            |> List.map (_.TerminalSessionId >> TerminalSessionId)
+            |> Set.ofList
+
+        this.QueryOwnedSessions(now, terminalSessionIds)
+        |> Result.map (
+            replacementSessionPlan
+                CodingToolStatus.readConfiguredProvider
+                terminals
+        )
 
     member internal _.Store = store
 

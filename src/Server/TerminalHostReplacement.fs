@@ -8,10 +8,19 @@ open Server.TerminalHostManifest
 open Server.TerminalHostProcess
 open Treemon.TerminalHosting
 
-type internal ReplacementActivityQuery =
+type internal ReplacementTerminal =
+    { TerminalSessionId: string
+      WorktreePath: string }
+
+[<RequireQualifiedAccess>]
+type internal ReplacementSessionPlan =
+    | WaitingForIdle
+    | Ready of activityEpoch: int64 * resumeCommands: Map<string, string>
+
+type internal ReplacementPolicyQuery =
     DateTimeOffset
-        -> Set<SessionActivity.TerminalSessionId>
-        -> Result<SessionActivity.OwnedSessionSnapshot, string>
+        -> ReplacementTerminal list
+        -> Result<ReplacementSessionPlan, string>
 
 [<RequireQualifiedAccess>]
 type internal ReplacementOutcome =
@@ -36,7 +45,7 @@ type private HostLaunchOutcome =
     | HostLaunched of DiscoveryManifest
 
 type private ReplacementRecheck =
-    | ReadyToCommit of DiscoveryManifest * SessionActivity.OwnedSessionSnapshot
+    | ReadyToCommit of DiscoveryManifest * Map<string, string>
     | RecheckChanged
     | RecheckFailed of string
 
@@ -103,27 +112,18 @@ let private stagedExecutablePath config version =
     with error ->
         Error $"Could not validate the staged TerminalHost executable: {error.Message}"
 
-let private hasNonIdleOwnedSession
-    (snapshot: SessionActivity.OwnedSessionSnapshot)
-    =
-    snapshot.OpenSessions
-    |> List.exists (fun session ->
-        match session.Status with
-        | SessionActivity.SessionLevelStatus.Working
-        | SessionActivity.SessionLevelStatus.WaitingForUser -> true
-        | SessionActivity.SessionLevelStatus.Idle -> false)
-
-let private queryReplacementActivity
-    (query: ReplacementActivityQuery)
+let private queryReplacementPolicy
+    (query: ReplacementPolicyQuery)
     (terminals: TerminalRecord list)
-    : Result<SessionActivity.OwnedSessionSnapshot, string> =
+    : Result<ReplacementSessionPlan, string> =
     try
         terminals
-        |> List.map (_.SessionId >> SessionActivity.TerminalSessionId)
-        |> Set.ofList
+        |> List.map (fun terminal ->
+            { TerminalSessionId = terminal.SessionId
+              WorktreePath = terminal.WorktreePath })
         |> query DateTimeOffset.UtcNow
     with error ->
-        Error $"Could not query terminal-owned Copilot activity: {error.Message}"
+        Error $"Could not query the terminal replacement policy: {error.Message}"
 
 let private configForExecutable config executablePath =
     { config with
@@ -145,10 +145,9 @@ let private recreateTerminals
     (config: Config)
     (connection: DiscoveryManifest)
     (terminals: TerminalRecord list)
-    (resumableSessionIds:
-        Map<SessionActivity.TerminalSessionId, SessionActivity.SessionId>)
+    (resumeCommands: Map<string, string>)
     =
-    let rec recreate registry remaining =
+    let rec recreate registry (remaining: TerminalRecord list) =
         asyncResult {
             match remaining with
             | [] -> return registry
@@ -163,26 +162,15 @@ let private recreateTerminals
 
                         $"Could not recreate the terminal for '{previous.WorktreePath}': {error}")
 
-                match
-                    resumableSessionIds
-                    |> Map.tryFind (
-                        SessionActivity.TerminalSessionId previous.SessionId
-                    )
-                with
+                match resumeCommands |> Map.tryFind previous.SessionId with
                 | None -> ()
-                | Some(SessionActivity.SessionId sessionId) ->
-                    let provider =
-                        CodingToolStatus.readConfiguredProvider previous.WorktreePath
-
-                    let command =
-                        CodingToolCli.build provider (CodingToolCli.Resume(Some sessionId))
-
+                | Some command ->
                     do!
                         config.SendTerminalCommand
                             recreated.AttachmentEndpoint
-                            command.AsShellString
+                            command
                         |> AsyncResult.mapError (fun error ->
-                            $"Could not resume the terminal-owned Copilot session for '{previous.WorktreePath}': {error}")
+                            $"Could not deliver the replacement command for '{previous.WorktreePath}': {error}")
 
                 return! recreate nextRegistry tail
         }
@@ -207,7 +195,7 @@ let private replacementFailure stageVersion error =
 let private recoverOldHost
     (config: Config)
     (plan: ReplacementPlan)
-    resumableSessionIds
+    resumeCommands
     failure
     =
     async {
@@ -241,7 +229,7 @@ let private recoverOldHost
                             oldConfig
                             connection
                             plan.Terminals
-                            resumableSessionIds
+                            resumeCommands
                         |> AsyncResult.mapError (fun error ->
                             $"The previous host restarted, but its terminals could not be recovered: {error}")
 
@@ -265,7 +253,7 @@ let private recoverOldHost
 let private recheckReplacement
     (config: Config)
     (plan: ReplacementPlan)
-    (query: ReplacementActivityQuery)
+    (query: ReplacementPolicyQuery)
     =
     async {
         match! discoverHost config with
@@ -282,18 +270,19 @@ let private recheckReplacement
                      || registry.Terminals <> plan.Terminals ->
                 return RecheckChanged
             | Ok registry ->
-                match queryReplacementActivity query registry.Terminals with
+                match queryReplacementPolicy query registry.Terminals with
                 | Error error -> return RecheckFailed error
-                | Ok activity
-                    when activity.ActivityEpoch <> plan.ActivityEpoch
-                         || hasNonIdleOwnedSession activity ->
+                | Ok ReplacementSessionPlan.WaitingForIdle ->
                     return RecheckChanged
-                | Ok activity ->
+                | Ok(ReplacementSessionPlan.Ready(activityEpoch, _))
+                    when activityEpoch <> plan.ActivityEpoch ->
+                    return RecheckChanged
+                | Ok(ReplacementSessionPlan.Ready(_, resumeCommands)) ->
                     match resolveProcessExecutable config connection with
                     | Error error -> return RecheckFailed error
                     | Ok executablePath
                         when samePath executablePath plan.OldExecutablePath ->
-                        return ReadyToCommit(connection, activity)
+                        return ReadyToCommit(connection, resumeCommands)
                     | Ok _ -> return RecheckChanged
         | HealthyHost _
         | MissingHost
@@ -307,7 +296,7 @@ let private recheckReplacement
 let internal commitReplacement
     (config: Config)
     (plan: ReplacementPlan)
-    (query: ReplacementActivityQuery)
+    (query: ReplacementPolicyQuery)
     =
     async {
         let failed error =
@@ -319,7 +308,7 @@ let internal commitReplacement
             | RecheckChanged ->
                 return ReplacementCommit.KeepState ReplacementOutcome.RaceLost
             | RecheckFailed error -> return failed error
-            | ReadyToCommit(connection, activity) ->
+            | ReadyToCommit(connection, resumeCommands) ->
                 match! shutdownAndWait config connection with
                 | Error error ->
                     return
@@ -336,7 +325,7 @@ let internal commitReplacement
                             recoverOldHost
                                 config
                                 plan
-                                activity.ResumableSessionIds
+                                resumeCommands
                                 $"The staged host could not be launched: {error}"
                     | LaunchStartedButUnhealthy error ->
                         return
@@ -361,7 +350,7 @@ let internal commitReplacement
                                         stagedConfig
                                         replacement
                                         plan.Terminals
-                                        activity.ResumableSessionIds
+                                        resumeCommands
 
                                 return replacement, registry
                             }
@@ -426,12 +415,12 @@ let internal tryReplaceHostIgnoring
                                 $"Could not capture the authoritative terminal registry: {error}"
                             )
                     | Ok registry ->
-                        match queryReplacementActivity query registry.Terminals with
+                        match queryReplacementPolicy query registry.Terminals with
                         | Error error ->
                             return ReplacementOutcome.Failed(stagedVersion, error)
-                        | Ok activity when hasNonIdleOwnedSession activity ->
+                        | Ok ReplacementSessionPlan.WaitingForIdle ->
                             return ReplacementOutcome.WaitingForIdle
-                        | Ok activity ->
+                        | Ok(ReplacementSessionPlan.Ready(activityEpoch, _)) ->
                             let plan: ReplacementPlan =
                                 { OldHost = connection
                                   OldExecutablePath = oldExecutable
@@ -439,7 +428,7 @@ let internal tryReplaceHostIgnoring
                                   StagedExecutablePath = stagedExecutable
                                   RegistryRevision = registry.Revision
                                   Terminals = registry.Terminals
-                                  ActivityEpoch = activity.ActivityEpoch }
+                                  ActivityEpoch = activityEpoch }
 
                             try
                                 do! beforeRecheck ()
@@ -470,7 +459,7 @@ let internal runCoordinator tryReplace (cancellationToken: System.Threading.Canc
                     | ReplacementOutcome.Replaced stagedVersion ->
                         Log.log
                             "TerminalHost"
-                            $"Replaced the host with staged version {stagedVersion} at a natural Copilot-idle window"
+                            $"Replaced the host with staged version {stagedVersion} at a natural idle window"
 
                         None
                     | ReplacementOutcome.Failed(stagedVersion, error) ->
