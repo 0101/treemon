@@ -434,9 +434,10 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - The copied URL is clean: no SAS, signature, or other query-string token of any kind.
 - The deployed viewer and every returned share URL use
   `https://treemon.azurewebsites.net`; provisioning never substitutes a suffixed hostname.
-- Entra redirect/allow/deny: an anonymous request redirects to sign-in; any identity the tenant
-  authenticates -- member or B2B guest -- views the document; an identity outside the tenant is
-  denied.
+- Entra redirect/allow/deny: an anonymous browser navigation redirects to sign-in; the probe sends
+  browser navigation headers (`Accept: text/html`), since App Service Easy Auth may return an empty
+  401 instead of a redirect to an API-style client. Any identity the tenant authenticates -- member
+  or B2B guest -- views the document; an identity outside the tenant is denied.
 - The control-plane RBAC audit finds no effective Blob data-plane read assignment outside the share
   container, and the live second-container probe under the deployed viewer identity still returns
   403 as defense in depth.
