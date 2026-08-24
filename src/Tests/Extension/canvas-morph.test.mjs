@@ -21,6 +21,9 @@ const {
   captureEditableState,
   restoreEditableState,
   servedContentHash,
+  isBrowserProcessedScript,
+  hasAuthoredProcessedScript,
+  requiresDocumentReload,
 } = morph;
 
 /** Minimal node stand-ins — the selection logic only needs tree shape, tag names, and classes. */
@@ -119,6 +122,49 @@ function editableRoot(...controls) {
   root.querySelectorAll = (selector) => selector === "input, textarea" ? controls : [];
   return root;
 }
+
+function script(type = null, runtime = false) {
+  return {
+    getAttribute: (name) => name === "type" ? type : null,
+    hasAttribute: (name) => name === "data-treemon-runtime" && runtime,
+  };
+}
+
+function scriptDocument(...scripts) {
+  return {
+    querySelectorAll: (selector) => selector === "script" ? scripts : [],
+  };
+}
+
+test("only authored browser-processed scripts require document reload", () => {
+  const classic = script();
+  const module = script("module");
+  const legacyMime = script(" TEXT/JAVASCRIPT ; charset=utf-8");
+  const importMap = script("importmap");
+  const speculationRules = script("speculationrules");
+  const json = script("application/json");
+  const template = script("text/plain");
+  const runtime = script(null, true);
+
+  assert.equal(isBrowserProcessedScript(classic), true);
+  assert.equal(isBrowserProcessedScript(module), true);
+  assert.equal(isBrowserProcessedScript(legacyMime), true);
+  assert.equal(isBrowserProcessedScript(importMap), true);
+  assert.equal(isBrowserProcessedScript(speculationRules), true);
+  assert.equal(isBrowserProcessedScript(json), false);
+  assert.equal(isBrowserProcessedScript(template), false);
+  assert.equal(hasAuthoredProcessedScript(scriptDocument(runtime, json)), false);
+  assert.equal(hasAuthoredProcessedScript(scriptDocument(runtime, classic)), true);
+});
+
+test("script removal and addition both select reload while static documents stay morphable", () => {
+  const staticDoc = scriptDocument(script("application/json"), script(null, true));
+  const scriptedDoc = scriptDocument(script());
+
+  assert.equal(requiresDocumentReload(staticDoc, staticDoc), false);
+  assert.equal(requiresDocumentReload(scriptedDoc, staticDoc), true);
+  assert.equal(requiresDocumentReload(staticDoc, scriptedDoc), true);
+});
 
 test("a whitespace-only text change is not a change", () => {
   assert.equal(isWhitespaceOnlyChange("  hello  ", "hello"), true);

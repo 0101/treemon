@@ -55,6 +55,10 @@ let private selectionProcessingMarker = "canvas-selection-processing-pulse"
 
 // ── Item 3: injected JS error overlay marker ──────────────────────────────────
 let private errorOverlayMarker = "canvas-doc-error"   // the action the overlay posts (unique to errorOverlayScript)
+let private runtimeScriptMarker = "<script data-treemon-runtime>"
+
+let private withoutRuntimeScriptMarkers (injection: string) =
+    injection.Replace(" data-treemon-runtime", "")
 
 // The cap the client enforces (MaxPayloadBytes in src/Client/CanvasPane.fs, which is `private` so it
 // can't be referenced directly). The injected helper must carry the identical literal so the
@@ -162,11 +166,20 @@ type BuildInjectionTests() =
     [<Test>]
     member _.``AgentDoc injection includes the full morph + bridge machinery``() =
         let injection = buildInjection AgentDoc "status.html"
-        Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs), "Agent docs keep the idiomorph runtime")
-        Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script), "Agent docs keep the morph controller")
+        let unmarkedInjection = withoutRuntimeScriptMarkers injection
+        Assert.That(unmarkedInjection, Does.Contain(Server.IdiomorphScript.idiomorphJs), "Agent docs keep the idiomorph runtime")
+        Assert.That(unmarkedInjection, Does.Contain(Server.CanvasMorphScript.script), "Agent docs keep the morph controller")
         Assert.That(injection, Does.Contain(bridgeMarker), "Agent docs keep the message-bridge heartbeat")
         Assert.That(injection, Does.Contain(baseStyleMarker))
         Assert.That(injection, Does.Contain(linkInterceptorMarker))
+
+    [<Test>]
+    member _.``live injection marks every Treemon-owned script``() =
+        [ SystemView; AgentDoc ]
+        |> List.iter (fun kind ->
+            let injection = buildInjection kind "status.html"
+            Assert.That(injection, Does.Contain(runtimeScriptMarker), $"{kind}: runtime scripts must carry the authored-script exclusion marker")
+            Assert.That(injection, Does.Not.Contain("<script>"), $"{kind}: no injected runtime script may look authored to the morph controller"))
 
     // ── Changed-content highlight ─────────────────────────────────────────────
     // The morph marks what it changed with `canvas-updated`. Style and behaviour ship together and
@@ -446,12 +459,14 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``an agent .html classifies as an AgentDoc and gets the full injection``() =
-        let injection = buildInjection (CanvasDocKinds.classify "status.html") "status.html"
+        let injection =
+            buildInjection (CanvasDocKinds.classify "status.html") "status.html"
+            |> withoutRuntimeScriptMarkers
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script))
 
     [<Test>]
-    member _.``served AgentDoc reports the hash of the exact raw bytes read``() =
+    member _.``served AgentDoc exposes the exact raw-byte hash to the response and loaded document``() =
         withTempDir "canvas-served-content-hash" (fun worktreePath ->
             let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
             Directory.CreateDirectory(canvasDir) |> ignore
@@ -471,10 +486,19 @@ type BuildInjectionTests() =
                 System.Security.Cryptography.SHA256.HashData(rawBytes)
                 |> System.Convert.ToHexString
                 |> _.ToLowerInvariant()
-            Assert.That(
-                context.Response.Headers[contentHashHeaderName].ToString(),
-                Is.EqualTo(expectedHash),
-                "The morph completion identity must describe the raw file bytes this response actually served"))
+            responseBody.Position <- 0
+            use reader = new StreamReader(responseBody)
+            let servedHtml = reader.ReadToEnd()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    context.Response.Headers[contentHashHeaderName].ToString(),
+                    Is.EqualTo(expectedHash),
+                    "The refetch response must identify the raw file bytes it served")
+                Assert.That(
+                    servedHtml,
+                    Does.Contain($"<meta data-treemon-runtime name=\"{contentHashMetaName}\" content=\"{expectedHash}\">"),
+                    "A reloaded document must report the hash of the bytes that produced that document instance")))
 
 // ── injectUrl loopback guard (Finding 10 / SSRF) ──────────────────────────────
 // injectUrl is registered then used as a POST target by SessionBridge, so a non-loopback value

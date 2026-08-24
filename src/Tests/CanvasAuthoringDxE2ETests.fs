@@ -8,17 +8,20 @@ open Microsoft.Playwright.NUnit
 open Shared
 open Tests.CanvasTestHelpers
 
-/// Splice the REAL server injection (Server.CanvasDocServer.buildInjection) into a doc exactly the
-/// way CanvasDocServer.handleCanvasRequest does — before </head>, or prepended when there is none —
-/// so a browser renders the genuine injected output (base reset, canvasSend, error overlay, …).
-let private injectInto (kind: CanvasDocKind) (filename: string) (docHtml: string) =
-    let injection = Server.CanvasDocServer.buildInjection kind filename
+/// Splice an injection into the same head slot CanvasDocServer uses — before </head>, or prepended
+/// when there is none. Most tests use the runtime-only buildInjection; reload coverage uses
+/// buildLiveInjection because the served content hash is part of that behavior.
+let private injectAtHead (injection: string) (docHtml: string) =
     if docHtml.Contains("</head>", StringComparison.OrdinalIgnoreCase)
     then docHtml.Replace("</head>", injection + "</head>", StringComparison.OrdinalIgnoreCase)
     else injection + docHtml
 
+let private injectInto (kind: CanvasDocKind) (filename: string) (docHtml: string) =
+    docHtml
+    |> injectAtHead (Server.CanvasDocServer.buildInjection kind filename)
+
 // ============================================================================
-// Item 1 (base dark-theme reset) + Item 5 (cascade guards)
+// Base-theme/cascade behavior plus isolated AgentDoc live-update behavior.
 //
 // Self-contained, modeled on BeadspaceCanvasTests: Playwright route interception
 // serves the injected doc (no fixture worktree on disk needed). We then read the
@@ -231,6 +234,128 @@ type CanvasInjectionThemeE2ETests() =
                 state,
                 Is.EqualTo(
                     """{"version":"After","title":"User title","titleDefault":"Revised title","notes":"User notes","notesDefault":"Revised notes","untouched":"After","alerts":false,"alertsDefault":true,"modeA":false,"modeADefault":true,"modeB":true,"modeBDefault":false,"untouchedCheck":true,"untouchedCheckDefault":true,"active":"notes","selectionStart":2,"selectionEnd":6}"""))
+        }
+
+    [<Test>]
+    member this.``script-backed AgentDoc reloads and reinitializes after a live update``() =
+        task {
+            let authoredRuntime =
+                """<script>
+                window.__authoredRuns = (window.__authoredRuns || 0) + 1;
+                const data = JSON.parse(document.getElementById('scorecard-data').textContent);
+                document.getElementById('dynamic').textContent = data.label;
+                </script>"""
+            let doc label =
+                let raw =
+                    String.concat "" [
+                        "<!doctype html><html><head><title>scripted</title></head><body>"
+                        "<h1 id=\"version\">"; label; "</h1>"
+                        "<main id=\"dynamic\"></main>"
+                        "<script id=\"scorecard-data\" type=\"application/json\">{\"label\":\""; label; "\"}</script>"
+                        authoredRuntime
+                        "</body></html>"
+                    ]
+                let contentHash =
+                    raw
+                    |> System.Text.Encoding.UTF8.GetBytes
+                    |> Server.CanvasScanner.contentHash
+                let injection =
+                    Server.CanvasDocServer.buildLiveInjection AgentDoc "scripted.html" contentHash
+                raw |> injectAtHead injection, contentHash
+            let initial, initialHash = doc "Before"
+            let updated, updatedHash = doc "After"
+
+            // Playwright's route callback is the impure request boundary; the count distinguishes
+            // the initial iframe navigation from the controller's subsequent reload.
+            let mutable navigationRequests = 0
+            do! this.Page.RouteAsync("**/scripted.html", fun route ->
+                let body, contentHash =
+                    if route.Request.IsNavigationRequest then
+                        navigationRequests <- navigationRequests + 1
+                        if navigationRequests = 1 then initial, initialHash else updated, updatedHash
+                    else
+                        updated, updatedHash
+                route.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "text/html; charset=utf-8",
+                        Body = body,
+                        Headers =
+                            dict [
+                                Server.CanvasDocServer.contentHashHeaderName, contentHash
+                            ])))
+
+            let iframeUrl = $"{ServerFixture.canvasUrl}/wt/scripted.html"
+            let parentHtml =
+                String.concat "" [
+                    "<!doctype html><html><body>"
+                    "<script>window.__morphMessages=[];window.addEventListener('message',"
+                    "event=>{if(event.data&&event.data.action==='morph-complete')window.__morphMessages.push(event.data)})</script>"
+                    "<iframe id=\"canvas\" src=\""; iframeUrl; "\"></iframe>"
+                    "</body></html>"
+                ]
+            do! this.Page.SetContentAsync(parentHtml, PageSetContentOptions(WaitUntil = WaitUntilState.Load))
+
+            let frame = this.Page.FrameLocator("#canvas")
+            do! Assertions.Expect(frame.Locator("#dynamic")).ToHaveTextAsync("Before")
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__morphMessages.length === 1",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+            let! _ =
+                this.Page.EvaluateAsync("() => { window.__morphMessages = []; }")
+
+            let hashLiteral = System.Text.Json.JsonSerializer.Serialize(updatedHash)
+            let originLiteral = System.Text.Json.JsonSerializer.Serialize(ServerFixture.canvasUrl)
+            let signal =
+                "() => document.querySelector('#canvas').contentWindow.postMessage("
+                + "{action:'content-updated',scopedKey:'wt',filename:'scripted.html',contentHash:"
+                + hashLiteral
+                + "},"
+                + originLiteral
+                + ")"
+            let! _ = this.Page.EvaluateAsync(signal)
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => window.__morphMessages.length === 1",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(frame.Locator("#dynamic")).ToHaveTextAsync(
+                "After",
+                LocatorAssertionsToHaveTextOptions(Timeout = 5000.0f))
+
+            let! runtimeState =
+                frame.Locator("body").EvaluateAsync<string>(
+                    """body => {
+                        const runtimeScripts = Array.from(document.querySelectorAll('script[data-treemon-runtime]'));
+                        return JSON.stringify({
+                            dynamic: document.getElementById('dynamic').textContent,
+                            authoredRuns: window.__authoredRuns,
+                            runtimeScripts: runtimeScripts.length,
+                            uniqueRuntimeScripts: new Set(runtimeScripts.map(script => script.textContent)).size,
+                            canvasSend: typeof window.canvasSend,
+                            morphInstalled: window.canvasMorphInstalled,
+                            selectionInstalled: window.__canvasSelectionContextInstalled
+                        });
+                    }""")
+            let! morphMessages =
+                this.Page.EvaluateAsync<string>("() => JSON.stringify(window.__morphMessages)")
+
+            Assert.Multiple(fun () ->
+                Assert.That(navigationRequests, Is.EqualTo(2), "the update must perform one full document reload")
+                Assert.That(
+                    morphMessages,
+                    Is.EqualTo(
+                        """[{"action":"morph-complete","scopedKey":"wt","filename":"scripted.html","contentHash":"""
+                        + System.Text.Json.JsonSerializer.Serialize(updatedHash)
+                        + "}]"),
+                    "the freshly loaded document must report its own served hash")
+                Assert.That(
+                    runtimeState,
+                    Is.EqualTo(
+                        """{"dynamic":"After","authoredRuns":1,"runtimeScripts":9,"uniqueRuntimeScripts":9,"canvasSend":"function","morphInstalled":true,"selectionInstalled":true}"""),
+                    "navigation must execute the authored initializer and install each Treemon runtime once"))
         }
 
 // ============================================================================

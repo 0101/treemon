@@ -13,6 +13,9 @@ open Shared
 [<Literal>]
 let internal contentHashHeaderName = "X-Treemon-Canvas-Content-Hash"
 
+[<Literal>]
+let internal contentHashMetaName = "treemon-canvas-content-hash"
+
 [<CLIMutable>]
 type CanvasRegisterRequest =
     { worktreePath: string
@@ -230,6 +233,11 @@ let private handleHeartbeat (agent: MailboxProcessor<SchedulerState.StateMsg>) (
         do! ctx.Response.WriteAsync("malformed request")
 }
 
+let [<Literal>] private ScriptOpenTag = "<script>"
+
+let private markTreemonRuntimeScript (script: string) =
+    "<script data-treemon-runtime>" + script[ScriptOpenTag.Length..]
+
 let private bridgeScript =
     [ "<script>(function(){"
       "var p=decodeURIComponent(location.pathname.substring(1,location.pathname.lastIndexOf('/')));"
@@ -246,6 +254,7 @@ let private bridgeScript =
       "hb();setInterval(hb,30000)"
       "})()</script>" ]
     |> String.concat ""
+    |> markTreemonRuntimeScript
 
 /// Intercepts in-doc link clicks: same-origin .html links become navigate-canvas-doc messages
 /// (tab switch), everything else opens in a new tab. The target filename is taken from a.pathname
@@ -254,7 +263,9 @@ let private bridgeScript =
 /// match — not a suffixed name that would silently fall back to the wrong tab. The `||h` guards the
 /// (matched-branch-impossible) empty-pathname case; both match branches guarantee a.pathname ends
 /// with .html.
-let private linkInterceptor = "<script>document.addEventListener('click',function(e){var a=e.target.closest('a');if(!a)return;var h=a.getAttribute('href');if(!h||h.startsWith('#'))return;e.preventDefault();if((h.endsWith('.html')&&!h.includes('://'))||(a.origin===location.origin&&a.pathname.endsWith('.html'))){var f=(a.pathname||h).split('/').pop();parent.postMessage({action:'navigate-canvas-doc',filename:f},'*')}else{window.open(a.href,'_blank')}})</script>"
+let private linkInterceptor =
+    "<script>document.addEventListener('click',function(e){var a=e.target.closest('a');if(!a)return;var h=a.getAttribute('href');if(!h||h.startsWith('#'))return;e.preventDefault();if((h.endsWith('.html')&&!h.includes('://'))||(a.origin===location.origin&&a.pathname.endsWith('.html'))){var f=(a.pathname||h).split('/').pop();parent.postMessage({action:'navigate-canvas-doc',filename:f},'*')}else{window.open(a.href,'_blank')}})</script>"
+    |> markTreemonRuntimeScript
 
 /// Bridge Escape from a cross-origin canvas doc back to the dashboard's focus reclaim. The doc is a
 /// separate origin, so its keydown never reaches the pane's document-level focus-reclaim listener;
@@ -269,6 +280,7 @@ let private reclaimFocusScript =
       "return n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable}))return;"
       "parent.postMessage({action:'reclaim-focus'},'*')})</script>" ]
     |> String.concat ""
+    |> markTreemonRuntimeScript
 
 /// `.canvas-spinner`: the themed spinner style for the expand-in-place feedback, injected in the
 /// AgentDoc arm only. Its sole consumer is the spinner window.canvasExpand swaps the clicked button
@@ -305,6 +317,7 @@ let private canvasExpandScript =
       "return true}"
       "})()</script>" ]
     |> String.concat ""
+    |> markTreemonRuntimeScript
 
 /// Doc-side JS error overlay, injected in the AgentDoc arm only (a SystemView is server-generated
 /// and runs no author JS, so it never gets the overlay). Installs window.onerror plus an
@@ -347,11 +360,14 @@ let private errorOverlayScript (filename: string) =
       "report((r&&r.message)||String(r),'',null,null)})"
       "})()</script>" ]
     |> String.concat ""
+    |> markTreemonRuntimeScript
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
 /// Both kinds get baseStyle, link interception, Escape focus reclaim, canvasSend, and the generic
 /// selected-text contextual actions. AgentDocs additionally get the message-bridge heartbeat,
 /// canvasExpand helper, JS error overlay, and the idiomorph runtime + morph controller.
+/// Every Treemon-owned script carries data-treemon-runtime so the morph controller can distinguish
+/// injected helpers from authored executable scripts when choosing between a body morph and reload.
 /// `filename` is embedded into the error overlay so a doc-side error carries its own identity.
 /// SystemViews (e.g. the beads dashboard) are server-generated and data-driven with no authored
 /// owner: they drive their own refresh and must never morph (a morph would stomp the live,
@@ -364,21 +380,25 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
         CanvasExport.baseStyle
         + linkInterceptor
         + reclaimFocusScript
-        + CanvasSendScript.script
-        + CanvasSelectionScript.script
+        + markTreemonRuntimeScript CanvasSendScript.script
+        + markTreemonRuntimeScript CanvasSelectionScript.script
     | AgentDoc ->
         CanvasExport.baseStyle
         + linkInterceptor
         + reclaimFocusScript
         + bridgeScript
-        + CanvasSendScript.script
+        + markTreemonRuntimeScript CanvasSendScript.script
         + canvasExpandStyle
         + canvasExpandScript
-        + CanvasSelectionScript.script
+        + markTreemonRuntimeScript CanvasSelectionScript.script
         + errorOverlayScript filename
-        + IdiomorphScript.idiomorphJs
+        + markTreemonRuntimeScript IdiomorphScript.idiomorphJs
         + CanvasMorphScript.style
-        + CanvasMorphScript.script
+        + markTreemonRuntimeScript CanvasMorphScript.script
+
+let internal buildLiveInjection kind filename contentHash =
+    $"<meta data-treemon-runtime name=\"{contentHashMetaName}\" content=\"{contentHash}\">"
+    + buildInjection kind filename
 
 /// Serve a canvas doc from disk with the live injection spliced in, or the matching 400/404 for an
 /// invalid contract filename, a path that escapes the worktree, or a file that isn't there.
@@ -395,13 +415,14 @@ let internal serveCanvasDoc (ctx: HttpContext) (worktreePath: string) (filename:
     | Ok resolvedPath ->
         let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
         let html = System.Text.Encoding.UTF8.GetString(rawBytes)
-        let injection = buildInjection (CanvasDocKinds.classify filename) filename
+        let contentHash = CanvasScanner.contentHash rawBytes
+        let injection = buildLiveInjection (CanvasDocKinds.classify filename) filename contentHash
         // Same </head> placement the static export uses (CanvasExport.injectAtHead) — one
         // implementation so live-served and published docs can never drift.
         let injected = CanvasExport.injectAtHead injection html
         ctx.Response.ContentType <- "text/html; charset=utf-8"
         ctx.Response.Headers["Cache-Control"] <- "no-cache"
-        ctx.Response.Headers[contentHashHeaderName] <- CanvasScanner.contentHash rawBytes
+        ctx.Response.Headers[contentHashHeaderName] <- contentHash
         // Restrict who may frame a canvas doc to local treemon UI origins. The dashboard frames
         // docs cross-origin (loopback, with dev/prod ports that vary), so a port-wildcard
         // loopback allowlist permits the pane while blocking any public page from framing a doc
