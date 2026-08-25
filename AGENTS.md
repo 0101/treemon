@@ -61,6 +61,7 @@ This project uses strict functional F# style. These rules are non-negotiable.
 **Code style:**
 - Concise, readable code — optimize for clarity, not premature performance
 - Choose the simplest complete implementation — avoid one-call helpers, impossible-state guards, hypothetical feature flags, and unsupported compatibility shims. Durable stores may use the smallest bounded, idempotent, tested migration needed to prevent startup failure or data loss.
+- Files over roughly 1,000 lines warrant a cohesion check. Split only when they own distinct responsibilities with a clear module boundary, not solely to reduce line count.
 - Single responsibility per function/module
 - Expression-oriented — prefer expressions over statements
 - Comments explain non-obvious algorithms or critical edge cases. Do not add TODOs, change-history comments, restatements, or section-divider comments in production code; extract a named function instead.

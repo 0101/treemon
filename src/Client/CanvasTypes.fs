@@ -29,6 +29,27 @@ module CanvasShareState =
             | _ -> false
         shareState <> CanvasShareState.Idle, isSharing
 
+[<RequireQualifiedAccess>]
+type CanvasPathCopyState =
+    | Idle of revision: int
+    | Copying of scopedKey: string * filename: string * revision: int
+    | Copied of scopedKey: string * filename: string * revision: int
+
+module CanvasPathCopyState =
+    let revision = function
+        | CanvasPathCopyState.Idle value
+        | CanvasPathCopyState.Copying (_, _, value)
+        | CanvasPathCopyState.Copied (_, _, value) -> value
+
+    let isCopied (activeScopedKey: string option) (filename: string) = function
+        | CanvasPathCopyState.Copied (scopedKey, copiedFilename, _) ->
+            activeScopedKey = Some scopedKey && filename = copiedFilename
+        | _ -> false
+
+    let isCopying = function
+        | CanvasPathCopyState.Copying _ -> true
+        | _ -> false
+
 /// A doc-scoped banner error stamped with the worktree + the doc it is attributed to. Two producers
 /// feed it: (1) a doc-side JS error (window.onerror / unhandledrejection forwarded from an AgentDoc
 /// iframe via the injected errorOverlayScript), which self-identifies via the postMessage `wt`/`doc`

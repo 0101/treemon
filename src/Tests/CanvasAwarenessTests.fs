@@ -1064,6 +1064,98 @@ type DocErrorTests() =
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
             "Switching tabs clears the stored error so it can never re-show when you switch back")
 
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type CanvasDocPathCopyResultTests() =
+
+    let scopedKey = "r/feat"
+    let filename = "status.html"
+    let revision = 1
+    let path = @"Q:\code\demo\.agents\canvas\status.html"
+    let copyingModel sendState =
+        { defaultModel with
+            Canvas.CanvasSendState = sendState
+            Canvas.PathCopyState = CanvasPathCopyState.Copying (scopedKey, filename, revision) }
+
+    [<Test>]
+    member _.``A completed path write shows a scoped checkmark without a banner``() =
+        let updated, cmd =
+            update
+                (CanvasDocPathCopyResult (scopedKey, filename, revision, path, Ok ()))
+                (copyingModel (CanvasSendState.Failed "earlier failure"))
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.Canvas.ClipboardNotice, Is.EqualTo(None))
+            Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Idle))
+            Assert.That(
+                updated.Canvas.PathCopyState,
+                Is.EqualTo(CanvasPathCopyState.Copied (scopedKey, filename, revision)))
+            Assert.That(cmd, Is.Not.Empty))
+
+    [<Test>]
+    member _.``A rejected path write exposes the full path for manual copying``() =
+        let updated, _ =
+            update
+                (CanvasDocPathCopyResult (scopedKey, filename, revision, path, Error "NotAllowedError"))
+                (copyingModel CanvasSendState.Idle)
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.Canvas.ClipboardNotice, Is.EqualTo(None))
+            Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(
+                CanvasSendState.Failed $"Could not copy the path. Copy it manually: {path}"))
+            Assert.That(updated.Canvas.PathCopyState, Is.EqualTo(CanvasPathCopyState.Idle revision)))
+
+    [<Test>]
+    member _.``A stale reset cannot clear newer copied feedback``() =
+        let newerRevision = revision + 1
+        let model =
+            { defaultModel with
+                Canvas.PathCopyState = CanvasPathCopyState.Copied (scopedKey, filename, newerRevision) }
+        let updated, cmd =
+            update
+                (ClearCanvasDocPathCopied (scopedKey, filename, revision))
+                model
+
+        Assert.That(updated, Is.EqualTo(model))
+        Assert.That(cmd, Is.Empty)
+
+    [<Test>]
+    member _.``The matching reset hides copied feedback``() =
+        let model =
+            { defaultModel with
+                Canvas.PathCopyState = CanvasPathCopyState.Copied (scopedKey, filename, revision) }
+        let updated, cmd =
+            update
+                (ClearCanvasDocPathCopied (scopedKey, filename, revision))
+                model
+
+        Assert.That(updated.Canvas.PathCopyState, Is.EqualTo(CanvasPathCopyState.Idle revision))
+        Assert.That(cmd, Is.Empty)
+
+    [<Test>]
+    member _.``Copying a missing canvas doc fails visibly without scheduling clipboard work``() =
+        let updated, cmd =
+            update
+                (CopyCanvasDocPath ("missing/worktree", "missing.html"))
+                defaultModel
+
+        Assert.That(
+            updated.Canvas.CanvasSendState,
+            Is.EqualTo(CanvasSendState.Failed "Could not copy the canvas doc path because the document is no longer available."))
+        Assert.That(updated.Canvas.PathCopyState, Is.EqualTo(CanvasPathCopyState.Idle 0))
+        Assert.That(cmd, Is.Empty)
+
+    [<Test>]
+    member _.``Path copy is rejected while Canvas Share owns the clipboard workflow``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc filename "h" ] ] ]
+                Canvas.ShareState = CanvasShareState.Publishing (scopedKey, filename) }
+        let updated, cmd = update (CopyCanvasDocPath (scopedKey, filename)) model
+
+        Assert.That(updated, Is.EqualTo(model))
+        Assert.That(cmd, Is.Empty)
 
 // ── ShareCanvasDoc state machine + result banners (client share feature) ─────────────────────
 // A successful share does NOT immediately claim "link copied": the Ok arm clears a stale Failed
@@ -1100,7 +1192,7 @@ type ShareCanvasDocResultTests() =
             update
                 (ShareCanvasDocResult ("r/feat", "status.html", Ok shareResult))
                 (publishingModel CanvasSendState.Idle)
-        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(None),
+        Assert.That(updated.Canvas.ClipboardNotice, Is.EqualTo(None),
             "The 'link copied' banner must wait for the clipboard write's actual outcome (F6)")
         Assert.That(updated.Canvas.ShareState,
             Is.EqualTo(CanvasShareState.WritingClipboard ("r/feat", "status.html")),
@@ -1114,7 +1206,7 @@ type ShareCanvasDocResultTests() =
                 (publishingModel (CanvasSendState.Failed "earlier failure"))
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Idle),
             "A prior delivery error must be cleared on a successful share (no red + green banner at once)")
-        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(None),
+        Assert.That(updated.Canvas.ClipboardNotice, Is.EqualTo(None),
             "The success banner is deferred to the clipboard write; nothing is claimed yet")
 
     [<Test>]
@@ -1133,6 +1225,17 @@ type ShareCanvasDocResultTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "other.html" "h" ] ] ]
                 Canvas.ShareState = CanvasShareState.Publishing ("r/feat", "status.html") }
         let updated, cmd = update (ShareCanvasDoc ("r/feat", "other.html")) model
+        Assert.That(updated, Is.EqualTo(model))
+        Assert.That(cmd, Is.Empty)
+
+    [<Test>]
+    member _.``share is rejected while path copy owns the clipboard workflow``() =
+        let model =
+            { defaultModel with
+                Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "status.html" "h" ] ] ]
+                Canvas.PathCopyState = CanvasPathCopyState.Copying ("r/feat", "status.html", 1) }
+        let updated, cmd = update (ShareCanvasDoc ("r/feat", "status.html")) model
+
         Assert.That(updated, Is.EqualTo(model))
         Assert.That(cmd, Is.Empty)
 
@@ -1159,7 +1262,7 @@ type ShareCanvasDocResultTests() =
             update
                 (ClipboardWriteResult ("r/feat", "status.html", shareResult.Url, Ok ()))
                 writingClipboardModel
-        Assert.That(updated.Canvas.ShareNotice, Is.EqualTo(Some "Shared — link copied"))
+        Assert.That(updated.Canvas.ClipboardNotice, Is.EqualTo(Some "Shared — link copied"))
         Assert.That(updated.Canvas.ShareState, Is.EqualTo(CanvasShareState.Idle))
 
     [<Test>]
@@ -1168,7 +1271,7 @@ type ShareCanvasDocResultTests() =
             update
                 (ClipboardWriteResult ("r/feat", "status.html", shareResult.Url, Error "NotAllowedError"))
                 writingClipboardModel
-        match updated.Canvas.ShareNotice with
+        match updated.Canvas.ClipboardNotice with
         | Some notice ->
             Assert.That(notice, Does.Not.Contain("link copied"),
                 "A rejected clipboard write must NOT claim the link was copied (F6)")
@@ -1206,18 +1309,18 @@ type ShareCanvasDocResultTests() =
 
     [<Test>]
     member _.``Error preserves an independent Waiting send-state (F7 regression)``() =
-        Assert.That(preserveWaitingOnShareFailure (CanvasSendState.Waiting "r/feat") "share boom",
+        Assert.That(preserveWaitingOnFailure (CanvasSendState.Waiting "r/feat") "share boom",
             Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "A live 'waiting for session' banner is independent and must survive a share failure")
 
     [<Test>]
     member _.``Error raises the delivery-error banner from Idle``() =
-        Assert.That(preserveWaitingOnShareFailure CanvasSendState.Idle "share boom",
+        Assert.That(preserveWaitingOnFailure CanvasSendState.Idle "share boom",
             Is.EqualTo(CanvasSendState.Failed "share boom"))
 
     [<Test>]
     member _.``Error replaces a stale Failed with the latest message``() =
-        Assert.That(preserveWaitingOnShareFailure (CanvasSendState.Failed "old failure") "share boom",
+        Assert.That(preserveWaitingOnFailure (CanvasSendState.Failed "old failure") "share boom",
             Is.EqualTo(CanvasSendState.Failed "share boom"),
             "A retried share that fails again surfaces the latest error, not a stale one")
 // ── mostRecentUnviewedDoc (focus-retarget target picker) ─────────────

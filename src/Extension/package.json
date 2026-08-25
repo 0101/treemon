@@ -5,6 +5,6 @@
   "type": "module",
   "main": "extension.mjs",
   "dependencies": {
-    "@github/copilot-sdk": "*"
+    "@github/copilot-sdk": "1.0.9"
   }
 }

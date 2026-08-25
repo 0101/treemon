@@ -320,11 +320,14 @@
             cursor: pointer; border: 1px solid transparent; transition: background 0.12s, border-color 0.12s;
         }
         .overview-item:not(.overview-item-selected):hover { background: #2a2a3c; }
-        /* Selected group = a black "tab" with rounded TOP corners. Its content keeps the base
-           item's padding so it stays aligned with the sibling columns (only the background changes);
-           the extra bottom padding + align-self: stretch drop its bottom edge flush against the
-           black .overview-breakdown panel rendered below it. */
-        .overview-item-selected { background: #11111b; border-color: transparent; border-radius: 10px 10px 0 0; align-self: stretch; padding: 6px 8px 12px; }
+        /* Selected group = a black "tab" with rounded TOP corners. Removing the base item's -2px
+           start margin aligns the tab shell with the panel; reducing start padding by the same 2px
+           keeps its content aligned with sibling columns. Extra bottom padding + align-self: stretch
+           drop its bottom edge flush against the black .overview-breakdown panel rendered below it. */
+        .overview-item-selected {
+            background: #11111b; border-color: transparent; border-radius: 10px 10px 0 0;
+            align-self: stretch; margin-inline-start: 0; padding: 6px 8px 12px; padding-inline-start: 6px;
+        }
         .overview-meta { font-size: var(--fs-base); color: #a6adc8; white-space: nowrap; }
         /* Count and label share size/weight — only colour differs. The accent class sets `color`, so
            it tints the count text while the label keeps the neutral .overview-meta colour. */
@@ -374,6 +377,10 @@
            shared scale as the band bars above (--bar-fill is the documented inline-width exception). The
            panel's accent class tints the chip dots and task bars via currentColor. */
         .overview-breakdown { position: relative; background: #11111b; border-radius: 8px; padding: 16px 18px 18px; margin-top: 0; }
+        .overview-section:has(> .overview-items > .overview-item-selected:first-child) > .overview-breakdown,
+        .overview-agents-band:has(.overview-item-selected:first-child) + .overview-band-rest > .overview-breakdown {
+            border-top-left-radius: 0;
+        }
         .overview-bd-close { position: absolute; top: 10px; right: 12px; cursor: pointer; background: none; border: none; color: #6c7086; font-size: var(--fs-lg); line-height: 1; padding: 2px 5px; border-radius: 5px; }
         .overview-bd-close:hover { color: #cdd6f4; background: #1e1e2e; }
         .overview-bd-repo { margin: 0 0 13px; }
@@ -408,17 +415,13 @@
         /* In-band history chart (spec: docs/spec/overview-activity-history.md). Each stacked stepped-area
            chart hangs directly under its live section, split off by a dashed rule; the areas reuse the
            band's task and activity accent classes (fill = currentColor). Geometry mirrors the prototype
-           .agents/canvas/overview-chart-prototype.html. Empty series are omitted (chart + legend). */
+           .agents/canvas/overview-chart-prototype.html. Empty series are omitted from the chart. */
         .history-charts { margin-top: 14px; padding-top: 14px; border-top: 1px dashed #45475a; }
         /* Keep the live Agents/Tasks solid divider when the Agents chart sits between the sections. */
         .history-charts + .overview-section { margin-top: 17px; padding-top: 16px; border-top: 1px solid #313244; }
         .history-charts figure { background: #181825; padding: 12px 14px 6px; border-radius: 10px; margin: 10px 0 0; }
         .history-charts .chart-stage { position: relative; }
         .history-charts svg { display: block; width: 100%; height: auto; }
-        .chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 8px 0 0; font-size: var(--fs-sm); color: #a6adc8; }
-        .chart-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-        .chart-legend .swatch { width: 10px; height: 10px; border-radius: 2px; background: currentColor; flex: none; }
-        .chart-legend .chart-legend-label { color: #a6adc8; }
         /* Axis labels are SVG text inside the fixed 760x170 viewBox, so their size is in user units
            that scale with the chart — not screen px, and therefore not a type-scale token. */
         .history-charts .axis-label { fill: #6c7086; font: 10px system-ui; }
@@ -881,20 +884,16 @@
             font-size: var(--fs-base); padding: 0 4px; opacity: 0.6;
         }
         .canvas-waiting-dismiss:hover { opacity: 1; }
-        /* Share success banner ("Shared — link copied"). Green signals success and keeps it distinct
-           from the red delivery-error banner (a share failure reuses that one) and the blue waiting
-           banner. Like them it is a normal flex child of the column-layout pane, so it pushes the
-           iframe down rather than overlaying it. */
-        .canvas-share-banner {
+        .canvas-clipboard-banner {
             display: flex; align-items: center; justify-content: space-between;
             background: #1e3a2a; color: #a6e3a1; padding: 4px 12px;
             font-size: var(--fs-base); line-height: 1.4;
         }
-        .canvas-share-dismiss {
+        .canvas-clipboard-dismiss {
             background: none; border: none; color: #a6e3a1; cursor: pointer;
             font-size: var(--fs-base); padding: 0 4px; opacity: 0.6;
         }
-        .canvas-share-dismiss:hover { opacity: 1; }
+        .canvas-clipboard-dismiss:hover { opacity: 1; }
         /* Doc-side JS error banner. Amber accent keeps it visually distinct from the red
            message-delivery failure banner (.canvas-error-banner) and the blue waiting banner.
            As a normal flex child of the column-layout .canvas-pane it pushes the iframe down
@@ -931,6 +930,9 @@
             font-size: var(--fs-lg);
             font-weight: 200;
         }
+        .canvas-tab-shell {
+            position: relative; display: inline-flex; flex-shrink: 0;
+        }
         .canvas-tab {
             background: #313244; border: 1px solid #45475a; border-radius: 4px;
             padding: 2px 10px; font-size: var(--fs-base); cursor: pointer; color: #bac2de;
@@ -940,11 +942,35 @@
         .canvas-tab:hover { background: #45475a; border-color: #585b70; }
         .canvas-tab.active { background: #2e3452; border-color: #89b4fa; color: #89b4fa; }
         .canvas-tab-viewed { opacity: 0.5; }
+        .canvas-tab-meta {
+            position: relative; display: inline-block;
+            width: 18px; height: 18px; margin-left: 6px; vertical-align: middle;
+        }
         .canvas-tab-age {
-            margin-left: 6px; font-size: var(--fs-sm); color: #6c7086;
-            font-variant-numeric: tabular-nums;
+            position: absolute; inset: 0; display: grid; place-items: center;
+            font-size: var(--fs-sm); color: #9399b2; font-variant-numeric: tabular-nums;
+            transition: opacity 0.15s;
         }
         .canvas-tab.active .canvas-tab-age { color: #7f9bd6; }
+        .canvas-tab-copy {
+            position: absolute; top: 50%; right: 10px; transform: translateY(-50%);
+            width: 18px; height: 18px; padding: 2px; box-sizing: border-box;
+            display: grid; place-items: center;
+            background: #313244; border: 1px solid #45475a; border-radius: 4px;
+            color: #a6adc8; cursor: pointer; opacity: 0; pointer-events: none;
+            transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+        }
+        .canvas-tab-copy .btn-icon { width: 12px; height: 12px; }
+        .canvas-tab-shell:hover .canvas-tab-age { opacity: 0; }
+        .canvas-tab-shell:hover .canvas-tab-copy { opacity: 1; pointer-events: auto; }
+        .canvas-tab-copy:hover { color: #89b4fa; border-color: #89b4fa; }
+        .canvas-tab-copy:disabled { color: #585b70; border-color: #45475a; cursor: default; }
+        .canvas-tab-copy.copied,
+        .canvas-tab-copy.copied:hover { color: #a6e3a1; border-color: #a6e3a1; }
+        .canvas-tab-copy:focus-visible {
+            opacity: 1; pointer-events: auto;
+            outline: 2px solid #89b4fa; outline-offset: 1px;
+        }
         .canvas-system-tab {
             display: flex; align-items: center; gap: 5px;
             flex-shrink: 0; margin-right: 6px;

@@ -36,6 +36,9 @@
   button is disabled while that state is non-idle, only the matching scoped doc shows the spinner,
   and results only transition or clear the matching operation -- so navigation or a stale async
   completion cannot unlock or overwrite a newer share (locked by `ShareCanvasDocResultTests`).
+- Share and canvas-path copy are mutually exclusive clipboard workflows. The reducer rejects either
+  action while the other owns the clipboard, and both controls are disabled until that workflow
+  settles, so their async results cannot overwrite the pane-global error or clipboard notice state.
 - Sharing operates on a single, self-contained doc. Docs that link to sibling `.html` tabs are
   shared as just the focused file; those links remain inert in the exported copy, unchanged from
   today.

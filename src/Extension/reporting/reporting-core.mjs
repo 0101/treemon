@@ -1,11 +1,57 @@
 const MAX_MESSAGE_CHARS = 2000;
 export const MAX_TOOL_CALL_ID_CHARS = 512;
 
-function cap(text) {
-  const value = String(text ?? "");
-  return value.length > MAX_MESSAGE_CHARS ? value.slice(0, MAX_MESSAGE_CHARS) : value;
+/**
+ * @typedef ReportBaseContext
+ * @property {string} sessionId
+ * @property {string} worktreePath
+ * @property {string} provider
+ */
+
+/**
+ * @typedef ReportContext
+ * @property {string} sessionId
+ * @property {string} worktreePath
+ * @property {string} provider
+ * @property {string} eventId
+ * @property {string} occurredAt
+ */
+
+/**
+ * @param {unknown} value
+ * @returns {value is Record<string, unknown>}
+ */
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** @param {unknown} value */
+function stringValue(value) {
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * @param {ReportBaseContext} context
+ * @param {unknown} eventValue
+ */
+export function reportForSdkEvent(context, eventValue) {
+  if (!isRecord(eventValue)) return null;
+  const eventId = stringValue(eventValue.id)?.trim();
+  const occurredAt = stringValue(eventValue.timestamp)?.trim();
+  if (!eventId || !occurredAt) return null;
+
+  return mapSdkEvent({ ...context, eventId, occurredAt }, eventValue);
+}
+
+/** @param {string} text */
+function cap(text) {
+  return text.length > MAX_MESSAGE_CHARS ? text.slice(0, MAX_MESSAGE_CHARS) : text;
+}
+
+/**
+ * @param {ReportContext} context
+ * @param {string} kind
+ */
 export function buildReport(context, kind) {
   return {
     sessionId: context.sessionId,
@@ -17,38 +63,67 @@ export function buildReport(context, kind) {
   };
 }
 
+/**
+ * @param {ReportContext} context
+ * @param {string} kind
+ * @param {string} text
+ */
 function buildMessageReport(context, kind, text) {
   return {
     ...buildReport(context, kind),
-    message: { text: cap(text), at: context.occurredAt },
+    message: { text, at: context.occurredAt },
   };
 }
 
+/**
+ * @param {ReportContext} context
+ * @param {string} kind
+ * @param {unknown} text
+ */
 export function buildNonBlankMessageReport(context, kind, text) {
-  const value = String(text ?? "");
-  return value.trim() ? buildMessageReport(context, kind, value) : null;
+  const value = stringValue(text);
+  return value?.trim() ? buildMessageReport(context, kind, cap(value)) : null;
 }
 
+/** @param {Record<string, unknown>} data */
 function isSkillContextInjection(data) {
   // Require both trusted SDK source metadata and the matching preamble so genuine user text cannot
   // be mistaken for a runtime injection.
-  const source = String(data?.source ?? "").toLowerCase();
-  const content = String(data?.content ?? "").replace(/^\s+/, "").toLowerCase();
+  const source = stringValue(data.source)?.toLowerCase() ?? "";
+  const content = stringValue(data.content)?.replace(/^\s+/, "").toLowerCase() ?? "";
   return source.startsWith("skill-") && content.startsWith("<skill-context");
 }
 
+/**
+ * @param {ReportContext} context
+ * @param {Record<string, unknown>} event
+ * @param {Record<string, unknown>} data
+ */
 function backgroundAgentReport(context, event, data) {
   const kind = event.type === "subagent.started"
     ? "background_agent_started"
     : "background_agent_finished";
-  const toolCallId = String(data.toolCallId ?? "");
-  return toolCallId.trim() && toolCallId.length <= MAX_TOOL_CALL_ID_CHARS
+  const toolCallId = stringValue(data.toolCallId);
+  return toolCallId?.trim() && toolCallId.length <= MAX_TOOL_CALL_ID_CHARS
     ? { ...buildReport(context, kind), toolCallId }
     : null;
 }
 
-export function mapSdkEvent(context, event) {
-  const data = event.data ?? {};
+/** @param {unknown} value */
+function finiteNumber(value) {
+  if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+/**
+ * @param {ReportContext} context
+ * @param {unknown} eventValue
+ */
+export function mapSdkEvent(context, eventValue) {
+  if (!isRecord(eventValue) || typeof eventValue.type !== "string") return null;
+  const event = eventValue;
+  const data = isRecord(event.data) ? event.data : {};
 
   // Lifecycle events carry agentId too, so they must map before the generic sub-agent content filter.
   switch (event.type) {
@@ -70,7 +145,7 @@ export function mapSdkEvent(context, event) {
     case "session.idle":
       return buildReport(context, "went_idle");
     case "skill.invoked": {
-      const name = String(data.name ?? "").trim();
+      const name = stringValue(data.name)?.trim() ?? "";
       return name ? { ...buildReport(context, "skill_invoked"), skillName: name } : null;
     }
     case "assistant.message":
@@ -84,9 +159,9 @@ export function mapSdkEvent(context, event) {
         ? null
         : buildNonBlankMessageReport(context, "user_prompt", data.content);
     case "session.usage_info": {
-      const cur = Number(data.currentTokens);
-      const lim = Number(data.tokenLimit);
-      if (!Number.isFinite(cur) || !Number.isFinite(lim) || lim <= 0) return null;
+      const cur = finiteNumber(data.currentTokens);
+      const lim = finiteNumber(data.tokenLimit);
+      if (cur === null || lim === null || lim <= 0) return null;
       return {
         ...buildReport(context, "usage_info"),
         currentTokens: Math.max(0, Math.round(cur)),

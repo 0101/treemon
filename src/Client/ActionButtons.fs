@@ -59,3 +59,42 @@ let diffIcon =
             Svg.path [ svg.d "M10 4.5h3M11.5 3v3M10 11.5h3" ]
         ]
     ]
+
+let copyIcon =
+    Svg.svg [
+        svg.className "btn-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "2")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.custom ("aria-hidden", "true")
+        svg.custom ("focusable", "false")
+        svg.children [
+            Svg.rect [
+                svg.x 8
+                svg.y 8
+                svg.width 12
+                svg.height 12
+                svg.rx 2
+            ]
+            Svg.path [ svg.d "M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" ]
+        ]
+    ]
+
+let checkIcon =
+    Svg.svg [
+        svg.className "btn-icon check-icon"
+        svg.viewBox (0, 0, 24, 24)
+        svg.fill "none"
+        svg.stroke "currentColor"
+        svg.custom ("strokeWidth", "2.5")
+        svg.custom ("strokeLinecap", "round")
+        svg.custom ("strokeLinejoin", "round")
+        svg.custom ("aria-hidden", "true")
+        svg.custom ("focusable", "false")
+        svg.children [
+            Svg.path [ svg.d "M5 12l4 4L19 6" ]
+        ]
+    ]
