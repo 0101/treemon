@@ -8,226 +8,240 @@ open Navigation
 open AppTypes
 open TerminalPane
 
+let private terminalId value =
+    EmbeddedTerminalId value
+
+let private first = WorktreePath @"Q:\code\first"
+let private second = WorktreePath @"Q:\code\second"
+let private third = WorktreePath @"Q:\code\third"
+let private firstOne = terminalId "first-1"
+let private firstTwo = terminalId "first-2"
+let private secondOne = terminalId "second-1"
+let private thirdOne = terminalId "third-1"
+
+let private tab terminalId path lifecycle =
+    { Id = terminalId
+      Worktree = path
+      Lifecycle = lifecycle }
+
+let private running terminalId path port =
+    tab
+        terminalId
+        path
+        (EmbeddedTerminalLifecycle.Running
+            $"http://127.0.0.1:{port}/")
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type TerminalPaneStateTests() =
 
-    let first = WorktreePath @"Q:\code\first"
-    let second = WorktreePath @"Q:\code\second"
-    let third = WorktreePath @"Q:\code\third"
-    let tab path lifecycle =
-        { Worktree = path
-          Lifecycle = lifecycle }
-
     [<Test>]
-    member _.``Opening an absent terminal appends its starting tab``() =
+    member _.``Visible tabs are limited to the selected worktree``() =
+        let snapshot =
+            { Tabs =
+                [ running firstOne first 61231
+                  running secondOne second 61232
+                  running firstTwo first 61233 ] }
+
         Assert.That(
-            snapshotWhenOpened first EmbeddedTerminalSnapshot.empty,
-            Is.EqualTo(
-                { Tabs =
-                    [ tab first EmbeddedTerminalLifecycle.Starting ] }
-            )
+            snapshot
+            |> tabsForWorktree first
+            |> List.map _.Id,
+            Is.EqualTo([ firstOne; firstTwo ])
         )
 
     [<Test>]
-    member _.``Opening another worktree preserves the running tab``() =
-        let running =
-            tab
-                first
-                (EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61234/")
+    member _.``Each worktree keeps an independent active terminal``() =
+        let snapshot =
+            { Tabs =
+                [ running firstOne first 61231
+                  running firstTwo first 61232
+                  running secondOne second 61233 ] }
+
+        let selections =
+            Map.ofList [
+                first, firstTwo
+                second, secondOne
+            ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                activeTerminalId (Some first) selections snapshot,
+                Is.EqualTo(Some firstTwo)
+            )
+
+            Assert.That(
+                activeTerminalId (Some second) selections snapshot,
+                Is.EqualTo(Some secondOne)
+            ))
+
+    [<Test>]
+    member _.``A worktree without an explicit selection uses its first terminal``() =
+        let snapshot =
+            { Tabs =
+                [ running firstOne first 61231
+                  running firstTwo first 61232 ] }
 
         Assert.That(
-            snapshotWhenOpened second { Tabs = [ running ] },
-            Is.EqualTo(
-                { Tabs =
-                    [ running
-                      tab second EmbeddedTerminalLifecycle.Starting ] }
-            )
+            activeTerminalId (Some first) Map.empty snapshot,
+            Is.EqualTo(Some firstOne)
         )
 
     [<Test>]
-    member _.``Failed terminal retry keeps its tab position``() =
-        let other = tab second EmbeddedTerminalLifecycle.Starting
-        let failed = tab first (EmbeddedTerminalLifecycle.Failed "ttyd failed")
+    member _.``Selecting a tab changes only its worktree selection``() =
+        let snapshot =
+            { Tabs =
+                [ running firstOne first 61231
+                  running firstTwo first 61232
+                  running secondOne second 61233 ] }
+
+        let selections =
+            Map.ofList [
+                first, firstOne
+                second, secondOne
+            ]
+
+        let updated =
+            selections
+            |> selectTerminal firstTwo snapshot
 
         Assert.That(
-            snapshotWhenOpened first { Tabs = [ failed; other ] },
+            updated,
             Is.EqualTo(
-                { Tabs =
-                    [ tab first EmbeddedTerminalLifecycle.Starting
-                      other ] }
-            )
+                Map.ofList [
+                    first, firstTwo
+                    second, secondOne
+                ])
         )
 
     [<Test>]
-    member _.``Interrupted terminal retry keeps its tab position``() =
-        let other = tab second EmbeddedTerminalLifecycle.Starting
-        let interrupted =
-            tab
-                first
-                (EmbeddedTerminalLifecycle.Interrupted
-                    "host exited")
+    member _.``A completed start identifies the new terminal within its worktree``() =
+        let before =
+            { Tabs =
+                [ running firstOne first 61231
+                  running secondOne second 61232 ] }
+
+        let after =
+            { Tabs =
+                [ running firstOne first 61231
+                  running secondOne second 61232
+                  running firstTwo first 61233 ] }
 
         Assert.That(
-            snapshotWhenOpened first { Tabs = [ interrupted; other ] },
-            Is.EqualTo(
-                { Tabs =
-                    [ tab first EmbeddedTerminalLifecycle.Starting
-                      other ] }
-            )
+            startedTerminalId first before after,
+            Is.EqualTo(Some firstTwo)
         )
+
+    [<Test>]
+    member _.``Closing the active tab selects its same-worktree neighbour``() =
+        let before =
+            { Tabs =
+                [ running firstOne first 61231
+                  running secondOne second 61232
+                  running firstTwo first 61233
+                  running thirdOne first 61234 ] }
+
+        let after =
+            { Tabs =
+                [ running firstOne first 61231
+                  running secondOne second 61232
+                  running thirdOne first 61234 ] }
+
+        let updated =
+            Map.ofList [
+                first, firstTwo
+                second, secondOne
+            ]
+            |> reconcileSelections before after
+
+        Assert.That(
+            updated,
+            Is.EqualTo(
+                Map.ofList [
+                    first, thirdOne
+                    second, secondOne
+                ])
+        )
+
+    [<Test>]
+    member _.``Host replacement preserves the selected ordinal within a worktree``() =
+        let replacementFirst = terminalId "replacement-first"
+        let replacementSecond = terminalId "replacement-second"
+
+        let before =
+            { Tabs =
+                [ running firstOne first 61231
+                  running secondOne second 61232
+                  running firstTwo first 61233 ] }
+
+        let after =
+            { Tabs =
+                [ running replacementFirst first 61241
+                  running (terminalId "replacement-other") second 61242
+                  running replacementSecond first 61243 ] }
+
+        let updated =
+            Map.ofList [ first, firstTwo ]
+            |> reconcileSelections before after
+
+        Assert.That(
+            updated,
+            Is.EqualTo(Map.ofList [ first, replacementSecond ])
+        )
+
+    [<Test>]
+    member _.``Closing the last terminal clears only that worktree selection``() =
+        let before =
+            { Tabs =
+                [ running firstOne first 61231
+                  running secondOne second 61232 ] }
+
+        let after =
+            { Tabs = [ running secondOne second 61232 ] }
+
+        let updated =
+            Map.ofList [
+                first, firstOne
+                second, secondOne
+            ]
+            |> reconcileSelections before after
+
+        Assert.That(
+            updated,
+            Is.EqualTo(Map.ofList [ second, secondOne ])
+        )
+
+    [<Test>]
+    member _.``Start progress and errors are scoped by worktree``() =
+        let states =
+            Map.empty
+            |> setStartState first TerminalStartState.Starting
+            |> setStartState second (TerminalStartState.Failed "ttyd failed")
+
+        Assert.Multiple(fun () ->
+            Assert.That(isStarting first states, Is.True)
+            Assert.That(isStarting second states, Is.False)
+            Assert.That(
+                tryStartState second states,
+                Is.EqualTo(Some(TerminalStartState.Failed "ttyd failed"))
+            )
+            Assert.That(
+                states |> clearStartState first |> tryStartState first,
+                Is.EqualTo(None)
+            ))
 
     [<Test>]
     member _.``Interrupted tabs keep polling enabled for host recovery``() =
         let interrupted =
             { Tabs =
                 [ tab
+                      firstOne
                       first
                       (EmbeddedTerminalLifecycle.Interrupted
                           "host exited") ] }
 
         Assert.That(hasLiveTabs interrupted, Is.True)
-
-    [<Test>]
-    member _.``Close selects the same-index neighbour from the captured tab order``() =
-        let running path =
-            tab
-                path
-                (EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61234/")
-
-        let before =
-            { Tabs = [ running first; running second; running third ] }
-
-        let after =
-            { Tabs = [ running first; running third ] }
-
-        Assert.That(
-            nextActiveAfterClose second before after,
-            Is.EqualTo(Some third)
-        )
-
-    [<Test>]
-    member _.``Polling discovers the first server-owned tab deterministically``() =
-        let snapshot =
-            { Tabs =
-                [ tab first EmbeddedTerminalLifecycle.Starting
-                  tab second EmbeddedTerminalLifecycle.Starting ] }
-
-        Assert.That(
-            activeAfterSnapshot
-                None
-                None
-                EmbeddedTerminalSnapshot.empty
-                snapshot,
-            Is.EqualTo(Some first)
-        )
-
-    [<Test>]
-    member _.``Polling prefers a selected worktree when tabs are first discovered``() =
-        let snapshot =
-            { Tabs =
-                [ tab first EmbeddedTerminalLifecycle.Starting
-                  tab second EmbeddedTerminalLifecycle.Starting ] }
-
-        Assert.That(
-            activeAfterSnapshot
-                (Some second)
-                None
-                EmbeddedTerminalSnapshot.empty
-                snapshot,
-            Is.EqualTo(Some second)
-        )
-
-    [<Test>]
-    member _.``Polling preserves the selected worktree empty state``() =
-        let before =
-            { Tabs =
-                [ tab first EmbeddedTerminalLifecycle.Starting
-                  tab second EmbeddedTerminalLifecycle.Starting ] }
-
-        let refreshed =
-            { Tabs =
-                [ tab
-                      first
-                      (EmbeddedTerminalLifecycle.Running
-                          "http://127.0.0.1:61234/")
-                  tab second EmbeddedTerminalLifecycle.Starting ] }
-
-        Assert.That(
-            activeAfterSnapshot None None before refreshed,
-            Is.EqualTo(None)
-        )
-
-    [<Test>]
-    member _.``Closing a background tab preserves the selected tab``() =
-        let running path =
-            tab
-                path
-                (EmbeddedTerminalLifecycle.Running
-                    "http://127.0.0.1:61234/")
-
-        let before =
-            { Tabs = [ running first; running second; running third ] }
-
-        let after =
-            { Tabs = [ running first; running third ] }
-
-        Assert.That(
-            activeAfterClose (Some third) second before after,
-            Is.EqualTo(Some third)
-        )
-
-    [<Test>]
-    member _.``A reopened worktree wins over its stale close completion``() =
-        let running path =
-            tab
-                path
-                (EmbeddedTerminalLifecycle.Running
-                    "http://127.0.0.1:61234/")
-
-        let before =
-            { Tabs = [ running first; running second ] }
-
-        let after =
-            { Tabs = [ running second; running first ] }
-
-        Assert.That(
-            activeAfterClose (Some first) first before after,
-            Is.EqualTo(Some first)
-        )
-
-    [<Test>]
-    member _.``Hidden pane keeps its active tab while cards are selected``() =
-        let snapshot =
-            { Tabs =
-                [ tab first EmbeddedTerminalLifecycle.Starting
-                  tab second EmbeddedTerminalLifecycle.Starting ] }
-
-        Assert.That(
-            projectWorktreeSelection
-                false
-                (Some second)
-                (Some first)
-                snapshot,
-            Is.EqualTo(Some first)
-        )
-
-    [<Test>]
-    member _.``Visible pane clears the active tab for a worktree without a terminal``() =
-        let snapshot =
-            { Tabs =
-                [ tab first EmbeddedTerminalLifecycle.Starting
-                  tab second EmbeddedTerminalLifecycle.Starting ] }
-
-        Assert.That(
-            projectWorktreeSelection
-                true
-                (Some third)
-                (Some first)
-                snapshot,
-            Is.EqualTo(None)
-        )
 
     [<TestCase("http://127.0.0.1:61234/", true)>]
     [<TestCase("http://127.0.0.1:61234/client?arg=value", true)>]
@@ -238,36 +252,12 @@ type TerminalPaneStateTests() =
     [<TestCase("http://127.0.0.1:70000/", false)>]
     [<TestCase("http://127.0.0.1:not-a-port/", false)>]
     member _.``Only loopback non-production ttyd endpoints are rendered``(endpoint: string, expectedSafe: bool) =
-        Assert.That(safeEndpoint endpoint |> Option.isSome, Is.EqualTo(expectedSafe))
+        Assert.That(
+            safeEndpoint endpoint |> Option.isSome,
+            Is.EqualTo(expectedSafe)
+        )
 
-    [<Test>]
-    member _.``Pane visibility follows whether the registry has tabs``() =
-        Assert.Multiple(fun () ->
-            Assert.That(
-                paneOpenForSnapshot EmbeddedTerminalSnapshot.empty,
-                Is.False
-            )
-
-            Assert.That(
-                paneOpenForSnapshot
-                    { Tabs =
-                        [ tab
-                              first
-                              (EmbeddedTerminalLifecycle.Failed "failed") ] },
-                Is.True
-            ))
-
-let private focusFirst = WorktreePath @"Q:\code\first"
-let private focusSecond = WorktreePath @"Q:\code\second"
-let private focusThird = WorktreePath @"Q:\code\third"
-
-let private focusTab path =
-    { Worktree = path
-      Lifecycle =
-        EmbeddedTerminalLifecycle.Running
-            "http://127.0.0.1:61234/" }
-
-let private focusModel paneOpen active : Model =
+let private focusModel : Model =
     let worktree path =
         { Tests.WorktreeFixtures.baseWt with
             Path = path
@@ -277,9 +267,9 @@ let private focusModel paneOpen active : Model =
         { RepoId = RepoId "repo"
           Name = "repo"
           Worktrees =
-            [ worktree focusFirst
-              worktree focusSecond
-              worktree focusThird ]
+            [ worktree first
+              worktree second
+              worktree third ]
           ArchivedWorktrees = []
           IsReady = true
           IsCollapsed = false
@@ -297,7 +287,7 @@ let private focusModel paneOpen active : Model =
       AppVersion = Some "test"
       EditorName = "VS Code"
       WorktreeSkills = []
-      FocusedElement = Some (Card (WorktreePath.value focusFirst))
+      FocusedElement = Some (Card (WorktreePath.value first))
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
@@ -307,13 +297,18 @@ let private focusModel paneOpen active : Model =
       AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
-      TerminalPaneOpen = paneOpen
+      TerminalPaneOpen = true
       EmbeddedTerminals =
         { Tabs =
-            [ focusTab focusFirst
-              focusTab focusSecond ] }
-      ActiveEmbeddedTerminal = active
-      ClosingEmbeddedTerminals = Map.empty
+            [ running firstOne first 61231
+              running firstTwo first 61232
+              running secondOne second 61233 ] }
+      ActiveEmbeddedTerminals =
+        Map.ofList [
+            first, firstTwo
+            second, secondOne
+        ]
+      EmbeddedTerminalStarts = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -328,83 +323,70 @@ let private focusModel paneOpen active : Model =
 [<Category("Fast")>]
 type TerminalFocusTests() =
 
-    [<TestCase(true)>]
-    [<TestCase(false)>]
-    member _.``Every card-focus path activates an existing terminal while visible``(retarget: bool) =
+    [<Test>]
+    member _.``Card focus changes visible terminals without overwriting worktree selections``() =
         let updated, _ =
-            focusModel true (Some focusFirst)
+            focusModel
             |> CanvasUpdate.applyFocus
-                retarget
-                (Some (Card (WorktreePath.value focusSecond)))
+                true
+                (Some (Card (WorktreePath.value second)))
 
         Assert.Multiple(fun () ->
             Assert.That(
                 updated.FocusedElement,
-                Is.EqualTo(Some (Card (WorktreePath.value focusSecond)))
+                Is.EqualTo(Some (Card (WorktreePath.value second)))
             )
             Assert.That(
-                updated.ActiveEmbeddedTerminal,
-                Is.EqualTo(Some focusSecond)
+                updated.ActiveEmbeddedTerminals,
+                Is.EqualTo(focusModel.ActiveEmbeddedTerminals)
+            )
+            Assert.That(
+                activeTerminalId
+                    (Some second)
+                    updated.ActiveEmbeddedTerminals
+                    updated.EmbeddedTerminals,
+                Is.EqualTo(Some secondOne)
             ))
 
     [<Test>]
-    member _.``Card focus renders the start state when no terminal exists``() =
+    member _.``Card focus with no terminals renders no active terminal``() =
         let updated, _ =
-            focusModel true (Some focusFirst)
+            focusModel
             |> CanvasUpdate.applyFocus
                 true
-                (Some (Card (WorktreePath.value focusThird)))
-
-        Assert.That(updated.ActiveEmbeddedTerminal, Is.EqualTo(None))
-
-    [<Test>]
-    member _.``Card focus never retargets a hidden terminal pane``() =
-        let updated, _ =
-            focusModel false (Some focusFirst)
-            |> CanvasUpdate.applyFocus
-                true
-                (Some (Card (WorktreePath.value focusSecond)))
+                (Some (Card (WorktreePath.value third)))
 
         Assert.That(
-            updated.ActiveEmbeddedTerminal,
-            Is.EqualTo(Some focusFirst)
+            activeTerminalId
+                (Some third)
+                updated.ActiveEmbeddedTerminals
+                updated.EmbeddedTerminals,
+            Is.EqualTo(None)
         )
 
     [<Test>]
-    member _.``Polling during an active close selects the captured same-index neighbour``() =
-        let model =
-            { focusModel true (Some focusSecond) with
-                EmbeddedTerminals =
-                    { Tabs =
-                        [ focusTab focusFirst
-                          focusTab focusSecond
-                          focusTab focusThird ] }
-                ClosingEmbeddedTerminals =
-                    Map.ofList [
-                        focusSecond,
-                        { Tabs =
-                            [ focusTab focusFirst
-                              focusTab focusSecond
-                              focusTab focusThird ] }
-                    ] }
-
+    member _.``Polling a closed terminal advances only its worktree selection``() =
         let snapshot =
             { Tabs =
-                [ focusTab focusFirst
-                  focusTab focusThird ] }
+                [ running firstOne first 61231
+                  running secondOne second 61233 ] }
 
         let updated, _ =
             App.update
                 (EmbeddedTerminalSnapshotChanged snapshot)
-                model
+                focusModel
 
         Assert.That(
-            updated.ActiveEmbeddedTerminal,
-            Is.EqualTo(Some focusThird)
+            updated.ActiveEmbeddedTerminals,
+            Is.EqualTo(
+                Map.ofList [
+                    first, firstOne
+                    second, secondOne
+                ])
         )
 
     [<Test>]
-    member _.``Opening a canvas doc also retargets the visible terminal pane``() =
+    member _.``Opening a canvas doc switches the visible terminal worktree``() =
         let doc =
             { Filename = "status.html"
               ContentHash = "h1"
@@ -412,36 +394,36 @@ type TerminalFocusTests() =
               OwnerSessionId = None
               Kind = AgentDoc }
 
-        // Keep persistence outside this unit test: the Canvas pane and owning repo already start open.
-        let model =
-            { focusModel true (Some focusFirst) with
-                Canvas.CanvasPaneOpen = true }
-
         let repos =
-            model.Repos
+            focusModel.Repos
             |> List.map (fun repo ->
                 { repo with
                     Worktrees =
                         repo.Worktrees
                         |> List.map (fun worktree ->
-                            if worktree.Path = focusSecond then
+                            if worktree.Path = second then
                                 { worktree with CanvasDocs = [ doc ] }
                             else
                                 worktree) })
 
         let updated, _ =
             CanvasUpdate.openCanvasDoc
-                (WorktreePath.value focusSecond)
+                (WorktreePath.value second)
                 doc.Filename
-                { model with Repos = repos }
+                { focusModel with
+                    Repos = repos
+                    Canvas.CanvasPaneOpen = true }
 
         Assert.Multiple(fun () ->
             Assert.That(
                 updated.FocusedElement,
                 Is.EqualTo(
-                    Some (Card (WorktreePath.value focusSecond)))
+                    Some (Card (WorktreePath.value second)))
             )
             Assert.That(
-                updated.ActiveEmbeddedTerminal,
-                Is.EqualTo(Some focusSecond)
+                activeTerminalId
+                    (Some second)
+                    updated.ActiveEmbeddedTerminals
+                    updated.EmbeddedTerminals,
+                Is.EqualTo(Some secondOne)
             ))

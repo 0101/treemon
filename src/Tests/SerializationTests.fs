@@ -94,16 +94,13 @@ type WrapperTypeSerializationTests() =
     member _.``Embedded terminal registry snapshot survives JSON round-trip``() =
         let original =
             { Tabs =
-                [ { Worktree = WorktreePath @"Q:\code\starting"
-                    Lifecycle = EmbeddedTerminalLifecycle.Starting }
-                  { Worktree = WorktreePath @"Q:\code\running"
+                [ { Id = EmbeddedTerminalId "00000000000000000000000000000002"
+                    Worktree = WorktreePath @"Q:\code\running"
                     Lifecycle =
                         EmbeddedTerminalLifecycle.Running
                             "http://127.0.0.1:61234/" }
-                  { Worktree = WorktreePath @"Q:\code\failed"
-                    Lifecycle =
-                        EmbeddedTerminalLifecycle.Failed "ttyd exited" }
-                  { Worktree = WorktreePath @"Q:\code\interrupted"
+                  { Id = EmbeddedTerminalId "00000000000000000000000000000004"
+                    Worktree = WorktreePath @"Q:\code\interrupted"
                     Lifecycle =
                         EmbeddedTerminalLifecycle.Interrupted
                             "host exited" } ] }

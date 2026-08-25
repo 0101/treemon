@@ -772,7 +772,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                     "startEmbeddedTerminal"
                     (fun () -> EmbeddedTerminal.start embeddedTerminal wtPath)
             getEmbeddedTerminals = fun () -> EmbeddedTerminal.get embeddedTerminal
-            closeEmbeddedTerminal = fun wtPath -> EmbeddedTerminal.close embeddedTerminal wtPath }
+            closeEmbeddedTerminal = fun terminalId -> EmbeddedTerminal.close embeddedTerminal terminalId }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
@@ -782,7 +782,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                   "startEmbeddedTerminal"
                   (fun () -> EmbeddedTerminal.start embeddedTerminal wtPath)
           getEmbeddedTerminals = fun () -> EmbeddedTerminal.get embeddedTerminal
-          closeEmbeddedTerminal = fun wtPath -> EmbeddedTerminal.close embeddedTerminal wtPath
+          closeEmbeddedTerminal = fun terminalId -> EmbeddedTerminal.close embeddedTerminal terminalId
           openEditor = openEditor validatePath
           toggleAutoSync = fun wtPath enabled ->
               let path = WorktreePath.value wtPath

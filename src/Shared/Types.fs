@@ -195,13 +195,17 @@ type WorkspaceWidth =
 
 [<RequireQualifiedAccess>]
 type EmbeddedTerminalLifecycle =
-    | Starting
     | Running of endpoint: string
-    | Failed of error: string
     | Interrupted of error: string
 
+type EmbeddedTerminalId = EmbeddedTerminalId of string
+
+module EmbeddedTerminalId =
+    let value (EmbeddedTerminalId value) = value
+
 type EmbeddedTerminalTab =
-    { Worktree: WorktreePath
+    { Id: EmbeddedTerminalId
+      Worktree: WorktreePath
       Lifecycle: EmbeddedTerminalLifecycle }
 
 type EmbeddedTerminalSnapshot =

@@ -14,7 +14,7 @@ open Server.TerminalHostManifest
 open Server.TerminalHostProcess
 
 [<Literal>]
-let private controlApiVersion = 1
+let private controlApiVersion = 2
 
 [<Literal>]
 let private maximumResponseBytes = 1_048_576L
@@ -45,6 +45,8 @@ let private httpClient =
     let handler = new SocketsHttpHandler(UseProxy = false, AllowAutoRedirect = false)
 
     new HttpClient(handler, disposeHandler = true, Timeout = Timeout.InfiniteTimeSpan)
+
+let private apiPath version resource = $"/api/v{version}/{resource}"
 
 let private responseError statusCode (reasonPhrase: string) (content: string) =
     let hostError =
@@ -124,6 +126,9 @@ let private request
             return Error $"TerminalHost request failed: {error.Message}"
     }
 
+let private requestAtVersion config manifest method version resource body =
+    request config manifest method (apiPath version resource) body
+
 let private parseHealth (manifest: DiscoveryManifest) (text: string) =
     try
         use document = JsonDocument.Parse(text)
@@ -160,7 +165,9 @@ let private parseHealth (manifest: DiscoveryManifest) (text: string) =
 
 let private probe config manifest =
     async {
-        let! response = request config manifest HttpMethod.Get "/api/v1/health" None
+        let! response =
+            requestAtVersion config manifest HttpMethod.Get manifest.ControlApiVersion "health" None
+
         return response |> Result.bind (parseHealth manifest)
     }
 
@@ -264,17 +271,14 @@ let private parseRegistrySnapshot (manifest: DiscoveryManifest) (text: string) =
                 |> Seq.toList
                 |> List.traverseResultM (parseTerminal manifest)
                 |> Result.bind (fun terminals ->
-                    let distinct selector =
+                    let distinctSessionIds =
                         terminals
-                        |> List.map selector
+                        |> List.map _.SessionId
                         |> Set.ofList
                         |> _.Count
 
-                    if
-                        distinct _.SessionId <> terminals.Length
-                        || distinct (_.WorktreePath >> pathKey) <> terminals.Length
-                    then
-                        Error "TerminalHost registry contains duplicate terminals"
+                    if distinctSessionIds <> terminals.Length then
+                        Error "TerminalHost registry contains duplicate terminal session IDs"
                     else
                         Ok
                             { Revision = revision
@@ -286,14 +290,20 @@ let private parseRegistrySnapshot (manifest: DiscoveryManifest) (text: string) =
     | :? OverflowException ->
         Error "TerminalHost registry response is malformed"
 
-let internal listTerminals config manifest =
+let private listTerminalsAtVersion version config manifest =
     async {
-        let! response = request config manifest HttpMethod.Get "/api/v1/terminals" None
+        let! response =
+            requestAtVersion config manifest HttpMethod.Get version "terminals" None
+
         return response |> Result.bind (parseRegistrySnapshot manifest)
     }
 
-let internal findTerminalByPath path records =
-    records |> List.tryFind (fun terminal -> samePath terminal.WorktreePath path)
+let internal listTerminals config manifest = listTerminalsAtVersion controlApiVersion config manifest
+
+let internal findTerminalById sessionId records =
+    records
+    |> List.tryFind (fun terminal ->
+        String.Equals(terminal.SessionId, sessionId, StringComparison.Ordinal))
 
 let private authoritativeRelist action lastRegistry config manifest requestResult =
     async {
@@ -326,9 +336,11 @@ let internal waitForHostExit config manifest =
 
     wait ()
 
-let internal shutdownAndWait config manifest =
+let private shutdownAndWaitAtVersion version config manifest =
     async {
-        let! shutdownResult = request config manifest HttpMethod.Post "/api/v1/shutdown" None
+        let! shutdownResult =
+            requestAtVersion config manifest HttpMethod.Post version "shutdown" None
+
         let! waitResult = waitForHostExit config manifest
 
         return
@@ -338,6 +350,8 @@ let internal shutdownAndWait config manifest =
             | Error requestError, Error waitError ->
                 Error $"{requestError}; exact host shutdown could not be confirmed: {waitError}"
     }
+
+let internal shutdownAndWait config manifest = shutdownAndWaitAtVersion controlApiVersion config manifest
 
 let private terminalWebSocketEndpoint (attachmentEndpoint: string) =
     try
@@ -412,7 +426,7 @@ let private deploymentPreflightResult config manifest registry =
 
 let private preflightIncompatibleHost config manifest incompatibility =
     async {
-        match! listTerminals config manifest with
+        match! listTerminalsAtVersion manifest.ControlApiVersion config manifest with
         | Error listError ->
             return Error $"{incompatibility}; authoritative terminal list failed: {listError}"
         | Ok registry when not registry.Terminals.IsEmpty ->
@@ -422,7 +436,9 @@ let private preflightIncompatibleHost config manifest incompatibility =
             | Error error -> return Error error
             | Ok false -> return Ok None
             | Ok true ->
-                let! stopped = shutdownAndWait config manifest
+                let! stopped =
+                    shutdownAndWaitAtVersion manifest.ControlApiVersion config manifest
+
                 return
                     stopped
                     |> Result.map (fun () -> None)
@@ -494,54 +510,84 @@ let internal ensureHost config lastHost =
             | Ok false -> return! launchAndDiscover config
     }
 
-let internal startTerminalOnHost
-    (config: Config)
-    (manifest: DiscoveryManifest)
-    (path: string)
-    =
-    async {
-        let body = JsonSerializer.Serialize({| worktreePath = path |})
-
-        let! startResult =
-            request config manifest HttpMethod.Post "/api/v1/terminals" (Some body)
-
-        match! authoritativeRelist "start" None config manifest startResult with
-        | Error error -> return Error error
-        | Ok registry ->
-            match findTerminalByPath path registry.Terminals with
-            | Some terminal -> return Ok(registry, terminal)
-            | None ->
-                let error =
-                    match startResult with
-                    | Error startError -> startError
-                    | Ok _ ->
-                        "TerminalHost did not include the requested terminal in its authoritative registry"
-
-                return Error(MutationRejected(registry, error))
-    }
-
-let internal closeTerminalOnHost config manifest path =
+let internal startTerminalOnHost (config: Config) (manifest: DiscoveryManifest) (path: string) =
     async {
         match! listTerminals config manifest with
         | Error error -> return Error(MutationUnverified(None, error))
         | Ok before ->
-            match findTerminalByPath path before.Terminals with
+            let body = JsonSerializer.Serialize({| worktreePath = path |})
+
+            let! startResult =
+                requestAtVersion config manifest HttpMethod.Post controlApiVersion "terminals" (Some body)
+
+            match! authoritativeRelist "start" (Some before) config manifest startResult with
+            | Error error -> return Error error
+            | Ok after ->
+                let existingIds =
+                    before.Terminals |> List.map _.SessionId |> Set.ofList
+
+                let started =
+                    after.Terminals
+                    |> List.filter (fun terminal -> not (Set.contains terminal.SessionId existingIds))
+
+                match started with
+                | [ terminal ] when samePath terminal.WorktreePath path ->
+                    return Ok(after, terminal)
+                | _ ->
+                    let error =
+                        match startResult, started with
+                        | Error startError, [] -> startError
+                        | Ok _, [] -> "TerminalHost did not add the requested terminal to its authoritative registry"
+                        | _, [ _ ] -> "TerminalHost added a terminal for an unexpected worktree"
+                        | _ -> "TerminalHost added multiple terminals for one start request"
+
+                    return Error(MutationRejected(after, error))
+    }
+
+let internal closeTerminalOnHost config manifest sessionId =
+    async {
+        match! listTerminals config manifest with
+        | Error error -> return Error(MutationUnverified(None, error))
+        | Ok before ->
+            match findTerminalById sessionId before.Terminals with
             | None -> return Ok before
-            | Some terminal ->
+            | Some _ ->
+                let terminalsPath = apiPath controlApiVersion "terminals"
                 let! closeResult =
-                    request config manifest HttpMethod.Delete $"/api/v1/terminals/{terminal.SessionId}" None
+                    request config manifest HttpMethod.Delete $"{terminalsPath}/{sessionId}" None
 
                 match! authoritativeRelist "close" (Some before) config manifest closeResult with
                 | Error error -> return Error error
                 | Ok after ->
-                    match findTerminalByPath path after.Terminals with
+                    match findTerminalById sessionId after.Terminals with
                     | None -> return Ok after
                     | Some _ ->
                         let error =
                             match closeResult with
                             | Error closeError -> closeError
-                            | Ok _ ->
-                                "TerminalHost still lists the terminal after its close request"
+                            | Ok _ -> "TerminalHost still lists the terminal after its close request"
 
                         return Error(MutationRejected(after, error))
+    }
+
+let internal closeTerminalsForWorktreeOnHost config manifest path =
+    async {
+        match! listTerminals config manifest with
+        | Error error -> return Error(MutationUnverified(None, error))
+        | Ok before ->
+            let terminalIds =
+                before.Terminals
+                |> List.filter (fun terminal -> samePath terminal.WorktreePath path)
+                |> List.map _.SessionId
+
+            let rec closeAll latest = function
+                | [] -> async.Return(Ok latest)
+                | sessionId :: remaining ->
+                    async {
+                        match! closeTerminalOnHost config manifest sessionId with
+                        | Error error -> return Error error
+                        | Ok after -> return! closeAll after remaining
+                    }
+
+            return! closeAll before terminalIds
     }

@@ -23,13 +23,13 @@ type RunningControlApi =
 module ControlApi =
     let private jsonOptions = JsonSerializerOptions(JsonSerializerDefaults.Web)
 
-    let private terminalResponseV1 (terminal: TerminalRecord) =
+    let private terminalResponseV2 (terminal: TerminalRecord) =
         {| SessionId = terminal.SessionId; WorktreePath = terminal.WorktreePath
            AttachmentEndpoint = terminal.AttachmentEndpoint |}
 
-    let private registryResponseV1 (snapshot: RegistrySnapshot) =
+    let private registryResponseV2 (snapshot: RegistrySnapshot) =
         {| Revision = snapshot.Revision
-           Terminals = snapshot.Terminals |> List.map terminalResponseV1 |}
+           Terminals = snapshot.Terminals |> List.map terminalResponseV2 |}
 
     let private writeJson statusCode payload (context: HttpContext) =
         task {
@@ -121,7 +121,7 @@ module ControlApi =
             let path = context.Request.Path.Value |> Option.ofObj |> Option.defaultValue ""
 
             match method, path with
-            | "GET", "/api/v1/health" ->
+            | "GET", "/api/v2/health" ->
                 return!
                     writeJson
                         StatusCodes.Status200OK
@@ -130,10 +130,10 @@ module ControlApi =
                            HostVersion = hostVersion
                            ControlApiVersion = Protocol.ControlApiVersion |}
                         context
-            | "GET", "/api/v1/terminals" ->
+            | "GET", "/api/v2/terminals" ->
                 let! snapshot = TerminalRegistry.list registry |> Async.StartAsTask
-                return! writeJson StatusCodes.Status200OK (registryResponseV1 snapshot) context
-            | "POST", "/api/v1/terminals" ->
+                return! writeJson StatusCodes.Status200OK (registryResponseV2 snapshot) context
+            | "POST", "/api/v2/terminals" ->
                 match! readWorktreePath context with
                 | Error(status, message) -> return! writeError status message context
                 | Ok path ->
@@ -145,18 +145,18 @@ module ControlApi =
                     | Ok worktree ->
                         match! TerminalRegistry.start registry worktree |> Async.StartAsTask with
                         | Ok snapshot ->
-                            return! writeJson StatusCodes.Status200OK (registryResponseV1 snapshot) context
+                            return! writeJson StatusCodes.Status200OK (registryResponseV2 snapshot) context
                         | Error error ->
                             return! writeError StatusCodes.Status500InternalServerError error context
-            | "POST", "/api/v1/shutdown" ->
+            | "POST", "/api/v2/shutdown" ->
                 context.Response.OnCompleted(
                     Func<Task>(fun () -> lifetime.StopApplication(); Task.CompletedTask)
                 )
 
                 return! writeJson StatusCodes.Status202Accepted {| Accepted = true |} context
             | "DELETE", closePath
-                when closePath.StartsWith("/api/v1/terminals/", StringComparison.Ordinal) ->
-                let sessionId = closePath.Substring("/api/v1/terminals/".Length)
+                when closePath.StartsWith("/api/v2/terminals/", StringComparison.Ordinal) ->
+                let sessionId = closePath.Substring("/api/v2/terminals/".Length)
 
                 if not (validSessionId sessionId) then
                     return! writeError StatusCodes.Status400BadRequest "Invalid terminal session ID" context
@@ -165,7 +165,7 @@ module ControlApi =
                         TerminalRegistry.close registry (sessionId.ToLowerInvariant())
                         |> Async.StartAsTask
 
-                    return! writeJson StatusCodes.Status200OK (registryResponseV1 snapshot) context
+                    return! writeJson StatusCodes.Status200OK (registryResponseV2 snapshot) context
             | _ ->
                 return! writeError StatusCodes.Status404NotFound "Control endpoint not found" context
         }

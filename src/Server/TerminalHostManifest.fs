@@ -63,7 +63,8 @@ let private validBearerToken (value: string) =
            || character = '_')
 
 let internal validSessionId (value: string) =
-    value.Length = 32
+    not (String.IsNullOrEmpty value)
+    && value.Length = 32
     && value |> Seq.forall Uri.IsHexDigit
 
 let internal exactProperties required optional (element: JsonElement) =

@@ -5,7 +5,7 @@ open System
 [<RequireQualifiedAccess>]
 module Protocol =
     [<Literal>]
-    let ControlApiVersion = 1
+    let ControlApiVersion = 2
 
     [<Literal>]
     let MaximumRequestBodyBytes = 16_384L
@@ -18,8 +18,7 @@ module Protocol =
 
 type CanonicalWorktree =
     private
-        { Path: string
-          Key: string }
+        { Path: string }
 
 type TerminalProcess =
     { ProcessId: int
@@ -51,6 +50,5 @@ type HostManifest =
 
 [<RequireQualifiedAccess>]
 module CanonicalWorktree =
-    let internal create path key = { Path = path; Key = key }
+    let internal create path = { Path = path }
     let path worktree = worktree.Path
-    let internal key worktree = worktree.Key

@@ -839,10 +839,9 @@
             flex-shrink: 0;
             width: 1em;
             text-align: center;
-            font-weight: 700;
+            font-weight: 600;
         }
-        .terminal-tab.starting .terminal-tab-state { color: #f9e2af; }
-        .terminal-tab.running .terminal-tab-state { color: #a6e3a1; font-size: 0.7em; }
+        .terminal-tab.running .terminal-tab-state { color: #a6e3a1; font-size: var(--fs-sm); }
         .terminal-tab.failed .terminal-tab-state { color: #f38ba8; }
         .terminal-tab-close {
             border: none;
@@ -872,6 +871,10 @@
             justify-content: center;
             padding: 2px 6px;
         }
+        .terminal-new-btn:disabled {
+            color: #585b70;
+            cursor: default;
+        }
         .terminal-pane-body {
             display: flex;
             flex-direction: column;
@@ -892,7 +895,7 @@
         .terminal-pane-message {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
             flex-wrap: wrap;
         }
         .terminal-pane-empty-title {
@@ -900,7 +903,7 @@
         }
         .terminal-start-btn {
             flex-shrink: 0;
-            padding: 3px 8px;
+            padding: 4px 8px;
         }
         .terminal-iframe {
             flex: 1 1 auto;

@@ -22,117 +22,79 @@ type private CleanupReservation =
 
 [<RequireQualifiedAccess>]
 type private TerminalMutation =
-    | Start
-    | Close
+    | Start of WorktreePath
+    | Close of EmbeddedTerminalId
+
+type private CloseTarget =
+    | OneTerminal of EmbeddedTerminalId
+    | WorktreeTerminals of WorktreePath
 
 type private Message =
-    | Mutate of
-        TerminalMutation *
-        WorktreePath *
-        AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
+    | Mutate of TerminalMutation * AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | GetCached of AsyncReplyChannel<EmbeddedTerminalSnapshot>
-    | ReserveCleanup of
-        WorktreePath *
-        CleanupReservation *
-        AsyncReplyChannel<Result<CleanupReservation, string>>
+    | ReserveCleanup of WorktreePath * CleanupReservation * AsyncReplyChannel<Result<CleanupReservation, string>>
     | ReleaseCleanup of CleanupReservation
-    | BeginReplacement of
-        ReplacementPlan *
-        ReplacementPolicyQuery *
-        AsyncReplyChannel<ReplacementOutcome>
-    | FinishReplacement of
-        ReplacementCommit *
-        AsyncReplyChannel<ReplacementOutcome>
+    | BeginReplacement of ReplacementPlan * ReplacementPolicyQuery * AsyncReplyChannel<ReplacementOutcome>
+    | FinishReplacement of ReplacementCommit * AsyncReplyChannel<ReplacementOutcome>
 
-type Manager =
-    private
-        | Manager of Config * MailboxProcessor<Message>
-
-let private withoutPath path snapshot =
-    { Tabs =
-        snapshot.Tabs
-        |> List.filter (fun tab ->
-            not (samePath (WorktreePath.value tab.Worktree) path)) }
+type Manager = private | Manager of Config * MailboxProcessor<Message>
 
 let private interrupted error tab =
     match tab.Lifecycle with
-    | EmbeddedTerminalLifecycle.Running _
-    | EmbeddedTerminalLifecycle.Starting ->
+    | EmbeddedTerminalLifecycle.Running _ ->
         { tab with
             Lifecycle = EmbeddedTerminalLifecycle.Interrupted error }
-    | EmbeddedTerminalLifecycle.Failed _
     | EmbeddedTerminalLifecycle.Interrupted _ ->
         tab
 
 let private interruptSnapshot error snapshot =
     { Tabs = snapshot.Tabs |> List.map (interrupted error) }
 
-let private tabForRecord (terminal: TerminalRecord) =
-    { Worktree = PathUtils.toWorktreePath terminal.WorktreePath
-      Lifecycle =
-        EmbeddedTerminalLifecycle.Running terminal.AttachmentEndpoint }
+let private tabForRecord (terminal: TerminalHostClient.TerminalRecord) =
+    { Id = EmbeddedTerminalId terminal.SessionId
+      Worktree = PathUtils.toWorktreePath terminal.WorktreePath
+      Lifecycle = EmbeddedTerminalLifecycle.Running terminal.AttachmentEndpoint }
 
-let private reconcileSnapshot
-    previousHost
-    currentHost
-    (records: TerminalRecord list)
-    snapshot
-    =
-    let recordsByPath =
-        records
-        |> List.map (fun terminal ->
-            pathKey terminal.WorktreePath, terminal)
-        |> Map.ofList
+let private reconcileSnapshot resetTabs previousHost currentHost (records: TerminalHostClient.TerminalRecord list) (snapshot: EmbeddedTerminalSnapshot) =
+    let resetTabs =
+        resetTabs
+        || (previousHost |> Option.exists (fun previous -> not (hostIdentityMatches previous currentHost)))
 
-    let hostChanged =
-        previousHost
-        |> Option.exists (fun previous ->
-            hostIdentityMatches previous currentHost |> not)
+    if resetTabs then
+        { Tabs = records |> List.map tabForRecord }
+    else
+        let recordsById =
+            records
+            |> List.map (fun terminal -> EmbeddedTerminalId terminal.SessionId, terminal)
+            |> Map.ofList
 
-    let missingReason =
-        if hostChanged then
-            "TerminalHost changed before this terminal could be verified. Restart the terminal to continue."
-        else
-            "The terminal is no longer present in the authoritative TerminalHost registry."
+        let previousIds =
+            snapshot.Tabs |> List.map _.Id |> Set.ofList
 
-    let retained =
-        snapshot.Tabs
-        |> List.map (fun tab ->
-            let key = tab.Worktree |> WorktreePath.value |> pathKey
+        { Tabs =
+            (snapshot.Tabs
+             |> List.map (fun tab ->
+                 recordsById
+                 |> Map.tryFind tab.Id
+                 |> Option.map tabForRecord
+                 |> Option.defaultWith (fun () ->
+                     interrupted "The terminal is no longer present in the authoritative TerminalHost registry." tab)))
+            @ (records
+               |> List.filter (fun terminal ->
+                   not (Set.contains (EmbeddedTerminalId terminal.SessionId) previousIds))
+               |> List.map tabForRecord) }
 
-            match Map.tryFind key recordsByPath with
-            | Some terminal -> tabForRecord terminal
-            | None -> interrupted missingReason tab)
-
-    let retainedPaths =
-        retained
-        |> List.map (_.Worktree >> WorktreePath.value >> pathKey)
-        |> Set.ofList
-
-    let appended =
-        records
-        |> List.filter (fun terminal ->
-            retainedPaths
-            |> Set.contains (pathKey terminal.WorktreePath)
-            |> not)
-        |> List.map tabForRecord
-
-    { Tabs = retained @ appended }
-
-let private applyRegistry
-    (state: ManagerState)
-    (manifest: DiscoveryManifest)
-    (registry: RegistrySnapshot)
-    =
+let private applyRegistryWith rebindTerminals (state: ManagerState) (manifest: DiscoveryManifest) (registry: RegistrySnapshot) =
     { state with
         LastSnapshot =
-            reconcileSnapshot state.LastHost manifest registry.Terminals state.LastSnapshot
+            reconcileSnapshot rebindTerminals state.LastHost manifest registry.Terminals state.LastSnapshot
         LastHost = Some manifest }
 
+let private applyRegistry = applyRegistryWith false
+
 let private withHostFailure error state =
-    { state with
-        LastSnapshot = interruptSnapshot error state.LastSnapshot }
+    { state with LastSnapshot = interruptSnapshot error state.LastSnapshot }
 
 let private getTerminals config state =
     async {
@@ -141,13 +103,10 @@ let private getTerminals config state =
             match! listTerminals config connection with
             | Ok registry -> return applyRegistry state connection registry
             | Error error -> return withHostFailure error state
-        | MissingHost ->
-            return withHostFailure "TerminalHost discovery is missing; running terminals can no longer be verified." state
-        | DeadHost error ->
-            return withHostFailure $"{error}. Its terminals were interrupted." state
+        | MissingHost -> return withHostFailure "TerminalHost discovery is missing; running terminals can no longer be verified." state
+        | DeadHost error -> return withHostFailure $"{error}. Its terminals were interrupted." state
         | IncompatibleHost(_, error)
-        | UnusableHost error ->
-            return withHostFailure error state
+        | UnusableHost error -> return withHostFailure error state
     }
 
 let private mutationResult prepare state connection = function
@@ -169,9 +128,7 @@ let private startTerminal config state worktreePath =
         match! ensureHost config state.LastHost with
         | Error error -> return withHostFailure error state, Error error
         | Ok connection ->
-            let! result =
-                startTerminalOnHost config connection (WorktreePath.value worktreePath)
-
+            let! result = startTerminalOnHost config connection (WorktreePath.value worktreePath)
             return result |> Result.map fst |> mutationResult id state connection
     }
 
@@ -181,43 +138,61 @@ let private safeWithoutHealthyHost config state discovery =
     | MissingHost ->
         match knownHostIsStillLive config state.LastHost with
         | Ok false -> Ok()
-        | Ok true ->
-            Error
-                "The TerminalHost manifest is missing while the exact recorded host is still running"
+        | Ok true -> Error "The TerminalHost manifest is missing while the exact recorded host is still running"
         | Error error -> Error error
     | IncompatibleHost(_, error)
     | UnusableHost error -> Error error
     | HealthyHost _ -> failwith "unreachable"
 
-let private closeTerminal config state worktreePath =
+let private withoutTarget target snapshot =
+    let keep tab =
+        match target with
+        | OneTerminal terminalId -> tab.Id <> terminalId
+        | WorktreeTerminals path ->
+            not (samePath (WorktreePath.value tab.Worktree) (WorktreePath.value path))
+
+    { Tabs = snapshot.Tabs |> List.filter keep }
+
+let private closeOnHost config connection = function
+    | OneTerminal terminalId -> closeTerminalOnHost config connection (EmbeddedTerminalId.value terminalId)
+    | WorktreeTerminals path -> closeTerminalsForWorktreeOnHost config connection (WorktreePath.value path)
+
+let private closeTerminals config state target =
     async {
-        match! discoverHost config with
-        | HealthyHost connection ->
-            let path = WorktreePath.value worktreePath
-            let! result = closeTerminalOnHost config connection path
+        match target with
+        | OneTerminal terminalId
+            when not (validSessionId (EmbeddedTerminalId.value terminalId)) ->
+            return state, Error "Invalid embedded terminal ID"
+        | _ ->
+            match! discoverHost config with
+            | HealthyHost connection ->
+                let! result = closeOnHost config connection target
+                return
+                    result
+                    |> mutationResult (fun current ->
+                        { current with
+                            LastSnapshot =
+                                withoutTarget target current.LastSnapshot })
+                        state
+                        connection
+            | discovery ->
+                match safeWithoutHealthyHost config state discovery with
+                | Error error -> return withHostFailure error state, Error error
+                | Ok() ->
+                    let reason =
+                        match discovery with
+                        | DeadHost error -> $"{error}. Its terminals were interrupted."
+                        | MissingHost -> "TerminalHost is not running; no live terminal remains to close."
+                        | _ -> failwith "unreachable"
 
-            return result |> mutationResult (fun current ->
-                { current with LastSnapshot = withoutPath path current.LastSnapshot }) state connection
-        | discovery ->
-            match safeWithoutHealthyHost config state discovery with
-            | Error error -> return withHostFailure error state, Error error
-            | Ok() ->
-                let reason =
-                    match discovery with
-                    | DeadHost error -> $"{error}. Its terminals were interrupted."
-                    | MissingHost ->
-                        "TerminalHost is not running; no live terminal remains to close."
-                    | IncompatibleHost _
-                    | UnusableHost _
-                    | HealthyHost _ -> failwith "unreachable"
+                    let next =
+                        { state with
+                            LastSnapshot =
+                                state.LastSnapshot
+                                |> interruptSnapshot reason
+                                |> withoutTarget target }
 
-                let next =
-                    { state with
-                        LastSnapshot =
-                            state.LastSnapshot |> interruptSnapshot reason
-                            |> withoutPath (WorktreePath.value worktreePath) }
-
-                return next, Ok next.LastSnapshot
+                    return next, Ok next.LastSnapshot
     }
 
 let private applyReplacementCommit state commit =
@@ -226,16 +201,11 @@ let private applyReplacementCommit state commit =
     | ReplacementCommit.InterruptState(message, outcome) ->
         withHostFailure message state, outcome
     | ReplacementCommit.ApplyRegistry(manifest, registry, outcome) ->
-        applyRegistry state manifest registry, outcome
+        applyRegistryWith true state manifest registry, outcome
 
-let private replacementInProgressError =
-    "TerminalHost replacement is in progress; try again when it completes."
-
-let private cleanupInProgressError =
-    "Terminal cleanup is in progress for this worktree; try again when it completes."
-
-let private cleanupRequestTimeoutError =
-    "Terminal cleanup could not start within 60 seconds; try again."
+let private replacementInProgressError = "TerminalHost replacement is in progress; try again when it completes."
+let private cleanupInProgressError = "Terminal cleanup is in progress for this worktree; try again when it completes."
+let private cleanupRequestTimeoutError = "Terminal cleanup could not start within 60 seconds; try again."
 
 let private cleanupPathKey worktreePath =
     let path =
@@ -251,14 +221,24 @@ let private cleanupPathKey worktreePath =
     with _ ->
         pathKey path
 
-let private respond (channel: AsyncReplyChannel<'value>) value state =
-    channel.Reply value
-    state
+let private respond (channel: AsyncReplyChannel<'value>) value state = channel.Reply value; state
 
-let private mutate config mutation state worktreePath =
-    match mutation with
-    | TerminalMutation.Start -> startTerminal config state worktreePath
-    | TerminalMutation.Close -> closeTerminal config state worktreePath
+let private mutationWorktree state = function
+    | TerminalMutation.Start path -> Some path
+    | TerminalMutation.Close terminalId ->
+        state.LastSnapshot.Tabs
+        |> List.tryFind (fun tab -> tab.Id = terminalId)
+        |> Option.map _.Worktree
+
+let private mutationReserved state mutation =
+    mutationWorktree state mutation
+    |> Option.exists (fun path ->
+        state.CleanupReservations
+        |> Map.containsKey (cleanupPathKey path))
+
+let private mutate config state = function
+    | TerminalMutation.Start path -> startTerminal config state path
+    | TerminalMutation.Close terminalId -> closeTerminals config state (OneTerminal terminalId)
 
 let internal createWithConfig config =
     let agent =
@@ -275,18 +255,15 @@ let internal createWithConfig config =
                         return! loop (respond reply next.LastSnapshot next)
                     | GetCached reply ->
                         return! loop (respond reply state.LastSnapshot state)
-                    | Mutate(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
+                    | Mutate(_, reply) when state.Phase = ManagerPhase.Replacing ->
                         return! loop (respond reply (Error replacementInProgressError) state)
-                    | Mutate(_, worktreePath, reply)
-                        when state.CleanupReservations
-                             |> Map.containsKey (cleanupPathKey worktreePath) ->
+                    | Mutate(mutation, reply) when mutationReserved state mutation ->
                         return! loop (respond reply (Error cleanupInProgressError) state)
-                    | Mutate(mutation, worktreePath, reply) ->
-                        let! next, result = mutate config mutation state worktreePath
+                    | Mutate(mutation, reply) ->
+                        let! next, result = mutate config state mutation
 
                         return! loop (respond reply result next)
-                    | ReserveCleanup(_, _, reply)
-                        when state.Phase = ManagerPhase.Replacing ->
+                    | ReserveCleanup(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
                         return! loop (respond reply (Error replacementInProgressError) state)
                     | ReserveCleanup(worktreePath, (CleanupReservation(key, token) as reservation), reply) ->
                         match state.CleanupReservations |> Map.tryFind key with
@@ -295,10 +272,10 @@ let internal createWithConfig config =
                         | None ->
                             let reserved =
                                 { state with
-                                    CleanupReservations =
-                                        state.CleanupReservations |> Map.add key token }
+                                    CleanupReservations = state.CleanupReservations |> Map.add key token }
 
-                            let! next, result = closeTerminal config reserved worktreePath
+                            let! next, result =
+                                closeTerminals config reserved (WorktreeTerminals worktreePath)
 
                             match result with
                             | Error error ->
@@ -315,8 +292,7 @@ let internal createWithConfig config =
                             | _ -> state.CleanupReservations
 
                         return! loop { state with CleanupReservations = reservations }
-                    | BeginReplacement(_, _, reply)
-                        when state.Phase = ManagerPhase.Replacing ->
+                    | BeginReplacement(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
                         return! loop (respond reply ReplacementOutcome.RaceLost state)
                     | BeginReplacement(plan, query, reply) ->
                         async {
@@ -371,16 +347,14 @@ let internal runReplacementCoordinator
     query
     (cancellationToken: System.Threading.CancellationToken)
     =
-    TerminalHostReplacement.runCoordinator
-        (fun ignoredStagedVersion ->
-            tryReplaceHostIgnoring ignoredStagedVersion (fun () -> async.Return()) query manager)
-        cancellationToken
+    TerminalHostReplacement.runCoordinator (fun ignoredStagedVersion ->
+        tryReplaceHostIgnoring ignoredStagedVersion (fun () -> async.Return()) query manager) cancellationToken
 
 let private ask (agent: MailboxProcessor<Message>) build =
     agent.PostAndAsyncReply(build, timeout = 60_000)
 
 let start (Manager(_, agent)) worktreePath =
-    ask agent (fun reply -> Mutate(TerminalMutation.Start, worktreePath, reply))
+    ask agent (fun reply -> Mutate(TerminalMutation.Start worktreePath, reply))
 
 let get (Manager(_, agent)) =
     ask agent Get
@@ -389,8 +363,8 @@ let get (Manager(_, agent)) =
 let internal getCached (Manager(_, agent)) =
     ask agent GetCached
 
-let close (Manager(_, agent)) worktreePath =
-    ask agent (fun reply -> Mutate(TerminalMutation.Close, worktreePath, reply))
+let close (Manager(_, agent)) terminalId =
+    ask agent (fun reply -> Mutate(TerminalMutation.Close terminalId, reply))
 
 let private asTask cancellation workflow =
     Async.StartAsTask(workflow, cancellationToken = cancellation)

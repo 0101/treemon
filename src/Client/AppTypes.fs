@@ -48,8 +48,8 @@ type Model =
       Mascot: MascotState.MascotState
       TerminalPaneOpen: bool
       EmbeddedTerminals: EmbeddedTerminalSnapshot
-      ActiveEmbeddedTerminal: WorktreePath option
-      ClosingEmbeddedTerminals: Map<WorktreePath, EmbeddedTerminalSnapshot>
+      ActiveEmbeddedTerminals: Map<WorktreePath, EmbeddedTerminalId>
+      EmbeddedTerminalStarts: Map<WorktreePath, TerminalPane.TerminalStartState>
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
       OverviewAgentsStuck: bool
@@ -72,14 +72,17 @@ type Msg =
     | OpenTerminal of WorktreePath
     | OpenEmbeddedTerminal of WorktreePath
     | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
-    | EmbeddedTerminalStarted of WorktreePath * Result<EmbeddedTerminalSnapshot, string>
+    | EmbeddedTerminalStarted of
+        WorktreePath *
+        before: EmbeddedTerminalSnapshot *
+        Result<EmbeddedTerminalSnapshot, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
-    | SelectEmbeddedTerminal of WorktreePath
-    | CloseEmbeddedTerminal of WorktreePath
-    | EmbeddedTerminalCloseFailed of WorktreePath
+    | SelectEmbeddedTerminal of EmbeddedTerminalId
+    | CloseEmbeddedTerminal of EmbeddedTerminalId
+    | EmbeddedTerminalCloseFailed
     | HideTerminalPane
     | EmbeddedTerminalClosed of
-        WorktreePath *
+        EmbeddedTerminalId *
         before: EmbeddedTerminalSnapshot *
         after: EmbeddedTerminalSnapshot
     | OpenEditor of WorktreePath

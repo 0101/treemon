@@ -112,7 +112,7 @@ let private assertExactProperties expected element =
         Is.EquivalentTo(expected)
     )
 
-let private assertRegistryResponseV1Shape (document: JsonDocument) =
+let private assertRegistryResponseV2Shape (document: JsonDocument) =
     assertExactProperties
         [ "revision"; "terminals" ]
         document.RootElement
@@ -370,7 +370,7 @@ type TerminalRegistryResilienceTests() =
                 Path.Combine(Path.GetTempPath(), $"{name}-{Guid.NewGuid():N}")
             )
 
-        CanonicalWorktree.create path path
+        CanonicalWorktree.create path
 
     [<Test>]
     member _.``upstream exit racing prune has one cleanup owner and ignores stale notices``() =
@@ -615,11 +615,11 @@ type TerminalRegistryResilienceTests() =
 [<Category("TerminalHost")>]
 type TerminalHostControlApiTests() =
     [<Test>]
-    member _.``start reuses one stable session and close returns the authoritative list``() =
+    member _.``each start creates a distinct session and close targets one terminal``() =
         task {
             use fixture = new ApiFixture()
 
-            use! health = fixture.Client.GetAsync("/api/v1/health")
+            use! health = fixture.Client.GetAsync("/api/v2/health")
             use healthDocument = responseDocument health
 
             Assert.Multiple(fun () ->
@@ -643,67 +643,89 @@ type TerminalHostControlApiTests() =
 
             use! first =
                 fixture.Client.PostAsJsonAsync(
-                    "/api/v1/terminals",
+                    "/api/v2/terminals",
                     {| worktreePath = fixture.Worktree |}
                 )
 
             Assert.That(first.StatusCode, Is.EqualTo(HttpStatusCode.OK))
             use firstDocument = responseDocument first
-            assertRegistryResponseV1Shape firstDocument
+            assertRegistryResponseV2Shape firstDocument
             let firstIds = terminalIds firstDocument
             Assert.That(List.length firstIds, Is.EqualTo(1))
             let sessionId = firstIds.Head
 
-            use! reused =
+            use! second =
                 fixture.Client.PostAsJsonAsync(
-                    "/api/v1/terminals",
+                    "/api/v2/terminals",
                     {| worktreePath = Path.Combine(fixture.Worktree, ".") |}
                 )
 
-            use reusedDocument = responseDocument reused
-            assertRegistryResponseV1Shape reusedDocument
+            use secondDocument = responseDocument second
+            assertRegistryResponseV2Shape secondDocument
+            let secondIds = terminalIds secondDocument
+            let secondSessionId = secondIds[1]
 
             Assert.Multiple(fun () ->
-                Assert.That(reused.StatusCode, Is.EqualTo(HttpStatusCode.OK))
-                Assert.That(terminalIds reusedDocument, Is.EqualTo([ sessionId ]))
+                Assert.That(second.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                Assert.That(secondIds.Length, Is.EqualTo(2))
+                Assert.That(secondIds[0], Is.EqualTo(sessionId))
+                Assert.That(secondSessionId, Is.Not.EqualTo(sessionId))
                 Assert.That(
-                    terminalEndpoints reusedDocument,
+                    terminalEndpoints secondDocument,
                     Is.EqualTo(
-                        [ $"http://127.0.0.1:41000/_treemon/{sessionId}/{fixture.Token}/" ]
+                        [ $"http://127.0.0.1:41000/_treemon/{sessionId}/{fixture.Token}/"
+                          $"http://127.0.0.1:41000/_treemon/{secondSessionId}/{fixture.Token}/" ]
                     )
                 )
-                Assert.That(fixture.StartCount, Is.EqualTo(1)))
+                Assert.That(fixture.StartCount, Is.EqualTo(2)))
 
-            use! listed = fixture.Client.GetAsync("/api/v1/terminals")
+            use! listed = fixture.Client.GetAsync("/api/v2/terminals")
             use listDocument = responseDocument listed
-            assertRegistryResponseV1Shape listDocument
+            assertRegistryResponseV2Shape listDocument
 
             Assert.Multiple(fun () ->
                 Assert.That(listed.StatusCode, Is.EqualTo(HttpStatusCode.OK))
-                Assert.That(terminalIds listDocument, Is.EqualTo([ sessionId ])))
+                Assert.That(terminalIds listDocument, Is.EqualTo(secondIds)))
 
             use! unchanged =
                 fixture.Client.DeleteAsync(
-                    "/api/v1/terminals/00000000000000000000000000000000"
+                    "/api/v2/terminals/00000000000000000000000000000000"
                 )
 
             use unchangedDocument = responseDocument unchanged
-            assertRegistryResponseV1Shape unchangedDocument
-            Assert.That(terminalIds unchangedDocument, Is.EqualTo([ sessionId ]))
+            assertRegistryResponseV2Shape unchangedDocument
+            Assert.That(terminalIds unchangedDocument, Is.EqualTo(secondIds))
 
             use! closed =
-                fixture.Client.DeleteAsync($"/api/v1/terminals/{sessionId}")
+                fixture.Client.DeleteAsync($"/api/v2/terminals/{sessionId}")
 
             use closeDocument = responseDocument closed
-            assertRegistryResponseV1Shape closeDocument
+            assertRegistryResponseV2Shape closeDocument
 
             Assert.Multiple(fun () ->
                 Assert.That(closed.StatusCode, Is.EqualTo(HttpStatusCode.OK))
-                Assert.That(terminalIds closeDocument, Is.Empty)
+                Assert.That(
+                    terminalIds closeDocument,
+                    Is.EqualTo([ secondSessionId ])
+                )
                 Assert.That(fixture.CloseCount, Is.EqualTo(1))
                 Assert.That(
                     closeDocument.RootElement.GetProperty("revision").GetInt64(),
-                    Is.EqualTo(2L)
+                    Is.EqualTo(3L)
+                ))
+
+            use! finalClose =
+                fixture.Client.DeleteAsync(
+                    $"/api/v2/terminals/{secondSessionId}"
+                )
+
+            use finalDocument = responseDocument finalClose
+            Assert.Multiple(fun () ->
+                Assert.That(terminalIds finalDocument, Is.Empty)
+                Assert.That(fixture.CloseCount, Is.EqualTo(2))
+                Assert.That(
+                    finalDocument.RootElement.GetProperty("revision").GetInt64(),
+                    Is.EqualTo(4L)
                 ))
         }
         :> Task
@@ -713,20 +735,20 @@ type TerminalHostControlApiTests() =
         task {
             use fixture = new ApiFixture()
             use unauthenticated = new HttpClient(BaseAddress = Uri fixture.Endpoint)
-            use! missingToken = unauthenticated.GetAsync("/api/v1/health")
+            use! missingToken = unauthenticated.GetAsync("/api/v2/health")
             Assert.That(missingToken.StatusCode, Is.EqualTo(HttpStatusCode.Unauthorized))
 
-            use wrongHost = new HttpRequestMessage(HttpMethod.Get, "/api/v1/health")
+            use wrongHost = new HttpRequestMessage(HttpMethod.Get, "/api/v2/health")
             wrongHost.Headers.Host <- $"localhost:{Uri(fixture.Endpoint).Port}"
             use! hostRejected = fixture.Client.SendAsync wrongHost
             Assert.That(hostRejected.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden))
 
-            use wrongOrigin = new HttpRequestMessage(HttpMethod.Get, "/api/v1/health")
+            use wrongOrigin = new HttpRequestMessage(HttpMethod.Get, "/api/v2/health")
             wrongOrigin.Headers.Add("Origin", "http://attacker.example")
             use! originRejected = fixture.Client.SendAsync wrongOrigin
             Assert.That(originRejected.StatusCode, Is.EqualTo(HttpStatusCode.Forbidden))
 
-            use allowedOrigin = new HttpRequestMessage(HttpMethod.Get, "/api/v1/health")
+            use allowedOrigin = new HttpRequestMessage(HttpMethod.Get, "/api/v2/health")
             allowedOrigin.Headers.Add("Origin", "http://localhost:5174")
             use! originAccepted = fixture.Client.SendAsync allowedOrigin
 
@@ -738,13 +760,13 @@ type TerminalHostControlApiTests() =
                 new StringContent("{\"worktreePath\":", Encoding.UTF8, "application/json")
 
             use! malformedRejected =
-                fixture.Client.PostAsync("/api/v1/terminals", malformed)
+                fixture.Client.PostAsync("/api/v2/terminals", malformed)
 
             Assert.That(malformedRejected.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest))
 
             use! unknownRejected =
                 fixture.Client.PostAsJsonAsync(
-                    "/api/v1/terminals",
+                    "/api/v2/terminals",
                     {| worktreePath = fixture.UnknownDirectory |}
                 )
 
@@ -758,14 +780,14 @@ type TerminalHostControlApiTests() =
                 )
 
             use! oversizedRejected =
-                fixture.Client.PostAsync("/api/v1/terminals", oversized)
+                fixture.Client.PostAsync("/api/v2/terminals", oversized)
 
             Assert.That(
                 oversizedRejected.StatusCode,
                 Is.EqualTo(HttpStatusCode.RequestEntityTooLarge)
             )
 
-            use! extraEndpoint = fixture.Client.GetAsync("/api/v1/version")
+            use! extraEndpoint = fixture.Client.GetAsync("/api/v2/version")
             Assert.That(extraEndpoint.StatusCode, Is.EqualTo(HttpStatusCode.NotFound))
             Assert.That(fixture.StartCount, Is.Zero)
         }
@@ -776,7 +798,7 @@ type TerminalHostControlApiTests() =
         task {
             use fixture = new ApiFixture()
             use emptyBody = new ByteArrayContent(Array.empty)
-            use! response = fixture.Client.PostAsync("/api/v1/shutdown", emptyBody)
+            use! response = fixture.Client.PostAsync("/api/v2/shutdown", emptyBody)
             Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.Accepted))
 
             let shutdown = ControlApi.waitForShutdown fixture.Running
@@ -866,14 +888,8 @@ type TerminalHostDataPlaneTests() =
         let worktree =
             CanonicalWorktree.create
                 (Path.GetFullPath(Path.Combine(Path.GetTempPath(), "data-plane-worktree")))
-                "data-plane-worktree"
 
         try
-            TerminalRegistry.start registry worktree
-            |> Async.RunSynchronously
-            |> requireOk
-            |> ignore
-
             TerminalRegistry.start registry worktree
             |> Async.RunSynchronously
             |> requireOk
@@ -1323,9 +1339,7 @@ type TerminalHostSecurityTests() =
             |> Path.GetFullPath
 
         let worktree =
-            CanonicalWorktree.create
-                worktreePath
-                "fixture-key"
+            CanonicalWorktree.create worktreePath
 
         let specification =
             TerminalLauncher.startSpecification
@@ -1371,7 +1385,7 @@ type TerminalHostManifestTests() =
                   ProcessStartTimeUtcTicks = 638_900_000_000_000_000L
                   Endpoint = "http://127.0.0.1:32123"
                   HostVersion = "1.2.3"
-                  ControlApiVersion = 1 }
+                  ControlApiVersion = Protocol.ControlApiVersion }
 
             let stage version =
                 let directory =
@@ -1473,7 +1487,7 @@ type TerminalHostManifestTests() =
                   ProcessStartTimeUtcTicks = 638_900_000_000_000_000L
                   Endpoint = "http://127.0.0.1:32123"
                   HostVersion = "1.2.3"
-                  ControlApiVersion = 1 }
+                  ControlApiVersion = Protocol.ControlApiVersion }
 
             let stagedVersion =
                 Manifest.readStagedExecutableVersion layout

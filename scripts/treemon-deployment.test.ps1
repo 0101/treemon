@@ -99,7 +99,7 @@ function Get-DirectorySnapshot([string]$Directory) {
 function Stop-TestHost($Process, $Manifest) {
     if (-not $Process -or $Process.HasExited) { return }
     try {
-        Invoke-TestHostRequest $Manifest "POST" "/api/v1/shutdown" | Out-Null
+        Invoke-TestHostRequest $Manifest "POST" "/api/v2/shutdown" | Out-Null
         if (-not $Process.WaitForExit(10000)) {
             throw "Test TerminalHost did not stop after shutdown"
         }
@@ -232,7 +232,7 @@ try {
     $hostProcess = Start-TestHost (Join-Path $baseline "TerminalHost.exe") $state (Get-TestPort)
     $manifest = Wait-Manifest $state
     $canonicalWorktree = [IO.Path]::GetFullPath($worktree).TrimEnd('\', '/')
-    $started = Invoke-TestHostRequest $manifest "POST" "/api/v1/terminals" (
+    $started = Invoke-TestHostRequest $manifest "POST" "/api/v2/terminals" (
         @{ worktreePath = $canonicalWorktree } | ConvertTo-Json -Compress)
     Assert-True (@($started.terminals).Count -eq 1) "Fixture terminal did not start"
     $terminalSessionId = $started.terminals[0].sessionId
@@ -265,7 +265,7 @@ try {
         $hostIdentity
     ) "Staging replaced the live host"
     Assert-True (
-        @((Invoke-TestHostRequest $manifest "GET" "/api/v1/terminals").terminals)[0].sessionId -ceq
+        @((Invoke-TestHostRequest $manifest "GET" "/api/v2/terminals").terminals)[0].sessionId -ceq
         $terminalSessionId
     ) "Staging replaced the live terminal"
     Write-Host "PASS: staging leaves the exact live host and terminal untouched"
@@ -280,7 +280,7 @@ try {
     Assert-True (Test-Path -LiteralPath $compatible.ExecutablePath) "Live host publication was overwritten"
     Assert-True (-not $hostProcess.HasExited) "Compatible server install stopped the live host"
     Assert-True (
-        @((Invoke-TestHostRequest $manifest "GET" "/api/v1/terminals").terminals)[0].sessionId -ceq
+        @((Invoke-TestHostRequest $manifest "GET" "/api/v2/terminals").terminals)[0].sessionId -ceq
         $terminalSessionId
     ) "Compatible server install restarted the terminal"
     Write-Host "PASS: compatible deployment reuses the exact host"
@@ -289,7 +289,7 @@ try {
     # Corrupting only the manifest exercises fail-closed identity handling. The genuine compatible
     # / incompatible and empty / non-empty matrix is covered by EmbeddedTerminalControlClientTests.
     $mismatchedManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $mismatchedManifest.controlApiVersion = 2
+    $mismatchedManifest.controlApiVersion = 3
     $mismatchedManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
     $beforeRefusal = Get-DirectorySnapshot $root
     $refused = $false
@@ -304,14 +304,14 @@ try {
     ) "Mismatched-identity preflight changed deployment files"
     Assert-True (-not $hostProcess.HasExited) "Mismatched-identity preflight stopped the live host"
     Assert-True (
-        @((Invoke-TestHostRequest $manifest "GET" "/api/v1/terminals").terminals)[0].sessionId -ceq
+        @((Invoke-TestHostRequest $manifest "GET" "/api/v2/terminals").terminals)[0].sessionId -ceq
         $terminalSessionId
     ) "Mismatched-identity preflight changed the terminal"
-    $mismatchedManifest.controlApiVersion = 1
+    $mismatchedManifest.controlApiVersion = 2
     $mismatchedManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
     Write-Host "PASS: manifest and health identity mismatch is refused without side effects"
 
-    $closed = Invoke-TestHostRequest $manifest "DELETE" "/api/v1/terminals/$terminalSessionId"
+    $closed = Invoke-TestHostRequest $manifest "DELETE" "/api/v2/terminals/$terminalSessionId"
     Assert-True (@($closed.terminals).Count -eq 0) "Fixture terminal did not close"
 
     $compatibleEmpty = Test-TerminalHostDeployment $candidateServer
@@ -322,7 +322,7 @@ try {
         $hostIdentity
     ) "Compatible empty preflight changed the host identity"
 
-    $mismatchedManifest.controlApiVersion = 2
+    $mismatchedManifest.controlApiVersion = 3
     $mismatchedManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
     $unverifiedEmptyRefused = $false
     try {
@@ -332,7 +332,7 @@ try {
     }
     Assert-True $unverifiedEmptyRefused "Unverified empty-host identity was not refused"
     Assert-True (-not $hostProcess.HasExited) "Unverified preflight stopped the live host"
-    $mismatchedManifest.controlApiVersion = 1
+    $mismatchedManifest.controlApiVersion = 2
     $mismatchedManifest | ConvertTo-Json -Compress | Set-Content -LiteralPath $manifestPath -NoNewline
     Write-Host "PASS: compatible empty host proceeds and unverified identity fails closed"
 

@@ -172,21 +172,34 @@ let private failedTerminalPath =
 let private startableTerminalPath =
     WorktreePath "Q:/code/TestProject/feature-multidoc"
 
-let private runningTerminal path port =
-    { Worktree = path
+let private firstTerminalId =
+    EmbeddedTerminalId "00000000000000000000000000000001"
+
+let private firstAlternateTerminalId =
+    EmbeddedTerminalId "00000000000000000000000000000002"
+
+let private secondTerminalId =
+    EmbeddedTerminalId "00000000000000000000000000000003"
+
+let private runningTerminal terminalId path port =
+    { Id = terminalId
+      Worktree = path
       Lifecycle =
         EmbeddedTerminalLifecycle.Running
             $"http://127.0.0.1:{port}/" }
 
 let private initialTerminalSnapshot =
     { Tabs =
-        [ runningTerminal firstTerminalPath 61234
-          runningTerminal secondTerminalPath 61235
-          { Worktree = failedTerminalPath
+        [ runningTerminal firstTerminalId firstTerminalPath 61234
+          runningTerminal firstAlternateTerminalId firstTerminalPath 61237
+          runningTerminal secondTerminalId secondTerminalPath 61235
+          { Id = EmbeddedTerminalId "00000000000000000000000000000004"
+            Worktree = failedTerminalPath
             Lifecycle =
-                EmbeddedTerminalLifecycle.Failed
+                EmbeddedTerminalLifecycle.Interrupted
                     "ttyd exited with code 1" }
-          { Worktree = WorktreePath "Q:/code/TestProject/feature-stale"
+          { Id = EmbeddedTerminalId "00000000000000000000000000000005"
+            Worktree = WorktreePath "Q:/code/TestProject/feature-stale"
             Lifecycle =
                 EmbeddedTerminalLifecycle.Running
                     "https://example.com/unsafe-terminal" } ] }
@@ -305,24 +318,34 @@ type TerminalPaneDomTests() =
                     "**/IWorktreeApi/startEmbeddedTerminal",
                     fun route ->
                         startCalls <- startCalls + 1
-                        let startsNewTab =
-                            route.Request.PostData
-                            |> Option.ofObj
-                            |> Option.exists _.Contains(
-                                WorktreePath.displayName startableTerminalPath,
-                                StringComparison.Ordinal)
-                        if startsNewTab
-                           && (registry.Tabs
-                               |> List.exists (fun tab ->
-                                   tab.Worktree = startableTerminalPath)
-                               |> not) then
-                            registry <-
-                                { Tabs =
-                                    registry.Tabs
-                                    @ [ runningTerminal startableTerminalPath 61236 ] }
+                        let requestedPath =
+                            [ firstTerminalPath
+                              secondTerminalPath
+                              failedTerminalPath
+                              startableTerminalPath ]
+                            |> List.tryFind (fun path ->
+                                route.Request.PostData
+                                |> Option.ofObj
+                                |> Option.exists _.Contains(
+                                    WorktreePath.displayName path,
+                                    StringComparison.Ordinal))
 
                         let result: Result<EmbeddedTerminalSnapshot, string> =
-                            Ok registry
+                            match requestedPath with
+                            | None ->
+                                Error "Unknown terminal worktree"
+                            | Some path ->
+                                let terminalId =
+                                    EmbeddedTerminalId(
+                                        (100 + startCalls).ToString("D32"))
+
+                                registry <-
+                                    { Tabs =
+                                        registry.Tabs
+                                        @ [ runningTerminal terminalId path 61236 ] }
+
+                                Ok registry
+
                         route.FulfillAsync(
                             RouteFulfillOptions(
                                 ContentType = "application/json",
@@ -333,25 +356,17 @@ type TerminalPaneDomTests() =
                     "**/IWorktreeApi/closeEmbeddedTerminal",
                     fun route ->
                         closeCalls <- closeCalls + 1
-                        registry <-
+                        let closingId =
                             match closeCalls with
-                            | 1 ->
-                                { Tabs =
-                                    registry.Tabs
-                                    |> List.filter (fun tab ->
-                                        tab.Worktree <> firstTerminalPath) }
-                            | 2 ->
-                                { Tabs =
-                                    registry.Tabs
-                                    |> List.filter (fun tab ->
-                                        tab.Worktree <> secondTerminalPath) }
-                            | 3 ->
-                                { Tabs =
-                                    registry.Tabs
-                                    |> List.filter (fun tab ->
-                                        tab.Worktree <> failedTerminalPath) }
-                            | _ ->
-                                EmbeddedTerminalSnapshot.empty
+                            | 1 -> Some firstTerminalId
+                            | 2 -> Some firstAlternateTerminalId
+                            | _ -> None
+
+                        registry <-
+                            { Tabs =
+                                registry.Tabs
+                                |> List.filter (fun tab ->
+                                    closingId <> Some tab.Id) }
 
                         route.FulfillAsync(
                             RouteFulfillOptions(
@@ -364,7 +379,8 @@ type TerminalPaneDomTests() =
             for port, marker in
                 [ 61234, "first"
                   61235, "second"
-                  61236, "started" ] do
+                  61236, "started"
+                  61237, "first-alternate" ] do
                 do!
                     this.Page.RouteAsync(
                         $"http://127.0.0.1:{port}/**",
@@ -384,6 +400,7 @@ type TerminalPaneDomTests() =
                 this.Page
                     .Locator(".terminal-pane.open")
                     .WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+            do! focusCanvasCard this.Page "feature-active"
         }
 
     [<Test>]
@@ -422,53 +439,60 @@ type TerminalPaneDomTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(paneRole, Is.EqualTo("region"))
-                Assert.That(tabListLabel, Is.EqualTo("Worktree terminals"))
-                Assert.That(tabCount, Is.EqualTo(4))
+                Assert.That(
+                    tabListLabel,
+                    Is.EqualTo("Terminals for the selected worktree")
+                )
+                Assert.That(tabCount, Is.EqualTo(2))
                 Assert.That(
                     tabLabels,
-                    Is.EqualTo(
-                        [| "feature-active"
-                           "feature-recent"
-                           "feature-idle"
-                           "feature-stale" |]))
-                Assert.That(selectedLabel, Is.EqualTo("feature-active"))
+                    Is.EqualTo([| "Terminal 1"; "Terminal 2" |])
+                )
+                Assert.That(selectedLabel, Is.EqualTo("Terminal 1"))
                 Assert.That(selectedAria, Is.EqualTo("true"))
-                Assert.That(iframeCount, Is.EqualTo(2))
+                Assert.That(iframeCount, Is.EqualTo(3))
                 Assert.That(activeIframeCount, Is.EqualTo(1))
                 Assert.That(scrollingValues, Is.All.EqualTo("no"))
                 Assert.That(geometry[0], Is.EqualTo(0.5).Within(0.03))
                 Assert.That(geometry[1], Is.InRange(34.0, 48.0))
-                Assert.That(geometry[2], Is.EqualTo(geometry[3]).Within(1.0))
-                Assert.That(geometry[3], Is.EqualTo(geometry[4]).Within(1.0))
-                Assert.That(geometry[4], Is.EqualTo(geometry[5]).Within(1.0)))
+                Assert.That(geometry[2], Is.EqualTo(geometry[3]).Within(1.0)))
         }
 
     [<Test>]
-    member this.``Tab and card selection keep every running iframe mounted``() =
+    member this.``Tab selection is remembered per worktree while frames stay mounted``() =
         task {
             do! rememberFrames this.Page
 
-            let second = tabFor this.Page "feature-recent"
-            do! second.ClickAsync()
+            let secondTab = tabFor this.Page "Terminal 2"
+            do! secondTab.ClickAsync()
             do!
-                second.WaitForAsync(
+                secondTab.WaitForAsync(
                     LocatorWaitForOptions(Timeout = 5000.0f))
             let! secondSelected =
-                second.GetAttributeAsync("aria-selected")
+                secondTab.GetAttributeAsync("aria-selected")
             let! mountedAfterClick = framesStillMounted this.Page
 
-            let first = tabFor this.Page "feature-active"
-            do! second.FocusAsync()
-            do! second.PressAsync("ArrowLeft")
+            let firstTab = tabFor this.Page "Terminal 1"
+            do! secondTab.FocusAsync()
+            do! secondTab.PressAsync("ArrowLeft")
             let! firstSelected =
-                first.GetAttributeAsync("aria-selected")
+                firstTab.GetAttributeAsync("aria-selected")
             let! focusedLabel =
                 this.Page.EvaluateAsync<string>(
                     "() => document.activeElement.querySelector('.terminal-tab-label').textContent")
             let! mountedAfterKeyboard = framesStillMounted this.Page
+            do! secondTab.ClickAsync()
 
             do! focusCanvasCard this.Page "feature-recent"
+            let! recentTabCount =
+                this.Page.Locator(".terminal-tab").CountAsync()
             let! selectedFromCard =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+
+            do! focusCanvasCard this.Page "feature-active"
+            let! rememberedSelection =
                 (selectedTab this.Page)
                     .Locator(".terminal-tab-label")
                     .TextContentAsync()
@@ -484,7 +508,7 @@ type TerminalPaneDomTests() =
                     .GetByRole(AriaRole.Button, LocatorGetByRoleOptions(Name = "Start terminal"))
                     .ClickAsync()
             do!
-                (tabFor this.Page "feature-multidoc")
+                (tabFor this.Page "Terminal 1")
                     .WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! startedSelected =
                 (selectedTab this.Page)
@@ -497,22 +521,24 @@ type TerminalPaneDomTests() =
                 Assert.That(secondSelected, Is.EqualTo("true"))
                 Assert.That(mountedAfterClick, Is.True)
                 Assert.That(firstSelected, Is.EqualTo("true"))
-                Assert.That(focusedLabel, Is.EqualTo("feature-active"))
+                Assert.That(focusedLabel, Is.EqualTo("Terminal 1"))
                 Assert.That(mountedAfterKeyboard, Is.True)
-                Assert.That(selectedFromCard, Is.EqualTo("feature-recent"))
+                Assert.That(recentTabCount, Is.EqualTo(1))
+                Assert.That(selectedFromCard, Is.EqualTo("Terminal 1"))
+                Assert.That(rememberedSelection, Is.EqualTo("Terminal 2"))
                 Assert.That(selectedCount, Is.EqualTo(0))
                 Assert.That(emptyText, Does.Contain("feature-multidoc"))
                 Assert.That(mountedInEmptyState, Is.True)
                 Assert.That(startCalls, Is.EqualTo(1))
-                Assert.That(startedSelected, Is.EqualTo("feature-multidoc"))
-                Assert.That(startedFrameCount, Is.EqualTo(3)))
+                Assert.That(startedSelected, Is.EqualTo("Terminal 1"))
+                Assert.That(startedFrameCount, Is.EqualTo(4)))
         }
 
     [<Test>]
-    member this.``Failed tabs show their own error without disconnecting live terminals``() =
+    member this.``Interrupted tabs show their own error without disconnecting live terminals``() =
         task {
             do! rememberFrames this.Page
-            do! (tabFor this.Page "feature-idle").ClickAsync()
+            do! focusCanvasCard this.Page "feature-idle"
 
             let! error =
                 this.Page
@@ -521,9 +547,12 @@ type TerminalPaneDomTests() =
             let! activeFrameCount =
                 this.Page.Locator(".terminal-iframe-active").CountAsync()
             let! mounted = framesStillMounted this.Page
+            let! visibleTabs =
+                (tabFor this.Page "Terminal 1").CountAsync()
 
             Assert.Multiple(fun () ->
                 Assert.That(error, Does.Contain("ttyd exited with code 1"))
+                Assert.That(visibleTabs, Is.EqualTo(1))
                 Assert.That(activeFrameCount, Is.EqualTo(0))
                 Assert.That(mounted, Is.True))
         }
@@ -531,7 +560,7 @@ type TerminalPaneDomTests() =
     [<Test>]
     member this.``Unsafe running endpoint renders an error instead of an iframe``() =
         task {
-            do! (tabFor this.Page "feature-stale").ClickAsync()
+            do! focusCanvasCard this.Page "feature-stale"
 
             let! error =
                 this.Page
@@ -549,9 +578,16 @@ type TerminalPaneDomTests() =
         }
 
     [<Test>]
-    member this.``Hide preserves selection and iframe nodes until explicit reopen``() =
+    member this.``Hide preserves frames while reopening can add another selected-worktree terminal``() =
         task {
             do! rememberFrames this.Page
+            let! _ =
+                this.Page.EvaluateAsync(
+                    $"""() => {{
+                        window.__secondTerminalFrame =
+                            document.querySelector('[data-terminal-id="{EmbeddedTerminalId.value secondTerminalId}"]');
+                    }}""")
+
             do!
                 this.Page
                     .GetByRole(
@@ -584,69 +620,78 @@ type TerminalPaneDomTests() =
                 (selectedTab this.Page)
                     .Locator(".terminal-tab-label")
                     .TextContentAsync()
-            let! mountedAfterReopen = framesStillMounted this.Page
+            let! visibleTabsAfterReopen =
+                this.Page.Locator(".terminal-tab").CountAsync()
+            let! originalFramePreserved =
+                this.Page.EvaluateAsync<bool>(
+                    $"""() => {{
+                        const current = document.querySelector(
+                            '[data-terminal-id="{EmbeddedTerminalId.value secondTerminalId}"]');
+                        return current === window.__secondTerminalFrame && current.isConnected;
+                    }}""")
 
             Assert.Multiple(fun () ->
-                Assert.That(hiddenFrameCount, Is.EqualTo(2))
+                Assert.That(hiddenFrameCount, Is.EqualTo(3))
                 Assert.That(mountedWhileHidden, Is.True)
-                Assert.That(selectedWhileHidden, Is.EqualTo("feature-active"))
+                Assert.That(selectedWhileHidden, Is.EqualTo("Terminal 1"))
                 Assert.That(startCalls, Is.EqualTo(1))
-                Assert.That(selectedAfterReopen, Is.EqualTo("feature-recent"))
-                Assert.That(mountedAfterReopen, Is.True))
+                Assert.That(visibleTabsAfterReopen, Is.EqualTo(2))
+                Assert.That(selectedAfterReopen, Is.EqualTo("Terminal 2"))
+                Assert.That(originalFramePreserved, Is.True))
         }
 
     [<Test>]
-    member this.``Closing tabs selects a neighbour and the final close hides the pane``() =
+    member this.``Closing tabs stays within the selected worktree and leaves the pane open``() =
         task {
             let! _ =
                 this.Page.EvaluateAsync(
-                    """() => {
-                        window.__secondTerminalFrame =
-                            document.querySelector('[data-terminal-worktree="Q:/code/TestProject/feature-recent"]');
-                    }""")
+                    $"""() => {{
+                        window.__alternateTerminalFrame =
+                            document.querySelector('[data-terminal-id="{EmbeddedTerminalId.value firstAlternateTerminalId}"]');
+                    }}""")
 
             do!
-                (tabFor this.Page "feature-active")
+                (tabFor this.Page "Terminal 1")
                     .Locator(".terminal-tab-close")
                     .ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
-                    "() => document.querySelectorAll('.terminal-tab').length === 3")
+                    "() => document.querySelectorAll('.terminal-tab').length === 1")
             let! neighbour =
                 (selectedTab this.Page)
                     .Locator(".terminal-tab-label")
                     .TextContentAsync()
-            let! secondPreserved =
+            let! alternatePreserved =
                 this.Page.EvaluateAsync<bool>(
-                    """() => {
+                    $"""() => {{
                         const current = document.querySelector(
-                            '[data-terminal-worktree="Q:/code/TestProject/feature-recent"]');
-                        return current === window.__secondTerminalFrame && current.isConnected;
-                    }""")
+                            '[data-terminal-id="{EmbeddedTerminalId.value firstAlternateTerminalId}"]');
+                        return current === window.__alternateTerminalFrame && current.isConnected;
+                    }}""")
 
             do!
-                (tabFor this.Page "feature-recent")
-                    .Locator(".terminal-tab-close")
-                    .ClickAsync()
-            do!
-                (tabFor this.Page "feature-idle")
-                    .Locator(".terminal-tab-close")
-                    .ClickAsync()
-            do!
-                (tabFor this.Page "feature-stale")
+                (tabFor this.Page "Terminal 1")
                     .Locator(".terminal-tab-close")
                     .ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
-                    "() => document.querySelector('.terminal-pane').hidden")
+                    "() => document.querySelectorAll('.terminal-tab').length === 0")
             let! remainingTabs =
                 this.Page.Locator(".terminal-tab").CountAsync()
+            let! paneHidden =
+                this.Page.Locator(".terminal-pane").IsHiddenAsync()
+            let! emptyText =
+                this.Page
+                    .Locator(".terminal-pane-empty")
+                    .TextContentAsync()
 
             Assert.Multiple(fun () ->
-                Assert.That(closeCalls, Is.EqualTo(4))
-                Assert.That(neighbour, Is.EqualTo("feature-recent"))
-                Assert.That(secondPreserved, Is.True)
-                Assert.That(remainingTabs, Is.EqualTo(0)))
+                Assert.That(closeCalls, Is.EqualTo(2))
+                Assert.That(neighbour, Is.EqualTo("Terminal 1"))
+                Assert.That(alternatePreserved, Is.True)
+                Assert.That(remainingTabs, Is.EqualTo(0))
+                Assert.That(paneHidden, Is.False)
+                Assert.That(emptyText, Does.Contain("feature-active")))
         }
 
     [<Test>]
@@ -654,7 +699,7 @@ type TerminalPaneDomTests() =
         task {
             let iframe =
                 this.Page.Locator(
-                    "[data-terminal-worktree=\"Q:/code/TestProject/feature-active\"]")
+                    $"[data-terminal-id=\"{EmbeddedTerminalId.value firstTerminalId}\"]")
             let! scrolling = iframe.GetAttributeAsync("scrolling")
             let frame =
                 this.Page.Frames

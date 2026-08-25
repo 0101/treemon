@@ -11,7 +11,7 @@ type IWorktreeApi =
       openTerminal: WorktreePath -> Async<unit>
       startEmbeddedTerminal: WorktreePath -> Async<Result<EmbeddedTerminalSnapshot, string>>
       getEmbeddedTerminals: unit -> Async<EmbeddedTerminalSnapshot>
-      closeEmbeddedTerminal: WorktreePath -> Async<Result<EmbeddedTerminalSnapshot, string>>
+      closeEmbeddedTerminal: EmbeddedTerminalId -> Async<Result<EmbeddedTerminalSnapshot, string>>
       openEditor: WorktreePath -> Async<unit>
       toggleAutoSync: WorktreePath -> bool -> Async<Result<unit, string>>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
