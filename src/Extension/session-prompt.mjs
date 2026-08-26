@@ -73,3 +73,20 @@ export function promptForCanvasMessage(body) {
 
   return { kind: "canvas", prompt: `[canvas] ${serialized}` };
 }
+
+/**
+ * @param {{reachable: boolean, monitored: boolean}} registration
+ * @param {string} filename
+ * @param {string} url
+ * @returns {SessionPrompt | undefined}
+ */
+export function promptForBrowserFallback(registration, filename, url) {
+  if (registration.reachable || registration.monitored) return undefined;
+
+  return {
+    kind: "agent-prompt",
+    prompt:
+      `Canvas doc "${filename}" is served in browser-fallback mode at ${url} because Treemon is unreachable. ` +
+      "Share this ctrl+clickable URL with the user (or open it) to view the doc; it auto-reloads on changes and interactions are forwarded back to this session.",
+  };
+}

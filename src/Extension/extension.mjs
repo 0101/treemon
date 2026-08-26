@@ -10,6 +10,7 @@ import {
 } from "./canvas-ownership.mjs";
 import { isTrustedInjectionHeaders } from "./injection-request.mjs";
 import {
+  promptForBrowserFallback,
   promptForCanvasMessage,
   promptForSession,
 } from "./session-prompt.mjs";
@@ -333,10 +334,10 @@ function startHeartbeat(worktreePath, injectUrl, sessionId) {
 
 // React to a successful canvas-doc write. Monitored: declare ownership (the authoritative
 // attribution path; the server's file-watcher is fallback-only) — the extension stamps in its own
-// sessionId, the agent only supplied the filename. Browser mode (Treemon unreachable/unmonitored):
-// serve the doc locally and hand the session a clickable URL via session.send (events cannot inject
-// tool-result context the way the old onPostToolUse hook did).
-async function handleCanvasWrite(session, state, filename) {
+// sessionId, the agent only supplied the filename. Browser mode always serves the doc locally, but
+// only an unreachable Treemon sends the session a clickable URL; a known unmonitored worktree stays
+// silent so it does not compete with a host-native canvas.
+async function handleCanvasWrite(session, state, registration, filename) {
   if (!isValidCanvasFilename(filename)) {
     log(`canvas write: ignoring unsafe filename ${JSON.stringify(filename)}`);
     return;
@@ -352,11 +353,10 @@ async function handleCanvasWrite(session, state, filename) {
 
   const url = `http://127.0.0.1:${state.port}/canvas/${encodeURIComponent(filename)}`;
   log(`canvas write: serving ${filename} in browser mode → ${url}`);
-  enqueueSend(
-    session,
-    "agent-prompt",
-    `Canvas doc "${filename}" is served in browser-fallback mode at ${url} — Treemon is not monitoring this worktree. Share this ctrl+clickable URL with the user (or open it) to view the doc; it auto-reloads on changes and interactions are forwarded back to this session.`,
-  );
+  const fallbackPrompt = promptForBrowserFallback(registration, filename, url);
+  if (fallbackPrompt) {
+    enqueueSend(session, fallbackPrompt.kind, fallbackPrompt.prompt);
+  }
 }
 
 const worktreePath = process.cwd();
@@ -446,7 +446,7 @@ extensionState.browserMode = browserMode;
 Object.freeze(extensionState);
 
 // State is frozen and valid; start handling canvas writes (flushing any buffered during startup).
-canvasWrites.activate((write) => handleCanvasWrite(session, extensionState, write));
+canvasWrites.activate((write) => handleCanvasWrite(session, extensionState, registered, write));
 
 if (browserMode) {
   const reason = !registered.reachable ? "Treemon unreachable" : "directory not monitored by Treemon";
