@@ -22,10 +22,6 @@ param(
     [ValidateNotNullOrEmpty()]
     [string] $Identity,
 
-    [Parameter(Mandatory)]
-    [ValidateNotNullOrEmpty()]
-    [string] $Registration,
-
     [switch] $ValidateOnly
 )
 

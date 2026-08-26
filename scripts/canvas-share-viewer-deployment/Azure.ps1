@@ -1,13 +1,31 @@
+$registrationDisplayName = 'Treemon Canvas Viewer'
+$legacyRegistrationDisplayName = 'treemon-canvas-viewer-auth'
+$registrationDescription =
+    'Read-only viewer for Treemon canvas documents shared with authenticated members and guests of this Microsoft Entra tenant. It does not access Microsoft Graph, profile data, or offline tokens.'
+$registrationLogoPath =
+    Join-Path $PSScriptRoot 'treemon-canvas-viewer-logo.png'
+$easyAuthLoginParameter = 'scope=openid'
+
 function Get-ExactAppRegistration {
     $registrations = @(
-        Invoke-AzJson -Arguments @(
-            'ad', 'app', 'list',
-            '--display-name', $Registration)
-        | Where-Object displayName -CEQ $Registration
+        @(
+            $registrationDisplayName
+            $legacyRegistrationDisplayName
+        )
+        | Sort-Object -Unique
+        | ForEach-Object {
+            $displayName = $_
+            Invoke-AzJson -Arguments @(
+                'ad', 'app', 'list',
+                '--display-name', $displayName)
+            | Where-Object displayName -CEQ $displayName
+        }
+        | Group-Object appId
+        | ForEach-Object { $_.Group[0] }
     )
 
     if ($registrations.Count -gt 1) {
-        throw "More than one Entra app registration is named '$Registration'. Use a unique dedicated registration name."
+        throw "More than one Treemon canvas viewer app registration exists. Remove the duplicate before deployment."
     }
 
     if ($registrations.Count -eq 1) {
@@ -21,14 +39,47 @@ function Assert-RegistrationIsDedicated {
     param([Parameter(Mandatory)][pscustomobject] $AppRegistration)
 
     if (@($AppRegistration.passwordCredentials).Count -gt 0) {
-        throw "Entra app registration '$Registration' has a client secret. Use a dedicated secret-free registration."
+        throw "Entra app registration '$registrationDisplayName' has a client secret. Use a dedicated secret-free registration."
+    }
+
+    if (@($AppRegistration.requiredResourceAccess).Count -gt 0) {
+        throw "Entra app registration '$registrationDisplayName' declares API permissions. The canvas viewer requires only OpenID sign-in."
     }
 
     $redirectUris = @($AppRegistration.web.redirectUris)
     $unexpectedRedirectUris = @($redirectUris | Where-Object { $_ -cne $callbackUrl })
 
     if ($unexpectedRedirectUris.Count -gt 0) {
-        throw "Entra app registration '$Registration' has redirect URIs other than the canonical App Service callback. Use a dedicated registration."
+        throw "Entra app registration '$registrationDisplayName' has redirect URIs other than the canonical App Service callback. Use a dedicated registration."
+    }
+}
+
+function Assert-AppRegistrationBranding {
+    param([Parameter(Mandatory)][pscustomobject] $AppRegistration)
+
+    $info = Get-AzureResourcePropertyValue -Resource $AppRegistration -Name 'info'
+    $logoUrl =
+        if ($null -eq $info) {
+            ''
+        } else {
+            [string] (Get-AzureResourcePropertyValue -Resource $info -Name 'logoUrl')
+        }
+
+    if ([string] $AppRegistration.displayName -cne $registrationDisplayName -or
+        [string] $AppRegistration.description -cne $registrationDescription -or
+        [string] $AppRegistration.web.homePageUrl -cne $viewerBaseUrl -or
+        [string]::IsNullOrWhiteSpace($logoUrl)) {
+        throw "Entra app registration '$registrationDisplayName' is missing its canonical name, description, homepage, or logo."
+    }
+}
+
+function Assert-ServicePrincipalBranding {
+    param([Parameter(Mandatory)][pscustomobject] $ServicePrincipal)
+
+    if ([string] $ServicePrincipal.displayName -cne $registrationDisplayName -or
+        [string] $ServicePrincipal.description -cne $registrationDescription -or
+        [string] $ServicePrincipal.homepage -cne $viewerBaseUrl) {
+        throw "Enterprise application '$registrationDisplayName' is missing its canonical name, description, or homepage."
     }
 }
 
@@ -92,7 +143,7 @@ function Assert-AppRegistrationAuthenticationFlow {
         [string] $redirectUris[0] -cne $callbackUrl -or
         -not $idTokenIssuanceEnabled -or
         $accessTokenIssuanceEnabled) {
-        throw "Entra app registration '$Registration' is not configured for Easy Auth's single-tenant code/id_token callback."
+        throw "Entra app registration '$registrationDisplayName' is not configured for Easy Auth's single-tenant code/id_token callback."
     }
 }
 
@@ -523,8 +574,9 @@ function New-ViewerAppRegistration {
 
     Invoke-AzJson -Arguments (@(
         'ad', 'app', 'create',
-        '--display-name', $Registration,
+        '--display-name', $registrationDisplayName,
         '--sign-in-audience', 'AzureADMyOrg',
+        '--web-home-page-url', $viewerBaseUrl,
         '--web-redirect-uris', $callbackUrl
     ) + $referenceArguments)
 }
@@ -545,11 +597,99 @@ function Update-ViewerAppRegistration {
     Invoke-AzNone -Arguments (@(
         'ad', 'app', 'update',
         '--id', $AppId,
+        '--display-name', $registrationDisplayName,
         '--sign-in-audience', 'AzureADMyOrg',
+        '--web-home-page-url', $viewerBaseUrl,
         '--web-redirect-uris', $callbackUrl,
         '--enable-access-token-issuance', 'false',
-        '--enable-id-token-issuance', 'true'
+        '--enable-id-token-issuance', 'true',
+        '--set', "description=$registrationDescription"
     ) + $referenceArguments)
+}
+
+function Set-ViewerAppRegistrationLogo {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $ObjectId
+    )
+
+    Write-Step "Setting Entra app registration '$registrationDisplayName' logo"
+    $graphToken =
+        Invoke-AzJson -Arguments @(
+            'account', 'get-access-token',
+            '--resource-type', 'ms-graph')
+    $accessToken = [string] $graphToken.accessToken
+
+    if ([string]::IsNullOrWhiteSpace($accessToken)) {
+        throw 'Azure CLI did not return a Microsoft Graph access token for the logo upload.'
+    }
+
+    $secureAccessToken =
+        ConvertTo-SecureString `
+            -String $accessToken `
+            -AsPlainText `
+            -Force
+
+    try {
+        Invoke-RestMethod `
+            -Uri "https://graph.microsoft.com/v1.0/applications/$ObjectId/logo" `
+            -Method Put `
+            -Authentication Bearer `
+            -Token $secureAccessToken `
+            -ContentType 'image/png' `
+            -InFile $registrationLogoPath |
+            Out-Null
+    } catch {
+        throw "Could not set Entra app registration '$registrationDisplayName' logo: $($_.Exception.Message)"
+    }
+}
+
+function Set-ViewerServicePrincipalBranding {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $AppId
+    )
+
+    Invoke-AzNone -Arguments @(
+        'ad', 'sp', 'update',
+        '--id', $AppId,
+        '--set',
+        "displayName=$registrationDisplayName",
+        "description=$registrationDescription",
+        "homepage=$viewerBaseUrl")
+}
+
+function Get-BrandedAppRegistration {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string] $AppId
+    )
+
+    $attempts = 5
+
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        $appRegistration =
+            Invoke-AzJson -Arguments @(
+                'ad', 'app', 'show',
+                '--id', $AppId)
+        $info = Get-AzureResourcePropertyValue -Resource $appRegistration -Name 'info'
+        $logoUrl =
+            if ($null -eq $info) {
+                ''
+            } else {
+                [string] (Get-AzureResourcePropertyValue -Resource $info -Name 'logoUrl')
+            }
+
+        if (-not [string]::IsNullOrWhiteSpace($logoUrl) -or
+            $attempt -eq $attempts) {
+            return $appRegistration
+        }
+
+        Start-Sleep -Seconds 2
+    }
 }
 
 function Ensure-AppRegistration {
@@ -558,7 +698,7 @@ function Ensure-AppRegistration {
     $serviceManagementReference = ''
     $appRegistration =
         if ($null -eq $ExistingRegistration) {
-            Write-Step "Creating single-tenant Entra app registration '$Registration'"
+            Write-Step "Creating single-tenant Entra app registration '$registrationDisplayName'"
 
             try {
                 New-ViewerAppRegistration -ServiceManagementReference ''
@@ -600,6 +740,8 @@ function Ensure-AppRegistration {
             -ServiceManagementReference $serviceManagementReference
     }
 
+    Set-ViewerAppRegistrationLogo -ObjectId ([string] $appRegistration.id)
+
     $servicePrincipals = @(
         Invoke-AzJson -Arguments @(
             'ad', 'sp', 'list',
@@ -611,8 +753,10 @@ function Ensure-AppRegistration {
             'ad', 'sp', 'create',
             '--id', [string] $appRegistration.appId)
     } elseif ($servicePrincipals.Count -gt 1) {
-        throw "More than one service principal exists for Entra app registration '$Registration'."
+        throw "More than one service principal exists for Entra app registration '$registrationDisplayName'."
     }
+
+    Set-ViewerServicePrincipalBranding -AppId ([string] $appRegistration.appId)
 
     Invoke-AzJson -Arguments @('ad', 'app', 'show', '--id', [string] $appRegistration.appId)
 }
@@ -887,7 +1031,7 @@ function Ensure-EasyAuth {
                         openIdIssuer = "https://login.microsoftonline.com/$TenantId/v2.0"
                     }
                     login = [ordered]@{
-                        loginParameters = @()
+                        loginParameters = @($easyAuthLoginParameter)
                     }
                 }
             }
@@ -907,6 +1051,30 @@ function Ensure-EasyAuth {
         '--uri', "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Web/sites/$appName/config/authsettingsV2?api-version=2023-12-01",
         '--body', "@$authSettingsPath",
         '--subscription', $SubscriptionId)
+}
+
+function Assert-EasyAuthConfiguration {
+    param(
+        [Parameter(Mandatory)][pscustomobject] $AppRegistration,
+        [Parameter(Mandatory)][string] $TenantId,
+        [Parameter(Mandatory)][pscustomobject] $AuthSettings
+    )
+
+    $azureAd = $AuthSettings.properties.identityProviders.azureActiveDirectory
+    $loginParameters = @($azureAd.login.loginParameters)
+
+    if (-not [bool] $AuthSettings.properties.platform.enabled -or
+        -not [bool] $AuthSettings.properties.globalValidation.requireAuthentication -or
+        [string] $AuthSettings.properties.globalValidation.unauthenticatedClientAction -cne 'RedirectToLoginPage' -or
+        -not [bool] $azureAd.enabled -or
+        [string] $azureAd.registration.clientId -cne [string] $AppRegistration.appId -or
+        [string] $azureAd.registration.clientSecretSettingName -cne $managedIdentityAssertionSetting -or
+        [string] $azureAd.registration.openIdIssuer -cne "https://login.microsoftonline.com/$TenantId/v2.0" -or
+        $loginParameters.Count -ne 1 -or
+        [string] $loginParameters[0] -cne $easyAuthLoginParameter -or
+        [bool] $AuthSettings.properties.login.tokenStore.enabled) {
+        throw 'Easy Auth is not configured for openid-only, secret-free, single-tenant authentication with the token store disabled.'
+    }
 }
 
 function Disable-BasicPublishingCredentials {
@@ -1040,30 +1208,38 @@ function Assert-DeployedState {
         throw 'An Easy Auth client-secret setting is present.'
     }
 
-    $currentAppRegistration = Invoke-AzJson -Arguments @(
-        'ad', 'app', 'show',
-        '--id', [string] $AppRegistration.appId)
+    $currentAppRegistration =
+        Get-BrandedAppRegistration `
+            -AppId ([string] $AppRegistration.appId)
     Assert-AppRegistrationAuthenticationFlow `
         -AppRegistration $currentAppRegistration
+    Assert-AppRegistrationBranding `
+        -AppRegistration $currentAppRegistration
+    $currentServicePrincipals = @(
+        Invoke-AzJson -Arguments @(
+            'ad', 'sp', 'list',
+            '--filter', "appId eq '$($AppRegistration.appId)'")
+    )
+
+    if ($currentServicePrincipals.Count -ne 1) {
+        throw "Expected exactly one enterprise application for '$registrationDisplayName'."
+    }
+
+    $currentServicePrincipal = Invoke-AzJson -Arguments @(
+        'ad', 'sp', 'show',
+        '--id', [string] $AppRegistration.appId)
+    Assert-ServicePrincipalBranding `
+        -ServicePrincipal $currentServicePrincipal
 
     $authSettings = Invoke-AzJson -Arguments @(
         'rest',
         '--method', 'get',
         '--uri', "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Web/sites/$appName/config/authsettingsV2?api-version=2023-12-01",
         '--subscription', $SubscriptionId)
-    $azureAd = $authSettings.properties.identityProviders.azureActiveDirectory
-
-    if (-not [bool] $authSettings.properties.platform.enabled -or
-        -not [bool] $authSettings.properties.globalValidation.requireAuthentication -or
-        [string] $authSettings.properties.globalValidation.unauthenticatedClientAction -cne 'RedirectToLoginPage' -or
-        -not [bool] $azureAd.enabled -or
-        [string] $azureAd.registration.clientId -cne [string] $AppRegistration.appId -or
-        [string] $azureAd.registration.clientSecretSettingName -cne $managedIdentityAssertionSetting -or
-        [string] $azureAd.registration.openIdIssuer -cne "https://login.microsoftonline.com/$TenantId/v2.0" -or
-        @($azureAd.login.loginParameters).Count -ne 0 -or
-        [bool] $authSettings.properties.login.tokenStore.enabled) {
-        throw 'Easy Auth is not configured for required, secret-free, single-tenant authentication with the token store disabled.'
-    }
+    Assert-EasyAuthConfiguration `
+        -AppRegistration $AppRegistration `
+        -TenantId $TenantId `
+        -AuthSettings $authSettings
 
     foreach ($policyName in @('ftp', 'scm')) {
         $policy = Invoke-AzJson -Arguments @(

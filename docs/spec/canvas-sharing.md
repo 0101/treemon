@@ -164,7 +164,10 @@
   Easy Auth via a managed-identity federated credential rather than a long-lived client secret.
   The registration enables ID-token issuance because Easy Auth's browser callback requests
   `response_type=code id_token` with `response_mode=form_post`; browser access-token issuance
-  remains disabled.
+  remains disabled. Easy Auth explicitly requests only `openid`, the minimum scope needed for the
+  ID token and stable subject identifier; the viewer requests neither profile nor email claims.
+  The registration is presented as **Treemon Canvas Viewer**, with the canonical viewer homepage,
+  a plain-language read-only description, and a 215x215 logo derived from the Treemon PWA icon.
 - Two routes divide responsibility: a shell route (`/c/<opaque-prefix>/<filename>`) validates the
   request and expiry through an exact Blob properties lookup and renders a minimal HTML page
   without downloading the document body; a content route
@@ -210,9 +213,11 @@
 - Expiry is enforced synchronously on every request against the metadata the publisher wrote. The
   account's Blob lifecycle policy still runs, but only as eventual cleanup after the access
   deadline, not as the authorization boundary.
-- Easy Auth's token store is disabled and no downstream Graph scopes are requested; the viewer
-  origin exposes no upload/delete/admin API -- it is read-only, with only the shell and content
-  routes.
+- Easy Auth's token store is disabled and no downstream Graph or other API permissions are
+  declared. Microsoft Entra may still show its generic "Maintain access" consent text because
+  `offline_access` is implicit in delegated consent, but the authorization request omits that scope
+  and the viewer cannot retain provider refresh tokens. The viewer origin exposes no
+  upload/delete/admin API -- it is read-only, with only the shell and content routes.
 
 ### Wire contract (publisher <-> viewer)
 
@@ -244,8 +249,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 ### Provisioning
 
 - `scripts/deploy-canvas-share-viewer.ps1` is the idempotent validate/apply entry point. Deployment
-  names are operator inputs; storage and publisher identity come from machine configuration and the
-  selected Azure CLI user. Exact subscription, tenant, and resource identifiers remain private.
+  names except the canonical app registration are operator inputs; storage and publisher identity
+  come from machine configuration and the selected Azure CLI user. Exact subscription, tenant, and
+  resource identifiers remain private.
 - The requested, approved, and selected subscriptions must resolve to the same enabled subscription
   before any resource-provider or Entra operation. Every resource-plane call names that subscription
   explicitly, and failures identify the protected setting without revealing its value.
@@ -255,8 +261,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   identity whose effective Blob-read access is audited before mutation and after deployment; any
   read grant broader than the configured private container fails closed and is never auto-deleted.
 - Apply reconciles the private container, lifecycle rule, B1 Linux plan, App Service, secret-free
-  Easy Auth federation, production environment settings, and canonical `viewerBaseUrl`. Validation
-  performs the same safety checks plus a local Release publish without changing Azure or config.
+  Easy Auth federation, openid-only login scope, user-facing registration branding, production
+  environment settings, and canonical `viewerBaseUrl`. Validation performs the same safety checks
+  plus a local Release publish without changing Azure or config.
 - The lifecycle policy is merged with unrelated account rules, and verification removes only its
   temporary document fixtures. Canonical resources and access grants remain deployed.
 - Feature development, deployment, and verification never run a production lifecycle command
@@ -298,6 +305,8 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Enforce expiry in the viewer at request time rather than relying on Blob lifecycle deletion | Lifecycle deletion runs on a daily-ish schedule and is a backstop; relying on it alone would leave documents readable past their promised expiry. |
 | Prefer a managed-identity federated credential over an Easy Auth client secret | Avoids minting, storing, or rotating a long-lived secret for the viewer's app registration. |
 | Enable registration ID-token issuance but not browser access-token issuance | App Service Easy Auth uses an OIDC hybrid `code id_token` form-post callback and rejects sign-in when the registration cannot issue that ID token; it redeems the code server-side through managed-identity federation, so browser access-token issuance remains unnecessary. |
+| Request only the `openid` login scope | The viewer needs an ID token to authenticate a tenant subject but reads no profile/email claims and calls no downstream API. Explicit `scope=openid` prevents App Service's broader `openid profile email` defaults from adding an unused basic-profile consent ask. |
+| Give the registration a canonical product identity | A fixed **Treemon Canvas Viewer** name, read-only description, canonical homepage, and PWA logo make the consent/App info surfaces recognizable. The former technical name is accepted only as a bounded migration lookup so deployment renames the durable registration instead of creating a duplicate. |
 | Store expiry as blob metadata rather than a separate data store | Keeps the expiry attached to the artifact it governs, with no second store to keep in sync; it travels and disappears with the blob. |
 | Re-check segments and expiry on the content route instead of trusting the shell | The recipient holds the URL, so the content route is directly reachable; a shell-only check would leave an expired share readable by editing the path. |
 | Use a properties-only Blob lookup for the shell and reserve the body read for the content route | The shell needs only existence and expiry metadata, so downloading and discarding the complete document there would double the transferred document bytes without strengthening validation. |
@@ -338,6 +347,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | `scripts/canvas-share-viewer-deployment/SubscriptionGuard.ps1` | Fail-closed approved/requested/selected subscription, tenant, and delegated-publisher validation with private lookup diagnostics redacted |
 | `scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1` | Windows/Azure CLI shape, packaging-output, restricted-tenant registration, and Easy Auth callback regressions |
 | `scripts/canvas-share-viewer-deployment/ViewerBlobAccess.ps1` | Fail-closed audit of the viewer identity's effective Blob-read data-plane assignments |
+| `scripts/canvas-share-viewer-deployment/treemon-canvas-viewer-logo.png` | Entra-compliant logo derived from the Treemon PWA icon |
 | `scripts/canvas-share-lifecycle-policy.json` | Container-filtered deletion rule starting after 31 days |
 | `docs/canvas-share-viewer-deployment.md` | Local operator prerequisites, dry run, apply, and durable-resource guidance |
 
@@ -350,6 +360,9 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   browser navigation headers (`Accept: text/html`), since App Service Easy Auth may return an empty
   401 instead of a redirect to an API-style client. Any identity the tenant authenticates -- member
   or B2B guest -- views the document; an identity outside the tenant is denied.
+- The authorization redirect requests exactly `scope=openid` with `response_type=code id_token`;
+  the app registration declares no Graph or other API permissions, and both the registration and
+  Enterprise Application show the canonical name, read-only description, homepage, and PWA logo.
 - The control-plane RBAC audit finds no effective Blob data-plane read assignment outside the share
   container, and the live second-container probe under the deployed viewer identity still returns
   403 as defense in depth.

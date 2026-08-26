@@ -217,6 +217,53 @@ function Set-TreemonViewerBaseUrl {
     }
 }
 
+function Assert-RegistrationLogo {
+    param([Parameter(Mandatory)][string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Viewer registration logo was not found at '$Path'."
+    }
+
+    $bytes = [IO.File]::ReadAllBytes($Path)
+
+    if ($bytes.Length -gt 100KB) {
+        throw "Viewer registration logo at '$Path' exceeds 100 KB."
+    }
+
+    $hasPngHeader =
+        $bytes.Length -ge 24 -and
+        $bytes[0] -eq 0x89 -and
+        $bytes[1] -eq 0x50 -and
+        $bytes[2] -eq 0x4E -and
+        $bytes[3] -eq 0x47 -and
+        $bytes[4] -eq 0x0D -and
+        $bytes[5] -eq 0x0A -and
+        $bytes[6] -eq 0x1A -and
+        $bytes[7] -eq 0x0A
+    $width =
+        if ($hasPngHeader) {
+            ($bytes[16] -shl 24) -bor
+                ($bytes[17] -shl 16) -bor
+                ($bytes[18] -shl 8) -bor
+                $bytes[19]
+        } else {
+            0
+        }
+    $height =
+        if ($hasPngHeader) {
+            ($bytes[20] -shl 24) -bor
+                ($bytes[21] -shl 16) -bor
+                ($bytes[22] -shl 8) -bor
+                $bytes[23]
+        } else {
+            0
+        }
+
+    if (-not $hasPngHeader -or $width -ne 215 -or $height -ne 215) {
+        throw "Viewer registration logo at '$Path' must be a 215x215 PNG."
+    }
+}
+
 function Assert-Prerequisites {
     if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
         throw 'Azure CLI (az) is required.'
@@ -233,6 +280,8 @@ function Assert-Prerequisites {
     if (-not (Test-Path -LiteralPath $lifecyclePolicyPath -PathType Leaf)) {
         throw "Lifecycle policy was not found at '$lifecyclePolicyPath'."
     }
+
+    Assert-RegistrationLogo -Path $registrationLogoPath
 
     $azVersions = Invoke-AzJson -Arguments @('version')
     $azVersion = [version] $azVersions.'azure-cli'

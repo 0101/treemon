@@ -24,7 +24,9 @@ domain.
 
 - Azure permissions to create resources, update the storage account, assign roles at the Blob
   container scope, and disable App Service basic publishing credentials. Entra permissions must
-  allow creation or ownership of the dedicated app registration and its federated credential.
+  allow creation or ownership of the dedicated app registration and its federated credential,
+  updating the matching Enterprise Application, and uploading the registration logo through
+  Microsoft Graph.
   The operator must also be able to list the viewer identity's role assignments throughout the
   subscription and inherited parent scopes and read their role definitions.
 - If the tenant enforces `serviceManagementReference` on app-registration changes, the signed-in
@@ -65,7 +67,6 @@ Run the read-only validation first:
   -ResourceGroup '<non-production-resource-group>' `
   -Plan '<app-service-plan>' `
   -Identity '<viewer-managed-identity>' `
-  -Registration '<viewer-app-registration>' `
   -ValidateOnly
 ```
 
@@ -88,8 +89,7 @@ Remove `-ValidateOnly` to apply the same plan:
   -Tenant '<tenant-id>' `
   -ResourceGroup '<non-production-resource-group>' `
   -Plan '<app-service-plan>' `
-  -Identity '<viewer-managed-identity>' `
-  -Registration '<viewer-app-registration>'
+  -Identity '<viewer-managed-identity>'
 ```
 
 The script is idempotent and is intended to be run a second time with the same values. It:
@@ -101,18 +101,25 @@ The script is idempotent and is intended to be run a second time with the same v
    `Storage Blob Data Contributor`, both at that container's exact ARM scope. Before mutating an
    existing deployment and again during final verification, it rejects broader viewer Blob-read
    assignments discovered anywhere in the subscription or inherited from a parent scope.
-3. Creates or reuses one uniquely named, secret-free, current-tenant `AzureADMyOrg` app
-   registration and service principal. The registration accepts only the canonical App Service
-   callback. On a restricted tenant's specific `serviceManagementReference` error, creation or
-   update retries with the one unambiguous reference already carried by applications the delegated
-   publisher owns. It enables ID-token issuance for Easy Auth's `code id_token` form-post callback
-   while leaving browser access-token issuance disabled.
+3. Creates or reuses the secret-free, current-tenant `AzureADMyOrg` app registration and service
+   principal named **Treemon Canvas Viewer**. A bounded lookup recognizes the former
+   `treemon-canvas-viewer-auth` name so the existing registration is renamed rather than duplicated.
+   The registration uses the canonical viewer URL as its homepage, carries a plain-language
+   read-only description, and uploads a tracked 215x215 PNG derived from the Treemon PWA icon. It
+   accepts only the canonical App Service callback and declares no Graph or other API permissions. On a restricted
+   tenant's specific `serviceManagementReference` error, creation or update retries with the one
+   unambiguous reference already carried by applications the delegated publisher owns. It enables
+   ID-token issuance for Easy Auth's `code id_token` form-post callback while leaving browser
+   access-token issuance disabled.
 4. Adds a federated credential whose subject is the managed identity principal. Easy Auth uses the
    slot-sticky `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID` setting and its
    `clientSecretSettingName` sentinel, so no client secret is created.
-5. Requires Easy Auth before requests reach the viewer, uses the tenant's v2 issuer, requests no
-   extra login scopes, requires HTTPS, disables the token store, and pins both the .NET host and
-   ASP.NET Core environments to `Production`.
+5. Requires Easy Auth before requests reach the viewer, uses the tenant's v2 issuer, explicitly
+   requests only the `openid` scope, requires HTTPS, disables the token store, and pins both the
+   .NET host and ASP.NET Core environments to `Production`. This removes App Service's unused
+   default `profile` and `email` requests. Microsoft Entra can still display its generic
+   "Maintain access to data you have given it access to" consent line even though the request omits
+   `offline_access` and the disabled token store cannot retain provider refresh tokens.
 6. Merges `expire-shared-canvas-docs` into the storage account's complete lifecycle policy while
    preserving unrelated rules. Deletion starts only after more than 31 days, beyond the 30-day
    maximum share lifetime.
@@ -137,8 +144,9 @@ The script is idempotent and is intended to be run a second time with the same v
    running server, so a settings change made in the UI at the same moment could be overwritten.
 
 The automation does not invoke Treemon server lifecycle commands and does not bind any local
-Treemon port. Temporary build and JSON files are deleted on exit. It does not request or print
-access tokens, create deployment credentials, or read a publishing profile.
+Treemon port. Temporary build and JSON files are deleted on exit. It requests one Microsoft Graph
+token in memory to upload the app logo but never prints or persists it. It creates no deployment
+credentials and does not read a publishing profile.
 
 ## After deployment
 

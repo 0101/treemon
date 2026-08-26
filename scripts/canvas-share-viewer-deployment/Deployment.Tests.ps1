@@ -83,13 +83,13 @@ $contributorRole = 'Storage Blob Data Contributor'
 $ResourceGroup = 'viewer-rg'
 $Plan = 'viewer-plan'
 $Identity = 'viewer-identity'
-$Registration = 'viewer-registration'
 
 . (Join-Path $PSScriptRoot 'Azure.ps1')
 
 $script:scenario = ''
 $script:azNoneCalls = @()
 $script:azJsonCalls = @()
+$script:restMethodCalls = @()
 $script:subscriptionAccounts = @{}
 $script:subscriptionLookupFailures = @{}
 $script:selectedAccount = $null
@@ -107,12 +107,19 @@ $script:webAppResult =
     }
 $script:registrationResult =
     [pscustomobject]@{
+        id = '88888888-7777-6666-5555-444444444444'
         appId = '99999999-8888-7777-6666-555555555555'
-        displayName = $Registration
+        displayName = $registrationDisplayName
+        description = $registrationDescription
         signInAudience = 'AzureADMyOrg'
         passwordCredentials = @()
+        requiredResourceAccess = @()
         serviceManagementReference = $script:serviceManagementReference
+        info = [pscustomobject]@{
+            logoUrl = 'https://aadcdn.msftauthimages.net/logo.png'
+        }
         web = [pscustomobject]@{
+            homePageUrl = $viewerBaseUrl
             redirectUris = @($callbackUrl)
             implicitGrantSettings = [pscustomobject]@{
                 enableAccessTokenIssuance = $false
@@ -120,9 +127,105 @@ $script:registrationResult =
             }
         }
     }
+$script:legacyRegistrationResult =
+    [pscustomobject]@{
+        id = $script:registrationResult.id
+        appId = $script:registrationResult.appId
+        displayName = $legacyRegistrationDisplayName
+        description = $null
+        signInAudience = 'AzureADMyOrg'
+        passwordCredentials = @()
+        requiredResourceAccess = @()
+        serviceManagementReference = $script:serviceManagementReference
+        info = [pscustomobject]@{ logoUrl = $null }
+        web = [pscustomobject]@{
+            homePageUrl = $null
+            redirectUris = @($callbackUrl)
+            implicitGrantSettings = [pscustomobject]@{
+                enableAccessTokenIssuance = $false
+                enableIdTokenIssuance = $true
+            }
+        }
+    }
+$script:servicePrincipalResult =
+    [pscustomobject]@{
+        appId = $script:registrationResult.appId
+        displayName = $registrationDisplayName
+        description = $registrationDescription
+        homepage = $viewerBaseUrl
+    }
 
 function Write-Step {
     param([Parameter(Mandatory)][string] $Message)
+}
+
+Invoke-TestCase 'registration logo is a bounded 215-pixel PNG' {
+    Assert-RegistrationLogo -Path $registrationLogoPath
+
+    $temporaryDirectory =
+        Join-Path ([IO.Path]::GetTempPath()) "treemon-logo-test-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
+
+    try {
+        $missingRejected = $false
+
+        try {
+            Assert-RegistrationLogo `
+                -Path (Join-Path $temporaryDirectory 'missing.png')
+        } catch {
+            $missingRejected =
+                $_.Exception.Message -match 'was not found'
+        }
+
+        Assert-True `
+            -Condition $missingRejected `
+            -Because 'a missing consent-screen logo must fail before Azure mutation'
+
+        $wrongSizePath = Join-Path $temporaryDirectory 'wrong-size.png'
+        $wrongSizeBytes = [byte[]]::new(24)
+        $wrongSizeBytes[0] = 0x89
+        $wrongSizeBytes[1] = 0x50
+        $wrongSizeBytes[2] = 0x4E
+        $wrongSizeBytes[3] = 0x47
+        $wrongSizeBytes[4] = 0x0D
+        $wrongSizeBytes[5] = 0x0A
+        $wrongSizeBytes[6] = 0x1A
+        $wrongSizeBytes[7] = 0x0A
+        $wrongSizeBytes[19] = 0xC0
+        $wrongSizeBytes[23] = 0xC0
+        [IO.File]::WriteAllBytes($wrongSizePath, $wrongSizeBytes)
+        $wrongSizeRejected = $false
+
+        try {
+            Assert-RegistrationLogo -Path $wrongSizePath
+        } catch {
+            $wrongSizeRejected =
+                $_.Exception.Message -match '215x215 PNG'
+        }
+
+        Assert-True `
+            -Condition $wrongSizeRejected `
+            -Because 'a PWA icon must be derived to the exact Entra dimensions'
+
+        $oversizedPath = Join-Path $temporaryDirectory 'oversized.png'
+        [IO.File]::WriteAllBytes(
+            $oversizedPath,
+            [byte[]]::new(100KB + 1))
+        $oversizedRejected = $false
+
+        try {
+            Assert-RegistrationLogo -Path $oversizedPath
+        } catch {
+            $oversizedRejected =
+                $_.Exception.Message -match 'exceeds 100 KB'
+        }
+
+        Assert-True `
+            -Condition $oversizedRejected `
+            -Because 'an oversized logo must fail before Azure mutation'
+    } finally {
+        Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Invoke-AzNone {
@@ -195,6 +298,11 @@ function Invoke-AzJson {
         }
         'registration' {
             switch ($command) {
+                'account get-access-token --resource-type' {
+                    return [pscustomobject]@{
+                        accessToken = 'fixture-graph-token'
+                    }
+                }
                 'ad app create' {
                     $script:createCallCount++
 
@@ -223,6 +331,23 @@ function Invoke-AzJson {
                 }
             }
         }
+        'registration-lookup' {
+            switch ($command) {
+                'ad app list' {
+                    $displayNameIndex = [Array]::IndexOf($Arguments, '--display-name')
+                    $displayName = [string] $Arguments[$displayNameIndex + 1]
+
+                    if ($displayName -ceq $legacyRegistrationDisplayName) {
+                        return @($script:legacyRegistrationResult)
+                    }
+
+                    return @()
+                }
+                'ad app show' {
+                    return $script:legacyRegistrationResult
+                }
+            }
+        }
     }
 
     throw "Unexpected mocked Azure CLI command: $($Arguments -join ' ')"
@@ -238,6 +363,27 @@ function Reset-AzureContextMocks {
     $script:publisherResult =
         [pscustomobject]@{
             id = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+        }
+}
+
+function Invoke-RestMethod {
+    param(
+        [Parameter(Mandatory)][string] $Uri,
+        [Parameter(Mandatory)][string] $Method,
+        [Parameter(Mandatory)][string] $Authentication,
+        [Parameter(Mandatory)][securestring] $Token,
+        [Parameter(Mandatory)][string] $ContentType,
+        [Parameter(Mandatory)][string] $InFile
+    )
+
+    $script:restMethodCalls +=
+        [pscustomobject]@{
+            Uri = $Uri
+            Method = $Method
+            Authentication = $Authentication
+            Token = $Token
+            ContentType = $ContentType
+            InFile = $InFile
         }
 }
 
@@ -812,9 +958,38 @@ Invoke-TestCase 'clean and existing web apps use file-backed runtime configurati
     }
 }
 
+Invoke-TestCase 'legacy registration lookup preserves the durable app during branding migration' {
+    $script:scenario = 'registration-lookup'
+    $script:azJsonCalls = @()
+
+    $registration = Get-ExactAppRegistration
+
+    Assert-Equal `
+        -Actual ([string] $registration.appId) `
+        -Expected ([string] $script:legacyRegistrationResult.appId) `
+        -Because 'the existing technical-name registration must be reused rather than duplicated'
+
+    $lookupNames =
+        @(
+            $script:azJsonCalls
+            | Where-Object { ($_.Arguments[0..2] -join ' ') -eq 'ad app list' }
+            | ForEach-Object {
+                $displayNameIndex = [Array]::IndexOf($_.Arguments, '--display-name')
+                [string] $_.Arguments[$displayNameIndex + 1]
+            }
+        )
+    Assert-True `
+        -Condition ($lookupNames.Count -eq 2 -and
+            $lookupNames -contains $registrationDisplayName -and
+            $lookupNames -contains $legacyRegistrationDisplayName) `
+        -Because 'lookup must cover the canonical and one bounded legacy display name'
+}
+
 Invoke-TestCase 'restricted-tenant registration creation converges on existing state' {
     $script:scenario = 'registration'
     $script:azNoneCalls = @()
+    $script:azJsonCalls = @()
+    $script:restMethodCalls = @()
     $script:createCallCount = 0
 
     $created = Ensure-AppRegistration -ExistingRegistration $null
@@ -828,6 +1003,29 @@ Invoke-TestCase 'restricted-tenant registration creation converges on existing s
         -Actual ([string] $existing.appId) `
         -Expected ([string] $script:registrationResult.appId) `
         -Because 'the existing-state path reuses the same registration'
+
+    $createCalls = @(
+        $script:azJsonCalls
+        | Where-Object { ($_.Arguments[0..2] -join ' ') -eq 'ad app create' }
+    )
+    Assert-Equal `
+        -Actual $createCalls.Count `
+        -Expected 2 `
+        -Because 'restricted-tenant creation retries exactly once'
+
+    foreach ($call in $createCalls) {
+        $displayNameIndex = [Array]::IndexOf($call.Arguments, '--display-name')
+        Assert-Equal `
+            -Actual ([string] $call.Arguments[$displayNameIndex + 1]) `
+            -Expected $registrationDisplayName `
+            -Because 'new registrations must start with the user-facing name'
+
+        $homepageIndex = [Array]::IndexOf($call.Arguments, '--web-home-page-url')
+        Assert-Equal `
+            -Actual ([string] $call.Arguments[$homepageIndex + 1]) `
+            -Expected $viewerBaseUrl `
+            -Because 'new registrations must start with the canonical homepage'
+    }
 
     $updateCalls = @(
         $script:azNoneCalls
@@ -868,20 +1066,160 @@ Invoke-TestCase 'restricted-tenant registration creation converges on existing s
             -Actual ([string] $call.Arguments[$idTokenIndex + 1]) `
             -Expected 'true' `
             -Because 'Easy Auth requests code and id_token at its form-post callback'
+
+        $displayNameIndex =
+            [Array]::IndexOf($call.Arguments, '--display-name')
+        Assert-Equal `
+            -Actual ([string] $call.Arguments[$displayNameIndex + 1]) `
+            -Expected $registrationDisplayName `
+            -Because 'registration updates must reconcile the user-facing app name'
+
+        $homepageIndex =
+            [Array]::IndexOf($call.Arguments, '--web-home-page-url')
+        Assert-Equal `
+            -Actual ([string] $call.Arguments[$homepageIndex + 1]) `
+            -Expected $viewerBaseUrl `
+            -Because 'registration updates must reconcile the canonical homepage'
+
+        $descriptionIndex =
+            [Array]::IndexOf($call.Arguments, '--set')
+        Assert-Equal `
+            -Actual ([string] $call.Arguments[$descriptionIndex + 1]) `
+            -Expected "description=$registrationDescription" `
+            -Because 'registration updates must reconcile the plain-language description'
+    }
+
+    Assert-Equal `
+        -Actual $script:restMethodCalls.Count `
+        -Expected 2 `
+        -Because 'both clean and existing state must reconcile the PWA logo'
+
+    foreach ($call in $script:restMethodCalls) {
+        Assert-Equal `
+            -Actual ([string] $call.Uri) `
+            -Expected "https://graph.microsoft.com/v1.0/applications/$($script:registrationResult.id)/logo" `
+            -Because 'the logo must target the existing application object'
+
+        Assert-Equal `
+            -Actual ([string] $call.InFile) `
+            -Expected $registrationLogoPath `
+            -Because 'the logo upload must use the tracked Treemon PWA icon'
+        Assert-True `
+            -Condition ($call.Method -ceq 'Put' -and
+                $call.ContentType -ceq 'image/png' -and
+                $call.Authentication -ceq 'Bearer' -and
+                (ConvertFrom-SecureString $call.Token -AsPlainText) -ceq 'fixture-graph-token') `
+            -Because 'the logo must be uploaded as raw PNG bytes with an in-memory Graph token'
+    }
+
+    $servicePrincipalUpdates = @(
+        $script:azNoneCalls
+        | Where-Object { ($_.Arguments[0..2] -join ' ') -eq 'ad sp update' }
+    )
+    Assert-Equal `
+        -Actual $servicePrincipalUpdates.Count `
+        -Expected 2 `
+        -Because 'both clean and existing state must reconcile Enterprise Application details'
+
+    foreach ($call in $servicePrincipalUpdates) {
+        Assert-True `
+            -Condition ($call.Arguments -contains "displayName=$registrationDisplayName" -and
+                $call.Arguments -contains "description=$registrationDescription" -and
+                $call.Arguments -contains "homepage=$viewerBaseUrl") `
+            -Because 'the Enterprise Application must match the user-facing app registration'
+    }
+}
+
+Invoke-TestCase 'Easy Auth requests only openid and rejects broader deployed scopes' {
+    $script:scenario = 'registration'
+    $script:azNoneCalls = @()
+    $workingDirectory =
+        Join-Path ([IO.Path]::GetTempPath()) "treemon-easy-auth-test-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $workingDirectory | Out-Null
+
+    try {
+        Ensure-EasyAuth `
+            -AppRegistration $script:registrationResult `
+            -TenantId 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' `
+            -SubscriptionId '11111111-2222-3333-4444-555555555555' `
+            -WorkingDirectory $workingDirectory
+
+        $authCall =
+            @(
+                $script:azNoneCalls
+                | Where-Object {
+                    ($_.Arguments[0..2] -join ' ') -eq 'rest --method put' -and
+                        ($_.Arguments -join ' ') -match 'authsettingsV2'
+                }
+            )
+            | Select-Object -First 1
+        $bodyIndex = [Array]::IndexOf($authCall.Arguments, '--body')
+        $authSettingsPath =
+            ([string] $authCall.Arguments[$bodyIndex + 1]).TrimStart('@')
+        $authSettings =
+            Get-Content -LiteralPath $authSettingsPath -Raw |
+            ConvertFrom-Json
+        $loginParameters =
+            @($authSettings.properties.identityProviders.azureActiveDirectory.login.loginParameters)
+
+        Assert-Equal `
+            -Actual ($loginParameters -join '|') `
+            -Expected $easyAuthLoginParameter `
+            -Because 'Easy Auth must override its profile and email defaults with openid only'
+        Assert-Equal `
+            -Actual ([bool] $authSettings.properties.login.tokenStore.enabled) `
+            -Expected $false `
+            -Because 'openid-only authentication must not enable provider token storage'
+
+        Assert-EasyAuthConfiguration `
+            -AppRegistration $script:registrationResult `
+            -TenantId 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' `
+            -AuthSettings $authSettings
+
+        $authSettings.properties.identityProviders.azureActiveDirectory.login.loginParameters =
+            @('scope=openid profile email')
+        $rejectedDefaultScopes = $false
+
+        try {
+            Assert-EasyAuthConfiguration `
+                -AppRegistration $script:registrationResult `
+                -TenantId 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' `
+                -AuthSettings $authSettings
+        } catch {
+            $rejectedDefaultScopes =
+                $_.Exception.Message -match 'openid-only'
+        }
+
+        Assert-True `
+            -Condition $rejectedDefaultScopes `
+            -Because 'deployed-state verification must reject App Service default profile and email scopes'
+    } finally {
+        Remove-Item -LiteralPath $workingDirectory -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
 Invoke-TestCase 'deployed registration requires ID tokens without browser access tokens' {
     Assert-AppRegistrationAuthenticationFlow `
         -AppRegistration $script:registrationResult
+    Assert-AppRegistrationBranding `
+        -AppRegistration $script:registrationResult
+    Assert-ServicePrincipalBranding `
+        -ServicePrincipal $script:servicePrincipalResult
 
     $invalidRegistration =
         [pscustomobject]@{
+            id = $script:registrationResult.id
             appId = $script:registrationResult.appId
-            displayName = $Registration
+            displayName = $registrationDisplayName
+            description = $registrationDescription
             passwordCredentials = @()
+            requiredResourceAccess = @()
             signInAudience = 'AzureADMyOrg'
+            info = [pscustomobject]@{
+                logoUrl = 'https://aadcdn.msftauthimages.net/logo.png'
+            }
             web = [pscustomobject]@{
+                homePageUrl = $viewerBaseUrl
                 redirectUris = @($callbackUrl)
                 implicitGrantSettings = [pscustomobject]@{
                     enableAccessTokenIssuance = $false
@@ -918,6 +1256,59 @@ Invoke-TestCase 'deployed registration requires ID tokens without browser access
     Assert-True `
         -Condition $rejectedBrowserAccessToken `
         -Because 'deployed-state verification must keep browser access-token issuance disabled'
+
+    $invalidRegistration.web.implicitGrantSettings.enableAccessTokenIssuance = $false
+    $invalidRegistration.requiredResourceAccess =
+        @([pscustomobject]@{ resourceAppId = '00000003-0000-0000-c000-000000000000' })
+    $rejectedApiPermissions = $false
+
+    try {
+        Assert-AppRegistrationAuthenticationFlow `
+            -AppRegistration $invalidRegistration
+    } catch {
+        $rejectedApiPermissions =
+            $_.Exception.Message -match 'declares API permissions'
+    }
+
+    Assert-True `
+        -Condition $rejectedApiPermissions `
+        -Because 'the viewer registration must remain free of Microsoft Graph and other API permissions'
+
+    $invalidRegistration.requiredResourceAccess = @()
+    $invalidRegistration.description = 'technical placeholder'
+    $rejectedBranding = $false
+
+    try {
+        Assert-AppRegistrationBranding `
+            -AppRegistration $invalidRegistration
+    } catch {
+        $rejectedBranding =
+            $_.Exception.Message -match 'canonical name, description, homepage, or logo'
+    }
+
+    Assert-True `
+        -Condition $rejectedBranding `
+        -Because 'deployed-state verification must reject incomplete user-facing app details'
+
+    $invalidServicePrincipal =
+        [pscustomobject]@{
+            displayName = $legacyRegistrationDisplayName
+            description = $registrationDescription
+            homepage = $viewerBaseUrl
+        }
+    $rejectedEnterpriseAppBranding = $false
+
+    try {
+        Assert-ServicePrincipalBranding `
+            -ServicePrincipal $invalidServicePrincipal
+    } catch {
+        $rejectedEnterpriseAppBranding =
+            $_.Exception.Message -match 'Enterprise application'
+    }
+
+    Assert-True `
+        -Condition $rejectedEnterpriseAppBranding `
+        -Because 'deployed-state verification must reject a stale Enterprise Application name'
 }
 
 Write-Host 'Canvas share deployment regression tests passed.'
