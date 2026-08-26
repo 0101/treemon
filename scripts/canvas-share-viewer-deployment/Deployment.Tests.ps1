@@ -3,6 +3,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'TestHarness.ps1')
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $viewerProject = Join-Path $repoRoot 'src' 'CanvasShareViewer' 'CanvasShareViewer.fsproj'
 $lifecyclePolicyPath = Join-Path $repoRoot 'scripts' 'canvas-share-lifecycle-policy.json'
@@ -11,39 +13,6 @@ $viewerBaseUrl = 'https://treemon.azurewebsites.net'
 
 . (Join-Path $PSScriptRoot 'Common.ps1')
 . (Join-Path $PSScriptRoot 'SubscriptionGuard.ps1')
-
-function Assert-Equal {
-    param(
-        [AllowNull()][object] $Actual,
-        [AllowNull()][object] $Expected,
-        [Parameter(Mandatory)][string] $Because
-    )
-
-    if ($Actual -ne $Expected) {
-        throw "Expected '$Expected' but got '$Actual': $Because"
-    }
-}
-
-function Assert-True {
-    param(
-        [Parameter(Mandatory)][bool] $Condition,
-        [Parameter(Mandatory)][string] $Because
-    )
-
-    if (-not $Condition) {
-        throw "Expected true: $Because"
-    }
-}
-
-function Invoke-TestCase {
-    param(
-        [Parameter(Mandatory)][string] $Name,
-        [Parameter(Mandatory)][scriptblock] $Body
-    )
-
-    & $Body
-    Write-Host "PASS: $Name"
-}
 
 Invoke-TestCase 'deployment entry point loads the subscription guard after Common and before Azure' {
     $entryPoint =
@@ -117,13 +86,10 @@ $Identity = 'viewer-identity'
 $Registration = 'viewer-registration'
 
 . (Join-Path $PSScriptRoot 'Azure.ps1')
-. (Join-Path $PSScriptRoot 'CrossSubscriptionCorrection.ps1')
 
 $script:scenario = ''
 $script:azNoneCalls = @()
 $script:azJsonCalls = @()
-$script:azTryCalls = @()
-$script:blobAccessAudits = @()
 $script:subscriptionAccounts = @{}
 $script:subscriptionLookupFailures = @{}
 $script:selectedAccount = $null
@@ -134,50 +100,6 @@ $script:nameAvailabilityCallCount = 0
 $script:serviceManagementReference = '11111111-2222-3333-4444-555555555555'
 $script:planResourceId =
     '/subscriptions/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/resourceGroups/viewer-rg/providers/Microsoft.Web/serverfarms/viewer-plan'
-$script:correctionSubscriptionId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
-$script:correctionStorageAccount =
-    [pscustomobject]@{
-        id = "/subscriptions/$script:correctionSubscriptionId/resourceGroups/storage-rg/providers/Microsoft.Storage/storageAccounts/fixturestorage"
-        name = 'fixturestorage'
-        location = 'westeurope'
-        resourceGroup = 'storage-rg'
-        allowBlobPublicAccess = $false
-    }
-$script:correctionGroup =
-    [pscustomobject]@{
-        id = "/subscriptions/$script:correctionSubscriptionId/resourceGroups/$ResourceGroup"
-        name = $ResourceGroup
-        location = 'westeurope'
-        tags = [pscustomobject]@{ environment = 'nonproduction' }
-    }
-$script:correctionIdentity =
-    [pscustomobject]@{
-        id = "/subscriptions/$script:correctionSubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.ManagedIdentity/userAssignedIdentities/$Identity"
-        name = $Identity
-        principalId = '22222222-2222-2222-2222-222222222222'
-        clientId = '33333333-3333-3333-3333-333333333333'
-    }
-$script:correctionPlan =
-    [pscustomobject]@{
-        id = $script:planResourceId
-        name = $Plan
-        reserved = $true
-    }
-$script:correctionWebApp =
-    [pscustomobject]@{
-        id = "/subscriptions/$script:correctionSubscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Web/sites/$appName"
-        name = $appName
-        defaultHostName = 'treemon.azurewebsites.net'
-        kind = 'app,linux'
-        appServicePlanId = $script:planResourceId
-        httpsOnly = $true
-    }
-$script:correctionIdentityAttachmentSummary =
-    [pscustomobject]@{
-        identityType = $null
-        userAssignedIdentityCount = 0
-        preparedIdentityAttached = $false
-    }
 $script:webAppResult =
     [pscustomobject]@{
         appServicePlanId = $script:planResourceId
@@ -263,57 +185,6 @@ function Invoke-AzJson {
         throw 'Unexpected Azure CLI command in global-name-availability test.'
     }
 
-    if ($script:scenario -eq 'correction-preparation') {
-        if ($Arguments[0] -eq 'rest' -and
-            ($Arguments -join ' ') -match 'checknameavailability') {
-            $script:nameAvailabilityCallCount++
-            return [pscustomobject]@{ nameAvailable = $false }
-        }
-
-        $command = $Arguments[0..2] -join ' '
-
-        switch ($command) {
-            'group show --name' {
-                return $script:correctionGroup
-            }
-            'identity show --name' {
-                return $script:correctionIdentity
-            }
-            'role assignment list' {
-                return @()
-            }
-            default {
-                throw 'Unexpected Azure CLI command in correction-preparation test.'
-            }
-        }
-    }
-
-    if ($script:scenario -eq 'correction-destination') {
-        $command = $Arguments[0..2] -join ' '
-
-        switch ($command) {
-            'rest --method get' {
-                if (($Arguments -join ' ') -match '/sites/treemon\?api-version=') {
-                    return $script:correctionIdentityAttachmentSummary
-                }
-
-                throw 'Unexpected destination REST read in correction test.'
-            }
-            'ad app list' {
-                return @($script:registrationResult)
-            }
-            'ad app show' {
-                return $script:registrationResult
-            }
-            'webapp config appsettings' {
-                return @()
-            }
-            default {
-                throw 'Unexpected Azure CLI command in correction-destination test.'
-            }
-        }
-    }
-
     $command = $Arguments[0..2] -join ' '
 
     switch ($script:scenario) {
@@ -357,69 +228,6 @@ function Invoke-AzJson {
     throw "Unexpected mocked Azure CLI command: $($Arguments -join ' ')"
 }
 
-function Try-AzJson {
-    param([Parameter(Mandatory)][string[]] $Arguments)
-
-    $script:azTryCalls +=
-        [pscustomobject]@{ Arguments = @($Arguments) }
-    $command = $Arguments[0..2] -join ' '
-
-    if ($script:scenario -eq 'correction-preparation') {
-        switch ($command) {
-            'storage container-rm show' {
-                return [pscustomobject]@{ publicAccess = 'None' }
-            }
-            'group show --name' {
-                return $null
-            }
-            default {
-                throw 'Unexpected optional Azure CLI command in correction-preparation test.'
-            }
-        }
-    }
-
-    if ($script:scenario -eq 'correction-destination') {
-        switch ($command) {
-            'group show --name' {
-                return $script:correctionGroup
-            }
-            'identity show --name' {
-                return $script:correctionIdentity
-            }
-            'appservice plan show' {
-                return $script:correctionPlan
-            }
-            'rest --method get' {
-                if (($Arguments -join ' ') -match '/sites/treemon\?api-version=') {
-                    return $script:correctionWebApp
-                }
-
-                return $null
-            }
-            default {
-                throw 'Unexpected optional Azure CLI command in correction-destination test.'
-            }
-        }
-    }
-
-    throw "Unexpected mocked optional Azure CLI command: $($Arguments -join ' ')"
-}
-
-function Assert-ViewerBlobAccessIsContainerOnly {
-    param(
-        [Parameter(Mandatory)][string] $PrincipalObjectId,
-        [Parameter(Mandatory)][string] $ContainerScope,
-        [Parameter(Mandatory)][string] $SubscriptionId
-    )
-
-    $script:blobAccessAudits +=
-        [pscustomobject]@{
-            PrincipalObjectId = $PrincipalObjectId
-            ContainerScope = $ContainerScope
-            SubscriptionId = $SubscriptionId
-        }
-}
-
 function Reset-AzureContextMocks {
     $script:scenario = 'azure-context'
     $script:azJsonCalls = @()
@@ -433,21 +241,13 @@ function Reset-AzureContextMocks {
         }
 }
 
-function Reset-CorrectionMocks {
+function Reset-ResourceMocks {
     param([Parameter(Mandatory)][string] $Scenario)
 
     $script:scenario = $Scenario
     $script:azNoneCalls = @()
     $script:azJsonCalls = @()
-    $script:azTryCalls = @()
-    $script:blobAccessAudits = @()
     $script:nameAvailabilityCallCount = 0
-    $script:correctionIdentityAttachmentSummary =
-        [pscustomobject]@{
-            identityType = $null
-            userAssignedIdentityCount = 0
-            preparedIdentityAttached = $false
-        }
 }
 
 function New-SyntheticAccount {
@@ -790,115 +590,8 @@ Invoke-TestCase 'approved subscription context proceeds to publisher lookup' {
         -Because 'publisher lookup may proceed only after every subscription identity agrees'
 }
 
-Invoke-TestCase 'pre-move preparation bypasses the unavailable global app name safely' {
-    Reset-CorrectionMocks -Scenario 'correction-preparation'
-    $container = 'fixture-container'
-    $containerScope =
-        "$($script:correctionStorageAccount.id)/blobServices/default/containers/$container"
-    $output = @(
-        & {
-            Invoke-CrossSubscriptionMovePreparation `
-                -StorageAccount $script:correctionStorageAccount `
-                -Container $container `
-                -ContainerScope $containerScope `
-                -SubscriptionId $script:correctionSubscriptionId
-        } 6>&1
-    ) | ForEach-Object { [string] $_ }
-    $outputText = $output -join [Environment]::NewLine
-    $mutatingCommands =
-        @(
-            $script:azNoneCalls
-            | ForEach-Object { $_.Arguments[0..2] -join ' ' }
-        )
-
-    Assert-Equal `
-        -Actual $script:nameAvailabilityCallCount `
-        -Expected 0 `
-        -Because 'pre-move preparation must not check or weaken global App Service name availability'
-    Assert-Equal `
-        -Actual $script:azNoneCalls.Count `
-        -Expected 3 `
-        -Because 'preparation may create only the destination group, replacement identity, and reader grant'
-    Assert-True `
-        -Condition ($mutatingCommands -contains 'group create --name') `
-        -Because 'the approved destination resource group must be prepared'
-    Assert-True `
-        -Condition ($mutatingCommands -contains 'identity create --name') `
-        -Because 'the replacement user-assigned identity must be prepared'
-    Assert-True `
-        -Condition ($mutatingCommands -contains 'role assignment create') `
-        -Because 'the replacement identity must receive its container-scoped reader grant'
-    Assert-True `
-        -Condition (-not ($mutatingCommands | Where-Object {
-            $_ -match '^(appservice|storage|webapp|ad)\b'
-        })) `
-        -Because 'preparation must not mutate the plan, app, storage, or Entra registration'
-    $wrongSubscriptionCalls =
-        @(
-            @($script:azJsonCalls) + @($script:azTryCalls) + @($script:azNoneCalls)
-            | Where-Object {
-                $subscriptionIndex =
-                    [Array]::IndexOf($_.Arguments, '--subscription')
-                $subscriptionIndex -ge 0 -and
-                    [string] $_.Arguments[$subscriptionIndex + 1] -cne
-                        $script:correctionSubscriptionId
-            }
-        )
-    Assert-Equal `
-        -Actual $wrongSubscriptionCalls.Count `
-        -Expected 0 `
-        -Because 'preparation must issue every resource call only to the approved destination'
-
-    $roleAssignmentCall =
-        @(
-            $script:azNoneCalls
-            | Where-Object {
-                ($_.Arguments[0..2] -join ' ') -eq 'role assignment create'
-            }
-        )[0]
-    Assert-True `
-        -Condition ($roleAssignmentCall.Arguments -contains $readerRole -and
-            $roleAssignmentCall.Arguments -notcontains $contributorRole) `
-        -Because 'preparation grants only Storage Blob Data Reader to the replacement identity'
-    Assert-Equal `
-        -Actual $script:blobAccessAudits.Count `
-        -Expected 1 `
-        -Because 'the newly prepared identity must be audited after its reader grant'
-    Assert-True `
-        -Condition ($outputText -match 'Destination preparation complete' -and
-            $outputText -match 'detach its user-assigned identity attachment' -and
-            $outputText -match 'ConfirmPortalMoveCompleted') `
-        -Because 'preparation must emit the identity-detachment handoff and the explicit reconciliation command'
-    Assert-True `
-        -Condition ($outputText -notmatch '(?i)/subscriptions/|tenant-id|source-rg|source-identity|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}') `
-        -Because 'the emitted checklist must not contain source subscription, tenant, group, identity, or resource IDs'
-
-    $entrypoint =
-        [IO.File]::ReadAllText(
-            (Join-Path (Split-Path -Parent $PSScriptRoot) 'deploy-canvas-share-viewer.ps1'))
-    $preparationIndex =
-        $entrypoint.IndexOf(
-            'Invoke-CrossSubscriptionMovePreparation',
-            [StringComparison]::Ordinal)
-    $preparationReturnIndex =
-        $entrypoint.IndexOf(
-            'return',
-            $preparationIndex,
-            [StringComparison]::Ordinal)
-    $ordinaryDiscoveryIndex =
-        $entrypoint.IndexOf(
-            '$existingResources =',
-            $preparationIndex,
-            [StringComparison]::Ordinal)
-    Assert-True `
-        -Condition ($preparationIndex -ge 0 -and
-            $preparationReturnIndex -gt $preparationIndex -and
-            $preparationReturnIndex -lt $ordinaryDiscoveryIndex) `
-        -Because 'the entry point must return from preparation before ordinary app discovery and its global-name guard'
-}
-
 Invoke-TestCase 'ordinary creation and ValidateOnly retain the global-name failure' {
-    Reset-CorrectionMocks -Scenario 'global-name-unavailable'
+    Reset-ResourceMocks -Scenario 'global-name-unavailable'
     $existing =
         [pscustomobject]@{
             Group = $null
@@ -914,7 +607,7 @@ Invoke-TestCase 'ordinary creation and ValidateOnly retain the global-name failu
                 try {
                     Assert-ExistingResourceSafety `
                         -Existing $existing `
-                        -SubscriptionId $script:correctionSubscriptionId
+                        -SubscriptionId $approvedSubscriptionId
                     ''
                 } catch {
                     $_.Exception.Message
@@ -946,162 +639,6 @@ Invoke-TestCase 'ordinary creation and ValidateOnly retain the global-name failu
         -Because 'ordinary validation must run the existing-resource safety guard before its read-only success exit'
 }
 
-Invoke-TestCase 'post-move reconciliation requires explicit operator confirmation before tools run' {
-    Reset-CorrectionMocks -Scenario 'confirmation-gate'
-    $message = ''
-
-    try {
-        Assert-CrossSubscriptionCorrectionParameters `
-            -ReconcileCrossSubscriptionMove
-    } catch {
-        $message = $_.Exception.Message
-    }
-
-    Assert-True `
-        -Condition ($message -match 'ConfirmPortalMoveCompleted') `
-        -Because 'reconciliation must name the explicit confirmation switch when it is absent'
-    Assert-Equal `
-        -Actual ($script:azJsonCalls.Count + $script:azTryCalls.Count + $script:azNoneCalls.Count) `
-        -Expected 0 `
-        -Because 'the confirmation gate must not perform any Azure operation'
-
-    Assert-CrossSubscriptionCorrectionParameters `
-        -ReconcileCrossSubscriptionMove `
-        -ConfirmPortalMoveCompleted
-
-    $entrypoint =
-        [IO.File]::ReadAllText(
-            (Join-Path (Split-Path -Parent $PSScriptRoot) 'deploy-canvas-share-viewer.ps1'))
-    Assert-True `
-        -Condition ($entrypoint.IndexOf(
-                'Assert-CrossSubscriptionCorrectionParameters',
-                [StringComparison]::Ordinal) -lt
-            $entrypoint.IndexOf(
-                'Assert-Prerequisites',
-                [StringComparison]::Ordinal)) `
-        -Because 'the entry point must enforce confirmation before local tools or Azure are consulted'
-}
-
-Invoke-TestCase 'post-move discovery and identity attachment use approved destination state only' {
-    Reset-CorrectionMocks -Scenario 'correction-destination'
-    $resources =
-        Get-CrossSubscriptionMoveDestinationResources `
-            -SubscriptionId $script:correctionSubscriptionId
-    Assert-CrossSubscriptionMovedResources `
-        -Existing $resources `
-        -SubscriptionId $script:correctionSubscriptionId
-
-    $resourceCalls = @($script:azTryCalls)
-    $unguardedCalls =
-        @(
-            $resourceCalls
-            | Where-Object {
-                $subscriptionIndex =
-                    [Array]::IndexOf($_.Arguments, '--subscription')
-                $subscriptionIndex -lt 0 -or
-                    [string] $_.Arguments[$subscriptionIndex + 1] -cne
-                        $script:correctionSubscriptionId
-            }
-        )
-    Assert-Equal `
-        -Actual $unguardedCalls.Count `
-        -Expected 0 `
-        -Because 'post-move resource discovery must be scoped to the approved destination subscription'
-
-    $webAppCall =
-        @(
-            $resourceCalls
-            | Where-Object {
-                ($_.Arguments[0..2] -join ' ') -eq 'rest --method get' -and
-                    ($_.Arguments -join ' ') -match '/sites/treemon\?api-version='
-            }
-        )[0]
-    $queryIndex = [Array]::IndexOf($webAppCall.Arguments, '--query')
-    Assert-True `
-        -Condition ($queryIndex -ge 0 -and
-            [string] $webAppCall.Arguments[$queryIndex + 1] -notmatch '(?i)identity') `
-        -Because 'initial destination discovery must not retrieve a source identity attachment'
-    Assert-Equal `
-        -Actual $script:nameAvailabilityCallCount `
-        -Expected 0 `
-        -Because 'post-move discovery resolves the moved app and never checks global name availability'
-
-    $script:azNoneCalls = @()
-
-    Set-CrossSubscriptionReplacementIdentity `
-        -ManagedIdentity $script:correctionIdentity `
-        -SubscriptionId $script:correctionSubscriptionId
-
-    $identitySummaryCall =
-        @(
-            $script:azJsonCalls
-            | Where-Object {
-                ($_.Arguments[0..2] -join ' ') -eq 'rest --method get' -and
-                    ($_.Arguments -join ' ') -match '/sites/treemon\?api-version='
-            }
-        )[-1]
-    $identitySummaryQueryIndex =
-        [Array]::IndexOf($identitySummaryCall.Arguments, '--query')
-    $identitySummaryQuery =
-        [string] $identitySummaryCall.Arguments[$identitySummaryQueryIndex + 1]
-    Assert-True `
-        -Condition ($identitySummaryQueryIndex -ge 0 -and
-            $identitySummaryQuery -match 'userAssignedIdentityCount' -and
-            $identitySummaryQuery -match 'preparedIdentityAttached' -and
-            $identitySummaryQuery -notmatch '(?i)tenantId|/subscriptions/') `
-        -Because 'the preflight may return only a sanitized attachment count and prepared-identity match'
-
-    $assignmentCall = @($script:azNoneCalls)[0]
-    $identitiesIndex = [Array]::IndexOf($assignmentCall.Arguments, '--identities')
-    Assert-Equal `
-        -Actual ([string] $assignmentCall.Arguments[$identitiesIndex + 1]) `
-        -Expected ([string] $script:correctionIdentity.id) `
-        -Because 'the prepared destination identity must be attached after the preflight passes'
-    Assert-True `
-        -Condition (($assignmentCall.Arguments -join ' ') -notmatch 'source-subscription|source-rg|source-identity') `
-        -Because 'the identity assignment must not carry a source resource identifier'
-}
-
-Invoke-TestCase 'post-move reconciliation rejects a foreign identity before mutating the app' {
-    Reset-CorrectionMocks -Scenario 'correction-destination'
-    $script:correctionIdentityAttachmentSummary =
-        [pscustomobject]@{
-            identityType = 'UserAssigned'
-            userAssignedIdentityCount = 1
-            preparedIdentityAttached = $false
-        }
-    $message = ''
-
-    try {
-        Set-CrossSubscriptionReplacementIdentity `
-            -ManagedIdentity $script:correctionIdentity `
-            -SubscriptionId $script:correctionSubscriptionId
-    } catch {
-        $message = $_.Exception.Message
-    }
-
-    Assert-True `
-        -Condition ($message -match 'detach every other user-assigned identity' -and
-            $message -match 'No App Service change was made') `
-        -Because 'a foreign attachment must fail with actionable portal guidance'
-    Assert-Equal `
-        -Actual $script:azNoneCalls.Count `
-        -Expected 0 `
-        -Because 'the stale attachment must be detected before identity assignment mutates the app'
-    Assert-Equal `
-        -Actual $script:azJsonCalls.Count `
-        -Expected 1 `
-        -Because 'the rejection may perform only the sanitized destination-side attachment read'
-
-    $summaryCall = $script:azJsonCalls[0]
-    $subscriptionIndex =
-        [Array]::IndexOf($summaryCall.Arguments, '--subscription')
-    Assert-Equal `
-        -Actual ([string] $summaryCall.Arguments[$subscriptionIndex + 1]) `
-        -Expected $script:correctionSubscriptionId `
-        -Because 'the attachment preflight must stay within the approved destination'
-}
-
 Invoke-TestCase 'every Azure resource-plane call selects its subscription explicitly' {
     $resourceFamilies =
         @(
@@ -1117,7 +654,6 @@ Invoke-TestCase 'every Azure resource-plane call selects its subscription explic
         @(
             'SubscriptionGuard.ps1',
             'Azure.ps1',
-            'CrossSubscriptionCorrection.ps1',
             'ViewerBlobAccess.ps1'
             | ForEach-Object {
                 $path = Join-Path $PSScriptRoot $_

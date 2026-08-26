@@ -224,6 +224,12 @@ module internal ViewerApplication =
                 context.Response.ContentLength <- 0L
         }
 
+    let private serveShell reader clock =
+        handle
+            (ShareLookup.resolveProperties reader clock)
+            ShellContentSecurityPolicy
+            writeShell
+
     let private handleContent
         reader
         clock
@@ -236,11 +242,7 @@ module internal ViewerApplication =
                 writeContent
                 context
         else
-            handle
-                (ShareLookup.resolveProperties reader clock)
-                ShellContentSecurityPolicy
-                writeShell
-                context
+            serveShell reader clock context
 
     let create
         (builder: WebApplicationBuilder)
@@ -270,12 +272,7 @@ module internal ViewerApplication =
 
         app.MapGet(
             ShellRoute,
-            RequestDelegate(
-                handle
-                    (ShareLookup.resolveProperties reader clock)
-                    ShellContentSecurityPolicy
-                    writeShell
-            )
+            RequestDelegate(serveShell reader clock)
         )
         |> ignore
 

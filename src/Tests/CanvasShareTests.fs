@@ -174,21 +174,6 @@ type ViewerUrlTests() =
 
     let prefix = "0123456789AbCdEfGhIjKl"
 
-    [<TestCase("status.html")>]
-    [<TestCase("Status.HTML")>]
-    [<TestCase("release..notes.html")>]
-    member _.``publisher naming satisfies the viewer wire contract``(filename: string) =
-        Assert.Multiple(fun () ->
-            Assert.That(
-                PrefixLength,
-                Is.EqualTo(CanvasShareViewer.SharePath.PrefixLength))
-            Assert.That(
-                CanvasShareViewer.SharePath.tryCreate
-                    (generatePrefix ())
-                    filename
-                |> Option.isSome,
-                Is.True))
-
     [<Test>]
     member _.``viewer URL uses the canonical deployed origin and clean c path``() =
         let url =

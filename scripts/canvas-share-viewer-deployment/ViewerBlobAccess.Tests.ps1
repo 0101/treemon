@@ -3,6 +3,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'TestHarness.ps1')
+
 $script:directAssignments = @()
 $script:inheritedAssignments = @()
 $script:roleDefinitions = @{}
@@ -75,28 +77,6 @@ function Assert-TextContains {
     if (-not $Actual.Contains($Expected, [StringComparison]::Ordinal)) {
         throw "Expected '$Actual' to contain '$Expected'."
     }
-}
-
-function Assert-Equal {
-    param(
-        [Parameter(Mandatory)][object] $Actual,
-        [Parameter(Mandatory)][object] $Expected,
-        [Parameter(Mandatory)][string] $Because
-    )
-
-    if ($Actual -ne $Expected) {
-        throw "Expected '$Expected' but got '$Actual': $Because"
-    }
-}
-
-function Invoke-TestCase {
-    param(
-        [Parameter(Mandatory)][string] $Name,
-        [Parameter(Mandatory)][scriptblock] $Body
-    )
-
-    & $Body
-    Write-Host "PASS: $Name"
 }
 
 $subscriptionId = '11111111-1111-1111-1111-111111111111'

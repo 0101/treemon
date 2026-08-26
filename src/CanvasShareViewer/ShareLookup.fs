@@ -40,32 +40,8 @@ module internal ShareLookup =
                         NotFound
         }
 
-    let resolveProperties
-        (reader: BlobReader)
-        clock
-        prefix
-        filename
-        cancellationToken
-        =
-        resolve
-            reader.ReadPropertiesExact
-            id
-            clock
-            prefix
-            filename
-            cancellationToken
+    let resolveProperties (reader: BlobReader) =
+        resolve reader.ReadPropertiesExact id
 
-    let resolveDocument
-        (reader: BlobReader)
-        clock
-        prefix
-        filename
-        cancellationToken
-        =
-        resolve
-            reader.ReadExact
-            _.Metadata
-            clock
-            prefix
-            filename
-            cancellationToken
+    let resolveDocument (reader: BlobReader) =
+        resolve reader.ReadExact _.Metadata

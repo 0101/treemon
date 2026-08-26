@@ -123,7 +123,7 @@
   Its value may be a subscription name or ID; the script resolves it to a subscription ID and
   compares IDs, so the two forms are interchangeable.
 - The deployment script and the server both resolve the config through `TREEMON_CONFIG_DIR` when
-  it is set. Migration reconciliation and live verification use that isolation deliberately: they
+  it is set. Deployment and live verification use that isolation deliberately: they
   run against a throwaway config seeded with `accountName`, `container`, and
   `approvedSubscription` copied from the private machine config, so a run cannot add
   `viewerBaseUrl` to -- or otherwise alter -- the configuration the production instance reads.
@@ -243,111 +243,26 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 
 ### Provisioning
 
-- Provisioning targets the personal development Azure subscription and an isolated,
-  non-production resource group. Subscription, tenant, resource-group, plan, identity, and
-  registration names are operator inputs; the App Service name is `treemon`, producing
-  `https://treemon.azurewebsites.net`.
-- Machine-private configuration identifies the one approved subscription. Before any
-  resource-provider or Entra application operation, provisioning requires the operator input and
-  selected Azure CLI account to match that configured target exactly and fails with no changes when
-  the value is absent, ambiguous, disabled, or mismatched. Exact subscription and tenant
-  identifiers never appear in tracked repository content.
-  The match is by resolved subscription ID -- the configured value, the `-Subscription` input, and
-  the selected CLI account must all resolve to the same enabled subscription -- so a name and an ID
-  naming the same subscription agree, while a raw-string near-miss cannot pass. Failure diagnostics
-  name the configuration key and the mismatch, never the values.
-  The selected account resolves before either configured subscription value is looked up, so an
-  unusable Azure CLI sign-in keeps its own actionable authentication error instead of being
-  reported as a configuration problem.
-  The guard is mandatory and independent of whatever restrictions the operator's environment
-  places on direct Azure CLI use. An environment-level control can only see the commands issued to
-  it, not the `az` child processes this script spawns, so the script proves its own target on every
-  run; the two are layers, and neither is removed or relaxed because the other exists. Every
-  resource-plane `az` invocation the script makes names its subscription explicitly rather than
-  inheriting the CLI's selected account.
-- Before first creation, provisioning checks global App Service name availability and fails
-  clearly if `treemon` is no longer available. It never silently appends a random suffix because
-  that would change the durable shared-link origin and its browser SSO session.
-- The publisher keeps its existing delegated Entra/Azure CLI identity and
-  `Storage Blob Data Contributor` grant. The viewer uses a managed identity with the new read-only
-  grant scoped to the share container.
-- When the requested viewer identity already exists, provisioning audits its Blob-read RBAC before
-  any Azure mutation and repeats the audit as part of deployed-state verification. The audit
-  enumerates direct and group-derived assignments throughout the subscription plus assignments
-  inherited from parent scopes, resolves each role definition's effective
-  `dataActions`/`notDataActions`, and fails on a Blob-read grant unless its assignment scope is the
-  configured share container or a descendant. It reports but never deletes an offending
-  assignment, because that grant may belong to another workload.
-- Provisioning ensures the configured share container exists with anonymous access disabled before
-  either container-scoped grant is applied; the publisher intentionally does not create containers
-  at share time.
-- `scripts/deploy-canvas-share-viewer.ps1` is the idempotent operator entry point. Its only
-  deployment-name inputs are subscription, tenant, resource group, plan, identity, and app
-  registration; it reads account/container from the machine-level `canvasShare` config and resolves
-  the delegated publisher as the current Azure CLI user. The fixed B1 Linux plan and any new
-  resource group use the storage account's Azure location.
-- Azure CLI resource reads accept both flattened command output and fields nested under
-  `properties`, including the current `appServicePlanId` web-app field. The pipe-bearing Linux
-  runtime value is supplied through the CLI's JSON-file configuration path rather than as an
-  `az.cmd` argument. If Entra alone rejects an app-registration create or update because
-  `serviceManagementReference` is required, provisioning retries with the one distinct non-empty
-  reference on applications owned by the delegated publisher; zero or multiple values fail closed
-  rather than inventing or ambiguously selecting an organizational service reference.
-- `-ValidateOnly` performs subscription/tenant, configuration, existing-resource, viewer-identity
-  RBAC, global-name, and local-publish checks without changing Azure or machine configuration. An
-  apply run reconciles resources, merges the canvas rule into the account's complete lifecycle
-  policy without removing unrelated rules, deploys with `az webapp deploy` after SCM/FTP basic
-  authentication is disabled, verifies the resulting control-plane state, and writes the exact
-  canonical `viewerBaseUrl` while preserving every other machine setting.
-- Deployment sets and deployed-state validation asserts both `DOTNET_ENVIRONMENT=Production` and
-  `ASPNETCORE_ENVIRONMENT=Production`; the application-level dependency exception boundary remains
-  active even if either platform setting later drifts.
-- Easy Auth's `clientSecretSettingName` is the
-  `OVERRIDE_USE_MI_FIC_ASSERTION_CLIENTID` sentinel; the slot-sticky app setting with that name
-  contains the user-assigned identity's client ID. The registration's federated credential trusts
-  that identity's principal ID with the tenant v2 issuer and `api://AzureADTokenExchange`
-  audience. Provisioning and deployed-state validation require ID-token issuance for Easy Auth's
-  hybrid callback while keeping browser access-token issuance disabled. No client secret or extra
-  login scope is created.
-- The canonical App Service, identity, Entra configuration, RBAC grants, and lifecycle policy
-  remain deployed after verification. Verification removes only its document fixtures and any
-  auxiliary resources created solely to prove the permission boundary.
-- A cross-subscription correction preserves the canonical hostname by moving the App Service and
-  its plan together rather than deleting and recreating the globally named app. The correction is
-  split by who can reach which subscription. `-PrepareCrossSubscriptionMove` confirms the
-  configured private storage/container and reconciles only the approved destination resource
-  group, replacement user-assigned identity, and its container-scoped reader grant; it neither
-  checks the global app name nor reads or creates an App Service or plan.
-  `-ReconcileCrossSubscriptionMove` requires `-ConfirmPortalMoveCompleted` before any tool or Azure
-  call, resolves the moved app and plan only in the approved destination, and checks a sanitized
-  destination-side summary of the app's identity attachments before changing the app. A
-  system-assigned identity or any user-assigned identity other than the prepared destination
-  identity fails with portal guidance and no App Service mutation. Once the check passes,
-  reconciliation attaches the prepared identity and reconciles the retained tenant-scoped app
-  registration, federated credential, container RBAC, settings, package, and deployed state.
-  Between those modes the redacted portal checklist has the operator detach the app's current
-  user-assigned identity attachment, leave that identity resource and its roles in place, then move
-  the app and plan together. Automation never queries, validates, or mutates anything in the source
-  subscription and never carries a resource ID, subscription, or tenant identifier belonging to
-  it; the checklist identifies what to detach and move by resource type and the canonical App
-  Service and plan names.
-  Source-side leftovers -- the obsolete identity, its role assignments, any stand-in verification
-  storage, and the former resource groups -- stay in place until the move is independently
-  verified. Identity detachment makes the viewer unavailable until reconciliation; a failed or
-  rolled-back move requires the operator to reattach the preserved former identity in the portal.
-  Removing those leftovers is a separate, explicitly approved operator step, not part of the move.
-  The source app still holds the global name until it moves, so a pre-move `-ValidateOnly` run
-  against the destination subscription is expected to stop at the name-availability check. That
-  check is not relaxed for the correction: the operator's move is what places the app in the
-  destination, and reconciliation runs afterwards, when the app is already there and the check no
-  longer applies.
-- Decommissioning the source-side leftovers is a manual operator activity in the portal. Automation
-  prepares an ordered checklist describing each target by resource type and role -- never by
-  resource ID, subscription, or tenant identifier -- and reviews whatever redacted evidence the
-  operator supplies afterwards. It deletes nothing, at any scope, in either subscription.
+- `scripts/deploy-canvas-share-viewer.ps1` is the idempotent validate/apply entry point. Deployment
+  names are operator inputs; storage and publisher identity come from machine configuration and the
+  selected Azure CLI user. Exact subscription, tenant, and resource identifiers remain private.
+- The requested, approved, and selected subscriptions must resolve to the same enabled subscription
+  before any resource-provider or Entra operation. Every resource-plane call names that subscription
+  explicitly, and failures identify the protected setting without revealing its value.
+- The App Service keeps the fixed `treemon.azurewebsites.net` name. First creation fails rather than
+  silently choosing another hostname, preserving shared-link origin and browser SSO.
+- The delegated publisher retains Blob-contributor access. The viewer receives a separate managed
+  identity whose effective Blob-read access is audited before mutation and after deployment; any
+  read grant broader than the configured private container fails closed and is never auto-deleted.
+- Apply reconciles the private container, lifecycle rule, B1 Linux plan, App Service, secret-free
+  Easy Auth federation, production environment settings, and canonical `viewerBaseUrl`. Validation
+  performs the same safety checks plus a local Release publish without changing Azure or config.
+- The lifecycle policy is merged with unrelated account rules, and verification removes only its
+  temporary document fixtures. Canonical resources and access grants remain deployed.
 - Feature development, deployment, and verification never run a production lifecycle command
   (`treemon.ps1 deploy`/`start`/`stop`/`restart`) and never bind to or otherwise disturb the
   production instance on port 5000.
+- See `docs/canvas-share-viewer-deployment.md` for prerequisites and operator commands.
 
 ## Security Posture
 
@@ -396,11 +311,6 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Derive storage and publisher deployment inputs from machine/Azure CLI state | The existing `canvasShare` account/container and current delegated publisher are already the publisher's source of truth. Requiring them again as script arguments would permit a viewer and publisher to be provisioned against different containers or identities. |
 | Require an exact machine-private subscription allowlist match | Azure CLI's ambient default proves only what is selected, not whether that subscription is approved for this workload. A private source of truth keeps identifiers out of the repository and makes a mistaken shared-subscription deployment fail before any resource operation. |
 | Keep the in-script guard even when the environment already restricts direct CLI use | A control that filters issued commands cannot observe the `az` child processes a deployment script starts, so it stops covering exactly the operations this feature automates. The script's own check is the only one present inside a run, and an outer restriction is never accepted as a reason to remove or weaken it. |
-| Move the App Service and plan together when correcting subscription placement | An ARM move preserves the globally unique `treemon.azurewebsites.net` name; deleting and recreating the app would briefly release that name and make rollback dependent on reacquiring it. |
-| Have the operator perform the move in the portal rather than automating it | Automation is confined to the approved subscription and cannot query or validate the source one, so it cannot issue the move at all. Splitting the correction into prepare / operator move / reconcile keeps the one irreversible step under direct human control and leaves automation with only operations it is allowed to perform. |
-| Refuse a foreign app identity before post-move mutation | Removing a stale user-assigned identity through Azure CLI requires naming that identity's resource ID, which would carry a source-subscription identifier into automation. The portal checklist detaches the app attachment before the move; reconciliation reads only a sanitized destination-side count and prepared-identity match, fails before mutation if another attachment remains, and stays idempotent when only the prepared identity is already attached. |
-| Expose preparation and reconciliation as mutually exclusive deployment-script modes | Preparation must bypass the ordinary global-name guard without weakening it, while reconciliation must not begin from an unconfirmed portal handoff. Separate parameter sets and an explicit post-move confirmation make those safety boundaries visible at invocation time. |
-| Decommission by exact resource allowlist rather than broad scope | Shared subscriptions can contain unrelated workloads. Fresh inventory, drift checks, and individual resource-ID deletion make collateral changes falsifiable and leave ambiguous resources untouched. |
 | Reuse one unambiguous publisher-owned `serviceManagementReference` only when Entra requires it | Restricted tenants reject registration mutations without their organizational service reference, while an arbitrary GUID can be invalid or misrepresent ownership. Conditional discovery keeps the normal path unchanged, adds no secret or deployment-name input, and fails closed when publisher-owned state cannot identify one value. |
 | Pass the Linux runtime through Azure CLI's JSON-file configuration input | The runtime contains `|`, which the Windows `az.cmd` launcher can reinterpret as a command pipe even when PowerShell supplied it as one argument. A file preserves the exact value without platform-specific quoting or reliance on Azure CLI installation internals. |
 | Treat only a container-scoped RBAC assignment (or a descendant scope) as proof of viewer containment | Fully interpreting arbitrary Azure RBAC conditions would reproduce the authorization engine and could silently accept a broader grant. A conditioned assignment at an account, resource-group, subscription, or parent scope therefore fails closed; the operator must remove it or use a dedicated identity. |
@@ -426,8 +336,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | `scripts/deploy-canvas-share-viewer.ps1` | Idempotent non-production Azure provisioning, secret-free Easy Auth, Entra-authenticated ZIP deployment, validation, and machine-config update |
 | `scripts/canvas-share-viewer-deployment/Common.ps1` | Shared Azure CLI invocation and machine-configuration boundary for deployment helpers |
 | `scripts/canvas-share-viewer-deployment/SubscriptionGuard.ps1` | Fail-closed approved/requested/selected subscription, tenant, and delegated-publisher validation with private lookup diagnostics redacted |
-| `scripts/canvas-share-viewer-deployment/CrossSubscriptionCorrection.ps1` | Approved-destination preparation, redacted identity-detachment/move handoff, sanitized post-move identity preflight, and prepared-identity attachment |
-| `scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1` | Windows/Azure CLI shape, packaging-output, reconciliation, restricted-tenant registration, and Easy Auth callback regressions |
+| `scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1` | Windows/Azure CLI shape, packaging-output, restricted-tenant registration, and Easy Auth callback regressions |
 | `scripts/canvas-share-viewer-deployment/ViewerBlobAccess.ps1` | Fail-closed audit of the viewer identity's effective Blob-read data-plane assignments |
 | `scripts/canvas-share-lifecycle-policy.json` | Container-filtered deletion rule starting after 31 days |
 | `docs/canvas-share-viewer-deployment.md` | Local operator prerequisites, dry run, apply, and durable-resource guidance |
@@ -465,18 +374,6 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - Deployment against a subscription other than the machine-private approved one exits non-zero
   before any resource-provider or Entra application call, and its output contains no exact
   subscription name or ID; the approved context proceeds normally.
-- A moved app that still reports a foreign user-assigned identity fails reconciliation before any
-  App Service mutation, exposes no attached identity ID, and tells the operator to detach it in the
-  portal before retrying.
-- After the cross-subscription correction the App Service and its plan are in the approved
-  subscription, still answer on `https://treemon.azurewebsites.net`, and the authenticated share
-  lifecycle -- publish, view, expiry, revocation, containment, fixed 503 -- still passes end to
-  end when driven through an isolated `TREEMON_CONFIG_DIR` on a port other than 5000, leaving the
-  production configuration and instance untouched.
-- Nothing in the approved subscription outside the prepared destination and the reconciled app
-  changed, and the correction's own command log shows no operation against the source
-  subscription and no resource ID belonging to it. Source-side state is attested by the operator,
-  not queried by automation.
 
 ## Related Specs
 

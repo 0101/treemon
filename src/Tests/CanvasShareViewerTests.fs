@@ -416,6 +416,11 @@ type SharePathValidationTests() =
     [<Test>]
     member _.``prefix must be exactly 22 characters``() =
         Assert.That(
+            SharePath.PrefixLength,
+            Is.EqualTo(Server.CanvasShare.PrefixLength)
+        )
+
+        Assert.That(
             SharePath.tryCreate
                 "0123456789ABCDEFGHIJK"
                 "report.html"
