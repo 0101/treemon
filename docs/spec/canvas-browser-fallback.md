@@ -9,13 +9,14 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 1. **Treemon mode (unchanged)**: Extension registers with Treemon, heartbeats; canvas docs display in the Treemon canvas pane as today.
 2. **Browser fallback mode**: When Treemon is unreachable **or** reports that the current directory is not monitored, the extension:
    - Serves contract-valid `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
-   - After the agent writes a canvas file, sends the serving URL to the session via `session.send()` (the native runtime no longer supports SDK hook callbacks, so `additionalContext` can't be injected from a tool event).
+   - When Treemon is unreachable, sends the serving URL to the session via `session.send()` after the agent writes a canvas file.
+   - When Treemon explicitly reports the directory as unmonitored, does not post a write notification to the session, so a host-native canvas can handle the file without a competing agent prompt.
    - Receives `postMessage`-originated interactions at `POST /_message` and forwards them to the agent session via `session.send()`.
 3. **Same HTML, same API**: `canvasSend` is the primary authoring API and raw
    `window.parent.postMessage(...)` is its transport substrate. In a top-level fallback window, the
    transport shim intercepts self-posted messages and forwards them via HTTP. Zero agent-side
    changes.
-4. **Agent controls UX**: The agent decides whether to open the browser or output a ctrl+clickable URL.
+4. **Host-aware UX**: An unreachable Treemon gives the agent a browser URL to open or share; an explicitly unmonitored directory stays silent.
 
 ## Technical Approach
 
@@ -77,7 +78,8 @@ event carries neither the tool name nor its arguments, so supported canvas targe
 the **start** event (keyed by `toolCallId`) and acted on once the matching completion reports success.
 Create/edit arguments contribute one destination; `apply_patch` contributes canvas HTML destinations
 from Add/Update/Move headers. In browser mode the extension sends serving URLs for written docs via
-`session.send()`; in Treemon mode it declares ownership instead.
+`session.send()` only when Treemon is unreachable; an explicit unmonitored response suppresses that
+notification. In Treemon mode it declares ownership instead.
 
 ### Path Security
 
@@ -91,7 +93,7 @@ accepts only the bare filename rather than stripping a path down to its final se
 ## Decisions
 
 - **Event-driven, not file-watcher**: `session.on("tool.execution_*")` detects writes instead of `fs.watch`. Simpler, no OS-specific edge cases. (Was `onPostToolUse`; the native runtime dropped SDK hook callbacks, so detection moved to session events.)
-- **No auto-open**: Agent opens browser or outputs URL. Extension stays simple.
+- **No auto-open**: When Treemon is unreachable, the agent opens the browser or outputs the URL. An explicitly unmonitored directory produces no fallback prompt.
 - **Content polling over SSE**: 3s polling is simpler than SSE and adequate for agent file writes.
 - **Detect once at startup**: v1 does not switch modes mid-session. If Treemon starts later, it won't be detected until the extension restarts.
 
