@@ -773,7 +773,6 @@ type SessionActivityService internal
                     Log.log "Activity" $"Report for unmonitored worktree — {path} (ignored)"
                     return! Successful.ok (json {| recorded = false; monitored = false |}) next ctx
                 | IgnoredSystemReminder ->
-                    Log.log "Activity" "Ignored synthetic system reminder"
                     return! Successful.ok (json {| recorded = false; monitored = true |}) next ctx
                 | Accepted report ->
                     this.Submit report

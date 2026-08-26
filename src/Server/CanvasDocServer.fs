@@ -409,7 +409,6 @@ let internal serveCanvasDoc (ctx: HttpContext) (worktreePath: string) (filename:
         // legitimate cross-origin pane.
         ctx.Response.Headers["Content-Security-Policy"] <- "frame-ancestors 'self' http://localhost:* http://127.0.0.1:*"
         do! ctx.Response.WriteAsync(injected)
-        Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/{filename}"
 }
 
 /// Serve the beads issue list backing a worktree's beads dashboard doc.
@@ -419,7 +418,6 @@ let private serveBeadsData (ctx: HttpContext) (worktreePath: string) : System.Th
     ctx.Response.ContentType <- "application/json"
     ctx.Response.Headers["Cache-Control"] <- "no-cache"
     do! ctx.Response.WriteAsync(json)
-    Log.log "Canvas" $"Doc request 200: {Path.GetFileName(worktreePath)}/beads-data"
 }
 
 let private refuseUnknownWorktree (ctx: HttpContext) (worktreePath: string) : System.Threading.Tasks.Task = task {

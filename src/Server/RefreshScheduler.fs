@@ -567,8 +567,9 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
               Duration = duration })
 
     match result with
-    | Ok elapsed ->
+    | Ok elapsed when Log.isSlowOperation elapsed ->
         Log.log "Scheduler" $"{source} {target} completed in {elapsed.TotalMilliseconds:F0}ms"
+    | Ok _ -> ()
     | Error msg ->
         Log.log "Scheduler" $"{source} {target} failed: {msg}"
 
