@@ -14,18 +14,22 @@ let normalizePath (path: string) =
     else
         p
 
-/// Validates that a filename resolves inside the .agents/canvas/ directory for the given worktree.
+/// Validates that a bare filename follows the shared canvas contract and resolves inside the
+/// .agents/canvas/ directory for the given worktree.
 /// Returns Ok(resolvedPath) or Error(reason).
 let validateCanvasPath (worktreePath: string) (filename: string) =
-    let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
-    let resolvedPath = Path.Combine(canvasDir, filename)
-    let normalizedResolved = normalizePath resolvedPath
-    let normalizedCanvasDir = normalizePath canvasDir + string Path.DirectorySeparatorChar
-
-    if not (normalizedResolved.StartsWith(normalizedCanvasDir)) then
-        Error "Path traversal rejected"
+    if not (CanvasFilename.isValid filename) then
+        Error "Filename does not match the canvas filename contract"
     else
-        Ok resolvedPath
+        let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
+        let resolvedPath = Path.Combine(canvasDir, filename)
+        let normalizedResolved = normalizePath resolvedPath
+        let normalizedCanvasDir = normalizePath canvasDir + string Path.DirectorySeparatorChar
+
+        if not (normalizedResolved.StartsWith(normalizedCanvasDir)) then
+            Error "Path traversal rejected"
+        else
+            Ok resolvedPath
 
 let toRepoId (path: string) = path |> normalizePath |> RepoId
 

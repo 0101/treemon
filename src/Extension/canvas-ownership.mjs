@@ -1,6 +1,6 @@
 import { basename, dirname, relative, resolve } from "node:path";
+import { isValidCanvasFilename } from "./canvas-filename.mjs";
 
-const CANVAS_FILENAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.html$/;
 const PATCH_FILE_HEADER_RE =
   /^\*\*\* (Add File|Update File|Move to):[ \t]*(.+?)[ \t]*\r?$/gm;
 
@@ -59,8 +59,8 @@ function directCanvasFilenames(worktreePath, toolArgs) {
   return [canvasFilename(worktreePath, args?.path ?? args?.file_path)].filter(Boolean);
 }
 
-export function isValidCanvasFilename(filename) {
-  return typeof filename === "string" && CANVAS_FILENAME_RE.test(filename);
+export function canvasFilenameForClaim(filename) {
+  return isValidCanvasFilename(filename) ? filename : null;
 }
 
 export function canvasFilenamesForTool(toolName, toolArgs, worktreePath = process.cwd()) {
