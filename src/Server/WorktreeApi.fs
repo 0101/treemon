@@ -757,6 +757,42 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                 return! action ()
         }
 
+    let withReportedTerminalIntents snapshot =
+        async {
+            let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+
+            return
+                snapshot
+                |> TerminalSessionActivity.withReportedIntents
+                    DateTimeOffset.UtcNow
+                    (state.SessionStatuses |> Map.values)
+        }
+
+    let terminalMutation operation =
+        asyncResult {
+            let! snapshot = operation
+            let! enriched = withReportedTerminalIntents snapshot
+            return enriched
+        }
+
+    let startEmbeddedTerminal wtPath =
+        withValidatedPath
+            wtPath
+            "startEmbeddedTerminal"
+            (fun () ->
+                EmbeddedTerminal.start embeddedTerminal wtPath
+                |> terminalMutation)
+
+    let getEmbeddedTerminals () =
+        async {
+            let! snapshot = EmbeddedTerminal.get embeddedTerminal
+            return! withReportedTerminalIntents snapshot
+        }
+
+    let closeEmbeddedTerminal terminalId =
+        EmbeddedTerminal.close embeddedTerminal terminalId
+        |> terminalMutation
+
     match fixtures with
     | Some f ->
         { readOnlyApi
@@ -766,23 +802,15 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
           with
             getBranches = fun _ -> async { return [ "main"; "develop"; "feature/sample" ] }
             createWorktree = fun _ -> async { return Ok [] }
-            startEmbeddedTerminal = fun wtPath ->
-                withValidatedPath
-                    wtPath
-                    "startEmbeddedTerminal"
-                    (fun () -> EmbeddedTerminal.start embeddedTerminal wtPath)
-            getEmbeddedTerminals = fun () -> EmbeddedTerminal.get embeddedTerminal
-            closeEmbeddedTerminal = fun terminalId -> EmbeddedTerminal.close embeddedTerminal terminalId }
+            startEmbeddedTerminal = startEmbeddedTerminal
+            getEmbeddedTerminals = getEmbeddedTerminals
+            closeEmbeddedTerminal = closeEmbeddedTerminal }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
           openTerminal = openTerminal validatePath sessionAgent
-          startEmbeddedTerminal = fun wtPath ->
-              withValidatedPath
-                  wtPath
-                  "startEmbeddedTerminal"
-                  (fun () -> EmbeddedTerminal.start embeddedTerminal wtPath)
-          getEmbeddedTerminals = fun () -> EmbeddedTerminal.get embeddedTerminal
-          closeEmbeddedTerminal = fun terminalId -> EmbeddedTerminal.close embeddedTerminal terminalId
+          startEmbeddedTerminal = startEmbeddedTerminal
+          getEmbeddedTerminals = getEmbeddedTerminals
+          closeEmbeddedTerminal = closeEmbeddedTerminal
           openEditor = openEditor validatePath
           toggleAutoSync = fun wtPath enabled ->
               let path = WorktreePath.value wtPath

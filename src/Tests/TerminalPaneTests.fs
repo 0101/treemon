@@ -22,6 +22,7 @@ let private thirdOne = terminalId "third-1"
 let private tab terminalId path lifecycle =
     { Id = terminalId
       Worktree = path
+      ReportedIntent = None
       Lifecycle = lifecycle }
 
 let private running terminalId path port =
@@ -35,6 +36,22 @@ let private running terminalId path port =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type TerminalPaneStateTests() =
+
+    [<Test>]
+    member _.``Reported intent replaces the numbered terminal label``() =
+        let titled =
+            { running firstOne first 61231 with
+                ReportedIntent = Some "Investigating terminal title routing" }
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                tabLabel 0 titled,
+                Is.EqualTo("Investigating terminal title routing")
+            )
+            Assert.That(
+                tabLabel 1 (running firstTwo first 61232),
+                Is.EqualTo("Terminal 2")
+            ))
 
     [<Test>]
     member _.``Visible tabs are limited to the selected worktree``() =

@@ -51,12 +51,13 @@ discontinuous output into the existing state.
 The terminal pane normally follows the currently focused worktree card. Clicking a card's embedded
 terminal action explicitly targets that worktree without changing dashboard focus or the Canvas
 pane; the next card selection restores normal focus-following. Its tab strip shows only the targeted
-worktree's terminals, labels them `Terminal 1`, `Terminal 2`, and so on in opening order, and
-remembers the selected terminal independently for each worktree. **New** starts another terminal for
-the targeted worktree; the empty state offers **Start terminal**. Switching worktrees hides the
-other worktrees' tabs without closing their terminals, and running iframes stay mounted so their
-browser state survives. Closing the last visible tab leaves the pane open in its empty state; only
-**Hide** collapses the pane.
+worktree's terminals and labels each one with the reported `assistant.intent` from that exact
+terminal's representative live Copilot session. Until such a report exists, the label falls back to
+`Terminal 1`, `Terminal 2`, and so on in opening order. It remembers the selected terminal
+independently for each worktree. **New** starts another terminal for the targeted worktree; the
+empty state offers **Start terminal**. Switching worktrees hides the other worktrees' tabs without
+closing their terminals, and running iframes stay mounted so their browser state survives. Closing
+the last visible tab leaves the pane open in its empty state; only **Hide** collapses the pane.
 
 ### Control and discovery
 
@@ -96,6 +97,11 @@ participate in host-update gating. A session is non-idle when its existing `Sess
 effective per-session state is `Working` or `WaitingForUser`. `Idle`, closed, missing, and
 non-Copilot sessions do not gate. An unrelated Copilot session in the same worktree does not gate
 unless it carries that terminal's exact origin.
+
+The same exact-origin join supplies terminal tab titles. Among the live sessions attributed to one
+terminal, the active session wins; otherwise the most recently active live session is
+representative. Only its reported intent is exposed, so a session title alone does not replace the
+numbered fallback and an unrelated session in the same worktree cannot label the tab.
 
 `WaitingForUser` remains non-idle without a timeout. There is no forced replacement or operator
 override that discards a waiting Copilot session.
@@ -290,8 +296,11 @@ a bounded live-status cache and a process-local monotonic counter per terminal o
 terminal query filters the live cache to the caller's complete authoritative terminal-ID set before
 overlaying indexed durable rows, and returns only those raw rows plus their maximum epoch.
 `TerminalSessionActivity` owns the terminal-specific projection and returns an opaque replacement
-policy: wait, or proceed with the epoch and optional shell command keyed by exact terminal session
-ID. It applies generic openness and freshness decay only to non-waiting states; an effective
+policy plus the optional display-safe reported intent for each terminal. The remoting API enriches
+host registry snapshots from the scheduler's bounded live-session map; the TerminalHost registry
+and control API remain unaware of agent activity. Replacement policy remains opaque: wait, or
+proceed with the epoch and optional shell command keyed by exact terminal session ID. It applies
+generic openness and freshness decay only to non-waiting states; an effective
 `WaitingForUser` remains non-idle from its request/completion clocks regardless of `last_seen`, while
 exact terminal-ID filtering keeps the query bounded. It owns provider selection and `CodingToolCli`
 command construction; terminal replacement only rechecks the epoch, recreates terminals, and
@@ -424,7 +433,7 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, authoritative snapshot reconciliation, and public start/get/close surface |
 | `src/Server/SessionActivity.fs` | Effective per-session state used by the idle gate |
 | `src/Server/SessionActivityService.fs` | Activity ingestion, terminal-origin validation, bounded live state, pruned raw origin epochs, and mailbox-serialized terminal activity queries |
-| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection, idle gate, and opaque resume policy |
+| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection for tab intents, idle gating, and opaque resume policy |
 | `src/Server/SessionActivityStore.fs` | Durable Copilot session state, optional terminal origin, and indexed exact-origin queries |
 | `src/Extension/reporting/extension.mjs` | Passive activity reports sourced from `TREEMON_TERMINAL_SESSION_ID` |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |

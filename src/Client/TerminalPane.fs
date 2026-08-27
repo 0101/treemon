@@ -159,10 +159,16 @@ let private lifecyclePresentation lifecycle =
     | EmbeddedTerminalLifecycle.Interrupted _ ->
         "failed", "Interrupted", "!"
 
+let tabLabel index tab =
+    tab.ReportedIntent
+    |> Option.map _.Trim()
+    |> Option.filter (String.IsNullOrWhiteSpace >> not)
+    |> Option.defaultValue $"Terminal {index + 1}"
+
 let private terminalTab callbacks activeTerminal index tab =
     let terminalId = tab.Id
     let worktreeName = WorktreePath.displayName tab.Worktree
-    let label = $"Terminal {index + 1}"
+    let label = tabLabel index tab
     let isActive = activeTerminal = Some terminalId
     let lifecycleClass, lifecycleLabel, lifecycleGlyph =
         lifecyclePresentation tab.Lifecycle
@@ -382,13 +388,14 @@ let private runningIframes state =
                 let isActive =
                     state.ActiveTerminal = Some terminalId
 
-                let terminalNumber =
+                let terminalIndex =
                     state.Snapshot
                     |> tabsForWorktree tab.Worktree
                     |> List.tryFindIndex (fun candidate ->
                         candidate.Id = terminalId)
-                    |> Option.map ((+) 1)
-                    |> Option.defaultValue 1
+                    |> Option.defaultValue 0
+
+                let label = tabLabel terminalIndex tab
 
                 Html.iframe [
                     prop.key (EmbeddedTerminalId.value terminalId)
@@ -398,7 +405,7 @@ let private runningIframes state =
                         else
                             "terminal-iframe")
                     prop.hidden (not isActive)
-                    prop.title $"Terminal {terminalNumber} for {WorktreePath.displayName tab.Worktree}"
+                    prop.title $"{label} for {WorktreePath.displayName tab.Worktree}"
                     prop.src src
                     prop.custom ("data-terminal-id", EmbeddedTerminalId.value terminalId)
                     prop.custom ("data-terminal-worktree", WorktreePath.value tab.Worktree)

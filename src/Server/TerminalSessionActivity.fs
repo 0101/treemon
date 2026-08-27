@@ -1,6 +1,7 @@
 module Server.TerminalSessionActivity
 
 open System
+open Shared
 open Server.SessionActivity
 open Server.SessionActivityStore
 
@@ -87,6 +88,41 @@ let internal queryOwnedSessions
     =
     queryActivity terminalSessionIds
     |> Result.map (ownedSessionSnapshot now terminalSessionIds)
+
+let private terminalOrigin (tab: EmbeddedTerminalTab) =
+    tab.Id
+    |> EmbeddedTerminalId.value
+    |> TerminalSessionId
+
+let internal withReportedIntents
+    (now: DateTimeOffset)
+    (sessions: StoredStatus seq)
+    (snapshot: EmbeddedTerminalSnapshot)
+    =
+    let terminalSessionIds =
+        snapshot.Tabs
+        |> List.map terminalOrigin
+        |> Set.ofList
+
+    let reportedIntents =
+        sessions
+        |> joinOwnedSessions terminalSessionIds
+        |> List.groupBy fst
+        |> List.choose (fun (terminalSessionId, ownedSessions) ->
+            ownedSessions
+            |> List.map snd
+            |> CodingToolStatus.representativeReportedIntent now
+            |> Option.map (fun intent -> terminalSessionId, intent))
+        |> Map.ofList
+
+    { snapshot with
+        Tabs =
+            snapshot.Tabs
+            |> List.map (fun tab ->
+                { tab with
+                    ReportedIntent =
+                        reportedIntents
+                        |> Map.tryFind (terminalOrigin tab) }) }
 
 let private hasNonIdleOwnedSession (snapshot: OwnedSessionSnapshot) =
     snapshot.OpenSessions
