@@ -578,6 +578,7 @@ function Install-Extension {
     $requiredFiles = @(
         "package.json",
         "canvas-doc-kinds.json",
+        "canvas-filename-contract.json",
         "canvas-send.js",
         "canvas-selection-context.js"
     )
