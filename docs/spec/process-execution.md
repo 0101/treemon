@@ -169,5 +169,5 @@ not a settled one.
 ## Related Specs
 
 - `docs/spec/worktree-diff-viewer.md` — request-scoped deadline and byte-oriented Git consumers.
-- `docs/spec/remoting-csrf-hardening.md` — the other pipeline-level hardening of the same
+- `docs/spec/worktree-monitor.md` — the loopback request boundary protecting the same
   process-launching surface.

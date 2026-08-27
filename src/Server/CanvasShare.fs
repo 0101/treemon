@@ -34,6 +34,14 @@ let private base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn
 [<Literal>]
 let internal PrefixLength = 22
 
+[<Struct>]
+type internal SharePrefix =
+    private
+    | SharePrefix of string
+
+module internal SharePrefix =
+    let value (SharePrefix value) = value
+
 /// Publisher/viewer wire-contract key for the view-time-enforced expiry.
 [<Literal>]
 let internal ExpiryMetadataKey = "expiresOn"
@@ -59,13 +67,14 @@ let internal validateFilename (filename: string) : Result<unit, string> =
 /// A fresh high-entropy base62 prefix from the cryptographic RNG. `GetString` samples the alphabet
 /// uniformly (no modulo bias). Impure (RNG) but shape-testable: right length, alphabet-only, and
 /// distinct across calls.
-let internal generatePrefix () : string =
+let internal generatePrefix () : SharePrefix =
     System.Security.Cryptography.RandomNumberGenerator.GetString(base62Alphabet.AsSpan(), PrefixLength)
+    |> SharePrefix
 
 /// The blob name a published doc lands at: `<random-prefix>/<filename>`. `publish` admits only one
 /// validated filename segment, so this preserves that segment exactly for the viewer's lookup.
-let internal blobName (prefix: string) (filename: string) : string =
-    $"{prefix}/{filename}"
+let internal blobName (prefix: SharePrefix) (filename: string) : string =
+    $"{SharePrefix.value prefix}/{filename}"
 
 /// Builds the upload contract shared with the viewer: UTF-8 HTML plus an exact `expiresOn`
 /// metadata value in UTC round-trip form.
@@ -81,9 +90,9 @@ let internal buildUploadOptions (expiresOn: DateTimeOffset) =
 /// Constructs a recipient URL without consulting the Blob URI. The filename is encoded as one path
 /// segment without changing its casing, and validated config guarantees the base has no query or
 /// fragment to carry through.
-let internal buildViewerUrl (viewerBaseUrl: Uri) (prefix: string) (filename: string) =
+let internal buildViewerUrl (viewerBaseUrl: Uri) (prefix: SharePrefix) (filename: string) =
     let encodedFilename = Uri.EscapeDataString filename
-    $"{viewerBaseUrl.AbsoluteUri.TrimEnd('/')}/c/{prefix}/{encodedFilename}"
+    $"{viewerBaseUrl.AbsoluteUri.TrimEnd('/')}/c/{SharePrefix.value prefix}/{encodedFilename}"
 
 let private credential = lazy (AzureCliCredential())
 

@@ -258,5 +258,5 @@ projection but persists the complete count-only aggregate independently; see
 - `docs/spec/overview-activity-history.md` - durable canonical Overview snapshots.
 - `docs/spec/overview-drilldown.md` - per-group session details.
 - `docs/spec/resume-last-session.md` - resume command behavior.
-- `docs/spec/remoting-csrf-hardening.md` - endpoint origin protection.
+- `docs/spec/worktree-monitor.md` - endpoint origin protection.
 - `docs/spec/native-session-management.md` - terminal/window liveness, distinct from push openness.

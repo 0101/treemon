@@ -139,13 +139,16 @@ module internal ViewerApplication =
                     |]
                 )
 
-                context.Response.Clear()
-                context.Response.StatusCode <-
-                    StatusCodes.Status503ServiceUnavailable
-                applyResponsePolicy
-                    DependencyFailureContentSecurityPolicy
-                    context
-                context.Response.ContentLength <- 0L
+                if context.Response.HasStarted then
+                    context.Abort()
+                else
+                    context.Response.Clear()
+                    context.Response.StatusCode <-
+                        StatusCodes.Status503ServiceUnavailable
+                    applyResponsePolicy
+                        DependencyFailureContentSecurityPolicy
+                        context
+                    context.Response.ContentLength <- 0L
         }
 
     let private shellBytes (context: HttpContext) =
@@ -188,11 +191,12 @@ module internal ViewerApplication =
         (document: BlobDocument)
         : Task =
         task {
+            use document = document
             context.Response.ContentType <- "text/html; charset=utf-8"
-            context.Response.ContentLength <- document.Content.Length
+            context.Response.ContentLength <- document.ContentLength
             do!
-                context.Response.Body.WriteAsync(
-                    document.Content,
+                document.Content.CopyToAsync(
+                    context.Response.Body,
                     context.RequestAborted
                 )
         }

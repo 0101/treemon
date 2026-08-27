@@ -2,6 +2,7 @@ namespace CanvasShareViewer
 
 open System
 open System.Collections.Generic
+open System.IO
 open System.Threading
 open System.Threading.Tasks
 open Azure
@@ -10,8 +11,12 @@ open Azure.Storage.Blobs
 open Azure.Storage.Blobs.Models
 
 type internal BlobDocument =
-    { Content: ReadOnlyMemory<byte>
+    { Content: Stream
+      ContentLength: int64
       Metadata: Map<string, string> }
+    interface IDisposable with
+        member this.Dispose() =
+            this.Content.Dispose()
 
 type internal BlobReader =
     { ReadPropertiesExact:
@@ -96,15 +101,18 @@ module internal BlobStorage =
                             let! response =
                                 containerClient
                                     .GetBlobClient(blobName)
-                                    .DownloadContentAsync(
-                                        cancellationToken
+                                    .DownloadStreamingAsync(
+                                        cancellationToken =
+                                            cancellationToken
                                     )
 
                             let download = response.Value
 
                             return
                                 { Content =
-                                    download.Content.ToMemory()
+                                    download.Content
+                                  ContentLength =
+                                    download.Details.ContentLength
                                   Metadata =
                                     download.Details.Metadata
                                     |> metadataMap }

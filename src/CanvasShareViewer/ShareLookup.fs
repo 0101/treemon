@@ -13,6 +13,7 @@ module internal ShareLookup =
     let private resolve
         read
         metadata
+        release
         (clock: unit -> DateTimeOffset)
         prefix
         filename
@@ -28,20 +29,25 @@ module internal ShareLookup =
                         (SharePath.blobName path)
                         cancellationToken
 
-                return
-                    match stored with
-                    | Some value
-                        when ShareExpiry.isLive
-                            (clock ())
-                            (metadata value)
-                            ->
-                        Available value
-                    | _ ->
-                        NotFound
+                match stored with
+                | Some value
+                    when ShareExpiry.isLive
+                        (clock ())
+                        (metadata value)
+                        ->
+                    return Available value
+                | Some value ->
+                    release value
+                    return NotFound
+                | None ->
+                    return NotFound
         }
 
     let resolveProperties (reader: BlobReader) =
-        resolve reader.ReadPropertiesExact id
+        resolve reader.ReadPropertiesExact id ignore
 
     let resolveDocument (reader: BlobReader) =
-        resolve reader.ReadExact _.Metadata
+        resolve
+            reader.ReadExact
+            _.Metadata
+            (fun document -> document.Content.Dispose())

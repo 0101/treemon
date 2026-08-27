@@ -37,15 +37,45 @@ let private dependencyFailureContentSecurityPolicy =
 let private formatExpiry (value: DateTimeOffset) =
     value.ToString("o", CultureInfo.InvariantCulture)
 
+type private StoredBlobDocument =
+    { Content: byte array
+      Metadata: Map<string, string> }
+
+let private storedDocument content metadata =
+    { Content = content
+      Metadata = metadata }
+
 let private document
     (content: string)
     (metadata: Map<string, string>)
     =
+    storedDocument
+        (Encoding.UTF8.GetBytes content)
+        metadata
+
+let private openDocument
+    (stored: StoredBlobDocument)
+    : BlobDocument
+    =
     { Content =
-        content
-        |> Encoding.UTF8.GetBytes
-        |> ReadOnlyMemory<byte>
-      Metadata = metadata }
+        new MemoryStream(stored.Content, false)
+        :> Stream
+      ContentLength = int64 stored.Content.LongLength
+      Metadata = stored.Metadata }
+
+type private DisposalTrackingStream(content: byte array) =
+    inherit MemoryStream(content, false)
+
+    // Disposal observation is mutable because Stream.Dispose is an imperative boundary.
+    let mutable disposed = false
+
+    member _.IsDisposed = disposed
+
+    override this.Dispose(disposing) =
+        if disposing then
+            disposed <- true
+
+        base.Dispose(disposing)
 
 type private BlobLookup =
     | PropertiesLookup of string
@@ -124,8 +154,28 @@ let private fakeBlobReader documents =
 
                 documents
                 |> Map.tryFind blobName
+                |> Option.map openDocument
                 |> Task.FromResult }
       Requests = fun () -> List.rev requestsRev }
+
+let private withRunningViewer
+    (app: WebApplication)
+    port
+    (action: HttpClient -> string -> unit)
+    =
+    use app = app
+
+    app.StartAsync(CancellationToken.None)
+        .GetAwaiter()
+        .GetResult()
+
+    try
+        use client = new HttpClient()
+        action client $"http://127.0.0.1:{port}"
+    finally
+        app.StopAsync(CancellationToken.None)
+            .GetAwaiter()
+            .GetResult()
 
 let private withViewer
     documents
@@ -142,23 +192,13 @@ let private withViewer
         options.Listen(IPAddress.Loopback, port))
     |> ignore
 
-    use app =
+    let app =
         ViewerApplication.create
             builder
             fake.Reader
             (fun () -> now)
 
-    app.StartAsync(CancellationToken.None)
-        .GetAwaiter()
-        .GetResult()
-
-    try
-        use client = new HttpClient()
-        action fake client $"http://127.0.0.1:{port}"
-    finally
-        app.StopAsync(CancellationToken.None)
-            .GetAwaiter()
-            .GetResult()
+    withRunningViewer app port (action fake)
 
 let private withThrowingViewer
     environmentName
@@ -193,23 +233,13 @@ let private withThrowingViewer
                 createError ()
                 |> Task.FromException<BlobDocument option> }
 
-    use app =
+    let app =
         ViewerApplication.create
             builder
             reader
             (fun () -> now)
 
-    app.StartAsync(CancellationToken.None)
-        .GetAwaiter()
-        .GetResult()
-
-    try
-        use client = new HttpClient()
-        action logs client $"http://127.0.0.1:{port}"
-    finally
-        app.StopAsync(CancellationToken.None)
-            .GetAwaiter()
-            .GetResult()
+    withRunningViewer app port (action logs)
 
 let private await (work: Task<'value>) =
     work.GetAwaiter().GetResult()
@@ -558,6 +588,14 @@ type ShareExpiryTests() =
                 CancellationToken.None
             |> await
 
+        use resolvedDocument =
+            match documentResult with
+            | Available document ->
+                document
+            | NotFound ->
+                Assert.Fail("Expected the live document lookup to succeed.")
+                Unchecked.defaultof<BlobDocument>
+
         Assert.Multiple(fun () ->
             Assert.That(
                 ShareExpiry.isLive now mixedCaseMetadata,
@@ -572,8 +610,13 @@ type ShareExpiryTests() =
             )
 
             Assert.That(
-                documentResult,
-                Is.EqualTo(Available stored)
+                resolvedDocument.Metadata,
+                Is.EqualTo(mixedCaseMetadata)
+            )
+
+            Assert.That(
+                resolvedDocument.ContentLength,
+                Is.EqualTo(int64 stored.Content.LongLength)
             )
 
             Assert.That(
@@ -947,6 +990,50 @@ type ViewerRouteTests() =
                 )))
 
     [<Test>]
+    member _.``expired document lookup disposes the unread body stream``() =
+        let stream =
+            new DisposalTrackingStream(
+                Encoding.UTF8.GetBytes("expired")
+            )
+
+        let expiredMetadata =
+            Map [
+                ShareExpiry.MetadataKey,
+                formatExpiry now
+            ]
+
+        let reader =
+            { ReadPropertiesExact =
+                fun _ _ ->
+                    Task.FromResult(None)
+              ReadExact =
+                fun _ _ ->
+                    Task.FromResult(
+                        Some
+                            { Content = stream
+                              ContentLength = stream.Length
+                              Metadata = expiredMetadata }
+                    ) }
+
+        let result =
+            ShareLookup.resolveDocument
+                reader
+                (fun () -> now)
+                validPrefix
+                "report.html"
+                CancellationToken.None
+            |> await
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                (match result with
+                 | NotFound -> true
+                 | Available _ -> false),
+                Is.True
+            )
+            Assert.That(stream.IsDisposed, Is.True))
+
+    [<Test>]
     member _.``content route fails closed to the shell without exact iframe Fetch Metadata``() =
         let blobName = $"{validPrefix}/report.html"
         let secretMarker = "active-document-secret-marker"
@@ -1214,8 +1301,7 @@ type ViewerRouteTests() =
         let documents =
             Map [
                 blobName,
-                { Content = ReadOnlyMemory<byte>(fixture)
-                  Metadata = liveMetadata }
+                storedDocument fixture liveMetadata
             ]
 
         withViewer documents now (fun _ client baseUrl ->
@@ -1277,6 +1363,64 @@ type ViewerRouteTests() =
                     requiredAttribute "src" image,
                     Does.StartWith("data:image/")
                 )))
+
+    [<Test>]
+    member _.``content response disposes its Blob stream after copying``() =
+        let bytes =
+            Encoding.UTF8.GetBytes(
+                "<html><body>streamed</body></html>"
+            )
+
+        let stream = new DisposalTrackingStream(bytes)
+
+        let reader =
+            { ReadPropertiesExact =
+                fun _ _ ->
+                    Task.FromResult(Some liveMetadata)
+              ReadExact =
+                fun _ _ ->
+                    Task.FromResult(
+                        Some
+                            { Content = stream
+                              ContentLength = int64 bytes.LongLength
+                              Metadata = liveMetadata }
+                    ) }
+
+        let port = getFreeTcpPort ()
+        let builder =
+            WebApplication.CreateEmptyBuilder(
+                WebApplicationOptions()
+            )
+        builder.WebHost.UseKestrel(fun options ->
+            options.Listen(IPAddress.Loopback, port))
+        |> ignore
+
+        let app =
+            ViewerApplication.create
+                builder
+                reader
+                (fun () -> now)
+
+        withRunningViewer app port (fun client baseUrl ->
+            use response =
+                getIframeContent
+                    client
+                    $"{baseUrl}/c/{validPrefix}/report.html/content"
+                |> await
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    response.Content.ReadAsByteArrayAsync()
+                    |> await,
+                    Is.EqualTo(bytes)
+                )
+
+                Assert.That(
+                    response.Content.Headers.ContentLength,
+                    Is.EqualTo(int64 bytes.LongLength)
+                )))
+
+        Assert.That(stream.IsDisposed, Is.True)
 
     [<Test>]
     member _.``all not-found outcomes are indistinguishable on both routes``() =

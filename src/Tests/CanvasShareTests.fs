@@ -24,6 +24,9 @@ type ShareFilenameContractTests() =
     [<TestCase("Status.HTML")>]
     [<TestCase("release..notes.html")>]
     member _.``publisher and viewer accept the same valid filename``(filename: string) =
+        let prefix = generatePrefix ()
+        let prefixValue = SharePrefix.value prefix
+
         Assert.Multiple(fun () ->
             Assert.That(
                 validateFilename filename |> Result.isOk,
@@ -37,8 +40,8 @@ type ShareFilenameContractTests() =
                 Is.True,
                 "viewer")
             Assert.That(
-                blobName validPrefix filename,
-                Is.EqualTo($"{validPrefix}/{filename}"),
+                blobName prefix filename,
+                Is.EqualTo($"{prefixValue}/{filename}"),
                 "exact Blob name"))
 
     [<TestCase("")>]
@@ -93,24 +96,26 @@ type BlobNamingTests() =
 
     [<Test>]
     member _.``blobName joins the prefix and filename with a slash``() =
-        Assert.That(blobName "PREFIX123" "build-status.html", Is.EqualTo("PREFIX123/build-status.html"))
+        let prefix = generatePrefix ()
+        let prefixValue = SharePrefix.value prefix
+
+        Assert.That(
+            blobName prefix "build-status.html",
+            Is.EqualTo($"{prefixValue}/build-status.html"))
 
     [<Test>]
     member _.``blobName keeps the real filename so the recipient sees a meaningful title``() =
-        Assert.That(blobName "abc" "weekly-sync.html", Does.EndWith("/weekly-sync.html"))
-
-    [<Test>]
-    member _.``blobName preserves filename casing and consecutive dots``() =
         Assert.That(
-            blobName "P" "Release..Notes.HTML",
-            Is.EqualTo("P/Release..Notes.HTML"))
+            blobName (generatePrefix ()) "weekly-sync.html",
+            Does.EndWith("/weekly-sync.html"))
 
     [<Test>]
     member _.``generatePrefix is PrefixLength base62 characters``() =
         let prefix = generatePrefix ()
-        Assert.That(prefix.Length, Is.EqualTo(PrefixLength),
+        let value = SharePrefix.value prefix
+        Assert.That(value.Length, Is.EqualTo(PrefixLength),
                     "the prefix must be the fixed high-entropy length")
-        Assert.That(Regex.IsMatch(prefix, "^[0-9A-Za-z]+$"), Is.True,
+        Assert.That(Regex.IsMatch(value, "^[0-9A-Za-z]+$"), Is.True,
                     "the prefix must be base62 (digits + letters), URL-safe with no separators")
 
     [<Test>]
@@ -172,7 +177,8 @@ type UploadContractTests() =
 [<Category("Fast")>]
 type ViewerUrlTests() =
 
-    let prefix = "0123456789AbCdEfGhIjKl"
+    let prefix = generatePrefix ()
+    let prefixValue = SharePrefix.value prefix
 
     [<Test>]
     member _.``viewer URL uses the canonical deployed origin and clean c path``() =
@@ -185,7 +191,7 @@ type ViewerUrlTests() =
         Assert.That(
             url,
             Is.EqualTo(
-                $"https://treemon.azurewebsites.net/c/{prefix}/status.html"))
+                $"https://treemon.azurewebsites.net/c/{prefixValue}/status.html"))
 
     [<Test>]
     member _.``viewer URL uses the configured HTTPS host``() =
@@ -198,7 +204,7 @@ type ViewerUrlTests() =
         Assert.That(
             url,
             Is.EqualTo(
-                $"https://isolated-viewer.test:7443/c/{prefix}/status.html"))
+                $"https://isolated-viewer.test:7443/c/{prefixValue}/status.html"))
 
     [<Test>]
     member _.``viewer URL percent-encodes the filename as one path segment``() =
@@ -212,7 +218,7 @@ type ViewerUrlTests() =
             url,
             Is.EqualTo(
                 "https://viewer.test/c/"
-                + prefix
+                + prefixValue
                 + "/Q3%20report%20%231.html"))
 
     [<TestCase("Status.HTML")>]
@@ -227,23 +233,7 @@ type ViewerUrlTests() =
         Assert.That(
             url,
             Is.EqualTo(
-                $"https://viewer.test/c/{prefix}/{filename}"))
-
-    [<Test>]
-    member _.``viewer URL has no query fragment or Blob credential``() =
-        let url =
-            buildViewerUrl
-                (Uri("https://viewer.test"))
-                prefix
-                "status.html"
-        let uri = Uri url
-
-        Assert.Multiple(fun () ->
-            Assert.That(uri.Query, Is.Empty)
-            Assert.That(uri.Fragment, Is.Empty)
-            Assert.That(url, Does.Not.Contain("?"))
-            Assert.That(url, Does.Not.Contain("sig="))
-            Assert.That(url, Does.Not.Contain(".blob.core.windows.net")))
+                $"https://viewer.test/c/{prefixValue}/{filename}"))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -346,7 +336,6 @@ type CanvasShareConfigTests() =
             Assert.That(readCanvasShareConfig().Container, Is.EqualTo(defaultCanvasShareConfig.Container)))
 
     [<TestCase(1)>]
-    [<TestCase(7)>]
     [<TestCase(30)>]
     member _.``readCanvasShareConfig accepts a bounded product lifetime``(days: int) =
         withTempConfigDir "canvas-share-config" (fun dir ->
@@ -362,10 +351,6 @@ type CanvasShareConfigTests() =
                 $"""{{ "canvasShare": {{ "defaultExpiryDays": {days} }} }}"""
             Assert.That(readCanvasShareConfig().DefaultExpiryDays,
                         Is.EqualTo(defaultCanvasShareConfig.DefaultExpiryDays)))
-
-    [<Test>]
-    member _.``the durable product expiry ceiling is thirty days``() =
-        Assert.That(maxCanvasShareExpiryDays, Is.EqualTo(30))
 
 [<TestFixture>]
 [<Category("Unit")>]

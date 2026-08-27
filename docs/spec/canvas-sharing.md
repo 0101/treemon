@@ -40,13 +40,12 @@
   action while the other owns the clipboard, and both controls are disabled until that workflow
   settles, so their async results cannot overwrite the pane-global error or clipboard notice state.
 - Sharing operates on a single, self-contained doc. Docs that link to sibling `.html` tabs are
-  shared as just the focused file; those links remain inert in the exported copy, unchanged from
-  today.
+  shared as just the focused file; those links are inert in the exported copy.
 
 ### Static export
 
-- The static export (`CanvasExport.buildStaticHtml`) is unchanged: the on-disk
-  `.agents/canvas/<file>.html` is already free of the serve-time injected scripts (bridge heartbeat,
+- The static export (`CanvasExport.buildStaticHtml`) starts from the on-disk
+  `.agents/canvas/<file>.html`, which is free of the serve-time injected scripts (bridge heartbeat,
   `canvasSend`, idiomorph/morph, error overlay), so the export re-injects only the shared base theme
   `<style>` and a no-op `window.canvasSend` at `</head>` (or prepends when there is no `</head>`),
   via the same `injectAtHead` helper `CanvasDocServer` uses for live-served docs. It injects nothing
@@ -72,8 +71,9 @@
   the requested share exists.
 - A `BlobNotFound` 404 is the only dependency outcome treated as a missing share. Container or
   account failures, storage throttling, authorization, service, and managed-credential failures
-  return one fixed, empty 503 with restrictive response headers in every runtime environment, so
-  an outage is retryable without exposing framework diagnostics.
+  before a response starts return one fixed, empty 503 with restrictive response headers in every
+  runtime environment. A failure after document streaming starts aborts the response because its
+  status and partial body can no longer be replaced.
 - The audience is tenant-wide: any identity the tenant issuer authenticates -- a current-tenant
   user or an invited B2B guest -- may view a share whose link it holds. Enterprise-application
   assignment is deliberately not required, so possession of the link plus a tenant sign-in is the
@@ -94,19 +94,18 @@
 
 ### Clipboard
 
-- Clipboard behavior is unchanged: on success the client writes both `text/html` (a titled
+- On success the client writes both `text/html` (a titled
   `<a href>` using the doc's `<title>`, falling back to a prettified filename) and `text/plain` (the
   raw URL) via the async Clipboard API, and the outcome is routed back through
   `ClipboardWriteResult` rather than assumed -- the banner reads "copied" only once the write
   lands, and otherwise falls back to `Shared -- link ready, copy it manually: <url>` with the URL
-  shown as selectable text. What changed is only the shape of the URL itself: a clean `/c/...`
-  viewer path instead of a blob URL with a SAS query string.
+  shown as selectable text. The copied URL is a clean `/c/...` viewer path with no SAS query.
 
 ### Configuration
 
-- The `canvasShare` section of the machine-level Treemon config (`~/.treemon/config.json`) keeps
-  `accountName`, `container`, and `defaultExpiryDays`, and adds `viewerBaseUrl` -- the viewer App
-  Service's HTTPS base URL. All four are ordinary non-secret settings; none of them, and no Entra
+- The `canvasShare` section of the machine-level Treemon config (`~/.treemon/config.json`) contains
+  `accountName`, `container`, `defaultExpiryDays`, and `viewerBaseUrl` -- the viewer App Service's
+  HTTPS base URL. All four are ordinary non-secret settings; none of them, and no Entra
   tenant/client/resource identifier or secret, ships as a value in the repository's defaults.
   `accountName` and `viewerBaseUrl` have no default, so their absence means the feature is
   unconfigured; the canonical deployed value of `viewerBaseUrl` is
@@ -114,19 +113,9 @@
   `/`, with no user info, query, or fragment; path-based viewer URLs are rejected because the
   deployed viewer serves `/c/...` only at the origin root. An unconfigured Share action still
   fails with a clear `Result.Error` before any network call.
-- `defaultExpiryDays` remains 7 and `maxCanvasShareExpiryDays` is 30. The share container's Blob
+- `defaultExpiryDays` is 7 and `maxCanvasShareExpiryDays` is 30. The share container's Blob
   lifecycle policy deletes only after 31 days or more, so cleanup never removes a document the
   viewer would still have served.
-- The same section also carries `approvedSubscription`, read only by the deployment script and
-  never by the running server. It is machine-private: it has no repository default, no
-  placeholder value, and its absence means deployment is unconfigured rather than unrestricted.
-  Its value may be a subscription name or ID; the script resolves it to a subscription ID and
-  compares IDs, so the two forms are interchangeable.
-- The deployment script and the server both resolve the config through `TREEMON_CONFIG_DIR` when
-  it is set. Deployment and live verification use that isolation deliberately: they
-  run against a throwaway config seeded with `accountName`, `container`, and
-  `approvedSubscription` copied from the private machine config, so a run cannot add
-  `viewerBaseUrl` to -- or otherwise alter -- the configuration the production instance reads.
 - The viewer reads its own required, non-secret ASP.NET Core settings from
   `CanvasShareViewer:StorageAccountName` and `CanvasShareViewer:ShareContainer` (App Service
   environment names use `CanvasShareViewer__StorageAccountName` and
@@ -134,7 +123,7 @@
 
 ## Technical Approach
 
-### Publisher (`src/Server`, unchanged project)
+### Publisher (`src/Server`)
 
 - `CanvasShare` uploads the exported HTML directly to the pre-provisioned private Blob container
   using the same cached, delegated `AzureCliCredential`-backed identity as today. It writes the
@@ -142,21 +131,19 @@
   the blob's existing unguessable-prefix-plus-filename naming (`<opaque-prefix>/<filename>`); it
   never mints or returns a SAS.
 - `WorktreeApi.shareCanvasDocImpl` applies `CanvasShare.validateFilename` before path validation or
-  file access, then keeps the existing read, export, and publish pipeline behind the same
+  file access, then runs the read, export, and publish pipeline behind the same
   `withValidatedPath` guard that every other write method uses (mirroring `archiveCanvasDoc`).
-  `CanvasShare.publish` repeats that same validation at the upload boundary before configuration or
-  Azure work, and the demo-mode stub keeps returning `Error "... not available in demo mode"`.
-- `ShareCanvasDocRequest` and `CanvasShareResult` keep their existing shape (`WorktreePath`/
-  `Filename` in, `Url`/`Title` out); only the value and format of `Url` changes.
-- The Treemon server itself is unchanged: it stays bound to loopback and is never exposed to the
-  internet. Its shared Remoting `HttpSecurity.csrfGuard` (Origin/Referer allowlist, one
-  pipeline-level guard over every `IWorktreeApi` method) continues to gate `shareCanvasDoc` exactly
-  as it gates every other state-changing endpoint.
+  `CanvasShare.publish` repeats that validation at the upload boundary before configuration or
+  Azure work, and the demo-mode stub returns `Error "... not available in demo mode"`.
+- `ShareCanvasDocRequest` carries `WorktreePath` and `Filename`; `CanvasShareResult` carries `Url`
+  and `Title`.
+- The Treemon server stays bound to loopback and is never exposed to the internet. Its shared
+  `HttpSecurity.csrfGuard` gates `shareCanvasDoc` with every other state-changing endpoint.
 
-### Viewer (new project, `src/CanvasShareViewer/`)
+### Viewer (`src/CanvasShareViewer/`)
 
-- A small ASP.NET Core F# application, deployed to its own Azure App Service, is the only
-  internet-facing component this feature adds.
+- A small ASP.NET Core F# application on its own Azure App Service is the feature's only
+  internet-facing component.
 - Easy Auth is configured for the workforce, current-tenant, single-tenant Entra registration with
   authentication required at the platform level, so an unauthenticated request never reaches
   application code. Assignment is not required on the enterprise application: every identity the
@@ -166,14 +153,14 @@
   `response_type=code id_token` with `response_mode=form_post`; browser access-token issuance
   remains disabled. Easy Auth explicitly requests only `openid`, the minimum scope needed for the
   ID token and stable subject identifier; the viewer requests neither profile nor email claims.
-  The registration is presented as **Treemon Canvas Viewer**, with the canonical viewer homepage,
-  a plain-language read-only description, and a 215x215 logo derived from the Treemon PWA icon.
+  The registration is named **Treemon Canvas Viewer**.
 - Two routes divide responsibility: a shell route (`/c/<opaque-prefix>/<filename>`) validates the
   request and expiry through an exact Blob properties lookup and renders a minimal HTML page
   without downloading the document body; a content route
-  (`/c/<opaque-prefix>/<filename>/content`) performs the only body-bearing lookup and is the only
-  thing the shell's iframe loads. Keeping them separate lets the content response carry a much
-  stricter policy than the shell needs.
+  (`/c/<opaque-prefix>/<filename>/content`) performs the only body-bearing lookup and streams that
+  Blob response directly to the HTTP response. Keeping them separate lets the content response
+  carry a much stricter policy than the shell needs while bounding application memory independently
+  of document size.
 - Each route re-validates the segments and re-checks expiry against blob metadata on its own; the
   content route never trusts that the shell already checked. Otherwise the content route would be
   an unguarded bypass for an expired or malformed share whose URL the recipient still holds.
@@ -186,8 +173,9 @@
   through the same application-level ordering; only elapsed time may differ.
 - An exception boundary registered before routing handles non-404 Azure Storage failures and
   `DefaultAzureCredential` failures independently of the ASP.NET Core environment. It logs only
-  the exception type and available Azure status/error code, clears the route response, and emits
-  the fixed dependency-failure response; it never converts an outage to not-found.
+  the exception type and available Azure status/error code. Before headers are committed it clears
+  the route response and emits the fixed dependency-failure response; after streaming begins it
+  aborts the connection instead of attempting to replace a partial response.
 - The shell's iframe uses `sandbox="allow-scripts"` only -- it omits `allow-same-origin`,
   `allow-forms`, `allow-popups`, and `allow-top-navigation`, so the embedded document's script can
   run but cannot read the viewer's cookies or storage, submit forms, open popups, or navigate the
@@ -246,30 +234,33 @@ security boundary.
 `img-src data:`/`font-src data:`/`media-src data:` keep embedded assets working while denying the
 remote-URL fetch that would otherwise be a working exfiltration channel.
 
-### Provisioning
+### Provisioning Contract
 
-- `scripts/deploy-canvas-share-viewer.ps1` is the idempotent validate/apply entry point. Deployment
-  names except the canonical app registration are operator inputs; storage and publisher identity
-  come from machine configuration and the selected Azure CLI user. Exact subscription, tenant, and
-  resource identifiers remain private.
-- The requested, approved, and selected subscriptions must resolve to the same enabled subscription
-  before any resource-provider or Entra operation. Every resource-plane call names that subscription
-  explicitly, and failures identify the protected setting without revealing its value.
-- The App Service keeps the fixed `treemon.azurewebsites.net` name. First creation fails rather than
-  silently choosing another hostname, preserving shared-link origin and browser SSO.
-- The delegated publisher retains Blob-contributor access. The viewer receives a separate managed
-  identity whose effective Blob-read access is audited before mutation and after deployment; any
-  read grant broader than the configured private container fails closed and is never auto-deleted.
-- Apply reconciles the private container, lifecycle rule, B1 Linux plan, App Service, secret-free
-  Easy Auth federation, openid-only login scope, user-facing registration branding, production
-  environment settings, and canonical `viewerBaseUrl`. Validation performs the same safety checks
-  plus a local Release publish without changing Azure or config.
-- The lifecycle policy is merged with unrelated account rules, and verification removes only its
-  temporary document fixtures. Canonical resources and access grants remain deployed.
-- Feature development, deployment, and verification never run a production lifecycle command
-  (`treemon.ps1 deploy`/`start`/`stop`/`restart`) and never bind to or otherwise disturb the
-  production instance on port 5000.
-- See `docs/canvas-share-viewer-deployment.md` for prerequisites and operator commands.
+Provisioning is an attended, clean-slate agent operation rather than checked-in deployment
+automation. The agent confirms the private subscription and tenant immediately before mutation and
+fails if the requested resource group, B1 Linux plan, user-assigned managed identity, fixed-name
+`treemon` App Service, or **Treemon Canvas Viewer** app registration already exists. The configured
+publisher storage account is the sole pre-existing Azure prerequisite.
+
+The resulting Azure state must satisfy all of these invariants:
+
+- Blob public access is disabled. The configured container is private, the viewer identity has only
+  `Storage Blob Data Reader` at that container, and the current publisher has
+  `Storage Blob Data Contributor` at the same scope.
+- The storage account lifecycle policy preserves unrelated rules and contains one container-filtered
+  deletion rule that starts only after more than 31 days.
+- The App Service uses the fixed `https://treemon.azurewebsites.net` origin, .NET 10 on Linux,
+  HTTPS-only transport, disabled FTP/SCM basic publishing credentials, and the
+  `CanvasShareViewer__StorageAccountName` and `CanvasShareViewer__ShareContainer` settings.
+- Easy Auth requires the current single tenant before requests reach the application, requires no
+  enterprise-application assignment, requests only `openid`, disables its token store, and uses the
+  exact `https://treemon.azurewebsites.net/.auth/login/aad/callback` redirect.
+- The app registration declares no API permissions, enables ID-token issuance but not browser
+  access-token issuance, and authenticates Easy Auth through a managed-identity federated
+  credential rather than a client secret. A tenant-mandated `serviceManagementReference` is reused
+  only when one unambiguous publisher-owned value exists.
+- After deployment, the agent verifies the control-plane state and sets
+  `canvasShare.viewerBaseUrl` separately while Treemon is not writing machine configuration.
 
 ## Security Posture
 
@@ -277,8 +268,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   identifier, not an authorization grant; Entra sign-in plus the viewer's own expiry check are what
   authorize a view.
 - The embedded document is contained by iframe sandboxing (script execution allowed; same-origin,
-  forms, popups, and top-navigation denied) and a restrictive content CSP. This replaces the
-  previous posture of serving canvas exports as unsandboxed, top-level active HTML.
+  forms, popups, and top-navigation denied) and a restrictive content CSP.
 - The active-content CSP and security headers apply only after the content route accepts a
   same-origin iframe navigation. Direct, top-level, cross-site, and metadata-missing requests get
   the unframeable shell instead, preventing active script from using top-level self-navigation as a
@@ -291,7 +281,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 - Storage and credential outages are intentionally distinguishable from a missing share by their
   fixed empty 503, but are not distinguishable by route or runtime environment and expose no
   exception message, stack, request path, or document content.
-- The Remoting CSRF guard continues to protect the publish call itself: a forged cross-origin
+- The Remoting CSRF guard protects the publish call itself: a forged cross-origin
   `shareCanvasDoc` request from the operator's browser is rejected before any Azure I/O, the same as
   every other `IWorktreeApi` state-changing endpoint.
 
@@ -299,14 +289,13 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 
 | Decision | Rationale |
 |---|---|
-| Keep the existing private Blob container as backing storage rather than App Service's own storage | Minimizes change to the proven publish path and keeps the existing lifecycle policy and publisher RBAC grant intact. |
+| Use the publisher's private Blob container rather than App Service storage | One backing store keeps expiry metadata, lifecycle cleanup, and publisher RBAC attached to the shared artifact. |
 | Split the viewer into a shell route and a separate content route | Lets the content response carry a much stricter CSP than the shell page needs, and gives the iframe a distinct `src` resource. |
 | Sandbox the content iframe without `allow-same-origin` | Granting it would hand the embedded document the viewer's authenticated origin (cookies, Easy Auth session) even though it also has script execution. |
 | Enforce expiry in the viewer at request time rather than relying on Blob lifecycle deletion | Lifecycle deletion runs on a daily-ish schedule and is a backstop; relying on it alone would leave documents readable past their promised expiry. |
 | Prefer a managed-identity federated credential over an Easy Auth client secret | Avoids minting, storing, or rotating a long-lived secret for the viewer's app registration. |
 | Enable registration ID-token issuance but not browser access-token issuance | App Service Easy Auth uses an OIDC hybrid `code id_token` form-post callback and rejects sign-in when the registration cannot issue that ID token; it redeems the code server-side through managed-identity federation, so browser access-token issuance remains unnecessary. |
 | Request only the `openid` login scope | The viewer needs an ID token to authenticate a tenant subject but reads no profile/email claims and calls no downstream API. Explicit `scope=openid` prevents App Service's broader `openid profile email` defaults from adding an unused basic-profile consent ask. |
-| Give the registration a canonical product identity | A fixed **Treemon Canvas Viewer** name, read-only description, canonical homepage, and PWA logo make the consent/App info surfaces recognizable. The former technical name is accepted only as a bounded migration lookup so deployment renames the durable registration instead of creating a duplicate. |
 | Store expiry as blob metadata rather than a separate data store | Keeps the expiry attached to the artifact it governs, with no second store to keep in sync; it travels and disappears with the blob. |
 | Re-check segments and expiry on the content route instead of trusting the shell | The recipient holds the URL, so the content route is directly reachable; a shell-only check would leave an expired share readable by editing the path. |
 | Use a properties-only Blob lookup for the shell and reserve the body read for the content route | The shell needs only existence and expiry metadata, so downloading and discarding the complete document there would double the transferred document bytes without strengthening validation. |
@@ -317,39 +306,29 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
 | Look the blob up by exact composed name, never by listing or prefix search | A share URL then reveals only its own document; no reachable code path can turn one link into an inventory of the container. |
 | Allow `unsafe-eval` only inside the contained document response | Shared canvases already support arbitrary inline JavaScript; preserving `eval`/`new Function` compatibility does not grant viewer-origin or network access because the sandbox and remaining CSP directives still deny both. |
 | Use `treemon.azurewebsites.net` rather than a custom domain or generated suffix | The Azure-provided hostname is short, TLS-enabled, requires no DNS ownership, and gives every shared document one stable origin for browser SSO. |
-| Derive storage and publisher deployment inputs from machine/Azure CLI state | The existing `canvasShare` account/container and current delegated publisher are already the publisher's source of truth. Requiring them again as script arguments would permit a viewer and publisher to be provisioned against different containers or identities. |
-| Require an exact machine-private subscription allowlist match | Azure CLI's ambient default proves only what is selected, not whether that subscription is approved for this workload. A private source of truth keeps identifiers out of the repository and makes a mistaken shared-subscription deployment fail before any resource operation. |
-| Keep the in-script guard even when the environment already restricts direct CLI use | A control that filters issued commands cannot observe the `az` child processes a deployment script starts, so it stops covering exactly the operations this feature automates. The script's own check is the only one present inside a run, and an outer restriction is never accepted as a reason to remove or weaken it. |
-| Reuse one unambiguous publisher-owned `serviceManagementReference` only when Entra requires it | Restricted tenants reject registration mutations without their organizational service reference, while an arbitrary GUID can be invalid or misrepresent ownership. Conditional discovery keeps the normal path unchanged, adds no secret or deployment-name input, and fails closed when publisher-owned state cannot identify one value. |
+| Provision through an attended agent instead of checked-in deployment automation | The topology is small and infrequently created; preserving desired state is cheaper and clearer than maintaining migration, reconciliation, and mocked Azure CLI machinery. The agent confirms the private target, fails on existing named resources, and derives storage and publisher identity from the same sources the running publisher uses. |
+| Reuse one unambiguous publisher-owned `serviceManagementReference` only when Entra requires it | Restricted tenants reject registration creation without their organizational service reference, while an arbitrary GUID can be invalid or misrepresent ownership. |
 | Pass the Linux runtime through Azure CLI's JSON-file configuration input | The runtime contains `|`, which the Windows `az.cmd` launcher can reinterpret as a command pipe even when PowerShell supplied it as one argument. A file preserves the exact value without platform-specific quoting or reliance on Azure CLI installation internals. |
 | Treat only a container-scoped RBAC assignment (or a descendant scope) as proof of viewer containment | Fully interpreting arbitrary Azure RBAC conditions would reproduce the authorization engine and could silently accept a broader grant. A conditioned assignment at an account, resource-group, subscription, or parent scope therefore fails closed; the operator must remove it or use a dedicated identity. |
 | Merge the lifecycle rule instead of replacing the account policy | Azure lifecycle policies are whole-document resources. Preserving unrelated rules avoids destructive drift when the storage account has other lifecycle-managed data. |
 | Share with the whole tenant instead of requiring enterprise-application assignment | Sharing is link-driven and ad hoc; a maintained assignment list would lock out the colleagues and guests a link is handed to, while the unguessable path, tenant sign-in, and expiry already bound exposure. |
 | Guarantee an identical not-found response but not identical timing | Status, headers, body, and emission order are what an authenticated recipient can compare reliably; equalizing elapsed time would need a threat model, a maximum blob size, and padding, which is disproportionate to the leaked fact that a path once existed. |
 | Return a fixed 503 rather than 404 for storage or credential failures | Dependency outages are operational and retryable, not evidence that a share is missing; preserving that distinction avoids hiding failures while an environment-independent boundary prevents diagnostic disclosure. |
-| Let the deployment script write `~/.treemon/config.json` directly instead of through the running server | Provisioning must work with no Treemon instance running, and a server RPC or shared cross-process lock would add permanent coupling for a rare operator step; the script re-reads, replaces atomically, and preserves every other setting, and the operator runs it while Treemon is not writing config. |
+| Update `viewerBaseUrl` separately from Azure provisioning | Keeping machine configuration outside the Azure operation avoids a second config writer. Any out-of-band edit happens only while Treemon is not writing the file. |
 | Keep the publisher/viewer wire contract as pinned constants on both sides | The protocol is a handful of literals across two independently deployed apps, where a shared module would add coupling without preventing version skew; fixed-fixture compatibility tests catch drift at build time instead. |
 
 ## Key Files
 
 | File | Purpose |
 |---|---|
-| `src/Shared/Types.fs` | `ShareCanvasDocRequest`, `CanvasShareResult`, `IWorktreeApi.shareCanvasDoc` (shape unchanged) |
-| `src/Server/CanvasExport.fs` | Static export transform: base theme + no-op `canvasSend`; `extractTitle` / `resolveTitle` (unchanged) |
+| `src/Shared/Types.fs` | `ShareCanvasDocRequest`, `CanvasShareResult`, `IWorktreeApi.shareCanvasDoc` |
+| `src/Server/CanvasExport.fs` | Static export transform: base theme + no-op `canvasSend`; `extractTitle` / `resolveTitle` |
 | `src/Server/CanvasShare.fs` | Publisher filename validation, Blob upload, expiry metadata, and clean viewer-URL construction; no SAS |
 | `src/Server/WorktreeApi.fs` | Pre-I/O share filename/path gates, `shareCanvasDocImpl`, `withValidatedPath` wiring, and demo-mode stub |
 | `src/Server/GlobalConfig.fs` | `canvasShare` config: `accountName`, `container`, `defaultExpiryDays`, `viewerBaseUrl` |
-| `src/Server/HttpSecurity.fs` | Shared Remoting CSRF guard covering `shareCanvasDoc` (unchanged) |
-| `src/Client/CanvasPane.fs`, `CanvasState.fs`, `CanvasUpdate.fs`, `index.html` | Share button, `ShareState` phase machine, clipboard write and banner routing (unchanged) |
+| `src/Server/HttpSecurity.fs` | Shared Remoting CSRF guard covering `shareCanvasDoc` |
+| `src/Client/CanvasPane.fs`, `CanvasState.fs`, `CanvasUpdate.fs`, `index.html` | Share button, `ShareState` phase machine, clipboard write and banner routing |
 | `src/CanvasShareViewer/` | New App Service viewer: shell route, content route, expiry check, sandbox/CSP, Easy Auth configuration |
-| `scripts/deploy-canvas-share-viewer.ps1` | Idempotent non-production Azure provisioning, secret-free Easy Auth, Entra-authenticated ZIP deployment, validation, and machine-config update |
-| `scripts/canvas-share-viewer-deployment/Common.ps1` | Shared Azure CLI invocation and machine-configuration boundary for deployment helpers |
-| `scripts/canvas-share-viewer-deployment/SubscriptionGuard.ps1` | Fail-closed approved/requested/selected subscription, tenant, and delegated-publisher validation with private lookup diagnostics redacted |
-| `scripts/canvas-share-viewer-deployment/Deployment.Tests.ps1` | Windows/Azure CLI shape, packaging-output, restricted-tenant registration, and Easy Auth callback regressions |
-| `scripts/canvas-share-viewer-deployment/ViewerBlobAccess.ps1` | Fail-closed audit of the viewer identity's effective Blob-read data-plane assignments |
-| `scripts/canvas-share-viewer-deployment/treemon-canvas-viewer-logo.png` | Entra-compliant logo derived from the Treemon PWA icon |
-| `scripts/canvas-share-lifecycle-policy.json` | Container-filtered deletion rule starting after 31 days |
-| `docs/canvas-share-viewer-deployment.md` | Local operator prerequisites, dry run, apply, and durable-resource guidance |
 
 ## Verification
 
@@ -361,8 +340,8 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   401 instead of a redirect to an API-style client. Any identity the tenant authenticates -- member
   or B2B guest -- views the document; an identity outside the tenant is denied.
 - The authorization redirect requests exactly `scope=openid` with `response_type=code id_token`;
-  the app registration declares no Graph or other API permissions, and both the registration and
-  Enterprise Application show the canonical name, read-only description, homepage, and PWA logo.
+  the app registration declares no Graph or other API permissions and the Enterprise Application
+  does not require assignment.
 - The control-plane RBAC audit finds no effective Blob data-plane read assignment outside the share
   container, and the live second-container probe under the deployed viewer identity still returns
   403 as defense in depth.
@@ -373,7 +352,7 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   shell, runs only in its `sandbox="allow-scripts"` iframe, cannot navigate the top-level page, and
   sends no request to an external probe.
 - A normal shell-plus-content page load performs one properties-only exact Blob lookup and one
-  body-bearing exact read; the shell never downloads or buffers the document body.
+  streamed body read; neither route buffers the complete document in application memory.
 - Throwing storage and credential readers produce the same empty policy-headered 503 on shell and
   content routes in both Production and Development, with no framework diagnostic response.
 - Deleting or clearing a document's backing blob denies its link immediately (revocation).
@@ -381,12 +360,11 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   popups, parent/top navigation, frame self-navigation (`location`, `location.replace`, and
   `_self`), and network exfiltration all fail inside the sandboxed iframe and CSP, while intended
   self-contained document scripting still works.
-- Existing share UI/clipboard behavior -- AgentDoc-only button gating, `ShareState` lock and
-  spinner, and clipboard-outcome banner routing -- continues to pass unchanged.
+- Share UI/clipboard behavior covers AgentDoc-only button gating, the `ShareState` lock and
+  spinner, and clipboard-outcome banner routing.
 - The actual secret detector is run against a clean viewer URL and does not flag it.
-- Deployment against a subscription other than the machine-private approved one exits non-zero
-  before any resource-provider or Entra application call, and its output contains no exact
-  subscription name or ID; the approved context proceeds normally.
+- Before provisioning, the selected subscription and tenant are confirmed explicitly; the operation
+  fails rather than reusing or reconciling any named viewer resource.
 
 ## Related Specs
 
@@ -394,5 +372,5 @@ remote-URL fetch that would otherwise be a working exfiltration channel.
   SystemView, archive precedent)
 - `docs/spec/canvas-interaction-routing.md` -- per-doc ownership/routing (the Share button is
   AgentDoc-scoped like liveness/archive)
-- `docs/spec/remoting-csrf-hardening.md` -- the pipeline-level Origin/Referer guard that fronts
+- `docs/spec/worktree-monitor.md` -- the loopback Origin/Referer boundary that fronts
   `shareCanvasDoc` and the rest of the Remoting surface

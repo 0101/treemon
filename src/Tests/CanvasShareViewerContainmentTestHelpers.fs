@@ -59,12 +59,25 @@ let private exportedFixture
         (File.ReadAllText(fixturePath filename))
     |> Server.CanvasExport.buildStaticHtml
 
-let private blobDocument (content: string) : BlobDocument =
+type private StoredBlobDocument =
+    { Content: byte array
+      Metadata: Map<string, string> }
+
+let private blobDocument (content: string) : StoredBlobDocument =
     { Content =
         content
         |> Encoding.UTF8.GetBytes
-        |> ReadOnlyMemory<byte>
       Metadata = liveMetadata }
+
+let private openBlobDocument
+    (stored: StoredBlobDocument)
+    : BlobDocument
+    =
+    { Content =
+        new MemoryStream(stored.Content, false)
+        :> Stream
+      ContentLength = int64 stored.Content.LongLength
+      Metadata = stored.Metadata }
 
 let private isolatedPorts () =
     let rec reserve () =
@@ -194,6 +207,7 @@ let withContainmentHarness
 
                     documents
                     |> Map.tryFind blobName
+                    |> Option.map openBlobDocument
                     |> Task.FromResult }
 
         let builder =
