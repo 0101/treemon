@@ -695,11 +695,19 @@ type TerminalPaneDomTests() =
         }
 
     [<Test>]
-    member this.``Iframe chrome suppression leaves xterm scrollback scrollable``() =
+    member this.``Outer workspace overflow stays hidden while dashboard and xterm remain scrollable``() =
         task {
+            let layout = this.Page.Locator(".app-layout")
+            let dashboard = this.Page.Locator(".dashboard")
             let iframe =
                 this.Page.Locator(
                     $"[data-terminal-id=\"{EmbeddedTerminalId.value firstTerminalId}\"]")
+            let! layoutOverflow =
+                layout.EvaluateAsync<string[]>(
+                    "element => { const style = getComputedStyle(element); return [style.overflowX, style.overflowY]; }")
+            let! dashboardOverflow =
+                dashboard.EvaluateAsync<string>(
+                    "element => getComputedStyle(element).overflowY")
             let! scrolling = iframe.GetAttributeAsync("scrolling")
             let frame =
                 this.Page.Frames
@@ -722,6 +730,9 @@ type TerminalPaneDomTests() =
                     "element => element.scrollTop")
 
             Assert.Multiple(fun () ->
+                Assert.That(layoutOverflow[0], Is.EqualTo("hidden"))
+                Assert.That(layoutOverflow[1], Is.EqualTo("hidden"))
+                Assert.That(dashboardOverflow, Is.EqualTo("auto"))
                 Assert.That(scrolling, Is.EqualTo("no"))
                 Assert.That(before[1], Is.GreaterThan(before[0]))
                 Assert.That(after, Is.GreaterThan(0)))
