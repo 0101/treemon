@@ -237,7 +237,7 @@ type CanvasInjectionThemeE2ETests() =
         }
 
     [<Test>]
-    member this.``script-backed AgentDoc reloads and reinitializes after a live update``() =
+    member this.``script-backed AgentDoc completes a repeated update during delayed reload``() =
         task {
             let authoredRuntime =
                 """<script>
@@ -252,6 +252,7 @@ type CanvasInjectionThemeE2ETests() =
                         "<h1 id=\"version\">"; label; "</h1>"
                         "<main id=\"dynamic\"></main>"
                         "<script id=\"scorecard-data\" type=\"application/json\">{\"label\":\""; label; "\"}</script>"
+                        "<script src=\"/slow-script.js\"></script>"
                         authoredRuntime
                         "</body></html>"
                     ]
@@ -265,9 +266,25 @@ type CanvasInjectionThemeE2ETests() =
             let initial, initialHash = doc "Before"
             let updated, updatedHash = doc "After"
 
-            // Playwright's route callback is the impure request boundary; the count distinguishes
-            // the initial iframe navigation from the controller's subsequent reload.
+            // Playwright route callbacks are impure request boundaries; these counts distinguish
+            // the initial load from the controller's reload and expose any repeated navigation.
             let mutable navigationRequests = 0
+            let mutable slowScriptRequests = 0
+            let delayedReloadScript =
+                System.Threading.Tasks.TaskCompletionSource<IRoute>(
+                    System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+
+            do! this.Page.RouteAsync("**/slow-script.js", fun route ->
+                slowScriptRequests <- slowScriptRequests + 1
+                if slowScriptRequests = 1 then
+                    route.FulfillAsync(
+                        RouteFulfillOptions(
+                            ContentType = "application/javascript",
+                            Body = "window.__slowScriptLoaded = true;"))
+                else
+                    delayedReloadScript.TrySetResult(route) |> ignore
+                    System.Threading.Tasks.Task.CompletedTask)
+
             do! this.Page.RouteAsync("**/scripted.html", fun route ->
                 let body, contentHash =
                     if route.Request.IsNavigationRequest then
@@ -316,11 +333,20 @@ type CanvasInjectionThemeE2ETests() =
                 + ")"
             let! _ = this.Page.EvaluateAsync(signal)
 
+            let! delayedScriptRoute =
+                delayedReloadScript.Task.WaitAsync(TimeSpan.FromSeconds(5.0))
+            // The new controller is installed, but its body and DOMContentLoaded remain blocked.
+            // Repeating the target hash must acknowledge these loaded bytes, not restart navigation.
+            let! _ = this.Page.EvaluateAsync(signal)
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     "() => window.__morphMessages.length === 1",
                     null,
                     PageWaitForFunctionOptions(Timeout = 5000.0f))
+            do! delayedScriptRoute.FulfillAsync(
+                RouteFulfillOptions(
+                    ContentType = "application/javascript",
+                    Body = "window.__slowScriptLoaded = true;"))
             do! Assertions.Expect(frame.Locator("#dynamic")).ToHaveTextAsync(
                 "After",
                 LocatorAssertionsToHaveTextOptions(Timeout = 5000.0f))
@@ -344,6 +370,7 @@ type CanvasInjectionThemeE2ETests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(navigationRequests, Is.EqualTo(2), "the update must perform one full document reload")
+                Assert.That(slowScriptRequests, Is.EqualTo(2), "the repeated signal must not restart the delayed reload")
                 Assert.That(
                     morphMessages,
                     Is.EqualTo(

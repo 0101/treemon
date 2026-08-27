@@ -426,25 +426,26 @@
     }, '*');
   }
 
-  function postLoadedDocumentComplete() {
+  function loadedDocumentState() {
     var meta = document.querySelector(
       'meta[' + RUNTIME_ATTRIBUTE + '][name="' + CONTENT_HASH_META_NAME + '"]'
     );
     var contentHash = meta && meta.getAttribute('content');
-    if (!isContentHash(contentHash)) return;
+    if (!isContentHash(contentHash)) return null;
 
     var lastSlash = location.pathname.lastIndexOf('/');
-    var morph = {
+    return {
       scopedKey: decodeURIComponent(location.pathname.substring(1, lastSlash)),
-      filename: decodeURIComponent(location.pathname.substring(lastSlash + 1))
+      filename: decodeURIComponent(location.pathname.substring(lastSlash + 1)),
+      contentHash: contentHash
     };
-    window.addEventListener('DOMContentLoaded', function () {
-      postMorphComplete(morph, contentHash);
-    }, { once: true });
   }
 
   function install() {
-    postLoadedDocumentComplete();
+    var loadedDocument = loadedDocumentState();
+    var loadedContentHash = loadedDocument && loadedDocument.contentHash;
+    var loadedCompletionSent = false;
+    var reloading = false;
     var highlighted = [];
     // Signals overlap (a tab re-select racing a poll delta, or several queued behind one slow
     // morph) and two fetches have no completion order, so only the newest response may morph —
@@ -462,6 +463,13 @@
         filename: event.data.filename,
         contentHash: event.data.contentHash
       };
+      if (reloading) return;
+      if (loadedContentHash && morph.contentHash === loadedContentHash) {
+        loadedCompletionSent = true;
+        postMorphComplete(morph, loadedContentHash);
+        return;
+      }
+
       var key = [morph.scopedKey, morph.filename, morph.contentHash].join('\u0000');
       if (pendingMorph && pendingMorph.key === key) return;
 
@@ -480,20 +488,43 @@
         .then(function (refetched) {
           if (mine !== generation) return;
           pendingMorph = null;
+          if (refetched.contentHash === loadedContentHash) {
+            loadedCompletionSent = true;
+            postMorphComplete(morph, refetched.contentHash);
+            return;
+          }
           var incoming = new DOMParser().parseFromString(refetched.html, 'text/html');
           if (requiresDocumentReload(document, incoming)) {
+            reloading = true;
             location.reload();
             return;
           }
           highlighted = morphAndHighlight(document.body, incoming.body.innerHTML, highlighted);
+          loadedContentHash = refetched.contentHash;
+          loadedCompletionSent = true;
           window.dispatchEvent(new Event('canvas-morph-complete'));
           postMorphComplete(morph, refetched.contentHash);
         })
         .catch(function (err) {
-          if (mine === generation) pendingMorph = null;
+          if (mine === generation) {
+            pendingMorph = null;
+            reloading = false;
+          }
           console.error('Morph failed:', err);
         });
     });
+
+    function completeLoadedDocument() {
+      if (!loadedDocument || !loadedContentHash || loadedCompletionSent) return;
+      loadedCompletionSent = true;
+      postMorphComplete(loadedDocument, loadedContentHash);
+    }
+
+    if (document.readyState === 'loading') {
+      window.addEventListener('DOMContentLoaded', completeLoadedDocument, { once: true });
+    } else {
+      completeLoadedDocument();
+    }
   }
 
   if (typeof window !== 'undefined' && typeof document !== 'undefined') {
