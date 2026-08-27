@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isValidCanvasFilename } from "./canvas-filename.mjs";
+import { isValidCanvasFilename } from "../../Extension/canvas-filename.mjs";
 
 test("accepts contract canvas filenames", () => {
   [
