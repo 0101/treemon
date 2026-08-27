@@ -1,8 +1,10 @@
 namespace TerminalHost
 
 open System
+open System.Net
 open System.Net.Http
 open System.Net.WebSockets
+open System.Text
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
@@ -23,7 +25,18 @@ module internal TerminalProxy =
     [<Literal>]
     let private TtySubprotocol = "tty"
 
+    [<Literal>]
+    let private HiddenViewportScrollbarStyle =
+        "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
+
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
+
+    let internal hideViewportScrollbar (html: string) =
+        html.Replace(
+            "</head>",
+            HiddenViewportScrollbarStyle + "</head>",
+            StringComparison.OrdinalIgnoreCase
+        )
 
     let private receiveMessage maximumBytes (socket: WebSocket) =
         async {
@@ -166,6 +179,25 @@ module internal TerminalProxy =
             context.Response.Headers[pair.Key] <-
                 pair.Value |> Seq.toArray |> StringValues)
 
+    let private isTerminalPage targetPath (response: HttpResponseMessage) =
+        targetPath = "/"
+        && response.StatusCode = HttpStatusCode.OK
+        && (response.Content.Headers.ContentType
+            |> Option.ofObj
+            |> Option.exists (fun contentType ->
+                String.Equals(
+                    contentType.MediaType,
+                    "text/html",
+                    StringComparison.OrdinalIgnoreCase
+                )))
+        && Seq.isEmpty response.Content.Headers.ContentEncoding
+
+    let private removeTransformedRepresentationHeaders (context: HttpContext) =
+        [ "Accept-Ranges"; "Content-Encoding"; "Content-Length"; "Content-MD5"
+          "Content-Range"; "ETag" ]
+        |> List.iter (fun name ->
+            context.Response.Headers.Remove(name) |> ignore)
+
     let private protectAttachmentResponse allowedOrigins (context: HttpContext) =
         let frameAncestors =
             match allowedOrigins with
@@ -203,7 +235,30 @@ module internal TerminalProxy =
                     context.Response.StatusCode <- int response.StatusCode
                     copyResponseHeaders response context
 
-                    if context.Request.Method <> "HEAD" then
+                    if
+                        context.Request.Method = "GET"
+                        && isTerminalPage targetPath response
+                    then
+                        removeTransformedRepresentationHeaders context
+
+                        let! html =
+                            response.Content.ReadAsStringAsync(
+                                context.RequestAborted
+                            )
+
+                        let bytes =
+                            html
+                            |> hideViewportScrollbar
+                            |> Encoding.UTF8.GetBytes
+
+                        context.Response.ContentLength <- int64 bytes.Length
+
+                        do!
+                            context.Response.Body.WriteAsync(
+                                bytes,
+                                context.RequestAborted
+                            )
+                    elif context.Request.Method <> "HEAD" then
                         do!
                             response.Content.CopyToAsync(context.Response.Body, context.RequestAborted)
                 with

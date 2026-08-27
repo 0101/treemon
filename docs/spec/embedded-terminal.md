@@ -253,6 +253,9 @@ loopback, exact Host/Origin, bearer, and request-size checks as the control API.
 Every attachment HTTP response limits framing through a `Content-Security-Policy: frame-ancestors`
 directive built from the validated dashboard origins, or `'none'` when none are configured. A
 missing `Origin` remains valid for authenticated loopback non-browser protocol requests.
+The proxy injects a small style into ttyd's root HTML response that hides the native
+`.xterm-viewport` scrollbar without changing its overflow or scrollback. The terminal document is a
+separate origin, so the dashboard cannot apply this styling itself.
 
 ### Treemon integration
 
@@ -409,6 +412,9 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Origin-scoped attachment framing:** attachment responses use CSP `frame-ancestors` with every
   configured dashboard origin, rather than same-origin framing that would reject the legitimate
   cross-port dashboard iframe.
+- **Proxy-owned terminal scrollbar chrome:** the attachment proxy adds one CSS override to ttyd's
+  root page instead of carrying a forked custom index. It hides the rendered xterm scrollbar while
+  preserving wheel, keyboard, and programmatic scrollback.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the opaque command
   selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no

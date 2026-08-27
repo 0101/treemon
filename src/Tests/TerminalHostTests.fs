@@ -1164,6 +1164,31 @@ type TerminalHostDataPlaneTests() =
 [<Category("TerminalHost")>]
 type TerminalHostProxyTests() =
     [<Test>]
+    member _.``terminal page hides viewport scrollbar without disabling scrolling``() =
+        let html =
+            "<html><head><style>.xterm-viewport{overflow-y:scroll}</style></head><body></body></html>"
+
+        let styled = TerminalProxy.hideViewportScrollbar html
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                styled,
+                Does.Contain(".xterm-viewport{scrollbar-width:none}")
+            )
+
+            Assert.That(
+                styled,
+                Does.Contain(".xterm-viewport::-webkit-scrollbar{display:none}")
+            )
+
+            Assert.That(styled, Does.Contain("overflow-y:scroll"))
+
+            Assert.That(
+                styled.IndexOf("scrollbar-width:none", StringComparison.Ordinal),
+                Is.LessThan(styled.IndexOf("</head>", StringComparison.Ordinal))
+            ))
+
+    [<Test>]
     member _.``attachment endpoint rejects invalid bearer origin and oversized requests``() =
         let upstream = new TestWebSocket()
         let connectorCalls = ConcurrentQueue<int>()
