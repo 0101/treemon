@@ -94,7 +94,7 @@ let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
     asyncResult {
         let! sourcePath =
             Server.PathUtils.validateCanvasPath path request.Filename
-            |> Result.mapError (fun _ -> "Invalid filename: path escapes canvas directory")
+            |> Result.mapError (fun reason -> $"Invalid filename: {reason}")
 
         if not (File.Exists sourcePath) then
             return! Error $"File not found: {request.Filename}"
@@ -118,7 +118,7 @@ let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<C
     asyncResult {
         let! sourcePath =
             Server.PathUtils.validateCanvasPath path request.Filename
-            |> Result.mapError (fun _ -> "Invalid filename: path escapes canvas directory")
+            |> Result.mapError (fun reason -> $"Invalid filename: {reason}")
 
         // Sharing is AgentDoc-only per spec (a SystemView like beads.html is server-generated,
         // data-driven, and not shareable). The client only shows the Share button for AgentDocs;

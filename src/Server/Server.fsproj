@@ -13,6 +13,8 @@
 
   <ItemGroup>
     <Compile Include="Log.fs" />
+    <Compile Include="EmbeddedResource.fs" />
+    <Compile Include="CanvasFilename.fs" />
     <Compile Include="BackgroundLoop.fs" />
     <Compile Include="JsonStore.fs" />
     <Compile Include="PersistentStore.fs" />
@@ -41,7 +43,6 @@
     <Compile Include="CodingToolCli.fs" />
     <Compile Include="GithubPrStatus.fs" />
     <Compile Include="PrStatus.fs" />
-    <Compile Include="EmbeddedResource.fs" />
     <Compile Include="CanvasDocKinds.fs" />
     <Compile Include="CanvasDocOwnership.fs" />
     <Compile Include="MergedPrStore.fs" />
@@ -112,6 +113,9 @@
     </EmbeddedResource>
     <EmbeddedResource Include="..\Extension\canvas-doc-kinds.json">
       <LogicalName>CanvasDocKinds.json</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\Extension\canvas-filename-contract.json">
+      <LogicalName>CanvasFilenameContract.json</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
