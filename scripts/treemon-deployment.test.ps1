@@ -568,6 +568,14 @@ try {
 
     $script:mockRunningPid = 123
     $script:deploymentWorkflowEvents = @()
+    Start-ProductionServer @()
+    Assert-True (
+        $script:deploymentWorkflowEvents.Count -eq 0 -and
+        $script:mockRunningPid -eq 123
+    ) "Embedded-terminal start did not preserve the already-running no-op"
+
+    $script:mockRunningPid = $null
+    $script:deploymentWorkflowEvents = @()
     $startRefused = $false
     try {
         Start-ProductionServer @()

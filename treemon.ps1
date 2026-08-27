@@ -36,17 +36,19 @@ if (-not $Command -and $MyInvocation.InvocationName -ne ".") {
     Write-Host "  start [<path>...]          Start production server (auto-builds if wwwroot/ is empty)"
     Write-Host "                             No path uses the global config roots (~/.treemon/config.json)"
     Write-Host "  stop                       Stop the production server"
-    Write-Host "  restart                    Stop + start (uses the global config roots)"
+    Write-Host "  restart                    Stop + start (uses global roots; run from external PowerShell)"
     Write-Host "  status                     Show production server status (lists roots via 'tm roots')"
     Write-Host "  log                        Tail the production server log"
     Write-Host "  dev [<path>...]            Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
     Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
-    Write-Host "  deploy                     Build frontend, replace the app on the production port, and start this checkout"
-    Write-Host "  add <path> [<path>...]     Add watched root(s) via 'tm add' (restarts prod if running)"
+    Write-Host "  deploy                     Build and replace production (run from external PowerShell)"
+    Write-Host "  add <path> [<path>...]     Add watched root(s) via 'tm add' (embedded terminals defer restart)"
     Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
-    Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (restarts prod if running)"
+    Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (embedded terminals defer restart)"
     Write-Host "  install-skill              Install the tm CLI skill for AI coding agents"
     Write-Host "  setup-ttyd                 Install the pinned ttyd executable for embedded terminals"
+    Write-Host ""
+    Write-Host "Production launches require an external PowerShell window. Embedded add/remove saves the change but requires an external restart." -ForegroundColor Gray
     exit 0
 }
 
@@ -802,15 +804,15 @@ function Start-ProductionProcess(
 }
 
 function Start-ProductionServer([string[]]$Roots) {
-    Assert-ExternalProductionLifecycle "start Treemon production"
     $runningPid = Get-RunningPid
     if ($runningPid) {
         Write-Host "Production server is already running (PID: $runningPid)" -ForegroundColor Yellow
         Write-Host "  URL: http://localhost:$DefaultPort" -ForegroundColor Gray
-        Write-Host "Use '.\treemon.ps1 stop' first or '.\treemon.ps1 restart'" -ForegroundColor Gray
+        Write-Host "Use '.\treemon.ps1 stop' first or run '.\treemon.ps1 restart' from an external PowerShell window" -ForegroundColor Gray
         return
     }
 
+    Assert-ExternalProductionLifecycle "start Treemon production"
     Ensure-WwwRoot
     $terminalHostExecutable = Install-ServerDeployment {
         param($preflight)
@@ -889,7 +891,7 @@ function Show-Status {
     } elseif ($canvasConn) {
         Write-Host "  Canvas:  WARNING - port $CanvasPort is held by PID $($canvasConn.OwningProcess), not this server (PID $runningPid)" -ForegroundColor Yellow
     } else {
-        Write-Host "  Canvas:  DOWN - nothing listening on $CanvasPort; canvas docs will not load. Run '.\treemon.ps1 restart' to rebind." -ForegroundColor Red
+        Write-Host "  Canvas:  DOWN - nothing listening on $CanvasPort; canvas docs will not load. Run '.\treemon.ps1 restart' from an external PowerShell window to rebind." -ForegroundColor Red
     }
 
     # Watched roots come from the server (the single source of truth) via `tm roots`.

@@ -16,9 +16,9 @@ dotnet test src/Tests/Tests.fsproj                          # all tests
 dotnet test src/Tests/Tests.fsproj --filter "Category=Fast" # fast suite (<60s)
 dotnet test src/Tests/Tests.fsproj --filter "Category=Unit" # unit tests only
 .\treemon.ps1 dev "Q:\code\AITestAgent"                     # dev mode (path optional; omit to use global config roots)
-.\treemon.ps1 deploy                                        # build + replace production with this checkout
-.\treemon.ps1 add "Q:\code\OtherProject"                    # add a watched root (shim for 'tm add'; restarts prod if running)
-.\treemon.ps1 remove "Q:\code\OtherProject"                 # remove a watched root (shim for 'tm remove'; restarts prod if running)
+.\treemon.ps1 deploy                                        # external PowerShell only: build + replace production
+.\treemon.ps1 add "Q:\code\OtherProject"                    # embedded terminals save the root but defer restart
+.\treemon.ps1 remove "Q:\code\OtherProject"                 # embedded terminals save the change but defer restart
 ```
 
 ## F# Style Guide
@@ -106,7 +106,7 @@ disturb any existing process.
 
 `treemon.ps1` manages the application lifecycle: `dev`, `deploy`, `start`, `stop`, `restart`, `status`, `log`, `add`, `remove`.
 
-Watched worktree roots live in the global config (`~/.treemon/config.json` → `worktreeRoots`), written only by the server. `start`/`dev` no longer need a path — omit it to use the global roots (an empty list is valid). Manage roots live with the `tm` CLI — `tm add <path>...`, `tm remove <path>...`, `tm roots` — or the `treemon.ps1 add`/`remove` shims, which call `tm` and restart production when it is running. Changes persist immediately and apply on the next server (re)start. See `docs/spec/worktree-monitor.md` (Multi-Repo).
+Watched worktree roots live in the global config (`~/.treemon/config.json` → `worktreeRoots`), written only by the server. `start`/`dev` no longer need a path — omit it to use the global roots (an empty list is valid). Manage roots live with the `tm` CLI — `tm add <path>...`, `tm remove <path>...`, `tm roots` — or the `treemon.ps1 add`/`remove` shims. The shims restart running production outside embedded terminals; inside one, they save the change and require an external PowerShell restart. Production `start`, `restart`, and `deploy` also require an external PowerShell window. Changes persist immediately and apply on the next server (re)start. See `docs/spec/worktree-monitor.md` (Multi-Repo).
 
 ## Tech Stack
 

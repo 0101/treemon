@@ -111,12 +111,14 @@ other non-Copilot activity never gate an update. Treemon neither inspects nor wa
 shell work before replacement, and does not wait for every session associated with a worktree.
 
 Production lifecycle commands are a separate process-ownership boundary. `treemon.ps1` refuses
-`start`, `restart`, and `deploy` when the caller inherited `TREEMON_TERMINAL_SESSION_ID`, before
-stopping production or building deployment candidates. Any production process launched from that
-shell would inherit the terminal's kill-on-close Job Object and later die when the terminal closes,
-the host is replaced, or the host crashes. `add` and `remove` still persist successful root changes,
-but skip their automatic production restart in this context and direct the user to restart from an
-external PowerShell window. `stop`, `status`, `log`, development, and demo commands remain available.
+`restart`, `deploy`, and a `start` that would launch production when the caller inherited
+`TREEMON_TERMINAL_SESSION_ID`, before stopping production or building deployment candidates. A
+`start` against an already-running server remains an informational no-op. Any production process
+launched from that shell would inherit the terminal's kill-on-close Job Object and later die when
+the terminal closes, the host is replaced, or the host crashes. `add` and `remove` still persist
+successful root changes, but skip their automatic production restart in this context and direct the
+user to restart from an external PowerShell window. `stop`, `status`, `log`, development, and demo
+commands remain available.
 
 ### Opportunistic host updates
 
