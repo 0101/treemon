@@ -110,6 +110,14 @@ Arbitrary shell commands, child or background jobs, terminal output, browser att
 other non-Copilot activity never gate an update. Treemon neither inspects nor warns about foreground
 shell work before replacement, and does not wait for every session associated with a worktree.
 
+Production lifecycle commands are a separate process-ownership boundary. `treemon.ps1` refuses
+`start`, `restart`, and `deploy` when the caller inherited `TREEMON_TERMINAL_SESSION_ID`, before
+stopping production or building deployment candidates. Any production process launched from that
+shell would inherit the terminal's kill-on-close Job Object and later die when the terminal closes,
+the host is replaced, or the host crashes. `add` and `remove` still persist successful root changes,
+but skip their automatic production restart in this context and direct the user to restart from an
+external PowerShell window. `stop`, `status`, `log`, development, and demo commands remain available.
+
 ### Opportunistic host updates
 
 A newly published host executable is staged in a simple versioned directory while the current host
@@ -277,6 +285,8 @@ identity exited before allowing deployment. Server, frontend, and host candidate
 their active destinations, and the candidate Treemon's own compiled control client probes the exact
 live host before any active server files or processes are replaced. The staged directory carries the
 complete framework-dependent host publication alongside `TerminalHost.exe`.
+The script uses the inherited terminal session ID as a fail-closed origin marker for production
+launches and restarts; this check is independent of host compatibility and Copilot activity state.
 Compatibility probing uses the manifest-declared API version for health, list, and shutdown, so an
 empty older host can be retired safely while a non-empty one remains available to its matching
 server until its terminals are closed.
@@ -332,6 +342,10 @@ PowerShell lifecycle helpers, or compatibility shims.
   the implementation has one language, one process owner, and no script/runtime handoff.
 - **Job Object before execution:** kernel membership established before ttyd resumes is the only
   terminal-tree ownership authority.
+- **External production ownership:** production launch and restart require a caller outside an
+  embedded terminal because the terminal Job Object deliberately has no breakaway policy. The
+  inherited terminal session ID blocks self-owned production before destructive work; this is
+  independent of compatible-host idle gating and incompatible-host deployment refusal.
 - **One serialized cleanup owner:** only the registry closes retained process and Job Object handles.
   Data-plane upstream exit is a fire-and-forget exact-session notice, avoiding a mailbox dependency
   cycle while making stale notices harmless. Per-message recovery and bounded replies keep both
@@ -438,11 +452,11 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `src/Extension/reporting/extension.mjs` | Passive activity reports sourced from `TREEMON_TERMINAL_SESSION_ID` |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
 | `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |
-| `treemon.ps1` | Published host staging and deployment compatibility preflight |
+| `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` | Isolated host, replacement race, opaque command delivery, plain-shell restart, crash, security, and cleanup coverage |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
-| `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, and candidate-first deployment ordering coverage |
+| `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |
 
 ## Related Specs
 

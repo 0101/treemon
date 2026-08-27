@@ -130,10 +130,13 @@ $originalDefaultPort = $DefaultPort
 $originalCanvasPort = $CanvasPort
 $hadStateOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_STATE_DIR
 $previousStateOverride = $env:TREEMON_TERMINAL_HOST_STATE_DIR
+$hadTerminalSessionId = Test-Path Env:\TREEMON_TERMINAL_SESSION_ID
+$previousTerminalSessionId = $env:TREEMON_TERMINAL_SESSION_ID
 $hostProcess = $null
 $manifest = $null
 
 try {
+    Remove-Item Env:\TREEMON_TERMINAL_SESSION_ID -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Path $root | Out-Null
     Publish-TestProject (
         Join-Path $repoRoot "src\TerminalHost\TerminalHost.fsproj"
@@ -385,6 +388,7 @@ try {
     $script:mockDeploymentCandidate = $candidateServer
     $script:mockDeploymentScenario = ""
     $script:deploymentWorkflowEvents = @()
+    $script:mockRunningPid = $null
     $script:startedHostExecutable = $null
     $script:startedRoots = @()
     $script:mockStagedExecutable = Join-Path $root "staged\TerminalHost.exe"
@@ -407,7 +411,11 @@ try {
         $CanvasPort = Get-TestPort
     } while ($CanvasPort -eq $DefaultPort)
 
-    function Get-RunningPid { return $null }
+    function Get-RunningPid { return $script:mockRunningPid }
+    function Stop-ProductionServer {
+        $script:deploymentWorkflowEvents += "stop-server"
+        $script:mockRunningPid = $null
+    }
     function Ensure-WwwRoot {
         $script:deploymentWorkflowEvents += "ensure-frontend"
     }
@@ -541,6 +549,59 @@ try {
         $script:startedRoots.Count -eq 0
     ) "Deploy-Frontend unexpectedly supplied explicit roots"
     Write-Host "PASS: deploy uses the shared candidate-first server deployment workflow"
+
+    $env:TREEMON_TERMINAL_SESSION_ID = "embedded-deployment-fixture"
+
+    $script:mockRunningPid = $null
+    $script:deploymentWorkflowEvents = @()
+    $deployRefused = $false
+    try {
+        Deploy-Frontend
+    } catch {
+        $deployRefused = $_.Exception.Message -like
+            "Cannot deploy Treemon production from a Treemon embedded terminal*"
+    }
+    Assert-True $deployRefused "Embedded-terminal deploy was not refused"
+    Assert-True (
+        $script:deploymentWorkflowEvents.Count -eq 0
+    ) "Embedded-terminal deploy performed work before refusal"
+
+    $script:mockRunningPid = 123
+    $script:deploymentWorkflowEvents = @()
+    $startRefused = $false
+    try {
+        Start-ProductionServer @()
+    } catch {
+        $startRefused = $_.Exception.Message -like
+            "Cannot start Treemon production from a Treemon embedded terminal*"
+    }
+    Assert-True $startRefused "Embedded-terminal production start was not refused"
+    Assert-True (
+        $script:deploymentWorkflowEvents.Count -eq 0
+    ) "Embedded-terminal production start performed work before refusal"
+
+    $script:mockRunningPid = 123
+    $script:deploymentWorkflowEvents = @()
+    $restartRefused = $false
+    try {
+        Restart-ProductionServer @()
+    } catch {
+        $restartRefused = $_.Exception.Message -like
+            "Cannot restart Treemon production from a Treemon embedded terminal*"
+    }
+    Assert-True $restartRefused "Embedded-terminal production restart was not refused"
+    Assert-True (
+        $script:deploymentWorkflowEvents.Count -eq 0 -and
+        $script:mockRunningPid -eq 123
+    ) "Embedded-terminal production restart stopped or replaced the running server"
+
+    $script:deploymentWorkflowEvents = @()
+    Restart-ServerIfRunning
+    Assert-True (
+        $script:deploymentWorkflowEvents.Count -eq 0 -and
+        $script:mockRunningPid -eq 123
+    ) "Embedded-terminal automatic config restart stopped or replaced the running server"
+    Write-Host "PASS: production lifecycle refuses embedded-terminal ownership before side effects"
 } finally {
     $PublishDir = $originalPublishDir
     $PidFile = $originalPidFile
@@ -553,6 +614,11 @@ try {
         $env:TREEMON_TERMINAL_HOST_STATE_DIR = $previousStateOverride
     } else {
         Remove-Item Env:\TREEMON_TERMINAL_HOST_STATE_DIR -ErrorAction SilentlyContinue
+    }
+    if ($hadTerminalSessionId) {
+        $env:TREEMON_TERMINAL_SESSION_ID = $previousTerminalSessionId
+    } else {
+        Remove-Item Env:\TREEMON_TERMINAL_SESSION_ID -ErrorAction SilentlyContinue
     }
     if ($hostProcess -and $manifest) { Stop-TestHost $hostProcess $manifest }
     if ($hostProcess) { $hostProcess.Dispose() }
