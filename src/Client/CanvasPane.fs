@@ -201,10 +201,8 @@ let private overviewView (repos: RepoModel list) (bridgeLiveness: Map<string, Br
         ]
     ]
 
-/// Named callbacks the canvas pane raises back to its host. Grouped into a record so the handlers
-/// are passed by name: several share the type `string -> unit` (`SelectDoc`, `OnOverviewClick`,
-/// `ArchiveDoc`, `ShareDoc`), so positional passing let a silent argument transposition compile and
-/// surface only at runtime.
+/// Named callbacks the canvas pane raises back to its host. Grouped into a record so same-typed
+/// handlers cannot be silently transposed.
 type CanvasPaneCallbacks =
     { SetPosition: CanvasPosition -> unit
       SetSize: CanvasSize -> unit
@@ -213,15 +211,16 @@ type CanvasPaneCallbacks =
       OnOverviewDocClick: string -> string -> unit
       ArchiveDoc: string -> unit
       ShareDoc: string -> unit
+      CopyDocPath: string -> unit
       DismissError: unit -> unit
       DismissDocError: unit -> unit
-      DismissShareNotice: unit -> unit
+      DismissClipboardNotice: unit -> unit
       LaunchSession: unit -> unit }
 
 /// The subset of the canvas `CanvasState` that `view` renders from, bundled into one record so the
 /// pane takes a single state value instead of a long, order-dependent positional list. Grouped for
 /// the same reason as `CanvasPaneCallbacks`: the signature had been growing one positional param
-/// per feature (`docError` → `size` → `shareNotice`), which invited a silent argument
+/// per feature (`docError` → `size` → `clipboardNotice`), which invited a silent argument
 /// transposition that would compile and only surface at runtime. Built by `CanvasView.fs` from
 /// `model.Canvas.*`, mirroring how `canvasCallbacks` is assembled. Deliberately a subset record
 /// rather than `CanvasState` itself: `CanvasPane.fs` compiles before `CanvasState.fs` in
@@ -232,7 +231,8 @@ type CanvasPaneState =
       Size: CanvasSize
       SendState: CanvasSendState
       DocError: DocJsError option
-      ShareNotice: string option
+      ClipboardNotice: string option
+      PathCopyState: CanvasPathCopyState
       ActiveScopedKey: string option
       ShareState: CanvasShareState
       BridgeLiveness: Map<string, BridgeLiveness> }
@@ -253,7 +253,8 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           Size = size
           SendState = sendState
           DocError = docError
-          ShareNotice = shareNotice
+          ClipboardNotice = clipboardNotice
+          PathCopyState = pathCopyState
           ActiveScopedKey = activeScopedKey
           ShareState = shareState
           BridgeLiveness = bridgeLiveness } = state
@@ -264,13 +265,15 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
           OnOverviewDocClick = onOverviewDocClick
           ArchiveDoc = archiveDoc
           ShareDoc = shareDoc
+          CopyDocPath = copyDocPath
           DismissError = dismissError
           DismissDocError = dismissDocError
-          DismissShareNotice = dismissShareNotice
+          DismissClipboardNotice = dismissClipboardNotice
           LaunchSession = launchSession } = callbacks
     let { UnviewedByScopedKey = unviewedByScopedKey
           UnviewedFilenames = unviewedFilenames
           VisitedDocs = visitedDocs } = awareness
+    let isPathCopying = CanvasPathCopyState.isCopying pathCopyState
     let toggleButton (baseClass: string) (isActive: bool) (onClick: unit -> unit) (label: string) (title: string) =
         Html.button [
             prop.className (if isActive then $"{baseClass} active" else baseClass)
@@ -327,14 +330,16 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                         | Some d when d.Kind = AgentDoc ->
                             let shareActive, isSharing =
                                 CanvasShareState.buttonFlags activeScopedKey d.Filename shareState
+                            let shareDisabled = shareActive || isPathCopying
                             Html.button [
                                 prop.className (if isSharing then "canvas-share-btn sharing" else "canvas-share-btn")
-                                prop.disabled shareActive
+                                prop.disabled shareDisabled
                                 prop.onClick (fun _ -> shareDoc d.Filename)
                                 prop.title (
-                                    match isSharing, shareActive with
-                                    | true, _ -> "Sharing this doc…"
-                                    | false, true -> "Another canvas doc is being shared"
+                                    match isSharing, shareActive, isPathCopying with
+                                    | true, _, _ -> "Sharing this doc…"
+                                    | false, _, true -> "Wait for the canvas path copy to finish"
+                                    | false, true, false -> "Another canvas doc is being shared"
                                     | _ -> "Share this doc — copies a rich link to the clipboard")
                                 prop.children [
                                     if isSharing then Html.span [ prop.className "share-spinner" ] else shareIcon
@@ -415,19 +420,16 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
             ]
         | _ -> Html.none
 
-    // Success banner shown after a doc is shared and its rich link copied to the clipboard. A share
-    // *failure* reuses the red errorBanner (CanvasSendState.Failed) above; this green notice is the
-    // Ok path and is dismissible like the others.
-    let shareBanner =
-        match shareNotice with
+    let clipboardBanner =
+        match clipboardNotice with
         | Some msg ->
             Html.div [
-                prop.className "canvas-share-banner"
+                prop.className "canvas-clipboard-banner"
                 prop.children [
                     Html.span [ prop.text msg ]
                     Html.button [
-                        prop.className "canvas-share-dismiss"
-                        prop.onClick (fun _ -> dismissShareNotice ())
+                        prop.className "canvas-clipboard-dismiss"
+                        prop.onClick (fun _ -> dismissClipboardNotice ())
                         prop.text "✕"
                     ]
                 ]
@@ -445,25 +447,48 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
             let agentTab (d: CanvasDoc) =
                 let isActive = d.Filename = doc.Filename
                 let isViewed = not (Set.contains d.Filename unviewedFilenames)
+                let isCopied = CanvasPathCopyState.isCopied activeScopedKey d.Filename pathCopyState
+                let isShareActive = shareState <> CanvasShareState.Idle
+                let copyDisabled = isShareActive || isPathCopying
+                let copyTitle =
+                    if isShareActive then "Wait for Canvas Share to finish"
+                    elif isPathCopying then "Copying canvas path…"
+                    elif isCopied then "Path copied"
+                    else $"Copy full path to {d.Filename}"
                 let cls =
                     [ "canvas-tab"
                       if isActive then "active"
                       if isViewed && not isActive then "canvas-tab-viewed" ]
                     |> String.concat " "
-                Html.button [
-                    prop.className cls
-                    prop.onClick (fun _ -> selectDoc d.Filename)
-                    prop.onDoubleClick (fun _ -> openDocInBrowserTab wt d)
-                    prop.title $"{d.Filename} — double-click to open in a browser tab (for full-page screenshots)"
+                Html.div [
+                    prop.className "canvas-tab-shell"
                     prop.children [
-                        livenessDotFor bridgeLiveness d
-                        Html.text (d.Filename.Replace(".html", ""))
-                        // On-disk freshness of the authored file, refreshed on the pane's existing
-                        // render cadence. Scoped to AgentDoc tabs (a SystemView is server-generated
-                        // and carries no authored-file age).
-                        Html.span [
-                            prop.className "canvas-tab-age"
-                            prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now d.LastModified)
+                        Html.button [
+                            prop.className cls
+                            prop.onClick (fun _ -> selectDoc d.Filename)
+                            prop.onDoubleClick (fun _ -> openDocInBrowserTab wt d)
+                            prop.title $"{d.Filename} — double-click to open in a browser tab (for full-page screenshots)"
+                            prop.children [
+                                livenessDotFor bridgeLiveness d
+                                Html.text (d.Filename.Replace(".html", ""))
+                                Html.span [
+                                    prop.className "canvas-tab-meta"
+                                    prop.children [
+                                        Html.span [
+                                            prop.className "canvas-tab-age"
+                                            prop.text (Components.relativeTimeCompact System.DateTimeOffset.Now d.LastModified)
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ]
+                        Html.button [
+                            prop.className (if isCopied then "canvas-tab-copy copied" else "canvas-tab-copy")
+                            prop.disabled copyDisabled
+                            prop.onClick (fun _ -> copyDocPath d.Filename)
+                            prop.title copyTitle
+                            prop.custom ("aria-label", copyTitle)
+                            prop.children [ if isCopied then checkIcon else copyIcon ]
                         ]
                     ]
                 ]
@@ -504,7 +529,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                 errorBanner
                 docErrorBanner
                 waitingBanner
-                shareBanner
+                clipboardBanner
                 yield! iframes
             ]
         | None ->
@@ -513,7 +538,7 @@ let view (state: CanvasPaneState) (focusedDoc: (WorktreeStatus * CanvasDoc) opti
                 errorBanner
                 docErrorBanner
                 waitingBanner
-                shareBanner
+                clipboardBanner
                 overviewView allRepos bridgeLiveness unviewedByScopedKey onOverviewClick onOverviewDocClick
             ]
 
