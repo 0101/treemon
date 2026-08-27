@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   isLoopbackOrigin,
   isTrustedInjectionHeaders,
-} from "./injection-request.mjs";
+} from "../../Extension/injection-request.mjs";
 
 test("loopback origins cover the supported local host forms", () => {
   assert.equal(isLoopbackOrigin("http://127.0.0.1:5000"), true);

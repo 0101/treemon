@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createSendQueue } from "./send-queue.mjs";
+import { createSendQueue } from "../../Extension/send-queue.mjs";
 
 // session.send stays pending until its gate is released, so a payload can be observed while it is
 // still queued (never started) versus already in flight.
