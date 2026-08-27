@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { EOL } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  canvasFilenameForClaim,
   canvasFilenamesForTool,
-  isValidCanvasFilename,
   watchCanvasWrites,
-} from "./canvas-ownership.mjs";
+} from "../../Extension/canvas-ownership.mjs";
 
 function patch(lines) {
   return lines.join(EOL);
@@ -77,7 +77,14 @@ test("preserves create and edit canvas detection", () => {
     ["edited.html"],
   );
   assert.deepEqual(canvasFilenamesForTool("edit", { path: "src/ignored.html" }, worktreePath), []);
-  assert.equal(isValidCanvasFilename("unsafe name.html"), false);
+});
+
+test("ownership claims require a bare contract filename", () => {
+  assert.equal(canvasFilenameForClaim("review.html"), "review.html");
+  assert.equal(canvasFilenameForClaim(".agents/canvas/review.html"), null);
+  assert.equal(canvasFilenameForClaim(join(".agents", "canvas", "review.html")), null);
+  assert.equal(canvasFilenameForClaim("../review.html"), null);
+  assert.equal(canvasFilenameForClaim("..\\review.html"), null);
 });
 
 test("ignores canvas-shaped paths outside the worktree root canvas directory", () => {

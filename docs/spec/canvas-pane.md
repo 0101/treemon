@@ -12,6 +12,24 @@
 
 ## Expected Behavior
 
+### Canvas Filenames
+
+Canvas document identity is a bare filename matching
+`^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.html$`: it starts with an ASCII letter or digit, contains only ASCII
+letters, digits, `_`, `.`, and `-`, and uses the lowercase `.html` suffix. Paths, directory
+separators, spaces, quotes, and control characters are invalid.
+
+`src/Extension/canvas-filename-contract.json` is the single authoritative pattern. The extension
+loads it directly and the server embeds the same file through `CanvasFilename`; neither runtime
+defines its own regex. `CanvasScanner` drops invalid names before hashing, kind classification,
+ownership lookup, or `CanvasDoc` construction. Direct document serving, archive/share path
+resolution, and ownership claims reject the same invalid names, so an unclaimable file cannot
+appear in inventory.
+
+Continuation prompts serialize `worktreePath` and `filename` as escaped JSON values and explicitly
+label them as opaque file identity data. Repository-derived path text is never interpolated as a
+free-form prompt instruction.
+
 ### Canvas Doc Kinds
 
 Every `CanvasDoc` carries a `Kind` (`src/Shared/Types.fs`), set when `CanvasScanner` scans the file via `CanvasDocKinds.classify filename`. The classifier reads the shared `src/Extension/canvas-doc-kinds.json` list also used by browser fallback:
@@ -46,7 +64,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 
 ### Doc Lifecycle
 
-- Agents create or update `.html` files in `.agents/canvas/`.
+- Agents create or update contract-valid `.html` files in `.agents/canvas/`.
 - `RefreshScheduler.CanvasScanner` scans those files and computes `ContentHash` from file bytes.
 - `CanvasWatchers` keeps one `FileSystemWatcher` per worktree `.agents/canvas/` directory and posts `UpdateCanvasDoc` into the scheduler mailbox when files change.
 - The canvas doc server serves each file at `http://127.0.0.1:5002/{encodedWorktreePath}/{filename}`.
@@ -99,7 +117,11 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - `BridgeLiveness.LiveSessionIds` exposes every identified session whose registration is within the liveness TTL. The worktree-level `SessionId` remains the freshest registration for aggregate status and SystemView fallback behavior, but it does not decide authored-document liveness.
 - The liveness dot shown in tabs and overview checks the doc's `OwnerSessionId` against `LiveSessionIds`, so two concurrently heartbeating sessions in one worktree both keep their own documents alive regardless of heartbeat order. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
 - The pane shows `▶ Start session` only when the active doc is an `AgentDoc` whose recorded owner is not live. A `SystemView` never has this button.
-- `LaunchCanvasSession` uses the existing action-launch flow and sends a cold-start prompt built by `CanvasSessionPrompt.forAgentDoc` in `src/Client/CanvasSessionPrompt.fs`. It tells the replacement session to load the canvas skill, claim the focused doc, and read its on-disk file (`{worktree}/.agents/canvas/{filename}`) before handling user interactions through the doc.
+- `LaunchCanvasSession` uses the existing action-launch flow and sends a cold-start prompt built by
+  `CanvasSessionPrompt.forAgentDoc` in `src/Client/CanvasSessionPrompt.fs`. It carries `worktreePath`
+  and `filename` as escaped JSON data, then tells the replacement session to load the canvas skill,
+  claim the focused doc using the JSON `filename`, and read `.agents/canvas/<filename>` beneath the
+  JSON `worktreePath` before handling user interactions through the doc.
 - Canvas messages route to the author session for the selected doc.
 - If the recorded owner is unreachable, the message queues. After a replacement session claims the doc, its next bridge registration can deliver the waiting message; doc identity never changes.
 - SystemView interactions store no target. Each one resolves to the worktree's most recently active
@@ -152,7 +174,11 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 ### Doc Server
 
 - The canvas doc server runs on port 5002 and serves HTML from `.agents/canvas/` only.
-- Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known and the filename resolves inside `.agents/canvas/`. One scheduler-state lookup per request identifies the owning `PerRepoState`; its result supplies both the known-worktree decision for document/data routes and the server-owned base/upstream comparison context for diff summaries.
+- Requests use `/{encodedWorktreePath}/{filename}` and are rejected unless the worktree is known,
+  the filename matches the shared bare-name contract, and it resolves inside `.agents/canvas/`. One
+  scheduler-state lookup per request identifies the owning `PerRepoState`; its result supplies both
+  the known-worktree decision for document/data routes and the server-owned base/upstream comparison
+  context for diff summaries.
 - `GET /{encodedWorktreePath}/beads-data` serves beads issue data as JSON for the beadspace dashboard (see `docs/spec/beadspace-canvas.md`).
 - The server injects into `</head>` per doc kind via `CanvasDocServer.buildInjection`: both kinds
   receive the shared base style, link interceptor, Escape focus-reclaim bridge, `canvasSend`, and
@@ -245,8 +271,12 @@ changed rows already use).
 
 | File | Purpose |
 |---|---|
-| `src/Shared/Types.fs` | Shared canvas domain types (including `CanvasDocKind`), API methods, bridge liveness, send results, workspace width |
+| `src/Shared/Types.fs` | Shared canvas domain types (including `CanvasDocKind`), API methods, bridge liveness, send results, workspace width, and the JSON document-identity/prompt builder used by both startup flows |
+| `src/Extension/canvas-filename-contract.json` | Authoritative cross-runtime canvas filename pattern |
+| `src/Extension/canvas-filename.mjs` | Extension-side loader and exact-match validator for the shared filename pattern |
+| `src/Server/CanvasFilename.fs` | Server-side embedded-resource loader and exact-match validator |
 | `src/Server/CanvasDocKinds.fs` | Server classifier backed by the shared browser/server SystemView filename list |
+| `src/Client/CanvasSessionPrompt.fs` | AgentDoc replacement-session prompt using the shared JSON document identity |
 | `src/Client/App.fs` | Elmish `init`/`update` logic and the top-level `view` wiring (the `Model`/`Msg` types and shared plumbing live in `AppTypes.fs`; the canvas model slice in `CanvasState.fs`; the canvas `update`-arm bodies in `CanvasUpdate.fs`; the canvas pane view wiring in `CanvasView.fs` — each canvas arm here is a one-line delegation) |
 | `src/Client/AppTypes.fs` | Foundation module: the Elmish `Model` + `Msg` types plus shared plumbing (`worktreeApi` lazy proxy, `findWorktree`, `saveCollapsedReposCmd`) used by both `App.fs` and the canvas update arms. Compiled after `CanvasState.fs` and before `CanvasUpdate.fs`/`App.fs` so canvas update logic can be lifted out of `App.fs` without a cyclic reference. Type relocation only — `update` stays a single function in `App.fs`. |
 | `src/Client/CanvasUpdate.fs` | Canvas `update`-arm bodies extracted from `App.fs` (Toggle/SetWorkspaceWidth/Select/Open/Archive(+Result)/CopyPath(+Result+Reset)/Share(+Result)/ClipboardWriteResult/DismissClipboardNotice/Navigate/MessageReceived/SendResult/Dismiss/LaunchCanvasSession/Morph*), the shared canvas helpers (`activeVisibleDoc`, `reconcileMountedDocs`, `syncVisibleDocCmd`, `applyFocus`), and the `messageListener` subscription glue. App.fs delegates one arm → one function. Compiled after `AppTypes.fs` and before `App.fs`. Body extraction only — `update` stays one function (no sub-`Msg`/`Cmd.map`). |
@@ -274,6 +304,14 @@ changed rows already use).
 
 - **Separate origin + postMessage** — docs run on `:5002`, the app stays on `:5000`, and Elmish is the only privileged message gate.
 - **File as source of truth** — Treemon renders HTML from disk and derives `contentHash` from file bytes instead of keeping a separate live-doc state.
+- **One cross-runtime filename contract** — a JSON resource owns the pattern; the server and
+  extension only interpret it. Invalid files stay on disk but never become `CanvasDoc` inventory,
+  ownership targets, or session-launch prompt inputs.
+- **Prompt identity is JSON data** — `CanvasPrompt.documentIdentityJson` is shared by the
+  AgentDoc replacement prompt (`CanvasSessionPrompt.forAgentDoc`) and the SystemView auto-spawn
+  prompt (`CanvasPrompt.continueWorking`). Both escape `worktreePath` and `filename` into a labeled
+  JSON object, then use only fixed instructions to resolve `.agents/canvas/<filename>` beneath the
+  worktree. The Client and Shared projects remain free of `System.IO` because they are Fable-compiled.
 - **Split bridge registry** — `SessionBridge.sessionRegistry` and `pollRegistry` are separate so iframe heartbeats cannot clobber session-backed routing.
 - **Injected heartbeat script** — agent-authored docs participate in liveness and queued-message drain without extra per-doc setup.
 - **`CanvasSendState` DU** — send state is `Idle`, `Waiting of scopedKey`, or `Failed of message`, avoiding illegal combinations of optional fields. `Waiting` carries **only** the target worktree's `scopedKey` (`WorktreePath.value`, the same key space as `agentChangedDocs`); the earlier `queuedAt` timestamp and the wall-clock failure timer were removed (Finding C-02) because a queued message lives in the server-side queue and is delivered when its *target* session registers, so `Waiting` is cleared on delivery (`clearWaitingOnDelivery`) and is never reported as a failure on a timer. `CanvasSendResult` likewise dropped its `now` argument, removing two `Date.now()` reads from the send command and keeping `update` wall-clock-free.
@@ -284,7 +322,11 @@ changed rows already use).
 - **Canvas `update` arms extracted into `CanvasUpdate.fs`** — the canvas `update`-arm bodies (`ToggleCanvasPane`, `SetWorkspaceWidth`, `SelectCanvasDoc`, `OpenCanvasDoc`, `ArchiveCanvasDoc`, `ArchiveCanvasDocResult`, `CopyCanvasDocPath`, `CanvasDocPathCopyResult`, `ClearCanvasDocPathCopied`, `ShareCanvasDoc`, `ShareCanvasDocResult`, `ClipboardWriteResult`, `DismissClipboardNotice`, `NavigateCanvasDoc`, `CanvasMessageReceived`, `CanvasSendResult`, `DismissCanvasMessageError`, `LaunchCanvasSession`, `MorphActiveDoc`, `MorphComplete`), the active-doc/reveal/mounted-hash helpers, and the `messageListener` subscription glue live in `src/Client/CanvasUpdate.fs` (compiled after `AppTypes.fs`, before `App.fs`). Each canvas arm in `App.fs` delegates to this module while `update` remains one function over the flat `Msg` (no sub-`Msg`/`Cmd.map` split).
 - **Canvas model slice as a nested record** — canvas state is a nested `Canvas: CanvasState.CanvasState` record on `App.Model`. `CanvasState.fs` owns pure active-document selection, visited-LRU, rendered-AgentDoc, and loaded-hash reconciliation functions over explicit model slices; `CanvasUpdate.fs` owns the `Model`/`Msg` transitions that compose them.
 - **Exact-equality duplicate coalescing** — the extension queue compares payloads exactly on transport kind and session prompt text. There is no revision metadata and no content normalization, and a payload stops being pending the moment it is handed to `session.send` (`createSendQueue`, key deleted before the call so a rejected send leaves nothing stale). Suppression therefore only ever removes a message that would repeat an undelivered one. The server queue does not coalesce: auto-sync's durable accepted record already prevents a repeat prompt at the source.
-- **Cross-platform canvas doc paths** — `CanvasSessionPrompt.forAgentDoc` (`src/Client/CanvasSessionPrompt.fs`) builds the AgentDoc `Start session` prompt, while `CanvasPrompt.continueWorking` (`src/Shared/Types.fs`) builds the server's SystemView auto-spawn prompt. Both prompts use forward slashes (`{worktree}/.agents/canvas/{filename}`), which resolve correctly on Windows, Linux, and macOS. The tab copy action instead preserves the separator already used by the absolute worktree path, producing a native-looking path on disk. The client and Shared projects are Fable-compiled, so none of these paths use `System.IO.Path.Combine`.
+- **Copied paths preserve the worktree separator** — the tab copy action builds the full
+  `.agents/canvas/<filename>` disk path with the separator already used by the absolute worktree
+  path, producing a native-looking clipboard value on Windows and Unix. This is separate from the
+  JSON document identity used by startup prompts. The client is Fable-compiled, so the copy helper
+  uses bounded string composition rather than `System.IO.Path.Combine`.
 
 ## Related Specs
 

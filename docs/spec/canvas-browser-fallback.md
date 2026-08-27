@@ -8,7 +8,7 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 
 1. **Treemon mode (unchanged)**: Extension registers with Treemon, heartbeats; canvas docs display in the Treemon canvas pane as today.
 2. **Browser fallback mode**: When Treemon is unreachable **or** reports that the current directory is not monitored, the extension:
-   - Serves `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
+   - Serves contract-valid `.agents/canvas/*.html` files over HTTP with injected transport shim and content-polling reload scripts.
    - When Treemon is unreachable, sends the serving URL to the session via `session.send()` after the agent writes a canvas file.
    - When Treemon explicitly reports the directory as unmonitored, does not post a write notification to the session, so a host-native canvas can handle the file without a competing agent prompt.
    - Receives `postMessage`-originated interactions at `POST /_message` and forwards them to the agent session via `session.send()`.
@@ -83,7 +83,12 @@ notification. In Treemon mode it declares ownership instead.
 
 ### Path Security
 
-`GET /canvas/:filename` must validate the resolved path stays within `.agents/canvas/` (no `..` traversal). Reject filenames containing path separators or `..`.
+`GET /canvas/:filename` accepts only a bare name matching the shared
+`src/Extension/canvas-filename-contract.json` pattern. Spaces, quotes, control characters,
+directory separators, and traversal paths are rejected before file resolution; the resolved-path
+containment check remains defense in depth. Canvas-write detection applies the same validator after
+confirming the write target is directly inside `.agents/canvas/`, and `canvas_take_ownership`
+accepts only the bare filename rather than stripping a path down to its final segment.
 
 ## Decisions
 
@@ -98,6 +103,8 @@ notification. In Treemon mode it declares ownership instead.
 - `src/Extension/canvas-send.js` — canonical `window.canvasSend` runtime shared with the server
 - `src/Extension/canvas-selection-context.js` — canonical selected-text interaction runtime shared with the server
 - `src/Extension/canvas-doc-kinds.json` — canonical SystemView filename list shared with the server
+- `src/Extension/canvas-filename-contract.json` — canonical filename pattern shared with the server
+- `src/Extension/canvas-filename.mjs` — exact-match filename validation for serving and ownership
 - `src/Extension/canvas-ownership.mjs` — extracted session-event canvas-write watcher and apply-patch destination parsing
 - `src/Server/CanvasDocServer.fs` — `canvasRegisterHandler` returns `{ registered, monitored }`; `isKnownWorktree` checks the scheduler's `KnownPaths`
 - `src/Extension/skill/SKILL.md` — minor update noting browser fallback

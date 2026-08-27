@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import "./canvas-selection-context.js";
+import "../../Extension/canvas-selection-context.js";
 
 const selection = globalThis.canvasSelectionContextInternals;
 const { validateSelectionMetadata } = selection;
