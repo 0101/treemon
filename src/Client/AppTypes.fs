@@ -47,6 +47,9 @@ type Model =
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
       TerminalPaneOpen: bool
+      // A card's terminal action can target that worktree without changing dashboard/canvas focus.
+      // The next explicit focus transition clears the override and restores normal focus-following.
+      TerminalPaneTarget: WorktreePath option
       EmbeddedTerminals: EmbeddedTerminalSnapshot
       ActiveEmbeddedTerminals: Map<WorktreePath, EmbeddedTerminalId>
       EmbeddedTerminalStarts: Map<WorktreePath, TerminalPane.TerminalStartState>

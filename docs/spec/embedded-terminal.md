@@ -48,13 +48,15 @@ If a paused attachment falls behind the replay window, resume resets and clears 
 a visible omission notice, and then sends the surviving frames instead of silently splicing
 discontinuous output into the existing state.
 
-The terminal pane follows the currently focused worktree card, like the Canvas pane. Its tab strip
-shows only that worktree's terminals, labels them `Terminal 1`, `Terminal 2`, and so on in opening
-order, and remembers the selected terminal independently for each worktree. **New** starts another
-terminal for the focused worktree; the empty state offers **Start terminal**. Switching worktrees
-hides the other worktrees' tabs without closing their terminals, and running iframes stay mounted so
-their browser state survives. Closing the last visible tab leaves the pane open in its empty state;
-only **Hide** collapses the pane.
+The terminal pane normally follows the currently focused worktree card. Clicking a card's embedded
+terminal action explicitly targets that worktree without changing dashboard focus or the Canvas
+pane; the next card selection restores normal focus-following. Its tab strip shows only the targeted
+worktree's terminals, labels them `Terminal 1`, `Terminal 2`, and so on in opening order, and
+remembers the selected terminal independently for each worktree. **New** starts another terminal for
+the targeted worktree; the empty state offers **Start terminal**. Switching worktrees hides the
+other worktrees' tabs without closing their terminals, and running iframes stay mounted so their
+browser state survives. Closing the last visible tab leaves the pane open in its empty state; only
+**Hide** collapses the pane.
 
 ### Control and discovery
 

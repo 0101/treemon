@@ -140,12 +140,14 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
 /// by another available doc because Diff is explicit-only. An open pane reveals and synchronizes
 /// the doc; a closed pane selects it without marking it viewed. Idle auto-display and explicit
 /// canvas-doc navigation pass `retarget = false` because they select their own target doc.
+/// Any ordinary focus transition also clears a terminal action's explicit worktree target.
 /// See docs/spec/canvas-pane.md.
 let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
     let previousFocus = model.FocusedElement
     let focused =
         { model with
             FocusedElement = newFocus
+            TerminalPaneTarget = None
             Canvas.TargetWorktree = None }
     match retarget, newFocus with
     | true, Some (Card scopedKey) ->

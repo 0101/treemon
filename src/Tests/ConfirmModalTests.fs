@@ -70,6 +70,7 @@ let private defaultModel : Model =
       Activity = ActivityState.empty
       Mascot = MascotState.empty
       TerminalPaneOpen = false
+      TerminalPaneTarget = None
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
       ActiveEmbeddedTerminals = Map.empty
       EmbeddedTerminalStarts = Map.empty

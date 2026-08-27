@@ -99,6 +99,7 @@ let init () =
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
       TerminalPaneOpen = false
+      TerminalPaneTarget = None
       EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
       ActiveEmbeddedTerminals = Map.empty
       EmbeddedTerminalStarts = Map.empty
@@ -167,11 +168,33 @@ let removeWorktreeByPath (path: WorktreePath) (model: Model) =
     let updatedModel =
         { model with
             Repos = updatedRepos
-            DeletedPaths = markDeleted path model.DeletedPaths }
+            DeletedPaths = markDeleted path model.DeletedPaths
+            TerminalPaneTarget =
+                if model.TerminalPaneTarget = Some path then None
+                else model.TerminalPaneTarget }
     { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement }
 
 let terminalAction (wt: WorktreeStatus) =
     if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
+
+let beginEmbeddedTerminalStart path model =
+    let alreadyStarting =
+        TerminalPane.isStarting
+            path
+            model.EmbeddedTerminalStarts
+
+    { model with
+        TerminalPaneOpen = true
+        TerminalPaneTarget = Some path
+        EmbeddedTerminalStarts =
+            if alreadyStarting then
+                model.EmbeddedTerminalStarts
+            else
+                model.EmbeddedTerminalStarts
+                |> TerminalPane.setStartState
+                    path
+                    TerminalPane.TerminalStartState.Starting },
+    alreadyStarting
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
@@ -376,32 +399,11 @@ let update msg model =
         model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
     | OpenEmbeddedTerminal path ->
         let before = model.EmbeddedTerminals
-        let focused, focusCmd =
-            CanvasUpdate.applyFocus
-                true
-                (Some (Card (WorktreePath.value path)))
-                model
-
-        let alreadyStarting =
-            TerminalPane.isStarting
-                path
-                focused.EmbeddedTerminalStarts
-
-        let updated =
-            { focused with
-                TerminalPaneOpen = true
-                EmbeddedTerminalStarts =
-                    if alreadyStarting then
-                        focused.EmbeddedTerminalStarts
-                    else
-                        focused.EmbeddedTerminalStarts
-                        |> TerminalPane.setStartState
-                            path
-                            TerminalPane.TerminalStartState.Starting }
+        let updated, alreadyStarting =
+            beginEmbeddedTerminalStart path model
 
         updated,
         Cmd.batch [
-            focusCmd
             if alreadyStarting then
                 Cmd.none
             else
@@ -697,7 +699,10 @@ let update msg model =
         CanvasUpdate.applyFocus true target model
 
     | SetFocusNoRetarget target ->
-        CanvasUpdate.applyFocus false target model
+        let focused, cmd =
+            CanvasUpdate.applyFocus false target model
+        // Idle canvas auto-display changes focus internally, not by selecting a card.
+        { focused with TerminalPaneTarget = model.TerminalPaneTarget }, cmd
 
     | ArchiveMsg archiveMsg ->
         let result, archiveCmd = ArchiveViews.update worktreeApi archiveMsg
@@ -1246,12 +1251,9 @@ let view model dispatch =
 
     let terminalEl =
         let selectedWorktree =
-            match model.FocusedElement with
-            | Some (Card scopedKey) ->
-                findWorktree scopedKey model
-                |> Option.map _.Path
-            | _ ->
-                None
+            TerminalPane.selectedWorktree
+                model.TerminalPaneTarget
+                model.FocusedElement
 
         let activeTerminal =
             TerminalPane.activeTerminalId

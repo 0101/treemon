@@ -4,6 +4,7 @@ open System
 open Browser.Types
 open Feliz
 open Shared
+open Navigation
 
 [<RequireQualifiedAccess>]
 type TerminalStartState =
@@ -124,6 +125,13 @@ let isStarting path states =
     | Some TerminalStartState.Starting -> true
     | Some (TerminalStartState.Failed _)
     | None -> false
+
+let selectedWorktree targetWorktree focusedElement =
+    targetWorktree
+    |> Option.orElseWith (fun () ->
+        match focusedElement with
+        | Some (Card scopedKey) -> Some (WorktreePath scopedKey)
+        | _ -> None)
 
 let hasLiveTabs snapshot =
     not (List.isEmpty snapshot.Tabs)

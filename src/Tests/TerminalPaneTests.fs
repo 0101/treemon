@@ -298,6 +298,7 @@ let private focusModel : Model =
       Activity = ActivityState.empty
       Mascot = MascotState.empty
       TerminalPaneOpen = true
+      TerminalPaneTarget = None
       EmbeddedTerminals =
         { Tabs =
             [ running firstOne first 61231
@@ -347,6 +348,82 @@ type TerminalFocusTests() =
                     updated.EmbeddedTerminals,
                 Is.EqualTo(Some secondOne)
             ))
+
+    [<Test>]
+    member _.``Opening an embedded terminal targets its worktree without moving the canvas``() =
+        let canvasDoc filename kind =
+            { Filename = filename
+              ContentHash = filename
+              LastModified = DateTimeOffset.MinValue
+              OwnerSessionId = None
+              Kind = kind }
+
+        let repos =
+            focusModel.Repos
+            |> List.map (fun repo ->
+                { repo with
+                    Worktrees =
+                        repo.Worktrees
+                        |> List.map (fun worktree ->
+                            match worktree.Path with
+                            | path when path = first ->
+                                { worktree with
+                                    CanvasDocs =
+                                        [ canvasDoc "beads.html" SystemView
+                                          canvasDoc "status.html" AgentDoc ] }
+                            | path when path = second ->
+                                { worktree with
+                                    CanvasDocs = [ canvasDoc "beads.html" SystemView ] }
+                            | _ -> worktree) })
+
+        let model =
+            { focusModel with
+                Repos = repos
+                Canvas.CanvasPaneOpen = true
+                Canvas.ActiveCanvasDoc =
+                    Map.ofList [
+                        WorktreePath.value first, "status.html"
+                    ] }
+
+        let updated, _ =
+            App.beginEmbeddedTerminalStart second model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.FocusedElement, Is.EqualTo(model.FocusedElement))
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some second))
+            Assert.That(
+                selectedWorktree
+                    updated.TerminalPaneTarget
+                    updated.FocusedElement,
+                Is.EqualTo(Some second)
+            )
+            Assert.That(
+                CanvasUpdate.activeVisibleDoc updated,
+                Is.EqualTo(
+                    Some (
+                        WorktreePath.value first,
+                        "status.html"))
+            ))
+
+    [<Test>]
+    member _.``Selecting a card restores terminal focus following``() =
+        let updated, _ =
+            { focusModel with TerminalPaneTarget = Some third }
+            |> CanvasUpdate.applyFocus
+                true
+                (Some (Card (WorktreePath.value second)))
+
+        Assert.That(updated.TerminalPaneTarget, Is.EqualTo(None))
+
+    [<Test>]
+    member _.``Automatic canvas focus preserves an explicit terminal target``() =
+        let updated, _ =
+            App.update
+                (SetFocusNoRetarget
+                    (Some (Card (WorktreePath.value second))))
+                { focusModel with TerminalPaneTarget = Some third }
+
+        Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some third))
 
     [<Test>]
     member _.``Card focus with no terminals renders no active terminal``() =
