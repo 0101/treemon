@@ -174,16 +174,38 @@ let withContainmentHarness
                     "{{PROBE_BASE_URL}}", probeBaseUrl
                 ]
 
+        let selfNavigationDocuments =
+            [
+                "self-location"
+                "self-replace"
+                "self-target"
+            ]
+            |> List.map (fun navigationKind ->
+                let content =
+                    exportedFixture
+                        "self-navigation.html"
+                        [
+                            "{{PROBE_BASE_URL}}",
+                            probeBaseUrl
+                            "{{NAVIGATION_KIND}}",
+                            navigationKind
+                        ]
+
+                $"{validPrefix}/{navigationKind}.html",
+                blobDocument content)
+
         let benign =
             exportedFixture "self-contained.html" []
 
         let documents =
-            Map [
+            [
                 $"{validPrefix}/hostile.html",
                 blobDocument hostile
                 $"{validPrefix}/self-contained.html",
                 blobDocument benign
             ]
+            @ selfNavigationDocuments
+            |> Map.ofList
 
         let blobRequests =
             ConcurrentQueue<string>()

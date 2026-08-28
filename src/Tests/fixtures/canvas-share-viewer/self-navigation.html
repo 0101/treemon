@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Viewer self-navigation containment fixture</title>
+</head>
+<body>
+  <pre
+    id="navigation-result"
+    data-attempted="false"
+    data-navigation="{{NAVIGATION_KIND}}"
+  >starting</pre>
+  <script>
+    (() => {
+      const probeBaseUrl = "{{PROBE_BASE_URL}}";
+      const navigationKind = "{{NAVIGATION_KIND}}";
+      const target = `${probeBaseUrl}/${navigationKind}`;
+      const output = document.getElementById("navigation-result");
+
+      const navigate = {
+        "self-location": () => {
+          window.location.href = target;
+        },
+        "self-replace": () => {
+          window.location.replace(target);
+        },
+        "self-target": () => {
+          window.open(target, "_self");
+        }
+      }[navigationKind];
+
+      setTimeout(() => {
+        output.dataset.attempted = "true";
+        output.textContent = navigationKind;
+
+        setTimeout(navigate, 250);
+      }, 250);
+    })();
+  </script>
+</body>
+</html>

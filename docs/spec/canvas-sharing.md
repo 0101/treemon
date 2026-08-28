@@ -251,7 +251,9 @@ The resulting Azure state must satisfy all of these invariants:
   deletion rule that starts only after more than 31 days.
 - The App Service uses the fixed `https://treemon.azurewebsites.net` origin, .NET 10 on Linux,
   HTTPS-only transport, disabled FTP/SCM basic publishing credentials, and the
-  `CanvasShareViewer__StorageAccountName` and `CanvasShareViewer__ShareContainer` settings.
+  `CanvasShareViewer__StorageAccountName`, `CanvasShareViewer__ShareContainer`, and
+  `AZURE_CLIENT_ID` settings. `AZURE_CLIENT_ID` is the created user-assigned identity's client ID,
+  which selects that identity for `DefaultAzureCredential`.
 - Easy Auth requires the current single tenant before requests reach the application, requires no
   enterprise-application assignment, requests only `openid`, disables its token store, and uses the
   exact `https://treemon.azurewebsites.net/.auth/login/aad/callback` redirect.
@@ -259,8 +261,9 @@ The resulting Azure state must satisfy all of these invariants:
   access-token issuance, and authenticates Easy Auth through a managed-identity federated
   credential rather than a client secret. A tenant-mandated `serviceManagementReference` is reused
   only when one unambiguous publisher-owned value exists.
-- After deployment, the agent verifies the control-plane state and sets
-  `canvasShare.viewerBaseUrl` separately while Treemon is not writing machine configuration.
+- After deployment, the agent verifies the control-plane state, including that `AZURE_CLIENT_ID`
+  equals the created user-assigned identity's client ID, and sets `canvasShare.viewerBaseUrl`
+  separately while Treemon is not writing machine configuration.
 
 ## Security Posture
 
@@ -345,6 +348,8 @@ The resulting Azure state must satisfy all of these invariants:
 - The control-plane RBAC audit finds no effective Blob data-plane read assignment outside the share
   container, and the live second-container probe under the deployed viewer identity still returns
   403 as defense in depth.
+- The deployed App Service selects the created user-assigned identity through an exact
+  `AZURE_CLIENT_ID` match, and a live share-container read succeeds under that identity.
 - A document is denied immediately once its metadata expiry has passed, before any lifecycle
   deletion runs.
 - The content route enforces the same checks as the shell: an expired or malformed share is denied

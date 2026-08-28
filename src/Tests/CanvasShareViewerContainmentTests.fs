@@ -392,6 +392,71 @@ type CanvasShareViewerContainmentTests() =
                     popups
             })
 
+    [<TestCase("self-location")>]
+    [<TestCase("self-replace")>]
+    [<TestCase("self-target")>]
+    member this.``each frame self-navigation primitive is independently contained``(
+        navigationKind: string
+    ) =
+        withContainmentHarness (fun harness ->
+            task {
+                let
+                    (requests,
+                     responses,
+                     _,
+                     popups,
+                     _,
+                     _) =
+                    observePage this.Page
+
+                let url =
+                    $"{harness.ViewerBaseUrl}/c/{validPrefix}/{navigationKind}.html"
+
+                let! response = this.Page.GotoAsync(url)
+
+                Assert.That(
+                    response.Status,
+                    Is.EqualTo(200)
+                )
+
+                let result =
+                    this.Page
+                        .FrameLocator("iframe")
+                        .Locator("#navigation-result")
+
+                do!
+                    Assertions
+                        .Expect(result)
+                        .ToHaveAttributeAsync(
+                            "data-attempted",
+                            "true",
+                            LocatorAssertionsToHaveAttributeOptions(
+                                Timeout = 10000.0f
+                            )
+                        )
+
+                let! observedNavigation =
+                    result.GetAttributeAsync(
+                        "data-navigation"
+                    )
+
+                do! this.Page.WaitForTimeoutAsync(700.0f)
+
+                Assert.That(
+                    observedNavigation,
+                    Is.EqualTo(navigationKind)
+                )
+
+                assertNoEscape
+                    harness
+                    url
+                    $"{url}/content"
+                    this.Page
+                    requests
+                    responses
+                    popups
+            })
+
     [<Test>]
     member this.``direct content navigation falls back to sandboxed shell containment``() =
         withContainmentHarness (fun harness ->
