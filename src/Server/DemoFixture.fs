@@ -22,6 +22,14 @@ let private userMessage text timestamp =
       Text = text
       Timestamp = timestamp }
 
+let private planning openCount inProgress blocked closed =
+    { Planned = 0
+      Queued = 0
+      Loose = openCount
+      InProgress = inProgress
+      Blocked = blocked
+      Closed = closed }
+
 let private evt source message secsAgo status duration =
     { Source = source
       Message = message
@@ -161,7 +169,7 @@ let private wtAzDoMain: WorktreeStatus =
       Sessions = []
       LastCommitTime = baseTimestamp.AddMinutes(-30.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 12 }
-      Planning = BeadsPlanning.zero
+      Planning = planning 0 0 0 12
       CodingTool = NoSession
       CodingToolProvider = None
       CodingToolSince = None
@@ -189,7 +197,7 @@ let private wtRetryLogic: WorktreeStatus =
           { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 47000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-2.0)
       Beads = { Open = 3; InProgress = 1; Blocked = 0; Closed = 5 }
-      Planning = BeadsPlanning.zero
+      Planning = planning 3 1 0 5
       CodingTool = Working
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-5.0))
@@ -215,7 +223,7 @@ let private wtConfigLoading: WorktreeStatus =
       Sessions = [ { Status = Working; Skill = Some "refactor"; ContextUsage = Some { CurrentTokens = 38000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-12.0)
       Beads = { Open = 1; InProgress = 1; Blocked = 0; Closed = 3 }
-      Planning = BeadsPlanning.zero
+      Planning = planning 1 1 0 3
       CodingTool = Working
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-15.0))
@@ -241,7 +249,7 @@ let private wtAuthMiddleware: WorktreeStatus =
       Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
       Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
-      Planning = BeadsPlanning.zero
+      Planning = planning 1 0 0 5
       CodingTool = Idle
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-8.0))
@@ -267,7 +275,7 @@ let private wtArchived: WorktreeStatus =
       Sessions = []
       LastCommitTime = baseTimestamp.AddHours(-48.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 7 }
-      Planning = BeadsPlanning.zero
+      Planning = planning 0 0 0 7
       CodingTool = Idle
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddHours(-48.0))
@@ -322,7 +330,7 @@ let private wtStreaming: WorktreeStatus =
           { Status = Idle; Skill = None; ContextUsage = None } ]
       LastCommitTime = baseTimestamp.AddMinutes(-1.0)
       Beads = { Open = 2; InProgress = 2; Blocked = 0; Closed = 4 }
-      Planning = BeadsPlanning.zero
+      Planning = planning 2 2 0 4
       CodingTool = Working
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-3.0))
@@ -348,7 +356,7 @@ let private wtCsvFix: WorktreeStatus =
       Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 5000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-60.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
-      Planning = BeadsPlanning.zero
+      Planning = planning 0 0 0 2
       CodingTool = Idle
       CodingToolProvider = Some CopilotCli
       CodingToolSince = Some(baseTimestamp.AddMinutes(-60.0))
@@ -520,7 +528,9 @@ let private f11 =
 let private f12 =
     f11
     |> withRetry (fun wt ->
-        { wt with Beads = { Open = 2; InProgress = 1; Blocked = 0; Closed = 6 } })
+        { wt with
+            Beads = { Open = 2; InProgress = 1; Blocked = 0; Closed = 6 }
+            Planning = planning 2 1 0 6 })
     |> withCpu 42.0 14200
 
 // --- Frame list ---

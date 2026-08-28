@@ -31,20 +31,30 @@ type BeadsSummary =
 module BeadsSummary =
     let zero = { Open = 0; InProgress = 0; Blocked = 0; Closed = 0 }
 
-/// Server-side split of a worktree's OPEN beads tasks by their direct parent-feature status,
-/// the source of the band's started-vs-awaiting signal:
+/// Feature-free task projection for the Overview band. Open tasks are split by their direct
+/// parent-feature status, while non-open tasks retain their own status counts:
 ///   - Planned: open task under an OPEN feature (planning done, awaiting go-ahead)
 ///   - Queued:  open task under an IN_PROGRESS feature (execution underway, next-up)
 ///   - Loose:   open task with no/closed/blocked feature parent, or a non-feature parent
+///   - InProgress / Blocked / Closed: non-feature issues with the corresponding status
 /// Loose is kept distinct server-side for fidelity but folds into Planned for display.
 /// (FeaturesOpen/FeaturesWip were deliberately dropped — the v1 band shows no feature counts.)
 type BeadsPlanning =
     { Planned: int
       Queued: int
-      Loose: int }
+      Loose: int
+      InProgress: int
+      Blocked: int
+      Closed: int }
 
 module BeadsPlanning =
-    let zero = { Planned = 0; Queued = 0; Loose = 0 }
+    let zero =
+        { Planned = 0
+          Queued = 0
+          Loose = 0
+          InProgress = 0
+          Blocked = 0
+          Closed = 0 }
 
 type CodingToolStatus =
     | Working
