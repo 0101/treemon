@@ -531,10 +531,7 @@ let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePa
 
 let private openTerminal
     (validatePath: string -> Async<bool>)
-    (launchTerminal:
-        TerminalLaunch.Intent ->
-        WorktreePath ->
-        Async<Result<TerminalLaunch.LaunchResult, string>>)
+    (openNativeTerminal: WorktreePath -> Async<Result<unit, string>>)
     (wtPath: WorktreePath)
     =
     let path = WorktreePath.value wtPath
@@ -545,15 +542,10 @@ let private openTerminal
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
         else
             Log.log "API" $"openTerminal: launching terminal for '{path}'"
-            let! result =
-                launchTerminal
-                    TerminalLaunch.Intent.OpenNativeTerminal
-                    wtPath
+            let! result = openNativeTerminal wtPath
 
             match result with
-            | Ok TerminalLaunch.LaunchResult.Native -> ()
-            | Ok (TerminalLaunch.LaunchResult.Embedded _) ->
-                Log.log "API" $"openTerminal: embedded terminal returned for native launch '{path}'"
+            | Ok () -> ()
             | Error msg -> Log.log "API" $"openTerminal: failed for '{path}': {msg}"
     }
 
@@ -710,10 +702,7 @@ type WorktreeApiDependencies =
       DeployBranch: string option }
 
 let internal worktreeApiWithLaunch
-    (launchTerminal:
-        TerminalLaunch.Intent ->
-        WorktreePath ->
-        Async<Result<TerminalLaunch.LaunchResult, string>>)
+    (terminalLaunch: TerminalLaunch.Operations)
     (dependencies: WorktreeApiDependencies)
     : IWorktreeApi =
     let { Agent = agent
@@ -733,7 +722,11 @@ let internal worktreeApiWithLaunch
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
     let autoSyncDependencies =
-        RefreshScheduler.autoSyncDependencies agent launchTerminal activityStore autoSyncStore
+        RefreshScheduler.autoSyncDependencies
+            agent
+            terminalLaunch.StartEmbeddedCommand
+            activityStore
+            autoSyncStore
 
     /// Ends auto-sync bookkeeping for a worktree: disabling the preference or deleting the worktree
     /// leaves nothing for the accepted-revision record to suppress.
@@ -798,23 +791,15 @@ let internal worktreeApiWithLaunch
                     Snapshot = enriched }
         }
 
-    let startEmbedded intent wtPath =
-        launchTerminal intent wtPath
-        |> TerminalLaunch.requireEmbedded
-
     let startEmbeddedCommand wtPath command =
-        startEmbedded
-            (TerminalLaunch.Intent.StartEmbeddedCommand command)
-            wtPath
+        terminalLaunch.StartEmbeddedCommand wtPath command
 
     let startEmbeddedTerminal wtPath =
         withValidatedPath
             wtPath
             "startEmbeddedTerminal"
             (fun () ->
-                startEmbedded
-                    TerminalLaunch.Intent.StartEmbeddedTerminal
-                    wtPath
+                terminalLaunch.StartEmbeddedTerminal wtPath
                 |> terminalStart)
 
     let getEmbeddedTerminals () =
@@ -841,7 +826,7 @@ let internal worktreeApiWithLaunch
             closeEmbeddedTerminal = closeEmbeddedTerminal }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
-          openTerminal = openTerminal validatePath launchTerminal
+          openTerminal = openTerminal validatePath terminalLaunch.OpenNativeTerminal
           startEmbeddedTerminal = startEmbeddedTerminal
           getEmbeddedTerminals = getEmbeddedTerminals
           closeEmbeddedTerminal = closeEmbeddedTerminal
@@ -1046,10 +1031,7 @@ let internal worktreeApiWithLaunch
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
-                  launchTerminal
-                      TerminalLaunch.Intent.OpenNativeTab
-                      wtPath
-                  |> TerminalLaunch.requireNative)
+                  terminalLaunch.OpenNativeTab wtPath)
           launchAction = fun req ->
               withValidatedPath req.Path "launchAction" (fun () ->
                   async {
@@ -1183,7 +1165,7 @@ let internal worktreeApiWithLaunch
 
 let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
     worktreeApiWithLaunch
-        (TerminalLaunch.launch
+        (TerminalLaunch.create
             dependencies.SessionAgent
             dependencies.EmbeddedTerminal)
         dependencies

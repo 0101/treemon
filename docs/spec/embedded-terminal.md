@@ -237,9 +237,10 @@ by name or broad ancestry.
 
 `TerminalLaunch` is the single server-side boundary for starting user terminals.
 `SessionManager` and `EmbeddedTerminal` are backend implementations, not policy call sites.
-Operation intent selects the backend: native open/new-tab operations use `SessionManager`; plain
-embedded and agent-command operations use `EmbeddedTerminal`. Browser headers,
-`HttpContext`, and `TREEMON_TERMINAL_SESSION_ID` do not participate in this decision.
+It exposes separately typed native open/new-tab and embedded plain/command operations, preserving
+each backend's result type for callers: native operations use `SessionManager`; embedded operations
+use `EmbeddedTerminal`. Browser headers, `HttpContext`, and `TREEMON_TERMINAL_SESSION_ID` do not
+participate in this decision.
 
 Command-capable embedded start retains the exact `TerminalRecord` returned by
 `TerminalHostClient.startTerminalOnHost`, submits an optional command through the existing
@@ -494,9 +495,10 @@ PowerShell lifecycle helpers, or compatibility shims.
   direct commands carrying a control character are rejected rather than written, while
   `CodingToolCli` first converts control-bearing prompt data to a control-free UTF-8/base64 form.
   A stored Copilot `SessionId` therefore cannot inject an extra command line into a recreated shell.
-- **Intent-owned launch routing:** `TerminalLaunch` is the only product-level start boundary.
-  Explicit native card operations remain native; every agent-bearing launch uses the embedded
-  backend, including external `tm launch`.
+- **Typed launch-operation routing:** `TerminalLaunch` is the only product-level start boundary.
+  Its native operations return only native results and its embedded operations return exact
+  embedded-start results. Explicit native card operations remain native; every agent-bearing launch
+  uses the embedded backend, including external `tm launch`.
 - **Command delivery after lifecycle start:** normal agent launches reuse the same authenticated
   attachment input boundary as replacement resume. The stable TerminalHost v2 lifecycle protocol
   remains unchanged, the server rejects any complete input frame above the host's mirrored
@@ -549,7 +551,7 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus real proxy command delivery, control rejection, UTF-8 frame boundaries, replacement, crash, security, and cleanup coverage |
-| `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API launch-intent routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
+| `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
 | `src/Tests/TerminalPaneTests.fs` | Exact server-returned terminal selection and direct Canvas launch routing |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
 | `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |

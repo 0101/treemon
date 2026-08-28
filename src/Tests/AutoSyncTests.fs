@@ -1613,12 +1613,12 @@ type AutoSyncDeliveryTests() =
             Path.Combine("test", $"auto-sync-launch-{Guid.NewGuid():N}")
             |> WorktreePath
         let promptText = "Sync with upstream/main."
-        // The injected launch callback is the async effect whose exact intent is under test.
+        // The injected launch callback is the async effect whose exact operation is under test.
         let mutable observedLaunch = None
 
-        let launch intent requestedPath =
+        let launch requestedPath command =
             async {
-                observedLaunch <- Some(intent, requestedPath)
+                observedLaunch <- Some(requestedPath, command)
                 return Error "command delivery failed"
             }
 
@@ -1640,11 +1640,9 @@ type AutoSyncDeliveryTests() =
             Assert.That(accepted, Is.False)
 
             match observedLaunch with
-            | Some(TerminalLaunch.Intent.StartEmbeddedCommand command, requestedPath) ->
+            | Some(requestedPath, command) ->
                 Assert.That(command, Is.EqualTo(expectedCommand))
                 Assert.That(requestedPath, Is.EqualTo(path))
-            | Some(intent, _) ->
-                Assert.Fail($"Expected an embedded command launch, got {intent}")
             | None ->
                 Assert.Fail("Expected the AutoSync fallback to invoke the terminal launch boundary"))
 

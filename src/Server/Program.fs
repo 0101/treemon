@@ -429,6 +429,10 @@ let main args =
             let agent = SchedulerState.createAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
+            let terminalLaunch =
+                TerminalLaunch.create
+                    sessionAgent
+                    embeddedTerminal.Value
             CanvasDocOwnership.load ()
 
             match config.TestFixtures with
@@ -441,7 +445,8 @@ let main args =
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
 
-                WorktreeApi.worktreeApi
+                WorktreeApi.worktreeApiWithLaunch
+                    terminalLaunch
                     { Agent = agent
                       CardLog = cardLog
                       SessionAgent = sessionAgent
@@ -482,10 +487,8 @@ let main args =
                         AutoSyncStore.create
 
                 let schedulerServices: RefreshScheduler.SchedulerServices =
-                    { LaunchTerminal =
-                        TerminalLaunch.launch
-                            sessionAgent
-                            embeddedTerminal.Value
+                    { StartEmbeddedCommand =
+                        terminalLaunch.StartEmbeddedCommand
                       ActivityStore = Some store
                       MergedPrStore = mergedStore
                       AutoSyncStore = autoSyncStore }
@@ -506,7 +509,8 @@ let main args =
                     Log.log "Startup" "Session activity ingestion started"
                     Log.log "Startup" "Scheduler background loop started"
 
-                    WorktreeApi.worktreeApi
+                    WorktreeApi.worktreeApiWithLaunch
+                        terminalLaunch
                         { Agent = agent
                           CardLog = cardLog
                           SessionAgent = sessionAgent

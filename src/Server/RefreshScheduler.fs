@@ -9,10 +9,10 @@ open Shared
 open Server.SchedulerState
 
 type SchedulerServices =
-    { LaunchTerminal:
-        TerminalLaunch.Intent ->
+    { StartEmbeddedCommand:
         WorktreePath ->
-        Async<Result<TerminalLaunch.LaunchResult, string>>
+        string ->
+        Async<Result<EmbeddedTerminalStartResult, string>>
       ActivityStore: SessionActivityStore.SessionActivityStore option
       MergedPrStore: MergedPrStore.Store
       AutoSyncStore: AutoSyncStore.Store }
@@ -66,10 +66,10 @@ let internal reloadGitData (agent: MailboxProcessor<StateMsg>) (repoId: RepoId) 
 
 let internal autoSyncDependencies
     (agent: MailboxProcessor<StateMsg>)
-    (launchTerminal:
-        TerminalLaunch.Intent ->
+    (startEmbeddedCommand:
         WorktreePath ->
-        Async<Result<TerminalLaunch.LaunchResult, string>>)
+        string ->
+        Async<Result<EmbeddedTerminalStartResult, string>>)
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (autoSyncStore: AutoSyncStore.Store option)
     : AutoSync.TriggerDependencies =
@@ -80,10 +80,9 @@ let internal autoSyncDependencies
                 CodingToolCli.build provider (CodingToolCli.Interactive text)
 
             let! result =
-                launchTerminal
-                    (TerminalLaunch.Intent.StartEmbeddedCommand command.AsShellString)
+                startEmbeddedCommand
                     worktreePath
-                |> TerminalLaunch.requireEmbedded
+                    command.AsShellString
 
             return result |> Result.map ignore
         }
@@ -429,7 +428,7 @@ let internal executeTask
             AutoSync.triggerInBackground
                 (autoSyncDependencies
                     agent
-                    services.LaunchTerminal
+                    services.StartEmbeddedCommand
                     services.ActivityStore
                     (Some services.AutoSyncStore))
                 repoRoot

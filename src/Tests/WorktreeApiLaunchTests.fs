@@ -16,6 +16,13 @@ open Tests.TestUtils
 let private terminalId value =
     EmbeddedTerminalId value
 
+[<RequireQualifiedAccess>]
+type private LaunchCall =
+    | OpenNativeTerminal of WorktreePath
+    | OpenNativeTab of WorktreePath
+    | StartEmbeddedTerminal of WorktreePath
+    | StartEmbeddedCommand of WorktreePath * string
+
 let private assertTerminalCommandAccepted command =
     Assert.That(
         TerminalHostClient.validateTerminalCommand command,
@@ -39,7 +46,7 @@ let private createApi
     root
     worktreePath
     activityStore
-    launchTerminal
+    terminalLaunch
     =
     let agent = SchedulerState.createAgent ()
     let repoId = PathUtils.toRepoId root
@@ -56,7 +63,7 @@ let private createApi
     |> ignore
 
     WorktreeApi.worktreeApiWithLaunch
-        launchTerminal
+        terminalLaunch
         { Agent = agent
           CardLog = CardEventLog.createAgent ()
           // These backends are deliberately unavailable: every start in this fixture must cross
@@ -101,7 +108,7 @@ let private writePostForkMarkerScript repoRoot =
 type WorktreeApiLaunchTests() =
 
     [<Test>]
-    member _.``Worktree API selects launch intent and preserves exact embedded results``() =
+    member _.``Worktree API selects typed launch operations and preserves exact embedded results``() =
         withTempDir "treemon-worktree-api-launch" (fun root ->
             let path =
                 root
@@ -133,57 +140,70 @@ type WorktreeApiLaunchTests() =
             let actionId = terminalId "33333333333333333333333333333333"
             let canvasId = terminalId "44444444444444444444444444444444"
             let resumeId = terminalId "55555555555555555555555555555555"
-            let calls =
-                ConcurrentQueue<TerminalLaunch.Intent * WorktreePath>()
+            let calls = ConcurrentQueue<LaunchCall>()
 
-            let launchTerminal intent requestedPath =
-                async {
-                    calls.Enqueue((intent, requestedPath))
+            let terminalLaunch: TerminalLaunch.Operations =
+                { OpenNativeTerminal =
+                    fun requestedPath ->
+                        async {
+                            calls.Enqueue(LaunchCall.OpenNativeTerminal requestedPath)
+                            return Ok()
+                        }
+                  OpenNativeTab =
+                    fun requestedPath ->
+                        async {
+                            calls.Enqueue(LaunchCall.OpenNativeTab requestedPath)
+                            return Ok()
+                        }
+                  StartEmbeddedTerminal =
+                    fun requestedPath ->
+                        async {
+                            calls.Enqueue(LaunchCall.StartEmbeddedTerminal requestedPath)
 
-                    return
-                        match intent with
-                        | TerminalLaunch.Intent.OpenNativeTerminal
-                        | TerminalLaunch.Intent.OpenNativeTab ->
-                            Ok TerminalLaunch.LaunchResult.Native
-                        | TerminalLaunch.Intent.StartEmbeddedTerminal ->
-                            Ok(
-                                TerminalLaunch.LaunchResult.Embedded(
-                                    startResult requestedPath (EmbeddedTerminalId.value plainId)
+                            return
+                                Ok(
+                                    startResult
+                                        requestedPath
+                                        (EmbeddedTerminalId.value plainId)
                                 )
+                        }
+                  StartEmbeddedCommand =
+                    fun requestedPath command ->
+                        async {
+                            calls.Enqueue(
+                                LaunchCall.StartEmbeddedCommand(requestedPath, command)
                             )
-                        | TerminalLaunch.Intent.StartEmbeddedCommand command
-                            when command = launchCommand ->
-                            Ok(
-                                TerminalLaunch.LaunchResult.Embedded(
-                                    startResult requestedPath (EmbeddedTerminalId.value launchId)
-                                )
-                            )
-                        | TerminalLaunch.Intent.StartEmbeddedCommand command
-                            when command = actionCommand ->
-                            Ok(
-                                TerminalLaunch.LaunchResult.Embedded(
-                                    startResult requestedPath (EmbeddedTerminalId.value actionId)
-                                )
-                            )
-                        | TerminalLaunch.Intent.StartEmbeddedCommand command
-                            when command = canvasCommand ->
-                            Ok(
-                                TerminalLaunch.LaunchResult.Embedded(
-                                    startResult requestedPath (EmbeddedTerminalId.value canvasId)
-                                )
-                            )
-                        | TerminalLaunch.Intent.StartEmbeddedCommand command
-                            when command = resumeCommand ->
-                            Ok(
-                                TerminalLaunch.LaunchResult.Embedded(
-                                    startResult requestedPath (EmbeddedTerminalId.value resumeId)
-                                )
-                            )
-                        | TerminalLaunch.Intent.StartEmbeddedCommand _ ->
-                            Error "Unexpected embedded command"
-                }
 
-            let api = createApi root path None launchTerminal
+                            return
+                                match command with
+                                | value when value = launchCommand ->
+                                    Ok(
+                                        startResult
+                                            requestedPath
+                                            (EmbeddedTerminalId.value launchId)
+                                    )
+                                | value when value = actionCommand ->
+                                    Ok(
+                                        startResult
+                                            requestedPath
+                                            (EmbeddedTerminalId.value actionId)
+                                    )
+                                | value when value = canvasCommand ->
+                                    Ok(
+                                        startResult
+                                            requestedPath
+                                            (EmbeddedTerminalId.value canvasId)
+                                    )
+                                | value when value = resumeCommand ->
+                                    Ok(
+                                        startResult
+                                            requestedPath
+                                            (EmbeddedTerminalId.value resumeId)
+                                    )
+                                | _ -> Error "Unexpected embedded command"
+                        } }
+
+            let api = createApi root path None terminalLaunch
 
             api.openTerminal path |> runAsync
             let nativeTab = api.openNewTab path |> runAsync
@@ -217,13 +237,13 @@ type WorktreeApiLaunchTests() =
             Assert.That(
                 calls.ToArray(),
                 Is.EqualTo(
-                    [| (TerminalLaunch.Intent.OpenNativeTerminal, path)
-                       (TerminalLaunch.Intent.OpenNativeTab, path)
-                       (TerminalLaunch.Intent.StartEmbeddedTerminal, path)
-                       (TerminalLaunch.Intent.StartEmbeddedCommand launchCommand, path)
-                       (TerminalLaunch.Intent.StartEmbeddedCommand actionCommand, path)
-                       (TerminalLaunch.Intent.StartEmbeddedCommand canvasCommand, path)
-                       (TerminalLaunch.Intent.StartEmbeddedCommand resumeCommand, path) |]
+                    [| LaunchCall.OpenNativeTerminal path
+                       LaunchCall.OpenNativeTab path
+                       LaunchCall.StartEmbeddedTerminal path
+                       LaunchCall.StartEmbeddedCommand(path, launchCommand)
+                       LaunchCall.StartEmbeddedCommand(path, actionCommand)
+                       LaunchCall.StartEmbeddedCommand(path, canvasCommand)
+                       LaunchCall.StartEmbeddedCommand(path, resumeCommand) |]
                 )
             )
 
@@ -244,7 +264,7 @@ type WorktreeApiLaunchTests() =
 
             let started =
                 TaskCompletionSource<
-                    TerminalLaunch.Intent * WorktreePath * bool
+                    WorktreePath * string * bool
                  >(TaskCreationOptions.RunContinuationsAsynchronously)
             let release =
                 TaskCompletionSource<unit>(
@@ -253,33 +273,39 @@ type WorktreeApiLaunchTests() =
                 TaskCompletionSource<unit>(
                     TaskCreationOptions.RunContinuationsAsynchronously)
 
-            let launchTerminal intent requestedPath =
-                async {
-                    let markerExists =
-                        File.Exists(
-                            Path.Combine(
-                                WorktreePath.value requestedPath,
-                                "post-fork-ready.txt"
-                            )
-                        )
+            let terminalLaunch: TerminalLaunch.Operations =
+                { OpenNativeTerminal =
+                    fun _ -> async { return Error "Unexpected native terminal launch" }
+                  OpenNativeTab =
+                    fun _ -> async { return Error "Unexpected native tab launch" }
+                  StartEmbeddedTerminal =
+                    fun _ -> async { return Error "Unexpected plain embedded launch" }
+                  StartEmbeddedCommand =
+                    fun requestedPath command ->
+                        async {
+                            let markerExists =
+                                File.Exists(
+                                    Path.Combine(
+                                        WorktreePath.value requestedPath,
+                                        "post-fork-ready.txt"
+                                    )
+                                )
 
-                    started.TrySetResult((intent, requestedPath, markerExists))
-                    |> ignore
+                            started.TrySetResult((requestedPath, command, markerExists))
+                            |> ignore
 
-                    do! release.Task |> Async.AwaitTask
-                    completed.TrySetResult() |> ignore
+                            do! release.Task |> Async.AwaitTask
+                            completed.TrySetResult() |> ignore
 
-                    return
-                        Ok(
-                            TerminalLaunch.LaunchResult.Embedded(
-                                startResult
-                                    requestedPath
-                                    "66666666666666666666666666666666"
-                            )
-                        )
-                }
+                            return
+                                Ok(
+                                    startResult
+                                        requestedPath
+                                        "66666666666666666666666666666666"
+                                )
+                        } }
 
-            let api = createApi repoRoot rootPath None launchTerminal
+            let api = createApi repoRoot rootPath None terminalLaunch
             let prompt =
                 "Implement the next ready task.\r\n"
                 + "Preserve this second line exactly."
@@ -298,7 +324,7 @@ type WorktreeApiLaunchTests() =
                       Skill = Some skill }
                 |> runAsync
 
-            let intent, launchedPath, markerExists =
+            let launchedPath, command, markerExists =
                 started.Task
                     .WaitAsync(TimeSpan.FromSeconds 15.0)
                     .GetAwaiter()
@@ -322,13 +348,7 @@ type WorktreeApiLaunchTests() =
                             expectedPath,
                         Is.True
                     )
-                    Assert.That(
-                        intent,
-                        Is.EqualTo(
-                            TerminalLaunch.Intent.StartEmbeddedCommand
-                                expectedCommand
-                        )
-                    )
+                    Assert.That(command, Is.EqualTo(expectedCommand))
                     assertTerminalCommandAccepted expectedCommand
                     Assert.That(completed.Task.IsCompleted, Is.False,
                         "createWorktree must not wait for the fire-and-forget terminal launch"))
@@ -347,24 +367,29 @@ type WorktreeApiLaunchTests() =
                 |> Path.GetFullPath
                 |> PathUtils.normalizePath
                 |> WorktreePath
-            let calls =
-                ConcurrentQueue<TerminalLaunch.Intent * WorktreePath>()
+            let calls = ConcurrentQueue<WorktreePath * string>()
 
-            let launchTerminal intent requestedPath =
-                async {
-                    calls.Enqueue((intent, requestedPath))
+            let terminalLaunch: TerminalLaunch.Operations =
+                { OpenNativeTerminal =
+                    fun _ -> async { return Error "Unexpected native terminal launch" }
+                  OpenNativeTab =
+                    fun _ -> async { return Error "Unexpected native tab launch" }
+                  StartEmbeddedTerminal =
+                    fun _ -> async { return Error "Unexpected plain embedded launch" }
+                  StartEmbeddedCommand =
+                    fun requestedPath command ->
+                        async {
+                            calls.Enqueue((requestedPath, command))
 
-                    return
-                        Ok(
-                            TerminalLaunch.LaunchResult.Embedded(
-                                startResult
-                                    requestedPath
-                                    "77777777777777777777777777777777"
-                            )
-                        )
-                }
+                            return
+                                Ok(
+                                    startResult
+                                        requestedPath
+                                        "77777777777777777777777777777777"
+                                )
+                        } }
 
-            let api = createApi root path None launchTerminal
+            let api = createApi root path None terminalLaunch
             let filename = "diff.html"
             let result =
                 api.sendCanvasMessage
@@ -384,11 +409,7 @@ type WorktreeApiLaunchTests() =
                 Assert.That(result, Is.EqualTo CanvasMessageResult.Queued)
                 Assert.That(
                     calls.ToArray(),
-                    Is.EqualTo(
-                        [| TerminalLaunch.Intent.StartEmbeddedCommand
-                               expectedCommand,
-                           path |]
-                    )
+                    Is.EqualTo([| (path, expectedCommand) |])
                 )
 
                 assertTerminalCommandAccepted expectedCommand))
