@@ -1357,7 +1357,7 @@ type EmbeddedTerminalControlClientTests() =
                                 submissions.Enqueue((endpoint, command))
                                 return Ok()
                             } }
-            let manager = EmbeddedTerminal.createWithConfig config
+
             let manager = EmbeddedTerminal.createWithConfig config
             let target = worktree host.Root "command-start"
 
@@ -1469,7 +1469,7 @@ type EmbeddedTerminalControlClientTests() =
                                 submissions.Enqueue((endpoint, command))
                                 return Error "Simulated command delivery failure"
                             } }
-            let manager = EmbeddedTerminal.createWithConfig config
+
             let manager = EmbeddedTerminal.createWithConfig config
             let target = worktree host.Root "delivery-failure"
 
