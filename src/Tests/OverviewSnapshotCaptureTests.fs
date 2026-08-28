@@ -542,19 +542,31 @@ type OverviewSnapshotCaptureTests() =
                         [ activePath,
                           { Planned = 1
                             Queued = 3
-                            Loose = 1 }
+                            Loose = 1
+                            InProgress = 2
+                            Blocked = 1
+                            Closed = 1 }
                           retainedPath,
                           { Planned = 2
                             Queued = 5
-                            Loose = 0 }
+                            Loose = 0
+                            InProgress = 4
+                            Blocked = 2
+                            Closed = 1 }
                           archivedPath,
                           { Planned = 100
                             Queued = 100
-                            Loose = 100 }
+                            Loose = 100
+                            InProgress = 100
+                            Blocked = 100
+                            Closed = 100 }
                           ignoredPath,
                           { Planned = 100
                             Queued = 100
-                            Loose = 100 } ]
+                            Loose = 100
+                            InProgress = 100
+                            Blocked = 100
+                            Closed = 100 } ]
                 IsReady = true }
 
         let state =

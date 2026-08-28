@@ -481,7 +481,8 @@ type StateAgentTests() =
             agent.Post(UpdateGit(testRepoId, "/repo/feature", gitData))
 
             let beads : Shared.BeadsSummary = { Open = 1; InProgress = 2; Blocked = 0; Closed = 3 }
-            let planning : Shared.BeadsPlanning = { Planned = 1; Queued = 1; Loose = 0 }
+            let planning : Shared.BeadsPlanning =
+                { Shared.BeadsPlanning.zero with Planned = 1; Queued = 1 }
             agent.Post(UpdateBeads(testRepoId, "/repo/feature", beads, planning))
             do! waitForAgent agent
 
@@ -656,7 +657,7 @@ type StateAgentTests() =
                     testRepoId,
                     oldPath,
                     { Open = 1; InProgress = 0; Blocked = 0; Closed = 0 },
-                    { Planned = 1; Queued = 0; Loose = 0 }
+                    { Shared.BeadsPlanning.zero with Planned = 1 }
                 )
             )
 

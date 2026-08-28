@@ -73,10 +73,10 @@ let private agentDefs : SeriesDef list =
 // Task series in canonical stacking order, mirroring OverviewData.taskOrder and the band's task-* palette.
 let private taskDefs : SeriesDef list =
     [ TaskBucketKind.Planned
-      TaskBucketKind.Queued
-      TaskBucketKind.InProgress
+      TaskBucketKind.Underway
       TaskBucketKind.Blocked
       TaskBucketKind.Done
+      TaskBucketKind.ToLand
       TaskBucketKind.Unattended ]
     |> List.map (fun kind -> { Label = taskLabel kind; Accent = taskClass kind; ValueAt = taskCount kind })
 
@@ -148,7 +148,7 @@ let agentPoints (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSna
     buildPoints agentDefs now window snapshots
 
 /// Windowed points for the TASK series (counts aligned to the canonical task order
-/// Planned, Queued, In progress, Blocked, Done, Unattended). Pure test/reuse seam.
+/// Planned, Underway, Blocked, Done, To land, Unattended). Pure test/reuse seam.
 let taskPoints (now: DateTimeOffset) (window: TimeSpan) (snapshots: OverviewSnapshot list) : Point list =
     buildPoints taskDefs now window snapshots
 
