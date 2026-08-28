@@ -113,7 +113,7 @@ async function launchTerminalHost(executable, stateDirectory, worktreePath, port
 
         try {
           const response = await fetch(
-            new URL("/api/v1/shutdown", manifest.endpoint),
+            new URL("/api/v2/shutdown", manifest.endpoint),
             {
               method: "POST",
               headers: { Authorization: "Bearer " + manifest.bearerToken },
@@ -252,7 +252,7 @@ export async function runTtydRuntimeVerification() {
     );
 
     const response = await fetch(
-      new URL("/api/v1/terminals", host.manifest.endpoint),
+      new URL("/api/v2/terminals", host.manifest.endpoint),
       {
         method: "POST",
         headers: {
@@ -286,7 +286,7 @@ export async function runTtydRuntimeVerification() {
     await page.evaluate(
       ({ encodedMarker }) => {
         window.term.paste(
-          `$pwd.Path; Write-Output ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedMarker}')))`,
+          `1..120 | ForEach-Object { Write-Output ('scroll-line-' + $_) }; $pwd.Path; Write-Output ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedMarker}')))`,
         );
         window.term.input("\r", true);
       },
@@ -310,8 +310,43 @@ export async function runTtydRuntimeVerification() {
       text.includes(basename(fixture)),
       `Terminal cwd was not ${fixture}: ${text}`,
     );
+
+    const viewport = await page.evaluate(() => {
+      const element = document.querySelector(".xterm-viewport");
+      const style = getComputedStyle(element);
+      const maximumScrollTop = element.scrollHeight - element.clientHeight;
+      element.scrollTop = 0;
+
+      return {
+        scrollbarWidth: style.scrollbarWidth,
+        overflowY: style.overflowY,
+        maximumScrollTop,
+        scrollTop: element.scrollTop,
+      };
+    });
+    assert(
+      viewport.scrollbarWidth === "none",
+      `xterm viewport scrollbar remained visible: ${viewport.scrollbarWidth}`,
+    );
+    assert(
+      viewport.overflowY === "scroll" || viewport.overflowY === "auto",
+      `xterm viewport stopped being scrollable: ${viewport.overflowY}`,
+    );
+    assert(
+      viewport.maximumScrollTop > 0,
+      "xterm viewport had no scrollback after writing 120 lines",
+    );
+    assert(
+      viewport.scrollTop === 0,
+      `xterm viewport did not accept scrolling: ${viewport.scrollTop}`,
+    );
+    await page.locator(".xterm-screen").hover();
+    await page.mouse.wheel(0, 600);
+    await page.waitForFunction(
+      () => document.querySelector(".xterm-viewport").scrollTop > 0,
+    );
     console.log(
-      `PASS: stock ttyd accepted input through TerminalHost session ${terminal.sessionId} in ${fixture}`,
+      `PASS: stock ttyd accepted input with hidden scrollbar and working scrollback through TerminalHost session ${terminal.sessionId} in ${fixture}`,
     );
   } catch (error) {
     const bearerToken = host?.manifest?.bearerToken;

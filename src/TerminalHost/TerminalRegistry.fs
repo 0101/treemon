@@ -33,6 +33,9 @@ module TerminalRegistry =
     [<Literal>]
     let private ShutdownReplyTimeoutMilliseconds = 300_000
 
+    [<Literal>]
+    let private MaximumTerminals = 1024
+
     let private snapshot state =
         { Revision = state.Revision
           Terminals =
@@ -58,14 +61,6 @@ module TerminalRegistry =
         |> Seq.map closeHosted
         |> Async.Sequential
         |> Async.Ignore
-
-    let private findBySessionId sessionId entries =
-        entries
-        |> Map.tryPick (fun key terminal ->
-            if String.Equals(terminal.Record.SessionId, sessionId, StringComparison.Ordinal) then
-                Some(key, terminal)
-            else
-                None)
 
     let private removeAfterClose state (key, terminal) =
         async {
@@ -155,35 +150,34 @@ module TerminalRegistry =
                 match message with
                 | Start(_, reply) when current.Stopped ->
                     return respond reply (Error "Terminal host is shutting down") current
+                | Start(_, reply) when current.Entries.Count >= MaximumTerminals ->
+                    return respond reply (Error "Terminal host has reached its terminal limit") current
                 | Start(worktree, reply) ->
-                    let key = CanonicalWorktree.key worktree
+                    match!
+                        startHosted
+                            starter
+                            dataPlaneStarter
+                            (UpstreamExited >> inbox.Post)
+                            worktree
+                            current.NextOpenedOrder
+                    with
+                    | Error error -> return respond reply (Error error) current
+                    | Ok terminal ->
+                        let updated =
+                            { current with
+                                Entries =
+                                    current.Entries
+                                    |> Map.add terminal.Record.SessionId terminal
+                                Revision = current.Revision + 1L
+                                NextOpenedOrder = current.NextOpenedOrder + 1L }
 
-                    match Map.tryFind key current.Entries with
-                    | Some _ -> return respond reply (Ok(snapshot current)) current
-                    | None ->
-                        match!
-                            startHosted
-                                starter
-                                dataPlaneStarter
-                                (UpstreamExited >> inbox.Post)
-                                worktree
-                                current.NextOpenedOrder
-                        with
-                        | Error error -> return respond reply (Error error) current
-                        | Ok terminal ->
-                            let updated =
-                                { current with
-                                    Entries = Map.add key terminal current.Entries
-                                    Revision = current.Revision + 1L
-                                    NextOpenedOrder = current.NextOpenedOrder + 1L }
-
-                            return respond reply (Ok(snapshot updated)) updated
+                        return respond reply (Ok(snapshot updated)) updated
                 | List reply -> return respond reply (snapshot current) current
                 | Close(sessionId, reply) ->
-                    match findBySessionId sessionId current.Entries with
+                    match Map.tryFind sessionId current.Entries with
                     | None -> return respond reply (snapshot current) current
-                    | Some matched ->
-                        let! updated = removeAfterClose current matched
+                    | Some terminal ->
+                        let! updated = removeAfterClose current (sessionId, terminal)
                         return respond reply (snapshot updated) updated
                 | Shutdown reply ->
                     do! closeAll current.Entries
@@ -196,9 +190,10 @@ module TerminalRegistry =
 
                     return respond reply () updated
                 | UpstreamExited sessionId ->
-                    match findBySessionId sessionId current.Entries with
+                    match Map.tryFind sessionId current.Entries with
                     | None -> return current
-                    | Some matched -> return! removeAfterClose current matched
+                    | Some terminal ->
+                        return! removeAfterClose current (sessionId, terminal)
             }
 
         let mailbox = ResilientMailbox.start "TerminalRegistry" initial recoverMessage processMessage

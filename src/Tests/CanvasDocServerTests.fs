@@ -648,6 +648,22 @@ type AttributeOwnershipTests() =
             Assert.That(owner, Is.EqualTo(Some sessionId),
                         "getOwner must return the sessionId the authoring session declared"))
 
+    [<TestCase("unsafe name.html")>]
+    [<TestCase("../report.html")>]
+    [<TestCase("report.html\n")>]
+    member _.``an invalid canvas filename is rejected before ownership is recorded``(filename: string) =
+        withTempCwd (fun () ->
+            let worktree = uniquePath "attr-invalid-filename"
+            let agent = agentKnowing worktree
+
+            let outcome = runAsync (attributeOwnership agent worktree filename (uniqueSid "owner"))
+
+            Assert.That(outcome, Is.EqualTo(Invalid "invalid canvas filename"))
+            Assert.That(
+                runAsync (CanvasDocOwnership.getOwner worktree filename),
+                Is.EqualTo(None: string option),
+                "A filename outside the shared contract must never enter ownership state"))
+
     [<Test>]
     member _.``a SystemView declaration records nothing because its routing is resolved``() =
         withTempCwd (fun () ->

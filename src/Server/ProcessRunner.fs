@@ -230,6 +230,9 @@ let private describeTruncation streams =
 
         $", truncated: {names}"
 
+let internal shouldLogCompletion exitCode wasTruncated elapsed =
+    exitCode <> 0 || wasTruncated || Log.isSlowOperation elapsed
+
 /// Runs a process without shell argument parsing. Output capture is bounded and
 /// timeout cancellation terminates the complete process tree.
 let private runArgumentListCore
@@ -286,9 +289,12 @@ let private runArgumentListCore
                         [ if stdout.LimitExceeded then StandardOutput
                           if stderr.LimitExceeded then StandardError ]
 
-                    Log.log
-                        context
-                        $"{fileName} ({arguments.Length} args) -> exit {proc.ExitCode}, stdout bytes: {stdout.Bytes.Length}, stderr bytes: {stderr.Bytes.Length}{describeTruncation truncated}"
+                    executionStopwatch.Stop()
+
+                    if shouldLogCompletion proc.ExitCode (not (List.isEmpty truncated)) executionStopwatch.Elapsed then
+                        Log.log
+                            context
+                            $"{fileName} ({arguments.Length} args) -> exit {proc.ExitCode} in {executionStopwatch.ElapsedMilliseconds}ms, stdout bytes: {stdout.Bytes.Length}, stderr bytes: {stderr.Bytes.Length}{describeTruncation truncated}"
 
                     // The child exited, so the exit code is the answer. A caller that parses the
                     // captured bytes decides for itself whether truncation invalidates that answer.

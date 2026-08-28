@@ -6,7 +6,7 @@ import {
   MAX_TOOL_CALL_ID_CHARS,
   mapSdkEvent,
   reportForSdkEvent,
-} from "./reporting-core.mjs";
+} from "../../../Extension/reporting/reporting-core.mjs";
 
 const context = {
   sessionId: "session-1",

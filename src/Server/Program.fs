@@ -5,6 +5,7 @@ open Fable.Remoting.Giraffe
 open System
 open System.Threading
 open Microsoft.Extensions.Hosting
+open Microsoft.Extensions.Logging
 open Shared
 open Server
 open Treemon.TerminalHosting
@@ -40,6 +41,9 @@ let readAppVersion () =
             | false, _ -> ""
 
     $"{buildTime}|{serverGuid}"
+
+let internal configureLogging (builder: ILoggingBuilder) =
+    builder.AddFilter("Microsoft.AspNetCore", LogLevel.Warning) |> ignore
 
 type ServerConfig =
     { WorktreeRoots: string list
@@ -568,6 +572,7 @@ let main args =
 
     let app =
         application {
+            logging configureLogging
             use_router combinedRouter
             url serverUrl
             use_static "wwwroot"

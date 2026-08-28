@@ -168,8 +168,8 @@ let private bandProbeJs =
           return it ? it.querySelectorAll('.overview-donut').length : 0;
         })(),
         colors: {
-          taskDone: bg(itemByLabel(tasksSec, 'Done') && itemByLabel(tasksSec, 'Done').querySelector('.overview-bar')),
-          taskInProgress: bg(itemByLabel(tasksSec, 'In progress') && itemByLabel(tasksSec, 'In progress').querySelector('.overview-bar')),
+          taskToLand: bg(itemByLabel(tasksSec, 'To land') && itemByLabel(tasksSec, 'To land').querySelector('.overview-bar')),
+          taskUnderway: bg(itemByLabel(tasksSec, 'Underway') && itemByLabel(tasksSec, 'Underway').querySelector('.overview-bar')),
           taskPlanned: bg(itemByLabel(tasksSec, 'Planned') && itemByLabel(tasksSec, 'Planned').querySelector('.overview-bar')),
           agentPlanning: fg(itemByLabel(agentsSec, 'Planning') && itemByLabel(agentsSec, 'Planning').querySelector('.overview-circle')),
           agentReviewing: fg(itemByLabel(agentsSec, 'Reviewing') && itemByLabel(agentsSec, 'Reviewing').querySelector('.overview-circle')),
@@ -178,7 +178,7 @@ let private bandProbeJs =
           agentIdle: fg(itemByLabel(agentsSec, 'Idle') && itemByLabel(agentsSec, 'Idle').querySelector('.overview-circle'))
         },
         blockedPresent: !!itemByLabel(tasksSec, 'Blocked'),
-        queuedPresent: !!itemByLabel(tasksSec, 'Queued'),
+        donePresent: !!itemByLabel(tasksSec, 'Done'),
         prPresent: !!itemByLabel(agentsSec, 'PR'),
         prHasActivityClass: (() => { const it = itemByLabel(agentsSec, 'PR'); return !!it && it.classList.contains('activity-pr'); })(),
         executingPresent: !!itemByLabel(agentsSec, 'Executing'),
@@ -334,16 +334,16 @@ type OverviewBandE2ETests() =
             Assert.That(b.Value<int>("barCount"), Is.EqualTo(1), $"status {lbl} renders exactly ONE .overview-bar")
             Assert.That(b.Value<int>("childCells"), Is.EqualTo(0), $"bar for {lbl} is a single element, NOT a run of unit cells"))
 
-        let done_ = (widthOf "Done").Value<float>("width")
+        let toLand = (widthOf "To land").Value<float>("width")
         let planned = (widthOf "Planned").Value<float>("width")
-        let inProg = (widthOf "In progress").Value<float>("width")
+        let underway = (widthOf "Underway").Value<float>("width")
 
-        Assert.That(done_, Is.GreaterThan(planned), "largest count (Done=40) is widest")
-        Assert.That(planned, Is.GreaterThan(inProg), "smaller count (In progress=10) is strictly narrower than Planned=20")
+        Assert.That(toLand, Is.GreaterThan(planned), "largest count (To land=40) is widest")
+        Assert.That(planned, Is.GreaterThan(underway), "smaller count (Underway=10) is strictly narrower than Planned=20")
 
-        // Proportional (one true scale), not equal fixed widths: Planned≈½·Done, In progress≈¼·Done.
-        Assert.That(planned / done_, Is.EqualTo(0.5).Within(0.06), "Planned width ∝ its count on the shared scale")
-        Assert.That(inProg / done_, Is.EqualTo(0.25).Within(0.06), "In progress width ∝ its count on the shared scale")
+        // Proportional (one true scale), not equal fixed widths: Planned≈½·To land, Underway≈¼·To land.
+        Assert.That(planned / toLand, Is.EqualTo(0.5).Within(0.06), "Planned width ∝ its count on the shared scale")
+        Assert.That(underway / toLand, Is.EqualTo(0.25).Within(0.06), "Underway width ∝ its count on the shared scale")
 
         let bandRight = probe.Value<float>("bandRight")
         bars
@@ -356,8 +356,8 @@ type OverviewBandE2ETests() =
     member _.``Step 4 - accent colours match the Catppuccin palette``() =
         let probe = requireProbe ()
         let colors = probe["colors"] :?> JObject
-        Assert.That(colors.Value<string>("taskDone"), Is.EqualTo(rgb "#cba6f7"), "Done = mauve")
-        Assert.That(colors.Value<string>("taskInProgress"), Is.EqualTo(rgb "#a6e3a1"), "In progress = green")
+        Assert.That(colors.Value<string>("taskToLand"), Is.EqualTo(rgb "#89dceb"), "To land = sky")
+        Assert.That(colors.Value<string>("taskUnderway"), Is.EqualTo(rgb "#a6e3a1"), "Underway = green")
         Assert.That(colors.Value<string>("taskPlanned"), Is.EqualTo(rgb "#fab387"), "Planned = peach")
         Assert.That(colors.Value<string>("agentPlanning"), Is.EqualTo(rgb "#cba6f7"), "agent Planning = mauve")
         Assert.That(colors.Value<string>("agentReviewing"), Is.EqualTo(rgb "#f5c2e7"), "agent Reviewing = pink")
@@ -380,7 +380,9 @@ type OverviewBandE2ETests() =
     member _.``Step 6 - zero-count status and activity are omitted``() =
         let probe = requireProbe ()
         Assert.That(probe.Value<bool>("blockedPresent"), Is.False, "zero-count Blocked bucket must not render")
-        Assert.That(probe.Value<bool>("queuedPresent"), Is.False, "zero-count Queued bucket must not render")
+        // Every fixture worktree carrying closed tasks is finished, so all of them land in To land and
+        // the Done bucket is empty — the closed-task split renders as one bucket, never both.
+        Assert.That(probe.Value<bool>("donePresent"), Is.False, "zero-count Done bucket must not render")
         Assert.That(probe.Value<bool>("executingPresent"), Is.False, "zero-count Executing activity must not render")
         Assert.That(probe.Value<bool>("genericWorkingPresent"), Is.False, "zero-count generic Working activity must not render")
         Assert.That(probe.Value<int>("zeroTextCount"), Is.EqualTo(0), "no count element ever renders the text '0'")

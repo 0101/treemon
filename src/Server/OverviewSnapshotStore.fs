@@ -52,6 +52,10 @@ let private collapseEqualRuns snapshots =
     ) []
     |> List.rev
 
+// Union cases are serialized BY NAME, so rows written before the task buckets were restructured
+// (Queued/InProgress merged into Underway, Done split into Done/ToLand) carry case names this
+// build cannot deserialize. Dropping the legacy table and reading from a fresh one is a one-time,
+// idempotent migration that costs at most the 72-hour retention window of history.
 let private migrationSql =
     $"""
 DROP TABLE IF EXISTS overview_history_staging;
@@ -60,8 +64,9 @@ DROP TABLE IF EXISTS overview_history_session_bounds;
 DROP TABLE IF EXISTS overview_history_state;
 DROP TABLE IF EXISTS session_liveness;
 DROP TABLE IF EXISTS task_snapshots;
+DROP TABLE IF EXISTS overview_snapshots;
 
-CREATE TABLE IF NOT EXISTS overview_snapshots (
+CREATE TABLE IF NOT EXISTS overview_snapshots_v2 (
     bucket INTEGER PRIMARY KEY CHECK (bucket %% {OverviewSnapshotBoundary.resolutionSeconds} = 0),
     tasks  TEXT NOT NULL,
     agents TEXT NOT NULL
@@ -113,7 +118,7 @@ type OverviewSnapshotStore(dbPath: string) =
         insert.Transaction <- transaction
         insert.CommandText <-
             """
-INSERT OR IGNORE INTO overview_snapshots(bucket, tasks, agents)
+INSERT OR IGNORE INTO overview_snapshots_v2(bucket, tasks, agents)
 VALUES ($bucket, $tasks, $agents);
 """
         insert.Parameters.AddWithValue("$bucket", bucket) |> ignore
@@ -124,7 +129,7 @@ VALUES ($bucket, $tasks, $agents);
         if inserted then
             use prune = connection.CreateCommand()
             prune.Transaction <- transaction
-            prune.CommandText <- "DELETE FROM overview_snapshots WHERE bucket < $cutoff;"
+            prune.CommandText <- "DELETE FROM overview_snapshots_v2 WHERE bucket < $cutoff;"
             prune.Parameters.AddWithValue("$cutoff", bucket - retentionSeconds) |> ignore
             prune.ExecuteNonQuery() |> ignore
 
@@ -134,7 +139,7 @@ VALUES ($bucket, $tasks, $agents);
     member _.LatestAnchor() : DateTimeOffset option =
         use connection = openConnection ()
         use command = connection.CreateCommand()
-        command.CommandText <- "SELECT max(bucket) FROM overview_snapshots;"
+        command.CommandText <- "SELECT max(bucket) FROM overview_snapshots_v2;"
         let value = command.ExecuteScalar()
 
         if isNull value || Convert.IsDBNull value then
@@ -161,7 +166,7 @@ VALUES ($bucket, $tasks, $agents);
         command.CommandText <-
             """
 SELECT bucket, tasks, agents
-FROM overview_snapshots
+FROM overview_snapshots_v2
 WHERE bucket >= $start
   AND bucket <= $anchor
   AND (($anchor - bucket) % $step) = 0
@@ -203,11 +208,11 @@ LIMIT $limit;
             """
 WITH latest AS (
     SELECT COALESCE(MAX(bucket), $emptyAnchor) AS anchor
-    FROM overview_snapshots
+    FROM overview_snapshots_v2
 ),
 sampled AS (
     SELECT snapshots.bucket, snapshots.tasks, snapshots.agents
-    FROM overview_snapshots AS snapshots
+    FROM overview_snapshots_v2 AS snapshots
     CROSS JOIN latest
     WHERE snapshots.bucket >= latest.anchor - $duration
       AND snapshots.bucket <= latest.anchor

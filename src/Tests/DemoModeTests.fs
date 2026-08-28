@@ -95,6 +95,30 @@ let private stopDemoProcesses () =
     viteProcess.Value <- None
 
 [<TestFixture>]
+[<Category("Unit")>]
+type DemoFixtureTests() =
+    [<Test>]
+    member _.``Demo fixture exercises overview task buckets``() =
+        let now = DateTimeOffset(2026, 8, 19, 8, 0, 0, TimeSpan.Zero)
+        let fixture = Server.DemoFixture.selectFrame now now
+
+        let taskCounts =
+            fixture.Worktrees.Repos
+            |> OverviewData.aggregate
+            |> _.Tasks
+            |> List.map (fun bucket -> bucket.Kind, bucket.Count)
+
+        Assert.That(
+            taskCounts,
+            Is.EqualTo(
+                [ OverviewData.TaskBucketKind.Planned, 7
+                  OverviewData.TaskBucketKind.Underway, 4
+                  OverviewData.TaskBucketKind.Done, 17
+                  OverviewData.TaskBucketKind.ToLand, 14 ]
+            )
+        )
+
+[<TestFixture>]
 [<Category("Demo")>]
 [<Category("E2E")>]
 type DemoModeTests() =

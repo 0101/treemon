@@ -3,11 +3,16 @@ module OverviewData
 // Pure cross-worktree aggregation behind the Overview band (spec: docs/spec/beads-overview-band.md).
 // Folds every monitored NON-ARCHIVED worktree into the band's two aggregate lenses (archived
 // worktrees are dropped up front, so they contribute to nothing — no task bucket and no agent group):
-//   - Tasks: the status buckets (Planned · Queued · In progress · Blocked · Done · Unattended), each
-//     a cross-worktree sum. Planned folds in Loose (decision #6). In progress and Queued count only
-//     where the worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser); on an inactive
-//     worktree those tasks are likely stale beads status and fold into the muted Unattended catch-all
-//     instead. Every other bucket sums across all (non-archived) worktrees.
+//   - Tasks: the status buckets (Planned · Underway · Blocked · Done · To land · Unattended), each
+//     a cross-worktree sum. Planned folds in Loose (decision #6). Underway is all work an agent has
+//     started — beads in_progress tasks PLUS open tasks under an in_progress feature — and counts
+//     only where the worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser); on an
+//     inactive worktree that same work is likely stale beads status and folds into the muted
+//     Unattended catch-all instead, so Unattended is exactly Underway's inactive mirror. Closed
+//     tasks split by whether their worktree still has task work left: Done while it does, To land
+//     once it does not. Blocked sums across all non-archived worktrees. Every bucket uses the
+//     feature-free Planning projection, so feature containers never inflate task counts or keep an
+//     otherwise-complete worktree out of To land.
 //   - Agents: red-dot WORKING agents (CodingTool = Working) grouped by the skill each is running,
 //     classified through the shared Shared.Activity.classify, PLUS a distinct Waiting group for
 //     agents parked on the user (CodingTool = WaitingForUser, yellow dot), PLUS a distinct Idle
@@ -25,17 +30,18 @@ module OverviewData
 open System
 open Shared
 
-/// A cross-worktree task status bucket. RequireQualifiedAccess keeps Done/InProgress/Blocked from
+/// A cross-worktree task status bucket. RequireQualifiedAccess keeps Done/Blocked from
 /// colliding with the BeadsSummary field labels and other DU cases (same reason
 /// CurrentActivity is qualified). The case list order below is the band's canonical left-to-right
-/// display order.
+/// display order. Done and ToLand are the two halves of a worktree's closed tasks — mutually
+/// exclusive, so together they always sum to Σ Planning.Closed.
 [<RequireQualifiedAccess>]
 type TaskBucketKind =
     | Planned
-    | Queued
-    | InProgress
+    | Underway
     | Blocked
     | Done
+    | ToLand
     | Unattended
 
 /// One worktree's membership in a group, carrying everything the drill-down panel needs: the focus
@@ -134,14 +140,15 @@ type OverviewHistoryResponse =
     { Anchor: DateTimeOffset
       Snapshots: OverviewSnapshot list }
 
-// Canonical left-to-right order of the task bars. Unattended trails Done: it is the muted
-// catch-all for In-progress/Queued tasks whose worktree has no active agent.
+// Canonical left-to-right order of the task bars: a lifecycle, with To land (the user's move) after
+// Done. Unattended trails both: it is the muted catch-all for Underway work whose worktree has no
+// active agent.
 let private taskOrder =
     [ TaskBucketKind.Planned
-      TaskBucketKind.Queued
-      TaskBucketKind.InProgress
+      TaskBucketKind.Underway
       TaskBucketKind.Blocked
       TaskBucketKind.Done
+      TaskBucketKind.ToLand
       TaskBucketKind.Unattended ]
 
 // Canonical order of the activity groups (mirrors the spec's activity table).
@@ -194,25 +201,39 @@ let aggregate (repos: RepoWorktrees list) : Overview =
           Sessions = sessions
           Contribution = contribution }
 
-    // A worktree's contribution to one task bucket. In-progress and Queued only count toward their
-    // live buckets when their worktree has an ACTIVE agent (CodingTool = Working or WaitingForUser);
-    // on an inactive worktree (Idle/NoSession) they are likely stale beads status nobody is working, so
-    // they fold into the muted Unattended catch-all instead. Archived worktrees never reach here
-    // (dropped when building taggedWorktrees), so every bucket sums only non-archived worktrees.
-    // Planned folds Loose in (Loose -> Planned, decision #6). This single per-worktree predicate is
-    // the one source of truth: the bucket Count sums it and Members keep every worktree whose
-    // contribution is > 0 — they can never diverge.
+    // A worktree's contribution to one task bucket. Underway is all started task work — in-progress
+    // non-feature issues plus open tasks under an in-progress feature — and only counts when it has an
+    // ACTIVE agent (CodingTool = Working or WaitingForUser); on an inactive worktree (Idle/NoSession)
+    // it is likely stale beads status nobody is working, so it folds into the muted Unattended
+    // catch-all instead, making Unattended exactly Underway's inactive mirror. Every task bucket uses
+    // the feature-free Planning projection, so feature containers never inflate the displayed work.
+    // Closed tasks split on whether the worktree has finished: while work remains they are Done, and
+    // once nothing open, in-progress or blocked is left they become To land — the agent is finished
+    // and a human has to land it (open/merge the PR). Archived worktrees never reach here (dropped when building
+    // taggedWorktrees), so every bucket sums only non-archived worktrees. Planned folds Loose in
+    // (Loose -> Planned, decision #6). This single per-worktree predicate is the one source of truth:
+    // the bucket Count sums it and Members keep every worktree whose contribution is > 0 — they can
+    // never diverge.
     let isActive w =
         w.CodingTool = CodingToolStatus.Working || w.CodingTool = CodingToolStatus.WaitingForUser
+
+    // A worktree with no open, in-progress or blocked non-feature issues has no task work left for an
+    // agent to pick up, so its closed tasks are waiting on a human. Feature containers do not gate it.
+    let isFinished w =
+        w.Planning.Planned = 0
+        && w.Planning.Queued = 0
+        && w.Planning.Loose = 0
+        && w.Planning.InProgress = 0
+        && w.Planning.Blocked = 0
 
     let contributionFor kind (w: WorktreeStatus) =
         match kind with
         | TaskBucketKind.Planned    -> w.Planning.Planned + w.Planning.Loose
-        | TaskBucketKind.Queued     -> if isActive w then w.Planning.Queued else 0
-        | TaskBucketKind.InProgress -> if isActive w then w.Beads.InProgress else 0
-        | TaskBucketKind.Blocked    -> w.Beads.Blocked
-        | TaskBucketKind.Done       -> w.Beads.Closed
-        | TaskBucketKind.Unattended -> if isActive w then 0 else w.Beads.InProgress + w.Planning.Queued
+        | TaskBucketKind.Underway   -> if isActive w then w.Planning.Queued + w.Planning.InProgress else 0
+        | TaskBucketKind.Blocked    -> w.Planning.Blocked
+        | TaskBucketKind.Done       -> if isFinished w then 0 else w.Planning.Closed
+        | TaskBucketKind.ToLand     -> if isFinished w then w.Planning.Closed else 0
+        | TaskBucketKind.Unattended -> if isActive w then 0 else w.Planning.Queued + w.Planning.InProgress
 
     // Members of one task bucket, in repo/worktree order: every worktree whose contribution is > 0.
     let taskMembersFor kind =

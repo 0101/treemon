@@ -96,7 +96,7 @@ type private FakeControlHost
     let mutable logicalShutdown = false
     let mutable online = true
     let mutable hostVersion = "1.0.0-test"
-    let mutable controlApiVersion = 1
+    let mutable controlApiVersion = 2
     let mutable stagedVersion: string option = None
     let mutable currentExecutable = oldExecutable
     let mutable registryJsonOverride: string option = None
@@ -154,37 +154,25 @@ type private FakeControlHost
     let startTerminal path =
         let startedPath, fail =
             lock gate (fun () ->
-                let existing =
+                let sessionId = Guid.NewGuid().ToString("N")
+                let canonical =
+                    Path.GetFullPath path
+                    |> Path.TrimEndingDirectorySeparator
+
+                terminals <-
                     terminals
-                    |> List.tryFind (fun terminal ->
-                        Shared.PathUtils.pathEquals
-                            terminal.WorktreePath
-                            path)
+                    @ [ { SessionId = sessionId
+                          WorktreePath = canonical
+                          AttachmentEndpoint =
+                            $"http://127.0.0.1:41001/_treemon/{sessionId}/{token}/" } ]
 
-                let startedPath =
-                    match existing with
-                    | Some _ -> None
-                    | None ->
-                        let sessionId = Guid.NewGuid().ToString("N")
-                        let canonical =
-                            Path.GetFullPath path
-                            |> Path.TrimEndingDirectorySeparator
-
-                        terminals <-
-                            terminals
-                            @ [ { SessionId = sessionId
-                                  WorktreePath = canonical
-                                  AttachmentEndpoint =
-                                    $"http://127.0.0.1:41001/_treemon/{sessionId}/{token}/" } ]
-
-                        revision <- revision + 1L
-                        Some canonical
+                revision <- revision + 1L
 
                 let fail = failNextStartResponse
                 failNextStartResponse <- false
-                startedPath, fail)
+                canonical, fail)
 
-        startedPath |> Option.iter terminalStarted
+        terminalStarted startedPath
         fail
 
     let closeTerminal sessionId =
@@ -241,13 +229,13 @@ type private FakeControlHost
             else
                 let method = context.Request.Method
                 let path = context.Request.Path.Value |> Option.ofObj |> Option.defaultValue ""
+                let version, apiVersion =
+                    lock gate (fun () ->
+                        hostVersion, controlApiVersion)
+                let apiRoot = $"/api/v{apiVersion}"
 
                 match method, path with
-                | "GET", "/api/v1/health" ->
-                    let version, apiVersion =
-                        lock gate (fun () ->
-                            hostVersion, controlApiVersion)
-
+                | "GET", requestPath when requestPath = $"{apiRoot}/health" ->
                     return!
                         writeJson
                             StatusCodes.Status200OK
@@ -256,7 +244,7 @@ type private FakeControlHost
                               HostVersion = version
                               ControlApiVersion = apiVersion }
                             context
-                | "GET", "/api/v1/terminals" ->
+                | "GET", requestPath when requestPath = $"{apiRoot}/terminals" ->
                     listRequests.Enqueue()
 
                     match lock gate (fun () -> registryJsonOverride) with
@@ -266,7 +254,7 @@ type private FakeControlHost
                         context.Response.StatusCode <- StatusCodes.Status200OK
                         context.Response.ContentType <- "application/json; charset=utf-8"
                         return! context.Response.WriteAsync content
-                | "POST", "/api/v1/terminals" ->
+                | "POST", requestPath when requestPath = $"{apiRoot}/terminals" ->
                     let! requested = readWorktreePath context
 
                     match requested |> Option.ofObj with
@@ -303,11 +291,11 @@ type private FakeControlHost
                                 return! writeJson StatusCodes.Status200OK (snapshot ()) context
                 | "DELETE", closePath
                     when closePath.StartsWith(
-                        "/api/v1/terminals/",
+                        $"{apiRoot}/terminals/",
                         StringComparison.Ordinal
                     ) ->
                     let sessionId =
-                        closePath.Substring("/api/v1/terminals/".Length)
+                        closePath.Substring($"{apiRoot}/terminals/".Length)
 
                     closeRequests.Enqueue sessionId
                     let fail = closeTerminal sessionId
@@ -320,7 +308,7 @@ type private FakeControlHost
                                 context
                     else
                         return! writeJson StatusCodes.Status200OK (snapshot ()) context
-                | "POST", "/api/v1/shutdown" ->
+                | "POST", requestPath when requestPath = $"{apiRoot}/shutdown" ->
                     shutdownRequests.Enqueue()
 
                     let stopApi =
@@ -1027,7 +1015,7 @@ type EmbeddedTerminalControlClientTests() =
                 requireOk started |> ignore
 
             if incompatible then
-                host.SetControlApiVersion 2
+                host.SetControlApiVersion 1
 
                 if not hasTerminal then
                     host.EnableLogicalReplacement()
@@ -1052,7 +1040,7 @@ type EmbeddedTerminalControlClientTests() =
                     Assert.That(
                         error,
                         Is.EqualTo(
-                            "TerminalHost control API version 2 is not supported (expected 1)"
+                            "TerminalHost control API version 1 is not supported (expected 2)"
                         )
                     )
 
@@ -1097,7 +1085,7 @@ type EmbeddedTerminalControlClientTests() =
     member _.``incompatible empty host fails closed when exact shutdown is not confirmed``() =
         task {
             use host = new FakeControlHost()
-            host.SetControlApiVersion 2
+            host.SetControlApiVersion 1
             host.PublishManifest()
 
             let config =
@@ -1129,13 +1117,13 @@ type EmbeddedTerminalControlClientTests() =
         }
 
     [<Test>]
-    member _.``deployment preflight does not trust a registry after health identity mismatch``() =
+    member _.``deployment preflight does not trust a registry after an unsupported manifest API route``() =
         task {
             use host = new FakeControlHost()
 
             host.PublishManifestWithJsonField(
                 "controlApiVersion",
-                "2"
+                "3"
             )
 
             let! result =
@@ -1149,7 +1137,7 @@ type EmbeddedTerminalControlClientTests() =
                     result,
                     Is.EqualTo(
                         Error
-                            "TerminalHost health identity does not match its discovery manifest"
+                            "TerminalHost returned HTTP 404: Control endpoint not found"
                         : Result<TerminalHostClient.DeploymentPreflightResult option, string>
                     )
                 )
@@ -1159,7 +1147,7 @@ type EmbeddedTerminalControlClientTests() =
         }
 
     [<Test>]
-    member _.``starts lazily and resolves ambiguous start and close by authoritative relist``() =
+    member _.``starts distinct terminals lazily and resolves ambiguous mutations by relist``() =
         task {
             use host = new FakeControlHost()
             let launches = ConcurrentQueue<unit>()
@@ -1179,8 +1167,10 @@ type EmbeddedTerminalControlClientTests() =
                 EmbeddedTerminal.start manager target
                 |> Async.StartAsTask
 
-            let snapshot = requireOk started
-            let endpoint = assertRunningFor target snapshot
+            let firstStart = requireOk started
+            let endpoint = assertRunningFor target firstStart
+            let firstTerminalId =
+                firstStart.Tabs |> List.exactlyOne |> _.Id
 
             Assert.Multiple(fun () ->
                 Assert.That(launches.Count, Is.EqualTo(1))
@@ -1188,27 +1178,24 @@ type EmbeddedTerminalControlClientTests() =
                 Assert.That(host.ListRequestCount, Is.GreaterThanOrEqualTo(1))
                 Assert.That(endpoint, Does.EndWith($"{host.Token}/")))
 
-            let! reused =
+            let! second =
                 EmbeddedTerminal.start manager target
                 |> Async.StartAsTask
 
             Assert.Multiple(fun () ->
-                Assert.That((requireOk reused).Tabs.Length, Is.EqualTo(1))
+                Assert.That((requireOk second).Tabs.Length, Is.EqualTo(2))
                 Assert.That(launches.Count, Is.EqualTo(1)))
 
             host.FailNextCloseResponse()
 
             let! closed =
-                EmbeddedTerminal.close manager target
+                EmbeddedTerminal.close manager firstTerminalId
                 |> Async.StartAsTask
 
             Assert.Multiple(fun () ->
-                Assert.That(
-                    requireOk closed,
-                    Is.EqualTo EmbeddedTerminalSnapshot.empty
-                )
+                Assert.That((requireOk closed).Tabs.Length, Is.EqualTo(1))
                 Assert.That(host.CloseRequestCount, Is.EqualTo(1))
-                Assert.That(host.ListRequestCount, Is.GreaterThanOrEqualTo(3)))
+                Assert.That(host.ListRequestCount, Is.GreaterThanOrEqualTo(5)))
         }
 
     [<Test>]
@@ -1769,7 +1756,9 @@ type EmbeddedTerminalReplacementTests() =
                 EmbeddedTerminal.start manager running
                 |> Async.StartAsTask
 
-            requireOk started |> ignore
+            let runningStart = requireOk started
+            let originalRunningTerminalId =
+                runningStart.Tabs |> List.exactlyOne |> _.Id
 
             let query _ _ =
                 Ok(
@@ -1808,7 +1797,9 @@ type EmbeddedTerminalReplacementTests() =
                             |> Async.StartAsTask
 
                         let closeTask =
-                            EmbeddedTerminal.close manager running
+                            EmbeddedTerminal.close
+                                manager
+                                originalRunningTerminalId
                             |> Async.StartAsTask
 
                         let! snapshot =
@@ -1891,8 +1882,18 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk retriedStart |> ignore
 
+            let! current =
+                EmbeddedTerminal.get manager
+                |> Async.StartAsTask
+
+            let runningTerminalId =
+                current.Tabs
+                |> List.find (fun tab ->
+                    tab.Worktree = running)
+                |> _.Id
+
             let! retriedClose =
-                EmbeddedTerminal.close manager running
+                EmbeddedTerminal.close manager runningTerminalId
                 |> Async.StartAsTask
 
             requireOk retriedClose |> ignore
@@ -2380,6 +2381,12 @@ type EmbeddedTerminalWorktreeCleanupTests() =
 
             requireOk initial |> ignore
 
+            let! alternate =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk alternate |> ignore
+
             let operationEntered =
                 TaskCompletionSource<unit>(
                     TaskCreationOptions.RunContinuationsAsynchronously
@@ -2472,6 +2479,11 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 requireOk unrelatedStart |> ignore
                 requireOk firstResult |> ignore
                 requireOk restarted |> ignore
+                Assert.That(
+                    host.CloseRequestCount,
+                    Is.EqualTo(2),
+                    "cleanup must close every terminal owned by the worktree"
+                )
 
                 Assert.That(
                     host.CurrentTerminals |> List.map _.WorktreePath,
@@ -2589,6 +2601,65 @@ type EmbeddedTerminalWorktreeCleanupTests() =
         }
 
     [<Test>]
+    member _.``partial multi-terminal close failure keeps the worktree mutation blocked``() =
+        task {
+            // Kestrel callbacks may close two fixture terminals; mutation stays at this test boundary.
+            let mutable closeAttempts = 0
+            use host =
+                new FakeControlHost(
+                    onTerminalClosing = fun _ ->
+                        closeAttempts <- closeAttempts + 1
+
+                        if closeAttempts = 2 then
+                            raise (
+                                InvalidOperationException(
+                                    "simulated second terminal close failure"
+                                )
+                            )
+                )
+
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+            let target = worktree host.Root "partial-close"
+
+            for _ in 1..2 do
+                let! started =
+                    EmbeddedTerminal.start manager target
+                    |> Async.StartAsTask
+
+                requireOk started |> ignore
+
+            let mutationEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let! result =
+                EmbeddedTerminal.withReservedCleanup
+                    manager
+                    target
+                    (fun () ->
+                        async {
+                            mutationEntered.TrySetResult() |> ignore
+                            return Ok()
+                        })
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(requireError result, Is.Not.Empty)
+                Assert.That(closeAttempts, Is.EqualTo(2))
+                Assert.That(
+                    host.CurrentTerminals
+                    |> List.filter (fun terminal ->
+                        terminal.WorktreePath = WorktreePath.value target)
+                    |> List.length,
+                    Is.EqualTo(1)
+                )
+                Assert.That(mutationEntered.Task.IsCompleted, Is.False))
+        }
+
+    [<Test>]
     member _.``strict close failure releases its canonical path reservation``() =
         task {
             use host =
@@ -2645,8 +2716,9 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 requireOk reused |> ignore)
         }
 
-    [<Test>]
-    member _.``malformed close path does not stop the lifecycle mailbox``() =
+    [<TestCase(null)>]
+    [<TestCase("\u0000")>]
+    member _.``malformed terminal ID is rejected without stopping the lifecycle mailbox``(invalidId: string) =
         task {
             use host = new FakeControlHost()
             host.PublishManifest()
@@ -2654,7 +2726,9 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
 
             let! malformedClose =
-                EmbeddedTerminal.close manager (WorktreePath "\u0000")
+                EmbeddedTerminal.close
+                    manager
+                    (EmbeddedTerminalId invalidId)
                 |> Async.StartAsTask
                 |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
 
@@ -2666,7 +2740,10 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
 
             Assert.Multiple(fun () ->
-                requireOk malformedClose |> ignore
+                Assert.That(
+                    requireError malformedClose,
+                    Is.EqualTo("Invalid embedded terminal ID")
+                )
                 requireOk started |> ignore)
         }
 

@@ -36,17 +36,19 @@ if (-not $Command -and $MyInvocation.InvocationName -ne ".") {
     Write-Host "  start [<path>...]          Start production server (auto-builds if wwwroot/ is empty)"
     Write-Host "                             No path uses the global config roots (~/.treemon/config.json)"
     Write-Host "  stop                       Stop the production server"
-    Write-Host "  restart                    Stop + start (uses the global config roots)"
+    Write-Host "  restart                    Stop + start (uses global roots; run from external PowerShell)"
     Write-Host "  status                     Show production server status (lists roots via 'tm roots')"
     Write-Host "  log                        Tail the production server log"
     Write-Host "  dev [<path>...]            Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
     Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
-    Write-Host "  deploy                     Build frontend, replace the app on the production port, and start this checkout"
-    Write-Host "  add <path> [<path>...]     Add watched root(s) via 'tm add' (restarts prod if running)"
+    Write-Host "  deploy                     Build and replace production (run from external PowerShell)"
+    Write-Host "  add <path> [<path>...]     Add watched root(s) via 'tm add' (embedded terminals defer restart)"
     Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
-    Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (restarts prod if running)"
+    Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (embedded terminals defer restart)"
     Write-Host "  install-skill              Install the tm CLI skill for AI coding agents"
     Write-Host "  setup-ttyd                 Install the pinned ttyd executable for embedded terminals"
+    Write-Host ""
+    Write-Host "Production launches require an external PowerShell window. Embedded add/remove saves the change but requires an external restart." -ForegroundColor Gray
     exit 0
 }
 
@@ -687,6 +689,16 @@ function Install-ServerDeployment(
     }
 }
 
+function Test-EmbeddedTerminalContext {
+    return -not [string]::IsNullOrWhiteSpace($env:TREEMON_TERMINAL_SESSION_ID)
+}
+
+function Assert-ExternalProductionLifecycle([string]$Action) {
+    if (Test-EmbeddedTerminalContext) {
+        throw "Cannot $Action from a Treemon embedded terminal because production processes inherit the terminal's shutdown boundary. Run the command from an external PowerShell window."
+    }
+}
+
 function Start-ProductionProcess(
     [string[]]$Roots,
     [string]$TerminalHostExecutable
@@ -796,10 +808,11 @@ function Start-ProductionServer([string[]]$Roots) {
     if ($runningPid) {
         Write-Host "Production server is already running (PID: $runningPid)" -ForegroundColor Yellow
         Write-Host "  URL: http://localhost:$DefaultPort" -ForegroundColor Gray
-        Write-Host "Use '.\treemon.ps1 stop' first or '.\treemon.ps1 restart'" -ForegroundColor Gray
+        Write-Host "Use '.\treemon.ps1 stop' first or run '.\treemon.ps1 restart' from an external PowerShell window" -ForegroundColor Gray
         return
     }
 
+    Assert-ExternalProductionLifecycle "start Treemon production"
     Ensure-WwwRoot
     $terminalHostExecutable = Install-ServerDeployment {
         param($preflight)
@@ -822,6 +835,14 @@ function Stop-ProductionServer {
     Stop-Process -Id $runningPid -Force -ErrorAction SilentlyContinue
     Remove-Item $PidFile -ErrorAction SilentlyContinue
     Write-Host "Production server stopped" -ForegroundColor Green
+}
+
+function Restart-ProductionServer([string[]]$Roots) {
+    Assert-ExternalProductionLifecycle "restart Treemon production"
+    Write-Host "Restarting server..." -ForegroundColor Cyan
+    Stop-ProductionServer
+    Start-Sleep -Seconds 1
+    Start-ProductionServer $Roots
 }
 
 function Stop-ProductionPortListeners {
@@ -870,7 +891,7 @@ function Show-Status {
     } elseif ($canvasConn) {
         Write-Host "  Canvas:  WARNING - port $CanvasPort is held by PID $($canvasConn.OwningProcess), not this server (PID $runningPid)" -ForegroundColor Yellow
     } else {
-        Write-Host "  Canvas:  DOWN - nothing listening on $CanvasPort; canvas docs will not load. Run '.\treemon.ps1 restart' to rebind." -ForegroundColor Red
+        Write-Host "  Canvas:  DOWN - nothing listening on $CanvasPort; canvas docs will not load. Run '.\treemon.ps1 restart' from an external PowerShell window to rebind." -ForegroundColor Red
     }
 
     # Watched roots come from the server (the single source of truth) via `tm roots`.
@@ -1095,7 +1116,6 @@ function Install-CopilotExtension(
     $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
     if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
     Get-ChildItem -Path $SrcDir -Filter "*.mjs" -File |
-        Where-Object { $_.Name -notlike "*.test.mjs" } |
         Copy-Item -Destination $dest -Force
     $RequiredFiles | ForEach-Object { Copy-Item (Join-Path $SrcDir $_) $dest -Force }
     Write-Host "$FriendlyName installed to $dest" -ForegroundColor Green
@@ -1106,6 +1126,7 @@ function Install-Extension {
     $requiredFiles = @(
         "package.json",
         "canvas-doc-kinds.json",
+        "canvas-filename-contract.json",
         "canvas-send.js",
         "canvas-selection-context.js"
     )
@@ -1165,14 +1186,17 @@ function Restart-ServerIfRunning {
     # global config at startup, so we restart with empty args (@()).
     $runningPid = Get-RunningPid
     if ($runningPid) {
-        Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
-        Stop-ProductionServer
-        Start-Sleep -Seconds 1
-        Start-ProductionServer @()
+        if (Test-EmbeddedTerminalContext) {
+            Write-Host "Production was not restarted because this command is running in a Treemon embedded terminal." -ForegroundColor Yellow
+            Write-Host "The root change is saved; run '.\treemon.ps1 restart' from an external PowerShell window to apply it." -ForegroundColor Gray
+        } else {
+            Restart-ProductionServer @()
+        }
     }
 }
 
 function Deploy-Frontend {
+    Assert-ExternalProductionLifecycle "deploy Treemon production"
     $frontendCandidate = "$WwwRoot.candidate-$([Guid]::NewGuid().ToString('N'))"
     try {
         Write-Host "Building frontend candidate..." -ForegroundColor Cyan
@@ -1216,9 +1240,7 @@ switch ($Command) {
         Stop-ProductionServer
     }
     "restart" {
-        Stop-ProductionServer
-        Start-Sleep -Seconds 1
-        Start-ProductionServer $WorktreeRoots
+        Restart-ProductionServer $WorktreeRoots
     }
     "status" {
         Show-Status

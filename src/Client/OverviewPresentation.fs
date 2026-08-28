@@ -24,19 +24,19 @@ let historyWindowLabel =
 let taskLabel =
     function
     | TaskBucketKind.Planned -> "Planned"
-    | TaskBucketKind.Queued -> "Queued"
-    | TaskBucketKind.InProgress -> "In progress"
+    | TaskBucketKind.Underway -> "Underway"
     | TaskBucketKind.Blocked -> "Blocked"
     | TaskBucketKind.Done -> "Done"
+    | TaskBucketKind.ToLand -> "To land"
     | TaskBucketKind.Unattended -> "Unattended"
 
 let taskClass =
     function
     | TaskBucketKind.Planned -> "task-planned"
-    | TaskBucketKind.Queued -> "task-queued"
-    | TaskBucketKind.InProgress -> "task-inprogress"
+    | TaskBucketKind.Underway -> "task-underway"
     | TaskBucketKind.Blocked -> "task-blocked"
     | TaskBucketKind.Done -> "task-done"
+    | TaskBucketKind.ToLand -> "task-toland"
     | TaskBucketKind.Unattended -> "task-unattended"
 
 let activityLabel =

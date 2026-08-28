@@ -94,16 +94,15 @@ type WrapperTypeSerializationTests() =
     member _.``Embedded terminal registry snapshot survives JSON round-trip``() =
         let original =
             { Tabs =
-                [ { Worktree = WorktreePath @"Q:\code\starting"
-                    Lifecycle = EmbeddedTerminalLifecycle.Starting }
-                  { Worktree = WorktreePath @"Q:\code\running"
+                [ { Id = EmbeddedTerminalId "00000000000000000000000000000002"
+                    Worktree = WorktreePath @"Q:\code\running"
+                    ReportedIntent = Some "Implementing terminal titles"
                     Lifecycle =
                         EmbeddedTerminalLifecycle.Running
                             "http://127.0.0.1:61234/" }
-                  { Worktree = WorktreePath @"Q:\code\failed"
-                    Lifecycle =
-                        EmbeddedTerminalLifecycle.Failed "ttyd exited" }
-                  { Worktree = WorktreePath @"Q:\code\interrupted"
+                  { Id = EmbeddedTerminalId "00000000000000000000000000000004"
+                    Worktree = WorktreePath @"Q:\code\interrupted"
+                    ReportedIntent = None
                     Lifecycle =
                         EmbeddedTerminalLifecycle.Interrupted
                             "host exited" } ] }
@@ -216,7 +215,8 @@ type OverviewSnapshotSerializationTests() =
         { Timestamp = DateTimeOffset(2026, 7, 14, 9, 30, 0, TimeSpan.Zero)
           Tasks =
             [ { Kind = TaskBucketKind.Planned; Count = 3 }
-              { Kind = TaskBucketKind.InProgress; Count = 2 }
+              { Kind = TaskBucketKind.Underway; Count = 2 }
+              { Kind = TaskBucketKind.ToLand; Count = 5 }
               { Kind = TaskBucketKind.Unattended; Count = 1 } ]
           Agents =
             [ { Kind = AgentGroupKind.Activity CurrentActivity.Executing; Count = 4 }

@@ -227,14 +227,13 @@ let registerSession (worktreePath: string) (injectUrl: string) (sessionId: strin
           RegisteredAt = nextRegisteredAt now }
 
     sessionRegistry[registryKey] <- entry
-    Log.log "SessionBridge" $"Session registered {worktreeKey} (key={registryKey}) -> {injectUrl}"
+    Log.log "SessionBridge" $"Session registered for {Path.GetFileName worktreeKey}"
     drainQueue now worktreeKey entry
 
 let registerPoll (worktreePath: string) =
     let now = DateTime.UtcNow
     let key = normalizePath worktreePath
     pollRegistry[key] <- now
-    Log.log "SessionBridge" $"Poll heartbeat for {key}"
 
 let sessionsForWorktree (worktreePath: string) : SessionEntry list =
     let worktreeKey = normalizePath worktreePath

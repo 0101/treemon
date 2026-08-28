@@ -25,9 +25,5 @@
     "*.mjs",
     "reporting/*.mjs",
     "extension-globals.d.ts"
-  ],
-  "exclude": [
-    "*.test.mjs",
-    "reporting/*.test.mjs"
   ]
 }

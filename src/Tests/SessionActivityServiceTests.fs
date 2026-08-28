@@ -1841,6 +1841,88 @@ type TerminalOwnershipQueryTests() =
         )
 
     [<Test>]
+    member _.``terminal snapshot titles use the exact terminal's representative reported intent``() =
+        let terminalA =
+            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+        let terminalB =
+            TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+        let unrelated =
+            TerminalSessionId "cccccccccccccccccccccccccccccccc"
+
+        let now = ts "2026-03-01T10:05:00Z"
+        let message text at = Some { Text = text; At = at }
+
+        let stored terminalSessionId sessionId status updatedAt lastSeen intent title =
+            { ownedStored terminalSessionId sessionId lastSeen with
+                Status =
+                    { emptyStatus with
+                        Status = status
+                        Intent = intent
+                        Title = title }
+                UpdatedAt = updatedAt }
+
+        let snapshot =
+            { Tabs =
+                [ { Id = EmbeddedTerminalId(TerminalSessionId.value terminalA)
+                    Worktree = WorktreePath "C:/wt/a"
+                    ReportedIntent = None
+                    Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61001/" }
+                  { Id = EmbeddedTerminalId(TerminalSessionId.value terminalB)
+                    Worktree = WorktreePath "C:/wt/a"
+                    ReportedIntent = None
+                    Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61002/" } ] }
+
+        let decorated =
+            snapshot
+            |> withReportedIntents
+                now
+                [ stored
+                      terminalA
+                      "idle-a"
+                      SessionLevelStatus.Idle
+                      (ts "2026-03-01T10:03:00Z")
+                      (ts "2026-03-01T10:04:00Z")
+                      (message "Idle terminal work" (ts "2026-03-01T10:03:00Z"))
+                      None
+                  stored
+                      terminalA
+                      "working-a"
+                      SessionLevelStatus.Working
+                      (ts "2026-03-01T10:02:00Z")
+                      (ts "2026-03-01T10:04:30Z")
+                      (message "Implementing exact terminal titles" (ts "2026-03-01T10:04:30Z"))
+                      None
+                  stored
+                      terminalB
+                      "working-b"
+                      SessionLevelStatus.Working
+                      (ts "2026-03-01T10:04:00Z")
+                      (ts "2026-03-01T10:04:30Z")
+                      None
+                      (message "Session title only" (ts "2026-03-01T10:04:00Z"))
+                  stored
+                      unrelated
+                      "unrelated"
+                      SessionLevelStatus.Working
+                      (ts "2026-03-01T10:04:30Z")
+                      (ts "2026-03-01T10:04:30Z")
+                      (message "Wrong terminal" (ts "2026-03-01T10:04:30Z"))
+                      None ]
+
+        Assert.That(
+            decorated.Tabs
+            |> List.map (fun tab -> tab.Id, tab.ReportedIntent),
+            Is.EqualTo(
+                [ (EmbeddedTerminalId(TerminalSessionId.value terminalA),
+                   Some "Implementing exact terminal titles")
+                  (EmbeddedTerminalId(TerminalSessionId.value terminalB),
+                   None) ]
+            )
+        )
+
+    [<Test>]
     member _.``service live cache evicts sessions outside the idle window``() =
         let oldTerminal =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

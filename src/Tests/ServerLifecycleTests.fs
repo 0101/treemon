@@ -5,6 +5,9 @@ open System.Collections.Concurrent
 open System.IO
 open System.Threading
 open System.Threading.Tasks
+open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Logging
+open Microsoft.Extensions.Options
 open NUnit.Framework
 open Program
 open Shared
@@ -27,6 +30,28 @@ let private serverConfig arguments =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type ServerLifecycleTests() =
+
+    [<Test>]
+    member _.``ASP.NET request diagnostics require warning level``() =
+        let services = ServiceCollection()
+        services.AddLogging(Action<ILoggingBuilder>(configureLogging)) |> ignore
+        use provider = services.BuildServiceProvider()
+
+        let options =
+            provider.GetRequiredService<IOptions<LoggerFilterOptions>>().Value
+
+        let rule =
+            options.Rules
+            |> Seq.tryFind (fun candidate ->
+                candidate.CategoryName = "Microsoft.AspNetCore")
+
+        match rule with
+        | Some configured ->
+            Assert.That(
+                configured.LogLevel,
+                Is.EqualTo(Nullable LogLevel.Warning)
+            )
+        | None -> Assert.Fail("Expected a Microsoft.AspNetCore logging filter")
 
     [<Test>]
     member _.``runtime shares one store and ingestion drains before releasing its borrow``() =

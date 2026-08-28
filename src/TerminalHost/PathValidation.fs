@@ -21,12 +21,6 @@ module PathValidation =
         Path.GetFullPath(path)
         |> Path.TrimEndingDirectorySeparator
 
-    let private keyFor (path: string) =
-        if OperatingSystem.IsWindows() then
-            path.ToUpperInvariant()
-        else
-            path
-
     let private exactGitTopLevel path =
         let marker = Path.Combine(path, ".git")
 
@@ -82,7 +76,7 @@ module PathValidation =
                 elif not (exactGitTopLevel canonical) then
                     Error WorktreeValidationError.UnknownWorktree
                 else
-                    Ok(CanonicalWorktree.create canonical (keyFor canonical))
+                    Ok(CanonicalWorktree.create canonical)
         with
         | :? ArgumentException
         | :? NotSupportedException

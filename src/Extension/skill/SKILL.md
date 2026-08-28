@@ -14,9 +14,9 @@ Use the visual medium to make the result easier to understand, not to move a wal
 
 ## Creating a canvas doc
 
-Write an HTML file to `.agents/canvas/<name>.html`. Treemon scans for new files automatically. Use a descriptive filename — it becomes the tab name (e.g. `build-status.html`, `test-results.html`).
+Write an HTML file to `.agents/canvas/<name>.html`. Treemon scans for new files automatically. The filename must be a **bare name** matching `^[a-zA-Z0-9][a-zA-Z0-9_.-]*\.html$`: start with an ASCII letter or digit, use only ASCII letters, digits, `_`, `.`, and `-`, and keep the `.html` suffix lowercase. Spaces, quotes, control characters, paths, and directory separators are rejected and the file will not enter the canvas inventory. Use a descriptive filename — it becomes the tab name (e.g. `build-status.html`, `test-results.html`).
 
-Give the doc a `<title>` too, with the casing you want to read — e.g. `<title>MTP TestExplorer Hang</title>`. It's the human-readable name used for the **shared link** and for the standalone page's browser tab. The filename stays a lowercase kebab slug (it's the tab id and URL), so a doc with **no** `<title>` can only be shared under a sentence-cased version of that slug (`mtp-testexplorer-hang.html` → "Mtp testexplorer hang"), which can't recover acronyms or camelCase. Setting a `<title>` is how you get "MTP TestExplorer Hang" instead.
+Give the doc a `<title>` too, with the casing you want to read — e.g. `<title>MTP TestExplorer Hang</title>`. It's the human-readable name used for the **shared link** and for the standalone page's browser tab. A lowercase kebab-case filename gives the most readable automatic fallback (`mtp-testexplorer-hang.html` → "Mtp testexplorer hang"), but the contract also permits uppercase letters, `_`, and additional dots. The fallback cannot recover acronyms or camelCase, so setting a `<title>` is how you get "MTP TestExplorer Hang" instead.
 
 ## Styling
 
@@ -143,7 +143,7 @@ You never need to know or send your own session ID: writing the `.html` file wit
 
 Editing a doc another session created transfers ownership to you (most recent author wins), so from then on its messages arrive in your session.
 
-**Claiming ownership explicitly.** If a canvas doc was written by a **script or unsupported tool** (so no supported write event fired to declare ownership), or its messages are reaching the **wrong session**, claim it directly: call the **`canvas_take_ownership`** tool with the doc's filename — e.g. `canvas_take_ownership({ filename: "review.html" })`. It stamps in your session ID without rewriting the file. When the user says something like "take ownership of the review doc," find which `.agents/canvas/*.html` they mean and call the tool with that filename.
+**Claiming ownership explicitly.** If a canvas doc was written by a **script or unsupported tool** (so no supported write event fired to declare ownership), or its messages are reaching the **wrong session**, claim it directly: call the **`canvas_take_ownership`** tool with the bare contract filename — e.g. `canvas_take_ownership({ filename: "review.html" })`. Full paths and directory separators are rejected. It stamps in your session ID without rewriting the file. When the user says something like "take ownership of the review doc," find which `.agents/canvas/*.html` they mean and call the tool with that filename.
 
 Generated SystemViews such as `diff.html` and `beads.html` are not claimable: their interactions
 always reach the worktree's most recently active session, resolved per interaction rather than

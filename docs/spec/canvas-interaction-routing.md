@@ -18,7 +18,9 @@ Resolution depends only on `CanvasDoc.Kind`.
 An **AgentDoc** has a real author. Its `(worktree, filename)` target is persisted in
 `data/canvas-owners.json`, assigned when the authoring extension reports a successful canvas write
 or when `canvas_take_ownership` claims it explicitly. That ownership is sticky: it changes only
-through another author write or another explicit claim.
+through another author write or another explicit claim. Both paths require the bare filename to
+match the shared canvas filename contract; a full path, separator, traversal attempt, space, quote,
+or control character is rejected before ownership state is touched.
 
 A **SystemView** is server-generated and has no author, so nothing is persisted for it. Each
 interaction resolves, at send time, to the most recently active session that currently holds a live

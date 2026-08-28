@@ -2,7 +2,8 @@
 
 ## Goals
 
-- Provide one writable embedded PowerShell terminal per canonical worktree path.
+- Allow each canonical worktree path to own multiple independently selectable and closable writable
+  PowerShell terminals.
 - Keep terminals alive across browser attachment changes and ordinary Treemon server restarts.
 - Run the terminal on one small, separately running F#/.NET `TerminalHost` executable with no Node
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
@@ -22,12 +23,14 @@
 
 ### Terminal lifetime and attachments
 
-Opening a terminal starts one for the canonical worktree path or reuses the existing one. The
+Opening a terminal always starts a new terminal for the canonical worktree path. Existing terminals
+remain available until explicitly closed. The
 `TerminalHost` runs independently from the Treemon server, so a compatible server restart or deploy
 rediscovers the same host, ttyd processes, and terminal tabs instead of replacing them. Server
 shutdown alone never closes the host.
 
-The host owns one ttyd process tree per worktree. It creates ttyd suspended, assigns it to an
+The host owns one ttyd process tree per terminal, and a worktree may own several terminals. It
+creates each ttyd suspended, assigns it to an
 in-process Windows Job Object configured to kill its members when the owning handle closes, and only
 then resumes ttyd. Process ownership comes only from that Job Object and retained exact handles;
 process names and ancestry are never discovery or cleanup authority.
@@ -45,9 +48,16 @@ If a paused attachment falls behind the replay window, resume resets and clears 
 a visible omission notice, and then sends the surviving frames instead of silently splicing
 discontinuous output into the existing state.
 
-The client keeps running terminal iframes mounted while tabs are hidden, preserving normal tab
-switching behavior. Tab order is opening order, tab labels are worktree display names, and selection
-remains client state.
+The terminal pane normally follows the currently focused worktree card. Clicking a card's embedded
+terminal action explicitly targets that worktree without changing dashboard focus or the Canvas
+pane; the next card selection restores normal focus-following. Its tab strip shows only the targeted
+worktree's terminals and labels each one with the reported `assistant.intent` from that exact
+terminal's representative live Copilot session. Until such a report exists, the label falls back to
+`Terminal 1`, `Terminal 2`, and so on in opening order. It remembers the selected terminal
+independently for each worktree. **New** starts another terminal for the targeted worktree; the
+empty state offers **Start terminal**. Switching worktrees hides the other worktrees' tabs without
+closing their terminals, and running iframes stay mounted so their browser state survives. Closing
+the last visible tab leaves the pane open in its empty state; only **Hide** collapses the pane.
 
 ### Control and discovery
 
@@ -56,7 +66,7 @@ lifecycle surface is:
 
 - health and version;
 - authoritative terminal list;
-- start or reuse by canonical worktree path;
+- start a new terminal by canonical worktree path;
 - close one terminal; and
 - shutdown, used only for committed host replacement or an explicit administrative request.
 
@@ -88,12 +98,27 @@ effective per-session state is `Working` or `WaitingForUser`. `Idle`, closed, mi
 non-Copilot sessions do not gate. An unrelated Copilot session in the same worktree does not gate
 unless it carries that terminal's exact origin.
 
+The same exact-origin join supplies terminal tab titles. Among the live sessions attributed to one
+terminal, the active session wins; otherwise the most recently active live session is
+representative. Only its reported intent is exposed, so a session title alone does not replace the
+numbered fallback and an unrelated session in the same worktree cannot label the tab.
+
 `WaitingForUser` remains non-idle without a timeout. There is no forced replacement or operator
 override that discards a waiting Copilot session.
 
 Arbitrary shell commands, child or background jobs, terminal output, browser attachment state, and
 other non-Copilot activity never gate an update. Treemon neither inspects nor warns about foreground
 shell work before replacement, and does not wait for every session associated with a worktree.
+
+Production lifecycle commands are a separate process-ownership boundary. `treemon.ps1` refuses
+`restart`, `deploy`, and a `start` that would launch production when the caller inherited
+`TREEMON_TERMINAL_SESSION_ID`, before stopping production or building deployment candidates. A
+`start` against an already-running server remains an informational no-op. Any production process
+launched from that shell would inherit the terminal's kill-on-close Job Object and later die when
+the terminal closes, the host is replaced, or the host crashes. `add` and `remove` still persist
+successful root changes, but skip their automatic production restart in this context and direct the
+user to restart from an external PowerShell window. `stop`, `status`, `log`, development, and demo
+commands remain available.
 
 ### Opportunistic host updates
 
@@ -123,8 +148,9 @@ For a terminal with a resumable session, Treemon uses the existing provider-spec
 `CodingToolCli` resume command. A terminal without one restarts as a plain PowerShell shell.
 
 Stopping the old host may discard arbitrary shell state, running commands, raw replay, and
-scrollback. Existing terminal-pane behavior preserves tab labels, order, and selection where
-possible; process state and scrollback do not survive host replacement.
+scrollback. Recreated terminals keep the captured opening order, and the client remaps each
+worktree's selected tab to the same sibling ordinal where possible. Process state and scrollback do
+not survive host replacement.
 
 A compatible Treemon deployment reconnects to the running host. When it carries a newer compatible
 host executable, that executable is staged and replaced only through the opportunistic flow above.
@@ -134,12 +160,14 @@ deliberately stable.
 
 ### Worktree lifecycle and failure
 
-Deleting or archiving a worktree first closes that exact worktree's terminal through the
-authoritative host API and proceeds only after successful cleanup. Other worktrees are unaffected.
+Deleting or archiving a worktree first closes every terminal owned by that exact worktree through
+the authoritative host API. The worktree mutation proceeds only after every close succeeds; a
+partial close failure leaves the worktree intact and reconciles the authoritative remaining
+terminals. Other worktrees are unaffected.
 The lifecycle mailbox holds a short-lived in-memory reservation for the canonical worktree path
-from before terminal close through the delete/archive mutation. Another cleanup or terminal start
-for that path receives a retryable busy error, while unrelated worktrees remain available; the
-reservation is released after both successful and failed mutations.
+from before its terminal closes through the delete/archive mutation. Another cleanup, terminal
+start for that path receives a retryable busy error, while unrelated worktrees remain available;
+the reservation is released after both successful and failed mutations.
 An attempt made during committed host replacement fails without mutating the worktree or archive
 state; the client reconciles from the authoritative worktree snapshot and leaves the action
 available to retry after replacement.
@@ -162,9 +190,10 @@ by name or broad ancestry.
 ### Terminal host
 
 `src/TerminalHost` is a small F#/.NET executable published with Treemon but launched as an
-independent process. Its in-memory registry is keyed by canonical worktree path and owns the terminal
-session ID, ttyd Job Object and process handles, sole upstream WebSocket, one browser attachment, and
-bounded replay bytes.
+independent process. Its in-memory registry is keyed by terminal session ID; each entry carries its
+canonical worktree path and owns the ttyd Job Object and process handles, sole upstream WebSocket,
+one browser attachment, and bounded replay bytes. This makes worktree-to-terminal ownership
+one-to-many while close and upstream-exit handling remain exact-session operations.
 
 `TerminalDataPlane` owns only the replay and attachment mailbox, with `createCore` as its focused
 state-machine seam. `TerminalProxy` owns the ttyd/browser WebSocket pumps, HTTP forwarding, and
@@ -184,19 +213,22 @@ endpoints. Control DTOs and limits are versioned. Path canonicalization, known-w
 endpoint validation, request-size bounds, bearer authentication, and exact `Host`/`Origin` checks
 occur before lifecycle or terminal input is accepted.
 
-Control API version 1 is exactly:
+Control API version 2 is exactly:
 
-- `GET /api/v1/health`;
-- `GET /api/v1/terminals`;
-- `POST /api/v1/terminals` with the sole JSON field `worktreePath`;
-- `DELETE /api/v1/terminals/{sessionId}`; and
-- `POST /api/v1/shutdown`.
+- `GET /api/v2/health`;
+- `GET /api/v2/terminals`;
+- `POST /api/v2/terminals` with the sole JSON field `worktreePath`;
+- `DELETE /api/v2/terminals/{sessionId}`; and
+- `POST /api/v2/shutdown`.
 
 Health returns the host PID, process-start ticks, host version, and control API version. List, start,
 and close return the same authoritative `{ revision, terminals }` snapshot, where each terminal has
 only its stable `sessionId`, canonical `worktreePath`, and live `attachmentEndpoint`. A path is a
 known worktree only when it is an existing, fully-qualified directory with a `.git` marker and
 `git rev-parse --show-toplevel` resolves to that exact canonical directory.
+Every successful start appends exactly one fresh session ID. The server reads the registry before
+the request and authoritatively relists afterward, so it can identify the new terminal and resolve an
+ambiguous response without conflating it with an existing sibling in the same worktree.
 
 The machine discovery file is `%LOCALAPPDATA%\Treemon\TerminalHost\host.json` by default (tests and
 isolated hosts override the state directory). Its exact fields are `pid`,
@@ -223,6 +255,9 @@ loopback, exact Host/Origin, bearer, and request-size checks as the control API.
 Every attachment HTTP response limits framing through a `Content-Security-Policy: frame-ancestors`
 directive built from the validated dashboard origins, or `'none'` when none are configured. A
 missing `Origin` remains valid for authenticated loopback non-browser protocol requests.
+The proxy injects a small style into ttyd's root HTML response that hides the native
+`.xterm-viewport` scrollbar without changing its overflow or scrollback. The terminal document is a
+separate origin, so the dashboard cannot apply this styling itself.
 
 ### Treemon integration
 
@@ -239,6 +274,9 @@ the delete/archive operation runs outside the mailbox so unrelated paths remain 
 `finally` release prevents failed or cancelled mutations from leaving a path busy.
 The mailbox grants one replacement phase, keeps serving cached reads and bounded rejection replies
 while replacement runs asynchronously, then alone applies the replacement's registry transition.
+The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes
+retain exact selections while IDs remain valid, choose the same-worktree neighbor after a close,
+and preserve the selected sibling ordinal across replacement.
 Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
 port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
 option and allows only the configured server origin aliases, so the terminal client never infers a
@@ -252,6 +290,11 @@ identity exited before allowing deployment. Server, frontend, and host candidate
 their active destinations, and the candidate Treemon's own compiled control client probes the exact
 live host before any active server files or processes are replaced. The staged directory carries the
 complete framework-dependent host publication alongside `TerminalHost.exe`.
+The script uses the inherited terminal session ID as a fail-closed origin marker for production
+launches and restarts; this check is independent of host compatibility and Copilot activity state.
+Compatibility probing uses the manifest-declared API version for health, list, and shutdown, so an
+empty older host can be retired safely while a non-empty one remains available to its matching
+server until its terminals are closed.
 Replacement always derives `ttyd.exe` from the exact host executable being launched: a staged host
 uses its staged sibling and rollback uses the old host's sibling. A configured path from another
 bundle generation can never override that pairing.
@@ -268,8 +311,11 @@ a bounded live-status cache and a process-local monotonic counter per terminal o
 terminal query filters the live cache to the caller's complete authoritative terminal-ID set before
 overlaying indexed durable rows, and returns only those raw rows plus their maximum epoch.
 `TerminalSessionActivity` owns the terminal-specific projection and returns an opaque replacement
-policy: wait, or proceed with the epoch and optional shell command keyed by exact terminal session
-ID. It applies generic openness and freshness decay only to non-waiting states; an effective
+policy plus the optional display-safe reported intent for each terminal. The remoting API enriches
+host registry snapshots from the scheduler's bounded live-session map; the TerminalHost registry
+and control API remain unaware of agent activity. Replacement policy remains opaque: wait, or
+proceed with the epoch and optional shell command keyed by exact terminal session ID. It applies
+generic openness and freshness decay only to non-waiting states; an effective
 `WaitingForUser` remains non-idle from its request/completion clocks regardless of `last_seen`, while
 exact terminal-ID filtering keeps the query bounded. It owns provider selection and `CodingToolCli`
 command construction; terminal replacement only rechecks the epoch, recreates terminals, and
@@ -284,8 +330,9 @@ input.
 
 Replacement snapshots terminal presentation and exact resumable Copilot ownership before stopping
 the old host. `TerminalSessionActivity` uses `CodingToolCli` to prepare provider-specific commands;
-terminal replacement delivers those opaque commands while preserving the same terminal-pane
-ordering and selection model already used during normal polling.
+terminal replacement delivers those opaque commands in captured opening order. The replacement
+registry receives fresh session IDs, so the client preserves each worktree's selection by sibling
+ordinal rather than by stale identity.
 
 ### Deliberate simplicity
 
@@ -300,12 +347,16 @@ PowerShell lifecycle helpers, or compatibility shims.
   the implementation has one language, one process owner, and no script/runtime handoff.
 - **Job Object before execution:** kernel membership established before ttyd resumes is the only
   terminal-tree ownership authority.
+- **External production ownership:** production launch and restart require a caller outside an
+  embedded terminal because the terminal Job Object deliberately has no breakaway policy. The
+  inherited terminal session ID blocks self-owned production before destructive work; this is
+  independent of compatible-host idle gating and incompatible-host deployment refusal.
 - **One serialized cleanup owner:** only the registry closes retained process and Job Object handles.
   Data-plane upstream exit is a fire-and-forget exact-session notice, avoiding a mailbox dependency
   cycle while making stale notices harmless. Per-message recovery and bounded replies keep both
   mailboxes responsive; type-only diagnostics preserve the no-terminal-content logging boundary.
-- **One upstream and one browser writer:** the host preserves the shell across browser reconnects
-  without defining multi-writer input semantics.
+- **One upstream and one browser writer per terminal:** the host preserves each shell across browser
+  reconnects without defining multi-writer input semantics.
 - **Separate state from proxy hosting:** the replay/attachment mailbox remains independently
   testable while HTTP/WebSocket hosting shares one loopback-only Kestrel bootstrap with the control
   API, preventing security-sensitive host configuration from drifting.
@@ -332,7 +383,9 @@ PowerShell lifecycle helpers, or compatibility shims.
   waits until no terminals exist instead of carrying old protocol clients or migrating live state.
 - **Explicit versioned wire contracts:** the candidate deployment preflight is a parsed server run
   mode with a named JSON result, and the host maps registry domain records to dedicated control API
-  v1 response property sets. Exact-property regression tests prevent internal fields from leaking
+  v2 response property sets. Version 2 defines every start as creation of one fresh terminal, so a
+  server never silently reconnects to singleton-style start semantics. Exact-property regression
+  tests prevent internal fields from leaking
   onto either wire contract.
 - **Truthful failure:** host loss kills owned trees and becomes an interruption, never a claimed
   reconnect to an unproven process.
@@ -361,6 +414,9 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Origin-scoped attachment framing:** attachment responses use CSP `frame-ancestors` with every
   configured dashboard origin, rather than same-origin framing that would reject the legitimate
   cross-port dashboard iframe.
+- **Proxy-owned terminal scrollbar chrome:** the attachment proxy adds one CSS override to ttyd's
+  root page instead of carrying a forked custom index. It hides the rendered xterm scrollbar while
+  preserving wheel, keyboard, and programmatic scrollback.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the opaque command
   selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
@@ -385,7 +441,7 @@ PowerShell lifecycle helpers, or compatibility shims.
   avoids timeout mismatches and stale lifecycle requests without allowing a registry race during
   replacement.
 - **Exact in-memory cleanup exclusion:** delete/archive uses a mailbox-owned canonical-path
-  reservation around terminal close plus mutation. Same-path lifecycle mutations fail
+  reservation around all owned terminal closes plus mutation. Same-path lifecycle mutations fail
   retryably until a `finally` release, while unrelated worktrees stay concurrent; no persistent
   lease, supervisor, or cross-process cleanup protocol is required.
 
@@ -399,16 +455,16 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, authoritative snapshot reconciliation, and public start/get/close surface |
 | `src/Server/SessionActivity.fs` | Effective per-session state used by the idle gate |
 | `src/Server/SessionActivityService.fs` | Activity ingestion, terminal-origin validation, bounded live state, pruned raw origin epochs, and mailbox-serialized terminal activity queries |
-| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection, idle gate, and opaque resume policy |
+| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection for tab intents, idle gating, and opaque resume policy |
 | `src/Server/SessionActivityStore.fs` | Durable Copilot session state, optional terminal origin, and indexed exact-origin queries |
 | `src/Extension/reporting/extension.mjs` | Passive activity reports sourced from `TREEMON_TERMINAL_SESSION_ID` |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
 | `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |
-| `treemon.ps1` | Published host staging and deployment compatibility preflight |
+| `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` | Isolated host, replacement race, opaque command delivery, plain-shell restart, crash, security, and cleanup coverage |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
-| `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, and candidate-first deployment ordering coverage |
+| `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |
 
 ## Related Specs
 

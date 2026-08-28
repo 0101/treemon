@@ -15,6 +15,9 @@ let init () =
 
 let private lockObj = obj ()
 
+let internal isSlowOperation (elapsed: TimeSpan) =
+    elapsed >= TimeSpan.FromSeconds 5.0
+
 let log (context: string) (message: string) =
     let timestamp = DateTimeOffset.Now.ToString("yyyy-MM-ddTHH:mm:ss.fff")
     let line = $"{timestamp} [{context}] {message}{Environment.NewLine}"

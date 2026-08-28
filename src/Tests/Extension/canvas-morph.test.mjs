@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 // canvas-morph.js ships as a classic <script> injected into agent docs, so it cannot use `export`.
 // Importing it for its side effect publishes the pure selection logic for the test runner.
-import "./canvas-morph.js";
+import "../../Extension/canvas-morph.js";
 
 const morph = globalThis.canvasMorphInternals;
 

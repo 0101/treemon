@@ -146,14 +146,14 @@ start/cancel/await lifecycle machinery while retaining independent cadence polic
 | Decision | Choice |
 |---|---|
 | Authoritative data | The canonical `OverviewData.aggregate` result observed at capture time |
-| Storage | One durable SQLite `overview_snapshots` table |
+| Storage | One durable SQLite `overview_snapshots_v2` table |
 | Canonical resolution | 30 seconds |
 | Boundary arithmetic | One shared server module for capture, validation, sampling, and empty anchors |
 | Capture cadence | Independent fixed boundary loop |
 | Boundary fidelity | Mailbox-ordered immutable barrier with at most one second of start skew; skip later wakes |
 | Stored shape | Count-only tasks and agents captured atomically |
 | Retention | Exactly 72 hours |
-| Startup | Existing rows or empty history; no backfill |
+| Startup | Existing rows or empty history; no backfill. Snapshots serialize task-bucket and agent-group union cases **by name**, so a restructure of those cases invalidates stored rows: the superseded table is dropped once and the versioned successor starts empty, bounded by the 72-hour retention window. |
 | Startup readiness | Worktree discovery + included task inputs + live-session seed; do not wait for PR data |
 | Missed time | Leave gaps; never catch up or reconstruct |
 | Late events | Do not modify captured snapshots |
