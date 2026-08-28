@@ -312,6 +312,38 @@ let private focusModel : Model =
 type TerminalFocusTests() =
 
     [<Test>]
+    member _.``Repeated Resume keeps one in-flight launch without an action cooldown``() =
+        let model =
+            { focusModel with
+                TerminalPaneOpen = false
+                TerminalPaneTarget = None }
+
+        let started, firstCmd =
+            App.update
+                (ResumeSession first)
+                model
+
+        let repeated, repeatedCmd =
+            App.update
+                (ResumeSession first)
+                started
+
+        Assert.Multiple(fun () ->
+            Assert.That(started.TerminalPaneOpen, Is.True)
+            Assert.That(started.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(isStarting first started.EmbeddedTerminalStarts, Is.True)
+            Assert.That(List.length firstCmd, Is.EqualTo(2))
+            Assert.That(repeated.TerminalPaneOpen, Is.True)
+            Assert.That(repeated.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(isStarting first repeated.EmbeddedTerminalStarts, Is.True)
+            Assert.That(
+                List.length repeatedCmd,
+                Is.EqualTo(1),
+                "the repeated update should retain only pane-open persistence"
+            )
+            Assert.That(repeated.ActionCooldowns, Is.EqualTo(model.ActionCooldowns)))
+
+    [<Test>]
     member _.``Completed launch selects the exact server-returned terminal``() =
         let exact = terminalId "exact-start"
         let competing = terminalId "competing-start"
@@ -350,6 +382,38 @@ type TerminalFocusTests() =
                 tryStartState first updated.EmbeddedTerminalStarts,
                 Is.EqualTo(None)
             ))
+
+    [<Test>]
+    member _.``Launch errors preserve exact terminal state and stay scoped``() =
+        let model =
+            { focusModel with
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        first, TerminalStartState.Starting
+                        second, TerminalStartState.Starting
+                    ] }
+
+        [ EmbeddedTerminalStarted(first, Error "resume rejected"), "resume rejected"
+          EmbeddedTerminalRequestFailed(first, "request failed"), "request failed" ]
+        |> List.iter (fun (message, expectedError) ->
+            let updated, cmd =
+                App.update message model
+
+            Assert.Multiple(fun () ->
+                Assert.That(updated.EmbeddedTerminals, Is.EqualTo(model.EmbeddedTerminals))
+                Assert.That(
+                    updated.ActiveEmbeddedTerminals,
+                    Is.EqualTo(model.ActiveEmbeddedTerminals)
+                )
+                Assert.That(
+                    tryStartState first updated.EmbeddedTerminalStarts,
+                    Is.EqualTo(Some(TerminalStartState.Failed expectedError))
+                )
+                Assert.That(
+                    tryStartState second updated.EmbeddedTerminalStarts,
+                    Is.EqualTo(Some TerminalStartState.Starting)
+                )
+                Assert.That(cmd, Is.Empty)))
 
     [<Test>]
     member _.``First polled terminal remains background state until the user opens the pane``() =

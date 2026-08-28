@@ -199,6 +199,22 @@ let beginEmbeddedTerminalStart path model =
     targetEmbeddedTerminalLaunch path model,
     alreadyStarting
 
+let private saveTerminalPaneOpenCmd () =
+    Cmd.OfAsync.attempt
+        (fun () -> worktreeApi.Value.saveTerminalPaneOpen true)
+        ()
+        (fun _ -> NoOp)
+
+let private launchEmbeddedTerminalCmd path start =
+    Cmd.batch [
+        Cmd.OfAsync.either
+            start
+            ()
+            (fun result -> EmbeddedTerminalStarted(path, result))
+            (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
+        saveTerminalPaneOpenCmd ()
+    ]
+
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
     | Card scopedKey, "Enter" -> findWorktree scopedKey model |> Option.map terminalAction
@@ -405,18 +421,12 @@ let update msg model =
             beginEmbeddedTerminalStart path model
 
         updated,
-        Cmd.batch [
-            if alreadyStarting then
-                Cmd.none
-            else
-                Cmd.OfAsync.either
-                    worktreeApi.Value.startEmbeddedTerminal
-                    path
-                    (fun result ->
-                        EmbeddedTerminalStarted(path, result))
-                    (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
-            Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
-        ]
+        if alreadyStarting then
+            saveTerminalPaneOpenCmd ()
+        else
+            launchEmbeddedTerminalCmd
+                path
+                (fun () -> worktreeApi.Value.startEmbeddedTerminal path)
     | EmbeddedTerminalSnapshotChanged snapshot ->
         { model with
             EmbeddedTerminals = snapshot
@@ -651,28 +661,26 @@ let update msg model =
         model, Cmd.OfAsync.perform worktreeApi.Value.openNewTab path SessionResult
 
     | ResumeSession path ->
-        targetEmbeddedTerminalLaunch path model,
-        Cmd.batch [
-            Cmd.OfAsync.either
-                worktreeApi.Value.resumeSession
+        let updated, alreadyStarting =
+            beginEmbeddedTerminalStart path model
+
+        updated,
+        if alreadyStarting then
+            saveTerminalPaneOpenCmd ()
+        else
+            launchEmbeddedTerminalCmd
                 path
-                (fun result -> EmbeddedTerminalStarted(path, result))
-                (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
-            Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
-        ]
+                (fun () -> worktreeApi.Value.resumeSession path)
 
     | LaunchCanvasSession scopedKey ->
         match CanvasUpdate.canvasSessionAction scopedKey model with
         | Some(path, action) ->
             targetEmbeddedTerminalLaunch path model,
-            Cmd.batch [
-                Cmd.OfAsync.either
+            launchEmbeddedTerminalCmd
+                path
+                (fun () ->
                     worktreeApi.Value.launchAction
-                    { Path = path; Action = action }
-                    (fun result -> EmbeddedTerminalStarted(path, result))
-                    (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
-                Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
-            ]
+                        { Path = path; Action = action })
         | None ->
             model, Cmd.none
 
@@ -689,12 +697,11 @@ let update msg model =
             { targetEmbeddedTerminalLaunch path model with
                 ActionCooldowns = model.ActionCooldowns.Add path },
             Cmd.batch [
-                Cmd.OfAsync.either
-                    worktreeApi.Value.launchAction
-                    { Path = path; Action = action }
-                    (fun result -> EmbeddedTerminalStarted(path, result))
-                    (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
-                Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
+                launchEmbeddedTerminalCmd
+                    path
+                    (fun () ->
+                        worktreeApi.Value.launchAction
+                            { Path = path; Action = action })
                 clearAfter
             ]
 
