@@ -35,26 +35,23 @@ let internal effectiveOwnedSessionStates
     : OwnedSessionState list =
     ownedSessions
     |> List.choose (fun (terminalId, session) ->
-        let status = effectiveStatus session.Status
-
         // Generic openness and crash-freshness windows are display/liveness heuristics. An exact
         // ask_user wait is a durable replacement gate until its request/completion clocks say that
         // input completed, even when heartbeats stop updating LastSeen.
-        let replacementStatus =
-            match status with
-            | SessionLevelStatus.WaitingForUser -> Some status
-            | _ when now - session.LastSeen < openWindow ->
-                session.Status
-                |> freshnessAdjusted now session.LastSeen
-                |> effectiveStatus
-                |> Some
-            | _ -> None
+        let owned status =
+            Some
+                { TerminalSessionId = terminalId
+                  CopilotSessionId = session.SessionId
+                  Status = status }
 
-        replacementStatus
-        |> Option.map (fun status ->
-            { TerminalSessionId = terminalId
-              CopilotSessionId = session.SessionId
-              Status = status }))
+        match effectiveStatus session.Status with
+        | SessionLevelStatus.WaitingForUser as status -> owned status
+        | _ when now - session.LastSeen < openWindow ->
+            session.Status
+            |> freshnessAdjusted now session.LastSeen
+            |> effectiveStatus
+            |> owned
+        | _ -> None)
     |> List.sortBy (fun session ->
         TerminalSessionId.value session.TerminalSessionId, SessionId.value session.CopilotSessionId)
 
@@ -90,19 +87,14 @@ let internal queryOwnedSessions
     |> Result.map (ownedSessionSnapshot now terminalSessionIds)
 
 let private terminalOrigin (tab: EmbeddedTerminalTab) =
-    tab.Id
-    |> EmbeddedTerminalId.value
-    |> TerminalSessionId
+    tab.Id |> EmbeddedTerminalId.value |> TerminalSessionId
 
 let internal withReportedActivity
     (now: DateTimeOffset)
     (sessions: StoredStatus seq)
     (snapshot: EmbeddedTerminalSnapshot)
     =
-    let terminalSessionIds =
-        snapshot.Tabs
-        |> List.map terminalOrigin
-        |> Set.ofList
+    let terminalSessionIds = snapshot.Tabs |> List.map terminalOrigin |> Set.ofList
 
     let reportedActivity =
         sessions
@@ -119,25 +111,14 @@ let internal withReportedActivity
         Tabs =
             snapshot.Tabs
             |> List.map (fun tab ->
-                { tab with
-                    ReportedActivity =
-                        reportedActivity
-                        |> Map.tryFind (terminalOrigin tab) }) }
-
-let private hasNonIdleOwnedSession (snapshot: OwnedSessionSnapshot) =
-    snapshot.OpenSessions
-    |> List.exists (fun session ->
-        match session.Status with
-        | SessionLevelStatus.Working
-        | SessionLevelStatus.WaitingForUser -> true
-        | SessionLevelStatus.Idle -> false)
+                { tab with ReportedActivity = reportedActivity |> Map.tryFind (terminalOrigin tab) }) }
 
 let internal replacementSessionPlan
     resolveProvider
     (terminals: TerminalHostReplacement.ReplacementTerminal list)
     (snapshot: OwnedSessionSnapshot)
     =
-    if hasNonIdleOwnedSession snapshot then
+    if snapshot.OpenSessions |> List.exists (fun session -> session.Status <> SessionLevelStatus.Idle) then
         TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
     else
         let resumeCommands =
@@ -146,12 +127,11 @@ let internal replacementSessionPlan
                 snapshot.ResumableSessionIds
                 |> Map.tryFind (TerminalSessionId terminal.TerminalSessionId)
                 |> Option.map (fun sessionId ->
-                    let command =
-                        CodingToolCli.build
-                            (resolveProvider terminal.WorktreePath)
-                            (CodingToolCli.Resume(Some(SessionId.value sessionId)))
-
-                    terminal.TerminalSessionId, command.AsShellString))
+                    terminal.TerminalSessionId,
+                    CodingToolCli.build
+                        (resolveProvider terminal.WorktreePath)
+                        (CodingToolCli.Resume(Some(SessionId.value sessionId)))
+                    |> _.AsShellString))
             |> Map.ofList
 
         TerminalHostReplacement.ReplacementSessionPlan.Ready(snapshot.ActivityEpoch, resumeCommands)

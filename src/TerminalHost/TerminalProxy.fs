@@ -32,11 +32,7 @@ module internal TerminalProxy =
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
     let internal hideViewportScrollbar (html: string) =
-        html.Replace(
-            "</head>",
-            HiddenViewportScrollbarStyle + "</head>",
-            StringComparison.OrdinalIgnoreCase
-        )
+        html.Replace("</head>", HiddenViewportScrollbarStyle + "</head>", StringComparison.OrdinalIgnoreCase)
 
     let private receiveMessage maximumBytes (socket: WebSocket) =
         async {
@@ -140,16 +136,10 @@ module internal TerminalProxy =
         if List.isEmpty headers then pathHeaders, targetPath else headers, targetPath
 
     let private reject rejection (context: HttpContext) =
-        task {
-            match rejection with
-            | RequestRejection.Forbidden ->
-                context.Response.StatusCode <- StatusCodes.Status403Forbidden
-            | RequestRejection.Unauthorized ->
-                context.Response.Headers.WWWAuthenticate <- "Bearer"
-                context.Response.StatusCode <- StatusCodes.Status401Unauthorized
-            | RequestRejection.TooLarge ->
-                context.Response.StatusCode <- StatusCodes.Status413PayloadTooLarge
-        }
+        if rejection = RequestRejection.Unauthorized then
+            context.Response.Headers.WWWAuthenticate <- "Bearer"
+
+        context.Response.StatusCode <- RequestSecurity.statusCode rejection
 
     let private copyRequestHeaders (context: HttpContext) (request: HttpRequestMessage) =
         [ "Accept"; "Accept-Language"; "If-Modified-Since"; "If-None-Match"; "Range" ]
@@ -182,21 +172,14 @@ module internal TerminalProxy =
     let private isTerminalPage targetPath (response: HttpResponseMessage) =
         targetPath = "/"
         && response.StatusCode = HttpStatusCode.OK
-        && (response.Content.Headers.ContentType
+        && String.Equals(
+            response.Content.Headers.ContentType
             |> Option.ofObj
-            |> Option.exists (fun contentType ->
-                String.Equals(
-                    contentType.MediaType,
-                    "text/html",
-                    StringComparison.OrdinalIgnoreCase
-                )))
+            |> Option.bind (_.MediaType >> Option.ofObj)
+            |> Option.defaultValue "",
+            "text/html",
+            StringComparison.OrdinalIgnoreCase)
         && Seq.isEmpty response.Content.Headers.ContentEncoding
-
-    let private removeTransformedRepresentationHeaders (context: HttpContext) =
-        [ "Accept-Ranges"; "Content-Encoding"; "Content-Length"; "Content-MD5"
-          "Content-Range"; "ETag" ]
-        |> List.iter (fun name ->
-            context.Response.Headers.Remove(name) |> ignore)
 
     let private protectAttachmentResponse allowedOrigins (context: HttpContext) =
         let frameAncestors =
@@ -239,12 +222,11 @@ module internal TerminalProxy =
                         context.Request.Method = "GET"
                         && isTerminalPage targetPath response
                     then
-                        removeTransformedRepresentationHeaders context
+                        [ "Accept-Ranges"; "Content-Encoding"; "Content-Length"; "Content-MD5"
+                          "Content-Range"; "ETag" ]
+                        |> List.iter (context.Response.Headers.Remove >> ignore)
 
-                        let! html =
-                            response.Content.ReadAsStringAsync(
-                                context.RequestAborted
-                            )
+                        let! html = response.Content.ReadAsStringAsync(context.RequestAborted)
 
                         let bytes =
                             html
@@ -252,12 +234,7 @@ module internal TerminalProxy =
                             |> Encoding.UTF8.GetBytes
 
                         context.Response.ContentLength <- int64 bytes.Length
-
-                        do!
-                            context.Response.Body.WriteAsync(
-                                bytes,
-                                context.RequestAborted
-                            )
+                        do! context.Response.Body.WriteAsync(bytes, context.RequestAborted)
                     elif context.Request.Method <> "HEAD" then
                         do!
                             response.Content.CopyToAsync(context.Response.Body, context.RequestAborted)
@@ -291,7 +268,7 @@ module internal TerminalProxy =
                     allowedOrigins bearerToken
                     (RequestSecurity.metadata authorizationHeaders context)
             with
-            | Error rejection -> return! reject rejection context
+            | Error rejection -> reject rejection context
             | Ok() ->
                 if targetPath = "/ws" then
                     let supportsTty =

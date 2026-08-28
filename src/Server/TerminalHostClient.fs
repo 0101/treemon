@@ -53,12 +53,13 @@ let private responseError statusCode (reasonPhrase: string) (content: string) =
         try
             use document = JsonDocument.Parse(content)
             let root = document.RootElement
+            let error = root.GetProperty("error")
 
             if
                 exactProperties (set [ "error" ]) Set.empty root
-                && root.GetProperty("error").ValueKind = JsonValueKind.String
+                && error.ValueKind = JsonValueKind.String
             then
-                root.GetProperty("error").GetString()
+                error.GetString()
                 |> Option.ofObj
                 |> Option.filter (validBoundedText 512)
             else
@@ -226,25 +227,26 @@ let private parseTerminal manifest (element: JsonElement) =
         Error "TerminalHost terminal record has an invalid shape"
     else
         try
-            let sessionId = element.GetProperty("sessionId").GetString() |> Option.ofObj
-            let worktreePath = element.GetProperty("worktreePath").GetString() |> Option.ofObj
-            let attachmentEndpoint = element.GetProperty("attachmentEndpoint").GetString() |> Option.ofObj
+            let stringProperty (name: string) =
+                element.GetProperty(name).GetString()
+                |> Option.ofObj
+                |> Option.defaultValue ""
 
-            if sessionId |> Option.exists validSessionId |> not then
+            let sessionId = stringProperty "sessionId"
+            let worktreePath = stringProperty "worktreePath"
+            let attachmentEndpoint = stringProperty "attachmentEndpoint"
+
+            if not (validSessionId sessionId) then
                 Error "TerminalHost returned an invalid terminal session ID"
-            elif worktreePath |> Option.exists validCanonicalWorktreePath |> not then
+            elif not (validCanonicalWorktreePath worktreePath) then
                 Error "TerminalHost returned an invalid worktree path"
-            elif
-                Option.map2 (validAttachmentEndpoint manifest) sessionId attachmentEndpoint
-                |> Option.defaultValue false
-                |> not
-            then
+            elif not (validAttachmentEndpoint manifest sessionId attachmentEndpoint) then
                 Error "TerminalHost returned an invalid attachment endpoint"
             else
                 Ok
-                    { SessionId = (sessionId |> Option.get).ToLowerInvariant()
-                      WorktreePath = worktreePath |> Option.get
-                      AttachmentEndpoint = attachmentEndpoint |> Option.get }
+                    { SessionId = sessionId.ToLowerInvariant()
+                      WorktreePath = worktreePath
+                      AttachmentEndpoint = attachmentEndpoint }
         with
         | :? InvalidOperationException ->
             Error "TerminalHost terminal record is malformed"
@@ -271,18 +273,12 @@ let private parseRegistrySnapshot (manifest: DiscoveryManifest) (text: string) =
                 |> Seq.toList
                 |> List.traverseResultM (parseTerminal manifest)
                 |> Result.bind (fun terminals ->
-                    let distinctSessionIds =
-                        terminals
-                        |> List.map _.SessionId
-                        |> Set.ofList
-                        |> _.Count
+                    let distinctSessionIds = terminals |> List.map _.SessionId |> Set.ofList
 
-                    if distinctSessionIds <> terminals.Length then
+                    if distinctSessionIds.Count <> terminals.Length then
                         Error "TerminalHost registry contains duplicate terminal session IDs"
                     else
-                        Ok
-                            { Revision = revision
-                              Terminals = terminals })
+                        Ok { Revision = revision; Terminals = terminals })
     with
     | :? JsonException
     | :? InvalidOperationException
@@ -420,16 +416,6 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
 
 let internal defaultConfig allowedOrigins = TerminalHostProcess.defaultConfig allowedOrigins sendTerminalCommandDefault
 
-let private deploymentPreflightResult config manifest registry =
-    resolveProcessExecutable config manifest
-    |> Result.map (fun executablePath ->
-            Some
-                { Pid = manifest.Pid
-                  ProcessStartTimeUtcTicks =
-                    manifest.ProcessStartTimeUtcTicks
-                  ExecutablePath = executablePath
-                  TerminalCount = registry.Terminals.Length })
-
 let private preflightIncompatibleHost config manifest incompatibility =
     async {
         match! listTerminalsAtVersion manifest.ControlApiVersion config manifest with
@@ -463,7 +449,15 @@ let internal preflightDeploymentWith config =
         | HealthyHost manifest ->
             match! listTerminals config manifest with
             | Error error -> return Error error
-            | Ok registry -> return deploymentPreflightResult config manifest registry
+            | Ok registry ->
+                return
+                    resolveProcessExecutable config manifest
+                    |> Result.map (fun executablePath ->
+                        Some
+                            { Pid = manifest.Pid
+                              ProcessStartTimeUtcTicks = manifest.ProcessStartTimeUtcTicks
+                              ExecutablePath = executablePath
+                              TerminalCount = registry.Terminals.Length })
     }
 
 let internal waitForHealthyHost config =
@@ -529,9 +523,7 @@ let internal startTerminalOnHost (config: Config) (manifest: DiscoveryManifest) 
             match! authoritativeRelist "start" (Some before) config manifest startResult with
             | Error error -> return Error error
             | Ok after ->
-                let existingIds =
-                    before.Terminals |> List.map _.SessionId |> Set.ofList
-
+                let existingIds = before.Terminals |> List.map _.SessionId |> Set.ofList
                 let started =
                     after.Terminals
                     |> List.filter (fun terminal -> not (Set.contains terminal.SessionId existingIds))

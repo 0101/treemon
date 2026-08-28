@@ -23,13 +23,13 @@ type RunningControlApi =
 module ControlApi =
     let private jsonOptions = JsonSerializerOptions(JsonSerializerDefaults.Web)
 
-    let private terminalResponseV2 (terminal: TerminalRecord) =
-        {| SessionId = terminal.SessionId; WorktreePath = terminal.WorktreePath
-           AttachmentEndpoint = terminal.AttachmentEndpoint |}
-
     let private registryResponseV2 (snapshot: RegistrySnapshot) =
         {| Revision = snapshot.Revision
-           Terminals = snapshot.Terminals |> List.map terminalResponseV2 |}
+           Terminals =
+            snapshot.Terminals
+            |> List.map (fun terminal ->
+                {| SessionId = terminal.SessionId; WorktreePath = terminal.WorktreePath
+                   AttachmentEndpoint = terminal.AttachmentEndpoint |}) |}
 
     let private writeJson statusCode payload (context: HttpContext) =
         task {
@@ -48,15 +48,17 @@ module ControlApi =
     let private writeError statusCode message context =
         writeJson statusCode {| Error = message |} context
 
-    let private reject rejection context =
-        match rejection with
-        | RequestRejection.Forbidden ->
-            writeError StatusCodes.Status403Forbidden "Request origin rejected" context
-        | RequestRejection.Unauthorized ->
+    let private reject (rejection: RequestRejection) (context: HttpContext) =
+        if rejection = RequestRejection.Unauthorized then
             context.Response.Headers.WWWAuthenticate <- "Bearer"
-            writeError StatusCodes.Status401Unauthorized "Authentication required" context
-        | RequestRejection.TooLarge ->
-            writeError StatusCodes.Status413PayloadTooLarge "Request body too large" context
+
+        let message =
+            match rejection with
+            | RequestRejection.Forbidden -> "Request origin rejected"
+            | RequestRejection.Unauthorized -> "Authentication required"
+            | RequestRejection.TooLarge -> "Request body too large"
+
+        writeError (RequestSecurity.statusCode rejection) message context
 
     let private hasJsonContentType (context: HttpContext) =
         // MediaTypeHeaderValue.TryParse is a byref-only framework parser; mutation stays at this boundary.
@@ -170,33 +172,6 @@ module ControlApi =
                 return! writeError StatusCodes.Status404NotFound "Control endpoint not found" context
         }
 
-    let private handle
-        config
-        bearerToken
-        hostPid
-        processStartTimeUtcTicks
-        hostVersion
-        registry
-        lifetime
-        (context: HttpContext)
-        =
-        task {
-            let authorizationHeaders =
-                context.Request.Headers.Authorization |> Seq.toList
-
-            match
-                RequestSecurity.validate
-                    config.AllowedOrigins
-                    bearerToken
-                    (RequestSecurity.metadata authorizationHeaders context)
-            with
-            | Error rejection ->
-                return! reject rejection context
-            | Ok() ->
-                return!
-                    route hostPid processStartTimeUtcTicks hostVersion registry lifetime context
-        }
-
     let start config bearerToken hostPid processStartTimeUtcTicks hostVersion registry =
         task {
             let buildPipeline (application: WebApplication) =
@@ -204,7 +179,19 @@ module ControlApi =
                     application.Services.GetRequiredService<IHostApplicationLifetime>()
 
                 RequestDelegate(fun context ->
-                    handle config bearerToken hostPid processStartTimeUtcTicks hostVersion registry lifetime context
+                    task {
+                        let authorizationHeaders =
+                            context.Request.Headers.Authorization |> Seq.toList
+
+                        match
+                            RequestSecurity.validate
+                                config.AllowedOrigins bearerToken
+                                (RequestSecurity.metadata authorizationHeaders context)
+                        with
+                        | Error rejection -> return! reject rejection context
+                        | Ok() ->
+                            return! route hostPid processStartTimeUtcTicks hostVersion registry lifetime context
+                    }
                     :> Task)
 
             let! application, boundPort =

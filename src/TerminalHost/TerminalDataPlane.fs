@@ -169,14 +169,6 @@ module TerminalDataPlane =
                         Ok()
         }
 
-    let private initializeAttachment upstream state attachment frame =
-        async {
-            match TerminalProtocol.parseHandshakeSize frame with
-            | Error error -> return state, Error error
-            | Ok terminalSize ->
-                return! activateAttachment upstream state attachment terminalSize (initialBrowserFrames state)
-        }
-
     let private resumeAttachment upstream state attachment =
         async {
             let frames =
@@ -222,16 +214,12 @@ module TerminalDataPlane =
         if attachment.Initialized then
             handleInitializedBrowserFrame upstream state attachment frame
         else
-            initializeAttachment upstream state attachment frame
-
-    let private updatedControlFrame state (frame: byte array) =
-        if frame.Length = 0 then
-            state
-        else
-            match char frame[0] with
-            | '1' -> { state with TitleFrame = Some(Array.copy frame) }
-            | '2' -> { state with PreferencesFrame = Some(Array.copy frame) }
-            | _ -> state
+            async {
+                match TerminalProtocol.parseHandshakeSize frame with
+                | Error error -> return state, Error error
+                | Ok terminalSize ->
+                    return! activateAttachment upstream state attachment terminalSize (initialBrowserFrames state)
+            }
 
     let private sendLiveFrame state sequence (frame: byte array) =
         async {
@@ -266,36 +254,26 @@ module TerminalDataPlane =
                         { state with Replay = replay },
                         Some(ReplayBuffer.nextSequence replay)
                     else
-                        updatedControlFrame state frame, None
+                        match char frame[0] with
+                        | '1' -> { state with TitleFrame = Some(Array.copy frame) }, None
+                        | '2' -> { state with PreferencesFrame = Some(Array.copy frame) }, None
+                        | _ -> state, None
 
                 return! sendLiveFrame updated sequence frame
         }
 
-    let private notifyUpstreamEnded onUpstreamEnded =
-        try
-            onUpstreamEnded ()
-        with _ ->
-            ()
-
     let private respond (channel: AsyncReplyChannel<'value>) value state =
-        channel.Reply value
-        state
-
-    let private closeAttachment status reason state =
-        async {
-            match state.Attachment with
-            | Some attachment -> do! closeSocket status reason attachment.Socket
-            | None -> ()
-
-            return { state with Attachment = None }
-        }
+        channel.Reply value; state
 
     let private stopPlane upstream attachmentStatus attachmentReason upstreamReason notify state =
         async {
-            let! detached = closeAttachment attachmentStatus attachmentReason state
+            match state.Attachment with
+            | Some attachment -> do! closeSocket attachmentStatus attachmentReason attachment.Socket
+            | None -> ()
+
             do! closeSocket WebSocketCloseStatus.NormalClosure upstreamReason upstream
             notify ()
-            return { detached with Stopped = true }
+            return { state with Attachment = None; Stopped = true }
         }
 
     let private recoverMessage state message =
@@ -331,7 +309,8 @@ module TerminalDataPlane =
                 WebSocketCloseStatus.EndpointUnavailable
                 "Terminal session interrupted"
                 "Terminal upstream closed"
-                (fun () -> notifyUpstreamEnded onUpstreamEnded)
+                (fun () ->
+                    try onUpstreamEnded () with _ -> ())
                 state
 
         let explicitlyStopped state =
@@ -400,17 +379,12 @@ module TerminalDataPlane =
 
         let mailbox = ResilientMailbox.start "TerminalDataPlane" initial recoverMessage processMessage
 
-        let ask build =
-            ResilientMailbox.ask ReplyTimeoutMilliseconds build mailbox
+        let ask build = ResilientMailbox.ask ReplyTimeoutMilliseconds build mailbox
 
         { AttachmentEndpoint = ""
           AttachSocket = fun socket -> ask (fun reply -> Attach(socket, reply))
-          AcceptBrowserFrame =
-            fun attachmentId frame ->
-                ask (fun reply -> BrowserFrame(attachmentId, Array.copy frame, reply))
-          DetachSocket =
-            fun attachmentId -> ask (fun reply -> Detach(attachmentId, reply))
-          AcceptUpstreamFrame =
-            fun frame -> ask (fun reply -> UpstreamFrame(Array.copy frame, reply))
+          AcceptBrowserFrame = fun attachmentId frame -> ask (fun reply -> BrowserFrame(attachmentId, Array.copy frame, reply))
+          DetachSocket = fun attachmentId -> ask (fun reply -> Detach(attachmentId, reply))
+          AcceptUpstreamFrame = fun frame -> ask (fun reply -> UpstreamFrame(Array.copy frame, reply))
           UpstreamEnded = fun () -> ask UpstreamClosed
           Stop = fun () -> ask Stop }

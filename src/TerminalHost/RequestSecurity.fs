@@ -23,6 +23,11 @@ type RequestRejection =
 
 [<RequireQualifiedAccess>]
 module RequestSecurity =
+    let statusCode = function
+        | RequestRejection.Forbidden -> StatusCodes.Status403Forbidden
+        | RequestRejection.Unauthorized -> StatusCodes.Status401Unauthorized
+        | RequestRejection.TooLarge -> StatusCodes.Status413PayloadTooLarge
+
     let private fixedTimeEquals (expected: string) (actual: string) =
         let expectedBytes = Encoding.UTF8.GetBytes expected
         let actualBytes = Encoding.UTF8.GetBytes actual

@@ -31,7 +31,7 @@ let internal processIdentityMatchesDefault pid processStartTimeUtcTicks =
 
             Ok(startTicks = processStartTimeUtcTicks)
     with
-    | :? ArgumentException -> Ok false
+    | :? ArgumentException
     | :? InvalidOperationException -> Ok false
     | error ->
         Error $"Could not verify TerminalHost process identity: {error.Message}"
@@ -50,11 +50,7 @@ let internal resolveProcessExecutableDefault pid processStartTimeUtcTicks =
                 Ok(Path.GetFullPath mainModule.FileName)
             | _ ->
                 Error "Could not resolve the exact TerminalHost executable path"
-    with
-    | :? ArgumentException
-    | :? InvalidOperationException as error ->
-        Error $"Could not resolve the exact TerminalHost executable path: {error.Message}"
-    | error ->
+    with error ->
         Error $"Could not resolve the exact TerminalHost executable path: {error.Message}"
 
 let internal launchDetached (startInfo: ProcessStartInfo) =
@@ -79,25 +75,18 @@ let internal resolveHostExecutable baseDirectory configuredPath =
         Path.Combine(baseDirectory, "terminal-host", hostExecutableName)
         |> Path.GetFullPath
 
-let private defaultHostExecutable () =
-    Environment.GetEnvironmentVariable("TREEMON_TERMINAL_HOST_EXECUTABLE")
-    |> Option.ofObj
-    |> resolveHostExecutable AppContext.BaseDirectory
-
 let internal originsFor (serverOrigin: string) configuredOrigins =
-    try
-        let origin = Uri(serverOrigin, UriKind.Absolute)
-        let scheme = origin.Scheme
-        let port = origin.Port
+    let origins =
+        try
+            let origin = Uri(serverOrigin, UriKind.Absolute)
+            [ origin.GetLeftPart(UriPartial.Authority)
+              $"{origin.Scheme}://localhost:{origin.Port}"
+              $"{origin.Scheme}://127.0.0.1:{origin.Port}" ]
+            @ configuredOrigins
+        with _ ->
+            serverOrigin :: configuredOrigins
 
-        ([ origin.GetLeftPart(UriPartial.Authority)
-           $"{scheme}://localhost:{port}"
-           $"{scheme}://127.0.0.1:{port}" ]
-         @ configuredOrigins)
-        |> List.distinctBy _.ToUpperInvariant()
-    with _ ->
-        serverOrigin :: configuredOrigins
-        |> List.distinctBy _.ToUpperInvariant()
+    origins |> List.distinctBy _.ToUpperInvariant()
 
 let internal hostStartInfo config =
     let workingDirectory =
@@ -149,7 +138,10 @@ let internal probeDelayMilliseconds config =
 
 let internal defaultConfig allowedOrigins sendTerminalCommand =
     let layout = TerminalHostLayout.current ()
-    let hostExecutable = defaultHostExecutable ()
+    let hostExecutable =
+        Environment.GetEnvironmentVariable("TREEMON_TERMINAL_HOST_EXECUTABLE")
+        |> Option.ofObj
+        |> resolveHostExecutable AppContext.BaseDirectory
 
     { HostExecutablePath = hostExecutable
       HostStateDirectory = layout.StateDirectory

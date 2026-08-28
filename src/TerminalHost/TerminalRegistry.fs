@@ -52,19 +52,16 @@ module TerminalRegistry =
                 terminalProcess.Close()
         }
 
-    let private closeHosted terminal =
-        stopAndClose terminal.DataPlane terminal.Process
-
     let private closeAll entries =
         entries
         |> Map.values
-        |> Seq.map closeHosted
+        |> Seq.map (fun terminal -> stopAndClose terminal.DataPlane terminal.Process)
         |> Async.Sequential
         |> Async.Ignore
 
     let private removeAfterClose state (key, terminal) =
         async {
-            do! closeHosted terminal
+            do! stopAndClose terminal.DataPlane terminal.Process
 
             return { state with Entries = Map.remove key state.Entries; Revision = state.Revision + 1L }
         }

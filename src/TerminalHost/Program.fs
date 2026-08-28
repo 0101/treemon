@@ -106,19 +106,17 @@ module private HostConfig =
 
 [<RequireQualifiedAccess>]
 module private HostRuntime =
-    let private hostVersion () =
-        Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()
-        |> Option.ofObj
-        |> Option.map _.InformationalVersion
-        |> Option.filter (String.IsNullOrWhiteSpace >> not)
-        |> Option.defaultValue "1.0.0"
-
     let run config =
         task {
             use currentProcess = Process.GetCurrentProcess()
             let hostPid = currentProcess.Id
             let processStartTimeUtcTicks = currentProcess.StartTime.ToUniversalTime().Ticks
-            let version = hostVersion ()
+            let version =
+                Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                |> Option.ofObj
+                |> Option.map _.InformationalVersion
+                |> Option.filter (String.IsNullOrWhiteSpace >> not)
+                |> Option.defaultValue "1.0.0"
             let token = Manifest.generateBearerToken ()
 
             let registry =

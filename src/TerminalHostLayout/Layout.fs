@@ -30,11 +30,7 @@ module TerminalHostLayout =
     [<Literal>]
     let VersionDirectoryPattern = @"\A[A-Za-z0-9._-]{1,128}\z"
 
-    let HostExecutableName =
-        if OperatingSystem.IsWindows() then
-            "TerminalHost.exe"
-        else
-            "TerminalHost"
+    let HostExecutableName = if OperatingSystem.IsWindows() then "TerminalHost.exe" else "TerminalHost"
 
     let RequiredBundleFileNames =
         [ HostExecutableName
@@ -46,12 +42,7 @@ module TerminalHostLayout =
           TtydExecutableName ]
 
     let private versionDirectoryRegex =
-        Regex(
-            VersionDirectoryPattern,
-            RegexOptions.CultureInvariant
-            ||| RegexOptions.NonBacktracking,
-            TimeSpan.FromSeconds 1.0
-        )
+        Regex(VersionDirectoryPattern, RegexOptions.CultureInvariant ||| RegexOptions.NonBacktracking, TimeSpan.FromSeconds 1.0)
 
     let defaultStateDirectory () =
         let localApplicationData =
@@ -99,28 +90,10 @@ module TerminalHostLayout =
                 Error "The staged TerminalHost version is not a direct version directory"
             else
                 let directory = DirectoryInfo(versionDirectory layout version)
-                let stagingDirectory = DirectoryInfo layout.StagingDirectory
 
-                let pathComparison =
-                    if OperatingSystem.IsWindows() then
-                        StringComparison.OrdinalIgnoreCase
-                    else
-                        StringComparison.Ordinal
-
-                let hasExactParent =
-                    directory.Parent
-                    |> Option.ofObj
-                    |> Option.exists (fun parent ->
-                        String.Equals(
-                            parent.FullName,
-                            stagingDirectory.FullName,
-                            pathComparison
-                        ))
-
-                if
-                    directory.Name <> version
-                    || not hasExactParent
-                then
+                // The version grammar excludes separators and rooted paths; a changed final segment
+                // catches "."/".." and platform path normalization without a second parent walk.
+                if directory.Name <> version then
                     Error "The staged TerminalHost version is not a direct version directory"
                 elif
                     not directory.Exists

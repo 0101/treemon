@@ -58,11 +58,6 @@ type internal ReplacementCommit =
     | InterruptState of message: string * ReplacementOutcome
     | ApplyRegistry of DiscoveryManifest * RegistrySnapshot * ReplacementOutcome
 
-let private stagedExecutablePath config version =
-    config.HostStateDirectory
-    |> TerminalHostLayout.forStateDirectory
-    |> fun layout -> TerminalHostLayout.validateStagedVersion layout version
-
 let private queryReplacementPolicy
     (query: ReplacementPolicyQuery)
     (terminals: TerminalRecord list)
@@ -290,7 +285,11 @@ let internal tryReplaceHostIgnoring
             | Some stagedVersion ->
                 let candidate =
                     result {
-                        let! stagedExecutable = stagedExecutablePath config stagedVersion
+                        let! stagedExecutable =
+                            config.HostStateDirectory
+                            |> TerminalHostLayout.forStateDirectory
+                            |> fun layout -> TerminalHostLayout.validateStagedVersion layout stagedVersion
+
                         let! oldExecutable = resolveProcessExecutable config connection
 
                         return stagedExecutable, oldExecutable
@@ -339,35 +338,27 @@ let internal tryReplaceHostIgnoring
             return ReplacementOutcome.NoCandidate
     }
 
-let private failureRetryCooldown =
-    TimeSpan.FromMinutes 1.0
-
-let private activeIgnoredVersion now cooldown =
-    cooldown
-    |> Option.filter (fun failed -> now < failed.RetryAfter)
-    |> Option.map _.StagedVersion
+let private activeCooldown now =
+    Option.filter (fun failed -> now < failed.RetryAfter)
 
 let private nextCooldown now outcome current =
     match outcome with
     | ReplacementOutcome.Replaced _ -> None
     | ReplacementOutcome.Failed(stagedVersion, _) ->
-        Some { StagedVersion = stagedVersion; RetryAfter = now + failureRetryCooldown }
+        Some { StagedVersion = stagedVersion; RetryAfter = now + TimeSpan.FromMinutes 1.0 }
     | ReplacementOutcome.NoCandidate
     | ReplacementOutcome.WaitingForIdle
     | ReplacementOutcome.RaceLost ->
-        current
-        |> Option.filter (fun failed -> now < failed.RetryAfter)
+        current |> activeCooldown now
 
-let private logOutcome outcome =
-    match outcome with
+let private logOutcome = function
     | ReplacementOutcome.Replaced stagedVersion ->
         Log.log "TerminalHost" $"Replaced the host with staged version {stagedVersion} at a natural idle window"
     | ReplacementOutcome.Failed(stagedVersion, error) ->
         Log.log "TerminalHost" $"Replacement of staged version {stagedVersion} failed: {error}"
     | ReplacementOutcome.NoCandidate
     | ReplacementOutcome.WaitingForIdle
-    | ReplacementOutcome.RaceLost ->
-        ()
+    | ReplacementOutcome.RaceLost -> ()
 
 let internal runCoordinatorWith
     utcNow
@@ -380,7 +371,8 @@ let internal runCoordinatorWith
             if cancellationToken.IsCancellationRequested then
                 return ()
             else
-                let ignoredStagedVersion = cooldown |> activeIgnoredVersion (utcNow ())
+                let ignoredStagedVersion =
+                    cooldown |> activeCooldown (utcNow ()) |> Option.map _.StagedVersion
 
                 let! outcome = tryReplace ignoredStagedVersion
                 logOutcome outcome
