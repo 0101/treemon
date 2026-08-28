@@ -343,7 +343,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
   surfaced because the worktree already exists, and it launches even after a post-fork warning.
   Provider is read **directly** from the new worktree's `.treemon.json` because it is not in
   scheduler state yet.
-- The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The prompt (and skill) are single-quote-escaped at the CLI sink, so an odd skill value is a no-op for the tool, not an injection concern, making validation pure complication.
+- The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The resulting interactive prompt is single-quoted when control-free and otherwise carried as UTF-8/base64 data decoded by a fixed PowerShell expression, so multiline prompt content remains intact without becoming terminal syntax.
 - Create-worktree and delete-confirm MVU updates defer forcing the lazy remoting proxy until their Elmish commands execute. Constructing a command therefore remains separate from evaluating the pure model transition, including under .NET unit tests.
 
 ## Related Specs

@@ -1158,11 +1158,170 @@ type TerminalHostDataPlaneTests() =
         | ReplaySlice.Gap _ ->
             Assert.Fail("a never-written replay buffer was reported as a gap")
 
+let private terminalInputFrames (upstream: TestWebSocket) =
+    upstream.Sent
+    |> List.filter (fun frame ->
+        frame.Length > 0
+        && frame[0] = byte '0')
+
+let private withCommandProxy action =
+    let upstream = new TestWebSocket()
+    let connector _ =
+        async.Return(Ok(upstream :> System.Net.WebSockets.WebSocket))
+
+    let plane =
+        TerminalProxy.startWithConnector
+            connector
+            []
+            "command-boundary-token"
+            "command-boundary-session"
+            1
+            ignore
+        |> Async.RunSynchronously
+        |> requireOk
+
+    try
+        action upstream plane
+    finally
+        plane.Stop() |> Async.RunSynchronously
+
+let private submitTerminalCommand (plane: TerminalDataPlane) command =
+    Server.TerminalHostClient.sendTerminalCommandDefault
+        plane.AttachmentEndpoint
+        command
+    |> Async.RunSynchronously
+
+let private requireTerminalInputFrame (upstream: TestWebSocket) =
+    let delivered =
+        waitUntil
+            (TimeSpan.FromSeconds 2.0)
+            (fun () ->
+                terminalInputFrames upstream
+                |> List.isEmpty
+                |> not)
+
+    Assert.That(delivered, Is.True, "Command was not forwarded to the terminal upstream")
+
+    match terminalInputFrames upstream with
+    | [ frame ] -> frame
+    | frames ->
+        Assert.Fail($"Expected one terminal input frame, got {frames.Length}")
+        Array.empty
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 [<Category("TerminalHost")>]
 type TerminalHostProxyTests() =
+    [<Test>]
+    member _.``multiline launch prompts cross the real attachment as one control-free frame``() =
+        let cases =
+            [ ("AgentDoc",
+               CanvasSessionPrompt.forAgentDoc
+                   "Q:/code/demo"
+                   "report.html")
+              ("SystemView",
+               Shared.CanvasPrompt.continueWorking
+                   "Q:/code/demo"
+                   "diff.html")
+              ("create-worktree",
+               Server.CodingToolStatus.skillInvocation
+                   None
+                   "bd-execute"
+                   "Implement the first line.\r\nPreserve the second line.") ]
+
+        cases
+        |> List.iter (fun (name, prompt) ->
+            withCommandProxy (fun upstream plane ->
+                let command =
+                    Server.CodingToolCli.build
+                        None
+                        (Server.CodingToolCli.Interactive prompt)
+                    |> _.AsShellString
+
+                let result = submitTerminalCommand plane command
+                assertOk result $"{name} command submission failed"
+                let frame = requireTerminalInputFrame upstream
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        command |> Seq.exists Char.IsControl,
+                        Is.False,
+                        $"{name} launch command must be one control-free line"
+                    )
+
+                    Assert.That(
+                        frame,
+                        Is.EqualTo(Encoding.UTF8.GetBytes($"0{command}\r")),
+                        $"{name} prompt command changed while crossing the attachment"
+                    ))))
+
+    [<Test>]
+    member _.``command sender delivers a frame exactly at the attachment byte limit``() =
+        withCommandProxy (fun upstream plane ->
+            let command =
+                String('x', Protocol.MaximumAttachmentMessageBytes - 2)
+
+            let result = submitTerminalCommand plane command
+            assertOk result "Exact-limit command submission failed"
+            let frame = requireTerminalInputFrame upstream
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    frame.Length,
+                    Is.EqualTo Protocol.MaximumAttachmentMessageBytes
+                )
+
+                Assert.That(
+                    frame,
+                    Is.EqualTo(Encoding.UTF8.GetBytes($"0{command}\r"))
+                )))
+
+    [<Test>]
+    member _.``command sender rejects one-byte-over ASCII and multibyte frames``() =
+        [ ("ASCII",
+           String('x', Protocol.MaximumAttachmentMessageBytes - 1),
+           Protocol.MaximumAttachmentMessageBytes - 1)
+          ("multibyte",
+           String('x', Protocol.MaximumAttachmentMessageBytes - 3) + "é",
+           Protocol.MaximumAttachmentMessageBytes - 2) ]
+        |> List.iter (fun (name, command, expectedCharacterCount) ->
+            withCommandProxy (fun upstream plane ->
+                let result = submitTerminalCommand plane command
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        command.Length,
+                        Is.EqualTo expectedCharacterCount,
+                        $"{name} character-count fixture changed"
+                    )
+
+                    Assert.That(
+                        Encoding.UTF8.GetByteCount($"0{command}\r"),
+                        Is.EqualTo(Protocol.MaximumAttachmentMessageBytes + 1),
+                        $"{name} frame must be exactly one byte over"
+                    )
+
+                    Assert.That(
+                        result,
+                        Is.EqualTo(
+                            Error "The terminal command is invalid"
+                            : Result<unit, string>
+                        )
+                    )
+
+                    Assert.That(
+                        terminalInputFrames upstream,
+                        Is.Empty,
+                        $"{name} oversized command must not reach the attachment"
+                    )
+
+                    Assert.That(
+                        upstream.Sent.Length,
+                        Is.EqualTo 1,
+                        $"{name} oversized command must be rejected before browser attachment"
+                    ))))
+
     [<Test>]
     member _.``terminal page hides viewport scrollbar without disabling scrolling``() =
         let html =

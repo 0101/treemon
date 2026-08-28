@@ -19,6 +19,10 @@ let private controlApiVersion = 2
 [<Literal>]
 let private maximumResponseBytes = 1_048_576L
 
+// Mirrors TerminalHost.Protocol.MaximumAttachmentMessageBytes without coupling the server assembly.
+[<Literal>]
+let private maximumTerminalCommandFrameBytes = 16_384
+
 type internal TerminalRecord = { SessionId: string; WorktreePath: string; AttachmentEndpoint: string }
 
 type internal RegistrySnapshot = { Revision: int64; Terminals: TerminalRecord list }
@@ -369,8 +373,8 @@ let private terminalWebSocketEndpoint (attachmentEndpoint: string) =
 let internal validateTerminalCommand command =
     if
         String.IsNullOrWhiteSpace command
-        || command.Length > 65_000
         || (command |> Seq.exists Char.IsControl)
+        || Encoding.UTF8.GetByteCount($"0{command}\r") > maximumTerminalCommandFrameBytes
     then
         Error "The terminal command is invalid"
     else

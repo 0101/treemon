@@ -87,11 +87,17 @@ active-session indicator. That flag and its terminal-button glow, focus label, n
 visibility, and delete/archive native-kill prompt remain tied only to a tracked Windows Terminal
 window. Existing coding-tool status continues to show whether an embedded agent is working.
 
-An embedded command launch rejects blank, oversized, or control-character-bearing input before
-creating a terminal. It then creates one terminal through the existing lifecycle API and submits the
-validated command through that terminal's authenticated attachment endpoint. If command submission
-fails, Treemon closes that exact new terminal and reports the launch as failed rather than leaving
-an unseeded shell and claiming success.
+Interactive agent-launch prompts containing control characters, including newlines, are
+UTF-8/base64 encoded as inert data and decoded by a fixed PowerShell expression. The resulting
+shell command is one control-free line while the coding tool receives the original prompt text
+unchanged.
+
+The raw terminal-input boundary rejects blank or control-character-bearing commands and commands
+whose complete UTF-8 ttyd input frame (`0` prefix, command, and carriage return) exceeds 16,384
+bytes, before creating a terminal. It then creates one terminal through the existing lifecycle API
+and submits the validated command through that terminal's authenticated attachment endpoint. If
+command submission fails, Treemon closes that exact new terminal and reports the launch as failed
+rather than leaving an unseeded shell and claiming success.
 
 ### Control and discovery
 
@@ -239,6 +245,12 @@ lifecycle API input.
 Every start — plain or command-bearing — carries that exact terminal ID out to its caller, so the
 browser selects the started terminal by identity. Comparing registry snapshots taken before and
 after a start cannot distinguish it from a terminal a background launch created in the same window.
+
+`CodingToolCli` keeps control-free interactive prompts readable as single-quoted PowerShell
+arguments. An interactive prompt containing controls is encoded as UTF-8/base64 and decoded only by
+a fixed expression in the emitted command. `TerminalHostClient` separately validates the raw
+command and mirrors the host's 16,384-byte attachment-message cap against the complete transmitted
+input frame; no command chunking or acknowledgement protocol is added.
 
 ### Terminal host
 
@@ -473,15 +485,18 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the opaque command
   selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
-  input and remains a plain PowerShell shell. Submitted terminal input is a shell boundary: a
-  command carrying a control character is rejected rather than written, so a stored Copilot
-  `SessionId` can never inject an extra command line into a recreated shell.
+  input and remains a plain PowerShell shell. Submitted terminal input is a raw shell boundary:
+  direct commands carrying a control character are rejected rather than written, while
+  `CodingToolCli` first converts control-bearing prompt data to a control-free UTF-8/base64 form.
+  A stored Copilot `SessionId` therefore cannot inject an extra command line into a recreated shell.
 - **Intent-owned launch routing:** `TerminalLaunch` is the only product-level start boundary.
   Explicit native card operations remain native; every agent-bearing launch uses the embedded
   backend, including external `tm launch`.
 - **Command delivery after lifecycle start:** normal agent launches reuse the same authenticated
   attachment input boundary as replacement resume. The stable TerminalHost v2 lifecycle protocol
-  remains unchanged, and failed command delivery closes only the exact new terminal.
+  remains unchanged, the server rejects any complete input frame above the host's mirrored
+  16,384-byte attachment cap before lifecycle start, and failed command delivery closes only the
+  exact new terminal. No chunking or acknowledgement protocol is introduced.
 - **Background discovery without focus theft:** the client polls the registry even from an empty
   snapshot. Background and CLI launches become attachable without opening or retargeting a user's
   pane.
@@ -528,8 +543,8 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
-| `src/Tests/EmbeddedTerminalTests.fs` | Isolated host, replacement race, opaque command delivery, plain-shell restart, crash, security, and cleanup coverage |
-| `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API launch-intent routing, exact result identity, post-fork launch ordering, and queued Canvas fallback coverage |
+| `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus real proxy command delivery, control rejection, UTF-8 frame boundaries, replacement, crash, security, and cleanup coverage |
+| `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API launch-intent routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
 | `src/Tests/TerminalPaneTests.fs` | Exact server-returned terminal selection and direct Canvas launch routing |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
 | `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |

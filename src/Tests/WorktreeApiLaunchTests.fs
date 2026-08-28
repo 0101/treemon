@@ -16,6 +16,12 @@ open Tests.TestUtils
 let private terminalId value =
     EmbeddedTerminalId value
 
+let private assertTerminalCommandAccepted command =
+    Assert.That(
+        TerminalHostClient.validateTerminalCommand command,
+        Is.EqualTo(Ok command : Result<string, string>)
+    )
+
 let private startResult path id =
     let id = terminalId id
 
@@ -105,7 +111,10 @@ type WorktreeApiLaunchTests() =
 
             let launchPrompt = "Read the copied prompt and implement it"
             let action = FixBuild "https://example.test/build/42"
-            let canvasPrompt = "Continue the authored canvas document"
+            let canvasPrompt =
+                CanvasSessionPrompt.forAgentDoc
+                    (WorktreePath.value path)
+                    "review.html"
             let launchCommand =
                 (build None (Interactive launchPrompt)).AsShellString
             let actionCommand =
@@ -208,15 +217,17 @@ type WorktreeApiLaunchTests() =
             Assert.That(
                 calls.ToArray(),
                 Is.EqualTo(
-                    [| TerminalLaunch.Intent.OpenNativeTerminal, path
-                       TerminalLaunch.Intent.OpenNativeTab, path
-                       TerminalLaunch.Intent.StartEmbeddedTerminal, path
-                       TerminalLaunch.Intent.StartEmbeddedCommand launchCommand, path
-                       TerminalLaunch.Intent.StartEmbeddedCommand actionCommand, path
-                       TerminalLaunch.Intent.StartEmbeddedCommand canvasCommand, path
-                       TerminalLaunch.Intent.StartEmbeddedCommand resumeCommand, path |]
+                    [| (TerminalLaunch.Intent.OpenNativeTerminal, path)
+                       (TerminalLaunch.Intent.OpenNativeTab, path)
+                       (TerminalLaunch.Intent.StartEmbeddedTerminal, path)
+                       (TerminalLaunch.Intent.StartEmbeddedCommand launchCommand, path)
+                       (TerminalLaunch.Intent.StartEmbeddedCommand actionCommand, path)
+                       (TerminalLaunch.Intent.StartEmbeddedCommand canvasCommand, path)
+                       (TerminalLaunch.Intent.StartEmbeddedCommand resumeCommand, path) |]
                 )
-            ))
+            )
+
+            assertTerminalCommandAccepted canvasCommand)
 
     [<Test>]
     member _.``Create with prompt launches after post-fork without awaiting terminal completion``() =
@@ -269,7 +280,9 @@ type WorktreeApiLaunchTests() =
                 }
 
             let api = createApi repoRoot rootPath None launchTerminal
-            let prompt = "Implement the next ready task"
+            let prompt =
+                "Implement the next ready task.\r\n"
+                + "Preserve this second line exactly."
             let skill = "bd-execute"
             let branch = "routed-create"
 
@@ -316,6 +329,7 @@ type WorktreeApiLaunchTests() =
                                 expectedCommand
                         )
                     )
+                    assertTerminalCommandAccepted expectedCommand
                     Assert.That(completed.Task.IsCompleted, Is.False,
                         "createWorktree must not wait for the fire-and-forget terminal launch"))
             finally
@@ -375,4 +389,6 @@ type WorktreeApiLaunchTests() =
                                expectedCommand,
                            path |]
                     )
-                )))
+                )
+
+                assertTerminalCommandAccepted expectedCommand))
