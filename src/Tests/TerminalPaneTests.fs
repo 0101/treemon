@@ -304,7 +304,8 @@ let private focusModel : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = DateTimeOffset.MinValue
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -416,6 +417,63 @@ type TerminalFocusTests() =
                 Assert.That(cmd, Is.Empty)))
 
     [<Test>]
+    member _.``Repeated ticks keep an empty-snapshot terminal poll single-flight``() =
+        let model =
+            { focusModel with
+                TerminalPaneOpen = false
+                TerminalPaneTarget = None
+                EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+                ActiveEmbeddedTerminals = Map.empty
+                EmbeddedTerminalPollInFlight = false }
+
+        let firstPoll, firstCmd =
+            App.update
+                (Tick 1_000.0)
+                model
+
+        let repeatedTick, repeatedCmd =
+            App.update
+                (Tick 2_000.0)
+                firstPoll
+
+        Assert.Multiple(fun () ->
+            Assert.That(firstPoll.EmbeddedTerminalPollInFlight, Is.True)
+            Assert.That(repeatedTick.EmbeddedTerminalPollInFlight, Is.True)
+            Assert.That(
+                List.length firstCmd,
+                Is.EqualTo(List.length repeatedCmd + 1),
+                "the first tick should add one terminal request and later ticks should not"
+            ))
+
+    [<Test>]
+    member _.``Failed terminal poll permits the next tick to retry``() =
+        let failed, failureCmd =
+            App.update
+                EmbeddedTerminalPollFailed
+                { focusModel with EmbeddedTerminalPollInFlight = true }
+
+        let retry, retryCmd =
+            App.update
+                (Tick 1_000.0)
+                failed
+
+        let repeatedTick, repeatedCmd =
+            App.update
+                (Tick 2_000.0)
+                retry
+
+        Assert.Multiple(fun () ->
+            Assert.That(failed.EmbeddedTerminalPollInFlight, Is.False)
+            Assert.That(failureCmd, Is.Empty)
+            Assert.That(retry.EmbeddedTerminalPollInFlight, Is.True)
+            Assert.That(repeatedTick.EmbeddedTerminalPollInFlight, Is.True)
+            Assert.That(
+                List.length retryCmd,
+                Is.EqualTo(List.length repeatedCmd + 1),
+                "the first tick after a failure should issue a new terminal request"
+            ))
+
+    [<Test>]
     member _.``First polled terminal remains background state until the user opens the pane``() =
         let discovered =
             { Tabs = [ running firstOne first 61231 ] }
@@ -424,7 +482,8 @@ type TerminalFocusTests() =
                 TerminalPaneOpen = false
                 TerminalPaneTarget = None
                 EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
-                ActiveEmbeddedTerminals = Map.empty }
+                ActiveEmbeddedTerminals = Map.empty
+                EmbeddedTerminalPollInFlight = true }
 
         let updated, cmd =
             App.update
@@ -437,6 +496,7 @@ type TerminalFocusTests() =
             Assert.That(updated.TerminalPaneTarget, Is.EqualTo(None))
             Assert.That(updated.FocusedElement, Is.EqualTo(model.FocusedElement))
             Assert.That(updated.Repos, Is.EqualTo(model.Repos))
+            Assert.That(updated.EmbeddedTerminalPollInFlight, Is.False)
             Assert.That(
                 activeTerminalId
                     (Some first)

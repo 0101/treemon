@@ -63,7 +63,8 @@ type Model =
       OverviewHistoryWindow: HistoryWindow option
       OverviewHistory: InstalledOverviewHistory option
       OverviewHistoryRequestedAt: System.DateTimeOffset
-      OverviewHistoryRequestInFlight: OverviewHistoryRequest option }
+      OverviewHistoryRequestInFlight: OverviewHistoryRequest option
+      EmbeddedTerminalPollInFlight: bool }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -75,6 +76,7 @@ type Msg =
     | OpenTerminal of WorktreePath
     | OpenEmbeddedTerminal of WorktreePath
     | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
+    | EmbeddedTerminalPollFailed
     | EmbeddedTerminalStarted of
         WorktreePath *
         Result<EmbeddedTerminalStartResult, string>

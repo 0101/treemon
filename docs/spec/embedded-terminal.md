@@ -83,7 +83,9 @@ in flight re-targets the pane without issuing a second launch; the in-flight sta
 success and failure, so a rejected launch never wedges the action.
 Background and CLI launches never steal dashboard focus. The browser polls the
 authoritative terminal registry on its normal activity cadence even when its current snapshot is
-empty, so the first background-created terminal becomes visible without a reload.
+empty, so the first background-created terminal becomes visible without a reload. That poll is
+single-flight: a tick starts no new registry request while one is outstanding, and the next tick
+resumes polling once the request settles, whether it succeeded or failed.
 
 Embedded terminals do not change `WorktreeStatus.HasActiveSession` or add another card-level
 active-session indicator. That flag and its terminal-button glow, focus label, native `+`

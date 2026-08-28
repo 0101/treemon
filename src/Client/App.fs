@@ -23,13 +23,14 @@ let fetchWorktrees () =
         DataFailed
 
 let fetchEmbeddedTerminals (api: Lazy<IWorktreeApi>) =
-    Cmd.OfAsync.perform
-        api.Value.getEmbeddedTerminals
+    Cmd.OfAsync.either
+        (fun () -> api.Value.getEmbeddedTerminals ())
         ()
         EmbeddedTerminalSnapshotChanged
+        (fun _ -> EmbeddedTerminalPollFailed)
 
 let fetchSyncStatus () =
-    Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
+    Cmd.OfAsync.perform (fun () -> worktreeApi.Value.getSyncStatus ()) () SyncStatusUpdate
 
 let deleteWorktreeCmd (api: Lazy<IWorktreeApi>) path =
     Cmd.OfAsync.either
@@ -116,7 +117,8 @@ let init () =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None },
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false },
     Cmd.batch [
         fetchWorktrees ()
         fetchSyncStatus ()
@@ -434,7 +436,11 @@ let update msg model =
                 TerminalPane.reconcileSelections
                     model.EmbeddedTerminals
                     snapshot
-                    model.ActiveEmbeddedTerminals },
+                    model.ActiveEmbeddedTerminals
+            EmbeddedTerminalPollInFlight = false },
+        Cmd.none
+    | EmbeddedTerminalPollFailed ->
+        { model with EmbeddedTerminalPollInFlight = false },
         Cmd.none
     | EmbeddedTerminalStarted(path, result) ->
         match result with
@@ -589,7 +595,12 @@ let update msg model =
         // The registry is authoritative even when the browser currently knows no terminals.
         // Background and CLI launches can create the first tab, so discovery must stay on the
         // normal activity cadence without opening or retargeting the pane.
-        let terminalCmd = fetchEmbeddedTerminals worktreeApi
+        let model, terminalCmd =
+            if model.EmbeddedTerminalPollInFlight then
+                model, Cmd.none
+            else
+                { model with EmbeddedTerminalPollInFlight = true },
+                fetchEmbeddedTerminals worktreeApi
 
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd; terminalCmd ]

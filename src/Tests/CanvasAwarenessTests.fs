@@ -96,7 +96,8 @@ let private defaultModel : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
 let private dispatchedMsgs cmd : Msg list =
     let mutable captured = [] // Elmish effects expose messages only through their dispatch callback.
