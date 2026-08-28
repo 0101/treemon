@@ -9,12 +9,18 @@
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
   `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`,
   `src/Server/TerminalSessionActivity.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific
-  runtime script) stays at or below 4,000 nonblank production lines.
+  runtime script) stays at or below 4,000 nonblank production lines. Product-level launch policy
+  (`TerminalLaunch.fs`, `SessionManager.fs`, `WorktreeApi.fs`) routes to that runtime and is outside
+  both it and the budget.
 - Give every terminal an exact kernel-owned process boundary established before ttyd executes.
 - Keep lifecycle control loopback-only, authenticated, versioned, and limited to the five endpoints
   listed below.
 - Preserve terminal tabs across a host update by resuming only the Copilot session owned by each
   exact terminal.
+- Route every prompted or automatic agent launch through the embedded host while retaining Windows
+  Terminal only for the card's explicit `>` / Enter and tracked-window `+` actions.
+- Make server-created terminals discoverable from an initially empty browser snapshot without
+  stealing dashboard focus.
 - Apply host updates at naturally idle Copilot boundaries without draining work, blocking new work,
   or treating unrelated shell activity as a gate.
 - Keep development and verification isolated from production state, ports, and processes.
@@ -59,6 +65,33 @@ for the targeted worktree; the empty state offers **Start terminal**. Switching 
 other worktrees' tabs without closing their terminals, and running iframes stay mounted so their
 browser state survives. Closing the last visible tab leaves the pane open in its empty state; only
 **Hide** collapses the pane.
+
+### Launch routing and command startup
+
+The card's `>` / Enter action remains the explicit native Windows Terminal choice, and its `+`
+action opens another tab in that tracked native window. The dedicated embedded-terminal action and
+the terminal pane's **New** action continue to start plain embedded PowerShell terminals.
+
+Every agent-bearing launch uses an embedded terminal: Resume, contextual card actions, explicit
+Canvas session launch, create-worktree prompt launch, AutoSync fallback, queued Canvas fallback,
+and `tm launch`. A browser need not be open for a CLI or background launch; the host owns the
+terminal until a dashboard attaches later.
+
+Direct dashboard actions that start an agent open and target the terminal pane, selecting the exact
+new terminal. Background and CLI launches never steal dashboard focus. The browser polls the
+authoritative terminal registry on its normal activity cadence even when its current snapshot is
+empty, so the first background-created terminal becomes visible without a reload.
+
+Embedded terminals do not change `WorktreeStatus.HasActiveSession` or add another card-level
+active-session indicator. That flag and its terminal-button glow, focus label, native `+`
+visibility, and delete/archive native-kill prompt remain tied only to a tracked Windows Terminal
+window. Existing coding-tool status continues to show whether an embedded agent is working.
+
+An embedded command launch rejects blank, oversized, or control-character-bearing input before
+creating a terminal. It then creates one terminal through the existing lifecycle API and submits the
+validated command through that terminal's authenticated attachment endpoint. If command submission
+fails, Treemon closes that exact new terminal and reports the launch as failed rather than leaving
+an unseeded shell and claiming success.
 
 ### Control and discovery
 
@@ -188,6 +221,24 @@ process. Cleanup targets only fixture-owned exact PIDs and process-start identit
 by name or broad ancestry.
 
 ## Technical Approach
+
+### Launch routing
+
+`TerminalLaunch` is the single server-side boundary for starting user terminals.
+`SessionManager` and `EmbeddedTerminal` are backend implementations, not policy call sites.
+Operation intent selects the backend: native open/new-tab operations use `SessionManager`; plain
+embedded and agent-command operations use `EmbeddedTerminal`. Browser headers,
+`HttpContext`, and `TREEMON_TERMINAL_SESSION_ID` do not participate in this decision.
+
+Command-capable embedded start retains the exact `TerminalRecord` returned by
+`TerminalHostClient.startTerminalOnHost`, submits an optional command through the existing
+`SendTerminalCommand` function, and returns both the reconciled snapshot and exact started terminal
+ID. The TerminalHost v2 control request remains `{ worktreePath }`; command text never becomes
+lifecycle API input.
+
+Every start — plain or command-bearing — carries that exact terminal ID out to its caller, so the
+browser selects the started terminal by identity. Comparing registry snapshots taken before and
+after a start cannot distinguish it from a terminal a background launch created in the same window.
 
 ### Terminal host
 
@@ -425,6 +476,18 @@ PowerShell lifecycle helpers, or compatibility shims.
   input and remains a plain PowerShell shell. Submitted terminal input is a shell boundary: a
   command carrying a control character is rejected rather than written, so a stored Copilot
   `SessionId` can never inject an extra command line into a recreated shell.
+- **Intent-owned launch routing:** `TerminalLaunch` is the only product-level start boundary.
+  Explicit native card operations remain native; every agent-bearing launch uses the embedded
+  backend, including external `tm launch`.
+- **Command delivery after lifecycle start:** normal agent launches reuse the same authenticated
+  attachment input boundary as replacement resume. The stable TerminalHost v2 lifecycle protocol
+  remains unchanged, and failed command delivery closes only the exact new terminal.
+- **Background discovery without focus theft:** the client polls the registry even from an empty
+  snapshot. Background and CLI launches become attachable without opening or retargeting a user's
+  pane.
+- **Native-only card session state:** embedded terminal presence does not feed
+  `HasActiveSession` or add a second card indicator. The existing card state continues to describe
+  only the explicitly tracked Windows Terminal window; coding-tool activity describes agents.
 - **Truthful lifecycle state on failure:** only evidence that the exact host was lost interrupts
   every tab. A rejected single-terminal request keeps the authoritative registry and leaves other
   terminals running, and a replacement that stops short of a proven live host never reports its
@@ -454,7 +517,8 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `src/TerminalHostLayout/Layout.fs` | Shared state/staging paths, version-directory grammar, executable names, and required host bundle members |
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
 | `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, and replacement coordination |
-| `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, authoritative snapshot reconciliation, and public start/get/close surface |
+| `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
+| `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, command-capable start, authoritative snapshot reconciliation, and public start/get/close surface |
 | `src/Server/SessionActivity.fs` | Effective per-session state used by the idle gate |
 | `src/Server/SessionActivityService.fs` | Activity ingestion, terminal-origin validation, bounded live state, pruned raw origin epochs, and mailbox-serialized terminal activity queries |
 | `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection for tab activity, idle gating, and opaque resume policy |
@@ -472,5 +536,6 @@ PowerShell lifecycle helpers, or compatibility shims.
 
 - `docs/spec/session-status-push.md` — authoritative per-session Copilot activity and terminal-origin
   reporting.
-- `docs/spec/native-session-management.md` — external Windows Terminal fallback.
+- `docs/spec/native-session-management.md` — explicit card `>` / Enter and tracked-window `+`
+  Windows Terminal behavior.
 - `docs/spec/worktree-monitor.md` — worktree lifecycle and dashboard integration.

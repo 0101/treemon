@@ -227,6 +227,10 @@ type EmbeddedTerminalSnapshot =
 module EmbeddedTerminalSnapshot =
     let empty = { Tabs = [] }
 
+type EmbeddedTerminalStartResult =
+    { Snapshot: EmbeddedTerminalSnapshot
+      TerminalId: EmbeddedTerminalId }
+
 type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven
     | SystemView    // server-generated; data-driven; no owner (e.g. the beads dashboard)

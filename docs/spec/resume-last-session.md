@@ -3,7 +3,7 @@
 ## Goals
 
 - After a machine reboot (all terminal sessions gone), allow one-click resume of the last coding session from any worktree card
-- Launch the Copilot CLI with the exact stored session id in a new tracked terminal window
+- Launch the Copilot CLI with the exact stored session id in a new embedded terminal
 - Show a resume button only on cards where a session can actually be resumed
 
 ## Expected Behavior
@@ -33,14 +33,14 @@ When clicked:
 3. Server builds `copilot --yolo --resume <id>` via
    `CodingToolCli.build provider (Resume sessionId)`, falling back to `--continue` when no retained
    session exists
-4. Server spawns a new tracked Windows Terminal window with the resume command
-5. The worktree card transitions to `HasActiveSession = true`
+4. Server starts a new embedded terminal and submits the resume command
+5. Client opens the terminal pane and selects that exact new terminal
 
 ### Edge Cases
 
 - If provider cannot be determined: fall back to `CodingToolProvider.Default` (Copilot)
 - If the durable row was pruned or never existed: launch with `--continue`
-- If resume fails: the terminal stays open for the user to start fresh — `pwsh -NoExit` ensures this
+- If command submission fails: the exact new terminal is closed and the launch reports an error
 
 ## Technical Approach
 
@@ -61,19 +61,18 @@ behavior of fresh sessions launched from the dashboard.
 
 ### Server: API Endpoint
 
-`IWorktreeApi` exposes:
-```
-resumeSession: WorktreePath -> Async<Result<unit, string>>
-```
+`IWorktreeApi.resumeSession` returns the reconciled embedded-terminal snapshot plus the exact
+started terminal ID.
 
 Implementation in `WorktreeApi.fs`:
 1. Validate path against known worktrees
 2. Read the provider from `.treemon.json`, defaulting to Copilot
 3. Read the greatest durable `(UpdatedAt, SessionId)` through the scalar store lookup
 4. Build the resume command via `CodingToolCli.build provider (Resume sessionId)`
-5. Call `SessionManager.spawnSession` to spawn a new tracked terminal with the command
+5. Call the shared embedded command-launch boundary and return its exact result
 
-Reuses the existing `launchSession` flow (spawn tracked terminal with command) — no new `SessionManager` messages needed.
+It reuses the same embedded command launch as contextual actions and `tm launch`; native
+`SessionManager` state is unchanged.
 
 ### Client: Resume Button
 
@@ -115,8 +114,11 @@ Minimal styling for `.resume-btn` — matches existing button styles (`.terminal
 
 - **`--resume <id>` over `--continue`**: `--continue` is supposed to resume the most recent session in the current directory, but in practice Copilot's `--continue` doesn't reliably scope to the working directory — it can resume sessions from other worktrees. Using `--resume <session-id>` with the specific UUID ensures the correct session is targeted. Falls back to `--continue` if no session ID is found.
 - **Hidden over disabled**: Unlike contextual card actions (which remain visible and temporarily disable during launch cooldown), the resume button is hidden when not applicable — it targets a specific scenario (post-reboot) and showing a disabled "resume" button when a session IS active would be confusing
-- **No new shared types needed**: Client already has `HasActiveSession`, `LastUserMessage`, and `CodingTool` — enough to determine visibility. Server resolves provider at request time.
-- **Spawn (not new-tab)**: Resume always spawns a new terminal window since the precondition is "no tracked terminal exists"
+- **Existing fields still decide visibility:** `HasActiveSession`, `LastUserMessage`, and
+  `CodingTool` remain sufficient for the button predicate. The remoting contract separately returns
+  the shared exact embedded-launch result needed for terminal selection.
+- **Fresh embedded terminal:** Resume always starts one new embedded terminal so the resumed
+  session has an exact terminal origin and can be selected without guessing among siblings
 
 ## Key Files
 
@@ -134,4 +136,4 @@ Minimal styling for `.resume-btn` — matches existing button styles (`.terminal
 ## Related Specs
 
 - `docs/spec/worktree-monitor.md` — Contextual card-action visibility and launch behavior
-- `docs/spec/native-session-management.md` — Session spawning/tracking and smart action-launch foundation
+- `docs/spec/embedded-terminal.md` — command-capable embedded launch and exact terminal selection

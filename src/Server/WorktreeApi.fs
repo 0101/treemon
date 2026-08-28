@@ -775,13 +775,20 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
             return enriched
         }
 
+    let terminalStart operation =
+        asyncResult {
+            let! started = operation
+            let! enriched = withTerminalActivity started.Snapshot
+            return enriched
+        }
+
     let startEmbeddedTerminal wtPath =
         withValidatedPath
             wtPath
             "startEmbeddedTerminal"
             (fun () ->
                 EmbeddedTerminal.start embeddedTerminal wtPath
-                |> terminalMutation)
+                |> terminalStart)
 
     let getEmbeddedTerminals () =
         async {

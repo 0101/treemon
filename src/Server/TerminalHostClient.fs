@@ -370,15 +370,21 @@ let private terminalWebSocketEndpoint (attachmentEndpoint: string) =
     with _ ->
         Error "TerminalHost returned an invalid command attachment endpoint"
 
+let internal validateTerminalCommand command =
+    if
+        String.IsNullOrWhiteSpace command
+        || command.Length > 65_000
+        || (command |> Seq.exists Char.IsControl)
+    then
+        Error "The terminal command is invalid"
+    else
+        Ok command
+
 let internal sendTerminalCommandDefault attachmentEndpoint command =
     async {
-        if
-            String.IsNullOrWhiteSpace command
-            || command.Length > 65_000
-            || (command |> Seq.exists Char.IsControl)
-        then
-            return Error "The terminal command is invalid"
-        else
+        match validateTerminalCommand command with
+        | Error error -> return Error error
+        | Ok validatedCommand ->
             match terminalWebSocketEndpoint attachmentEndpoint with
             | Error error -> return Error error
             | Ok endpoint ->
@@ -395,7 +401,7 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
                 try
                     do! socket.ConnectAsync(endpoint, cancellation.Token) |> Async.AwaitTask
                     do! Encoding.UTF8.GetBytes("""{"AuthToken":"","columns":120,"rows":30}""") |> send
-                    do! Encoding.UTF8.GetBytes($"0{command}\r") |> send
+                    do! Encoding.UTF8.GetBytes($"0{validatedCommand}\r") |> send
 
                     let! _ =
                         socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Terminal command submitted", cancellation.Token)

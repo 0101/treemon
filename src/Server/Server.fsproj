@@ -69,6 +69,7 @@
     <Compile Include="TerminalHostReplacement.fs" />
     <Compile Include="TerminalSessionActivity.fs" />
     <Compile Include="EmbeddedTerminal.fs" />
+    <Compile Include="TerminalLaunch.fs" />
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="OverviewSnapshotCapture.fs" />
     <Compile Include="IdiomorphScript.fs" />

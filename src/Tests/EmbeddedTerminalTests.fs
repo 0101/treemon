@@ -102,6 +102,7 @@ type private FakeControlHost
     let mutable registryJsonOverride: string option = None
     let listRequests = ConcurrentQueue<unit>()
     let startRequests = ConcurrentQueue<string>()
+    let startRequestBodies = ConcurrentQueue<string>()
     let closeRequests = ConcurrentQueue<string>()
     let shutdownRequests = ConcurrentQueue<unit>()
     let jsonOptions = JsonSerializerOptions(JsonSerializerDefaults.Web)
@@ -145,6 +146,8 @@ type private FakeControlHost
     let readWorktreePath (context: HttpContext) =
         task {
             use! document = JsonDocument.ParseAsync(context.Request.Body)
+            startRequestBodies.Enqueue(document.RootElement.GetRawText())
+
             return
                 document.RootElement
                     .GetProperty("worktreePath")
@@ -390,7 +393,9 @@ type private FakeControlHost
     member _.Token = token
     member _.ListRequestCount = listRequests.Count
     member _.StartRequestCount = startRequests.Count
+    member _.StartRequestBodies = startRequestBodies.ToArray() |> Array.toList
     member _.CloseRequestCount = closeRequests.Count
+    member _.ClosedSessionIds = closeRequests.ToArray() |> Array.toList
     member _.ShutdownRequestCount = shutdownRequests.Count
     member _.OldExecutable = oldExecutable
     member _.CurrentExecutable = lock gate (fun () -> currentExecutable)
@@ -610,6 +615,164 @@ let private populateAgent
         let! _ = agent.PostAndAsyncReply(GetState)
         return ()
     }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type TerminalLaunchTests() =
+    let startResult path id =
+        let terminalId = EmbeddedTerminalId id
+
+        { Snapshot =
+            { Tabs =
+                [ { Id = terminalId
+                    Worktree = path
+                    ReportedActivity = None
+                    Lifecycle =
+                        EmbeddedTerminalLifecycle.Running
+                            $"http://127.0.0.1:41001/{id}/" } ] }
+          TerminalId = terminalId }
+
+    [<Test>]
+    member _.``native intents select only their native backend``() =
+        task {
+            let path = WorktreePath "Q:/repo/native"
+            let nativeCalls = ConcurrentQueue<string * WorktreePath>()
+            let embeddedCalls = ConcurrentQueue<WorktreePath * string option>()
+
+            let backends: TerminalLaunch.Backends =
+                { OpenNativeTerminal =
+                    fun requested ->
+                        async {
+                            nativeCalls.Enqueue(("terminal", requested))
+                            return Ok()
+                        }
+                  OpenNativeTab =
+                    fun requested ->
+                        async {
+                            nativeCalls.Enqueue(("tab", requested))
+                            return Ok()
+                        }
+                  StartEmbedded =
+                    fun requested command ->
+                        async {
+                            embeddedCalls.Enqueue((requested, command))
+                            return Ok(startResult requested "unexpected")
+                        } }
+
+            let! terminal =
+                TerminalLaunch.launchWith
+                    backends
+                    TerminalLaunch.Intent.OpenNativeTerminal
+                    path
+                |> Async.StartAsTask
+
+            let! tab =
+                TerminalLaunch.launchWith
+                    backends
+                    TerminalLaunch.Intent.OpenNativeTab
+                    path
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    terminal,
+                    Is.EqualTo(
+                        Ok TerminalLaunch.LaunchResult.Native
+                        : Result<TerminalLaunch.LaunchResult, string>
+                    )
+                )
+
+                Assert.That(
+                    tab,
+                    Is.EqualTo(
+                        Ok TerminalLaunch.LaunchResult.Native
+                        : Result<TerminalLaunch.LaunchResult, string>
+                    )
+                )
+
+                Assert.That(
+                    nativeCalls.ToArray(),
+                    Is.EqualTo(
+                        [| ("terminal", path); ("tab", path) |]
+                    )
+                )
+
+                Assert.That(embeddedCalls, Is.Empty))
+        }
+
+    [<Test>]
+    member _.``embedded intents select only embedded backend and preserve its exact result``() =
+        task {
+            let path = WorktreePath "Q:/repo/embedded"
+            let command = "copilot --yolo --prompt test"
+            let nativeCalls = ConcurrentQueue<string>()
+            let embeddedCalls = ConcurrentQueue<WorktreePath * string option>()
+            let plainResult = startResult path "plain-terminal"
+            let commandResult = startResult path "command-terminal"
+
+            let unexpectedNative name _ =
+                async {
+                    nativeCalls.Enqueue name
+                    return Error "Unexpected native launch"
+                }
+
+            let backends: TerminalLaunch.Backends =
+                { OpenNativeTerminal = unexpectedNative "terminal"
+                  OpenNativeTab = unexpectedNative "tab"
+                  StartEmbedded =
+                    fun requested requestedCommand ->
+                        async {
+                            embeddedCalls.Enqueue((requested, requestedCommand))
+
+                            return
+                                Ok(
+                                    match requestedCommand with
+                                    | None -> plainResult
+                                    | Some _ -> commandResult
+                                )
+                        } }
+
+            let! plain =
+                TerminalLaunch.launchWith
+                    backends
+                    TerminalLaunch.Intent.StartEmbeddedTerminal
+                    path
+                |> Async.StartAsTask
+
+            let! commanded =
+                TerminalLaunch.launchWith
+                    backends
+                    (TerminalLaunch.Intent.StartEmbeddedCommand command)
+                    path
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    plain,
+                    Is.EqualTo(
+                        Ok(TerminalLaunch.LaunchResult.Embedded plainResult)
+                        : Result<TerminalLaunch.LaunchResult, string>
+                    )
+                )
+
+                Assert.That(
+                    commanded,
+                    Is.EqualTo(
+                        Ok(TerminalLaunch.LaunchResult.Embedded commandResult)
+                        : Result<TerminalLaunch.LaunchResult, string>
+                    )
+                )
+
+                Assert.That(
+                    embeddedCalls.ToArray(),
+                    Is.EqualTo(
+                        [| (path, None); (path, Some command) |]
+                    )
+                )
+
+                Assert.That(nativeCalls, Is.Empty))
+        }
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -1147,6 +1310,219 @@ type EmbeddedTerminalControlClientTests() =
         }
 
     [<Test>]
+    member _.``plain start returns the reconciled snapshot and exact terminal identity``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+
+            let target = worktree host.Root "plain-start"
+
+            let! result =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let started = requireOk result
+            let terminal = host.CurrentTerminals |> List.exactlyOne
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    started.TerminalId,
+                    Is.EqualTo(EmbeddedTerminalId terminal.SessionId)
+                )
+
+                Assert.That(
+                    started.Snapshot.Tabs |> List.map _.Id,
+                    Is.EqualTo([ started.TerminalId ])
+                )
+
+                Assert.That(host.StartRequestCount, Is.EqualTo(1))
+                Assert.That(host.CloseRequestCount, Is.Zero))
+        }
+
+    [<Test>]
+    member _.``command start uses the attachment transport and returns the exact new sibling``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let submissions = ConcurrentQueue<string * string>()
+
+            let config =
+                { managerConfig host noLaunch with
+                    SendTerminalCommand =
+                        fun endpoint command ->
+                            async {
+                                submissions.Enqueue((endpoint, command))
+                                return Ok()
+                            } }
+            let manager = EmbeddedTerminal.createWithConfig config
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "command-start"
+
+            let! existing =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let existingId = (requireOk existing).TerminalId
+            let command = "Write-Output command-started"
+
+            let! result =
+                EmbeddedTerminal.startWithCommand manager target command
+                |> Async.StartAsTask
+
+            let started = requireOk result
+            let terminals = host.CurrentTerminals
+            let exact =
+                terminals
+                |> List.find (fun terminal ->
+                    terminal.SessionId = EmbeddedTerminalId.value started.TerminalId)
+
+            let submittedEndpoint, submittedCommand =
+                submissions.ToArray() |> Array.exactlyOne
+
+            Assert.Multiple(fun () ->
+                Assert.That(started.TerminalId, Is.Not.EqualTo existingId)
+                Assert.That(submittedEndpoint, Is.EqualTo exact.AttachmentEndpoint)
+                Assert.That(submittedCommand, Is.EqualTo command)
+
+                Assert.That(
+                    started.Snapshot.Tabs |> List.map _.Id,
+                    Is.EqualTo(
+                        terminals
+                        |> List.map (fun terminal ->
+                            EmbeddedTerminalId terminal.SessionId)
+                    )
+                )
+
+                for body in host.StartRequestBodies do
+                    use document = JsonDocument.Parse body
+
+                    Assert.That(
+                        document.RootElement.EnumerateObject()
+                        |> Seq.map _.Name
+                        |> Seq.toList,
+                        Is.EqualTo([ "worktreePath" ]),
+                        "TerminalHost control API v2 start must remain limited to worktreePath"
+                    ))
+        }
+
+    [<Test>]
+    member _.``invalid command is rejected before starting or attaching a terminal``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let submissions = ConcurrentQueue<string * string>()
+
+            let config =
+                { managerConfig host noLaunch with
+                    SendTerminalCommand =
+                        fun endpoint command ->
+                            async {
+                                submissions.Enqueue((endpoint, command))
+                                return Ok()
+                            } }
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "invalid-command"
+
+            let! result =
+                EmbeddedTerminal.startWithCommand
+                    manager
+                    target
+                    "Write-Output first\nWrite-Output second"
+                |> Async.StartAsTask
+
+            let! cached =
+                EmbeddedTerminal.getCached manager
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    result,
+                    Is.EqualTo(
+                        Error "The terminal command is invalid"
+                        : Result<EmbeddedTerminalStartResult, string>
+                    )
+                )
+
+                Assert.That(host.StartRequestCount, Is.Zero)
+                Assert.That(host.CloseRequestCount, Is.Zero)
+                Assert.That(host.CurrentTerminals, Is.Empty)
+                Assert.That(cached.Tabs, Is.Empty)
+                Assert.That(submissions, Is.Empty))
+        }
+
+    [<Test>]
+    member _.``delivery failure closes only the exact new terminal and preserves siblings``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let submissions = ConcurrentQueue<string * string>()
+
+            let config =
+                { managerConfig host noLaunch with
+                    SendTerminalCommand =
+                        fun endpoint command ->
+                            async {
+                                submissions.Enqueue((endpoint, command))
+                                return Error "Simulated command delivery failure"
+                            } }
+            let manager = EmbeddedTerminal.createWithConfig config
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "delivery-failure"
+
+            let! existing =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let existingId = (requireOk existing).TerminalId
+
+            let! result =
+                EmbeddedTerminal.startWithCommand
+                    manager
+                    target
+                    "Write-Output should-fail"
+                |> Async.StartAsTask
+
+            let! cached =
+                EmbeddedTerminal.getCached manager
+                |> Async.StartAsTask
+
+            let submittedEndpoint, _ =
+                submissions.ToArray() |> Array.exactlyOne
+
+            let closedId =
+                host.ClosedSessionIds |> List.exactlyOne
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    result,
+                    Is.EqualTo(
+                        Error "Simulated command delivery failure"
+                        : Result<EmbeddedTerminalStartResult, string>
+                    )
+                )
+
+                Assert.That(closedId, Is.Not.EqualTo(EmbeddedTerminalId.value existingId))
+                Assert.That(submittedEndpoint, Does.Contain(closedId))
+
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.SessionId,
+                    Is.EqualTo([ EmbeddedTerminalId.value existingId ])
+                )
+
+                Assert.That(
+                    cached.Tabs |> List.map _.Id,
+                    Is.EqualTo([ existingId ])
+                )
+
+                Assert.That(host.StartRequestCount, Is.EqualTo(2))
+                Assert.That(host.CloseRequestCount, Is.EqualTo(1)))
+        }
+
+    [<Test>]
     member _.``starts distinct terminals lazily and resolves ambiguous mutations by relist``() =
         task {
             use host = new FakeControlHost()
@@ -1168,9 +1544,9 @@ type EmbeddedTerminalControlClientTests() =
                 |> Async.StartAsTask
 
             let firstStart = requireOk started
-            let endpoint = assertRunningFor target firstStart
+            let endpoint = assertRunningFor target firstStart.Snapshot
             let firstTerminalId =
-                firstStart.Tabs |> List.exactlyOne |> _.Id
+                firstStart.Snapshot.Tabs |> List.exactlyOne |> _.Id
 
             Assert.Multiple(fun () ->
                 Assert.That(launches.Count, Is.EqualTo(1))
@@ -1183,7 +1559,7 @@ type EmbeddedTerminalControlClientTests() =
                 |> Async.StartAsTask
 
             Assert.Multiple(fun () ->
-                Assert.That((requireOk second).Tabs.Length, Is.EqualTo(2))
+                Assert.That((requireOk second).Snapshot.Tabs.Length, Is.EqualTo(2))
                 Assert.That(launches.Count, Is.EqualTo(1)))
 
             host.FailNextCloseResponse()
@@ -1292,7 +1668,7 @@ type EmbeddedTerminalControlClientTests() =
 
             let beforeRestart = requireOk secondStarted
             let endpointsBefore =
-                beforeRestart.Tabs
+                beforeRestart.Snapshot.Tabs
                 |> List.map runningEndpoint
 
             let restartedManager =
@@ -1309,7 +1685,7 @@ type EmbeddedTerminalControlClientTests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     rediscovered.Tabs |> List.map _.Worktree,
-                    Is.EqualTo(beforeRestart.Tabs |> List.map _.Worktree)
+                    Is.EqualTo(beforeRestart.Snapshot.Tabs |> List.map _.Worktree)
                 )
 
                 Assert.That(endpointsAfter, Is.EqualTo endpointsBefore)
@@ -1758,7 +2134,7 @@ type EmbeddedTerminalReplacementTests() =
 
             let runningStart = requireOk started
             let originalRunningTerminalId =
-                runningStart.Tabs |> List.exactlyOne |> _.Id
+                runningStart.Snapshot.Tabs |> List.exactlyOne |> _.Id
 
             let query _ _ =
                 Ok(

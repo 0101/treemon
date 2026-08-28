@@ -30,7 +30,8 @@ type private CloseTarget =
     | WorktreeTerminals of WorktreePath
 
 type private Message =
-    | Mutate of TerminalMutation * AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
+    | Start of WorktreePath * command: string option * AsyncReplyChannel<Result<EmbeddedTerminalStartResult, string>>
+    | Close of EmbeddedTerminalId * AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | GetCached of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | ReserveCleanup of WorktreePath * CleanupReservation * AsyncReplyChannel<Result<CleanupReservation, string>>
@@ -110,28 +111,24 @@ let private getTerminals config state =
         | UnusableHost error -> return withHostFailure error state
     }
 
-let private mutationResult prepare state connection = function
-    | Error(MutationUnverified(lastRegistry, error)) ->
+let private mutationFailure state connection = function
+    | MutationUnverified(lastRegistry, error) ->
         let current =
             lastRegistry
             |> Option.map (applyRegistry state connection)
             |> Option.defaultValue state
 
-        withHostFailure error current, Error error
-    | Error(MutationRejected(registry, error)) ->
-        applyRegistry state connection registry, Error error
+        withHostFailure error current, error
+    | MutationRejected(registry, error) ->
+        applyRegistry state connection registry, error
+
+let private mutationResult prepare state connection = function
+    | Error failure ->
+        let next, error = mutationFailure state connection failure
+        next, Error error
     | Ok registry ->
         let next = applyRegistry (prepare state) connection registry
         next, Ok next.LastSnapshot
-
-let private startTerminal config state worktreePath =
-    async {
-        match! ensureHost config state.LastHost with
-        | Error error -> return withHostFailure error state, Error error
-        | Ok connection ->
-            let! result = startTerminalOnHost config connection (WorktreePath.value worktreePath)
-            return result |> Result.map fst |> mutationResult id state connection
-    }
 
 let private safeWithoutHealthyHost config state discovery =
     match discovery with
@@ -153,6 +150,75 @@ let private withoutTarget target snapshot =
             not (samePath (WorktreePath.value tab.Worktree) (WorktreePath.value path))
 
     { Tabs = snapshot.Tabs |> List.filter keep }
+
+let private deliverCommand config attachmentEndpoint command =
+    async {
+        try
+            return! config.SendTerminalCommand attachmentEndpoint command
+        with _ ->
+            return Error "Could not submit the terminal command"
+    }
+
+let private closeStartedTerminal config state connection terminalId =
+    async {
+        let target = OneTerminal terminalId
+        let! result =
+            closeTerminalOnHost config connection (EmbeddedTerminalId.value terminalId)
+
+        return
+            result
+            |> mutationResult (fun current ->
+                { current with
+                    LastSnapshot =
+                        withoutTarget target current.LastSnapshot })
+                state
+                connection
+    }
+
+let private startTerminal config state worktreePath command =
+    async {
+        let validatedCommand =
+            match command with
+            | None -> Ok None
+            | Some value ->
+                validateTerminalCommand value
+                |> Result.map Some
+
+        match validatedCommand with
+        | Error error -> return state, Error error
+        | Ok command ->
+            match! ensureHost config state.LastHost with
+            | Error error -> return withHostFailure error state, Error error
+            | Ok connection ->
+                match! startTerminalOnHost config connection (WorktreePath.value worktreePath) with
+                | Error failure ->
+                    let next, error = mutationFailure state connection failure
+                    return next, Error error
+                | Ok(registry, terminal) ->
+                    let next = applyRegistry state connection registry
+                    let terminalId = EmbeddedTerminalId terminal.SessionId
+
+                    let started =
+                        { Snapshot = next.LastSnapshot
+                          TerminalId = terminalId }
+
+                    match command with
+                    | None -> return next, Ok started
+                    | Some validated ->
+                        match! deliverCommand config terminal.AttachmentEndpoint validated with
+                        | Ok() -> return next, Ok started
+                        | Error deliveryError ->
+                            let! afterCleanup, cleanupResult =
+                                closeStartedTerminal config next connection terminalId
+
+                            let error =
+                                match cleanupResult with
+                                | Ok _ -> deliveryError
+                                | Error cleanupError ->
+                                    $"{deliveryError}; could not close the new embedded terminal: {cleanupError}"
+
+                            return afterCleanup, Error error
+    }
 
 let private closeOnHost config connection = function
     | OneTerminal terminalId -> closeTerminalOnHost config connection (EmbeddedTerminalId.value terminalId)
@@ -237,10 +303,6 @@ let private mutationReserved state mutation =
         state.CleanupReservations
         |> Map.containsKey (cleanupPathKey path))
 
-let private mutate config state = function
-    | TerminalMutation.Start path -> startTerminal config state path
-    | TerminalMutation.Close terminalId -> closeTerminals config state (OneTerminal terminalId)
-
 let internal createWithConfig config =
     let agent =
         MailboxProcessor.Start(fun inbox ->
@@ -256,12 +318,24 @@ let internal createWithConfig config =
                         return! loop (respond reply next.LastSnapshot next)
                     | GetCached reply ->
                         return! loop (respond reply state.LastSnapshot state)
-                    | Mutate(_, reply) when state.Phase = ManagerPhase.Replacing ->
+                    | Start(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
                         return! loop (respond reply (Error replacementInProgressError) state)
-                    | Mutate(mutation, reply) when mutationReserved state mutation ->
+                    | Close(_, reply) when state.Phase = ManagerPhase.Replacing ->
+                        return! loop (respond reply (Error replacementInProgressError) state)
+                    | Start(worktreePath, _, reply)
+                        when mutationReserved state (TerminalMutation.Start worktreePath) ->
                         return! loop (respond reply (Error cleanupInProgressError) state)
-                    | Mutate(mutation, reply) ->
-                        let! next, result = mutate config state mutation
+                    | Close(terminalId, reply)
+                        when mutationReserved state (TerminalMutation.Close terminalId) ->
+                        return! loop (respond reply (Error cleanupInProgressError) state)
+                    | Start(worktreePath, command, reply) ->
+                        let! next, result =
+                            startTerminal config state worktreePath command
+
+                        return! loop (respond reply result next)
+                    | Close(terminalId, reply) ->
+                        let! next, result =
+                            closeTerminals config state (OneTerminal terminalId)
 
                         return! loop (respond reply result next)
                     | ReserveCleanup(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
@@ -354,8 +428,14 @@ let internal runReplacementCoordinator
 let private ask (agent: MailboxProcessor<Message>) build =
     agent.PostAndAsyncReply(build, timeout = 60_000)
 
-let start (Manager(_, agent)) worktreePath =
-    ask agent (fun reply -> Mutate(TerminalMutation.Start worktreePath, reply))
+let private startCore (Manager(_, agent)) worktreePath command =
+    ask agent (fun reply -> Start(worktreePath, command, reply))
+
+let start manager worktreePath =
+    startCore manager worktreePath None
+
+let startWithCommand manager worktreePath command =
+    startCore manager worktreePath (Some command)
 
 let get (Manager(_, agent)) =
     ask agent Get
@@ -365,7 +445,7 @@ let internal getCached (Manager(_, agent)) =
     ask agent GetCached
 
 let close (Manager(_, agent)) terminalId =
-    ask agent (fun reply -> Mutate(TerminalMutation.Close terminalId, reply))
+    ask agent (fun reply -> Close(terminalId, reply))
 
 let private asTask cancellation workflow =
     Async.StartAsTask(workflow, cancellationToken = cancellation)
