@@ -23,6 +23,9 @@ let private maximumResponseBytes = 1_048_576L
 [<Literal>]
 let private maximumTerminalCommandFrameBytes = 16_384
 
+[<Literal>]
+let private terminalCommandSubprotocol = "treemon-command"
+
 type internal TerminalRecord = { SessionId: string; WorktreePath: string; AttachmentEndpoint: string }
 
 type internal RegistrySnapshot = { Revision: int64; Terminals: TerminalRecord list }
@@ -305,6 +308,18 @@ let internal findTerminalById sessionId records =
     |> List.tryFind (fun terminal ->
         String.Equals(terminal.SessionId, sessionId, StringComparison.Ordinal))
 
+let internal confirmTerminalOnHost config manifest sessionId =
+    async {
+        match! listTerminals config manifest with
+        | Error error -> return Error(MutationUnverified(None, error))
+        | Ok registry ->
+            return
+                if findTerminalById sessionId registry.Terminals |> Option.isSome then
+                    Ok registry
+                else
+                    Error(MutationRejected(registry, "TerminalHost did not retain the started terminal after command delivery"))
+    }
+
 let private authoritativeRelist action lastRegistry config manifest requestResult =
     async {
         match! listTerminals config manifest with
@@ -389,7 +404,7 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
             | Error error -> return Error error
             | Ok endpoint ->
                 use socket = new ClientWebSocket()
-                socket.Options.AddSubProtocol("tty")
+                socket.Options.AddSubProtocol terminalCommandSubprotocol
 
                 use cancellation =
                     new CancellationTokenSource(TimeSpan.FromSeconds 5.0)

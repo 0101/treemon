@@ -485,6 +485,9 @@ type private FakeControlHost
     member _.FailNextCloseResponse() =
         lock gate (fun () -> failNextCloseResponse <- true)
 
+    member _.RemoveTerminal sessionId =
+        closeTerminal sessionId |> ignore
+
     member _.CurrentTerminals =
         lock gate (fun () -> terminals)
 
@@ -1362,6 +1365,57 @@ type EmbeddedTerminalControlClientTests() =
 
                 Assert.That(host.StartRequestCount, Is.EqualTo(2))
                 Assert.That(host.CloseRequestCount, Is.EqualTo(1)))
+        }
+
+    [<Test>]
+    member _.``command start fails when the authoritative host drops the new terminal after delivery``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+
+            let config =
+                { managerConfig host noLaunch with
+                    SendTerminalCommand =
+                        fun _ _ ->
+                            async {
+                                let terminal =
+                                    host.CurrentTerminals |> List.last
+
+                                host.RemoveTerminal terminal.SessionId
+                                return Ok()
+                            } }
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "lost-after-delivery"
+
+            let! result =
+                EmbeddedTerminal.startWithCommand
+                    manager
+                    target
+                    "Write-Output should-not-succeed"
+                |> Async.StartAsTask
+
+            let! cached =
+                EmbeddedTerminal.getCached manager
+                |> Async.StartAsTask
+
+            match result with
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        error,
+                        Is.EqualTo(
+                            "TerminalHost did not retain the started terminal after command delivery"
+                        )
+                    )
+
+                    Assert.That(host.CurrentTerminals, Is.Empty)
+                    Assert.That(cached.Tabs, Is.Empty)
+                    Assert.That(host.CloseRequestCount, Is.Zero))
+            | Ok started ->
+                Assert.Fail(
+                    $"A lost terminal was reported as started: {EmbeddedTerminalId.value started.TerminalId}"
+                )
         }
 
     [<Test>]

@@ -198,22 +198,33 @@ let private startTerminal config state worktreePath command =
                         { Snapshot = next.LastSnapshot
                           TerminalId = terminalId }
 
+                    let fail current error =
+                        async {
+                            let! afterCleanup, cleanupResult =
+                                closeOnHost config current connection (OneTerminal terminalId)
+
+                            let message =
+                                match cleanupResult with
+                                | Ok _ -> error
+                                | Error cleanupError ->
+                                    $"{error}; could not close the new embedded terminal: {cleanupError}"
+
+                            return afterCleanup, Error message
+                        }
+
                     match command with
                     | None -> return next, Ok started
                     | Some validated ->
                         match! deliverCommand config terminal.AttachmentEndpoint validated with
-                        | Ok() -> return next, Ok started
-                        | Error deliveryError ->
-                            let! afterCleanup, cleanupResult =
-                                closeOnHost config next connection (OneTerminal terminalId)
-
-                            let error =
-                                match cleanupResult with
-                                | Ok _ -> deliveryError
-                                | Error cleanupError ->
-                                    $"{deliveryError}; could not close the new embedded terminal: {cleanupError}"
-
-                            return afterCleanup, Error error
+                        | Error error -> return! fail next error
+                        | Ok() ->
+                            match! confirmTerminalOnHost config connection terminal.SessionId with
+                            | Ok retainedRegistry ->
+                                let retained = applyRegistry next connection retainedRegistry
+                                return retained, Ok { started with Snapshot = retained.LastSnapshot }
+                            | Error failure ->
+                                let current, error = mutationFailure next connection failure
+                                return! fail current error
     }
 
 let private closeTerminals config state target =

@@ -50,6 +50,8 @@ attachment. Replacing or losing the browser attachment does not replace the shel
 receives the bounded replay and a resize so full-screen applications can redraw. Attachment routing
 is data-plane behavior, not an additional lifecycle state. Output older than the buffer, terminal
 scrollback, and browser-rendered state are not durable.
+The host does not publish a terminal as started until that upstream has delivered its first terminal
+output frame; a bound ttyd TCP port alone is not evidence that PowerShell is ready for input.
 If a paused attachment falls behind the replay window, resume resets and clears the emulator, shows
 a visible omission notice, and then sends the surviving frames instead of silently splicing
 discontinuous output into the existing state.
@@ -100,9 +102,11 @@ unchanged.
 The raw terminal-input boundary rejects blank or control-character-bearing commands and commands
 whose complete UTF-8 ttyd input frame (`0` prefix, command, and carriage return) exceeds 16,384
 bytes, before creating a terminal. It then creates one terminal through the existing lifecycle API
-and submits the validated command through that terminal's authenticated attachment endpoint. If
-command submission fails, Treemon closes that exact new terminal and reports the launch as failed
-rather than leaving an unseeded shell and claiming success.
+and submits the validated command through that terminal's authenticated command-only attachment.
+That attachment skips browser replay and output forwarding, so a short-lived sender cannot race
+shell startup or replay delivery. Treemon then authoritatively relists the registry and reports
+success only while the exact new terminal remains registered. Failed submission or retention closes
+that exact terminal when possible and reports the launch as failed rather than claiming success.
 
 ### Control and discovery
 
@@ -244,9 +248,9 @@ participate in this decision.
 
 Command-capable embedded start retains the exact `TerminalRecord` returned by
 `TerminalHostClient.startTerminalOnHost`, submits an optional command through the existing
-`SendTerminalCommand` function, and returns both the reconciled snapshot and exact started terminal
-ID. The TerminalHost v2 control request remains `{ worktreePath }`; command text never becomes
-lifecycle API input.
+`SendTerminalCommand` function, authoritatively confirms the exact ID after delivery, and returns
+both the reconciled snapshot and exact started terminal ID. The TerminalHost v2 control request
+remains `{ worktreePath }`; command text never becomes lifecycle API input.
 
 Every start — plain or command-bearing — carries that exact terminal ID out to its caller, so the
 browser selects the started terminal by identity. Comparing registry snapshots taken before and
@@ -269,7 +273,10 @@ one-to-many while close and upstream-exit handling remain exact-session operatio
 `TerminalDataPlane` owns only the replay and attachment mailbox, with `createCore` as its focused
 state-machine seam. `TerminalProxy` owns the ttyd/browser WebSocket pumps, HTTP forwarding, and
 attachment endpoint. It and `ControlApi` use one `LoopbackHost` bootstrap for the shared Kestrel
-loopback binding, request-size limit, server-header policy, and dynamic-port discovery.
+loopback binding, request-size limit, server-header policy, and dynamic-port discovery. Startup
+waits for the first ttyd output frame before exposing the attachment endpoint. Browser attachments
+use ttyd's `tty` subprotocol and receive replay; server command attachments use the authenticated
+`treemon-command` subprotocol and are input-only.
 
 Windows process creation uses `CREATE_SUSPENDED`, immediate `AssignProcessToJobObject`, and
 `ResumeThread` in the host process. The Job Object uses kill-on-close without a breakaway policy, so
@@ -502,8 +509,10 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Command delivery after lifecycle start:** normal agent launches reuse the same authenticated
   attachment input boundary as replacement resume. The stable TerminalHost v2 lifecycle protocol
   remains unchanged, the server rejects any complete input frame above the host's mirrored
-  16,384-byte attachment cap before lifecycle start, and failed command delivery closes only the
-  exact new terminal. No chunking or acknowledgement protocol is introduced.
+  16,384-byte attachment cap before lifecycle start, waits for output-backed shell readiness, and
+  confirms the exact registry entry after delivery. The command-only subprotocol skips replay and
+  output forwarding; failed delivery or retention closes only the exact new terminal. No chunking
+  or acknowledgement protocol is introduced.
 - **Background discovery without focus theft:** the client polls the registry even from an empty
   snapshot. Background and CLI launches become attachable without opening or retargeting a user's
   pane.

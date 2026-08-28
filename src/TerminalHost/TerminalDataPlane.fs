@@ -5,9 +5,15 @@ open System.Net.WebSockets
 open System.Text
 open System.Threading
 
+[<RequireQualifiedAccess>]
+type internal TerminalAttachmentMode =
+    | Browser
+    | Command
+
 type private BrowserAttachment =
     { Id: Guid
       Socket: WebSocket
+      Mode: TerminalAttachmentMode
       Initialized: bool
       Paused: bool
       NextSequence: int64 }
@@ -21,7 +27,7 @@ type private DataPlaneState =
       Stopped: bool }
 
 type private DataPlaneMessage =
-    | Attach of WebSocket * AsyncReplyChannel<Guid option>
+    | Attach of TerminalAttachmentMode * WebSocket * AsyncReplyChannel<Guid option>
     | BrowserFrame of
         Guid *
         byte array *
@@ -34,7 +40,7 @@ type private DataPlaneMessage =
 type TerminalDataPlane =
     internal
         { AttachmentEndpoint: string
-          AttachSocket: WebSocket -> Async<Guid option>
+          AttachSocket: TerminalAttachmentMode -> WebSocket -> Async<Guid option>
           AcceptBrowserFrame: Guid -> byte array -> Async<Result<unit, string>>
           DetachSocket: Guid -> Async<unit>
           AcceptUpstreamFrame: byte array -> Async<unit>
@@ -159,7 +165,7 @@ module TerminalDataPlane =
                     let active =
                         { attachment with
                             Initialized = true
-                            Paused = false
+                            Paused = attachment.Mode = TerminalAttachmentMode.Command
                             NextSequence = ReplayBuffer.nextSequence state.Replay }
 
                     return
@@ -218,7 +224,12 @@ module TerminalDataPlane =
                 match TerminalProtocol.parseHandshakeSize frame with
                 | Error error -> return state, Error error
                 | Ok terminalSize ->
-                    return! activateAttachment upstream state attachment terminalSize (initialBrowserFrames state)
+                    let frames =
+                        match attachment.Mode with
+                        | TerminalAttachmentMode.Browser -> initialBrowserFrames state
+                        | TerminalAttachmentMode.Command -> []
+
+                    return! activateAttachment upstream state attachment terminalSize frames
             }
 
     let private sendLiveFrame state sequence (frame: byte array) =
@@ -280,7 +291,7 @@ module TerminalDataPlane =
         async {
             try
                 match message with
-                | Attach(socket, reply) ->
+                | Attach(_, socket, reply) ->
                     do! closeSocket WebSocketCloseStatus.EndpointUnavailable "Terminal data plane unavailable" socket
 
                     return respond reply None state
@@ -325,11 +336,11 @@ module TerminalDataPlane =
         let processMessage _ state message =
             async {
                 match message with
-                | Attach(socket, reply) when state.Stopped ->
+                | Attach(_, socket, reply) when state.Stopped ->
                     do! closeSocket WebSocketCloseStatus.EndpointUnavailable "Terminal session closed" socket
 
                     return respond reply None state
-                | Attach(socket, reply) ->
+                | Attach(mode, socket, reply) ->
                     match state.Attachment with
                     | Some previous ->
                         do! closeSocket WebSocketCloseStatus.NormalClosure "Replaced by a new attachment" previous.Socket
@@ -338,6 +349,7 @@ module TerminalDataPlane =
                     let attachment =
                         { Id = Guid.NewGuid()
                           Socket = socket
+                          Mode = mode
                           Initialized = false
                           Paused = false
                           NextSequence = ReplayBuffer.nextSequence state.Replay }
@@ -382,7 +394,7 @@ module TerminalDataPlane =
         let ask build = ResilientMailbox.ask ReplyTimeoutMilliseconds build mailbox
 
         { AttachmentEndpoint = ""
-          AttachSocket = fun socket -> ask (fun reply -> Attach(socket, reply))
+          AttachSocket = fun mode socket -> ask (fun reply -> Attach(mode, socket, reply))
           AcceptBrowserFrame = fun attachmentId frame -> ask (fun reply -> BrowserFrame(attachmentId, Array.copy frame, reply))
           DetachSocket = fun attachmentId -> ask (fun reply -> Detach(attachmentId, reply))
           AcceptUpstreamFrame = fun frame -> ask (fun reply -> UpstreamFrame(Array.copy frame, reply))
