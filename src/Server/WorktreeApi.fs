@@ -757,13 +757,13 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                 return! action ()
         }
 
-    let withReportedTerminalIntents snapshot =
+    let withTerminalActivity snapshot =
         async {
             let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
             return
                 snapshot
-                |> TerminalSessionActivity.withReportedIntents
+                |> TerminalSessionActivity.withReportedActivity
                     DateTimeOffset.UtcNow
                     (state.SessionStatuses |> Map.values)
         }
@@ -771,7 +771,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
     let terminalMutation operation =
         asyncResult {
             let! snapshot = operation
-            let! enriched = withReportedTerminalIntents snapshot
+            let! enriched = withTerminalActivity snapshot
             return enriched
         }
 
@@ -786,7 +786,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
     let getEmbeddedTerminals () =
         async {
             let! snapshot = EmbeddedTerminal.get embeddedTerminal
-            return! withReportedTerminalIntents snapshot
+            return! withTerminalActivity snapshot
         }
 
     let closeEmbeddedTerminal terminalId =

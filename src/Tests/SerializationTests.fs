@@ -96,13 +96,13 @@ type WrapperTypeSerializationTests() =
             { Tabs =
                 [ { Id = EmbeddedTerminalId "00000000000000000000000000000002"
                     Worktree = WorktreePath @"Q:\code\running"
-                    ReportedIntent = Some "Implementing terminal titles"
+                    ReportedActivity = Some "Implementing terminal titles"
                     Lifecycle =
                         EmbeddedTerminalLifecycle.Running
                             "http://127.0.0.1:61234/" }
                   { Id = EmbeddedTerminalId "00000000000000000000000000000004"
                     Worktree = WorktreePath @"Q:\code\interrupted"
-                    ReportedIntent = None
+                    ReportedActivity = None
                     Lifecycle =
                         EmbeddedTerminalLifecycle.Interrupted
                             "host exited" } ] }

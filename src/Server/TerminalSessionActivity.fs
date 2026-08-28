@@ -94,7 +94,7 @@ let private terminalOrigin (tab: EmbeddedTerminalTab) =
     |> EmbeddedTerminalId.value
     |> TerminalSessionId
 
-let internal withReportedIntents
+let internal withReportedActivity
     (now: DateTimeOffset)
     (sessions: StoredStatus seq)
     (snapshot: EmbeddedTerminalSnapshot)
@@ -104,15 +104,15 @@ let internal withReportedIntents
         |> List.map terminalOrigin
         |> Set.ofList
 
-    let reportedIntents =
+    let reportedActivity =
         sessions
         |> joinOwnedSessions terminalSessionIds
         |> List.groupBy fst
         |> List.choose (fun (terminalSessionId, ownedSessions) ->
             ownedSessions
             |> List.map snd
-            |> CodingToolStatus.representativeReportedIntent now
-            |> Option.map (fun intent -> terminalSessionId, intent))
+            |> CodingToolStatus.representativeActivityText now
+            |> Option.map (fun activity -> terminalSessionId, activity))
         |> Map.ofList
 
     { snapshot with
@@ -120,8 +120,8 @@ let internal withReportedIntents
             snapshot.Tabs
             |> List.map (fun tab ->
                 { tab with
-                    ReportedIntent =
-                        reportedIntents
+                    ReportedActivity =
+                        reportedActivity
                         |> Map.tryFind (terminalOrigin tab) }) }
 
 let private hasNonIdleOwnedSession (snapshot: OwnedSessionSnapshot) =

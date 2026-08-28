@@ -216,9 +216,9 @@ module EmbeddedTerminalId =
 type EmbeddedTerminalTab =
     { Id: EmbeddedTerminalId
       Worktree: WorktreePath
-      /// Display-safe assistant intent from the representative live Copilot session owned by this
-      /// exact terminal. None while no terminal-owned session has reported an intent.
-      ReportedIntent: string option
+      /// Display-safe activity from the representative live Copilot session owned by this exact
+      /// terminal, using the freshest reported intent or session title.
+      ReportedActivity: string option
       Lifecycle: EmbeddedTerminalLifecycle }
 
 type EmbeddedTerminalSnapshot =

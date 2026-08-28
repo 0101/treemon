@@ -181,16 +181,16 @@ let private firstAlternateTerminalId =
 let private secondTerminalId =
     EmbeddedTerminalId "00000000000000000000000000000003"
 
-let private firstTerminalIntent =
+let private firstTerminalActivity =
     "Implementing terminal lifecycle"
 
-let private firstAlternateTerminalIntent =
+let private firstAlternateTerminalActivity =
     "Reviewing host replacement"
 
 let private runningTerminal terminalId path port =
     { Id = terminalId
       Worktree = path
-      ReportedIntent = None
+      ReportedActivity = None
       Lifecycle =
         EmbeddedTerminalLifecycle.Running
             $"http://127.0.0.1:{port}/" }
@@ -198,19 +198,19 @@ let private runningTerminal terminalId path port =
 let private initialTerminalSnapshot =
     { Tabs =
         [ { runningTerminal firstTerminalId firstTerminalPath 61234 with
-                ReportedIntent = Some firstTerminalIntent }
+                ReportedActivity = Some firstTerminalActivity }
           { runningTerminal firstAlternateTerminalId firstTerminalPath 61237 with
-                ReportedIntent = Some firstAlternateTerminalIntent }
+                ReportedActivity = Some firstAlternateTerminalActivity }
           runningTerminal secondTerminalId secondTerminalPath 61235
           { Id = EmbeddedTerminalId "00000000000000000000000000000004"
             Worktree = failedTerminalPath
-            ReportedIntent = None
+            ReportedActivity = None
             Lifecycle =
                 EmbeddedTerminalLifecycle.Interrupted
                     "ttyd exited with code 1" }
           { Id = EmbeddedTerminalId "00000000000000000000000000000005"
             Worktree = WorktreePath "Q:/code/TestProject/feature-stale"
-            ReportedIntent = None
+            ReportedActivity = None
             Lifecycle =
                 EmbeddedTerminalLifecycle.Running
                     "https://example.com/unsafe-terminal" } ] }
@@ -458,10 +458,10 @@ type TerminalPaneDomTests() =
                 Assert.That(
                     tabLabels,
                     Is.EqualTo(
-                        [| firstTerminalIntent
-                           firstAlternateTerminalIntent |])
+                        [| firstTerminalActivity
+                           firstAlternateTerminalActivity |])
                 )
-                Assert.That(selectedLabel, Is.EqualTo(firstTerminalIntent))
+                Assert.That(selectedLabel, Is.EqualTo(firstTerminalActivity))
                 Assert.That(selectedAria, Is.EqualTo("true"))
                 Assert.That(iframeCount, Is.EqualTo(3))
                 Assert.That(activeIframeCount, Is.EqualTo(1))
@@ -476,7 +476,7 @@ type TerminalPaneDomTests() =
         task {
             do! rememberFrames this.Page
 
-            let secondTab = tabFor this.Page firstAlternateTerminalIntent
+            let secondTab = tabFor this.Page firstAlternateTerminalActivity
             do! secondTab.ClickAsync()
             do!
                 secondTab.WaitForAsync(
@@ -485,7 +485,7 @@ type TerminalPaneDomTests() =
                 secondTab.GetAttributeAsync("aria-selected")
             let! mountedAfterClick = framesStillMounted this.Page
 
-            let firstTab = tabFor this.Page firstTerminalIntent
+            let firstTab = tabFor this.Page firstTerminalActivity
             do! secondTab.FocusAsync()
             do! secondTab.PressAsync("ArrowLeft")
             let! firstSelected =
@@ -534,11 +534,11 @@ type TerminalPaneDomTests() =
                 Assert.That(secondSelected, Is.EqualTo("true"))
                 Assert.That(mountedAfterClick, Is.True)
                 Assert.That(firstSelected, Is.EqualTo("true"))
-                Assert.That(focusedLabel, Is.EqualTo(firstTerminalIntent))
+                Assert.That(focusedLabel, Is.EqualTo(firstTerminalActivity))
                 Assert.That(mountedAfterKeyboard, Is.True)
                 Assert.That(recentTabCount, Is.EqualTo(1))
                 Assert.That(selectedFromCard, Is.EqualTo("Terminal 1"))
-                Assert.That(rememberedSelection, Is.EqualTo(firstAlternateTerminalIntent))
+                Assert.That(rememberedSelection, Is.EqualTo(firstAlternateTerminalActivity))
                 Assert.That(selectedCount, Is.EqualTo(0))
                 Assert.That(emptyText, Does.Contain("feature-multidoc"))
                 Assert.That(mountedInEmptyState, Is.True)
@@ -664,7 +664,7 @@ type TerminalPaneDomTests() =
                     }}""")
 
             do!
-                (tabFor this.Page firstTerminalIntent)
+                (tabFor this.Page firstTerminalActivity)
                     .Locator(".terminal-tab-close")
                     .ClickAsync()
             let! _ =
@@ -683,7 +683,7 @@ type TerminalPaneDomTests() =
                     }}""")
 
             do!
-                (tabFor this.Page firstAlternateTerminalIntent)
+                (tabFor this.Page firstAlternateTerminalActivity)
                     .Locator(".terminal-tab-close")
                     .ClickAsync()
             let! _ =
@@ -700,7 +700,7 @@ type TerminalPaneDomTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(closeCalls, Is.EqualTo(2))
-                Assert.That(neighbour, Is.EqualTo(firstAlternateTerminalIntent))
+                Assert.That(neighbour, Is.EqualTo(firstAlternateTerminalActivity))
                 Assert.That(alternatePreserved, Is.True)
                 Assert.That(remainingTabs, Is.EqualTo(0))
                 Assert.That(paneHidden, Is.False)

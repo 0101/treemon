@@ -89,9 +89,10 @@ titles, context usage, and session resume all use this shared state; no session-
   `SessionId` to one exact host-owned terminal. Treemon never infers terminal ownership from the
   worktree path, so unrelated Copilot sessions in the same worktree remain unrelated.
 - The embedded-terminal API uses the bounded live-session projection to label each tab with the
-  representative exact session's reported intent. An active session wins; otherwise the most
-  recently active live session is representative. A missing intent keeps the numbered terminal
-  fallback, and a session title alone is not substituted.
+  representative exact session's freshest display-safe activity. An active session wins; otherwise
+  the most recently active live session is representative. Activity uses the same reported-intent
+  or session-title choice as the worktree card; when neither exists the tab keeps its numbered
+  fallback.
 - `TerminalSessionId` is attribution metadata for exact host-terminal joins. It does not participate
   in status folding, ordering, liveness, representative selection, or the existing worktree
   projection, and it does not change worktree-level resume behavior.
@@ -265,7 +266,7 @@ card or Overview status.
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
 | Resume | Query durable most-recent activity identity, not the bounded live cache or heartbeat recency. |
-| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; a focused terminal module derives exact ownership for tab intents and replacement from bounded current-ID projections, never from worktree inference. |
+| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; a focused terminal module derives exact ownership for tab activity and replacement from bounded current-ID projections, never from worktree inference. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 
@@ -277,7 +278,7 @@ card or Overview status.
 | `src/Extension/reporting/reporting-core.mjs` | Pure message, usage, and background-lifecycle wire mapping. |
 | `src/Server/SessionActivity.fs` | Event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
 | `src/Server/SessionActivityService.fs` | Request validation, synthetic filtering, independent ordering paths, bounded mailbox ingestion, and raw exact-origin queries. |
-| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection for embedded-terminal tab intents and TerminalHost replacement policy. |
+| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection for embedded-terminal tab activity and TerminalHost replacement policy. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
 | `src/Server/SessionActivityStore.fs` | Session persistence including optional terminal origin, post-column query index, idempotent event append, representative queries, and retention. |

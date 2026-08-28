@@ -160,7 +160,7 @@ let private lifecyclePresentation lifecycle =
         "failed", "Interrupted", "!"
 
 let tabLabel index tab =
-    tab.ReportedIntent
+    tab.ReportedActivity
     |> Option.map _.Trim()
     |> Option.filter (String.IsNullOrWhiteSpace >> not)
     |> Option.defaultValue $"Terminal {index + 1}"

@@ -54,7 +54,7 @@ let private interruptSnapshot error snapshot =
 let private tabForRecord (terminal: TerminalHostClient.TerminalRecord) =
     { Id = EmbeddedTerminalId terminal.SessionId
       Worktree = PathUtils.toWorktreePath terminal.WorktreePath
-      ReportedIntent = None
+      ReportedActivity = None
       Lifecycle = EmbeddedTerminalLifecycle.Running terminal.AttachmentEndpoint }
 
 let private reconcileSnapshot resetTabs previousHost currentHost (records: TerminalHostClient.TerminalRecord list) (snapshot: EmbeddedTerminalSnapshot) =

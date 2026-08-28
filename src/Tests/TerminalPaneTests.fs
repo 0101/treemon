@@ -22,7 +22,7 @@ let private thirdOne = terminalId "third-1"
 let private tab terminalId path lifecycle =
     { Id = terminalId
       Worktree = path
-      ReportedIntent = None
+      ReportedActivity = None
       Lifecycle = lifecycle }
 
 let private running terminalId path port =
@@ -38,10 +38,10 @@ let private running terminalId path port =
 type TerminalPaneStateTests() =
 
     [<Test>]
-    member _.``Reported intent replaces the numbered terminal label``() =
+    member _.``Reported activity replaces the numbered terminal label``() =
         let titled =
             { running firstOne first 61231 with
-                ReportedIntent = Some "Investigating terminal title routing" }
+                ReportedActivity = Some "Investigating terminal title routing" }
 
         Assert.Multiple(fun () ->
             Assert.That(
