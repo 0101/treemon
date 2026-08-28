@@ -11,5 +11,5 @@ type BuildScriptTests() =
     [<Test>]
     member _.``native terminal script doubles a single quote in the path``() =
         let result = buildScript @"C:\wt\o'brien"
+        // Exact equality also guards against reintroducing an appended startup command.
         Assert.That(result, Is.EqualTo(@"Set-Location 'C:\wt\o''brien'"))
-        Assert.That(result, Does.Not.Contain(";"), "native terminal startup must not append a command")
