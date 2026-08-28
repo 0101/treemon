@@ -78,7 +78,10 @@ and `tm launch`. A browser need not be open for a CLI or background launch; the 
 terminal until a dashboard attaches later.
 
 Direct dashboard actions that start an agent open and target the terminal pane, selecting the exact
-new terminal. Background and CLI launches never steal dashboard focus. The browser polls the
+new terminal. Repeating the terminal-open or Resume action while that worktree already has a start
+in flight re-targets the pane without issuing a second launch; the in-flight state clears on both
+success and failure, so a rejected launch never wedges the action.
+Background and CLI launches never steal dashboard focus. The browser polls the
 authoritative terminal registry on its normal activity cadence even when its current snapshot is
 empty, so the first background-created terminal becomes visible without a reload.
 
