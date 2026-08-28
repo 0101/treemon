@@ -11,11 +11,8 @@ open Microsoft.AspNetCore.Builder
 open Microsoft.AspNetCore.Http
 open Microsoft.Extensions.Primitives
 
-type private SocketReceive =
-    | Frame of byte array
-    | PeerClosed
-    | MessageTooLarge
-    | ReceiveFailed
+type private SocketReceive = Frame of byte array | PeerClosed | MessageTooLarge | ReceiveFailed
+type private SocketReceiveMode = Buffered of int | Streaming of (byte array -> Async<unit>)
 
 [<RequireQualifiedAccess>]
 module internal TerminalProxy =
@@ -37,52 +34,61 @@ module internal TerminalProxy =
     let internal hideViewportScrollbar (html: string) =
         html.Replace("</head>", HiddenViewportScrollbarStyle + "</head>", StringComparison.OrdinalIgnoreCase)
 
-    let private receiveMessage maximumBytes (socket: WebSocket) =
-        async {
-            let buffer = Array.zeroCreate<byte> 8_192
+    let private receiveMessage mode (socket: WebSocket) =
+        let buffer = Array.zeroCreate<byte> 8_192
 
-            let rec receive chunks total messageType =
-                async {
-                    try
-                        let! result =
-                            socket.ReceiveAsync(ArraySegment<byte>(buffer), CancellationToken.None)
-                            |> Async.AwaitTask
+        let rec receive chunks total messageType frameKind =
+            async {
+                try
+                    let! result =
+                        socket.ReceiveAsync(ArraySegment<byte>(buffer), CancellationToken.None)
+                        |> Async.AwaitTask
 
-                        if result.MessageType = WebSocketMessageType.Close then
-                            return PeerClosed
-                        elif messageType |> Option.exists ((<>) result.MessageType) then
-                            return ReceiveFailed
-                        elif total + result.Count > maximumBytes then
+                    if result.MessageType = WebSocketMessageType.Close then return PeerClosed
+                    elif messageType |> Option.exists ((<>) result.MessageType) then return ReceiveFailed
+                    else
+                        let chunk = buffer.AsSpan(0, result.Count).ToArray()
+
+                        match mode with
+                        | Buffered maximumBytes when total + chunk.Length > maximumBytes ->
                             return MessageTooLarge
-                        else
-                            let chunk = buffer.AsSpan(0, result.Count).ToArray()
+                        | Buffered _ ->
                             let updated = chunk :: chunks
+                            if result.EndOfMessage then return Frame(updated |> List.rev |> Array.concat)
+                            else return! receive updated (total + chunk.Length) (Some result.MessageType) None
+                        | Streaming forward ->
+                            // WebSocket continuations omit ttyd's leading message kind; restore it on each forwarded chunk.
+                            let frame =
+                                match frameKind with
+                                | Some kind when chunk.Length > 0 -> Array.append [| kind |] chunk
+                                | Some _ -> Array.empty
+                                | None -> chunk
 
-                            if result.EndOfMessage then
-                                return updated |> List.rev |> Array.concat |> Frame
+                            if frame.Length > 0 then do! forward frame
+                            if result.EndOfMessage then return Frame Array.empty
                             else
-                                return! receive updated (total + result.Count) (Some result.MessageType)
-                    with _ ->
-                        return ReceiveFailed
-                }
+                                return!
+                                    receive [] 0 (Some result.MessageType)
+                                        (frameKind |> Option.orElseWith (fun () -> Array.tryHead chunk))
+                with _ -> return ReceiveFailed
+            }
 
-            return! receive [] 0 None
-        }
+        receive [] 0 None None
 
-    let private startUpstreamPumpUntilReady plane (upstream: WebSocket) =
+    let private startUpstreamPumpUntilReady (startupTimeout: TimeSpan) plane upstream =
         let ready = TaskCompletionSource<Result<unit, string>>(TaskCreationOptions.RunContinuationsAsynchronously)
+
+        let forward frame =
+            async {
+                do! plane.AcceptUpstreamFrame frame
+                if frame[0] = byte '0' then ready.TrySetResult(Ok()) |> ignore
+            }
 
         let rec pump () =
             async {
-                match! receiveMessage Protocol.MaximumReplayBytes upstream with
-                | Frame frame ->
-                    do! plane.AcceptUpstreamFrame frame
-                    if frame.Length > 0 && frame[0] = byte '0' then
-                        ready.TrySetResult(Ok()) |> ignore
-                    return! pump ()
-                | PeerClosed
-                | MessageTooLarge
-                | ReceiveFailed ->
+                match! receiveMessage (Streaming forward) upstream with
+                | Frame _ -> return! pump ()
+                | _ ->
                     ready.TrySetResult(Error "Terminal upstream closed before the shell became ready")
                     |> ignore
                     do! plane.UpstreamEnded()
@@ -91,16 +97,20 @@ module internal TerminalProxy =
         Async.Start(pump ())
 
         async {
-            try
-                return! ready.Task.WaitAsync(TimeSpan.FromSeconds 5.0) |> Async.AwaitTask
-            with :? TimeoutException ->
+            let! completed =
+                Task.WhenAny(ready.Task :> Task, Task.Delay startupTimeout)
+                |> Async.AwaitTask
+
+            if Object.ReferenceEquals(completed, ready.Task) then
+                return! ready.Task |> Async.AwaitTask
+            else
                 return Error "Timed out waiting for the terminal shell to become ready"
         }
 
     let private runBrowser plane attachmentId (socket: WebSocket) =
         let rec receive () =
             async {
-                match! receiveMessage Protocol.MaximumAttachmentMessageBytes socket with
+                match! receiveMessage (Buffered Protocol.MaximumAttachmentMessageBytes) socket with
                 | Frame frame ->
                     match! plane.AcceptBrowserFrame attachmentId frame with
                     | Ok() -> return! receive ()
@@ -350,13 +360,8 @@ module internal TerminalProxy =
         }
 
     let internal startWithConnector
-        connector
-        allowedOrigins
-        bearerToken
-        sessionId
-        ttydPort
-        onUpstreamEnded
-        =
+        connector startupTimeout allowedOrigins bearerToken
+        sessionId ttydPort onUpstreamEnded =
         async {
             match! connector ttydPort with
             | Error error -> return Error error
@@ -374,7 +379,7 @@ module internal TerminalProxy =
                 else
                     let core = TerminalDataPlane.createCore Protocol.MaximumReplayBytes upstream onUpstreamEnded
 
-                    match! startUpstreamPumpUntilReady core upstream with
+                    match! startUpstreamPumpUntilReady startupTimeout core upstream with
                     | Error error ->
                         do! core.Stop()
                         return Error error
@@ -395,11 +400,7 @@ module internal TerminalProxy =
                                         Stop = fun () -> stopWorkflow.Value |> Async.AwaitTask }
         }
 
-    let start
-        allowedOrigins
-        bearerToken
-        sessionId
-        ttydPort
-        onUpstreamEnded
-        =
-        startWithConnector openUpstream allowedOrigins bearerToken sessionId ttydPort onUpstreamEnded
+    let start startupTimeout allowedOrigins bearerToken
+        sessionId ttydPort onUpstreamEnded =
+        startWithConnector openUpstream startupTimeout allowedOrigins bearerToken
+            sessionId ttydPort onUpstreamEnded

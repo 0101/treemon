@@ -51,7 +51,10 @@ receives the bounded replay and a resize so full-screen applications can redraw.
 is data-plane behavior, not an additional lifecycle state. Output older than the buffer, terminal
 scrollback, and browser-rendered state are not durable.
 The host does not publish a terminal as started until that upstream has delivered its first terminal
-output frame; a bound ttyd TCP port alone is not evidence that PowerShell is ready for input.
+output frame within the terminal startup timeout; a bound ttyd TCP port alone is not evidence that
+PowerShell is ready for input. Upstream output is streamed into protocol-valid chunks, so the
+1 MiB replay capacity is only a retention bound: one larger WebSocket message evicts old replay
+rather than ending the upstream and terminal.
 If a paused attachment falls behind the replay window, resume resets and clears the emulator, shows
 a visible omission notice, and then sends the surviving frames instead of silently splicing
 discontinuous output into the existing state.
@@ -274,9 +277,11 @@ one-to-many while close and upstream-exit handling remain exact-session operatio
 state-machine seam. `TerminalProxy` owns the ttyd/browser WebSocket pumps, HTTP forwarding, and
 attachment endpoint. It and `ControlApi` use one `LoopbackHost` bootstrap for the shared Kestrel
 loopback binding, request-size limit, server-header policy, and dynamic-port discovery. Startup
-waits for the first ttyd output frame before exposing the attachment endpoint. Browser attachments
-use ttyd's `tty` subprotocol and receive replay; server command attachments use the authenticated
-`treemon-command` subprotocol and are input-only.
+waits for the first ttyd output frame using the launcher's configured startup timeout before
+exposing the attachment endpoint. The upstream pump forwards fragmented output incrementally and
+restores ttyd's protocol prefix on continuation chunks instead of buffering a whole WebSocket
+message under the replay limit. Browser attachments use ttyd's `tty` subprotocol and receive replay;
+server command attachments use the authenticated `treemon-command` subprotocol and are input-only.
 
 Windows process creation uses `CREATE_SUSPENDED`, immediate `AssignProcessToJobObject`, and
 `ResumeThread` in the host process. The Job Object uses kill-on-close without a breakaway policy, so
@@ -439,7 +444,8 @@ PowerShell lifecycle helpers, or compatibility shims.
   testable while HTTP/WebSocket hosting shares one loopback-only Kestrel bootstrap with the control
   API, preventing security-sensitive host configuration from drifting.
 - **Raw bounded replay:** reconnect gets useful recent output without persisting terminal content or
-  introducing a terminal-state serializer.
+  introducing a terminal-state serializer. Replay capacity never doubles as an upstream transport
+  limit; large output messages are streamed while old retained frames are evicted.
 - **Explicit replay discontinuities:** replay reads distinguish a complete suffix from one whose
   requested prefix was evicted. Resuming across that gap resets and clears the emulator and shows an
   omission notice before the retained output.
