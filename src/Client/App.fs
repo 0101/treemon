@@ -177,23 +177,23 @@ let removeWorktreeByPath (path: WorktreePath) (model: Model) =
 let terminalAction (wt: WorktreeStatus) =
     if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
 
+let targetEmbeddedTerminalLaunch path model =
+    { model with
+        TerminalPaneOpen = true
+        TerminalPaneTarget = Some path
+        EmbeddedTerminalStarts =
+            model.EmbeddedTerminalStarts
+            |> TerminalPane.setStartState
+                path
+                TerminalPane.TerminalStartState.Starting }
+
 let beginEmbeddedTerminalStart path model =
     let alreadyStarting =
         TerminalPane.isStarting
             path
             model.EmbeddedTerminalStarts
 
-    { model with
-        TerminalPaneOpen = true
-        TerminalPaneTarget = Some path
-        EmbeddedTerminalStarts =
-            if alreadyStarting then
-                model.EmbeddedTerminalStarts
-            else
-                model.EmbeddedTerminalStarts
-                |> TerminalPane.setStartState
-                    path
-                    TerminalPane.TerminalStartState.Starting },
+    targetEmbeddedTerminalLaunch path model,
     alreadyStarting
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
@@ -398,7 +398,6 @@ let update msg model =
     | OpenTerminal path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
     | OpenEmbeddedTerminal path ->
-        let before = model.EmbeddedTerminals
         let updated, alreadyStarting =
             beginEmbeddedTerminalStart path model
 
@@ -411,7 +410,7 @@ let update msg model =
                     worktreeApi.Value.startEmbeddedTerminal
                     path
                     (fun result ->
-                        EmbeddedTerminalStarted(path, before, result))
+                        EmbeddedTerminalStarted(path, result))
                     (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
             Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
         ]
@@ -424,40 +423,28 @@ let update msg model =
                     snapshot
                     model.ActiveEmbeddedTerminals },
         Cmd.none
-    | EmbeddedTerminalStarted(path, before, result) ->
+    | EmbeddedTerminalStarted(path, result) ->
         match result with
-        | Ok snapshot ->
+        | Ok started ->
+            let snapshot = started.Snapshot
             let selections =
                 model.ActiveEmbeddedTerminals
                 |> TerminalPane.reconcileSelections
                     model.EmbeddedTerminals
                     snapshot
 
-            match TerminalPane.startedTerminalId path before snapshot with
-            | Some terminalId ->
-                { model with
-                    EmbeddedTerminals = snapshot
-                    ActiveEmbeddedTerminals =
-                        selections
-                        |> TerminalPane.selectTerminal
-                            terminalId
-                            snapshot
-                    EmbeddedTerminalStarts =
-                        TerminalPane.clearStartState
-                            path
-                            model.EmbeddedTerminalStarts },
-                Cmd.none
-            | None ->
-                { model with
-                    EmbeddedTerminals = snapshot
-                    ActiveEmbeddedTerminals = selections
-                    EmbeddedTerminalStarts =
-                        model.EmbeddedTerminalStarts
-                        |> TerminalPane.setStartState
-                            path
-                            (TerminalPane.TerminalStartState.Failed
-                                "The terminal host did not return the newly started terminal.") },
-                Cmd.none
+            { model with
+                EmbeddedTerminals = snapshot
+                ActiveEmbeddedTerminals =
+                    selections
+                    |> TerminalPane.selectTerminal
+                        started.TerminalId
+                        snapshot
+                EmbeddedTerminalStarts =
+                    TerminalPane.clearStartState
+                        path
+                        model.EmbeddedTerminalStarts },
+            Cmd.none
         | Error error ->
             { model with
                 EmbeddedTerminalStarts =
@@ -669,9 +656,30 @@ let update msg model =
         model, Cmd.OfAsync.perform worktreeApi.Value.openNewTab path SessionResult
 
     | ResumeSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.Value.resumeSession path SessionResult
+        targetEmbeddedTerminalLaunch path model,
+        Cmd.batch [
+            Cmd.OfAsync.either
+                worktreeApi.Value.resumeSession
+                path
+                (fun result -> EmbeddedTerminalStarted(path, result))
+                (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
+            Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
+        ]
 
-    | LaunchCanvasSession scopedKey -> CanvasUpdate.launchCanvasSession scopedKey model
+    | LaunchCanvasSession scopedKey ->
+        match CanvasUpdate.canvasSessionAction scopedKey model with
+        | Some(path, action) ->
+            targetEmbeddedTerminalLaunch path model,
+            Cmd.batch [
+                Cmd.OfAsync.either
+                    worktreeApi.Value.launchAction
+                    { Path = path; Action = action }
+                    (fun result -> EmbeddedTerminalStarted(path, result))
+                    (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
+                Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
+            ]
+        | None ->
+            model, Cmd.none
 
     | SessionResult _ ->
         model, fetchWorktrees ()
@@ -683,14 +691,17 @@ let update msg model =
             let clearAfter =
                 Cmd.ofEffect (fun dispatch ->
                     Fable.Core.JS.setTimeout (fun () -> dispatch (ClearActionCooldown path)) 10_000 |> ignore)
-            { model with ActionCooldowns = model.ActionCooldowns.Add path },
+            { targetEmbeddedTerminalLaunch path model with
+                ActionCooldowns = model.ActionCooldowns.Add path },
             Cmd.batch [
-                Cmd.OfAsync.perform worktreeApi.Value.launchAction { Path = path; Action = action } LaunchActionResult
+                Cmd.OfAsync.either
+                    worktreeApi.Value.launchAction
+                    { Path = path; Action = action }
+                    (fun result -> EmbeddedTerminalStarted(path, result))
+                    (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
+                Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen true (fun _ -> NoOp)
                 clearAfter
             ]
-
-    | LaunchActionResult _ ->
-        model, fetchWorktrees ()
 
     | ClearActionCooldown path ->
         { model with ActionCooldowns = model.ActionCooldowns.Remove path }, Cmd.none

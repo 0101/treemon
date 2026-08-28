@@ -77,8 +77,7 @@ type Msg =
     | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
     | EmbeddedTerminalStarted of
         WorktreePath *
-        before: EmbeddedTerminalSnapshot *
-        Result<EmbeddedTerminalSnapshot, string>
+        Result<EmbeddedTerminalStartResult, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | SelectEmbeddedTerminal of EmbeddedTerminalId
     | CloseEmbeddedTerminal of EmbeddedTerminalId
@@ -106,7 +105,6 @@ type Msg =
     | SetFocusNoRetarget of FocusTarget option
     | ArchiveMsg of ArchiveViews.Msg
     | LaunchAction of path: WorktreePath * action: ActionKind
-    | LaunchActionResult of Result<unit, string>
     | ClearActionCooldown of WorktreePath
     | ResumeSession of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg

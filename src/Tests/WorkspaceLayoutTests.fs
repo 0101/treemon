@@ -341,7 +341,7 @@ type TerminalPaneDomTests() =
                                     WorktreePath.displayName path,
                                     StringComparison.Ordinal))
 
-                        let result: Result<EmbeddedTerminalSnapshot, string> =
+                        let result: Result<EmbeddedTerminalStartResult, string> =
                             match requestedPath with
                             | None ->
                                 Error "Unknown terminal worktree"
@@ -355,7 +355,9 @@ type TerminalPaneDomTests() =
                                         registry.Tabs
                                         @ [ runningTerminal terminalId path 61236 ] }
 
-                                Ok registry
+                                Ok
+                                    { Snapshot = registry
+                                      TerminalId = terminalId }
 
                         route.FulfillAsync(
                             RouteFulfillOptions(

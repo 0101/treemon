@@ -100,17 +100,6 @@ let reconcileSelections before after selections =
         |> Option.map (fun replacement -> path, replacement))
     |> Map.ofList
 
-let startedTerminalId path before after =
-    let previousIds =
-        before.Tabs |> List.map _.Id |> Set.ofList
-
-    after
-    |> tabsForWorktree path
-    |> List.filter (fun tab ->
-        not (Set.contains tab.Id previousIds))
-    |> List.tryLast
-    |> Option.map _.Id
-
 let tryStartState path states =
     tryPathValue path states
 

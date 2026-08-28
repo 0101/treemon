@@ -529,6 +529,8 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` | Isolated host, replacement race, opaque command delivery, plain-shell restart, crash, security, and cleanup coverage |
+| `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API launch-intent routing, exact result identity, post-fork launch ordering, and queued Canvas fallback coverage |
+| `src/Tests/TerminalPaneTests.fs` | Exact server-returned terminal selection and direct Canvas launch routing |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
 | `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |
 

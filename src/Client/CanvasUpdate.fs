@@ -91,7 +91,7 @@ let private revealCanvasDoc
     | Visible -> syncVisibleDocCmd selected
     | Hidden -> Cmd.none
 
-let launchCanvasSession (scopedKey: string) (model: Model) =
+let canvasSessionAction (scopedKey: string) (model: Model) =
     match findWorktree scopedKey model with
     | Some wt ->
         let wtPath = WorktreePath.value wt.Path
@@ -99,10 +99,8 @@ let launchCanvasSession (scopedKey: string) (model: Model) =
             activeVisibleDoc model
             |> Option.map (fun (_, filename) -> CanvasSessionPrompt.forAgentDoc wtPath filename)
             |> Option.defaultValue ""
-        let action = CanvasSession prompt
-        model, Cmd.OfAsync.perform worktreeApi.Value.launchAction { Path = wt.Path; Action = action } LaunchActionResult
-    | None ->
-        model, Cmd.none
+        Some(wt.Path, CanvasSession prompt)
+    | None -> None
 
 let toggleCanvasPane (model: Model) =
     let newState = not model.Canvas.CanvasPaneOpen

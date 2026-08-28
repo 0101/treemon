@@ -52,10 +52,10 @@ let withPort portMaybe fn =
     else
         fn port
 
-let runApi port (fn: IWorktreeApi -> Async<Result<unit, string>>) successMsg =
+let runApi port (fn: IWorktreeApi -> Async<Result<'a, string>>) successMsg =
     tryCallServer port (fun api ->
         match fn api |> Async.RunSynchronously with
-        | Ok() -> printfn $"✓ %s{successMsg}"; 0
+        | Ok _ -> printfn $"✓ %s{successMsg}"; 0
         | Error e -> eprintfn $"Error: %s{e}"; 1)
 
 let sanitizeForTerminal (s: string) =

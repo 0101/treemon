@@ -133,24 +133,6 @@ type TerminalPaneStateTests() =
         )
 
     [<Test>]
-    member _.``A completed start identifies the new terminal within its worktree``() =
-        let before =
-            { Tabs =
-                [ running firstOne first 61231
-                  running secondOne second 61232 ] }
-
-        let after =
-            { Tabs =
-                [ running firstOne first 61231
-                  running secondOne second 61232
-                  running firstTwo first 61233 ] }
-
-        Assert.That(
-            startedTerminalId first before after,
-            Is.EqualTo(Some firstTwo)
-        )
-
-    [<Test>]
     member _.``Closing the active tab selects its same-worktree neighbour``() =
         let before =
             { Tabs =
@@ -340,6 +322,91 @@ let private focusModel : Model =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type TerminalFocusTests() =
+
+    [<Test>]
+    member _.``Completed launch selects the exact server-returned terminal``() =
+        let exact = terminalId "exact-start"
+        let competing = terminalId "competing-start"
+        let snapshot =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                @ [ running exact first 61241
+                    running competing first 61242 ] }
+        let model =
+            { focusModel with
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        first, TerminalStartState.Starting
+                    ] }
+
+        let updated, _ =
+            App.update
+                (EmbeddedTerminalStarted(
+                    first,
+                    Ok
+                        { Snapshot = snapshot
+                          TerminalId = exact }
+                ))
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                activeTerminalId
+                    (Some first)
+                    updated.ActiveEmbeddedTerminals
+                    updated.EmbeddedTerminals,
+                Is.EqualTo(Some exact),
+                "a concurrent terminal appended later must not replace the exact launch result"
+            )
+            Assert.That(
+                tryStartState first updated.EmbeddedTerminalStarts,
+                Is.EqualTo(None)
+            ))
+
+    [<Test>]
+    member _.``Explicit Canvas session builds the direct action launch``() =
+        let filename = "status.html"
+        let doc =
+            { Filename = filename
+              ContentHash = "hash"
+              LastModified = DateTimeOffset.UtcNow
+              OwnerSessionId = None
+              Kind = AgentDoc }
+        let model =
+            { focusModel with
+                Repos =
+                    focusModel.Repos
+                    |> List.map (fun repo ->
+                        { repo with
+                            Worktrees =
+                                repo.Worktrees
+                                |> List.map (fun worktree ->
+                                    if worktree.Path = first then
+                                        { worktree with CanvasDocs = [ doc ] }
+                                    else
+                                        worktree) })
+                Canvas.ActiveCanvasDoc =
+                    Map.ofList [
+                        WorktreePath.value first, filename
+                    ] }
+        let action =
+            CanvasUpdate.canvasSessionAction
+                (WorktreePath.value first)
+                model
+
+        Assert.That(
+            action,
+            Is.EqualTo(
+                Some(
+                    first,
+                    CanvasSession(
+                        CanvasSessionPrompt.forAgentDoc
+                            (WorktreePath.value first)
+                            filename
+                    )
+                )
+            )
+        )
 
     [<Test>]
     member _.``Card focus changes visible terminals without overwriting worktree selections``() =

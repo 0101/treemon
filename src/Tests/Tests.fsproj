@@ -54,6 +54,7 @@
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="WorktreePathResolutionTests.fs" />
+    <Compile Include="WorktreeApiLaunchTests.fs" />
     <Compile Include="SessionManagerSpawnTests.fs" />
     <Compile Include="ActionLaunchSpawnTests.fs" />
     <Compile Include="CommandBuilderTests.fs" />
