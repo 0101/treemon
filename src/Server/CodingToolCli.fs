@@ -15,8 +15,7 @@ type CliInvocation =
 
 // Injection-safety chokepoint: every value interpolated into an Args string MUST be wrapped in
 // single quotes with embedded single quotes doubled, so a hostile value (';', newline, '$(...)')
-// cannot break out of the quoted literal once the shell string is embedded into the pwsh
-// -EncodedCommand script by SessionManager.buildScript.
+// cannot break out of the quoted literal when the shell string is submitted to PowerShell.
 let private escape (s: string) = s.Replace("'", "''")
 
 let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvocation =

@@ -59,7 +59,6 @@
     <Compile Include="CanvasExport.fs" />
     <Compile Include="CanvasShare.fs" />
     <Compile Include="SchedulerState.fs" />
-    <Compile Include="RefreshScheduler.fs" />
     <Compile Include="CardEventLog.fs" />
     <Compile Include="DemoFixture.fs" />
     <Compile Include="TerminalHostProcess.fs" />
@@ -70,6 +69,7 @@
     <Compile Include="TerminalSessionActivity.fs" />
     <Compile Include="EmbeddedTerminal.fs" />
     <Compile Include="TerminalLaunch.fs" />
+    <Compile Include="RefreshScheduler.fs" />
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="OverviewSnapshotCapture.fs" />
     <Compile Include="IdiomorphScript.fs" />

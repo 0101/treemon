@@ -58,7 +58,8 @@ type RefreshGitTaskTests() =
             agent.Post(UpdateBaseBranch(testRepoId, "missing"))
 
             let services =
-                { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
+                { SchedulerServices.LaunchTerminal =
+                    fun _ _ -> async { return Error "Unexpected terminal launch" }
                   ActivityStore = None
                   MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json"))
                   AutoSyncStore = Server.AutoSyncStore.create (Path.Combine(tempDir, "auto-sync.json")) }
@@ -99,7 +100,8 @@ type RefreshGitTaskTests() =
             agent.Post(UpdateBaseBranch(testRepoId, "main"))
 
             let services =
-                { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
+                { SchedulerServices.LaunchTerminal =
+                    fun _ _ -> async { return Error "Unexpected terminal launch" }
                   ActivityStore = None
                   MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json"))
                   AutoSyncStore = Server.AutoSyncStore.create (Path.Combine(tempDir, "auto-sync.json")) }

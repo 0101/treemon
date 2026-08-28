@@ -482,7 +482,10 @@ let main args =
                         AutoSyncStore.create
 
                 let schedulerServices: RefreshScheduler.SchedulerServices =
-                    { SessionAgent = sessionAgent
+                    { LaunchTerminal =
+                        TerminalLaunch.launch
+                            sessionAgent
+                            embeddedTerminal.Value
                       ActivityStore = Some store
                       MergedPrStore = mergedStore
                       AutoSyncStore = autoSyncStore }

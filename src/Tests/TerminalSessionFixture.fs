@@ -98,7 +98,7 @@ let private encodedCommandLine =
 
 let internal isOwnedPowerShellCommand (worktreePath: string) (commandLine: string) =
     let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
-    let expectedScriptPrefix = buildScript nativePath None
+    let expectedScriptPrefix = buildScript nativePath
     let matched = encodedCommandLine.Match(commandLine)
 
     if not matched.Success then

@@ -52,11 +52,27 @@ let withPort portMaybe fn =
     else
         fn port
 
-let runApi port (fn: IWorktreeApi -> Async<Result<'a, string>>) successMsg =
+let writeLaunchResult
+    (writeOutput: string -> unit)
+    (writeError: string -> unit)
+    (result: Result<EmbeddedTerminalStartResult, string>)
+    =
+    match result with
+    | Ok _ ->
+        writeOutput "✓ Agent launched in embedded terminal"
+        0
+    | Error error ->
+        writeError $"Error: {error}"
+        1
+
+let runLaunchApi
+    port
+    (fn: IWorktreeApi -> Async<Result<EmbeddedTerminalStartResult, string>>)
+    =
     tryCallServer port (fun api ->
-        match fn api |> Async.RunSynchronously with
-        | Ok _ -> printfn $"✓ %s{successMsg}"; 0
-        | Error e -> eprintfn $"Error: %s{e}"; 1)
+        fn api
+        |> Async.RunSynchronously
+        |> writeLaunchResult (printfn "%s") (eprintfn "%s"))
 
 let sanitizeForTerminal (s: string) =
     Regex.Replace(s, @"[\x00-\x1F\x7F]", "")
@@ -137,15 +153,19 @@ let launchCmd =
                             eprintfn $"Error: %s{e}"
                             1
                         | Ok() ->
-                            runApi port (fun api -> api.launchSession { Path = wtPath; Prompt = metaPrompt }) "Session launched"
+                            runLaunchApi
+                                port
+                                (fun api -> api.launchSession { Path = wtPath; Prompt = metaPrompt })
                 | Choice2Of2 action ->
-                    runApi port (fun api -> api.launchAction { Path = wtPath; Action = action }) "Action launched"
+                    runLaunchApi
+                        port
+                        (fun api -> api.launchAction { Path = wtPath; Action = action })
             | _ ->
                 eprintfn "Error: Provide exactly one of: --prompt-file, --fix-pr, --fix-build, or --create-pr"
                 1)
 
     command "launch" {
-        description "Launch a coding agent in a worktree terminal tab"
+        description "Launch a coding agent in a new embedded terminal"
 
         inputs (
             option<string> "--path" |> desc "Worktree path" |> required,

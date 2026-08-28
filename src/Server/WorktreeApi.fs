@@ -733,7 +733,7 @@ let internal worktreeApiWithLaunch
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
     let autoSyncDependencies =
-        RefreshScheduler.autoSyncDependencies agent sessionAgent activityStore autoSyncStore
+        RefreshScheduler.autoSyncDependencies agent launchTerminal activityStore autoSyncStore
 
     /// Ends auto-sync bookkeeping for a worktree: disabling the preference or deleting the worktree
     /// leaves nothing for the accepted-revision record to suppress.
@@ -789,28 +789,6 @@ let internal worktreeApiWithLaunch
             return enriched
         }
 
-    let embeddedLaunchResult operation =
-        async {
-            match! operation with
-            | Ok (TerminalLaunch.LaunchResult.Embedded started) ->
-                return Ok started
-            | Ok TerminalLaunch.LaunchResult.Native ->
-                return Error "Terminal launch returned a native terminal for an embedded operation"
-            | Error error ->
-                return Error error
-        }
-
-    let nativeLaunchResult operation =
-        async {
-            match! operation with
-            | Ok TerminalLaunch.LaunchResult.Native ->
-                return Ok()
-            | Ok (TerminalLaunch.LaunchResult.Embedded _) ->
-                return Error "Terminal launch returned an embedded terminal for a native operation"
-            | Error error ->
-                return Error error
-        }
-
     let terminalStart operation =
         asyncResult {
             let! started = operation
@@ -822,7 +800,7 @@ let internal worktreeApiWithLaunch
 
     let startEmbedded intent wtPath =
         launchTerminal intent wtPath
-        |> embeddedLaunchResult
+        |> TerminalLaunch.requireEmbedded
 
     let startEmbeddedCommand wtPath command =
         startEmbedded
@@ -1071,7 +1049,7 @@ let internal worktreeApiWithLaunch
                   launchTerminal
                       TerminalLaunch.Intent.OpenNativeTab
                       wtPath
-                  |> nativeLaunchResult)
+                  |> TerminalLaunch.requireNative)
           launchAction = fun req ->
               withValidatedPath req.Path "launchAction" (fun () ->
                   async {

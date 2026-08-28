@@ -25,6 +25,24 @@ let private mapResult mapping operation =
         return result |> Result.map mapping
     }
 
+let internal requireEmbedded operation =
+    async {
+        match! operation with
+        | Ok (LaunchResult.Embedded started) -> return Ok started
+        | Ok LaunchResult.Native ->
+            return Error "Terminal launch returned a native terminal for an embedded operation"
+        | Error error -> return Error error
+    }
+
+let internal requireNative operation =
+    async {
+        match! operation with
+        | Ok LaunchResult.Native -> return Ok()
+        | Ok (LaunchResult.Embedded _) ->
+            return Error "Terminal launch returned an embedded terminal for a native operation"
+        | Error error -> return Error error
+    }
+
 let internal launchWith backends intent worktreePath =
     match intent with
     | Intent.OpenNativeTerminal ->

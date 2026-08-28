@@ -87,7 +87,9 @@ let private closedPr = prInfo PrState.ClosedUnmerged
 /// overlapping inside the durable-record layer, which the guard serializes in production, and
 /// `AutoSyncMechanicalTests` covers the guard itself.
 let private withAcceptedRecords agent store deliver =
-    { autoSyncDependencies agent (SessionManager.createAgent ()) None (Some store) with
+    let unexpectedLaunch _ _ = async { return Error "Unexpected terminal launch" }
+
+    { autoSyncDependencies agent unexpectedLaunch None (Some store) with
         ReadPrStatus = fun _ -> async { return Some NoPr }
         ReadOwnership = fun _ -> async { return Free(IdleSession "session-a") }
         TryBeginOperation = fun _ -> async { return true }
@@ -1604,6 +1606,47 @@ type AutoSyncDeliveryTests() =
             |> Async.RunSynchronously
 
         Assert.That(accepted, Is.False)
+
+    [<Test>]
+    member _.``AutoSync fallback uses embedded command launch and rejects failed command delivery``() =
+        let path =
+            Path.Combine("test", $"auto-sync-launch-{Guid.NewGuid():N}")
+            |> WorktreePath
+        let promptText = "Sync with upstream/main."
+        // The injected launch callback is the async effect whose exact intent is under test.
+        let mutable observedLaunch = None
+
+        let launch intent requestedPath =
+            async {
+                observedLaunch <- Some(intent, requestedPath)
+                return Error "command delivery failed"
+            }
+
+        let dependencies =
+            autoSyncDependencies (createAgent ()) launch None None
+
+        let accepted =
+            dependencies.Deliver
+                { WorktreePath = path
+                  Target = NoOpenSession None
+                  Prompt = promptText }
+            |> Async.RunSynchronously
+
+        let expectedCommand =
+            CodingToolCli.build None (CodingToolCli.Interactive promptText)
+            |> _.AsShellString
+
+        Assert.Multiple(fun () ->
+            Assert.That(accepted, Is.False)
+
+            match observedLaunch with
+            | Some(TerminalLaunch.Intent.StartEmbeddedCommand command, requestedPath) ->
+                Assert.That(command, Is.EqualTo(expectedCommand))
+                Assert.That(requestedPath, Is.EqualTo(path))
+            | Some(intent, _) ->
+                Assert.Fail($"Expected an embedded command launch, got {intent}")
+            | None ->
+                Assert.Fail("Expected the AutoSync fallback to invoke the terminal launch boundary"))
 
     [<Test>]
     member _.``Delivery failure is accepted for queued retry without fallback launch``() =

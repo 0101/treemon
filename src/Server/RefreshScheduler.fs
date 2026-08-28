@@ -9,7 +9,10 @@ open Shared
 open Server.SchedulerState
 
 type SchedulerServices =
-    { SessionAgent: SessionManager.SessionAgent
+    { LaunchTerminal:
+        TerminalLaunch.Intent ->
+        WorktreePath ->
+        Async<Result<TerminalLaunch.LaunchResult, string>>
       ActivityStore: SessionActivityStore.SessionActivityStore option
       MergedPrStore: MergedPrStore.Store
       AutoSyncStore: AutoSyncStore.Store }
@@ -63,15 +66,27 @@ let internal reloadGitData (agent: MailboxProcessor<StateMsg>) (repoId: RepoId) 
 
 let internal autoSyncDependencies
     (agent: MailboxProcessor<StateMsg>)
-    (sessionAgent: SessionManager.SessionAgent)
+    (launchTerminal:
+        TerminalLaunch.Intent ->
+        WorktreePath ->
+        Async<Result<TerminalLaunch.LaunchResult, string>>)
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (autoSyncStore: AutoSyncStore.Store option)
     : AutoSync.TriggerDependencies =
     let launch worktreePath text =
-        let provider = CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
-        let command =
-            CodingToolCli.build provider (CodingToolCli.Interactive text)
-        SessionManager.launchAction sessionAgent worktreePath command.AsShellString
+        async {
+            let provider = CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
+            let command =
+                CodingToolCli.build provider (CodingToolCli.Interactive text)
+
+            let! result =
+                launchTerminal
+                    (TerminalLaunch.Intent.StartEmbeddedCommand command.AsShellString)
+                    worktreePath
+                |> TerminalLaunch.requireEmbedded
+
+            return result |> Result.map ignore
+        }
 
     // Fixture mode runs without a durable store: nothing is recorded, so every observation of a
     // behind worktree is a first one and the operation guard remains the only serialization.
@@ -414,7 +429,7 @@ let internal executeTask
             AutoSync.triggerInBackground
                 (autoSyncDependencies
                     agent
-                    services.SessionAgent
+                    services.LaunchTerminal
                     services.ActivityStore
                     (Some services.AutoSyncStore))
                 repoRoot

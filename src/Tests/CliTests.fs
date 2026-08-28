@@ -38,6 +38,49 @@ type ResolvePortTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type LaunchCommandTests() =
+
+    [<Test>]
+    member _.``successful embedded launch reports terminal placement``() =
+        // Writer callbacks are the side-effect boundary under test, so their observations are local mutation.
+        let mutable output = []
+        let mutable errors = []
+        let result =
+            Ok
+                { Snapshot = EmbeddedTerminalSnapshot.empty
+                  TerminalId = EmbeddedTerminalId "terminal-1" }
+
+        let exitCode =
+            writeLaunchResult
+                (fun line -> output <- line :: output)
+                (fun line -> errors <- line :: errors)
+                result
+
+        Assert.Multiple(fun () ->
+            Assert.That(exitCode, Is.Zero)
+            Assert.That(output, Is.EqualTo([ "✓ Agent launched in embedded terminal" ]))
+            Assert.That(errors, Is.Empty))
+
+    [<Test>]
+    member _.``failed embedded launch reports the server error``() =
+        // Writer callbacks are the side-effect boundary under test, so their observations are local mutation.
+        let mutable output = []
+        let mutable errors = []
+
+        let exitCode =
+            writeLaunchResult
+                (fun line -> output <- line :: output)
+                (fun line -> errors <- line :: errors)
+                (Error "command delivery failed")
+
+        Assert.Multiple(fun () ->
+            Assert.That(exitCode, Is.EqualTo(1))
+            Assert.That(output, Is.Empty)
+            Assert.That(errors, Is.EqualTo([ "Error: command delivery failed" ])))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type FormatPrTests() =
 
     let basePr =
