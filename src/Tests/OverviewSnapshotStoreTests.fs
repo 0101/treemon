@@ -29,7 +29,7 @@ let private snapshot timestamp taskCount agentCount : OverviewSnapshot =
 let private buckets path =
     use connection = openConnection path
     use command = connection.CreateCommand()
-    command.CommandText <- "SELECT bucket FROM overview_snapshots ORDER BY bucket;"
+    command.CommandText <- "SELECT bucket FROM overview_snapshots_v2 ORDER BY bucket;"
     use reader = command.ExecuteReader()
 
     let rec read acc =
@@ -102,7 +102,7 @@ type OverviewSnapshotStoreTests() =
                 path
                 """
 CREATE TRIGGER fail_overview_snapshot_prune
-BEFORE DELETE ON overview_snapshots
+BEFORE DELETE ON overview_snapshots_v2
 BEGIN
     SELECT RAISE(ABORT, 'forced overview snapshot prune failure');
 END;
@@ -208,10 +208,10 @@ END;
                 { Timestamp = anchor
                   Tasks =
                     [ { Kind = TaskBucketKind.Planned; Count = 1 }
-                      { Kind = TaskBucketKind.Queued; Count = 2 }
-                      { Kind = TaskBucketKind.InProgress; Count = 3 }
+                      { Kind = TaskBucketKind.Underway; Count = 2 }
                       { Kind = TaskBucketKind.Blocked; Count = 4 }
                       { Kind = TaskBucketKind.Done; Count = 5 }
+                      { Kind = TaskBucketKind.ToLand; Count = 3 }
                       { Kind = TaskBucketKind.Unattended; Count = 6 } ]
                   Agents =
                     [ { Kind = AgentGroupKind.Activity CurrentActivity.Investigating; Count = 1 }
@@ -285,6 +285,11 @@ CREATE TABLE overview_history_session_bounds (
     first_observed_at TEXT NOT NULL,
     last_observed_at TEXT NOT NULL
 );
+CREATE TABLE overview_snapshots (
+    bucket INTEGER PRIMARY KEY,
+    tasks TEXT NOT NULL,
+    agents TEXT NOT NULL
+);
 INSERT INTO session_liveness(session_id, ts)
 VALUES ('session-1', '{anchor:O}');
 INSERT INTO task_snapshots(ts, tasks)
@@ -295,6 +300,8 @@ INSERT INTO overview_history_staging(generation, bucket, tasks, agents)
 VALUES (0, {anchor.ToUnixTimeSeconds()}, '[]', '[]');
 INSERT OR REPLACE INTO overview_history_session_bounds(session_id, first_observed_at, last_observed_at)
 VALUES ('session-1', '{anchor:O}', '{anchor:O}');
+INSERT INTO overview_snapshots(bucket, tasks, agents)
+VALUES ({anchor.ToUnixTimeSeconds()}, '[{{"Kind":"Queued","Count":2}},{{"Kind":"InProgress","Count":3}}]', '[]');
 """
 
             let first = OverviewSnapshotStore path
@@ -314,13 +321,16 @@ VALUES ('session-1', '{anchor:O}', '{anchor:O}');
                   "overview_history_rows"
                   "overview_history_state"
                   "overview_history_staging"
-                  "overview_history_session_bounds" ]
+                  "overview_history_session_bounds"
+                  // Pre-restructure snapshots serialized the removed Queued/InProgress case names,
+                  // so the whole table is dropped rather than read back into the current DU.
+                  "overview_snapshots" ]
 
             Assert.Multiple(fun () ->
                 Assert.That(schemaNames path "table" legacyTables, Is.Empty)
                 Assert.That(
-                    schemaNames path "table" [ "session_status"; "activity_events"; "overview_snapshots" ],
-                    Is.EqualTo [ "activity_events"; "overview_snapshots"; "session_status" ]
+                    schemaNames path "table" [ "session_status"; "activity_events"; "overview_snapshots_v2" ],
+                    Is.EqualTo [ "activity_events"; "overview_snapshots_v2"; "session_status" ]
                 )
                 Assert.That(scalarInt path "SELECT count(*) FROM session_status;", Is.EqualTo 1)
                 Assert.That(scalarInt path "SELECT count(*) FROM activity_events;", Is.EqualTo 1)

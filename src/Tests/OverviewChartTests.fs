@@ -33,8 +33,8 @@ type OverviewChartTests() =
         { Timestamp = ts; Tasks = [ { TaskCount.Kind = kind; Count = count } ]; Agents = [] }
 
     // Index of a bucket in the canonical task order the chart aligns Counts to.
-    // Planned, Queued, In progress, Blocked, Done, Unattended.
-    let doneIdx = 4
+    // Planned, Underway, Blocked, Done, To land, Unattended.
+    let doneIdx = 3
 
     [<Test>]
     member _.``empty history yields no points`` () =

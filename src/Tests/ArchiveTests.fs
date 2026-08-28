@@ -359,7 +359,7 @@ type ArchiveE2ETests() =
             "Path":{{"WorktreePath":"Q:/test/{branch}"}},"Branch":"{branch}",
             "LastCommitMessage":"test commit","LastCommitTime":"2026-02-16T22:30:00+00:00",
             "Beads":{{"Open":0,"InProgress":0,"Blocked":0,"Closed":0}},
-            "Planning":{{"Planned":0,"Queued":0,"Loose":0}},
+            "Planning":{{"Planned":0,"Queued":0,"Loose":0,"InProgress":0,"Blocked":0,"Closed":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"AutoSyncEnabled":false,"IsDirty":false,
             "HasDiff":false,"WorkMetrics":{workMetrics},"HasActiveSession":false,

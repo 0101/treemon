@@ -190,7 +190,8 @@ type OverviewSnapshotSerializationTests() =
         { Timestamp = DateTimeOffset(2026, 7, 14, 9, 30, 0, TimeSpan.Zero)
           Tasks =
             [ { Kind = TaskBucketKind.Planned; Count = 3 }
-              { Kind = TaskBucketKind.InProgress; Count = 2 }
+              { Kind = TaskBucketKind.Underway; Count = 2 }
+              { Kind = TaskBucketKind.ToLand; Count = 5 }
               { Kind = TaskBucketKind.Unattended; Count = 1 } ]
           Agents =
             [ { Kind = AgentGroupKind.Activity CurrentActivity.Executing; Count = 4 }

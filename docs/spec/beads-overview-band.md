@@ -8,8 +8,11 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 
 - One glance answers "what is the swarm of agents doing, and what needs *me*?" without scanning
   every worktree card.
-- Surface the novel **started-vs-awaiting** split: work an agent is already executing (**Queued**)
+- Surface the novel **started-vs-awaiting** split: work an agent has already started (**Underway**)
   vs. work where planning is done and the agent waits for the user's go-ahead (**Planned**).
+- Separate work the *machine* still owns from work that is now the *user's* move: a worktree that has
+  closed out its whole plan surfaces as **To land**, not buried in the same bucket as partial
+  progress.
 - Show **live agent activity** (which skill each active agent is running) as an aggregate.
 - Reuse the existing single per-worktree beads collection point and the Canvas toggle/persistence
   patterns — no second collection, no duplicated plumbing.
@@ -53,7 +56,7 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
      session that has not reported usage yet (including a row migrated without a snapshot) falls back
      to the solid circle. The last known usage survives a Treemon restart for sessions restored into
      the live window. Idle is a second track sharing the Agents row.
-  2. **Tasks** — one solid **bar** per status (**Planned · Queued · In progress · Blocked · Done ·
+  2. **Tasks** — one solid **bar** per status (**Planned · Underway · Blocked · Done · To land ·
      Unattended**), width ∝ count on **one true shared linear scale** (no cap, no fade). Each column
      keeps its label width so a short bar still shows its full label.
 - Task bar width is computed from `Overview.Scale`: the largest bucket fills a fixed max width and
@@ -61,7 +64,7 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
   remains visible. This dynamic width is the documented inline `width`/CSS-variable exception to the
   CSS-classes-only rule.
 - **Palette (Catppuccin Mocha, exact):**
-  - Tasks — Planned `#fab387` · Queued `#89dceb` · In progress `#a6e3a1` · Blocked `#f38ba8` · Done `#cba6f7` · Unattended `#7f849c`.
+  - Tasks — Planned `#fab387` · Underway `#a6e3a1` · Blocked `#f38ba8` · Done `#cba6f7` · To land `#89dceb` · Unattended `#7f849c`.
   - Activities — Investigating `#89dceb` · Planning `#cba6f7` · Executing `#a6e3a1` · Reviewing `#f5c2e7` · PR `#fab387` · Working `#ff0000`.
   - Waiting — `#f9e2af`, matching the card's `WaitingForUser` dot.
   - Idle — `#89b4fa`, matching the card's `Idle` dot. No two co-occurring agent
@@ -81,16 +84,22 @@ the Canvas pane. Investigation: `.agents/beads-panel-investigation.md` (see its 
 | Bucket | Definition |
 |---|---|
 | **Planned** | Open tasks under an **open** feature (planning done, awaiting go-ahead) **plus** loose open tasks (no/closed/blocked parent). |
-| **Queued** | Open tasks under an **in_progress** feature (execution underway, next-up) **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree they fold into **Unattended**. |
-| **In progress** | Tasks with status `in_progress` (`Beads.InProgress`) **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree they fold into **Unattended**. |
-| **Blocked** | Tasks with status `blocked` (`Beads.Blocked`). |
-| **Done** | Σ closed **issues** (any type) across **non-archived** worktrees (`Beads.Closed` where `not IsArchived`). Naturally bounded — a worktree's `.beads/beads.db` is not committed, so its closed issues drop out when the worktree is merged/deleted. Only filter is `not IsArchived`. |
-| **Unattended** | `In progress` + `Queued` tasks whose worktree has **no active agent** (`CodingTool` = `Idle` or `NoSession`) — likely stale beads status nobody is working. A single muted catch-all, trailing Done. |
+| **Underway** | All task work an agent has started: non-feature issues with status `in_progress` (`Planning.InProgress`) **plus** open tasks under an **in_progress** feature (`Planning.Queued`, execution underway, next-up) — counted only **on a worktree with an active agent** (`CodingTool` = `Working` or `WaitingForUser`). On an inactive worktree it folds into **Unattended**. Feature containers never count as task units. |
+| **Blocked** | Non-feature issues with status `blocked` (`Planning.Blocked`) — an **explicitly declared** status, never inferred. A task merely waiting on an unmet dependency is still `open` and counts as **Planned** (or **Underway**), because `blocks` edges are deliberately ignored (see decision (e)). |
+| **Done** | Σ closed non-feature issues on **non-archived** worktrees that still have task work left (`Planning.Closed` where `not IsArchived` and the worktree is **not finished**). Naturally bounded — a worktree's `.beads/beads.db` is not committed, so its closed tasks drop out when the worktree is merged/deleted. |
+| **To land** | Σ closed non-feature issues on **non-archived**, **finished** worktrees — those with no planned, queued, loose, in-progress, or blocked non-feature issue. Feature containers do not keep an otherwise-complete worktree out of this bucket. Independent of agent state: a finished worktree lands here whether or not a session is live. |
+| **Unattended** | **Underway** work whose worktree has **no active agent** (`CodingTool` = `Idle` or `NoSession`) — likely stale beads status nobody is working. A single muted catch-all, trailing To land. |
+
+**Done** and **To land** are the two halves of a worktree's closed tasks: mutually exclusive per
+worktree, so they always sum to Σ `Planning.Closed`. **Underway** and **Unattended** are likewise the
+active/inactive halves of Σ (`Planning.Queued` + `Planning.InProgress`). Both bucket the same underlying
+work; only the placement differs.
 
 The **Planned/Queued/Loose** split derives from the **parent-child dependency graph + feature
 status**: for each open task, find its parent feature (parent-child edge) and read that feature's
 status — `open` → Planned, `in_progress` → Queued, none/`closed`/`blocked` → Loose. Loose is a
-distinct server-side bucket for fidelity but folds into **Planned** for display (decision #6).
+distinct server-side bucket for fidelity but folds into **Planned** for display (decision #6);
+Queued folds into **Underway** alongside `Planning.InProgress`.
 
 ### Live agent activity
 
@@ -206,8 +215,8 @@ activity is **derived** from the skill via the pure Shared classifier (no separa
 
 ### Domain changes (`src/Shared/Types.fs`)
 
-- `BeadsPlanning { Planned; Queued; Loose }` (+ `zero`), new field
-  `Planning: BeadsPlanning` on `WorktreeStatus`.
+- `BeadsPlanning { Planned; Queued; Loose; InProgress; Blocked; Closed }` (+ `zero`) is carried by
+  `WorktreeStatus.Planning`.
 - `CurrentActivity` DU (`Investigating | Planning | Executing | Reviewing | PR | Working`) +
   `Activity.classify : string -> CurrentActivity`; Waiting is an overview activity group derived
   from `CodingToolStatus.WaitingForUser`, not from skill classification.
@@ -224,18 +233,20 @@ the solution compiling (no compat shims, per house rules).
 
 - Aggregate with the shared `src/Shared/OverviewData.fs`
   (`OverviewData.aggregate : RepoWorktrees list -> Overview`) folds every **non-archived** worktree →
-  task buckets (Planned = Σ Planned+Loose, Queued and InProgress only when the worktree has
-  `CodingTool = Working` or `WaitingForUser`, inactive Queued/InProgress folded into Unattended,
-  Blocked, Done = Σ Closed) + agent groups (each open `WorktreeStatus.Sessions` entry is classified
+  task buckets (all feature-free: Planned = Σ Planned+Loose; Underway = Σ Queued+InProgress but only when the worktree
+  has `CodingTool` = `Working` or `WaitingForUser`, with inactive Underway work folded into
+  Unattended; Blocked; Closed split into Done and To land by whether the worktree still has open,
+  in-progress or blocked work) + agent groups (each open `WorktreeStatus.Sessions` entry is classified
   from its own status and skill via `OverviewData.agentGroupOf`; one worktree can therefore contribute
   sessions to several groups, while an empty session list / `NoSession` contributes none) + `Scale`
   (the largest bucket count — the one true shared linear denominator). **Archived
   worktrees are excluded from the entire roll-up** (every task bucket and every agent group), so
   archiving a worktree drops all of its contributions at once. Empty buckets/groups are omitted
-  (never a `0`); both lists come back in canonical order, with Unattended trailing Done. The result
+  (never a `0`); both lists come back in canonical order, with To land after Done and Unattended
+  trailing both. The result
   `Overview` carries `Tasks: TaskBucket list` / `Agents: AgentGroup list` / `Scale: int`
-  (`TaskBucketKind` is `[<RequireQualifiedAccess>]` to keep its case names — `Done`, `Blocked`,
-  `InProgress` — from colliding with `BeadsSummary` field labels and other DU cases). **Input contract:** pass the un-split `RepoWorktrees` shape (see decision (f))
+  (`TaskBucketKind` is `[<RequireQualifiedAccess>]` to keep its case names — `Done`, `Blocked` —
+  from colliding with `BeadsSummary` field labels and other DU cases). **Input contract:** pass the un-split `RepoWorktrees` shape (see decision (f))
   — not the client `RepoModel`.
 - The band is native **Feliz with CSS classes**, with the documented exception that each task bar
   uses a computed inline width or CSS variable for its proportional scale. Toggle mirrors Canvas:
@@ -291,7 +302,8 @@ the solution compiling (no compat shims, per house rules).
 Authoritative list is "Decisions locked" in `.agents/beads-panel-investigation.md`. Key ones:
 band is chrome-less and dashboard-scoped; aggregate-only; agent **circles** + task **true-scale
 bars**; empty categories omitted; **Planned vs Queued** = open vs in_progress parent feature; Loose →
-Planned; **Done** = Σ closed; **archived worktrees excluded from the whole roll-up** (every task
+Planned and Queued → **Underway**; closed issues split **Done vs To land** on whether the worktree
+still has work left; **archived worktrees excluded from the whole roll-up** (every task
 bucket and every agent group); clickable group columns with drill-down delegated to
 `docs/spec/overview-drilldown.md`; reuse the single `getBeadsData`
 call site; running skill and persisted per-session context usage from the existing session scan.
@@ -303,8 +315,9 @@ call site; running skill and persisted per-session context usage from the existi
   (single source, no new spawn).
 - (c) **No keyboard shortcut** — the band is toggled by its `ctrl-btn` only (Canvas's `C` is
   deliberately not mirrored; deferred).
-- (d) **`FeaturesOpen` / `FeaturesWip` are dropped** — the band never displays feature counts, so
-  `BeadsPlanning` carries only `{ Planned; Queued; Loose }` (no computed-but-dead fields). The
+- (d) **Feature containers are excluded from every task bucket** — the band displays task work, so
+  `BeadsPlanning` carries `{ Planned; Queued; Loose; InProgress; Blocked; Closed }` for non-feature
+  issues while `BeadsSummary` remains the feature-inclusive card summary. The
   classifier still reads each task's parent-feature status to bucket it accurately; it just emits no
   standalone feature counts. The **Planned-vs-Queued** count must be exact — it is the feature's
   core signal.
@@ -336,8 +349,14 @@ call site; running skill and persisted per-session context usage from the existi
   report `None`.
 - `review` and `focused-review:review` both classify as Reviewing.
 - There is no per-card `act-*` stripe; card activity remains the existing coding-tool status dot.
-- In-progress and Queued task counts require an active agent and otherwise fold into the muted
-  Unattended bucket; Planned, Blocked, and Done are unaffected.
+- Underway task counts require an active agent and otherwise fold into the muted Unattended bucket;
+  Planned, Blocked, Done and To land are unaffected by agent state.
+- The `To land` split reads **only beads state**, never PR state. `WorktreeStatus.Pr` is available but
+  deliberately unused: membership would then flap on the slower, network-bound PR refresh. PR detail
+  belongs in the drill-down, not the predicate.
+- `To land` counts **closed tasks**, like every other bar, so it stays on the one shared linear scale.
+  It answers "how much finished work is waiting", not "how many worktrees need me" — the drill-down
+  member list answers the latter.
 
 ## Key Files
 

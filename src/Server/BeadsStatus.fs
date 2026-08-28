@@ -22,16 +22,17 @@ type PlanningIssue =
 let private eqCI (a: string) (b: string) =
     not (isNull a) && String.Equals(a, b, StringComparison.OrdinalIgnoreCase)
 
-/// Pure classifier: partitions OPEN, non-feature issues into Planned/Queued/Loose by the status
-/// of their DIRECT parent-child parent when that parent is a feature (ONE hop, not transitive).
-/// This is the feature's core signal, so the open-vs-in_progress parent distinction must be exact.
-/// Features themselves are containers, never subjects: the spec buckets "open tasks under a
-/// feature", and display folds Loose into Planned, so counting an open feature would over-count.
+/// Pure classifier: projects non-feature issues for the Overview task buckets. Open issues are
+/// partitioned into Planned/Queued/Loose by the status of their DIRECT parent-child parent when
+/// that parent is a feature (ONE hop, not transitive); other statuses are counted directly.
+/// Features themselves are containers, never task units.
 module Planning =
 
     let [<Literal>] private FeatureType = "feature"
     let [<Literal>] private StatusOpen = "open"
     let [<Literal>] private StatusInProgress = "in_progress"
+    let [<Literal>] private StatusBlocked = "blocked"
+    let [<Literal>] private StatusClosed = "closed"
 
     /// Status of an issue's parent feature via one parent-child hop, or None when there is no
     /// parent, the parent is missing from the set, or the parent is not a feature.
@@ -41,7 +42,8 @@ module Planning =
         |> Option.filter (fun parent -> eqCI parent.IssueType FeatureType)
         |> Option.map _.Status
 
-    /// Partition OPEN, non-feature issues by their direct parent-feature status:
+    /// Project non-feature issues into feature-free task counts. Open issues are partitioned by
+    /// their direct parent-feature status:
     ///   open feature parent        => Planned
     ///   in_progress feature parent => Queued
     ///   no parent / closed|blocked feature / non-feature parent => Loose
@@ -49,12 +51,18 @@ module Planning =
         let byId = issues |> List.map (fun i -> i.Id, i) |> Map.ofList
 
         issues
-        |> List.filter (fun issue -> eqCI issue.Status StatusOpen && not (eqCI issue.IssueType FeatureType))
+        |> List.filter (fun issue -> not (eqCI issue.IssueType FeatureType))
         |> List.fold (fun acc issue ->
-            match parentFeatureStatus byId issue with
-            | Some status when eqCI status StatusOpen -> { acc with Planned = acc.Planned + 1 }
-            | Some status when eqCI status StatusInProgress -> { acc with Queued = acc.Queued + 1 }
-            | _ -> { acc with Loose = acc.Loose + 1 })
+            match issue.Status with
+            | status when eqCI status StatusOpen ->
+                match parentFeatureStatus byId issue with
+                | Some parentStatus when eqCI parentStatus StatusOpen -> { acc with Planned = acc.Planned + 1 }
+                | Some parentStatus when eqCI parentStatus StatusInProgress -> { acc with Queued = acc.Queued + 1 }
+                | _ -> { acc with Loose = acc.Loose + 1 }
+            | status when eqCI status StatusInProgress -> { acc with InProgress = acc.InProgress + 1 }
+            | status when eqCI status StatusBlocked -> { acc with Blocked = acc.Blocked + 1 }
+            | status when eqCI status StatusClosed -> { acc with Closed = acc.Closed + 1 }
+            | _ -> acc)
             BeadsPlanning.zero
 
 /// Parse one issues.jsonl line into the lightweight model. The parent-child parent is resolved
@@ -108,8 +116,8 @@ let parseIssues (content: string) : PlanningIssue list =
         if line.Length = 0 then None else parseLine line)
     |> Array.toList
 
-/// Status BeadsSummary counting ALL issue types by status (features included, unlike the planning
-/// split). Closed feeds the band's Done bucket downstream.
+/// Card-level BeadsSummary counting ALL issue types by status. The Overview band instead consumes
+/// the feature-free Planning projection.
 let summarize (issues: PlanningIssue list) : BeadsSummary =
     let count status = issues |> List.filter (fun i -> eqCI i.Status status) |> List.length
     { Open = count "open"
@@ -130,9 +138,9 @@ let getBeadsIssueList (dbPath: string) =
             return "[]"
     }
 
-/// Reads .beads/issues.jsonl and derives BOTH the status summary (all issue types by status) and
-/// the planning split (open non-feature tasks by parent-feature status) from a SINGLE parse — no
-/// `bd` spawn, no SQLite dependency. Missing OR empty file => (zero, zero), never an exception.
+/// Reads .beads/issues.jsonl and derives BOTH the card summary (all issue types by status) and the
+/// feature-free Overview task projection from a SINGLE parse — no `bd` spawn, no SQLite dependency.
+/// Missing OR empty file => (zero, zero), never an exception.
 ///
 /// FRESHNESS: issues.jsonl is beads' canonical JSONL export, auto-flushed after CRUD, so it can
 /// lag the live beads.db by up to the flush interval. We read it as-is and accept that lag
