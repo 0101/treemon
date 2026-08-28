@@ -230,18 +230,6 @@ type TerminalPaneStateTests() =
                 Is.EqualTo(None)
             ))
 
-    [<Test>]
-    member _.``Interrupted tabs keep polling enabled for host recovery``() =
-        let interrupted =
-            { Tabs =
-                [ tab
-                      firstOne
-                      first
-                      (EmbeddedTerminalLifecycle.Interrupted
-                          "host exited") ] }
-
-        Assert.That(hasLiveTabs interrupted, Is.True)
-
     [<TestCase("http://127.0.0.1:61234/", true)>]
     [<TestCase("http://127.0.0.1:61234/client?arg=value", true)>]
     [<TestCase("https://127.0.0.1:61234/", false)>]
@@ -362,6 +350,38 @@ type TerminalFocusTests() =
                 tryStartState first updated.EmbeddedTerminalStarts,
                 Is.EqualTo(None)
             ))
+
+    [<Test>]
+    member _.``First polled terminal remains background state until the user opens the pane``() =
+        let discovered =
+            { Tabs = [ running firstOne first 61231 ] }
+        let model =
+            { focusModel with
+                TerminalPaneOpen = false
+                TerminalPaneTarget = None
+                EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+                ActiveEmbeddedTerminals = Map.empty }
+
+        let updated, cmd =
+            App.update
+                (EmbeddedTerminalSnapshotChanged discovered)
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.EmbeddedTerminals, Is.EqualTo(discovered))
+            Assert.That(updated.TerminalPaneOpen, Is.False)
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(None))
+            Assert.That(updated.FocusedElement, Is.EqualTo(model.FocusedElement))
+            Assert.That(updated.Repos, Is.EqualTo(model.Repos))
+            Assert.That(
+                activeTerminalId
+                    (Some first)
+                    updated.ActiveEmbeddedTerminals
+                    updated.EmbeddedTerminals,
+                Is.EqualTo(Some firstOne),
+                "the discovered terminal should be attachable when its worktree is selected"
+            )
+            Assert.That(cmd, Is.Empty))
 
     [<Test>]
     member _.``Explicit Canvas session builds the direct action launch``() =

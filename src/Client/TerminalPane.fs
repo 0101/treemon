@@ -122,9 +122,6 @@ let selectedWorktree targetWorktree focusedElement =
         | Some (Card scopedKey) -> Some (WorktreePath scopedKey)
         | _ -> None)
 
-let hasLiveTabs snapshot =
-    not (List.isEmpty snapshot.Tabs)
-
 let safeEndpoint (endpoint: string) =
     let prefix = "http://127.0.0.1:"
 

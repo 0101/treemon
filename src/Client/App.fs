@@ -22,6 +22,12 @@ let fetchWorktrees () =
         (fun r -> DataLoaded (r, System.DateTimeOffset.Now))
         DataFailed
 
+let fetchEmbeddedTerminals (api: Lazy<IWorktreeApi>) =
+    Cmd.OfAsync.perform
+        api.Value.getEmbeddedTerminals
+        ()
+        EmbeddedTerminalSnapshotChanged
+
 let fetchSyncStatus () =
     Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
 
@@ -116,10 +122,7 @@ let init () =
         fetchSyncStatus ()
         Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp)
         Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes
-        Cmd.OfAsync.perform
-            worktreeApi.Value.getEmbeddedTerminals
-            ()
-            EmbeddedTerminalSnapshotChanged
+        fetchEmbeddedTerminals worktreeApi
     ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
@@ -482,11 +485,7 @@ let update msg model =
             | Error _ -> EmbeddedTerminalCloseFailed)
             (fun _ -> EmbeddedTerminalCloseFailed)
     | EmbeddedTerminalCloseFailed ->
-        model,
-        Cmd.OfAsync.perform
-            worktreeApi.Value.getEmbeddedTerminals
-            ()
-            EmbeddedTerminalSnapshotChanged
+        model, fetchEmbeddedTerminals worktreeApi
     | HideTerminalPane ->
         { model with TerminalPaneOpen = false },
         Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen false (fun _ -> NoOp)
@@ -577,14 +576,10 @@ let update msg model =
                     OverviewHistoryRequestInFlight = Some request }
             | None -> model
 
-        let terminalCmd =
-            if TerminalPane.hasLiveTabs model.EmbeddedTerminals then
-                Cmd.OfAsync.perform
-                    worktreeApi.Value.getEmbeddedTerminals
-                    ()
-                    EmbeddedTerminalSnapshotChanged
-            else
-                Cmd.none
+        // The registry is authoritative even when the browser currently knows no terminals.
+        // Background and CLI launches can create the first tab, so discovery must stay on the
+        // normal activity cadence without opening or retargeting the pane.
+        let terminalCmd = fetchEmbeddedTerminals worktreeApi
 
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
         Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd; terminalCmd ]
