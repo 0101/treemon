@@ -424,6 +424,14 @@ content-addressed bundles, runtime-lock process, tombstones, leases, concurrent 
 legacy protocol migration, or live process-state migration. It does not retain a Node runtime,
 PowerShell lifecycle helpers, or compatibility shims.
 
+## Verification
+
+Run `npm run test:embedded-launch-routing` to build and execute the isolated launch-routing harness.
+It exercises every agent-bearing entry point, prints bearer-redacted raw host registry JSON and raw
+copilot-recorder JSON for each route, verifies native HWND preservation and exact failed-delivery
+rollback with no AutoSync acceptance, and removes only its exact fixture terminals, processes,
+ports, and state.
+
 ## Decisions
 
 - **One separately running F# host:** ordinary Treemon restarts remain control-plane events while
@@ -567,6 +575,7 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus real proxy command delivery, control rejection, UTF-8 frame boundaries, replacement, crash, security, and cleanup coverage |
 | `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
+| `src/Tests/EmbeddedLaunchEndToEndTests.fs`, `src/TestAgentRecorder`, and `scripts/verify-embedded-launch-routing.ps1` | Reproducible isolated real-host launch matrix, exact argv recorder, raw route evidence, forced-delivery rollback, native HWND preservation, and exact cleanup |
 | `src/Tests/TerminalPaneTests.fs` | Exact server-returned terminal selection and direct Canvas launch routing |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
 | `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |
