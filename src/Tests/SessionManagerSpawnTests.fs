@@ -104,10 +104,35 @@ type SessionManagerSpawnTests() =
         |> fun result -> assertOk result "spawnTerminal should return Ok"
 
         let hwnd = runAsync (getActiveSessions a) |> Map.find testPathStr
+        let windowsBeforeFocus = Server.Win32.listWindowsTerminalWindows () |> Set.ofList
+
+        let shellsBeforeFocus =
+            match runAsync (ownedPowerShellProcessIds testPathStr) with
+            | Ok pids -> Set.ofList pids
+            | Error message ->
+                Assert.Fail($"Failed to inspect fixture PowerShell processes: {message}")
+                Set.empty
+
+        Assert.Multiple(fun () ->
+            Assert.That(windowsBeforeFocus, Does.Contain(hwnd))
+            Assert.That(shellsBeforeFocus, Is.Not.Empty))
 
         focusSession a testPath
         |> runAsync
         |> fun result -> assertOk result "focusSession should return Ok"
+
+        let windowsAfterFocus = Server.Win32.listWindowsTerminalWindows () |> Set.ofList
+
+        let shellsAfterFocus =
+            match runAsync (ownedPowerShellProcessIds testPathStr) with
+            | Ok pids -> Set.ofList pids
+            | Error message ->
+                Assert.Fail($"Failed to inspect fixture PowerShell processes: {message}")
+                Set.empty
+
+        Assert.Multiple(fun () ->
+            Assert.That(windowsAfterFocus, Is.EqualTo(windowsBeforeFocus))
+            Assert.That(shellsAfterFocus, Is.EqualTo(shellsBeforeFocus)))
 
         openNewTab a testPath
         |> runAsync

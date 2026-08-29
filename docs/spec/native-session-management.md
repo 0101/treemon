@@ -25,7 +25,7 @@
 
 ### Terminal Button (`>` on card)
 - **No tracked session**: spawns `wt.exe --window new new-tab -d <path>`, HWND tracked by SessionManager
-- **Tracked session exists**: `SetForegroundWindow` to bring window to foreground
+- **Tracked session exists**: activates that exact HWND through the focus sequence below
 - Single button — no separate launch/focus/kill buttons on the card
 
 ### Native New Tab (`+` on card)
@@ -35,7 +35,11 @@ window and asks `wt.exe` to add one plain PowerShell tab in the worktree directo
 Resume, contextual actions, background fallbacks, and `tm launch` do not use this path.
 
 ### Focus / Kill
-- `focusSession` calls `SetForegroundWindow(hwnd)` with ALT keypress workaround for foreground lock
+- `focusSession` restores a minimized tracked window, temporarily attaches to the current foreground
+  thread, and uses `SetForegroundWindow` plus `SwitchToThisWindow` to activate the exact HWND.
+- When Windows reports no foreground owner, there is no competing HWND to verify. In that state, a
+  completed switch request against a still-valid tracked HWND is accepted; when another foreground
+  window exists, failure to activate the target is reported.
 - `killSession` sends `WM_CLOSE` to the specific window (not `Process.Kill`, which would kill ALL WT windows)
 
 ### Persistence
@@ -61,7 +65,9 @@ Resume, contextual actions, background fallbacks, and `tm launch` do not use thi
 4. New HWND = diff between before/after sets (200-300ms typical latency)
 
 ### Win32 P/Invoke (`Win32.fs`)
-`EnumWindows`, `SetForegroundWindow`, `GetWindowThreadProcessId`, `IsWindow`, `GetClassName`, `keybd_event`, `PostMessage` (WM_CLOSE), `ShowWindow`, `BringWindowToTop`
+`EnumWindows`, `GetForegroundWindow`, `SetForegroundWindow`, `AttachThreadInput`,
+`GetWindowThreadProcessId`, `GetCurrentThreadId`, `IsWindow`, `IsIconic`, `ShowWindowAsync`,
+`SwitchToThisWindow`, `GetClassName`, and `PostMessage` (WM_CLOSE).
 
 ### Server State
 `Map<string, nativeint>` in a `MailboxProcessor` (`SessionManager.fs`). HWNDs are validated on each
@@ -76,7 +82,9 @@ API call. The mailbox owns native spawn, focus, new-tab, kill, and persistence o
 ## Decisions
 
 - **One window per worktree** — HWNDs are reliable identifiers, tab indices are not
-- **keybd_event ALT for focus** — simplest reliable workaround for Windows foreground lock (3 lines, no thread attachment)
+- **Foreground-thread attachment plus switch fallback** — attach only while requesting foreground,
+  always detach afterward, and ask Windows to switch to the exact tracked HWND. This avoids depending
+  on synthetic ALT input, which is unavailable on a detached input desktop.
 - **WM_CLOSE for kill** — all WT windows share one process; `Process.Kill` would terminate ALL windows
 - **Explicit `new-tab` subcommand** — `wt.exe --window new new-tab -d "path"` required; implicit default silently drops `-d`
 - **CreateNoWindow for launcher** — wt.exe launcher is just IPC; hiding its console avoids a flash

@@ -208,6 +208,18 @@ let private replyError (msg: SessionMsg) (sessions: Map<string, nativeint>) (ex:
 let private pathOf (wtPath: WorktreePath) =
     WorktreePath.value wtPath |> PathUtils.normalizePath
 
+let internal focusTrackedSession focusWindow path (sessions: Map<string, nativeint>) =
+    match sessions |> Map.tryFind path with
+    | Some hwnd ->
+        let result =
+            if focusWindow hwnd then
+                Ok()
+            else
+                Error "Failed to activate tracked terminal window"
+
+        result, sessions
+    | None -> Error "No active session for this worktree", sessions
+
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     async {
         match msg with
@@ -231,18 +243,9 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
         | Focus(wtPath, reply) ->
             let path = pathOf wtPath
             let validated = validateSessions sessions
-
-            match validated |> Map.tryFind path with
-            | Some hwnd ->
-                if Win32.focusWindow hwnd then
-                    reply.Reply(Ok())
-                else
-                    reply.Reply(Error "SetForegroundWindow failed")
-
-                return validated
-            | None ->
-                reply.Reply(Error "No active session for this worktree")
-                return validated
+            let result, unchanged = focusTrackedSession Win32.focusWindow path validated
+            reply.Reply(result)
+            return unchanged
 
         | Kill(wtPath, reply) ->
             let path = pathOf wtPath

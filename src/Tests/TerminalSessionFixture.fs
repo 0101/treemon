@@ -210,7 +210,7 @@ let private requestSessionClosure (agent: SessionAgent) =
             |> Async.Ignore
     }
 
-let private remainingOwnedProcessIds worktreePath =
+let internal ownedPowerShellProcessIds worktreePath =
     async {
         let! processes = ownedPowerShellProcesses worktreePath
 
@@ -230,7 +230,7 @@ let private closeTrackedSessions environment =
         let! fallback = stopOwnedPowerShellProcesses worktreePath
         do! requestSessionClosure environment.Agent
         let! remainingSessions = getActiveSessions environment.Agent
-        let! remainingProcesses = remainingOwnedProcessIds worktreePath
+        let! remainingProcesses = ownedPowerShellProcessIds worktreePath
 
         return
             match fallback, remainingProcesses, remainingSessions.IsEmpty with
