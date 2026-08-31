@@ -89,6 +89,30 @@ let internal queryOwnedSessions
 let private terminalOrigin (tab: EmbeddedTerminalTab) =
     tab.Id |> EmbeddedTerminalId.value |> TerminalSessionId
 
+let internal tryFindLiveTerminalId
+    (now: DateTimeOffset)
+    (worktreePath: WorktreePath)
+    (copilotSessionId: SessionId)
+    (sessions: StoredStatus seq)
+    (snapshot: EmbeddedTerminalSnapshot)
+    : EmbeddedTerminalId option =
+    let runningTerminals =
+        snapshot.Tabs
+        |> List.choose (fun tab ->
+            match tab.Lifecycle with
+            | EmbeddedTerminalLifecycle.Running _ when tab.Worktree = worktreePath ->
+                Some(terminalOrigin tab, tab.Id)
+            | _ -> None)
+        |> Map.ofList
+
+    sessions
+    |> Seq.filter (fun session -> session.WorktreePath = worktreePath)
+    |> joinOwnedSessions (runningTerminals |> Map.keys |> Set.ofSeq)
+    |> effectiveOwnedSessionStates now
+    |> List.tryFind (fun session -> session.CopilotSessionId = copilotSessionId)
+    |> Option.bind (fun session ->
+        runningTerminals |> Map.tryFind session.TerminalSessionId)
+
 let internal withReportedActivity
     (now: DateTimeOffset)
     (sessions: StoredStatus seq)

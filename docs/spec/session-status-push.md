@@ -95,7 +95,9 @@ titles, context usage, and session resume all use this shared state; no session-
   fallback.
 - `TerminalSessionId` is attribution metadata for exact host-terminal joins. It does not participate
   in status folding, ordering, liveness, representative selection, or the existing worktree
-  projection, and it does not change worktree-level resume behavior.
+  projection. Resume uses it only after selecting the durable target session: if that exact session
+  is already live in a running terminal, the existing terminal is returned instead of launching a
+  duplicate process.
 
 ### Context usage, resume, and restart
 
@@ -265,8 +267,8 @@ card or Overview status.
 | Persistence | Store latest session state plus idempotent accepted events in SQLite WAL. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
-| Resume | Query durable most-recent activity identity, not the bounded live cache or heartbeat recency. |
-| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; a focused terminal module derives exact ownership for tab activity and replacement from bounded current-ID projections, never from worktree inference. |
+| Resume | Query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
+| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; a focused terminal module derives exact ownership for tab activity, Resume idempotency, and replacement from bounded current-ID projections, never from worktree inference. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 

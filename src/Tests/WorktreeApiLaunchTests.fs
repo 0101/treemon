@@ -42,6 +42,20 @@ let private startResult path id =
                         $"http://127.0.0.1:41001/{EmbeddedTerminalId.value id}/" } ] }
       TerminalId = id }
 
+let private liveSession now path terminalId sessionId : SessionActivityStore.StoredStatus =
+    { SessionId = SessionActivity.SessionId sessionId
+      TerminalSessionId =
+        terminalId
+        |> EmbeddedTerminalId.value
+        |> SessionActivity.TerminalSessionId
+        |> Some
+      WorktreePath = path
+      Provider = CodingToolProvider.CopilotCli
+      Status = SessionActivity.emptyStatus
+      UpdatedAt = now
+      LastSeen = now
+      ContextUsageAt = None }
+
 let private createApi
     root
     worktreePath
@@ -106,6 +120,50 @@ let private writePostForkMarkerScript repoRoot =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type WorktreeApiLaunchTests() =
+
+    [<Test>]
+    member _.``Resume finds the terminal already running the exact session``() =
+        let now = DateTimeOffset.UtcNow
+        let path = WorktreePath "C:/wt/resume"
+        let existingId =
+            terminalId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let existing = startResult path (EmbeddedTerminalId.value existingId)
+
+        let result =
+            TerminalSessionActivity.tryFindLiveTerminalId
+                now
+                path
+                (SessionActivity.SessionId "copilot-session")
+                [ liveSession
+                      now
+                      path
+                      existingId
+                      "copilot-session" ]
+                existing.Snapshot
+
+        Assert.That(result, Is.EqualTo(Some existingId))
+
+    [<Test>]
+    member _.``Resume does not reuse a terminal owned by a different session``() =
+        let now = DateTimeOffset.UtcNow
+        let path = WorktreePath "C:/wt/resume"
+        let existingId =
+            terminalId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let existing = startResult path (EmbeddedTerminalId.value existingId)
+
+        let result =
+            TerminalSessionActivity.tryFindLiveTerminalId
+                now
+                path
+                (SessionActivity.SessionId "target-session")
+                [ liveSession
+                      now
+                      path
+                      existingId
+                      "different-session" ]
+                existing.Snapshot
+
+        Assert.That(result, Is.EqualTo None)
 
     [<Test>]
     member _.``Worktree API selects typed launch operations and preserves exact embedded results``() =

@@ -1066,9 +1066,39 @@ let internal worktreeApiWithLaunch
                               activityStore
                               |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
-                      return!
+                      let start () =
                           startEmbeddedCommand wtPath inv.AsShellString
                           |> terminalStart
+
+                      match sessionId with
+                      | None -> return! start ()
+                      | Some targetSessionId ->
+                          let! snapshot = EmbeddedTerminal.get embeddedTerminal
+                          let! state =
+                              agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                          let sessions =
+                              state.SessionStatuses |> Map.values |> Seq.toList
+
+                          let now = DateTimeOffset.UtcNow
+
+                          match
+                              TerminalSessionActivity.tryFindLiveTerminalId
+                                  now
+                                  wtPath
+                                  (SessionActivity.SessionId targetSessionId)
+                                  sessions
+                                  snapshot
+                          with
+                          | Some terminalId ->
+                              return
+                                  Ok
+                                      { Snapshot =
+                                          snapshot
+                                          |> TerminalSessionActivity.withReportedActivity
+                                              now
+                                              sessions
+                                        TerminalId = terminalId }
+                          | None -> return! start ()
                   })
           sendCanvasMessage = fun request ->
               withValidatedPathValue request.WorktreePath "sendCanvasMessage" CanvasMessageResult.Error (fun () ->
