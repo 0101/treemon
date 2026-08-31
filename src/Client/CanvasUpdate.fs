@@ -271,9 +271,9 @@ let archiveCanvasDocResult (scopedKey: string) (filename: string) (result: Resul
 /// The two clipboard formats written on a successful share (see `buildClipboardPayload`).
 type ClipboardPayload =
     { /// `text/html` — a titled `<a>` so rich targets (Teams, Slack, Outlook, Gmail, Word) render a
-      /// hyperlink whose visible text is the doc title, hiding the long SAS URL.
+      /// hyperlink whose visible text is the doc title.
       Html: string
-      /// `text/plain` — the raw SAS URL, for plain targets (the VS Code editor, a terminal, Notepad).
+      /// `text/plain` — the raw viewer URL, for plain targets (the VS Code editor, a terminal, Notepad).
       Text: string }
 
 /// Escape the four characters that would otherwise break the rich `<a href="…">…</a>` — used for
@@ -306,7 +306,7 @@ let canvasDocDiskPath (worktreePath: WorktreePath) (filename: string) =
 /// user activation / an active document, both of which can be lost across the share network round-trip;
 /// the permission may be revoked; or the API/`ClipboardItem` may be unavailable, which throws
 /// synchronously). Every one of those paths dispatches an `Error` so the success banner can correct its
-/// "link copied" claim instead of lying (F6). `payload.Text` is the raw SAS URL, threaded into the
+/// "link copied" claim instead of lying (F6). `payload.Text` is the raw viewer URL, threaded into the
 /// result so a failed copy can still surface a manually-copyable link.
 let private writeClipboardCmd (scopedKey: string) (filename: string) (payload: ClipboardPayload) : Cmd<Msg> =
     Cmd.ofEffect (fun dispatch ->
@@ -429,7 +429,7 @@ let shareCanvasDocResult (scopedKey: string) (filename: string) (result: Result<
 
 /// Banner text for a *settled* clipboard write after a successful share (Decision #10). A landed write
 /// confirms the copy ("Shared — link copied"); a rejected write drops the false "copied" claim, tells
-/// the user the link is ready, and surfaces the raw SAS URL as selectable text so they can still copy
+/// the user the link is ready, and surfaces the raw viewer URL as selectable text so they can still copy
 /// it by hand. Pure so the copied-vs-manual text is unit-testable without a browser clipboard.
 let clipboardResultNotice (url: string) (outcome: Result<unit, string>) : string =
     match outcome with

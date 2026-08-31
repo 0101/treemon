@@ -33,11 +33,21 @@
 
 ### Configuration Store
 
-Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DIR` when set, for tests). `src/Server/GlobalConfig.fs` is the sole owner of that file — a single JSON store fronted by typed accessors, with these invariants:
+Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DIR` when set, for tests). `src/Server/GlobalConfig.fs` owns all runtime access to that file — a single JSON store fronted by typed accessors. Out-of-band operator edits are made only while Treemon is not writing the file. The store has these invariants:
 
-- **Single serialized writer, atomic on disk.** Every mutation funnels through one in-process lock and writes via a temp-file-then-replace; no write bypasses the lock, so concurrent updates can't interleave or leave a partially written file.
+- **Single serialized runtime writer, atomic on disk.** Every server mutation funnels through one in-process lock and writes via a temp-file-then-replace, so concurrent runtime updates can't interleave or leave a partially written file.
 - **Never destroy data.** An unparseable `config.json` is backed up to a timestamped `*.corrupt-<ts>` sibling before a fresh object is started, and each write touches only its own named keys — every unrelated key is left intact.
 - **Typed accessors over one store.** Watched roots (with the missing-vs-empty distinction the startup resolver depends on — see Multi-Repo above), canvas pane open/position, collapsed repos, last-viewed hashes, and the editor command/name reader are thin wrappers over the same locked store.
+
+### Loopback Request Boundary
+
+- `HttpSecurity.csrfGuard` fronts the complete Fable.Remoting API and every state-changing canvas
+  and session-activity POST route. Safe GET, HEAD, and OPTIONS requests pass directly.
+- For state-changing methods, `Origin` is authoritative when present and `Referer` is consulted only
+  when `Origin` is absent. A present value must be an absolute loopback URL (`localhost`,
+  `127.0.0.0/8`, or `::1`); malformed, opaque `null`, LAN, and public origins receive HTTP 403.
+- Requests with neither header remain valid for non-browser clients such as `tm` and the reporting
+  extension. Kestrel remains loopback-bound, so this carve-out does not expose the API remotely.
 
 ### Worktree Identification
 
@@ -287,6 +297,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, upstream remote, and the raw `diffCategories` read |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
+| `src/Server/HttpSecurity.fs` | Shared loopback Origin/Referer guard for state-changing HTTP routes |
 | `src/Server/SessionManager.fs` | Explicit native card-terminal spawn/focus/new-tab/kill and persistence |
 | `src/Server/TerminalLaunch.fs` | Shared native-versus-embedded terminal launch policy |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
@@ -355,6 +366,5 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `docs/spec/embedded-terminal.md` — embedded agent launches, command delivery, and terminal
   discovery
 - `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
-- `docs/spec/remoting-csrf-hardening.md` — Origin/Referer CSRF guard fronting the remoting and canvas POST surfaces (the create-worktree auto-launch made state-changing remoting an agent-execution sink)
 - `docs/spec/canvas-pane.md` — interactive HTML docs and the canvas-specific consumer of the generic session bridge
 - `docs/spec/session-status-push.md` — coding-tool session collapse and the related auto-sync target selection

@@ -84,7 +84,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - Selecting a tab marks that doc viewed.
 - Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity.
 - The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.
-- The share button publishes the active doc to an unguessable, auto-expiring URL and copies a rich titled link to the clipboard. Like archive, it is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-generated, not shareable, so it has no share button. Clipboard success uses the shared, dismissible `ClipboardNotice` channel (green), independent of the send `Waiting` and delivery-`Failed` banners: a successful publish shows `Shared — link copied` (or `Shared — link ready, copy it manually: <url>` when the async clipboard write is rejected), while a *failed* publish reuses the existing red `CanvasSendState.Failed` error banner. Success and failure are mutually exclusive — each result arm clears the other channel — so a red + green stack never renders. Share cannot start while a path copy is pending, and path copy cannot start until Share has completed its publish and clipboard phases. See `docs/spec/canvas-sharing.md` for the full publish/SAS/clipboard flow.
+- The share button publishes the active doc to an unguessable, auto-expiring authenticated-viewer URL and copies a rich titled link to the clipboard. Like archive, it is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-generated, not shareable, so it has no share button. Clipboard success uses the dismissible `ClipboardNotice` channel (green), independent of the send `Waiting` and delivery-`Failed` banners: a successful publish shows `Shared — link copied` (or `Shared — link ready, copy it manually: <url>` when the async clipboard write is rejected), while a *failed* publish reuses the existing red `CanvasSendState.Failed` error banner. Success and failure are mutually exclusive — each result arm clears the other channel — so a red + green stack never renders. Share cannot start while a path copy is pending, and path copy cannot start until Share has completed its publish and clipboard phases. See `docs/spec/canvas-sharing.md` for the full publish/viewer/clipboard flow.
 
 ### Canvas Overview
 
@@ -335,7 +335,7 @@ changed rows already use).
 
 - `docs/spec/worktree-monitor.md` — parent dashboard architecture spec
 - `docs/spec/beadspace-canvas.md` — beads dashboard integration in the canvas pane
-- `docs/spec/canvas-sharing.md` — one-click Share of a focused `AgentDoc` to an unguessable, auto-expiring URL (the tab-bar Share button, its publish/SAS backend, and the clipboard rich link)
+- `docs/spec/canvas-sharing.md` — one-click Share of a focused `AgentDoc` to an unguessable, auto-expiring authenticated-viewer URL (the tab-bar Share button, private-Blob publisher, and clipboard rich link)
 - `docs/spec/canvas-interaction-routing.md` — ownership, generated-view affinity, queueing, and session routing
 - `docs/spec/worktree-diff-viewer.md` — generated worktree diff SystemView
 - `docs/spec/future/canvas-roadmap.md` — remaining canvas work (authoring DX, templates)
