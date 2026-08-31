@@ -110,16 +110,18 @@ let private archiveCanvasDocImpl (request: ArchiveCanvasDocRequest) =
         File.Move(sourcePath, destPath, overwrite = true)
     }
 
-/// Share a canvas doc: validate the path → read the on-disk file → static-export it
-/// (`CanvasExport.buildStaticHtml` re-injects theme + no-op canvasSend) → publish to Azure Blob and
-/// mint a per-doc read-only SAS (`CanvasShare.publish`) → assemble the `CanvasShareResult` with the
-/// SAS URL and the doc's resolved title. Mirrors `archiveCanvasDocImpl`. `Title` uses
+/// Share a canvas doc: validate the viewer-compatible filename and path → read the on-disk file →
+/// static-export it (`CanvasExport.buildStaticHtml` re-injects theme + no-op canvasSend) → publish
+/// to Azure Blob and record its expiry (`CanvasShare.publish`) → assemble the `CanvasShareResult`
+/// with the clean viewer URL and the doc's resolved title. Mirrors `archiveCanvasDocImpl`. `Title` uses
 /// `CanvasExport.resolveTitle` (the doc's `<title>`, falling back to a prettified filename) because
 /// `CanvasShareResult.Title` is a plain string, not an option; the title is read from the original
 /// HTML (`buildStaticHtml` injects only at `</head>`, so it never alters the doc's `<title>`).
-let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<CanvasShareResult, string>> =
+let internal shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<CanvasShareResult, string>> =
     let path = WorktreePath.value request.WorktreePath
     asyncResult {
+        do! Server.CanvasShare.validateFilename request.Filename
+
         let! sourcePath =
             Server.PathUtils.validateCanvasPath path request.Filename
             |> Result.mapError (fun reason -> $"Invalid filename: {reason}")
@@ -134,9 +136,9 @@ let private shareCanvasDocImpl (request: ShareCanvasDocRequest) : Async<Result<C
             return! Error $"File not found: {request.Filename}"
 
         let html = File.ReadAllText sourcePath
-        let! sasUrl = Server.CanvasShare.publish request.Filename (Server.CanvasExport.buildStaticHtml html)
+        let! viewerUrl = Server.CanvasShare.publish request.Filename (Server.CanvasExport.buildStaticHtml html)
         return
-            { Url = sasUrl
+            { Url = viewerUrl
               Title = Server.CanvasExport.resolveTitle html request.Filename }
     }
 
@@ -531,7 +533,7 @@ let private openEditor (validatePath: string -> Async<bool>) (wtPath: WorktreePa
 
 let private openTerminal
     (validatePath: string -> Async<bool>)
-    (sessionAgent: SessionManager.SessionAgent)
+    (openNativeTerminal: WorktreePath -> Async<Result<unit, string>>)
     (wtPath: WorktreePath)
     =
     let path = WorktreePath.value wtPath
@@ -542,7 +544,7 @@ let private openTerminal
             Log.log "API" $"openTerminal: rejected unknown path '{path}'"
         else
             Log.log "API" $"openTerminal: launching terminal for '{path}'"
-            let! result = SessionManager.spawnTerminal sessionAgent wtPath
+            let! result = openNativeTerminal wtPath
 
             match result with
             | Ok () -> ()
@@ -701,7 +703,10 @@ type WorktreeApiDependencies =
       AppVersion: string
       DeployBranch: string option }
 
-let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
+let internal worktreeApiWithLaunch
+    (terminalLaunch: TerminalLaunch.Operations)
+    (dependencies: WorktreeApiDependencies)
+    : IWorktreeApi =
     let { Agent = agent
           CardLog = cardLog
           SessionAgent = sessionAgent
@@ -719,7 +724,11 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
 
     let rootPaths = RefreshScheduler.buildRootPaths worktreeRoots
     let autoSyncDependencies =
-        RefreshScheduler.autoSyncDependencies agent sessionAgent activityStore autoSyncStore
+        RefreshScheduler.autoSyncDependencies
+            agent
+            terminalLaunch.StartEmbeddedCommand
+            activityStore
+            autoSyncStore
 
     /// Ends auto-sync bookkeeping for a worktree: disabling the preference or deleting the worktree
     /// leaves nothing for the accepted-revision record to suppress.
@@ -757,13 +766,13 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                 return! action ()
         }
 
-    let withReportedTerminalIntents snapshot =
+    let withTerminalActivity snapshot =
         async {
             let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
             return
                 snapshot
-                |> TerminalSessionActivity.withReportedIntents
+                |> TerminalSessionActivity.withReportedActivity
                     DateTimeOffset.UtcNow
                     (state.SessionStatuses |> Map.values)
         }
@@ -771,22 +780,34 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
     let terminalMutation operation =
         asyncResult {
             let! snapshot = operation
-            let! enriched = withReportedTerminalIntents snapshot
+            let! enriched = withTerminalActivity snapshot
             return enriched
         }
+
+    let terminalStart operation =
+        asyncResult {
+            let! started = operation
+            let! enriched = withTerminalActivity started.Snapshot
+            return
+                { started with
+                    Snapshot = enriched }
+        }
+
+    let startEmbeddedCommand wtPath command =
+        terminalLaunch.StartEmbeddedCommand wtPath command
 
     let startEmbeddedTerminal wtPath =
         withValidatedPath
             wtPath
             "startEmbeddedTerminal"
             (fun () ->
-                EmbeddedTerminal.start embeddedTerminal wtPath
-                |> terminalMutation)
+                terminalLaunch.StartEmbeddedTerminal wtPath
+                |> terminalStart)
 
     let getEmbeddedTerminals () =
         async {
             let! snapshot = EmbeddedTerminal.get embeddedTerminal
-            return! withReportedTerminalIntents snapshot
+            return! withTerminalActivity snapshot
         }
 
     let closeEmbeddedTerminal terminalId =
@@ -807,7 +828,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
             closeEmbeddedTerminal = closeEmbeddedTerminal }
     | None ->
         { getWorktrees = fun () -> getWorktrees agent sessionAgent activityStore rootPaths appVersion deployBranch
-          openTerminal = openTerminal validatePath sessionAgent
+          openTerminal = openTerminal validatePath terminalLaunch.OpenNativeTerminal
           startEmbeddedTerminal = startEmbeddedTerminal
           getEmbeddedTerminals = getEmbeddedTerminals
           closeEmbeddedTerminal = closeEmbeddedTerminal
@@ -896,7 +917,9 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                       let path = WorktreePath.value req.Path
                       let provider = CodingToolStatus.readConfiguredProvider path
                       let inv = CodingToolCli.build provider (CodingToolCli.Interactive req.Prompt)
-                      return! SessionManager.spawnSession sessionAgent req.Path inv.AsShellString
+                      return!
+                          startEmbeddedCommand req.Path inv.AsShellString
+                          |> terminalStart
                   })
           focusSession = fun wtPath ->
               withValidatedPath wtPath "focusSession" (fun () ->
@@ -943,9 +966,8 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                   let! fork = GitWorktree.forkWorktree root (BranchName.value req.BaseBranch) branchName
                   agent.Post(SchedulerState.StateMsg.ExpediteRefresh repoId)
 
-                  // Fire-and-forget: when a prompt was supplied, spawn a tracked coding-agent
-                  // window in the new worktree seeded with the config-driven skill invocation.
-                  // Reuses SessionManager.launchAction (spawns+tracks when no window exists yet).
+                  // Fire-and-forget: when a prompt was supplied, start an embedded coding-agent
+                  // terminal in the new worktree seeded with the config-driven skill invocation.
                   // A blank prompt is a no-op. Deferred until post-fork finishes below so the
                   // session starts with dependencies already installed.
                   let launchPromptSession () =
@@ -967,13 +989,10 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                               | Some skill -> CodingToolStatus.skillInvocation provider skill prompt
                               | None -> prompt
                           let cmd = (CodingToolCli.build provider (CodingToolCli.Interactive wrapped)).AsShellString
-                          // The try/with is required: launchAction's PostAndAsyncReply(timeout=30s)
-                          // throws on timeout, and Async.Ignore would swallow the Error case — an
-                          // unguarded Async.Start could fault silently.
                           async {
                               try
-                                  match! SessionManager.launchAction sessionAgent (WorktreePath newPath) cmd with
-                                  | Ok () -> ()
+                                  match! startEmbeddedCommand (WorktreePath newPath) cmd with
+                                  | Ok _ -> ()
                                   | Error msg -> Log.log "API" $"Auto-launch failed for {newPath}: {msg}"
                               with ex ->
                                   Log.log "API" $"Auto-launch crashed for {newPath}: {ex}"
@@ -1014,7 +1033,7 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
               }
           openNewTab = fun wtPath ->
               withValidatedPath wtPath "openNewTab" (fun () ->
-                  SessionManager.openNewTab sessionAgent wtPath)
+                  terminalLaunch.OpenNativeTab wtPath)
           launchAction = fun req ->
               withValidatedPath req.Path "launchAction" (fun () ->
                   async {
@@ -1022,7 +1041,9 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                       let provider = CodingToolStatus.readConfiguredProvider path
                       let prompt = CodingToolStatus.actionPrompt provider req.Action
                       let command = CodingToolCli.build provider (CodingToolCli.Interactive prompt)
-                      return! SessionManager.launchAction sessionAgent req.Path command.AsShellString
+                      return!
+                          startEmbeddedCommand req.Path command.AsShellString
+                          |> terminalStart
                   })
           reportActivity = fun level -> async { agent.Post(SchedulerState.StateMsg.ReportClientActivity(level, DateTimeOffset.UtcNow)) }
           saveCollapsedRepos = fun repos -> async { writeCollapsedRepos repos }
@@ -1045,7 +1066,39 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                               activityStore
                               |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
                       let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
-                      return! SessionManager.spawnSession sessionAgent wtPath inv.AsShellString
+                      let start () =
+                          startEmbeddedCommand wtPath inv.AsShellString
+                          |> terminalStart
+
+                      match sessionId with
+                      | None -> return! start ()
+                      | Some targetSessionId ->
+                          let! snapshot = EmbeddedTerminal.get embeddedTerminal
+                          let! state =
+                              agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
+                          let sessions =
+                              state.SessionStatuses |> Map.values |> Seq.toList
+
+                          let now = DateTimeOffset.UtcNow
+
+                          match
+                              TerminalSessionActivity.tryFindLiveTerminalId
+                                  now
+                                  wtPath
+                                  (SessionActivity.SessionId targetSessionId)
+                                  sessions
+                                  snapshot
+                          with
+                          | Some terminalId ->
+                              return
+                                  Ok
+                                      { Snapshot =
+                                          snapshot
+                                          |> TerminalSessionActivity.withReportedActivity
+                                              now
+                                              sessions
+                                        TerminalId = terminalId }
+                          | None -> return! start ()
                   })
           sendCanvasMessage = fun request ->
               withValidatedPathValue request.WorktreePath "sendCanvasMessage" CanvasMessageResult.Error (fun () ->
@@ -1077,13 +1130,12 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                                   $"sendCanvasMessage: no reachable session for {request.Filename}; launching one"
 
                               match!
-                                  SessionManager.launchAction
-                                      sessionAgent
+                                  startEmbeddedCommand
                                       request.WorktreePath
                                       command.AsShellString
                                   |> Async.Catch
                               with
-                              | Choice1Of2(Ok()) -> return result
+                              | Choice1Of2(Ok _) -> return result
                               | Choice1Of2(Error err) ->
                                   do! CanvasBridge.cancelPendingLaunch path
 
@@ -1142,3 +1194,10 @@ let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
                                 )
                             )
                     } }
+
+let worktreeApi (dependencies: WorktreeApiDependencies) : IWorktreeApi =
+    worktreeApiWithLaunch
+        (TerminalLaunch.create
+            dependencies.SessionAgent
+            dependencies.EmbeddedTerminal)
+        dependencies

@@ -12,8 +12,26 @@ extern bool private EnumWindows(EnumWindowsProc lpEnumFunc, nativeint lParam)
 [<DllImport("user32.dll", SetLastError = true)>]
 extern bool private SetForegroundWindow(nativeint hWnd)
 
+[<DllImport("user32.dll")>]
+extern nativeint private GetForegroundWindow()
+
+[<DllImport("user32.dll", SetLastError = true)>]
+extern bool private AttachThreadInput(uint32 idAttach, uint32 idAttachTo, bool fAttach)
+
+[<DllImport("user32.dll")>]
+extern bool private IsIconic(nativeint hWnd)
+
+[<DllImport("user32.dll")>]
+extern bool private ShowWindowAsync(nativeint hWnd, int nCmdShow)
+
+[<DllImport("user32.dll")>]
+extern void private SwitchToThisWindow(nativeint hWnd, bool fUnknown)
+
 [<DllImport("user32.dll", SetLastError = true)>]
 extern uint32 private GetWindowThreadProcessId(nativeint hWnd, uint32& lpdwProcessId)
+
+[<DllImport("kernel32.dll")>]
+extern uint32 private GetCurrentThreadId()
 
 [<DllImport("user32.dll", EntryPoint = "IsWindow")>]
 extern bool private IsWindowNative(nativeint hWnd)
@@ -27,13 +45,19 @@ extern bool private IsWindowVisible(nativeint hWnd)
 [<DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)>]
 extern bool private PostMessageNative(nativeint hWnd, uint32 Msg, nativeint wParam, nativeint lParam)
 
-[<DllImport("user32.dll")>]
-extern void private keybd_event(byte bVk, byte bScan, uint32 dwFlags, nativeint dwExtraInfo)
-
-let private VK_MENU = 0x12uy
-let private KEYEVENTF_EXTENDEDKEY = 0x1u
-let private KEYEVENTF_KEYUP = 0x2u
+let private SW_RESTORE = 9
 let private WM_CLOSE = 0x0010u
+
+type internal WindowActivationApi =
+    { IsWindow: nativeint -> bool
+      IsIconic: nativeint -> bool
+      RestoreWindow: nativeint -> unit
+      GetForegroundWindow: unit -> nativeint
+      GetCurrentThreadId: unit -> uint32
+      GetWindowThreadId: nativeint -> uint32
+      AttachThreadInput: uint32 -> uint32 -> bool -> bool
+      SetForegroundWindow: nativeint -> bool
+      SwitchToThisWindow: nativeint -> unit }
 
 let listTopLevelWindows () =
     let windows = System.Collections.Generic.List<nativeint>()
@@ -55,14 +79,63 @@ let getWindowPid (hwnd: nativeint) =
     GetWindowThreadProcessId(hwnd, &pid) |> ignore
     int pid
 
-let focusWindow (hwnd: nativeint) =
-    if not (IsWindowNative(hwnd)) then
+let private getWindowThreadId hwnd =
+    let mutable pid = 0u
+    GetWindowThreadProcessId(hwnd, &pid)
+
+let internal focusWindowWith (api: WindowActivationApi) (hwnd: nativeint) =
+    if not (api.IsWindow hwnd) then
         false
     else
-        keybd_event(VK_MENU, 0uy, KEYEVENTF_EXTENDEDKEY, 0n)
-        let result = SetForegroundWindow(hwnd)
-        keybd_event(VK_MENU, 0uy, KEYEVENTF_EXTENDEDKEY ||| KEYEVENTF_KEYUP, 0n)
-        result
+        if api.IsIconic hwnd then
+            api.RestoreWindow hwnd
+
+        let foreground = api.GetForegroundWindow()
+
+        if foreground = hwnd then
+            true
+        else
+            let currentThread = api.GetCurrentThreadId()
+
+            let foregroundThread =
+                if foreground = 0n then
+                    0u
+                else
+                    api.GetWindowThreadId foreground
+
+            let attached =
+                foregroundThread <> 0u
+                && foregroundThread <> currentThread
+                && api.AttachThreadInput foregroundThread currentThread true
+
+            let setForeground =
+                try
+                    api.SetForegroundWindow hwnd
+                finally
+                    if attached then
+                        api.AttachThreadInput foregroundThread currentThread false |> ignore
+
+            api.SwitchToThisWindow hwnd
+
+            let observedForeground = api.GetForegroundWindow()
+            let noForegroundOwner = foreground = 0n && observedForeground = 0n
+
+            api.IsWindow hwnd
+            && (setForeground || observedForeground = hwnd || noForegroundOwner)
+
+let private windowActivationApi =
+    { IsWindow = IsWindowNative
+      IsIconic = IsIconic
+      RestoreWindow = fun hwnd -> ShowWindowAsync(hwnd, SW_RESTORE) |> ignore
+      GetForegroundWindow = GetForegroundWindow
+      GetCurrentThreadId = GetCurrentThreadId
+      GetWindowThreadId = getWindowThreadId
+      AttachThreadInput = fun source target attach -> AttachThreadInput(source, target, attach)
+      SetForegroundWindow = SetForegroundWindow
+      SwitchToThisWindow = fun hwnd -> SwitchToThisWindow(hwnd, true) }
+
+let focusWindow hwnd =
+    focusWindowWith windowActivationApi hwnd
 
 let listWindowsTerminalWindows () =
     listTopLevelWindows ()

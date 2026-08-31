@@ -81,7 +81,8 @@ let private defaultModel : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 let private updateModel msg model = update msg model |> fst
 
 

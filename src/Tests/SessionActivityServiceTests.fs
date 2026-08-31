@@ -1841,7 +1841,7 @@ type TerminalOwnershipQueryTests() =
         )
 
     [<Test>]
-    member _.``terminal snapshot titles use the exact terminal's representative reported intent``() =
+    member _.``terminal snapshot titles use each exact terminal's representative activity``() =
         let terminalA =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -1867,16 +1867,16 @@ type TerminalOwnershipQueryTests() =
             { Tabs =
                 [ { Id = EmbeddedTerminalId(TerminalSessionId.value terminalA)
                     Worktree = WorktreePath "C:/wt/a"
-                    ReportedIntent = None
+                    ReportedActivity = None
                     Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61001/" }
                   { Id = EmbeddedTerminalId(TerminalSessionId.value terminalB)
                     Worktree = WorktreePath "C:/wt/a"
-                    ReportedIntent = None
+                    ReportedActivity = None
                     Lifecycle = EmbeddedTerminalLifecycle.Running "http://127.0.0.1:61002/" } ] }
 
         let decorated =
             snapshot
-            |> withReportedIntents
+            |> withReportedActivity
                 now
                 [ stored
                       terminalA
@@ -1913,12 +1913,12 @@ type TerminalOwnershipQueryTests() =
 
         Assert.That(
             decorated.Tabs
-            |> List.map (fun tab -> tab.Id, tab.ReportedIntent),
+            |> List.map (fun tab -> tab.Id, tab.ReportedActivity),
             Is.EqualTo(
                 [ (EmbeddedTerminalId(TerminalSessionId.value terminalA),
                    Some "Implementing exact terminal titles")
                   (EmbeddedTerminalId(TerminalSessionId.value terminalB),
-                   None) ]
+                   Some "Session title only") ]
             )
         )
 

@@ -70,7 +70,8 @@ let private modelWith repos =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
 let private response repos =
     { Repos = repos |> List.map toRepoWorktrees

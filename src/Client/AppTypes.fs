@@ -63,7 +63,8 @@ type Model =
       OverviewHistoryWindow: HistoryWindow option
       OverviewHistory: InstalledOverviewHistory option
       OverviewHistoryRequestedAt: System.DateTimeOffset
-      OverviewHistoryRequestInFlight: OverviewHistoryRequest option }
+      OverviewHistoryRequestInFlight: OverviewHistoryRequest option
+      EmbeddedTerminalPollInFlight: bool }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -75,10 +76,10 @@ type Msg =
     | OpenTerminal of WorktreePath
     | OpenEmbeddedTerminal of WorktreePath
     | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
+    | EmbeddedTerminalPollFailed
     | EmbeddedTerminalStarted of
         WorktreePath *
-        before: EmbeddedTerminalSnapshot *
-        Result<EmbeddedTerminalSnapshot, string>
+        Result<EmbeddedTerminalStartResult, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | SelectEmbeddedTerminal of EmbeddedTerminalId
     | CloseEmbeddedTerminal of EmbeddedTerminalId
@@ -106,7 +107,6 @@ type Msg =
     | SetFocusNoRetarget of FocusTarget option
     | ArchiveMsg of ArchiveViews.Msg
     | LaunchAction of path: WorktreePath * action: ActionKind
-    | LaunchActionResult of Result<unit, string>
     | ClearActionCooldown of WorktreePath
     | ResumeSession of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
@@ -136,7 +136,7 @@ type Msg =
     | CopyCanvasDocPath of scopedKey: string * filename: string
     | CanvasDocPathCopyResult of scopedKey: string * filename: string * revision: int * path: string * Result<unit, string>
     | ClearCanvasDocPathCopied of scopedKey: string * filename: string * revision: int
-    // Share the focused AgentDoc: publish it (server mints a per-doc read-only SAS URL + returns the
+    // Share the focused AgentDoc: publish it (server returns a clean authenticated-viewer URL + the
     // doc title) then write a rich clipboard link. ShareCanvasDocResult carries the CanvasShareResult
     // on Ok (→ dual-format clipboard write, deferring the banner to ClipboardWriteResult) or an error
     // message on failure (→ the existing error banner). ClipboardWriteResult reports whether the async

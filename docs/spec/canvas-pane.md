@@ -84,7 +84,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - Selecting a tab marks that doc viewed.
 - Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity.
 - The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.
-- The share button publishes the active doc to an unguessable, auto-expiring URL and copies a rich titled link to the clipboard. Like archive, it is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-generated, not shareable, so it has no share button. Clipboard success uses the shared, dismissible `ClipboardNotice` channel (green), independent of the send `Waiting` and delivery-`Failed` banners: a successful publish shows `Shared — link copied` (or `Shared — link ready, copy it manually: <url>` when the async clipboard write is rejected), while a *failed* publish reuses the existing red `CanvasSendState.Failed` error banner. Success and failure are mutually exclusive — each result arm clears the other channel — so a red + green stack never renders. Share cannot start while a path copy is pending, and path copy cannot start until Share has completed its publish and clipboard phases. See `docs/spec/canvas-sharing.md` for the full publish/SAS/clipboard flow.
+- The share button publishes the active doc to an unguessable, auto-expiring authenticated-viewer URL and copies a rich titled link to the clipboard. Like archive, it is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-generated, not shareable, so it has no share button. Clipboard success uses the dismissible `ClipboardNotice` channel (green), independent of the send `Waiting` and delivery-`Failed` banners: a successful publish shows `Shared — link copied` (or `Shared — link ready, copy it manually: <url>` when the async clipboard write is rejected), while a *failed* publish reuses the existing red `CanvasSendState.Failed` error banner. Success and failure are mutually exclusive — each result arm clears the other channel — so a red + green stack never renders. Share cannot start while a path copy is pending, and path copy cannot start until Share has completed its publish and clipboard phases. See `docs/spec/canvas-sharing.md` for the full publish/viewer/clipboard flow.
 
 ### Canvas Overview
 
@@ -117,19 +117,22 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - `BridgeLiveness.LiveSessionIds` exposes every identified session whose registration is within the liveness TTL. The worktree-level `SessionId` remains the freshest registration for aggregate status and SystemView fallback behavior, but it does not decide authored-document liveness.
 - The liveness dot shown in tabs and overview checks the doc's `OwnerSessionId` against `LiveSessionIds`, so two concurrently heartbeating sessions in one worktree both keep their own documents alive regardless of heartbeat order. It renders only for `AgentDoc` docs (via `livenessDotFor`); a `SystemView` has no owner session and shows no liveness dot.
 - The pane shows `▶ Start session` only when the active doc is an `AgentDoc` whose recorded owner is not live. A `SystemView` never has this button.
-- `LaunchCanvasSession` uses the existing action-launch flow and sends a cold-start prompt built by
-  `CanvasSessionPrompt.forAgentDoc` in `src/Client/CanvasSessionPrompt.fs`. It carries `worktreePath`
-  and `filename` as escaped JSON data, then tells the replacement session to load the canvas skill,
-  claim the focused doc using the JSON `filename`, and read `.agents/canvas/<filename>` beneath the
-  JSON `worktreePath` before handling user interactions through the doc.
+- `LaunchCanvasSession` starts an embedded terminal through the shared action-launch flow and sends
+  a cold-start prompt built by `CanvasSessionPrompt.forAgentDoc` in
+  `src/Client/CanvasSessionPrompt.fs`. It carries `worktreePath` and `filename` as escaped JSON data,
+  then tells the replacement session to load the canvas skill, claim the focused doc using the JSON
+  `filename`, and read `.agents/canvas/<filename>` beneath the JSON `worktreePath` before handling
+  user interactions through the doc. The direct action opens the terminal pane and selects the
+  exact new terminal.
 - Canvas messages route to the author session for the selected doc.
 - If the recorded owner is unreachable, the message queues. After a replacement session claims the doc, its next bridge registration can deliver the waiting message; doc identity never changes.
 - SystemView interactions store no target. Each one resolves to the worktree's most recently active
   session that currently holds a live bridge registration, so nothing is surfaced as
   `OwnerSessionId` and liveness UI is unaffected. If no session can receive the interaction, the
-  server starts one with a SystemView-specific prompt: load the canvas skill for its interaction
-  protocol, but do not apply its authoring instructions because the view is generated and must not
-  be edited or claimed; the queued user request will arrive separately. See
+  server starts one embedded session with a SystemView-specific prompt without stealing dashboard
+  focus: load the canvas skill for its interaction protocol, but do not apply its authoring
+  instructions because the view is generated and must not be edited or claimed; the queued user
+  request will arrive separately. See
   `docs/spec/canvas-interaction-routing.md`.
 
 ### Message Flow
@@ -332,7 +335,7 @@ changed rows already use).
 
 - `docs/spec/worktree-monitor.md` — parent dashboard architecture spec
 - `docs/spec/beadspace-canvas.md` — beads dashboard integration in the canvas pane
-- `docs/spec/canvas-sharing.md` — one-click Share of a focused `AgentDoc` to an unguessable, auto-expiring URL (the tab-bar Share button, its publish/SAS backend, and the clipboard rich link)
+- `docs/spec/canvas-sharing.md` — one-click Share of a focused `AgentDoc` to an unguessable, auto-expiring authenticated-viewer URL (the tab-bar Share button, private-Blob publisher, and clipboard rich link)
 - `docs/spec/canvas-interaction-routing.md` — ownership, generated-view affinity, queueing, and session routing
 - `docs/spec/worktree-diff-viewer.md` — generated worktree diff SystemView
 - `docs/spec/future/canvas-roadmap.md` — remaining canvas work (authoring DX, templates)

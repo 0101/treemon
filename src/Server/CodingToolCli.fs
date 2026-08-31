@@ -1,5 +1,7 @@
 module Server.CodingToolCli
 
+open System
+open System.Text
 open Shared
 
 type InvocationMode =
@@ -13,11 +15,18 @@ type CliInvocation =
 
     member this.AsShellString = $"{this.Executable} {this.Args}"
 
-// Injection-safety chokepoint: every value interpolated into an Args string MUST be wrapped in
-// single quotes with embedded single quotes doubled, so a hostile value (';', newline, '$(...)')
-// cannot break out of the quoted literal once the shell string is embedded into the pwsh
-// -EncodedCommand script by SessionManager.buildScript.
+// Keep the readable single-quoted form for control-free values. Control-bearing prompts are
+// decoded from inert base64 data so the emitted terminal command remains one line.
 let private escape (s: string) = s.Replace("'", "''")
+
+let private quoted value = $"'{escape value}'"
+
+let private promptArgument (prompt: string) =
+    if prompt |> Seq.exists Char.IsControl then
+        let encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes prompt)
+        $"([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded}')))"
+    else
+        quoted prompt
 
 let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvocation =
     let p = provider |> Option.defaultValue CodingToolProvider.Default
@@ -25,10 +34,10 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
     match p, mode with
     | CodingToolProvider.CopilotCli, Interactive prompt ->
         { Executable = "copilot"
-          Args = $"--yolo -i '{escape prompt}'" }
+          Args = $"--yolo -i {promptArgument prompt}" }
     | CodingToolProvider.CopilotCli, Resume (Some id) ->
         { Executable = "copilot"
-          Args = $"--yolo --resume '{escape id}'" }
+          Args = $"--yolo --resume {quoted id}" }
     | CodingToolProvider.CopilotCli, Resume None ->
         { Executable = "copilot"
           Args = "--yolo --continue" }

@@ -54,8 +54,10 @@
     <Compile Include="EventProcessingTests.fs" />
     <Compile Include="ArchiveTests.fs" />
     <Compile Include="WorktreePathResolutionTests.fs" />
+    <Compile Include="WorktreeApiLaunchTests.fs" />
+    <Compile Include="EmbeddedLaunchEndToEndTests.fs" />
+    <Compile Include="NativeSessionFocusTests.fs" />
     <Compile Include="SessionManagerSpawnTests.fs" />
-    <Compile Include="ActionLaunchSpawnTests.fs" />
     <Compile Include="CommandBuilderTests.fs" />
     <Compile Include="CliTests.fs" />
     <Compile Include="SessionPersistenceTests.fs" />
@@ -106,6 +108,9 @@
     <Compile Include="HttpSecurityTests.fs" />
     <Compile Include="CanvasExportTests.fs" />
     <Compile Include="CanvasShareTests.fs" />
+    <Compile Include="CanvasShareViewerTests.fs" />
+    <Compile Include="CanvasShareViewerContainmentTestHelpers.fs" />
+    <Compile Include="CanvasShareViewerContainmentTests.fs" />
     <Compile Include="SmokeTests.fs" />
   </ItemGroup>
 
@@ -122,10 +127,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\CanvasShareViewer\CanvasShareViewer.fsproj" />
     <ProjectReference Include="..\Server\Server.fsproj" />
     <ProjectReference Include="..\TerminalHost\TerminalHost.fsproj" />
     <ProjectReference Include="..\Client\Client.fsproj" />
     <ProjectReference Include="..\Cli\Cli.fsproj" />
+    <ProjectReference Include="..\TestAgentRecorder\TestAgentRecorder.fsproj"
+                      ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

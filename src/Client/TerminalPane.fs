@@ -100,17 +100,6 @@ let reconcileSelections before after selections =
         |> Option.map (fun replacement -> path, replacement))
     |> Map.ofList
 
-let startedTerminalId path before after =
-    let previousIds =
-        before.Tabs |> List.map _.Id |> Set.ofList
-
-    after
-    |> tabsForWorktree path
-    |> List.filter (fun tab ->
-        not (Set.contains tab.Id previousIds))
-    |> List.tryLast
-    |> Option.map _.Id
-
 let tryStartState path states =
     tryPathValue path states
 
@@ -132,9 +121,6 @@ let selectedWorktree targetWorktree focusedElement =
         match focusedElement with
         | Some (Card scopedKey) -> Some (WorktreePath scopedKey)
         | _ -> None)
-
-let hasLiveTabs snapshot =
-    not (List.isEmpty snapshot.Tabs)
 
 let safeEndpoint (endpoint: string) =
     let prefix = "http://127.0.0.1:"
@@ -160,7 +146,7 @@ let private lifecyclePresentation lifecycle =
         "failed", "Interrupted", "!"
 
 let tabLabel index tab =
-    tab.ReportedIntent
+    tab.ReportedActivity
     |> Option.map _.Trim()
     |> Option.filter (String.IsNullOrWhiteSpace >> not)
     |> Option.defaultValue $"Terminal {index + 1}"

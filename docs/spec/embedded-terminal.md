@@ -9,12 +9,18 @@
   or PowerShell productization stack. The whole terminal runtime (`src/TerminalHost`,
   `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`,
   `src/Server/TerminalSessionActivity.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific
-  runtime script) stays at or below 4,000 nonblank production lines.
+  runtime script) stays at or below 4,000 nonblank production lines. Product-level launch policy
+  (`TerminalLaunch.fs`, `SessionManager.fs`, `WorktreeApi.fs`) routes to that runtime and is outside
+  both it and the budget.
 - Give every terminal an exact kernel-owned process boundary established before ttyd executes.
 - Keep lifecycle control loopback-only, authenticated, versioned, and limited to the five endpoints
   listed below.
 - Preserve terminal tabs across a host update by resuming only the Copilot session owned by each
   exact terminal.
+- Route every prompted or automatic agent launch through the embedded host while retaining Windows
+  Terminal only for the card's explicit `>` / Enter and tracked-window `+` actions.
+- Make server-created terminals discoverable from an initially empty browser snapshot without
+  stealing dashboard focus.
 - Apply host updates at naturally idle Copilot boundaries without draining work, blocking new work,
   or treating unrelated shell activity as a gate.
 - Keep development and verification isolated from production state, ports, and processes.
@@ -44,6 +50,11 @@ attachment. Replacing or losing the browser attachment does not replace the shel
 receives the bounded replay and a resize so full-screen applications can redraw. Attachment routing
 is data-plane behavior, not an additional lifecycle state. Output older than the buffer, terminal
 scrollback, and browser-rendered state are not durable.
+The host does not publish a terminal as started until that upstream has delivered its first terminal
+output frame within the terminal startup timeout; a bound ttyd TCP port alone is not evidence that
+PowerShell is ready for input. Upstream output is streamed into protocol-valid chunks, so the
+1 MiB replay capacity is only a retention bound: one larger WebSocket message evicts old replay
+rather than ending the upstream and terminal.
 If a paused attachment falls behind the replay window, resume resets and clears the emulator, shows
 a visible omission notice, and then sends the surviving frames instead of silently splicing
 discontinuous output into the existing state.
@@ -51,13 +62,57 @@ discontinuous output into the existing state.
 The terminal pane normally follows the currently focused worktree card. Clicking a card's embedded
 terminal action explicitly targets that worktree without changing dashboard focus or the Canvas
 pane; the next card selection restores normal focus-following. Its tab strip shows only the targeted
-worktree's terminals and labels each one with the reported `assistant.intent` from that exact
-terminal's representative live Copilot session. Until such a report exists, the label falls back to
-`Terminal 1`, `Terminal 2`, and so on in opening order. It remembers the selected terminal
-independently for each worktree. **New** starts another terminal for the targeted worktree; the
-empty state offers **Start terminal**. Switching worktrees hides the other worktrees' tabs without
-closing their terminals, and running iframes stay mounted so their browser state survives. Closing
-the last visible tab leaves the pane open in its empty state; only **Hide** collapses the pane.
+worktree's terminals and labels each one with the freshest display-safe activity from that exact
+terminal's representative live Copilot session: reported `assistant.intent` or session title.
+Until either exists, the label falls back to `Terminal 1`, `Terminal 2`, and so on in opening order.
+It remembers the selected terminal independently for each worktree. **New** starts another terminal
+for the targeted worktree; the empty state offers **Start terminal**. Switching worktrees hides the
+other worktrees' tabs without closing their terminals, and running iframes stay mounted so their
+browser state survives. Closing the last visible tab leaves the pane open in its empty state; only
+**Hide** collapses the pane.
+
+### Launch routing and command startup
+
+The card's `>` / Enter action remains the explicit native Windows Terminal choice, and its `+`
+action opens another tab in that tracked native window. The dedicated embedded-terminal action and
+the terminal pane's **New** action continue to start plain embedded PowerShell terminals.
+
+Every agent-bearing process launch uses an embedded terminal: Resume, contextual card actions,
+explicit Canvas session launch, create-worktree prompt launch, AutoSync fallback, queued Canvas
+fallback, and `tm launch`. A browser need not be open for a CLI or background launch; the host owns
+the terminal until a dashboard attaches later.
+
+Direct dashboard actions that start an agent open and target the terminal pane, selecting the exact
+returned terminal. Resume first joins its durable target session ID to the authoritative running
+terminal snapshot; when that exact session is already live, it returns the existing terminal and
+starts no second Copilot process. Other terminals in the worktree do not suppress Resume. Repeating
+the terminal-open or Resume action while that worktree already has a start in flight re-targets the
+pane without issuing a second launch; the in-flight state clears on both success and failure, so a
+rejected launch never wedges the action.
+Background and CLI launches never steal dashboard focus. The browser polls the
+authoritative terminal registry on its normal activity cadence even when its current snapshot is
+empty, so the first background-created terminal becomes visible without a reload. That poll is
+single-flight: a tick starts no new registry request while one is outstanding, and the next tick
+resumes polling once the request settles, whether it succeeded or failed.
+
+Embedded terminals do not change `WorktreeStatus.HasActiveSession` or add another card-level
+active-session indicator. That flag and its terminal-button glow, focus label, native `+`
+visibility, and delete/archive native-kill prompt remain tied only to a tracked Windows Terminal
+window. Existing coding-tool status continues to show whether an embedded agent is working.
+
+Interactive agent-launch prompts containing control characters, including newlines, are
+UTF-8/base64 encoded as inert data and decoded by a fixed PowerShell expression. The resulting
+shell command is one control-free line while the coding tool receives the original prompt text
+unchanged.
+
+The raw terminal-input boundary rejects blank or control-character-bearing commands and commands
+whose complete UTF-8 ttyd input frame (`0` prefix, command, and carriage return) exceeds 16,384
+bytes, before creating a terminal. It then creates one terminal through the existing lifecycle API
+and submits the validated command through that terminal's authenticated command-only attachment.
+That attachment skips browser replay and output forwarding, so a short-lived sender cannot race
+shell startup or replay delivery. Treemon then authoritatively relists the registry and reports
+success only while the exact new terminal remains registered. Failed submission or retention closes
+that exact terminal when possible and reports the launch as failed rather than claiming success.
 
 ### Control and discovery
 
@@ -100,8 +155,9 @@ unless it carries that terminal's exact origin.
 
 The same exact-origin join supplies terminal tab titles. Among the live sessions attributed to one
 terminal, the active session wins; otherwise the most recently active live session is
-representative. Only its reported intent is exposed, so a session title alone does not replace the
-numbered fallback and an unrelated session in the same worktree cannot label the tab.
+representative. Its freshest reported intent or session title is exposed through the same activity
+selection and display formatting used by the worktree card. An unrelated session in the same
+worktree cannot label the tab.
 
 `WaitingForUser` remains non-idle without a timeout. There is no forced replacement or operator
 override that discards a waiting Copilot session.
@@ -187,6 +243,31 @@ by name or broad ancestry.
 
 ## Technical Approach
 
+### Launch routing
+
+`TerminalLaunch` is the single server-side boundary for starting user terminals.
+`SessionManager` and `EmbeddedTerminal` are backend implementations, not policy call sites.
+It exposes separately typed native open/new-tab and embedded plain/command operations, preserving
+each backend's result type for callers: native operations use `SessionManager`; embedded operations
+use `EmbeddedTerminal`. Browser headers, `HttpContext`, and `TREEMON_TERMINAL_SESSION_ID` do not
+participate in this decision.
+
+Command-capable embedded start retains the exact `TerminalRecord` returned by
+`TerminalHostClient.startTerminalOnHost`, submits an optional command through the existing
+`SendTerminalCommand` function, authoritatively confirms the exact ID after delivery, and returns
+both the reconciled snapshot and exact started terminal ID. The TerminalHost v2 control request
+remains `{ worktreePath }`; command text never becomes lifecycle API input.
+
+Every start — plain or command-bearing — carries that exact terminal ID out to its caller, so the
+browser selects the started terminal by identity. Comparing registry snapshots taken before and
+after a start cannot distinguish it from a terminal a background launch created in the same window.
+
+`CodingToolCli` keeps control-free interactive prompts readable as single-quoted PowerShell
+arguments. An interactive prompt containing controls is encoded as UTF-8/base64 and decoded only by
+a fixed expression in the emitted command. `TerminalHostClient` separately validates the raw
+command and mirrors the host's 16,384-byte attachment-message cap against the complete transmitted
+input frame; no command chunking or acknowledgement protocol is added.
+
 ### Terminal host
 
 `src/TerminalHost` is a small F#/.NET executable published with Treemon but launched as an
@@ -198,7 +279,12 @@ one-to-many while close and upstream-exit handling remain exact-session operatio
 `TerminalDataPlane` owns only the replay and attachment mailbox, with `createCore` as its focused
 state-machine seam. `TerminalProxy` owns the ttyd/browser WebSocket pumps, HTTP forwarding, and
 attachment endpoint. It and `ControlApi` use one `LoopbackHost` bootstrap for the shared Kestrel
-loopback binding, request-size limit, server-header policy, and dynamic-port discovery.
+loopback binding, request-size limit, server-header policy, and dynamic-port discovery. Startup
+waits for the first ttyd output frame using the launcher's configured startup timeout before
+exposing the attachment endpoint. The upstream pump forwards fragmented output incrementally and
+restores ttyd's protocol prefix on continuation chunks instead of buffering a whole WebSocket
+message under the replay limit. Browser attachments use ttyd's `tty` subprotocol and receive replay;
+server command attachments use the authenticated `treemon-command` subprotocol and are input-only.
 
 Windows process creation uses `CREATE_SUSPENDED`, immediate `AssignProcessToJobObject`, and
 `ResumeThread` in the host process. The Job Object uses kill-on-close without a breakaway policy, so
@@ -311,11 +397,11 @@ a bounded live-status cache and a process-local monotonic counter per terminal o
 terminal query filters the live cache to the caller's complete authoritative terminal-ID set before
 overlaying indexed durable rows, and returns only those raw rows plus their maximum epoch.
 `TerminalSessionActivity` owns the terminal-specific projection and returns an opaque replacement
-policy plus the optional display-safe reported intent for each terminal. The remoting API enriches
-host registry snapshots from the scheduler's bounded live-session map; the TerminalHost registry
-and control API remain unaware of agent activity. Replacement policy remains opaque: wait, or
-proceed with the epoch and optional shell command keyed by exact terminal session ID. It applies
-generic openness and freshness decay only to non-waiting states; an effective
+policy plus the optional display-safe activity for each terminal. The remoting API enriches host
+registry snapshots from the scheduler's bounded live-session map; the TerminalHost registry and
+control API remain unaware of agent activity. Replacement policy remains opaque: wait, or proceed
+with the epoch and optional shell command keyed by exact terminal session ID. It applies generic
+openness and freshness decay only to non-waiting states; an effective
 `WaitingForUser` remains non-idle from its request/completion clocks regardless of `last_seen`, while
 exact terminal-ID filtering keeps the query bounded. It owns provider selection and `CodingToolCli`
 command construction; terminal replacement only rechecks the epoch, recreates terminals, and
@@ -341,6 +427,14 @@ content-addressed bundles, runtime-lock process, tombstones, leases, concurrent 
 legacy protocol migration, or live process-state migration. It does not retain a Node runtime,
 PowerShell lifecycle helpers, or compatibility shims.
 
+## Verification
+
+Run `npm run test:embedded-launch-routing` to build and execute the isolated launch-routing harness.
+It exercises every agent-bearing entry point, prints bearer-redacted raw host registry JSON and raw
+copilot-recorder JSON for each route, verifies native HWND preservation and exact failed-delivery
+rollback with no AutoSync acceptance, and removes only its exact fixture terminals, processes,
+ports, and state.
+
 ## Decisions
 
 - **One separately running F# host:** ordinary Treemon restarts remain control-plane events while
@@ -361,7 +455,8 @@ PowerShell lifecycle helpers, or compatibility shims.
   testable while HTTP/WebSocket hosting shares one loopback-only Kestrel bootstrap with the control
   API, preventing security-sensitive host configuration from drifting.
 - **Raw bounded replay:** reconnect gets useful recent output without persisting terminal content or
-  introducing a terminal-state serializer.
+  introducing a terminal-state serializer. Replay capacity never doubles as an upstream transport
+  limit; large output messages are streamed while old retained frames are evicted.
 - **Explicit replay discontinuities:** replay reads distinguish a complete suffix from one whose
   requested prefix was evicted. Resuming across that gap resets and clears the emulator and shows an
   omission notice before the retained output.
@@ -420,9 +515,27 @@ PowerShell lifecycle helpers, or compatibility shims.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the opaque command
   selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
-  input and remains a plain PowerShell shell. Submitted terminal input is a shell boundary: a
-  command carrying a control character is rejected rather than written, so a stored Copilot
-  `SessionId` can never inject an extra command line into a recreated shell.
+  input and remains a plain PowerShell shell. Submitted terminal input is a raw shell boundary:
+  direct commands carrying a control character are rejected rather than written, while
+  `CodingToolCli` first converts control-bearing prompt data to a control-free UTF-8/base64 form.
+  A stored Copilot `SessionId` therefore cannot inject an extra command line into a recreated shell.
+- **Typed launch-operation routing:** `TerminalLaunch` is the only product-level start boundary.
+  Its native operations return only native results and its embedded operations return exact
+  embedded-start results. Explicit native card operations remain native; every agent-bearing launch
+  uses the embedded backend, including external `tm launch`.
+- **Command delivery after lifecycle start:** normal agent launches reuse the same authenticated
+  attachment input boundary as replacement resume. The stable TerminalHost v2 lifecycle protocol
+  remains unchanged, the server rejects any complete input frame above the host's mirrored
+  16,384-byte attachment cap before lifecycle start, waits for output-backed shell readiness, and
+  confirms the exact registry entry after delivery. The command-only subprotocol skips replay and
+  output forwarding; failed delivery or retention closes only the exact new terminal. No chunking
+  or acknowledgement protocol is introduced.
+- **Background discovery without focus theft:** the client polls the registry even from an empty
+  snapshot. Background and CLI launches become attachable without opening or retargeting a user's
+  pane.
+- **Native-only card session state:** embedded terminal presence does not feed
+  `HasActiveSession` or add a second card indicator. The existing card state continues to describe
+  only the explicitly tracked Windows Terminal window; coding-tool activity describes agents.
 - **Truthful lifecycle state on failure:** only evidence that the exact host was lost interrupts
   every tab. A rejected single-terminal request keeps the authoritative registry and leaves other
   terminals running, and a replacement that stops short of a proven live host never reports its
@@ -452,17 +565,21 @@ PowerShell lifecycle helpers, or compatibility shims.
 | `src/TerminalHostLayout/Layout.fs` | Shared state/staging paths, version-directory grammar, executable names, and required host bundle members |
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
 | `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, and replacement coordination |
-| `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, authoritative snapshot reconciliation, and public start/get/close surface |
+| `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
+| `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, command-capable start, authoritative snapshot reconciliation, and public start/get/close surface |
 | `src/Server/SessionActivity.fs` | Effective per-session state used by the idle gate |
 | `src/Server/SessionActivityService.fs` | Activity ingestion, terminal-origin validation, bounded live state, pruned raw origin epochs, and mailbox-serialized terminal activity queries |
-| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection for tab intents, idle gating, and opaque resume policy |
+| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection for tab activity, idle gating, and opaque resume policy |
 | `src/Server/SessionActivityStore.fs` | Durable Copilot session state, optional terminal origin, and indexed exact-origin queries |
 | `src/Extension/reporting/extension.mjs` | Passive activity reports sourced from `TREEMON_TERMINAL_SESSION_ID` |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
 | `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
-| `src/Tests/EmbeddedTerminalTests.fs` | Isolated host, replacement race, opaque command delivery, plain-shell restart, crash, security, and cleanup coverage |
+| `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus real proxy command delivery, control rejection, UTF-8 frame boundaries, replacement, crash, security, and cleanup coverage |
+| `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
+| `src/Tests/EmbeddedLaunchEndToEndTests.fs`, `src/TestAgentRecorder`, and `scripts/verify-embedded-launch-routing.ps1` | Reproducible isolated real-host launch matrix, exact argv recorder, raw route evidence, forced-delivery rollback, native HWND preservation, and exact cleanup |
+| `src/Tests/TerminalPaneTests.fs` | Exact server-returned terminal selection and direct Canvas launch routing |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
 | `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |
 
@@ -470,5 +587,6 @@ PowerShell lifecycle helpers, or compatibility shims.
 
 - `docs/spec/session-status-push.md` — authoritative per-session Copilot activity and terminal-origin
   reporting.
-- `docs/spec/native-session-management.md` — external Windows Terminal fallback.
+- `docs/spec/native-session-management.md` — explicit card `>` / Enter and tracked-window `+`
+  Windows Terminal behavior.
 - `docs/spec/worktree-monitor.md` — worktree lifecycle and dashboard integration.

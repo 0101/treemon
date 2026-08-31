@@ -216,9 +216,9 @@ module EmbeddedTerminalId =
 type EmbeddedTerminalTab =
     { Id: EmbeddedTerminalId
       Worktree: WorktreePath
-      /// Display-safe assistant intent from the representative live Copilot session owned by this
-      /// exact terminal. None while no terminal-owned session has reported an intent.
-      ReportedIntent: string option
+      /// Display-safe activity from the representative live Copilot session owned by this exact
+      /// terminal, using the freshest reported intent or session title.
+      ReportedActivity: string option
       Lifecycle: EmbeddedTerminalLifecycle }
 
 type EmbeddedTerminalSnapshot =
@@ -226,6 +226,10 @@ type EmbeddedTerminalSnapshot =
 
 module EmbeddedTerminalSnapshot =
     let empty = { Tabs = [] }
+
+type EmbeddedTerminalStartResult =
+    { Snapshot: EmbeddedTerminalSnapshot
+      TerminalId: EmbeddedTerminalId }
 
 type CanvasDocKind =
     | AgentDoc      // authored & owned by a session; interactive; file-driven
@@ -545,9 +549,9 @@ type ShareCanvasDocRequest =
     { WorktreePath: WorktreePath
       Filename: string }
 
-/// Result of publishing a canvas doc: the per-doc read-only SAS URL plus the doc's title
-/// (extracted server-side from the HTML) so the client can build the rich clipboard link
-/// without re-parsing.
+/// Result of publishing a canvas doc: the clean authenticated-viewer URL plus the doc's title
+/// (extracted server-side from the HTML) so the client can build the rich clipboard link without
+/// re-parsing.
 type CanvasShareResult =
     { Url: string
       Title: string }

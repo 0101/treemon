@@ -1,34 +1,27 @@
-/// Publishes an already-exported, standalone canvas doc to Azure Blob Storage and mints a per-doc,
-/// read-only SAS URL a recipient can open in a plain browser (no login). Deliberately independent of
-/// BOTH the Shared API contract and CanvasExport: `publish` takes an already-exported HTML string
-/// plus the doc's filename, so the caller (`WorktreeApi.shareCanvasDocImpl`) owns the export step and
-/// the assembly of the `CanvasShareResult`. That keeps this module a thin, replaceable storage
-/// adapter with only three dependencies: `Azure.Storage.Blobs`, `Azure.Identity` and `GlobalConfig`.
+/// Publishes an already-exported, standalone canvas doc to a pre-provisioned private Azure Blob
+/// container and returns its clean authenticated-viewer URL. Deliberately independent of BOTH the
+/// Shared API contract and CanvasExport: `publish` takes an already-exported HTML string plus the
+/// doc's filename, so `WorktreeApi.shareCanvasDocImpl` owns export and `CanvasShareResult` assembly.
 ///
-/// Credential model (docs/spec/canvas-sharing.md, Decision #3): Treemon stores no storage credential.
-/// Links are signed with a *user delegation key* fetched through `AzureCliCredential`, which uses the
-/// operator's persisted Azure CLI login. The account rejects Shared Key authorization, so Treemon
-/// never handles an account key or connection string. The cost is Azure's hard **7-day** ceiling on a
-/// user delegation key — and therefore on every link.
+/// Treemon stores no storage credential. A cached `AzureCliCredential` pipeline uses the operator's
+/// delegated Azure identity for uploads, while recipients authenticate to the separate viewer and
+/// never receive a Blob credential. Each blob carries its own expiry metadata and lands at an
+/// unguessable `<random-prefix>/<filename>` name. The prefix narrows exact lookup but is not an
+/// authorization grant: the viewer's Entra gate and synchronous expiry check enforce access.
 ///
-/// Secrecy model (Decisions #2/#4/#5): the container is PRIVATE (anonymous access disabled at the
-/// account), the blob lands under an unguessable `<random-prefix>/<filename>` name, and the returned
-/// link is a blob-scoped, read-only, https-only SAS (`sr=b`, `sp=r`, `spr=https`). Because the SAS is
-/// blob-scoped, a leaked link exposes exactly one doc; per-doc revoke is a blob delete.
-///
-/// The SAS is additionally bound to the *signing identity*: it carries `skoid`/`sktid`. Azure caches
-/// role assignments and user delegation keys, so role removal or key revocation invalidates existing
-/// links only after cache propagation, not immediately.
+/// Shared active HTML is never served directly from Blob Storage. The viewer renders it in the
+/// sandbox/CSP boundary described in `docs/spec/canvas-sharing.md`; deleting the backing blob still
+/// revokes one document immediately.
 module Server.CanvasShare
 
 open System
 open System.Collections.Concurrent
+open System.Globalization
 open System.IO
 open System.Text
 open Azure.Identity
 open Azure.Storage.Blobs
 open Azure.Storage.Blobs.Models
-open Azure.Storage.Sas
 open FsToolkit.ErrorHandling
 open Server.GlobalConfig
 
@@ -36,51 +29,70 @@ open Server.GlobalConfig
 /// `/` so it can't muddle the `<prefix>/<filename>` split.
 let private base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-/// Length of the random prefix. 22 base62 chars ≈ 131 bits of entropy — far beyond guessable; the
-/// SAS signature (not the name) is the real gate anyway (Decision #5).
+/// Length of the opaque random prefix. 22 base62 chars ≈ 131 bits of entropy; it is a durable,
+/// unguessable lookup identifier while Entra authentication remains the authorization gate.
 [<Literal>]
 let internal PrefixLength = 22
+
+[<Struct>]
+type internal SharePrefix =
+    private
+    | SharePrefix of string
+
+module internal SharePrefix =
+    let value (SharePrefix value) = value
+
+/// Publisher/viewer wire-contract key for the view-time-enforced expiry.
+[<Literal>]
+let internal ExpiryMetadataKey = "expiresOn"
+
+/// Fixed validation error for filenames that cannot be redeemed by the viewer. Kept free of the
+/// caller-supplied value so malformed paths are not reflected into logs or client diagnostics.
+[<Literal>]
+let internal InvalidFilenameMessage =
+    "Invalid filename: shared canvas docs must use one filename segment ending in .html."
+
+/// The publisher half of the filename wire contract. Extension matching is case-insensitive, but
+/// the filename itself is never normalized: its original casing must survive the URL and exact Blob
+/// lookup. Once both path separators are forbidden, consecutive dots inside the segment are inert.
+let internal validateFilename (filename: string) : Result<unit, string> =
+    let valid =
+        not (String.IsNullOrEmpty(filename))
+        && filename.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
+        && not (filename.Contains('/'))
+        && not (filename.Contains('\\'))
+
+    if valid then Ok() else Error InvalidFilenameMessage
 
 /// A fresh high-entropy base62 prefix from the cryptographic RNG. `GetString` samples the alphabet
 /// uniformly (no modulo bias). Impure (RNG) but shape-testable: right length, alphabet-only, and
 /// distinct across calls.
-let internal generatePrefix () : string =
+let internal generatePrefix () : SharePrefix =
     System.Security.Cryptography.RandomNumberGenerator.GetString(base62Alphabet.AsSpan(), PrefixLength)
+    |> SharePrefix
 
-/// The leaf of a filename — defends the blob name against a caller passing a doc path rather than a
-/// bare name. The live caller validates first, but publishing must never silently create nested
-/// blobs from `..`/subdirs. Pure.
-let internal leafName (filename: string) : string =
-    filename.Replace('\\', '/').Split('/') |> Array.last
+/// The blob name a published doc lands at: `<random-prefix>/<filename>`. `publish` admits only one
+/// validated filename segment, so this preserves that segment exactly for the viewer's lookup.
+let internal blobName (prefix: SharePrefix) (filename: string) : string =
+    $"{SharePrefix.value prefix}/{filename}"
 
-/// The blob name a published doc lands at: `<random-prefix>/<filename-leaf>`. The random prefix gives
-/// uniqueness + unguessability; the real filename gives the recipient a meaningful page/tab title
-/// (Decision #5). Pure given the prefix, so the naming shape is unit-testable.
-let internal blobName (prefix: string) (filename: string) : string =
-    $"{prefix}/{leafName filename}"
+/// Builds the upload contract shared with the viewer: UTF-8 HTML plus an exact `expiresOn`
+/// metadata value in UTC round-trip form.
+let internal buildUploadOptions (expiresOn: DateTimeOffset) =
+    let headers = BlobHttpHeaders(ContentType = "text/html; charset=utf-8")
+    let metadata =
+        dict [
+            ExpiryMetadataKey,
+            expiresOn.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture)
+        ]
+    BlobUploadOptions(HttpHeaders = headers, Metadata = metadata)
 
-/// Builds the per-doc SAS grant: blob-scoped (`sr=b`, `Resource = "b"`), read-only (`sp=r`),
-/// https-only (`spr=https`), expiring at `expiresOn`. Pure — it holds no credential and touches no
-/// network (the user delegation key is applied later by `ToSasQueryParameters`), so the exact
-/// least-privilege grant is unit-testable in isolation. Least privilege (Decision #2): a recipient of
-/// doc A's link cannot read doc B because the signature is bound to A's blob.
-///
-/// `expiresOn` must fall inside the delegation key's own validity window or the link is refused at
-/// use time regardless of what the token says, so `publish` derives both from one start instant.
-let internal buildSasBuilder (containerName: string) (blob: string) (expiresOn: DateTimeOffset) : BlobSasBuilder =
-    BlobSasBuilder(
-        BlobSasPermissions.Read, expiresOn,
-        BlobContainerName = containerName,
-        BlobName = blob,
-        Resource = "b",
-        Protocol = SasProtocol.Https)
-
-let internal buildSignedBlobUrl
-    (blobUri: Uri)
-    (accountName: string)
-    (delegationKey: UserDelegationKey)
-    (sasBuilder: BlobSasBuilder) =
-    $"{blobUri}?{sasBuilder.ToSasQueryParameters(delegationKey, accountName)}"
+/// Constructs a recipient URL without consulting the Blob URI. The filename is encoded as one path
+/// segment without changing its casing, and validated config guarantees the base has no query or
+/// fragment to carry through.
+let internal buildViewerUrl (viewerBaseUrl: Uri) (prefix: SharePrefix) (filename: string) =
+    let encodedFilename = Uri.EscapeDataString filename
+    $"{viewerBaseUrl.AbsoluteUri.TrimEnd('/')}/c/{SharePrefix.value prefix}/{encodedFilename}"
 
 let private credential = lazy (AzureCliCredential())
 
@@ -98,10 +110,10 @@ let internal serviceClient (accountName: string) =
                     credential.Value)))
     client.Value
 
-/// The client-facing "not configured" message names the non-secret account config rather than
+/// The client-facing "not configured" message names both required non-secret endpoints rather than
 /// suggesting an application-managed key or connection string.
 let internal notConfiguredMessage =
-    "Canvas sharing is not configured — set canvasShare.accountName in ~/.treemon/config.json to an Azure Storage account name."
+    "Canvas sharing is not configured — set canvasShare.accountName and an HTTPS canvasShare.viewerBaseUrl in ~/.treemon/config.json."
 
 /// The message shown when the host has no usable Entra identity (e.g. `az login` has expired). This
 /// is the one routine operational failure of the credential model, so it names the fix rather than
@@ -109,61 +121,34 @@ let internal notConfiguredMessage =
 let internal signInRequiredMessage =
     "Canvas sharing could not authenticate to Azure — run `az login` on this host and try again."
 
-/// Publish an already-exported standalone HTML doc; return a per-doc read-only SAS URL string.
+/// Publish an already-exported standalone HTML doc and return its clean viewer URL.
 ///
-/// Uploads `html` to the PRIVATE container (created on first use if absent) at
-/// `<random-prefix>/<filename>` with `Content-Type: text/html`, then signs a blob-scoped read-only
-/// https SAS with an Entra **user delegation key** and returns its absolute URL. Returns `Error`
-/// (never throws) when the backend is unconfigured, when the host has no Entra identity, or on any
-/// storage failure. No returned message or log line contains the full SAS.
-///
-/// SECURITY (accepted risk — focused-review F17): `html` is author-controlled canvas content, and it
-/// is published as ACTIVE, non-sandboxed HTML/JS with only `Content-Type` — no CSP, no
-/// `X-Content-Type-Options`, no sanitization — so whatever JS it contains runs top-level in the
-/// recipient's browser for the life of the link. Not sanitized on purpose: that would break the
-/// feature's interactivity goal (Decision #6), and a per-blob CSP would need a CDN/proxy. Documented,
-/// accepted trade-off — see `docs/spec/canvas-sharing.md` §"Security Posture".
+/// Uploads `html` to the configured pre-provisioned private container at
+/// `<random-prefix>/<filename>`, with UTF-8 HTML headers and the exact expiry metadata the viewer
+/// enforces. Filename validation runs before configuration or Azure work. Returns `Error` (never
+/// throws) when the filename is invalid, either endpoint is unconfigured, the host has no usable
+/// delegated identity, or storage fails. Returned errors and logs contain no recipient URL.
 let publish (filename: string) (html: string) : Async<Result<string, string>> =
     asyncResult {
+        do! validateFilename filename
         let config = readCanvasShareConfig ()
         let! accountName = config.AccountName |> Result.requireSome notConfiguredMessage
+        let! viewerBaseUrl = config.ViewerBaseUrl |> Result.requireSome notConfiguredMessage
         // The try/with stays around the Azure SDK calls (a genuine interop boundary); the
-        // Option→Error gate above is flattened into the asyncResult track.
+        // configuration gates above are flattened into the asyncResult track and run before any
+        // credential acquisition or network call.
         try
             let serviceClient = serviceClient accountName
-            // Backdate the start to absorb clock skew between this host and the storage service, and
-            // derive the expiry from it so the window stays strictly inside Azure's 7-day limit on a
-            // user delegation key — at the maximum configured expiry, `expiresOn` is a few minutes
-            // short of `now + 7d` rather than exactly on the boundary, which the service rejects.
-            let startsOn = DateTimeOffset.UtcNow.AddMinutes(-5.0)
-            let expiresOn = startsOn.AddDays(float config.DefaultExpiryDays)
-            let! delegationKey =
-                // The explicit CancellationToken selects the (startsOn, expiresOn, ct) overload; with
-                // two arguments F# binds the same-arity (options, ct) overload instead and fails.
-                serviceClient.GetUserDelegationKeyAsync(
-                    Nullable startsOn, expiresOn, Threading.CancellationToken.None)
-                |> Async.AwaitTask
+            let expiresOn = DateTimeOffset.UtcNow.AddDays(float config.DefaultExpiryDays)
             let containerClient = serviceClient.GetBlobContainerClient(config.Container)
-            // Create the PRIVATE container on demand (idempotent) so a fresh account/subscription
-            // works on first publish — the SDK never auto-creates it, and a missing container
-            // otherwise fails the upload with 404 ContainerNotFound. PublicAccessType.None keeps
-            // anonymous access off at the container level (Decision #4).
-            let! _ = containerClient.CreateIfNotExistsAsync(PublicAccessType.None) |> Async.AwaitTask
-            let blob = blobName (generatePrefix ()) filename
+            let prefix = generatePrefix ()
+            let blob = blobName prefix filename
             let blobClient = containerClient.GetBlobClient(blob)
-            // charset is declared so non-ASCII doc content isn't mojibaked when the blob is
-            // opened standalone (the export injects no <meta charset>).
-            let headers = BlobHttpHeaders(ContentType = "text/html; charset=utf-8")
             use stream = new MemoryStream(Encoding.UTF8.GetBytes html)
             let! _ =
-                blobClient.UploadAsync(stream, BlobUploadOptions(HttpHeaders = headers))
+                blobClient.UploadAsync(stream, buildUploadOptions expiresOn)
                 |> Async.AwaitTask
-            return
-                buildSignedBlobUrl
-                    blobClient.Uri
-                    accountName
-                    delegationKey.Value
-                    (buildSasBuilder config.Container blob expiresOn)
+            return buildViewerUrl viewerBaseUrl prefix filename
         with
         | :? AuthenticationFailedException as ex ->
             // The identity itself is unusable (expired/absent az login). Log the type only — an

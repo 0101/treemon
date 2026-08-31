@@ -57,7 +57,8 @@ let private model enabled : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = DateTimeOffset.MinValue
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
 let private enabled (model: Model) =
     findWorktree scopedKey model |> Option.map _.AutoSyncEnabled

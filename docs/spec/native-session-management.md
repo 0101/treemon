@@ -2,47 +2,44 @@
 
 ## Goals
 
-1. **Focus existing terminal windows** — navigate from dashboard to the correct window among many, by HWND
+1. **Focus existing terminal windows** — navigate from the card's explicit native action to the
+   correct window among many, by HWND
 2. **Track spawned windows** — maintain HWND-to-worktree mapping so focus/kill work reliably
-3. **Spawn terminal windows** — launch new Windows Terminal windows tied to worktrees, tracked by HWND
-4. **Kill and respawn** — replace a session by killing the old window and spawning fresh
+3. **Spawn explicit native terminals** — launch Windows Terminal only from the card's `>` / Enter
+   action
+4. **Open native tabs** — use the card's `+` action to add a plain PowerShell tab to the tracked
+   window
 5. **Survive server restarts** — persist tracked sessions to disk, restore and validate on startup
 6. **Native Windows** — all sessions run in native PowerShell with full git and Visual Studio access (no WSL)
 
 ## Non-Goals
 
 - Session persistence (detach/reattach) — not achievable with Windows Terminal
-- Reading terminal output — Claude status comes from JSONL session logs, already implemented
-- Tab-based session management — each worktree gets its own WT window (not a tab), though `launchAction` may open action tabs in an existing tracked window
+- Prompted or automatic agent launch — those sessions run in the embedded host
+- Reading terminal output — coding-tool status comes from push activity
+- Per-tab lifecycle management — each worktree gets one tracked WT window; native `+` tabs are not
+  independently addressed
 - Cross-machine portability (HWNDs are machine-local)
 
 ## Expected Behavior
 
 ### Terminal Button (`>` on card)
 - **No tracked session**: spawns `wt.exe --window new new-tab -d <path>`, HWND tracked by SessionManager
-- **Tracked session exists**: `SetForegroundWindow` to bring window to foreground
+- **Tracked session exists**: activates that exact HWND through the focus sequence below
 - Single button — no separate launch/focus/kill buttons on the card
 
-### launchSession (API-level)
-- Spawns `wt.exe --window new new-tab -d <path> -- <coding-tool> "prompt"`
-- If session already exists for worktree, kills it first (one window per worktree)
-- Used when a caller intentionally replaces the worktree's tracked session with a prompted session
+### Native New Tab (`+` on card)
 
-### Contextual Action Launch
-
-`IWorktreeApi.launchAction` accepts an `ActionRequest` for card actions (`FixPr`, `FixBuild`,
-`CreatePr`) and canvas continuation. The server resolves the configured provider, turns the action
-into a provider-specific prompt, and builds an interactive command (`copilot --yolo -i` today).
-
-`SessionManager.launchAction` validates the tracked HWND and chooses the placement:
-- **Tracked window exists**: open a new tab in that window with the command.
-- **No tracked window**: spawn and track a new Windows Terminal window with the command.
-
-This smart launch path is also reused by create-worktree prompt auto-launches, so callers do not
-duplicate window-selection logic.
+The button appears only while the worktree has a valid tracked native window. It focuses that
+window and asks `wt.exe` to add one plain PowerShell tab in the worktree directory. Agent prompts,
+Resume, contextual actions, background fallbacks, and `tm launch` do not use this path.
 
 ### Focus / Kill
-- `focusSession` calls `SetForegroundWindow(hwnd)` with ALT keypress workaround for foreground lock
+- `focusSession` restores a minimized tracked window, temporarily attaches to the current foreground
+  thread, and uses `SetForegroundWindow` plus `SwitchToThisWindow` to activate the exact HWND.
+- When Windows reports no foreground owner, there is no competing HWND to verify. In that state, a
+  completed switch request against a still-valid tracked HWND is accepted; when another foreground
+  window exists, failure to activate the target is reported.
 - `killSession` sends `WM_CLOSE` to the specific window (not `Process.Kill`, which would kill ALL WT windows)
 
 ### Persistence
@@ -53,7 +50,10 @@ duplicate window-selection logic.
 
 ### Status Integration
 - `WorktreeStatus.HasActiveSession: bool` — true when tracked HWND passes `IsWindow` check
-- Dashboard shows green left border on cards with active sessions
+- The flag remains native-only. It drives the terminal-button focus label/glow, native `+`
+  visibility, and delete/archive native-kill prompt.
+- Embedded terminals do not set this flag or add another card active-session indicator; coding-tool
+  status continues to represent agent activity.
 
 ## Technical Approach
 
@@ -65,10 +65,13 @@ duplicate window-selection logic.
 4. New HWND = diff between before/after sets (200-300ms typical latency)
 
 ### Win32 P/Invoke (`Win32.fs`)
-`EnumWindows`, `SetForegroundWindow`, `GetWindowThreadProcessId`, `IsWindow`, `GetClassName`, `keybd_event`, `PostMessage` (WM_CLOSE), `ShowWindow`, `BringWindowToTop`
+`EnumWindows`, `GetForegroundWindow`, `SetForegroundWindow`, `AttachThreadInput`,
+`GetWindowThreadProcessId`, `GetCurrentThreadId`, `IsWindow`, `IsIconic`, `ShowWindowAsync`,
+`SwitchToThisWindow`, `GetClassName`, and `PostMessage` (WM_CLOSE).
 
 ### Server State
-`Map<string, nativeint>` in a `MailboxProcessor` (`SessionManager.fs`). HWNDs validated on each API call. All PostAndAsyncReply calls use explicit timeouts (30s spawn, 10s others).
+`Map<string, nativeint>` in a `MailboxProcessor` (`SessionManager.fs`). HWNDs are validated on each
+API call. The mailbox owns native spawn, focus, new-tab, kill, and persistence only.
 
 ### Persistence Format
 ```json
@@ -79,20 +82,22 @@ duplicate window-selection logic.
 ## Decisions
 
 - **One window per worktree** — HWNDs are reliable identifiers, tab indices are not
-- **keybd_event ALT for focus** — simplest reliable workaround for Windows foreground lock (3 lines, no thread attachment)
+- **Foreground-thread attachment plus switch fallback** — attach only while requesting foreground,
+  always detach afterward, and ask Windows to switch to the exact tracked HWND. This avoids depending
+  on synthetic ALT input, which is unavailable on a detached input desktop.
 - **WM_CLOSE for kill** — all WT windows share one process; `Process.Kill` would terminate ALL windows
 - **Explicit `new-tab` subcommand** — `wt.exe --window new new-tab -d "path"` required; implicit default silently drops `-d`
 - **CreateNoWindow for launcher** — wt.exe launcher is just IPC; hiding its console avoids a flash
 - **Full rewrite persistence** — map is small, atomic rewrite is simpler than incremental updates
 - **No locking beyond MailboxProcessor** — writes only inside single-threaded agent, no concurrent races
 - **P/Invoke EntryPoint attributes** — DLL export names (`IsWindow`, `PostMessageW`) differ from F# binding names; missing EntryPoint crashes the MailboxProcessor silently
-- **Single smart action launch** — callers provide an action or command; `SessionManager` owns the existing-window-vs-new-window choice
-- **Interactive action sessions** — contextual actions use Copilot's interactive mode with `--yolo`; prompts are predefined or server-generated and escaped at the `CodingToolCli` shell boundary
+- **Explicit native scope** — only the card's `>` / Enter and tracked-window `+` actions launch
+  through `SessionManager`; agent-bearing launches use `TerminalLaunch` and the embedded backend
 
 ## Key Files
 
 - `src/Server/Win32.fs` — P/Invoke declarations, HWND resolution, focus/kill helpers
-- `src/Server/SessionManager.fs` — MailboxProcessor state agent, spawn/focus/kill/persist logic
-- `src/Server/CodingToolStatus.fs` / `CodingToolCli.fs` — action-to-prompt mapping and interactive command construction
-- `src/Server/WorktreeApi.fs` — API wiring, contextual action launch, `HasActiveSession` population
-- `src/Client/CardViews.fs` — contextual action visibility and placement on worktree cards
+- `src/Server/SessionManager.fs` — native window spawn/focus/new-tab/kill/persistence
+- `src/Server/TerminalLaunch.fs` — product-level backend selection
+- `src/Server/WorktreeApi.fs` — explicit native API wiring and `HasActiveSession` population
+- `src/Client/CardViews.fs` — native terminal and new-tab actions

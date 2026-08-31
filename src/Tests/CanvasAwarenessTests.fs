@@ -96,7 +96,8 @@ let private defaultModel : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
 let private dispatchedMsgs cmd : Msg list =
     let mutable captured = [] // Elmish effects expose messages only through their dispatch callback.
@@ -1148,7 +1149,8 @@ type CanvasDocPathCopyResultTests() =
 type ShareCanvasDocResultTests() =
 
     let shareResult : CanvasShareResult =
-        { Url = "https://acct.blob.core.windows.net/canvas/x/status.html?sig=s"; Title = "Status" }
+        { Url = "https://viewer.test/c/0123456789AbCdEfGhIjKl/status.html"
+          Title = "Status" }
 
     let publishingModel sendState =
         { defaultModel with
@@ -1252,7 +1254,7 @@ type ShareCanvasDocResultTests() =
             Assert.That(notice, Does.Not.Contain("link copied"),
                 "A rejected clipboard write must NOT claim the link was copied (F6)")
             Assert.That(notice, Does.Contain(shareResult.Url),
-                "The raw SAS URL must be surfaced so the user can copy it manually")
+                "The raw viewer URL must be surfaced so the user can copy it manually")
         | None -> Assert.Fail("A settled clipboard write must still raise the share banner")
 
     [<Test>]

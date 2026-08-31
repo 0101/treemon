@@ -40,13 +40,14 @@ morph behavior continue to depend only on `CanvasDoc.Kind`.
 
 A resolved live target receives the payload immediately. Otherwise the interaction is queued.
 
-When a SystemView interaction resolves no target, Treemon starts one session for that worktree and
-the queued interaction drains to it. A started launch suppresses another spawn for the same worktree
-for 30 seconds; the suppression **expires on time** rather than waiting to be cleared by a
-registration, so a spawn that never registers cannot block later interactions, and an unrelated
-session's periodic heartbeat cannot be mistaken for the launch completing. A spawn that fails
-releases the suppression immediately. Sessions the user starts concurrently are not arbitrated — the
-guard covers only Treemon's own spawns.
+When a SystemView interaction resolves no target, Treemon starts one embedded session for that
+worktree and the queued interaction drains to it. The background launch does not open or retarget
+the terminal pane; registry polling makes it attachable later. A started launch suppresses another
+spawn for the same worktree for 30 seconds; the suppression **expires on time** rather than waiting
+to be cleared by a registration, so a spawn that never registers cannot block later interactions,
+and an unrelated session's periodic heartbeat cannot be mistaken for the launch completing. A
+spawn that fails releases the suppression immediately. Sessions the user starts concurrently are
+not arbitrated — the guard covers only Treemon's own spawns.
 
 An AgentDoc interaction with no reachable author is queued without launching, because a new session
 would not be that document's author.
@@ -79,7 +80,8 @@ before allocating an unbounded clone.
 `CanvasDocOwnership` is the mailbox-backed store for AgentDoc ownership, providing assignment,
 lookup, removal, and pruning. `SessionBridge` owns the sessionId-keyed registry, transport queue,
 limits, and liveness shared by canvas and agent prompts. `CanvasBridge` layers target resolution and
-worktree launch policy over that generic transport.
+worktree launch policy over that generic transport, and delegates a required spawn to the shared
+embedded command-launch boundary.
 
 `CanvasBridge.resolveTarget` branches on `CanvasDocKinds.classify`: an AgentDoc reads
 `CanvasDocOwnership`, while a SystemView intersects the worktree's live bridge registrations with the

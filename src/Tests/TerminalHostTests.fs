@@ -127,17 +127,32 @@ let private assertRegistryResponseV2Shape (document: JsonDocument) =
 
 let private inertDataPlane endpoint =
     { AttachmentEndpoint = endpoint
-      AttachSocket = fun _ -> async.Return None
+      AttachSocket = fun _ _ -> async.Return None
       AcceptBrowserFrame = fun _ _ -> async.Return(Ok())
       DetachSocket = fun _ -> async.Return()
       AcceptUpstreamFrame = fun _ -> async.Return()
       UpstreamEnded = fun () -> async.Return()
       Stop = fun () -> async.Return() }
 
-type private TestWebSocket() =
+type private TestWebSocket(
+    ?startupFrame: byte array,
+    ?receiveScript: (byte array * bool) list
+) =
     inherit System.Net.WebSockets.WebSocket()
 
     let sent = ConcurrentQueue<byte array>()
+
+    let receives =
+        [ yield!
+              startupFrame
+              |> Option.map (fun frame -> Array.copy frame, true)
+              |> Option.toList
+          yield!
+              receiveScript
+              |> Option.defaultValue []
+              |> List.map (fun (frame, endOfMessage) ->
+                  Array.copy frame, endOfMessage) ]
+        |> ConcurrentQueue<byte array * bool>
 
     let receiveCompletion =
         TaskCompletionSource<System.Net.WebSockets.WebSocketReceiveResult>(
@@ -148,6 +163,7 @@ type private TestWebSocket() =
     let mutable state = System.Net.WebSockets.WebSocketState.Open
     let mutable closeStatus = Nullable<System.Net.WebSockets.WebSocketCloseStatus>()
     let mutable closeDescription: string option = None
+    let mutable receiveCount = 0
 
     let completeReceive status description =
         receiveCompletion.TrySetResult(
@@ -170,6 +186,7 @@ type private TestWebSocket() =
 
     member _.Sent = sent.ToArray() |> Array.toList
     member _.CloseDescription = closeDescription
+    member _.ReceiveCount = Volatile.Read(&receiveCount)
 
     override _.Abort() =
         state <- System.Net.WebSockets.WebSocketState.Aborted
@@ -195,10 +212,25 @@ type private TestWebSocket() =
             "disposed"
 
     override _.ReceiveAsync(
-        _: ArraySegment<byte>,
+        buffer: ArraySegment<byte>,
         _: CancellationToken
     ) : Task<System.Net.WebSockets.WebSocketReceiveResult> =
-        receiveCompletion.Task
+        match receives.TryDequeue() with
+        | true, (frame, endOfMessage) ->
+            if frame.Length > buffer.Count then
+                invalidOp "The scripted WebSocket frame exceeds the receive buffer"
+
+            Array.Copy(frame, 0, buffer.Array, buffer.Offset, frame.Length)
+            Interlocked.Increment(&receiveCount) |> ignore
+
+            Task.FromResult(
+                System.Net.WebSockets.WebSocketReceiveResult(
+                    frame.Length,
+                    System.Net.WebSockets.WebSocketMessageType.Binary,
+                    endOfMessage
+                )
+            )
+        | false, _ -> receiveCompletion.Task
 
     override _.SendAsync(
         buffer: ArraySegment<byte>,
@@ -242,7 +274,7 @@ type private ApiFixture() =
                 Ok
                     { AttachmentEndpoint =
                         $"http://127.0.0.1:41000/_treemon/{sessionId}/{token}/"
-                      AttachSocket = fun _ -> async.Return None
+                      AttachSocket = fun _ _ -> async.Return None
                       AcceptBrowserFrame = fun _ _ -> async.Return(Ok())
                       DetachSocket = fun _ -> async.Return()
                       AcceptUpstreamFrame = fun _ -> async.Return()
@@ -898,7 +930,7 @@ type TerminalHostDataPlaneTests() =
             let plane = planes.ToArray() |> Array.exactlyOne
             let first = new TestWebSocket()
             let firstId =
-                plane.AttachSocket first
+                plane.AttachSocket TerminalAttachmentMode.Browser first
                 |> Async.RunSynchronously
                 |> requireSome "first browser was not attached"
 
@@ -910,7 +942,7 @@ type TerminalHostDataPlaneTests() =
 
             let second = new TestWebSocket()
             let secondId =
-                plane.AttachSocket second
+                plane.AttachSocket TerminalAttachmentMode.Browser second
                 |> Async.RunSynchronously
                 |> requireSome "second browser was not attached"
             plane.DetachSocket firstId |> Async.RunSynchronously
@@ -949,7 +981,7 @@ type TerminalHostDataPlaneTests() =
 
             let browser = new TestWebSocket()
             let attachmentId =
-                plane.AttachSocket browser
+                plane.AttachSocket TerminalAttachmentMode.Browser browser
                 |> Async.RunSynchronously
                 |> requireSome "browser was not attached"
 
@@ -977,6 +1009,46 @@ type TerminalHostDataPlaneTests() =
             plane.Stop() |> Async.RunSynchronously
 
     [<Test>]
+    member _.``command attachment accepts input without replay or output forwarding``() =
+        let upstream = new TestWebSocket()
+        let plane = TerminalDataPlane.createCore 1_024 upstream ignore
+
+        try
+            plane.AcceptUpstreamFrame(frame "0startup replay")
+            |> Async.RunSynchronously
+
+            let commandSocket = new TestWebSocket()
+            let attachmentId =
+                plane.AttachSocket TerminalAttachmentMode.Command commandSocket
+                |> Async.RunSynchronously
+                |> requireSome "command client was not attached"
+
+            plane.AcceptBrowserFrame
+                attachmentId
+                (frame """{"AuthToken":"","columns":120,"rows":30}""")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            plane.AcceptBrowserFrame attachmentId (frame "0Write-Output ready\r")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            plane.AcceptUpstreamFrame(frame "0command output")
+            |> Async.RunSynchronously
+
+            Assert.Multiple(fun () ->
+                Assert.That(commandSocket.Sent, Is.Empty)
+                Assert.That(
+                    upstream.Sent |> List.map Encoding.UTF8.GetString,
+                    Is.EqualTo(
+                        [ """1{"columns":120,"rows":30}"""
+                          "0Write-Output ready\r" ]
+                    )
+                ))
+        finally
+            plane.Stop() |> Async.RunSynchronously
+
+    [<Test>]
     member _.``resume replays paused output and restores the latest browser resize``() =
         let upstream = new TestWebSocket()
         let plane = TerminalDataPlane.createCore 1_024 upstream ignore
@@ -985,7 +1057,7 @@ type TerminalHostDataPlaneTests() =
             let browser = new TestWebSocket()
 
             let attachmentId =
-                plane.AttachSocket browser
+                plane.AttachSocket TerminalAttachmentMode.Browser browser
                 |> Async.RunSynchronously
                 |> requireSome "browser was not attached"
 
@@ -1052,7 +1124,7 @@ type TerminalHostDataPlaneTests() =
             let browser = new TestWebSocket()
 
             let attachmentId =
-                plane.AttachSocket browser
+                plane.AttachSocket TerminalAttachmentMode.Browser browser
                 |> Async.RunSynchronously
                 |> requireSome "browser was not attached"
 
@@ -1158,11 +1230,284 @@ type TerminalHostDataPlaneTests() =
         | ReplaySlice.Gap _ ->
             Assert.Fail("a never-written replay buffer was reported as a gap")
 
+let private terminalInputFrames (upstream: TestWebSocket) =
+    upstream.Sent
+    |> List.filter (fun frame ->
+        frame.Length > 0
+        && frame[0] = byte '0')
+
+let private withCommandProxy action =
+    let upstream =
+        new TestWebSocket(Encoding.UTF8.GetBytes "0ready")
+    let connector _ =
+        async.Return(Ok(upstream :> System.Net.WebSockets.WebSocket))
+
+    let plane =
+        TerminalProxy.startWithConnector
+            connector
+            (TimeSpan.FromSeconds 5.0)
+            []
+            "command-boundary-token"
+            "command-boundary-session"
+            1
+            ignore
+        |> Async.RunSynchronously
+        |> requireOk
+
+    try
+        action upstream plane
+    finally
+        plane.Stop() |> Async.RunSynchronously
+
+let private submitTerminalCommand (plane: TerminalDataPlane) command =
+    Server.TerminalHostClient.sendTerminalCommandDefault
+        plane.AttachmentEndpoint
+        command
+    |> Async.RunSynchronously
+
+let private requireTerminalInputFrame (upstream: TestWebSocket) =
+    let delivered =
+        waitUntil
+            (TimeSpan.FromSeconds 2.0)
+            (fun () ->
+                terminalInputFrames upstream
+                |> List.isEmpty
+                |> not)
+
+    Assert.That(delivered, Is.True, "Command was not forwarded to the terminal upstream")
+
+    match terminalInputFrames upstream with
+    | [ frame ] -> frame
+    | frames ->
+        Assert.Fail($"Expected one terminal input frame, got {frames.Length}")
+        Array.empty
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 [<Category("TerminalHost")>]
 type TerminalHostProxyTests() =
+    [<Test>]
+    member _.``shell readiness uses the configured startup timeout``() =
+        use upstream = new TestWebSocket()
+
+        let connector _ =
+            async.Return(
+                Ok(upstream :> System.Net.WebSockets.WebSocket)
+            )
+
+        let result =
+            TerminalProxy.startWithConnector
+                connector
+                (TimeSpan.FromMilliseconds 50.0)
+                []
+                "readiness-timeout-token"
+                "readiness-timeout-session"
+                1
+                ignore
+            |> runWithin (TimeSpan.FromSeconds 1.0)
+
+        match result with
+        | Error error ->
+            Assert.That(
+                error,
+                Is.EqualTo("Timed out waiting for the terminal shell to become ready")
+            )
+        | Ok plane ->
+            try
+                Assert.Fail("A terminal without an output frame was published as ready")
+            finally
+                plane.Stop() |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``oversized upstream output message does not end a live terminal``() =
+        let outputByte = byte 'x'
+
+        let oversizedMessage =
+            [ yield
+                  Array.append
+                      [| byte '0' |]
+                      (Array.create 8_191 outputByte),
+                  false
+              yield!
+                  List.init 127 (fun _ ->
+                      Array.create 8_192 outputByte, false)
+              yield [| outputByte |], true ]
+
+        let script =
+            (Encoding.UTF8.GetBytes "0ready", true)
+            :: oversizedMessage
+            @ [ Encoding.UTF8.GetBytes "0after", true ]
+
+        use upstream = new TestWebSocket(receiveScript = script)
+        use upstreamEnded = new ManualResetEventSlim()
+
+        let connector _ =
+            async.Return(
+                Ok(upstream :> System.Net.WebSockets.WebSocket)
+            )
+
+        let plane =
+            TerminalProxy.startWithConnector
+                connector
+                (TimeSpan.FromSeconds 5.0)
+                []
+                "oversized-output-token"
+                "oversized-output-session"
+                1
+                upstreamEnded.Set
+            |> Async.RunSynchronously
+            |> requireOk
+
+        try
+            Assert.That(
+                waitUntil
+                    (TimeSpan.FromSeconds 2.0)
+                    (fun () -> upstream.ReceiveCount = script.Length),
+                Is.True,
+                "The upstream pump stopped after one output message exceeded the replay-buffer capacity"
+            )
+
+            let browser = new TestWebSocket()
+            let attachmentId =
+                plane.AttachSocket
+                    TerminalAttachmentMode.Browser
+                    browser
+                |> Async.RunSynchronously
+                |> requireSome "The live terminal rejected a browser attachment"
+
+            plane.AcceptBrowserFrame
+                attachmentId
+                (Encoding.UTF8.GetBytes
+                    """{"AuthToken":"","columns":120,"rows":30}""")
+            |> Async.RunSynchronously
+            |> requireOk
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    upstreamEnded.IsSet,
+                    Is.False,
+                    "A bounded replay policy must not be treated as proof that ttyd exited"
+                )
+
+                Assert.That(
+                    browser.Sent
+                    |> List.map Encoding.UTF8.GetString,
+                    Does.Contain("0after"),
+                    "The upstream pump did not continue after the oversized output message"
+                ))
+        finally
+            plane.Stop() |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``multiline launch prompts cross the real attachment as one control-free frame``() =
+        let cases =
+            [ ("AgentDoc",
+               CanvasSessionPrompt.forAgentDoc
+                   "Q:/code/demo"
+                   "report.html")
+              ("SystemView",
+               Shared.CanvasPrompt.continueWorking
+                   "Q:/code/demo"
+                   "diff.html")
+              ("create-worktree",
+               Server.CodingToolStatus.skillInvocation
+                   None
+                   "bd-execute"
+                   "Implement the first line.\r\nPreserve the second line.") ]
+
+        cases
+        |> List.iter (fun (name, prompt) ->
+            withCommandProxy (fun upstream plane ->
+                let command =
+                    Server.CodingToolCli.build
+                        None
+                        (Server.CodingToolCli.Interactive prompt)
+                    |> _.AsShellString
+
+                let result = submitTerminalCommand plane command
+                assertOk result $"{name} command submission failed"
+                let frame = requireTerminalInputFrame upstream
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        command |> Seq.exists Char.IsControl,
+                        Is.False,
+                        $"{name} launch command must be one control-free line"
+                    )
+
+                    Assert.That(
+                        frame,
+                        Is.EqualTo(Encoding.UTF8.GetBytes($"0{command}\r")),
+                        $"{name} prompt command changed while crossing the attachment"
+                    ))))
+
+    [<Test>]
+    member _.``command sender delivers a frame exactly at the attachment byte limit``() =
+        withCommandProxy (fun upstream plane ->
+            let command =
+                String('x', Protocol.MaximumAttachmentMessageBytes - 2)
+
+            let result = submitTerminalCommand plane command
+            assertOk result "Exact-limit command submission failed"
+            let frame = requireTerminalInputFrame upstream
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    frame.Length,
+                    Is.EqualTo Protocol.MaximumAttachmentMessageBytes
+                )
+
+                Assert.That(
+                    frame,
+                    Is.EqualTo(Encoding.UTF8.GetBytes($"0{command}\r"))
+                )))
+
+    [<Test>]
+    member _.``command sender rejects one-byte-over ASCII and multibyte frames``() =
+        [ ("ASCII",
+           String('x', Protocol.MaximumAttachmentMessageBytes - 1),
+           Protocol.MaximumAttachmentMessageBytes - 1)
+          ("multibyte",
+           String('x', Protocol.MaximumAttachmentMessageBytes - 3) + "é",
+           Protocol.MaximumAttachmentMessageBytes - 2) ]
+        |> List.iter (fun (name, command, expectedCharacterCount) ->
+            withCommandProxy (fun upstream plane ->
+                let result = submitTerminalCommand plane command
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        command.Length,
+                        Is.EqualTo expectedCharacterCount,
+                        $"{name} character-count fixture changed"
+                    )
+
+                    Assert.That(
+                        Encoding.UTF8.GetByteCount($"0{command}\r"),
+                        Is.EqualTo(Protocol.MaximumAttachmentMessageBytes + 1),
+                        $"{name} frame must be exactly one byte over"
+                    )
+
+                    Assert.That(
+                        result,
+                        Is.EqualTo(
+                            Error "The terminal command is invalid"
+                            : Result<unit, string>
+                        )
+                    )
+
+                    Assert.That(
+                        terminalInputFrames upstream,
+                        Is.Empty,
+                        $"{name} oversized command must not reach the attachment"
+                    )
+
+                    Assert.That(
+                        upstream.Sent.Length,
+                        Is.EqualTo 1,
+                        $"{name} oversized command must be rejected before browser attachment"
+                    ))))
+
     [<Test>]
     member _.``terminal page hides viewport scrollbar without disabling scrolling``() =
         let html =
@@ -1190,7 +1535,8 @@ type TerminalHostProxyTests() =
 
     [<Test>]
     member _.``attachment endpoint rejects invalid bearer origin and oversized requests``() =
-        let upstream = new TestWebSocket()
+        let upstream =
+            new TestWebSocket(Encoding.UTF8.GetBytes "0ready")
         let connectorCalls = ConcurrentQueue<int>()
         let token = "shared-control-bearer"
         let dashboardOrigin = "http://localhost:5174"
@@ -1208,6 +1554,7 @@ type TerminalHostProxyTests() =
         let plane =
             TerminalProxy.startWithConnector
                 connector
+                (TimeSpan.FromSeconds 5.0)
                 allowedOrigins
                 token
                 "security-session"
@@ -1304,7 +1651,8 @@ type TerminalHostProxyTests() =
 
     [<Test>]
     member _.``attachment response denies framing when no dashboard origin is configured``() =
-        let upstream = new TestWebSocket()
+        let upstream =
+            new TestWebSocket(Encoding.UTF8.GetBytes "0ready")
 
         let connector _ =
             async.Return(Ok(upstream :> System.Net.WebSockets.WebSocket))
@@ -1312,6 +1660,7 @@ type TerminalHostProxyTests() =
         let plane =
             TerminalProxy.startWithConnector
                 connector
+                (TimeSpan.FromSeconds 5.0)
                 []
                 "shared-control-bearer"
                 "no-origin-session"
@@ -1336,6 +1685,88 @@ type TerminalHostProxyTests() =
                 ))
         finally
             plane.Stop() |> Async.RunSynchronously
+
+[<TestFixture>]
+[<Category("Fast")>]
+[<Category("TerminalHost")>]
+[<Platform("Win")>]
+type TerminalHostCommandLifetimeTests() =
+    [<Test>]
+    member _.``background command launch paths remain registered after command exit without a browser``() =
+        withTempDir "terminal-host-background-command" (fun root ->
+            let ttyd = Path.Combine(AppContext.BaseDirectory, "ttyd.exe")
+            let powershell = executableOnPath "pwsh.exe"
+
+            Assert.That(File.Exists ttyd, Is.True, $"Could not find the test ttyd runtime at {ttyd}")
+
+            let registry =
+                TerminalRegistry.create
+                    (TerminalLauncher.start
+                        { TtydExecutable = ttyd
+                          ShellCommand = powershell
+                          StartupTimeout = TimeSpan.FromSeconds 5.0 })
+                    (TerminalProxy.start
+                        (TimeSpan.FromSeconds 5.0)
+                        []
+                        "background-command-token")
+
+            let worktree =
+                root
+                |> Path.GetFullPath
+                |> CanonicalWorktree.create
+
+            let quote (value: string) = value.Replace("'", "''")
+
+            let rec launch = function
+                | [] -> async.Return []
+                | pathName :: remaining ->
+                    async {
+                        let! started = TerminalRegistry.start registry worktree
+                        let terminal = (requireOk started).Terminals |> List.last
+                        let marker = Path.Combine(root, $"{pathName}.done")
+                        let command =
+                            $"pwsh -NoLogo -NoProfile -NonInteractive -Command 'Start-Sleep -Milliseconds 100'; Set-Content -LiteralPath '{quote marker}' -Value done"
+
+                        let! delivered =
+                            Server.TerminalHostClient.sendTerminalCommandDefault
+                                terminal.AttachmentEndpoint
+                                command
+
+                        requireOk delivered
+
+                        Assert.That(
+                            waitUntil (TimeSpan.FromSeconds 5.0) (fun () -> File.Exists marker),
+                            Is.True,
+                            $"{pathName} command did not finish inside its retained terminal"
+                        )
+
+                        let! launched = launch remaining
+                        return terminal.SessionId :: launched
+                    }
+
+            try
+                let expected =
+                    launch
+                        [ "create-with-prompt"
+                          "auto-sync-fallback"
+                          "canvas-fallback"
+                          "tm-launch" ]
+                    |> Async.RunSynchronously
+
+                let actual =
+                    TerminalRegistry.list registry
+                    |> Async.RunSynchronously
+                    |> _.Terminals
+                    |> List.map _.SessionId
+
+                Assert.That(
+                    actual,
+                    Is.EqualTo expected,
+                    "Every browserless command terminal must remain in the authoritative registry after its short-lived command exits"
+                )
+            finally
+                TerminalRegistry.shutdown registry
+                |> Async.RunSynchronously)
 
 [<TestFixture>]
 [<Category("Unit")>]

@@ -39,9 +39,7 @@ let internal hostIdentityMatches left right =
 let internal validBoundedText maximum (value: string) =
     not (String.IsNullOrWhiteSpace value)
     && value.Length <= maximum
-    && value
-       |> Seq.forall (fun character ->
-           not (Char.IsControl character))
+    && value |> Seq.forall (Char.IsControl >> not)
 
 let private validHostVersion (value: string) =
     validBoundedText 128 value
@@ -84,15 +82,13 @@ let internal exactProperties required optional (element: JsonElement) =
         && Set.isSubset distinct allowed
 
 let private optionalString name (element: JsonElement) =
-    match
-        element.EnumerateObject()
-        |> Seq.tryFind (fun property -> property.Name = name)
-    with
+    match element.EnumerateObject() |> Seq.tryFind (fun property -> property.Name = name) with
     | None -> Ok None
     | Some property when property.Value.ValueKind = JsonValueKind.String ->
-        match property.Value.GetString() |> Option.ofObj with
-        | Some value -> Ok(Some value)
-        | None -> Error $"{name} must be a JSON string"
+        property.Value.GetString()
+        |> Option.ofObj
+        |> Option.map (Some >> Ok)
+        |> Option.defaultValue (Error $"{name} must be a JSON string")
     | Some _ -> Error $"{name} must be a JSON string"
 
 let private validControlEndpoint (value: string) =
@@ -146,19 +142,9 @@ let private parseManifest (text: string) =
                     Error "TerminalHost discovery manifest has an invalid control endpoint"
                 elif bearerToken |> Option.exists validBearerToken |> not then
                     Error "TerminalHost discovery manifest has an invalid bearer token"
-                elif
-                    hostVersion
-                    |> Option.exists validHostVersion
-                    |> not
-                then
+                elif hostVersion |> Option.exists validHostVersion |> not then
                     Error "TerminalHost discovery manifest has an invalid host version"
-                elif
-                    stagedVersion
-                    |> Option.exists (
-                        TerminalHostLayout.isValidVersionDirectoryName
-                        >> not
-                    )
-                then
+                elif stagedVersion |> Option.exists (TerminalHostLayout.isValidVersionDirectoryName >> not) then
                     Error "TerminalHost discovery manifest has an invalid staged executable version"
                 else
                     Ok
@@ -176,12 +162,10 @@ let private parseManifest (text: string) =
     | :? OverflowException ->
         Error "TerminalHost discovery manifest is malformed"
 
-let private manifestPath config =
-    TerminalHostLayout.forStateDirectory config.HostStateDirectory
-    |> _.ManifestPath
-
 let internal readManifest config =
-    let path = manifestPath config
+    let path =
+        TerminalHostLayout.forStateDirectory config.HostStateDirectory
+        |> _.ManifestPath
 
     try
         let info = FileInfo path
