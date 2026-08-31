@@ -115,7 +115,7 @@ type Msg =
     | CopyCanvasDocPath of scopedKey: string * filename: string
     | CanvasDocPathCopyResult of scopedKey: string * filename: string * revision: int * path: string * Result<unit, string>
     | ClearCanvasDocPathCopied of scopedKey: string * filename: string * revision: int
-    // Share the focused AgentDoc: publish it (server mints a per-doc read-only SAS URL + returns the
+    // Share the focused AgentDoc: publish it (server returns a clean authenticated-viewer URL + the
     // doc title) then write a rich clipboard link. ShareCanvasDocResult carries the CanvasShareResult
     // on Ok (→ dual-format clipboard write, deferring the banner to ClipboardWriteResult) or an error
     // message on failure (→ the existing error banner). ClipboardWriteResult reports whether the async

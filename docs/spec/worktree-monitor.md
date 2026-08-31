@@ -33,11 +33,21 @@
 
 ### Configuration Store
 
-Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DIR` when set, for tests). `src/Server/GlobalConfig.fs` is the sole owner of that file — a single JSON store fronted by typed accessors, with these invariants:
+Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DIR` when set, for tests). `src/Server/GlobalConfig.fs` owns all runtime access to that file — a single JSON store fronted by typed accessors. Out-of-band operator edits are made only while Treemon is not writing the file. The store has these invariants:
 
-- **Single serialized writer, atomic on disk.** Every mutation funnels through one in-process lock and writes via a temp-file-then-replace; no write bypasses the lock, so concurrent updates can't interleave or leave a partially written file.
+- **Single serialized runtime writer, atomic on disk.** Every server mutation funnels through one in-process lock and writes via a temp-file-then-replace, so concurrent runtime updates can't interleave or leave a partially written file.
 - **Never destroy data.** An unparseable `config.json` is backed up to a timestamped `*.corrupt-<ts>` sibling before a fresh object is started, and each write touches only its own named keys — every unrelated key is left intact.
 - **Typed accessors over one store.** Watched roots (with the missing-vs-empty distinction the startup resolver depends on — see Multi-Repo above), canvas pane open/position, collapsed repos, last-viewed hashes, and the editor command/name reader are thin wrappers over the same locked store.
+
+### Loopback Request Boundary
+
+- `HttpSecurity.csrfGuard` fronts the complete Fable.Remoting API and every state-changing canvas
+  and session-activity POST route. Safe GET, HEAD, and OPTIONS requests pass directly.
+- For state-changing methods, `Origin` is authoritative when present and `Referer` is consulted only
+  when `Origin` is absent. A present value must be an absolute loopback URL (`localhost`,
+  `127.0.0.0/8`, or `::1`); malformed, opaque `null`, LAN, and public origins receive HTTP 403.
+- Requests with neither header remain valid for non-browser clients such as `tm` and the reporting
+  extension. Kestrel remains loopback-bound, so this carve-out does not expose the API remotely.
 
 ### Worktree Identification
 
@@ -275,6 +285,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/TreemonConfig.fs` | Repo-local `.treemon.json` persistence for auto-sync branches, archived branches, base branch, upstream remote, and the raw `diffCategories` read |
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
+| `src/Server/HttpSecurity.fs` | Shared loopback Origin/Referer guard for state-changing HTTP routes |
 | `src/Server/SessionManager.fs` | MailboxProcessor session agent, spawn/focus/kill, persistence |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, `appSubscriptions`, top-level `view` wiring |
@@ -320,7 +331,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - net10.0 with Fable pinned to 5.0.0: Fable 4.x deadlocks when the compiled project targets net10.0, so the client needs Fable 5 (which in turn requires Feliz 3 — the Feliz 2 compiler plugin targets the Fable 4 AST). Later Fable 5 releases each break the client: 5.1.0 made F# reflection report `option` as a union, which `Fable.SimpleJson` classifies before its option case, so every `option` field in a remoting response fails to deserialize; 5.5.0 does the same for `list` and additionally rejects `Fable.Remoting.MsgPack`'s `inline private` helpers with a check stricter than `fsc`'s own. 5.0.0 predates all three. Revisit when `Fable.SimpleJson` and `Fable.Remoting` publish fixes.
 - Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
 - Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups
-- Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start (the `treemon.ps1` shims trigger it when prod is running). Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The server is the single writer of `config.json` (with an internal write lock); the online-only CLI never writes config files, which removes the cross-process clobber hazard.
+- Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start (the `treemon.ps1` shims trigger it when prod is running). Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The online-only CLI never writes config files, which removes its cross-process clobber hazard.
 - `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the repo-local `.treemon.json` (`autoSyncBranches`, `baseBranch`, `upstreamRemote`, `diffCategories`) are deliberately separate stores in separate modules, named so the machine-vs-repo scope is obvious and the two never collide.
 - Create-worktree prompt auto-launch is **fire-and-forget, server-side, and reuses `launchAction`**: repo root, provider, and the new path are all in scope on the server, so it orchestrates the launch there rather than via a client follow-up. A failed spawn is logged, not surfaced (the worktree already exists), and it launches even after a post-fork warning. Provider is read **directly** from the new worktree's `.treemon.json` (it isn't in scheduler state yet, so `resolveProvider` would return `None` there), and the worktree path is single-quote-escaped in `SessionManager.buildScript` so a path containing `'` can't break the launch script.
 - The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The prompt (and skill) are single-quote-escaped at the CLI sink, so an odd skill value is a no-op for the tool, not an injection concern, making validation pure complication.
@@ -331,6 +342,5 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
 - `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking, including the no-live-session auto-sync fallback
 - `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
-- `docs/spec/remoting-csrf-hardening.md` — Origin/Referer CSRF guard fronting the remoting and canvas POST surfaces (the create-worktree auto-launch made state-changing remoting an agent-execution sink)
 - `docs/spec/canvas-pane.md` — interactive HTML docs and the canvas-specific consumer of the generic session bridge
 - `docs/spec/session-status-push.md` — coding-tool session collapse and the related auto-sync target selection

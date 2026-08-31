@@ -528,9 +528,9 @@ type ShareCanvasDocRequest =
     { WorktreePath: WorktreePath
       Filename: string }
 
-/// Result of publishing a canvas doc: the per-doc read-only SAS URL plus the doc's title
-/// (extracted server-side from the HTML) so the client can build the rich clipboard link
-/// without re-parsing.
+/// Result of publishing a canvas doc: the clean authenticated-viewer URL plus the doc's title
+/// (extracted server-side from the HTML) so the client can build the rich clipboard link without
+/// re-parsing.
 type CanvasShareResult =
     { Url: string
       Title: string }
