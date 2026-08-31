@@ -239,6 +239,77 @@ let worktreesCmd =
         setAction handler
     }
 
+let private tryFindTerminalWorktree (repos: RepoWorktrees list) (path: WorktreePath) =
+    repos
+    |> List.tryPick (fun repo ->
+        repo.Worktrees
+        |> List.tryFind (fun worktree ->
+            PathUtils.pathEquals
+                (WorktreePath.value worktree.Path)
+                (WorktreePath.value path))
+        |> Option.map (fun worktree -> repo, worktree))
+
+let private formatTerminalLifecycle =
+    function
+    | EmbeddedTerminalLifecycle.Running _ -> "Running"
+    | EmbeddedTerminalLifecycle.Interrupted error ->
+        $"Interrupted: %s{error}"
+
+let formatEmbeddedTerminalReport
+    (repos: RepoWorktrees list)
+    (snapshot: EmbeddedTerminalSnapshot)
+    =
+    match snapshot.Tabs with
+    | [] -> [ "No embedded terminals open." ]
+    | tabs ->
+        let rows =
+            tabs
+            |> List.map (fun tab ->
+                let repository, worktree, branch =
+                    match tryFindTerminalWorktree repos tab.Worktree with
+                    | Some(repo, trackedWorktree) ->
+                        repo.RootFolderName,
+                        WorktreePath.value trackedWorktree.Path,
+                        trackedWorktree.Branch
+                    | None ->
+                        "(untracked)",
+                        WorktreePath.value tab.Worktree,
+                        "(unknown)"
+
+                let activity =
+                    tab.ReportedActivity
+                    |> Option.defaultValue "(no reported title or intent)"
+
+                [ repository
+                  worktree
+                  branch
+                  formatTerminalLifecycle tab.Lifecycle
+                  activity ]
+                |> List.map sanitizeForTerminal
+                |> String.concat " | ")
+
+        [ $"Open embedded terminals: %d{List.length tabs}"
+          "REPOSITORY | WORKTREE | BRANCH | STATE | SESSION TITLE / INTENT" ]
+        @ rows
+
+let terminalsCmd =
+    let handler (port: int option) =
+        withPort port (fun port ->
+            tryCallServer port (fun api ->
+                let dashboard = api.getWorktrees() |> Async.RunSynchronously
+                let terminals = api.getEmbeddedTerminals() |> Async.RunSynchronously
+
+                formatEmbeddedTerminalReport dashboard.Repos terminals
+                |> List.iter (printfn "%s")
+
+                0))
+
+    command "terminals" {
+        description "List open embedded terminals and their reported session title or intent"
+        inputs (optionMaybe<int> "--port" |> desc "Server port (default: 5000, env: TREEMON_PORT)")
+        setAction handler
+    }
+
 /// Folds a per-path root operation (add/remove) into a tri-state exit code:
 ///   0 = all paths succeeded, 1 = all paths failed, 2 = partial success.
 /// A partial batch returns 2 (not 1) because the paths that succeeded WERE persisted
@@ -376,6 +447,7 @@ let main argv =
         addCommand launchCmd
         addCommand newCmd
         addCommand worktreesCmd
+        addCommand terminalsCmd
         addCommand addCmd
         addCommand removeCmd
         addCommand rootsCmd

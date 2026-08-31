@@ -82,6 +82,7 @@ tm launch --path C:\code\my-project --fix-build <url>      # fix failed build
 tm launch --path C:\code\my-project --create-pr             # create a pull request
 tm new --repo C:\code\my-project --branch feature/foo      # create worktree
 tm worktrees                                                 # list all worktrees
+tm terminals                                                 # list open embedded terminals and session activity
 tm add C:\code\my-project                                   # watch a root (applies on next server restart)
 tm remove C:\code\my-project                                # stop watching a root
 tm roots                                                     # list watched roots

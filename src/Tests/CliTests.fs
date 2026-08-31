@@ -148,6 +148,80 @@ type FormatPrTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type FormatEmbeddedTerminalReportTests() =
+
+    let repo name worktrees : RepoWorktrees =
+        { RepoId = RepoId name
+          RootFolderName = name
+          Worktrees = worktrees
+          IsReady = true
+          Provider = None
+          BaseBranch = "main" }
+
+    let tab id path activity lifecycle : EmbeddedTerminalTab =
+        { Id = EmbeddedTerminalId id
+          Worktree = WorktreePath path
+          ReportedActivity = activity
+          Lifecycle = lifecycle }
+
+    [<Test>]
+    member _.``empty registry reports no open embedded terminals``() =
+        let lines = formatEmbeddedTerminalReport [] EmbeddedTerminalSnapshot.empty
+
+        Assert.That(lines, Is.EqualTo([ "No embedded terminals open." ]))
+
+    [<Test>]
+    member _.``report maps tracked terminals to repositories without exposing attachment credentials``() =
+        let path = WorktreePath "Q:\\code\\tm-feature"
+        let worktree =
+            { Tests.WorktreeFixtures.baseWt with
+                Path = path
+                Branch = "feature" }
+        let endpoint = "http://127.0.0.1:54321/_treemon/terminal/secret-token/"
+        let snapshot =
+            { Tabs =
+                [ tab
+                      "terminal-1"
+                      "q:\\code\\tm-feature"
+                      (Some "Investigating\u001b[2J terminal titles")
+                      (EmbeddedTerminalLifecycle.Running endpoint) ] }
+
+        let lines =
+            formatEmbeddedTerminalReport [ repo "treemon" [ worktree ] ] snapshot
+        let rendered = lines |> String.concat Environment.NewLine
+
+        Assert.Multiple(fun () ->
+            Assert.That(rendered, Does.Contain("Open embedded terminals: 1"))
+            Assert.That(
+                rendered,
+                Does.Contain(
+                    "treemon | Q:\\code\\tm-feature | feature | Running | Investigating[2J terminal titles"))
+            Assert.That(rendered, Does.Not.Contain("secret-token"))
+            Assert.That(
+                lines
+                |> List.collect (Seq.filter Char.IsControl >> Seq.toList),
+                Is.Empty))
+
+    [<Test>]
+    member _.``report preserves untracked and interrupted terminal diagnostics``() =
+        let snapshot =
+            { Tabs =
+                [ tab
+                      "terminal-2"
+                      "Q:\\scratch\\terminal"
+                      None
+                      (EmbeddedTerminalLifecycle.Interrupted "Host exited\u001b[31m") ] }
+
+        let lines = formatEmbeddedTerminalReport [] snapshot
+
+        Assert.That(
+            lines,
+            Does.Contain(
+                "(untracked) | Q:\\scratch\\terminal | (unknown) | Interrupted: Host exited[31m | (no reported title or intent)"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type FoldRootResultsTests() =
 
     // Stub root op: fails for any path in failOn, succeeds otherwise. Lets us exercise the
