@@ -23,6 +23,7 @@ const {
   servedContentHash,
   isBrowserProcessedScript,
   hasAuthoredProcessedScript,
+  documentShellSignature,
   requiresDocumentReload,
 } = morph;
 
@@ -136,6 +137,31 @@ function scriptDocument(...scripts) {
   };
 }
 
+function headElement(outerHTML, runtime = false) {
+  return {
+    outerHTML,
+    hasAttribute: (name) => name === "data-treemon-runtime" && runtime,
+  };
+}
+
+function attribute(name, value) {
+  return { name, value };
+}
+
+function shellDocument({
+  scripts = [],
+  head = [],
+  htmlAttributes = [],
+  bodyAttributes = [],
+} = {}) {
+  return {
+    querySelectorAll: (selector) => selector === "script" ? scripts : [],
+    head: { children: head },
+    documentElement: { attributes: htmlAttributes },
+    body: { attributes: bodyAttributes },
+  };
+}
+
 test("only authored browser-processed scripts require document reload", () => {
   const classic = script();
   const module = script("module");
@@ -164,6 +190,68 @@ test("script removal and addition both select reload while static documents stay
   assert.equal(requiresDocumentReload(staticDoc, staticDoc), false);
   assert.equal(requiresDocumentReload(scriptedDoc, staticDoc), true);
   assert.equal(requiresDocumentReload(staticDoc, scriptedDoc), true);
+});
+
+test("authored head and root-attribute changes reload while runtime metadata does not", () => {
+  const redStyle = headElement("<style>#target{color:red}</style>");
+  const blueStyle = headElement("<style>#target{color:blue}</style>");
+  const current = shellDocument({
+    head: [
+      redStyle,
+      headElement("<meta data-treemon-runtime content=\"old\">", true),
+    ],
+    htmlAttributes: [attribute("lang", "en")],
+    bodyAttributes: [attribute("class", "compact")],
+  });
+  const sameSource = shellDocument({
+    head: [
+      redStyle,
+      headElement("<meta data-treemon-runtime content=\"new\">", true),
+    ],
+    htmlAttributes: [attribute("lang", "en")],
+    bodyAttributes: [attribute("class", "compact")],
+  });
+
+  assert.equal(documentShellSignature(current), documentShellSignature(sameSource));
+  assert.equal(requiresDocumentReload(current, sameSource), false);
+  assert.equal(
+    requiresDocumentReload(current, shellDocument({
+      head: [blueStyle],
+      htmlAttributes: [attribute("lang", "en")],
+      bodyAttributes: [attribute("class", "compact")],
+    })),
+    true
+  );
+  assert.equal(
+    requiresDocumentReload(current, shellDocument({
+      head: [redStyle],
+      htmlAttributes: [attribute("lang", "fr")],
+      bodyAttributes: [attribute("class", "compact")],
+    })),
+    true
+  );
+  assert.equal(
+    requiresDocumentReload(current, shellDocument({
+      head: [redStyle],
+      htmlAttributes: [attribute("lang", "en")],
+      bodyAttributes: [attribute("class", "wide")],
+    })),
+    true
+  );
+});
+
+test("live root mutations do not look like authored shell changes", () => {
+  const authored = shellDocument({
+    bodyAttributes: [attribute("class", "compact")],
+  });
+  const live = shellDocument({
+    bodyAttributes: [attribute("class", "user-expanded")],
+  });
+
+  assert.equal(
+    requiresDocumentReload(live, authored, documentShellSignature(authored)),
+    false
+  );
 });
 
 test("a whitespace-only text change is not a change", () => {

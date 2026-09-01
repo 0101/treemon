@@ -15,7 +15,8 @@ Authoring DX + Pane UX detail: `docs/spec/canvas-authoring-dx.md`.
 For context, the canvas pane already delivers: multi-doc pane with tab bar / dock positions,
 per-doc ownership + owner-aware routing, liveness + Start-session, archive, selected-text
 Explain/Remove/Comment actions, the Beadspace dashboard, in-place idiomorph morph on content
-change, and keep-iframes-alive across tab switches.
+change when only body contents differ, full reload for authored scripts or document-shell changes,
+and keep-iframes-alive across tab switches.
 
 Every served canvas doc is rewritten at the `</head>` injection point in
 `CanvasDocServer.buildInjection`. Today that injection is:
@@ -133,8 +134,9 @@ Two tightly-coupled tab-bar tweaks that ship together:
 Recorded so future readers know these were evaluated, not missed.
 
 - **Phase 5 — DOM morph, keep-iframes-alive, dev hot-reload — SHIPPED.** Idiomorph injection +
-  in-place morph on content change and cross-tab iframe persistence landed with the feature. "Dev
-  hot reload" is subsumed: a content change bumps the content hash, which already drives a morph.
+  in-place body morph, conservative reload for scripts or changes outside that morph target, and
+  cross-tab iframe persistence landed with the feature. "Dev hot reload" is subsumed: a content
+  change bumps the content hash, which already drives the appropriate live update.
 - **Morph state preservation — shipped.** Idiomorph preserves matched node identity but
   resynchronizes form values from authored markup. The injected morph controller snapshots dirty
   `<input>`/`<textarea>` values before each morph and restores them afterward while untouched fields

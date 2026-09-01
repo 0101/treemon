@@ -2,9 +2,11 @@
  * Canvas doc morph controller.
  *
  * Listens for the pane's `content-updated` signal and re-fetches the doc. Static documents morph in
- * place with idiomorph so scroll position and focus survive an update. Documents with authored
- * browser-processed scripts reload instead: parser-created scripts do not execute after a body
- * morph, and explicitly rerunning arbitrary author code could duplicate listeners and side effects.
+ * place with idiomorph so scroll position and focus survive an update. Changes outside the morph
+ * target — authored head elements or html/body attributes — reload so styles and document metadata
+ * do not stay stale. Documents with authored browser-processed scripts reload too: parser-created
+ * scripts do not execute after a body morph, and explicitly rerunning arbitrary author code could
+ * duplicate listeners and side effects.
  * Dirty input and textarea values, plus checkbox/radio checked state, are snapshotted immediately
  * before a static morph and restored afterward; untouched controls still receive the new authored
  * state.
@@ -115,8 +117,31 @@
     });
   }
 
-  function requiresDocumentReload(current, incoming) {
-    return hasAuthoredProcessedScript(current) || hasAuthoredProcessedScript(incoming);
+  function attributesOf(element) {
+    return nodesOf(element && element.attributes)
+      .map(function (attribute) { return [attribute.name, attribute.value]; })
+      .sort(function (left, right) {
+        return left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0;
+      });
+  }
+
+  function documentShellSignature(root) {
+    var authoredHead =
+      nodesOf(root.head && root.head.children)
+        .filter(function (element) { return !element.hasAttribute(RUNTIME_ATTRIBUTE); })
+        .map(function (element) { return element.outerHTML; });
+    return JSON.stringify([
+      authoredHead,
+      attributesOf(root.documentElement),
+      attributesOf(root.body)
+    ]);
+  }
+
+  function requiresDocumentReload(current, incoming, loadedShellSignature) {
+    return hasAuthoredProcessedScript(current) ||
+      hasAuthoredProcessedScript(incoming) ||
+      (loadedShellSignature || documentShellSignature(current)) !==
+        documentShellSignature(incoming);
   }
 
   function isEditableControl(control) {
@@ -444,6 +469,8 @@
   function install() {
     var loadedDocument = loadedDocumentState();
     var loadedContentHash = loadedDocument && loadedDocument.contentHash;
+    /** @type {string | null} */
+    var loadedShellSignature = null;
     var loadedCompletionSent = false;
     var reloading = false;
     var highlighted = [];
@@ -494,13 +521,14 @@
             return;
           }
           var incoming = new DOMParser().parseFromString(refetched.html, 'text/html');
-          if (requiresDocumentReload(document, incoming)) {
+          if (requiresDocumentReload(document, incoming, loadedShellSignature)) {
             reloading = true;
             location.reload();
             return;
           }
           highlighted = morphAndHighlight(document.body, incoming.body.innerHTML, highlighted);
           loadedContentHash = refetched.contentHash;
+          loadedShellSignature = documentShellSignature(incoming);
           loadedCompletionSent = true;
           window.dispatchEvent(new Event('canvas-morph-complete'));
           postMorphComplete(morph, refetched.contentHash);
@@ -515,6 +543,7 @@
     });
 
     function completeLoadedDocument() {
+      loadedShellSignature = documentShellSignature(document);
       if (!loadedDocument || !loadedContentHash || loadedCompletionSent) return;
       loadedCompletionSent = true;
       postMorphComplete(loadedDocument, loadedContentHash);
@@ -559,6 +588,7 @@
       servedContentHash: servedContentHash,
       isBrowserProcessedScript: isBrowserProcessedScript,
       hasAuthoredProcessedScript: hasAuthoredProcessedScript,
+      documentShellSignature: documentShellSignature,
       requiresDocumentReload: requiresDocumentReload
     };
   }

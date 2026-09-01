@@ -20,6 +20,14 @@ let private injectInto (kind: CanvasDocKind) (filename: string) (docHtml: string
     docHtml
     |> injectAtHead (Server.CanvasDocServer.buildInjection kind filename)
 
+let private injectLive (kind: CanvasDocKind) (filename: string) (docHtml: string) =
+    let contentHash =
+        docHtml
+        |> System.Text.Encoding.UTF8.GetBytes
+        |> Server.CanvasScanner.contentHash
+    let injection = Server.CanvasDocServer.buildLiveInjection kind filename contentHash
+    docHtml |> injectAtHead injection, contentHash
+
 // ============================================================================
 // Base-theme/cascade behavior plus isolated AgentDoc live-update behavior.
 //
@@ -130,11 +138,12 @@ type CanvasInjectionThemeE2ETests() =
         }
 
     [<Test>]
-    member this.``AgentDoc morph preserves user-edited form state``() =
+    member this.``AgentDoc morph applies body styles and preserves user-edited form state``() =
         task {
             let initial =
                 injectInto AgentDoc "form.html"
                     """<!doctype html><html><head><title>form</title></head><body>
+                    <style>#version{color:rgb(255,0,0)}</style>
                     <h1 id="version">Before</h1>
                     <input id="title" value="Agent title">
                     <textarea id="notes">Agent notes</textarea>
@@ -147,6 +156,7 @@ type CanvasInjectionThemeE2ETests() =
             let updated =
                 injectInto AgentDoc "form.html"
                     """<!doctype html><html><head><title>form</title></head><body>
+                    <style>#version{color:rgb(0,0,255)}</style>
                     <h1 id="version">After</h1>
                     <input id="title" value="Revised title">
                     <textarea id="notes">Revised notes</textarea>
@@ -211,6 +221,7 @@ type CanvasInjectionThemeE2ETests() =
                         const untouchedCheck = document.querySelector('#untouched-check');
                         return JSON.stringify({
                             version: document.querySelector('#version').textContent,
+                            versionColor: getComputedStyle(document.querySelector('#version')).color,
                             title: title.value,
                             titleDefault: title.defaultValue,
                             notes: notes.value,
@@ -233,7 +244,58 @@ type CanvasInjectionThemeE2ETests() =
             Assert.That(
                 state,
                 Is.EqualTo(
-                    """{"version":"After","title":"User title","titleDefault":"Revised title","notes":"User notes","notesDefault":"Revised notes","untouched":"After","alerts":false,"alertsDefault":true,"modeA":false,"modeADefault":true,"modeB":true,"modeBDefault":false,"untouchedCheck":true,"untouchedCheckDefault":true,"active":"notes","selectionStart":2,"selectionEnd":6}"""))
+                    """{"version":"After","versionColor":"rgb(0, 0, 255)","title":"User title","titleDefault":"Revised title","notes":"User notes","notesDefault":"Revised notes","untouched":"After","alerts":false,"alertsDefault":true,"modeA":false,"modeADefault":true,"modeB":true,"modeBDefault":false,"untouchedCheck":true,"untouchedCheckDefault":true,"active":"notes","selectionStart":2,"selectionEnd":6}"""))
+        }
+
+    [<Test>]
+    member this.``static AgentDoc reloads when an authored head style changes``() =
+        task {
+            let doc color =
+                String.concat "" [
+                    "<!doctype html><html><head><title>styled</title>"
+                    "<style>#styled{color:"; color; "}</style></head>"
+                    "<body><p id=\"styled\">Styled text</p></body></html>"
+                ]
+                |> injectLive AgentDoc "styled.html"
+            let initial, initialHash = doc "rgb(255,0,0)"
+            let updated, updatedHash = doc "rgb(0,0,255)"
+
+            // Playwright's route callback is the impure boundary whose navigation count proves the
+            // head-only update selected a reload rather than the body-innerHTML morph.
+            let mutable navigationRequests = 0
+            do! this.Page.RouteAsync("**/styled.html", fun route ->
+                let body, contentHash =
+                    if route.Request.IsNavigationRequest then
+                        navigationRequests <- navigationRequests + 1
+                        if navigationRequests = 1 then initial, initialHash else updated, updatedHash
+                    else
+                        updated, updatedHash
+                route.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "text/html; charset=utf-8",
+                        Body = body,
+                        Headers =
+                            dict [
+                                Server.CanvasDocServer.contentHashHeaderName, contentHash
+                            ])))
+
+            let! _ =
+                this.Page.GotoAsync(
+                    $"{ServerFixture.canvasUrl}/wt/styled.html",
+                    PageGotoOptions(WaitUntil = WaitUntilState.Load))
+            let styled = this.Page.Locator("#styled")
+            do! Assertions.Expect(styled).ToHaveCSSAsync("color", "rgb(255, 0, 0)")
+
+            let hashLiteral = System.Text.Json.JsonSerializer.Serialize(updatedHash)
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => window.postMessage("
+                    + "{action:'content-updated',scopedKey:'wt',filename:'styled.html',contentHash:"
+                    + hashLiteral
+                    + "},'*')")
+
+            do! Assertions.Expect(styled).ToHaveCSSAsync("color", "rgb(0, 0, 255)")
+            Assert.That(navigationRequests, Is.EqualTo(2), "an authored head change must reload the document")
         }
 
     [<Test>]
@@ -256,13 +318,7 @@ type CanvasInjectionThemeE2ETests() =
                         authoredRuntime
                         "</body></html>"
                     ]
-                let contentHash =
-                    raw
-                    |> System.Text.Encoding.UTF8.GetBytes
-                    |> Server.CanvasScanner.contentHash
-                let injection =
-                    Server.CanvasDocServer.buildLiveInjection AgentDoc "scripted.html" contentHash
-                raw |> injectAtHead injection, contentHash
+                raw |> injectLive AgentDoc "scripted.html"
             let initial, initialHash = doc "Before"
             let updated, updatedHash = doc "After"
 
