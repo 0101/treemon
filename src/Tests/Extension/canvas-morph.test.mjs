@@ -23,7 +23,7 @@ const {
   servedContentHash,
   isBrowserProcessedScript,
   hasAuthoredProcessedScript,
-  documentShellState,
+  documentMetaHash,
   requiresDocumentReload,
 } = morph;
 
@@ -131,35 +131,22 @@ function script(type = null, runtime = false) {
   };
 }
 
+const SHELL_HASH = "c".repeat(64);
+
+function documentWithShellHash(shellHash, ...scripts) {
+  const queryScripts = (selector) => selector === "script" ? scripts : [];
+  return {
+    querySelectorAll: queryScripts,
+    body: { querySelectorAll: queryScripts },
+    querySelector: (selector) =>
+      selector.includes('name="treemon-canvas-shell-hash"') && shellHash
+        ? { getAttribute: (name) => name === "content" ? shellHash : null }
+        : null,
+  };
+}
+
 function scriptDocument(...scripts) {
-  return {
-    querySelectorAll: (selector) => selector === "script" ? scripts : [],
-  };
-}
-
-function headElement(outerHTML, runtime = false) {
-  return {
-    outerHTML,
-    hasAttribute: (name) => name === "data-treemon-runtime" && runtime,
-  };
-}
-
-function attribute(name, value) {
-  return { name, value };
-}
-
-function shellDocument({
-  scripts = [],
-  head = [],
-  htmlAttributes = [],
-  bodyAttributes = [],
-} = {}) {
-  return {
-    querySelectorAll: (selector) => selector === "script" ? scripts : [],
-    head: { children: head },
-    documentElement: { attributes: htmlAttributes },
-    body: { attributes: bodyAttributes },
-  };
+  return documentWithShellHash(SHELL_HASH, ...scripts);
 }
 
 test("only authored browser-processed scripts require document reload", () => {
@@ -187,87 +174,30 @@ test("script removal and addition both select reload while static documents stay
   const staticDoc = scriptDocument(script("application/json"), script(null, true));
   const scriptedDoc = scriptDocument(script());
 
-  assert.equal(requiresDocumentReload(staticDoc, staticDoc), false);
-  assert.equal(requiresDocumentReload(scriptedDoc, staticDoc), true);
-  assert.equal(requiresDocumentReload(staticDoc, scriptedDoc), true);
+  assert.equal(requiresDocumentReload(staticDoc, staticDoc, SHELL_HASH), false);
+  assert.equal(requiresDocumentReload(scriptedDoc, staticDoc, SHELL_HASH), true);
+  assert.equal(requiresDocumentReload(staticDoc, scriptedDoc, SHELL_HASH), true);
 });
 
-test("authored head and root-attribute changes reload while runtime metadata does not", () => {
-  const redStyle = headElement("<style>#target{color:red}</style>");
-  const blueStyle = headElement("<style>#target{color:blue}</style>");
-  const current = shellDocument({
-    head: [
-      redStyle,
-      headElement("<meta data-treemon-runtime content=\"old\">", true),
-    ],
-    htmlAttributes: [attribute("lang", "en")],
-    bodyAttributes: [attribute("class", "compact")],
-  });
-  const sameSource = shellDocument({
-    head: [
-      redStyle,
-      headElement("<meta data-treemon-runtime content=\"new\">", true),
-    ],
-    htmlAttributes: [attribute("lang", "en")],
-    bodyAttributes: [attribute("class", "compact")],
-  });
+test("server shell hashes control reload without reading live head mutations", () => {
+  const changedHash = "d".repeat(64);
+  const current = documentWithShellHash(SHELL_HASH);
+  const sameSource = documentWithShellHash(SHELL_HASH);
+  const changedSource = documentWithShellHash(changedHash);
+  const missingSourceHash = documentWithShellHash(null);
+  const currentWithLiveHeadScript = documentWithShellHash(SHELL_HASH);
+  currentWithLiveHeadScript.querySelectorAll = (selector) =>
+    selector === "script" ? [script()] : [];
 
-  assert.deepEqual(documentShellState(current), documentShellState(sameSource));
-  assert.equal(requiresDocumentReload(current, sameSource), false);
+  assert.equal(documentMetaHash(current, "treemon-canvas-shell-hash"), SHELL_HASH);
+  assert.equal(requiresDocumentReload(current, sameSource, SHELL_HASH), false);
   assert.equal(
-    requiresDocumentReload(current, shellDocument({
-      head: [blueStyle],
-      htmlAttributes: [attribute("lang", "en")],
-      bodyAttributes: [attribute("class", "compact")],
-    })),
-    true
-  );
-  assert.equal(
-    requiresDocumentReload(current, shellDocument({
-      head: [redStyle],
-      htmlAttributes: [attribute("lang", "fr")],
-      bodyAttributes: [attribute("class", "compact")],
-    })),
-    true
-  );
-  assert.equal(
-    requiresDocumentReload(current, shellDocument({
-      head: [redStyle],
-      htmlAttributes: [attribute("lang", "en")],
-      bodyAttributes: [attribute("class", "wide")],
-    })),
-    true
-  );
-});
-
-test("live root mutations do not look like authored shell changes", () => {
-  const authored = shellDocument({
-    bodyAttributes: [attribute("class", "compact")],
-  });
-  const live = shellDocument({
-    bodyAttributes: [attribute("class", "user-expanded")],
-  });
-
-  assert.equal(
-    requiresDocumentReload(live, authored, documentShellState(authored)),
+    requiresDocumentReload(currentWithLiveHeadScript, sameSource, SHELL_HASH),
     false
   );
-});
-
-test("head mutations after the source snapshot do not force reload", () => {
-  const authoredStyle = headElement("<style>#target{color:red}</style>");
-  const authored = shellDocument({ head: [authoredStyle] });
-  const live = shellDocument({
-    head: [
-      authoredStyle,
-      headElement("<meta name=\"early-head-injection\">"),
-    ],
-  });
-
-  assert.equal(
-    requiresDocumentReload(live, authored, documentShellState(authored)),
-    false
-  );
+  assert.equal(requiresDocumentReload(current, changedSource, SHELL_HASH), true);
+  assert.equal(requiresDocumentReload(current, missingSourceHash, SHELL_HASH), true);
+  assert.equal(requiresDocumentReload(current, sameSource, null), true);
 });
 
 test("a whitespace-only text change is not a change", () => {

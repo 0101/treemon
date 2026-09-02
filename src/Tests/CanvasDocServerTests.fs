@@ -466,6 +466,32 @@ type BuildInjectionTests() =
         Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script))
 
     [<Test>]
+    member _.``document shell hash ignores body contents but includes head and root attributes``() =
+        let doc htmlAttributes head bodyAttributes body =
+            $"<!doctype html><html{htmlAttributes}><head>{head}</head><body{bodyAttributes}>{body}</body></html>"
+        let compactBody = " data-rule=\"a>b\" class=\"compact\""
+        let baseline =
+            doc " lang=\"en\"" "<style>body{color:red}</style>" compactBody "<p>Before</p>"
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                documentShellHash (doc " lang=\"en\"" "<style>body{color:red}</style>" compactBody "<p>After</p>"),
+                Is.EqualTo(documentShellHash baseline),
+                "body descendants are the Idiomorph target and must not change the shell hash")
+            Assert.That(
+                documentShellHash (doc " lang=\"en\"" "<style>body{color:blue}</style>" compactBody "<p>Before</p>"),
+                Is.Not.EqualTo(documentShellHash baseline),
+                "authored head changes require reload")
+            Assert.That(
+                documentShellHash (doc " lang=\"fr\"" "<style>body{color:red}</style>" compactBody "<p>Before</p>"),
+                Is.Not.EqualTo(documentShellHash baseline),
+                "html attributes require reload")
+            Assert.That(
+                documentShellHash (doc " lang=\"en\"" "<style>body{color:red}</style>" " data-rule=\"a>b\" class=\"wide\"" "<p>Before</p>"),
+                Is.Not.EqualTo(documentShellHash baseline),
+                "body attributes require reload"))
+
+    [<Test>]
     member _.``served AgentDoc exposes the exact raw-byte hash to the response and loaded document``() =
         withTempDir "canvas-served-content-hash" (fun worktreePath ->
             let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
@@ -486,6 +512,10 @@ type BuildInjectionTests() =
                 System.Security.Cryptography.SHA256.HashData(rawBytes)
                 |> System.Convert.ToHexString
                 |> _.ToLowerInvariant()
+            let expectedShellHash =
+                rawBytes
+                |> System.Text.Encoding.UTF8.GetString
+                |> documentShellHash
             responseBody.Position <- 0
             use reader = new StreamReader(responseBody)
             let servedHtml = reader.ReadToEnd()
@@ -498,7 +528,11 @@ type BuildInjectionTests() =
                 Assert.That(
                     servedHtml,
                     Does.Contain($"<meta data-treemon-runtime name=\"{contentHashMetaName}\" content=\"{expectedHash}\">"),
-                    "A reloaded document must report the hash of the bytes that produced that document instance")))
+                    "A reloaded document must report the hash of the bytes that produced that document instance")
+                Assert.That(
+                    servedHtml,
+                    Does.Contain($"<meta data-treemon-runtime name=\"{shellHashMetaName}\" content=\"{expectedShellHash}\">"),
+                    "The reload decision must use an authored source hash rather than the live browser head")))
 
 // ── injectUrl loopback guard (Finding 10 / SSRF) ──────────────────────────────
 // injectUrl is registered then used as a POST target by SessionBridge, so a non-loopback value

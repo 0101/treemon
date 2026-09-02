@@ -35,6 +35,7 @@
   var HIGHLIGHT_CLASS = 'canvas-updated';
   var CONTENT_HASH_HEADER = 'X-Treemon-Canvas-Content-Hash';
   var CONTENT_HASH_META_NAME = 'treemon-canvas-content-hash';
+  var SHELL_HASH_META_NAME = 'treemon-canvas-shell-hash';
   var RUNTIME_ATTRIBUTE = 'data-treemon-runtime';
   var JAVASCRIPT_MIME_TYPES = new Set([
     'application/ecmascript',
@@ -117,44 +118,21 @@
     });
   }
 
-  function attributesOf(element) {
-    return nodesOf(element && element.attributes)
-      .map(function (attribute) { return [attribute.name, attribute.value]; })
-      .sort(function (left, right) {
-        return left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0;
-      });
+  function documentMetaHash(root, name) {
+    var meta = root.querySelector(
+      'meta[' + RUNTIME_ATTRIBUTE + '][name="' + name + '"]'
+    );
+    var value = meta && meta.getAttribute('content');
+    return isContentHash(value) ? value : null;
   }
 
-  function headAndHtmlSignature(root) {
-    var authoredHead =
-      nodesOf(root.head && root.head.children)
-        .filter(function (element) { return !element.hasAttribute(RUNTIME_ATTRIBUTE); })
-        .map(function (element) { return element.outerHTML; });
-    return JSON.stringify([
-      authoredHead,
-      attributesOf(root.documentElement)
-    ]);
-  }
-
-  function bodyAttributesSignature(root) {
-    return JSON.stringify(attributesOf(root.body));
-  }
-
-  function documentShellState(root) {
-    return {
-      head: headAndHtmlSignature(root),
-      body: bodyAttributesSignature(root)
-    };
-  }
-
-  function requiresDocumentReload(current, incoming, loadedShellState) {
-    var loadedShell = loadedShellState || documentShellState(current);
-    var loadedBody =
-      loadedShell.body == null ? bodyAttributesSignature(current) : loadedShell.body;
-    return hasAuthoredProcessedScript(current) ||
+  function requiresDocumentReload(current, incoming, loadedShellHash) {
+    var incomingShellHash = documentMetaHash(incoming, SHELL_HASH_META_NAME);
+    return hasAuthoredProcessedScript(current.body || current) ||
       hasAuthoredProcessedScript(incoming) ||
-      loadedShell.head !== headAndHtmlSignature(incoming) ||
-      loadedBody !== bodyAttributesSignature(incoming);
+      !loadedShellHash ||
+      !incomingShellHash ||
+      loadedShellHash !== incomingShellHash;
   }
 
   function isEditableControl(control) {
@@ -465,30 +443,23 @@
   }
 
   function loadedDocumentState() {
-    var meta = document.querySelector(
-      'meta[' + RUNTIME_ATTRIBUTE + '][name="' + CONTENT_HASH_META_NAME + '"]'
-    );
-    var contentHash = meta && meta.getAttribute('content');
-    if (!isContentHash(contentHash)) return null;
+    var contentHash = documentMetaHash(document, CONTENT_HASH_META_NAME);
+    var shellHash = documentMetaHash(document, SHELL_HASH_META_NAME);
+    if (!contentHash || !shellHash) return null;
 
     var lastSlash = location.pathname.lastIndexOf('/');
     return {
       scopedKey: decodeURIComponent(location.pathname.substring(1, lastSlash)),
       filename: decodeURIComponent(location.pathname.substring(lastSlash + 1)),
-      contentHash: contentHash
+      contentHash: contentHash,
+      shellHash: shellHash
     };
   }
 
   function install() {
     var loadedDocument = loadedDocumentState();
     var loadedContentHash = loadedDocument && loadedDocument.contentHash;
-    /** @type {{ head: string, body: string | null }} */
-    var loadedShellState = {
-      // The controller is the final injected head script, so this captures source before
-      // DOMContentLoaded handlers or browser integrations can add live-only head elements.
-      head: headAndHtmlSignature(document),
-      body: null
-    };
+    var loadedShellHash = loadedDocument && loadedDocument.shellHash;
     var loadedCompletionSent = false;
     var reloading = false;
     var highlighted = [];
@@ -539,14 +510,14 @@
             return;
           }
           var incoming = new DOMParser().parseFromString(refetched.html, 'text/html');
-          if (requiresDocumentReload(document, incoming, loadedShellState)) {
+          if (requiresDocumentReload(document, incoming, loadedShellHash)) {
             reloading = true;
             location.reload();
             return;
           }
           highlighted = morphAndHighlight(document.body, incoming.body.innerHTML, highlighted);
           loadedContentHash = refetched.contentHash;
-          loadedShellState = documentShellState(incoming);
+          loadedShellHash = documentMetaHash(incoming, SHELL_HASH_META_NAME);
           loadedCompletionSent = true;
           window.dispatchEvent(new Event('canvas-morph-complete'));
           postMorphComplete(morph, refetched.contentHash);
@@ -561,10 +532,6 @@
     });
 
     function completeLoadedDocument() {
-      loadedShellState = {
-        head: loadedShellState.head,
-        body: bodyAttributesSignature(document)
-      };
       if (!loadedDocument || !loadedContentHash || loadedCompletionSent) return;
       loadedCompletionSent = true;
       postMorphComplete(loadedDocument, loadedContentHash);
@@ -609,7 +576,7 @@
       servedContentHash: servedContentHash,
       isBrowserProcessedScript: isBrowserProcessedScript,
       hasAuthoredProcessedScript: hasAuthoredProcessedScript,
-      documentShellState: documentShellState,
+      documentMetaHash: documentMetaHash,
       requiresDocumentReload: requiresDocumentReload
     };
   }

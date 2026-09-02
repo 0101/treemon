@@ -25,7 +25,9 @@ let private injectLive (kind: CanvasDocKind) (filename: string) (docHtml: string
         docHtml
         |> System.Text.Encoding.UTF8.GetBytes
         |> Server.CanvasScanner.contentHash
-    let injection = Server.CanvasDocServer.buildLiveInjection kind filename contentHash
+    let shellHash = Server.CanvasDocServer.documentShellHash docHtml
+    let injection =
+        Server.CanvasDocServer.buildLiveInjection kind filename contentHash shellHash
     docHtml |> injectAtHead injection, contentHash
 
 // ============================================================================
@@ -140,9 +142,8 @@ type CanvasInjectionThemeE2ETests() =
     [<Test>]
     member this.``AgentDoc body morph ignores live head additions and preserves user-edited form state``() =
         task {
-            let initial =
-                injectInto AgentDoc "form.html"
-                    """<!doctype html><html><head><title>form</title></head><body>
+            let initial, initialHash =
+                """<!doctype html><html><head><title>form</title></head><body>
                     <style>#version{color:rgb(255,0,0)}</style>
                     <h1 id="version">Before</h1>
                     <input id="title" value="Agent title">
@@ -153,9 +154,9 @@ type CanvasInjectionThemeE2ETests() =
                     <input id="mode-b" type="radio" name="mode">
                     <input id="untouched-check" type="checkbox">
                     </body></html>"""
-            let updated =
-                injectInto AgentDoc "form.html"
-                    """<!doctype html><html><head><title>form</title></head><body>
+                |> injectLive AgentDoc "form.html"
+            let updated, updatedHash =
+                """<!doctype html><html><head><title>form</title></head><body>
                     <style>#version{color:rgb(0,0,255)}</style>
                     <h1 id="version">After</h1>
                     <input id="title" value="Revised title">
@@ -166,27 +167,25 @@ type CanvasInjectionThemeE2ETests() =
                     <input id="mode-b" type="radio" name="mode">
                     <input id="untouched-check" type="checkbox" checked>
                     </body></html>"""
+                |> injectLive AgentDoc "form.html"
 
             do! this.Page.AddInitScriptAsync(
                 """document.addEventListener('DOMContentLoaded', () => {
-                    const probe = document.createElement('meta');
-                    probe.name = 'early-head-injection';
+                    const probe = document.createElement('script');
+                    probe.textContent = 'window.__earlyHeadInjection = true';
                     document.head.append(probe);
                 }, { once: true });""")
-            // The init script models a browser/runtime head mutation before the controller's
-            // DOMContentLoaded listener; it must not become part of the authored source baseline.
+            // The init script models a browser/runtime executable head injection. It must not be
+            // mistaken for authored source and turn a body-only update into a reload.
             let mutable navigationRequests = 0
             do! this.Page.RouteAsync("**/form.html", fun route ->
-                let body =
+                let body, contentHash =
                     if route.Request.IsNavigationRequest then
                         navigationRequests <- navigationRequests + 1
-                        if navigationRequests = 1 then initial else updated
+                        if navigationRequests = 1 then initial, initialHash
+                        else updated, updatedHash
                     else
-                        updated
-                let contentHash =
-                    body
-                    |> System.Text.Encoding.UTF8.GetBytes
-                    |> Server.CanvasScanner.contentHash
+                        updated, updatedHash
                 route.FulfillAsync(
                     RouteFulfillOptions(
                         ContentType = "text/html; charset=utf-8",
