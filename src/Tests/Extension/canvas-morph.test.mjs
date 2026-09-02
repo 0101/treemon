@@ -23,7 +23,7 @@ const {
   servedContentHash,
   isBrowserProcessedScript,
   hasAuthoredProcessedScript,
-  documentShellSignature,
+  documentShellState,
   requiresDocumentReload,
 } = morph;
 
@@ -212,7 +212,7 @@ test("authored head and root-attribute changes reload while runtime metadata doe
     bodyAttributes: [attribute("class", "compact")],
   });
 
-  assert.equal(documentShellSignature(current), documentShellSignature(sameSource));
+  assert.deepEqual(documentShellState(current), documentShellState(sameSource));
   assert.equal(requiresDocumentReload(current, sameSource), false);
   assert.equal(
     requiresDocumentReload(current, shellDocument({
@@ -249,7 +249,23 @@ test("live root mutations do not look like authored shell changes", () => {
   });
 
   assert.equal(
-    requiresDocumentReload(live, authored, documentShellSignature(authored)),
+    requiresDocumentReload(live, authored, documentShellState(authored)),
+    false
+  );
+});
+
+test("head mutations after the source snapshot do not force reload", () => {
+  const authoredStyle = headElement("<style>#target{color:red}</style>");
+  const authored = shellDocument({ head: [authoredStyle] });
+  const live = shellDocument({
+    head: [
+      authoredStyle,
+      headElement("<meta name=\"early-head-injection\">"),
+    ],
+  });
+
+  assert.equal(
+    requiresDocumentReload(live, authored, documentShellState(authored)),
     false
   );
 });

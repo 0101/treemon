@@ -138,7 +138,7 @@ type CanvasInjectionThemeE2ETests() =
         }
 
     [<Test>]
-    member this.``AgentDoc morph applies body styles and preserves user-edited form state``() =
+    member this.``AgentDoc body morph ignores live head additions and preserves user-edited form state``() =
         task {
             let initial =
                 injectInto AgentDoc "form.html"
@@ -167,8 +167,22 @@ type CanvasInjectionThemeE2ETests() =
                     <input id="untouched-check" type="checkbox" checked>
                     </body></html>"""
 
+            do! this.Page.AddInitScriptAsync(
+                """document.addEventListener('DOMContentLoaded', () => {
+                    const probe = document.createElement('meta');
+                    probe.name = 'early-head-injection';
+                    document.head.append(probe);
+                }, { once: true });""")
+            // The init script models a browser/runtime head mutation before the controller's
+            // DOMContentLoaded listener; it must not become part of the authored source baseline.
+            let mutable navigationRequests = 0
             do! this.Page.RouteAsync("**/form.html", fun route ->
-                let body = if route.Request.IsNavigationRequest then initial else updated
+                let body =
+                    if route.Request.IsNavigationRequest then
+                        navigationRequests <- navigationRequests + 1
+                        if navigationRequests = 1 then initial else updated
+                    else
+                        updated
                 let contentHash =
                     body
                     |> System.Text.Encoding.UTF8.GetBytes
@@ -241,10 +255,12 @@ type CanvasInjectionThemeE2ETests() =
                         });
                     }""")
 
-            Assert.That(
-                state,
-                Is.EqualTo(
-                    """{"version":"After","versionColor":"rgb(0, 0, 255)","title":"User title","titleDefault":"Revised title","notes":"User notes","notesDefault":"Revised notes","untouched":"After","alerts":false,"alertsDefault":true,"modeA":false,"modeADefault":true,"modeB":true,"modeBDefault":false,"untouchedCheck":true,"untouchedCheckDefault":true,"active":"notes","selectionStart":2,"selectionEnd":6}"""))
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    state,
+                    Is.EqualTo(
+                        """{"version":"After","versionColor":"rgb(0, 0, 255)","title":"User title","titleDefault":"Revised title","notes":"User notes","notesDefault":"Revised notes","untouched":"After","alerts":false,"alertsDefault":true,"modeA":false,"modeADefault":true,"modeB":true,"modeBDefault":false,"untouchedCheck":true,"untouchedCheckDefault":true,"active":"notes","selectionStart":2,"selectionEnd":6}"""))
+                Assert.That(navigationRequests, Is.EqualTo(1), "a live head mutation must not turn a body-only update into a reload"))
         }
 
     [<Test>]

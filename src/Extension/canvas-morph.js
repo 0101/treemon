@@ -125,23 +125,36 @@
       });
   }
 
-  function documentShellSignature(root) {
+  function headAndHtmlSignature(root) {
     var authoredHead =
       nodesOf(root.head && root.head.children)
         .filter(function (element) { return !element.hasAttribute(RUNTIME_ATTRIBUTE); })
         .map(function (element) { return element.outerHTML; });
     return JSON.stringify([
       authoredHead,
-      attributesOf(root.documentElement),
-      attributesOf(root.body)
+      attributesOf(root.documentElement)
     ]);
   }
 
-  function requiresDocumentReload(current, incoming, loadedShellSignature) {
+  function bodyAttributesSignature(root) {
+    return JSON.stringify(attributesOf(root.body));
+  }
+
+  function documentShellState(root) {
+    return {
+      head: headAndHtmlSignature(root),
+      body: bodyAttributesSignature(root)
+    };
+  }
+
+  function requiresDocumentReload(current, incoming, loadedShellState) {
+    var loadedShell = loadedShellState || documentShellState(current);
+    var loadedBody =
+      loadedShell.body == null ? bodyAttributesSignature(current) : loadedShell.body;
     return hasAuthoredProcessedScript(current) ||
       hasAuthoredProcessedScript(incoming) ||
-      (loadedShellSignature || documentShellSignature(current)) !==
-        documentShellSignature(incoming);
+      loadedShell.head !== headAndHtmlSignature(incoming) ||
+      loadedBody !== bodyAttributesSignature(incoming);
   }
 
   function isEditableControl(control) {
@@ -469,8 +482,13 @@
   function install() {
     var loadedDocument = loadedDocumentState();
     var loadedContentHash = loadedDocument && loadedDocument.contentHash;
-    /** @type {string | null} */
-    var loadedShellSignature = null;
+    /** @type {{ head: string, body: string | null }} */
+    var loadedShellState = {
+      // The controller is the final injected head script, so this captures source before
+      // DOMContentLoaded handlers or browser integrations can add live-only head elements.
+      head: headAndHtmlSignature(document),
+      body: null
+    };
     var loadedCompletionSent = false;
     var reloading = false;
     var highlighted = [];
@@ -521,14 +539,14 @@
             return;
           }
           var incoming = new DOMParser().parseFromString(refetched.html, 'text/html');
-          if (requiresDocumentReload(document, incoming, loadedShellSignature)) {
+          if (requiresDocumentReload(document, incoming, loadedShellState)) {
             reloading = true;
             location.reload();
             return;
           }
           highlighted = morphAndHighlight(document.body, incoming.body.innerHTML, highlighted);
           loadedContentHash = refetched.contentHash;
-          loadedShellSignature = documentShellSignature(incoming);
+          loadedShellState = documentShellState(incoming);
           loadedCompletionSent = true;
           window.dispatchEvent(new Event('canvas-morph-complete'));
           postMorphComplete(morph, refetched.contentHash);
@@ -543,7 +561,10 @@
     });
 
     function completeLoadedDocument() {
-      loadedShellSignature = documentShellSignature(document);
+      loadedShellState = {
+        head: loadedShellState.head,
+        body: bodyAttributesSignature(document)
+      };
       if (!loadedDocument || !loadedContentHash || loadedCompletionSent) return;
       loadedCompletionSent = true;
       postMorphComplete(loadedDocument, loadedContentHash);
@@ -588,7 +609,7 @@
       servedContentHash: servedContentHash,
       isBrowserProcessedScript: isBrowserProcessedScript,
       hasAuthoredProcessedScript: hasAuthoredProcessedScript,
-      documentShellSignature: documentShellSignature,
+      documentShellState: documentShellState,
       requiresDocumentReload: requiresDocumentReload
     };
   }
