@@ -1011,7 +1011,19 @@ type OverviewBandE2ETests() =
             Assert.That(sticky.Value<string>("groupGap"), Is.EqualTo("22px"))
             Assert.That(sticky.Value<bool>("topEdgeCovered"), Is.True, "pinned chrome must mask cards edge to edge along the dashboard top")
 
-            do! this.Page.SetViewportSizeAsync(700, 800)
+            // A bare viewport narrowing (e.g. 700px) is NOT a guaranteed-narrow dashboard: below the
+            // 900px `.app-layout` breakpoint, panes stop sitting side by side and each pane (including
+            // .dashboard) stretches to the FULL viewport width instead of its usual fractional share —
+            // so shrinking the browser that far actually widens the dashboard pane, and whether the six
+            // agent-group columns (~520px of content, measured via bounding rects since a stretched
+            // block's scrollWidth just mirrors its clientWidth when nothing overflows) overflow becomes
+            // a coin flip on font metrics. Switching to Wide canvas (dashboard -> 1/3 of the layout,
+            // canvas -> 2/3, per the `.workspace-wide-canvas` rule) while staying safely above the
+            // breakpoint keeps the three-pane row layout intact and gives the dashboard only ~333px at
+            // this viewport — comfortably under the content width on both Windows and Linux fonts.
+            do! this.Page.Locator(".canvas-width-btn[title^='Wide canvas']").ClickAsync()
+            do! this.Page.Locator(".app-layout.workspace-wide-canvas").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! this.Page.SetViewportSizeAsync(1000, 800)
             do! this.Page.WaitForTimeoutAsync(250.0f)
             let! narrowJson =
                 this.Page.EvaluateAsync<string>(
