@@ -133,6 +133,10 @@ Registry and data-plane mailbox calls have bounded replies. Each message failure
 the next message is processed, so a cleanup failure cannot wedge later list, close, or shutdown
 requests. Mailbox diagnostics identify only the mailbox and exception type, never terminal content,
 paths, environment values, or credentials.
+Start has a 150-second reply budget because its serialized workflow may include host startup,
+terminal creation, command delivery, authoritative confirmation, and compensating close. Other
+ordinary get, close, and cleanup operations retain the shared 60-second budget; replacement commit
+keeps its separate 300-second budget.
 
 A machine-level discovery manifest contains only the exact host identity (PID and process start
 identity), loopback endpoint and bearer token, host version, control API version, and the version of

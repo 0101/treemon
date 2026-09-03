@@ -298,9 +298,7 @@ card or Overview status.
 ## Related Specs
 
 - `docs/spec/worktree-monitor.md` - dashboard architecture and refresh model.
-- `docs/spec/beads-overview-band.md` - live task and agent aggregation.
+- `docs/spec/beads-overview-band.md` - live task and agent aggregation with per-group membership.
 - `docs/spec/overview-activity-history.md` - durable canonical Overview snapshots.
-- `docs/spec/overview-drilldown.md` - per-group session details.
 - `docs/spec/resume-last-session.md` - resume command behavior.
-- `docs/spec/worktree-monitor.md` - endpoint origin protection.
 - `docs/spec/native-session-management.md` - terminal/window liveness, distinct from push openness.

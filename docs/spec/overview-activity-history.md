@@ -182,7 +182,7 @@ start/cancel/await lifecycle machinery while retaining independent cadence polic
 ## Related Specs
 
 - `docs/spec/session-status-push.md` - live session ingestion and event idempotency.
-- `docs/spec/beads-overview-band.md` - canonical live Overview aggregation.
-- `docs/spec/overview-drilldown.md` - the mutually exclusive detail view.
+- `docs/spec/beads-overview-band.md` - canonical live aggregation, drill-down, and mutually
+  exclusive history presentation.
 - `docs/spec/user-idle-detection.md` - adaptive dashboard polling, intentionally separate from
   history capture cadence.

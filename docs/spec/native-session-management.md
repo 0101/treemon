@@ -2,102 +2,73 @@
 
 ## Goals
 
-1. **Focus existing terminal windows** — navigate from the card's explicit native action to the
-   correct window among many, by HWND
-2. **Track spawned windows** — maintain HWND-to-worktree mapping so focus/kill work reliably
-3. **Spawn explicit native terminals** — launch Windows Terminal only from the card's `>` / Enter
-   action
-4. **Open native tabs** — use the card's `+` action to add a plain PowerShell tab to the tracked
-   window
-5. **Survive server restarts** — persist tracked sessions to disk, restore and validate on startup
-6. **Native Windows** — all sessions run in native PowerShell with full git and Visual Studio access (no WSL)
-
-## Non-Goals
-
-- Session persistence (detach/reattach) — not achievable with Windows Terminal
-- Prompted or automatic agent launch — those sessions run in the embedded host
-- Reading terminal output — coding-tool status comes from push activity
-- Per-tab lifecycle management — each worktree gets one tracked WT window; native `+` tabs are not
-  independently addressed
-- Cross-machine portability (HWNDs are machine-local)
+- Keep one explicitly opened Windows Terminal window per worktree, tracked by HWND.
+- Focus, add a tab to, or close the exact tracked window.
+- Restore still-valid tracked windows after a Treemon server restart.
+- Keep prompted and automatic agent launches in the embedded-terminal subsystem.
 
 ## Expected Behavior
 
-### Terminal Button (`>` on card)
-- **No tracked session**: spawns `wt.exe --window new new-tab -d <path>`, HWND tracked by SessionManager
-- **Tracked session exists**: activates that exact HWND through the focus sequence below
-- Single button — no separate launch/focus/kill buttons on the card
+### Card actions
 
-### Native New Tab (`+` on card)
+The card's `>` action and Enter key are the only ways to open or focus a tracked native terminal.
+With no tracked window, Treemon starts:
 
-The button appears only while the worktree has a valid tracked native window. It focuses that
-window and asks `wt.exe` to add one plain PowerShell tab in the worktree directory. Agent prompts,
-Resume, contextual actions, background fallbacks, and `tm launch` do not use this path.
+`wt.exe --window new -- pwsh -NoExit -EncodedCommand <base64>`
 
-### Focus / Kill
-- `focusSession` restores a minimized tracked window, temporarily attaches to the current foreground
-  thread, and uses `SetForegroundWindow` plus `SwitchToThisWindow` to activate the exact HWND.
-- When Windows reports no foreground owner, there is no competing HWND to verify. In that state, a
-  completed switch request against a still-valid tracked HWND is accepted; when another foreground
-  window exists, failure to activate the target is reported.
-- `killSession` sends `WM_CLOSE` to the specific window (not `Process.Kill`, which would kill ALL WT windows)
+The decoded PowerShell script only changes directory to the worktree. With a valid tracked HWND,
+the same action focuses that window instead of starting another one.
 
-### Persistence
-- On every state change (spawn, kill, validation), write `Map<string, nativeint>` to `data/sessions.json`
-- On startup, read file, validate each HWND with `IsWindow`, seed MailboxProcessor with surviving sessions
-- Missing/corrupt file → start with empty map
-- Atomic write (temp file + rename) to prevent corruption
+The card's `+` action is available only for a valid tracked window. It focuses that window and runs:
 
-### Status Integration
-- `WorktreeStatus.HasActiveSession: bool` — true when tracked HWND passes `IsWindow` check
-- The flag remains native-only. It drives the terminal-button focus label/glow, native `+`
-  visibility, and delete/archive native-kill prompt.
-- Embedded terminals do not set this flag or add another card active-session indicator; coding-tool
-  status continues to represent agent activity.
+`wt.exe -w 0 new-tab -- pwsh -NoExit -EncodedCommand <base64>`
+
+Resume, contextual actions, Canvas launches, create-worktree prompts, AutoSync fallback, and
+`tm launch` use embedded terminals instead.
+
+### Focus, close, and persistence
+
+- Focus restores a minimized window and uses foreground-thread attachment plus
+  `SetForegroundWindow` and `SwitchToThisWindow`.
+- Close sends `WM_CLOSE` to the exact HWND. It never kills `WindowsTerminal.exe`, whose process may
+  own unrelated windows.
+- The normalized worktree-path-to-HWND map is persisted atomically in `data/sessions.json`.
+- Startup discards malformed state and HWNDs that no longer pass `IsWindow`.
+- `WorktreeStatus.HasActiveSession` describes only this native tracked-window state.
 
 ## Technical Approach
 
-### HWND Resolution
-`wt.exe` is a launcher that sends IPC to `WindowsTerminal.exe` then exits. Resolution:
-1. `EnumWindows` before spawn to snapshot existing windows
-2. Spawn `wt.exe --window new new-tab -d <path>`
-3. Poll `EnumWindows` for new `CASCADIA_HOSTING_WINDOW_CLASS` windows
-4. New HWND = diff between before/after sets (200-300ms typical latency)
+`SessionManager` owns a `MailboxProcessor<Map<string, nativeint>>`. Every request normalizes the
+worktree path, removes invalid HWNDs, performs one operation, and persists the map when it changes.
 
-### Win32 P/Invoke (`Win32.fs`)
-`EnumWindows`, `GetForegroundWindow`, `SetForegroundWindow`, `AttachThreadInput`,
-`GetWindowThreadProcessId`, `GetCurrentThreadId`, `IsWindow`, `IsIconic`, `ShowWindowAsync`,
-`SwitchToThisWindow`, `GetClassName`, and `PostMessage` (WM_CLOSE).
+To discover the HWND created by `wt.exe`, Treemon snapshots Windows Terminal windows before launch,
+waits for the launcher to exit, and polls for the new hosting-window HWND. `buildScript` doubles
+single quotes in the native path, and `encodeCommand` carries the script as UTF-16 PowerShell
+`-EncodedCommand` data.
 
-### Server State
-`Map<string, nativeint>` in a `MailboxProcessor` (`SessionManager.fs`). HWNDs are validated on each
-API call. The mailbox owns native spawn, focus, new-tab, kill, and persistence only.
-
-### Persistence Format
-```json
-{ "sessions": { "Q:\\code\\AITestAgent": 12345678 } }
-```
-`data/sessions.json`, full rewrite on every state change. `System.Text.Json` serialization.
+`Win32.fs` contains the P/Invoke boundary for window enumeration, validation, activation, restore,
+thread attachment, and `WM_CLOSE`.
 
 ## Decisions
 
-- **One window per worktree** — HWNDs are reliable identifiers, tab indices are not
-- **Foreground-thread attachment plus switch fallback** — attach only while requesting foreground,
-  always detach afterward, and ask Windows to switch to the exact tracked HWND. This avoids depending
-  on synthetic ALT input, which is unavailable on a detached input desktop.
-- **WM_CLOSE for kill** — all WT windows share one process; `Process.Kill` would terminate ALL windows
-- **Explicit `new-tab` subcommand** — `wt.exe --window new new-tab -d "path"` required; implicit default silently drops `-d`
-- **CreateNoWindow for launcher** — wt.exe launcher is just IPC; hiding its console avoids a flash
-- **Full rewrite persistence** — map is small, atomic rewrite is simpler than incremental updates
-- **No locking beyond MailboxProcessor** — writes only inside single-threaded agent, no concurrent races
-- **P/Invoke EntryPoint attributes** — DLL export names (`IsWindow`, `PostMessageW`) differ from F# binding names; missing EntryPoint crashes the MailboxProcessor silently
-- **Explicit native scope** — only the card's `>` / Enter and tracked-window `+` actions launch
-  through `SessionManager`; agent-bearing launches use `TerminalLaunch` and the embedded backend
+- **One tracked window per worktree:** HWNDs are reliable window identities; tab identities are not.
+- **Directory through encoded PowerShell:** neither native launch passes `-d`. A quoted
+  `Set-Location` script avoids Windows Terminal argument ambiguity for worktree paths.
+- **WM_CLOSE instead of process termination:** all Windows Terminal windows can share one process.
+- **Mailbox-owned persistence:** one serialized state owner is sufficient for the small map.
+- **Explicit native scope:** only the card terminal and native new-tab actions use this subsystem.
 
 ## Key Files
 
-- `src/Server/Win32.fs` — P/Invoke declarations, HWND resolution, focus/kill helpers
-- `src/Server/SessionManager.fs` — native window spawn/focus/new-tab/kill/persistence
-- `src/Server/TerminalLaunch.fs` — product-level backend selection
-- `src/Server/WorktreeApi.fs` — explicit native API wiring and `HasActiveSession` population
-- `src/Client/CardViews.fs` — native terminal and new-tab actions
+| File | Purpose |
+|---|---|
+| `src/Server/SessionManager.fs` | Native spawn, HWND tracking, focus, tab creation, close, and persistence |
+| `src/Server/Win32.fs` | Windows window-management P/Invoke boundary |
+| `src/Server/TerminalLaunch.fs` | Typed native-versus-embedded launch boundary |
+| `src/Server/WorktreeApi.fs` | Native API wiring and `HasActiveSession` population |
+| `src/Client/CardViews.fs` | Card terminal and native new-tab controls |
+
+## Related Specs
+
+- `docs/spec/embedded-terminal.md` - embedded shells and all agent-bearing launches.
+- `docs/spec/worktree-monitor.md` - card behavior and worktree lifecycle.

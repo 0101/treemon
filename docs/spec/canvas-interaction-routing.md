@@ -137,6 +137,5 @@ gating every lifecycle affordance on `CanvasDoc.Kind`.
 ## Related Specs
 
 - `docs/spec/canvas-pane.md` — document kinds, pane behavior, and message transport
-- `docs/spec/canvas-authoring-dx.md` — authored document creation and selected-text actions
 - `docs/spec/worktree-diff-viewer.md` — diff SystemView behavior and structured selection context
 - `docs/spec/beadspace-canvas.md` — Beadspace SystemView behavior

@@ -114,7 +114,7 @@ type Msg =
     | ToggleCanvasPane
     | ToggleOverviewPanel
     | SetOverviewAgentsStuck of bool
-    // Overview drill-down (spec: docs/spec/overview-drilldown.md). SelectOverviewGroup toggles the
+    // Overview drill-down (spec: docs/spec/beads-overview-band.md). SelectOverviewGroup toggles the
     // clicked group's breakdown panel (re-selecting the current group clears it). SelectOverviewWorktree
     // is the arrow-nav-parity handler: it focuses/expands/scrolls the clicked member card WITHOUT
     // opening the Canvas pane (the deliberate difference from FocusOverviewCard).
