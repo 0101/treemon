@@ -250,34 +250,70 @@ let terminalHostStateDirectory () =
     Directory.CreateDirectory path |> ignore
     path
 
-/// Best-effort shutdown of any TerminalHost process an E2E fixture started under its isolated state
-/// directory, verified by exact process identity (PID + start time) before killing so this never
-/// touches an unrelated process, then removes the directory. Call at fixture teardown alongside
-/// killing the fixture's own server/vite processes.
+let private stopTerminalHostProcess config (manifest: Server.TerminalHostManifest.DiscoveryManifest) =
+    match Server.TerminalHostManifest.processIdentityMatches config manifest with
+    | Error error ->
+        Error $"Could not verify the isolated TerminalHost process: {error}"
+    | Ok false ->
+        Ok()
+    | Ok true ->
+        try
+            use proc = Process.GetProcessById manifest.Pid
+
+            if proc.StartTime.ToUniversalTime().Ticks <> manifest.ProcessStartTimeUtcTicks then
+                Error
+                    $"Isolated TerminalHost PID {manifest.Pid} was reused before cleanup"
+            elif proc.HasExited then
+                Ok()
+            else
+                proc.Kill(entireProcessTree = true)
+
+                if proc.WaitForExit(5000) then
+                    Ok()
+                else
+                    Error
+                        $"Isolated TerminalHost PID {manifest.Pid} survived cleanup"
+        with
+        | :? ArgumentException ->
+            Ok()
+        | error ->
+            Error
+                $"Could not stop isolated TerminalHost PID {manifest.Pid}: {error.Message}"
+
+let private removeTerminalHostStateDirectory stateDirectory =
+    try
+        if Directory.Exists stateDirectory then
+            Directory.Delete(stateDirectory, recursive = true)
+
+        if Directory.Exists stateDirectory then
+            Error $"Isolated TerminalHost state directory survived cleanup: {stateDirectory}"
+        else
+            Ok()
+    with error ->
+        Error
+            $"Could not remove isolated TerminalHost state directory '{stateDirectory}': {error.Message}"
+
+/// Stop any exact TerminalHost process an E2E fixture started under its isolated state directory,
+/// verify it exited, then remove the directory. Returns an error instead of hiding incomplete
+/// cleanup so fixture teardown cannot leave TerminalHost or ttyd processes behind silently.
 let stopTerminalHostState (stateDirectory: string) =
-    try
-        let config =
-            { Server.TerminalHostClient.defaultConfig [] with HostStateDirectory = stateDirectory }
+    let config =
+        { Server.TerminalHostClient.defaultConfig [] with HostStateDirectory = stateDirectory }
 
+    let stopResult =
         match Server.TerminalHostManifest.readManifest config with
+        | Error error ->
+            Error $"Could not read the isolated TerminalHost manifest: {error}"
+        | Ok None ->
+            Ok()
         | Ok(Some manifest) ->
-            match Server.TerminalHostManifest.processIdentityMatches config manifest with
-            | Ok true ->
-                try
-                    use proc = Process.GetProcessById manifest.Pid
-                    proc.Kill()
-                    proc.WaitForExit(5000) |> ignore
-                with _ ->
-                    ()
-            | _ -> ()
-        | _ -> ()
-    with _ ->
-        ()
+            stopTerminalHostProcess config manifest
 
-    try
-        Directory.Delete(stateDirectory, recursive = true)
-    with _ ->
-        ()
+    match stopResult with
+    | Error _ as error ->
+        error
+    | Ok() ->
+        removeTerminalHostStateDirectory stateDirectory
 
 /// Launch the Treemon API server process for an E2E fixture. `rootArgs` is the already-quoted,
 /// space-joined worktree-root list; each fixture keeps its own port / orphan-kill / fixture policy

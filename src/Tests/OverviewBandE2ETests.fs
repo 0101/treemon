@@ -273,6 +273,8 @@ type OverviewBandE2ETests() =
         serverProcess.Value <- None
         viteProcess.Value <- None
         TestUtils.stopTerminalHostState terminalHostStateDirectory
+        |> fun result ->
+            TestUtils.assertOk result "Overview TerminalHost cleanup failed"
 
     // Navigate, wait for the grid, toggle Overview on, wait for the band, then snapshot the DOM once.
     [<SetUp>]

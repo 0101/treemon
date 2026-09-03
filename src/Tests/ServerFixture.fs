@@ -140,6 +140,8 @@ let stopAll () =
     serverProcess.Value <- None
     viteProcess.Value <- None
     TestUtils.stopTerminalHostState terminalHostStateDirectory
+    |> fun result ->
+        TestUtils.assertOk result "Dashboard TerminalHost cleanup failed"
 
 [<SetUpFixture>]
 type GlobalSetup() =

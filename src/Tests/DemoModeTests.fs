@@ -95,6 +95,8 @@ let private stopDemoProcesses () =
     serverProcess.Value <- None
     viteProcess.Value <- None
     TestUtils.stopTerminalHostState terminalHostStateDirectory
+    |> fun result ->
+        TestUtils.assertOk result "Demo TerminalHost cleanup failed"
 
 [<TestFixture>]
 [<Category("Unit")>]

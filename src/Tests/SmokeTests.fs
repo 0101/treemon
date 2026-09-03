@@ -153,13 +153,18 @@ type SmokeTests() =
     member _.StopServer() =
         killServer ()
         serverProc <- None
-        TestUtils.stopTerminalHostState smokeTerminalHostStateDir
+        let terminalHostCleanup =
+            TestUtils.stopTerminalHostState smokeTerminalHostStateDir
 
         try
             if Directory.Exists smokeConfigDir then
                 Directory.Delete(smokeConfigDir, recursive = true)
         with _ ->
             ()
+
+        terminalHostCleanup
+        |> fun result ->
+            TestUtils.assertOk result "Smoke TerminalHost cleanup failed"
 
     [<Test>]
     member _.``Server returns IsReady=true with real data``() =
@@ -348,13 +353,18 @@ type MultiRepoSmokeTests() =
         killProc viteProc
         serverProc <- None
         viteProc <- None
-        TestUtils.stopTerminalHostState multiRepoTerminalHostStateDir
+        let terminalHostCleanup =
+            TestUtils.stopTerminalHostState multiRepoTerminalHostStateDir
 
         try
             if Directory.Exists multiRepoConfigDir then
                 Directory.Delete(multiRepoConfigDir, recursive = true)
         with _ ->
             ()
+
+        terminalHostCleanup
+        |> fun result ->
+            TestUtils.assertOk result "Multi-repo TerminalHost cleanup failed"
 
     [<SetUp>]
     member this.NavigateToDashboard() =

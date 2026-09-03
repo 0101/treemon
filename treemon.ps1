@@ -973,7 +973,11 @@ function Start-DualProcess(
     }
     Write-Host ""
 
+    $hadVitePortOverride = Test-Path Env:\VITE_PORT
+    $previousVitePortOverride = $env:VITE_PORT
     $env:VITE_PORT = $devVitePort
+    $hadApiPortOverride = Test-Path Env:\API_PORT
+    $previousApiPortOverride = $env:API_PORT
     $env:API_PORT = $devApiPort
     $hadHostOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_EXECUTABLE
     $previousHostOverride = $env:TREEMON_TERMINAL_HOST_EXECUTABLE
@@ -1020,8 +1024,16 @@ function Start-DualProcess(
             Stop-Process -Id $viteProcess.Id -Force -ErrorAction SilentlyContinue
         }
 
-        Remove-Item Env:\VITE_PORT -ErrorAction SilentlyContinue
-        Remove-Item Env:\API_PORT -ErrorAction SilentlyContinue
+        if ($hadVitePortOverride) {
+            $env:VITE_PORT = $previousVitePortOverride
+        } else {
+            Remove-Item Env:\VITE_PORT -ErrorAction SilentlyContinue
+        }
+        if ($hadApiPortOverride) {
+            $env:API_PORT = $previousApiPortOverride
+        } else {
+            Remove-Item Env:\API_PORT -ErrorAction SilentlyContinue
+        }
         if ($hadHostOverride) {
             $env:TREEMON_TERMINAL_HOST_EXECUTABLE = $previousHostOverride
         } else {
