@@ -298,6 +298,8 @@ changed rows already use).
 | `src/Server/WorktreeApi.fs` | Canvas config persistence, archive endpoint, send routing, bridge-liveness API wiring |
 | `src/Server/SessionBridge.fs` | Generic session registry, poll registry, queueing, liveness, and prompt forwarding |
 | `src/Server/CanvasBridge.fs` | Canvas document-owner routing and canvas-specific queue/drain policy over `SessionBridge` |
+| `src/Server/CanvasExport.fs` | Pure canvas HTML transforms: shared theme, head injection, static export, title resolution, and authored document-shell hashing |
+| `src/Server/CanvasDocServer.fs` | Live canvas HTTP routes plus per-kind runtime, content-hash, and shell-hash injection |
 | `src/Server/BeadspaceTemplate.fs` | Reads the embedded `BeadspaceTemplate.html` resource at startup for auto-provisioning |
 | `src/Server/BeadspaceTemplate.html` | Beadspace dashboard HTML — single source of truth (embedded into the Server assembly) |
 | `src/Server/Program.fs` | Canvas register endpoint, bridge status endpoint, doc server, HTML injection, heartbeat route |

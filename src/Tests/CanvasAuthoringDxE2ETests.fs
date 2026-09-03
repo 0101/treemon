@@ -25,7 +25,7 @@ let private injectLive (kind: CanvasDocKind) (filename: string) (docHtml: string
         docHtml
         |> System.Text.Encoding.UTF8.GetBytes
         |> Server.CanvasScanner.contentHash
-    let shellHash = Server.CanvasDocServer.documentShellHash docHtml
+    let shellHash = Server.CanvasExport.documentShellHash docHtml
     let injection =
         Server.CanvasDocServer.buildLiveInjection kind filename contentHash shellHash
     docHtml |> injectAtHead injection, contentHash

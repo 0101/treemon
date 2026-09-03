@@ -399,59 +399,6 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
         + CanvasMorphScript.style
         + markTreemonRuntimeScript CanvasMorphScript.script
 
-let private isTagBoundary character =
-    System.Char.IsWhiteSpace character || character = '>' || character = '/'
-
-let private tryFindOpeningTag tagName startIndex (html: string) =
-    let token = $"<{tagName}"
-    let rec find fromIndex =
-        let index = html.IndexOf(token, fromIndex, System.StringComparison.OrdinalIgnoreCase)
-        if index < 0 then
-            None
-        else
-            let nextIndex = index + token.Length
-            if nextIndex = html.Length || isTagBoundary html[nextIndex] then Some index
-            else find nextIndex
-    find startIndex
-
-let private tryFindTagEnd startIndex (html: string) =
-    let rec find index quote =
-        if index >= html.Length then
-            None
-        else
-            match quote, html[index] with
-            | Some delimiter, character when character = delimiter -> find (index + 1) None
-            | Some _, _ -> find (index + 1) quote
-            | None, delimiter when delimiter = '"' || delimiter = '\'' ->
-                find (index + 1) (Some delimiter)
-            | None, '>' -> Some index
-            | None, _ -> find (index + 1) None
-    find startIndex None
-
-let internal documentShellHash (html: string) =
-    let headCloseIndex = html.IndexOf("</head>", System.StringComparison.OrdinalIgnoreCase)
-    let afterHeadIndex =
-        if headCloseIndex < 0 then 0
-        else headCloseIndex + "</head>".Length
-    let bodyStart = tryFindOpeningTag "body" afterHeadIndex html
-    let headEnd =
-        if headCloseIndex >= 0 then afterHeadIndex
-        else bodyStart |> Option.defaultValue html.Length
-    let headSource =
-        if headEnd = 0 then ""
-        else html[..headEnd - 1]
-    let bodyTag =
-        bodyStart
-        |> Option.map (fun startIndex ->
-            let endIndex =
-                tryFindTagEnd startIndex html
-                |> Option.defaultValue (html.Length - 1)
-            html[startIndex..endIndex])
-        |> Option.defaultValue ""
-    (headSource + "\u0000" + bodyTag)
-    |> System.Text.Encoding.UTF8.GetBytes
-    |> CanvasScanner.contentHash
-
 let internal buildLiveInjection kind filename contentHash shellHash =
     $"<meta data-treemon-runtime name=\"{contentHashMetaName}\" content=\"{contentHash}\">"
     + $"<meta data-treemon-runtime name=\"{shellHashMetaName}\" content=\"{shellHash}\">"
@@ -473,7 +420,7 @@ let internal serveCanvasDoc (ctx: HttpContext) (worktreePath: string) (filename:
         let! rawBytes = File.ReadAllBytesAsync(resolvedPath)
         let html = System.Text.Encoding.UTF8.GetString(rawBytes)
         let contentHash = CanvasScanner.contentHash rawBytes
-        let shellHash = documentShellHash html
+        let shellHash = CanvasExport.documentShellHash html
         let injection =
             buildLiveInjection (CanvasDocKinds.classify filename) filename contentHash shellHash
         // Same </head> placement the static export uses (CanvasExport.injectAtHead) — one

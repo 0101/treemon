@@ -517,16 +517,12 @@
           }
           highlighted = morphAndHighlight(document.body, incoming.body.innerHTML, highlighted);
           loadedContentHash = refetched.contentHash;
-          loadedShellHash = documentMetaHash(incoming, SHELL_HASH_META_NAME);
           loadedCompletionSent = true;
           window.dispatchEvent(new Event('canvas-morph-complete'));
           postMorphComplete(morph, refetched.contentHash);
         })
         .catch(function (err) {
-          if (mine === generation) {
-            pendingMorph = null;
-            reloading = false;
-          }
+          if (mine === generation) pendingMorph = null;
           console.error('Morph failed:', err);
         });
     });

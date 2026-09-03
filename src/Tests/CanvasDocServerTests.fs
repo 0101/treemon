@@ -475,24 +475,24 @@ type BuildInjectionTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(
-                documentShellHash (doc " lang=\"en\"" "<style>body{color:red}</style>" compactBody "<p>After</p>"),
-                Is.EqualTo(documentShellHash baseline),
+                CanvasExport.documentShellHash (doc " lang=\"en\"" "<style>body{color:red}</style>" compactBody "<p>After</p>"),
+                Is.EqualTo(CanvasExport.documentShellHash baseline),
                 "body descendants are the Idiomorph target and must not change the shell hash")
             Assert.That(
-                documentShellHash (doc " lang=\"en\"" "<style>body{color:blue}</style>" compactBody "<p>Before</p>"),
-                Is.Not.EqualTo(documentShellHash baseline),
+                CanvasExport.documentShellHash (doc " lang=\"en\"" "<style>body{color:blue}</style>" compactBody "<p>Before</p>"),
+                Is.Not.EqualTo(CanvasExport.documentShellHash baseline),
                 "authored head changes require reload")
             Assert.That(
-                documentShellHash (doc " lang=\"fr\"" "<style>body{color:red}</style>" compactBody "<p>Before</p>"),
-                Is.Not.EqualTo(documentShellHash baseline),
+                CanvasExport.documentShellHash (doc " lang=\"fr\"" "<style>body{color:red}</style>" compactBody "<p>Before</p>"),
+                Is.Not.EqualTo(CanvasExport.documentShellHash baseline),
                 "html attributes require reload")
             Assert.That(
-                documentShellHash (doc " lang=\"en\"" "<style>body{color:red}</style>" " data-rule=\"a>b\" class=\"wide\"" "<p>Before</p>"),
-                Is.Not.EqualTo(documentShellHash baseline),
+                CanvasExport.documentShellHash (doc " lang=\"en\"" "<style>body{color:red}</style>" " data-rule=\"a>b\" class=\"wide\"" "<p>Before</p>"),
+                Is.Not.EqualTo(CanvasExport.documentShellHash baseline),
                 "body attributes require reload")
             Assert.That(
-                documentShellHash "<style>body{color:blue}</style><h1>Fragment</h1>",
-                Is.Not.EqualTo(documentShellHash "<style>body{color:red}</style><h1>Fragment</h1>"),
+                CanvasExport.documentShellHash "<style>body{color:blue}</style><h1>Fragment</h1>",
+                Is.Not.EqualTo(CanvasExport.documentShellHash "<style>body{color:red}</style><h1>Fragment</h1>"),
                 "a fragment with no explicit head or body must conservatively reload when its leading style changes"))
 
     [<Test>]
@@ -519,7 +519,7 @@ type BuildInjectionTests() =
             let expectedShellHash =
                 rawBytes
                 |> System.Text.Encoding.UTF8.GetString
-                |> documentShellHash
+                |> CanvasExport.documentShellHash
             responseBody.Position <- 0
             use reader = new StreamReader(responseBody)
             let servedHtml = reader.ReadToEnd()

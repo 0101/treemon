@@ -72,6 +72,62 @@ let injectAtHead (injection: string) (html: string) : string =
     else
         injection + html
 
+let private isTagBoundary character =
+    Char.IsWhiteSpace character || character = '>' || character = '/'
+
+let private tryFindOpeningTag tagName startIndex (html: string) =
+    let token = $"<{tagName}"
+    let rec find fromIndex =
+        let index = html.IndexOf(token, fromIndex, StringComparison.OrdinalIgnoreCase)
+        if index < 0 then
+            None
+        else
+            let nextIndex = index + token.Length
+            if nextIndex = html.Length || isTagBoundary html[nextIndex] then Some index
+            else find nextIndex
+    find startIndex
+
+let private tryFindTagEnd startIndex (html: string) =
+    let rec find index quote =
+        if index >= html.Length then
+            None
+        else
+            match quote, html[index] with
+            | Some delimiter, character when character = delimiter -> find (index + 1) None
+            | Some _, _ -> find (index + 1) quote
+            | None, delimiter when delimiter = '"' || delimiter = '\'' ->
+                find (index + 1) (Some delimiter)
+            | None, '>' -> Some index
+            | None, _ -> find (index + 1) None
+    find startIndex None
+
+/// Hash the authored document surfaces outside the body-innerHTML morph target: everything through
+/// the closing head plus the quote-aware body opening tag. A fragment with neither marker hashes in
+/// full so browser-hoisted styles cannot fail open as an unchanged shell.
+let internal documentShellHash (html: string) =
+    let headCloseIndex = html.IndexOf("</head>", StringComparison.OrdinalIgnoreCase)
+    let afterHeadIndex =
+        if headCloseIndex < 0 then 0
+        else headCloseIndex + "</head>".Length
+    let bodyStart = tryFindOpeningTag "body" afterHeadIndex html
+    let headEnd =
+        if headCloseIndex >= 0 then afterHeadIndex
+        else bodyStart |> Option.defaultValue html.Length
+    let headSource =
+        if headEnd = 0 then ""
+        else html[..headEnd - 1]
+    let bodyTag =
+        bodyStart
+        |> Option.map (fun startIndex ->
+            let endIndex =
+                tryFindTagEnd startIndex html
+                |> Option.defaultValue (html.Length - 1)
+            html[startIndex..endIndex])
+        |> Option.defaultValue ""
+    (headSource + "\u0000" + bodyTag)
+    |> System.Text.Encoding.UTF8.GetBytes
+    |> CanvasScanner.contentHash
+
 /// Turn an on-disk canvas doc into a standalone, shareable page: re-inject the shared base theme +
 /// the inert `canvasSend` at `</head>` (or prepend when there is no `</head>`), and nothing else.
 /// Pure `string -> string` so the export is unit-testable without a server.
