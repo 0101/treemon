@@ -58,6 +58,16 @@ tm worktrees
 
 Shows all tracked worktrees with branch, agent status, and PR info. Use this to look up the path of a worktree you just created.
 
+### List embedded terminals
+
+```bash
+tm terminals
+```
+
+Shows every currently open embedded terminal with its repository, worktree, branch, lifecycle, and
+the exact terminal's reported Copilot session title or intent when available. Attachment endpoints
+and credentials are never printed.
+
 ## Options
 
 All commands accept `--port <number>` to override the server port (default: 5000, env: `TREEMON_PORT`).

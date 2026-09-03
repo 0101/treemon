@@ -58,6 +58,11 @@ let private modelWith repos =
       ActionCooldowns = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      TerminalPaneOpen = false
+      TerminalPaneTarget = None
+      EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+      ActiveEmbeddedTerminals = Map.empty
+      EmbeddedTerminalStarts = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = true
       OverviewAgentsStuck = false
@@ -65,7 +70,8 @@ let private modelWith repos =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
 let private response repos =
     { Repos = repos |> List.map toRepoWorktrees
@@ -77,10 +83,10 @@ let private response repos =
       EditorName = "VS Code"
       WorktreeSkills = []
       CollapsedRepos = Set.empty
+      TerminalPaneOpen = false
       CanvasPaneOpen = false
       OverviewPanelOpen = true
-      CanvasPosition = CanvasPosition.Right
-      CanvasSize = CanvasSize.Ratio1To1 }
+      WorkspaceWidth = WorkspaceWidth.EqualThirds }
 
 let private subscriptionKeys model =
     appSubscriptions model |> List.map (fst >> String.concat "/")

@@ -27,6 +27,33 @@ function map(event) {
   );
 }
 
+test("terminal origin is carried on every mapped report and omitted when absent", () => {
+  const event = {
+    id: "terminal-origin",
+    timestamp: context.occurredAt,
+    type: "assistant.turn_start",
+    data: {},
+  };
+  const terminalSessionId = "0123456789abcdef0123456789abcdef";
+
+  assert.deepEqual(
+    reportForSdkEvent({ ...context, terminalSessionId }, event),
+    {
+      sessionId: "session-1",
+      terminalSessionId,
+      worktreePath: "worktree",
+      provider: "copilot_cli",
+      eventId: "terminal-origin",
+      occurredAt: "2026-07-20T12:31:02.493Z",
+      kind: "turn_started",
+    },
+  );
+  assert.equal(
+    Object.hasOwn(reportForSdkEvent(context, event), "terminalSessionId"),
+    false,
+  );
+});
+
 test("metadata summary maps to title_bootstrap without a live title event", () => {
   assert.deepEqual(buildNonBlankMessageReport(context, "title_bootstrap", "Investigate Intent Title Runtime"), {
     sessionId: "session-1",

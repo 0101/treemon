@@ -59,9 +59,17 @@
     <Compile Include="CanvasExport.fs" />
     <Compile Include="CanvasShare.fs" />
     <Compile Include="SchedulerState.fs" />
-    <Compile Include="RefreshScheduler.fs" />
     <Compile Include="CardEventLog.fs" />
     <Compile Include="DemoFixture.fs" />
+    <Compile Include="TerminalHostProcess.fs" />
+    <Compile Include="TerminalHostEndpoint.fs" />
+    <Compile Include="TerminalHostManifest.fs" />
+    <Compile Include="TerminalHostClient.fs" />
+    <Compile Include="TerminalHostReplacement.fs" />
+    <Compile Include="TerminalSessionActivity.fs" />
+    <Compile Include="EmbeddedTerminal.fs" />
+    <Compile Include="TerminalLaunch.fs" />
+    <Compile Include="RefreshScheduler.fs" />
     <Compile Include="WorktreeApi.fs" />
     <Compile Include="OverviewSnapshotCapture.fs" />
     <Compile Include="IdiomorphScript.fs" />
@@ -143,6 +151,20 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Shared\Shared.fsproj" />
+    <ProjectReference Include="..\TerminalHostLayout\TerminalHostLayout.fsproj" />
+    <ProjectReference Include="..\TerminalHost\TerminalHost.fsproj"
+                      ReferenceOutputAssembly="false"
+                      Private="false" />
   </ItemGroup>
+
+  <Target Name="PublishTerminalHost"
+          AfterTargets="Publish">
+    <PropertyGroup>
+      <_TerminalHostPublishDir>$([System.IO.Path]::Combine('$(PublishDir)', 'terminal-host'))</_TerminalHostPublishDir>
+    </PropertyGroup>
+    <MSBuild Projects="..\TerminalHost\TerminalHost.fsproj"
+             Targets="Publish"
+             Properties="Configuration=$(Configuration);PublishDir=$(_TerminalHostPublishDir);SelfContained=false" />
+  </Target>
 
 </Project>

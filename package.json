@@ -6,7 +6,11 @@
     "test:auto-sync-ui": "dotnet test src/Tests/Tests.fsproj --filter \"Category=AutoSyncUiVerification\" --logger \"console;verbosity=detailed\"",
     "check:extension": "tsc --project src/Extension/tsconfig.json && tsc --project src/Extension/tsconfig.contracts.json",
     "test:extension": "npm run check:extension && node --test src/Tests/Extension/*.test.mjs src/Tests/Extension/reporting/*.test.mjs",
-    "test:reporting": "node --test src/Tests/Extension/reporting/*.test.mjs"
+    "test:reporting": "node --test src/Tests/Extension/reporting/*.test.mjs",
+    "test:treemon-deployment": "pwsh -NoProfile -File scripts/treemon-deployment.test.ps1",
+    "test:embedded-launch-routing": "pwsh -NoProfile -File scripts/verify-embedded-launch-routing.ps1",
+    "test:ttyd-runtime-unit": "node --test scripts/verify-ttyd-runtime.test.mjs",
+    "test:ttyd-runtime": "node scripts/verify-ttyd-runtime.mjs"
   },
   "devDependencies": {
     "@github/copilot-sdk": "1.0.9",

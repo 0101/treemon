@@ -10,8 +10,7 @@ open CanvasAwareness
 /// (mirrors how CreateModal/ConfirmModal nest their sub-component state into Model).
 type CanvasState =
     { CanvasPaneOpen: bool
-      CanvasPosition: CanvasPosition
-      CanvasSize: CanvasSize
+      WorkspaceWidth: WorkspaceWidth
       // An explicit pane target used by card-level SystemView actions such as Diff. None keeps the
       // normal behavior where the pane follows FocusedElement; selecting a card clears the override.
       TargetWorktree: string option
@@ -43,12 +42,11 @@ type CanvasState =
       ShareState: CanvasShareState
       BridgeLiveness: Map<string, BridgeLiveness> }
 
-/// Initial canvas state: pane closed on the right, all maps empty, send state idle.
-/// First-load values from the server (pane open/position) are applied in DataLoaded.
+/// Initial canvas state: pane closed, workspace in equal thirds, all maps empty, send state idle.
+/// First-load values from the server (pane open and workspace width) are applied in DataLoaded.
 let empty : CanvasState =
     { CanvasPaneOpen = false
-      CanvasPosition = CanvasPosition.Right
-      CanvasSize = CanvasSize.Ratio1To1
+      WorkspaceWidth = WorkspaceWidth.EqualThirds
       TargetWorktree = None
       ActiveCanvasDoc = Map.empty
       VisitedCanvasDocs = Map.empty

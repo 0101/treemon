@@ -84,6 +84,11 @@ let private defaultModel : Model =
       AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      TerminalPaneOpen = false
+      TerminalPaneTarget = None
+      EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+      ActiveEmbeddedTerminals = Map.empty
+      EmbeddedTerminalStarts = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -91,7 +96,8 @@ let private defaultModel : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
 let private dispatchedMsgs cmd : Msg list =
     let mutable captured = [] // Elmish effects expose messages only through their dispatch callback.
@@ -108,36 +114,7 @@ let private morph scopedKey filename contentHash =
       Filename = filename
       ContentHash = contentHash }
 
-/// Calls update and returns the model, ignoring the Cmd. Tolerates the
-/// Fable.Remoting.Client proxy build failing under .NET, which surfaces as a
-/// TypeInitializationException (eager static init) or an ArgumentException (the
-/// lazy proxy in App.fs forced during Cmd construction). The model is computed
-/// before the Cmd, so we re-derive it.
-let private tryUpdateModel msg model =
-    try
-        let m, _ = update msg model
-        m
-    with
-    | :? TypeInitializationException | :? ArgumentException ->
-        match msg with
-        | MarkDocViewed (scopedKey, filename) ->
-            match findWorktree scopedKey model with
-            | Some wt ->
-                let currentHash =
-                    wt.CanvasDocs
-                    |> List.tryFind (fun d -> d.Filename = filename)
-                    |> Option.map _.ContentHash
-                match currentHash with
-                | Some hash ->
-                    let innerMap =
-                        model.Canvas.LastViewedHashes
-                        |> Map.tryFind scopedKey
-                        |> Option.defaultValue Map.empty
-                        |> Map.add filename hash
-                    { model with Canvas.LastViewedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap }
-                | None -> model
-            | None -> model
-        | _ -> reraise ()
+let private updateModel msg model = update msg model |> fst
 
 
 // ── unviewedDocsByScopedKey ──────────────────────────────────────────
@@ -594,13 +571,14 @@ type MarkDocViewedTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "status.html" "hash-v2" ] ] ]
                 Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "status.html", "hash-v1" ] ] }
 
-        let updated = tryUpdateModel (MarkDocViewed ("r/feat", "status.html")) model
+        let updated, cmd = update (MarkDocViewed ("r/feat", "status.html")) model
 
         let viewedHash =
             updated.Canvas.LastViewedHashes
             |> Map.find "r/feat"
             |> Map.find "status.html"
         Assert.That(viewedHash, Is.EqualTo("hash-v2"), "Should update to current content hash")
+        Assert.That(cmd, Is.Not.Empty, "A changed viewed hash should be persisted")
 
     [<Test>]
     member _.``MarkDocViewed skips persistence when the current hash is already recorded``() =
@@ -621,7 +599,7 @@ type MarkDocViewedTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "new.html" "hash1" ] ] ]
                 Canvas.LastViewedHashes = Map.empty }
 
-        let updated = tryUpdateModel (MarkDocViewed ("r/feat", "new.html")) model
+        let updated = updateModel (MarkDocViewed ("r/feat", "new.html")) model
 
         Assert.That(updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True)
         let viewedHash =
@@ -639,7 +617,7 @@ type MarkDocViewedTests() =
                     makeDoc "b.html" "hb" ] ] ]
                 Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "old-ha" ] ] }
 
-        let updated = tryUpdateModel (MarkDocViewed ("r/feat", "b.html")) model
+        let updated = updateModel (MarkDocViewed ("r/feat", "b.html")) model
 
         let inner = updated.Canvas.LastViewedHashes |> Map.find "r/feat"
         Assert.That(inner |> Map.find "a.html", Is.EqualTo("old-ha"), "Existing entry should be preserved")
@@ -652,7 +630,7 @@ type MarkDocViewedTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
                 Canvas.LastViewedHashes = Map.empty }
 
-        let updated = tryUpdateModel (MarkDocViewed ("unknown/key", "a.html")) model
+        let updated = updateModel (MarkDocViewed ("unknown/key", "a.html")) model
 
         Assert.That(updated.Canvas.LastViewedHashes, Is.Empty, "Should not modify hashes for unknown scoped key")
 
@@ -663,7 +641,7 @@ type MarkDocViewedTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
                 Canvas.LastViewedHashes = Map.empty }
 
-        let updated = tryUpdateModel (MarkDocViewed ("r/feat", "nonexistent.html")) model
+        let updated = updateModel (MarkDocViewed ("r/feat", "nonexistent.html")) model
 
         Assert.That(updated.Canvas.LastViewedHashes, Is.Empty, "Should not modify hashes for unknown filename")
 
@@ -987,7 +965,7 @@ type DocErrorTests() =
     [<Test>]
     member _.``CanvasDocError stamps the error with the emitting doc``() =
         let model = focusedModel [ makeDoc "a.html" "ha" ]
-        let updated = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "Uncaught Error: boom (line 3:5)")) model
+        let updated = updateModel (CanvasDocError ("r/feat", "a.html", "Uncaught Error: boom (line 3:5)")) model
         Assert.That(updated.Canvas.DocError,
             Is.EqualTo(Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "Uncaught Error: boom (line 3:5)" }),
             "A doc-side JS error must be stored, stamped with the doc that emitted it (so the banner is doc-scoped)")
@@ -1003,7 +981,7 @@ type DocErrorTests() =
                 Repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "ha" ]
                                          makeWorktree "r" "other" [ makeDoc "b.html" "hb" ] ] ]
                 FocusedElement = Some (Card "r/feat") }
-        let updated = tryUpdateModel (CanvasDocError ("r/other", "b.html", "boom from hidden")) model
+        let updated = updateModel (CanvasDocError ("r/other", "b.html", "boom from hidden")) model
         Assert.That(updated.Canvas.DocError,
             Is.EqualTo(Some { ScopedKey = "r/other"; Filename = "b.html"; Message = "boom from hidden" }),
             "The error must be attributed to the emitter's worktree (r/other), not the focused worktree (r/feat)")
@@ -1011,7 +989,7 @@ type DocErrorTests() =
     [<Test>]
     member _.``CanvasDocError is dropped when the emitter's worktree is unknown``() =
         let model = focusedModel [ makeDoc "a.html" "ha" ]   // only r/feat exists
-        let updated = tryUpdateModel (CanvasDocError ("r/ghost", "a.html", "boom")) model
+        let updated = updateModel (CanvasDocError ("r/ghost", "a.html", "boom")) model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
             "An error whose worktree is not known has nothing to attribute it to, so it is dropped")
 
@@ -1021,7 +999,7 @@ type DocErrorTests() =
         // emitting worktree may raise a banner, so a stale/forged filename — e.g. from an archived or
         // deleted doc still posting from a lingering iframe — is dropped, never attributed.
         let model = focusedModel [ makeDoc "a.html" "ha" ]
-        let updated = tryUpdateModel (CanvasDocError ("r/feat", "ghost.html", "boom")) model
+        let updated = updateModel (CanvasDocError ("r/feat", "ghost.html", "boom")) model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
             "An error whose emitting filename is not a known doc of its worktree is dropped")
 
@@ -1029,7 +1007,7 @@ type DocErrorTests() =
     member _.``CanvasDocError does NOT touch CanvasSendState (distinct source)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
         let model = { baseModel with Canvas.CanvasSendState = CanvasSendState.Waiting "r/feat" }
-        let updated = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "boom")) model
+        let updated = updateModel (CanvasDocError ("r/feat", "a.html", "boom")) model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "Doc JS errors and message-delivery state are independent and must not overwrite each other")
         Assert.That(updated.Canvas.DocError |> Option.map _.Message, Is.EqualTo(Some "boom"))
@@ -1037,8 +1015,8 @@ type DocErrorTests() =
     [<Test>]
     member _.``the newest doc error wins``() =
         let model = focusedModel [ makeDoc "a.html" "ha" ]
-        let afterFirst = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "first")) model
-        let afterSecond = tryUpdateModel (CanvasDocError ("r/feat", "a.html", "second")) afterFirst
+        let afterFirst = updateModel (CanvasDocError ("r/feat", "a.html", "first")) model
+        let afterSecond = updateModel (CanvasDocError ("r/feat", "a.html", "second")) afterFirst
         Assert.That(afterSecond.Canvas.DocError |> Option.map _.Message, Is.EqualTo(Some "second"),
             "A fresh error replaces the prior one")
 
@@ -1046,13 +1024,13 @@ type DocErrorTests() =
     member _.``DismissCanvasDocError clears the doc error``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
         let model = { baseModel with Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" } }
-        let updated = tryUpdateModel DismissCanvasDocError model
+        let updated = updateModel DismissCanvasDocError model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None), "Dismiss must clear the banner")
 
     [<Test>]
     member _.``DismissCanvasDocError leaves CanvasSendState untouched``() =
         let model = { defaultModel with Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "boom" }; Canvas.CanvasSendState = CanvasSendState.Failed "send failed" }
-        let updated = tryUpdateModel DismissCanvasDocError model
+        let updated = updateModel DismissCanvasDocError model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Failed "send failed"),
             "Dismissing the doc-error banner must not clear an unrelated send failure")
 
@@ -1060,7 +1038,7 @@ type DocErrorTests() =
     member _.``SelectCanvasDoc clears a stale doc error (so a tab switch back never re-shows it)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha"; makeDoc "b.html" "hb" ]
         let model = { baseModel with Canvas.DocError = Some { ScopedKey = "r/feat"; Filename = "a.html"; Message = "stale" } }
-        let updated = tryUpdateModel (SelectCanvasDoc ("r/feat", "b.html")) model
+        let updated = updateModel (SelectCanvasDoc ("r/feat", "b.html")) model
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
             "Switching tabs clears the stored error so it can never re-show when you switch back")
 
@@ -1526,7 +1504,7 @@ type MalformedDocMessageTests() =
     [<Test>]
     member _.``CanvasMalformedDocMessage raises the doc-error banner on the active visible doc``() =
         let model = focusedModel [ makeDoc "a.html" "ha" ]
-        let updated = tryUpdateModel CanvasMalformedDocMessage model
+        let updated = updateModel CanvasMalformedDocMessage model
         match updated.Canvas.DocError with
         | Some err ->
             Assert.That(err.ScopedKey, Is.EqualTo("r/feat"),
@@ -1544,14 +1522,14 @@ type MalformedDocMessageTests() =
         // so the banner is stamped with the doc the user is actually looking at.
         let baseModel = focusedModel [ makeDoc "a.html" "ha"; makeDoc "b.html" "hb" ]
         let model = { baseModel with Canvas.ActiveCanvasDoc = Map.ofList [ "r/feat", "b.html" ] }
-        let updated = tryUpdateModel CanvasMalformedDocMessage model
+        let updated = updateModel CanvasMalformedDocMessage model
         Assert.That(updated.Canvas.DocError |> Option.map _.Filename, Is.EqualTo(Some "b.html"),
             "The banner is attributed to the active doc (b.html), not the worktree's first doc (a.html)")
 
     [<Test>]
     member _.``CanvasMalformedDocMessage is dropped when there is no active visible doc``() =
         // No focused card → activeVisibleDoc = None → nothing to attribute the banner to.
-        let updated = tryUpdateModel CanvasMalformedDocMessage defaultModel
+        let updated = updateModel CanvasMalformedDocMessage defaultModel
         Assert.That(updated.Canvas.DocError, Is.EqualTo(None),
             "With no active visible doc the malformed message has nothing to attribute it to, so no banner is raised")
 
@@ -1559,7 +1537,7 @@ type MalformedDocMessageTests() =
     member _.``CanvasMalformedDocMessage does NOT touch CanvasSendState (distinct source)``() =
         let baseModel = focusedModel [ makeDoc "a.html" "ha" ]
         let model = { baseModel with Canvas.CanvasSendState = CanvasSendState.Waiting "r/feat" }
-        let updated = tryUpdateModel CanvasMalformedDocMessage model
+        let updated = updateModel CanvasMalformedDocMessage model
         Assert.That(updated.Canvas.CanvasSendState, Is.EqualTo(CanvasSendState.Waiting "r/feat"),
             "Surfacing a malformed message must not overwrite unrelated message-delivery state")
         Assert.That(updated.Canvas.DocError |> Option.isSome, Is.True,
@@ -1584,7 +1562,7 @@ type LoadLastViewedHashesTests() =
         // server that has no saved hashes. The docs must stay viewed, not become unviewed.
         let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h1" ] ] ]
         let seeded = { defaultModel with Repos = repos; Canvas.LastViewedHashes = Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ] }
-        let updated = tryUpdateModel (LoadLastViewedHashes Map.empty) seeded
+        let updated = updateModel (LoadLastViewedHashes Map.empty) seeded
         Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes, Is.Empty,
             "an empty server map must not make a seeded, already-present doc look unviewed")
 
@@ -1593,7 +1571,7 @@ type LoadLastViewedHashesTests() =
         // The doc is now at h2 but the server last saw h1 (updated while away) → stays unviewed.
         let repos = [ makeRepo "r" [ makeWorktree "r" "feat" [ makeDoc "a.html" "h2" ] ] ]
         let model = { defaultModel with Repos = repos }
-        let updated = tryUpdateModel (LoadLastViewedHashes (Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ])) model
+        let updated = updateModel (LoadLastViewedHashes (Map.ofList [ "r/feat", Map.ofList [ "a.html", "h1" ] ])) model
         Assert.That(updated.Canvas.LastViewedHashes["r/feat"]["a.html"], Is.EqualTo("h1"),
             "the server value is kept (not overwritten by the current hash), so the update still registers")
         Assert.That(unviewedDocsByScopedKey updated.Repos updated.Canvas.LastViewedHashes |> Map.containsKey "r/feat", Is.True,

@@ -159,6 +159,12 @@ let private selectSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
         activeWinner
         |> Option.orElse (sessions |> StoredStatus.tryMostRecentActivity) }
 
+let internal representativeActivityText now sessions =
+    (selectSessions now sessions).Footer
+    |> Option.map _.Status
+    |> Option.bind effectiveDisplayActivity
+    |> Option.map (AgentActivity.textAndTimestamp >> fst >> _.Trim())
+
 let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
     let selection = selectSessions now sessions
 

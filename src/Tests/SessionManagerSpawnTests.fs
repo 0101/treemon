@@ -91,3 +91,55 @@ type SessionManagerSpawnTests() =
         TestContext.Out.WriteLine($"Re-spawn: HWND={hwnd2}")
 
         Assert.That(Server.Win32.isWindowValid hwnd2, Is.True, "Re-spawned HWND should be valid")
+
+    [<Test>]
+    member _.``focus and new tab preserve the tracked native window``() =
+        let testEnvironment = environment.Value
+        let a = testEnvironment.Agent
+        let testPath = testEnvironment.WorktreePath
+        let testPathStr = WorktreePath.value testPath |> Server.PathUtils.normalizePath
+
+        spawnTerminal a testPath
+        |> runAsync
+        |> fun result -> assertOk result "spawnTerminal should return Ok"
+
+        let hwnd = runAsync (getActiveSessions a) |> Map.find testPathStr
+        let windowsBeforeFocus = Server.Win32.listWindowsTerminalWindows () |> Set.ofList
+
+        let shellsBeforeFocus =
+            match runAsync (ownedPowerShellProcessIds testPathStr) with
+            | Ok pids -> Set.ofList pids
+            | Error message ->
+                Assert.Fail($"Failed to inspect fixture PowerShell processes: {message}")
+                Set.empty
+
+        Assert.Multiple(fun () ->
+            Assert.That(windowsBeforeFocus, Does.Contain(hwnd))
+            Assert.That(shellsBeforeFocus, Is.Not.Empty))
+
+        focusSession a testPath
+        |> runAsync
+        |> fun result -> assertOk result "focusSession should return Ok"
+
+        let windowsAfterFocus = Server.Win32.listWindowsTerminalWindows () |> Set.ofList
+
+        let shellsAfterFocus =
+            match runAsync (ownedPowerShellProcessIds testPathStr) with
+            | Ok pids -> Set.ofList pids
+            | Error message ->
+                Assert.Fail($"Failed to inspect fixture PowerShell processes: {message}")
+                Set.empty
+
+        Assert.Multiple(fun () ->
+            Assert.That(windowsAfterFocus, Is.EqualTo(windowsBeforeFocus))
+            Assert.That(shellsAfterFocus, Is.EqualTo(shellsBeforeFocus)))
+
+        openNewTab a testPath
+        |> runAsync
+        |> fun result -> assertOk result "openNewTab should return Ok"
+
+        let sessionsAfter = runAsync (getActiveSessions a)
+
+        Assert.Multiple(fun () ->
+            Assert.That(sessionsAfter[testPathStr], Is.EqualTo(hwnd))
+            Assert.That(Server.Win32.isWindowValid hwnd, Is.True))

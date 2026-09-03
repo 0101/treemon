@@ -33,8 +33,10 @@ open Server.SqliteStorage
 /// report must not block a slightly-earlier status transition, nor be discarded by one). It is
 /// server-internal ordering state persisted alongside `ContextUsage`, but never sent on the wire.
 /// Ask-user request/completion clocks live in `SessionStatus` and are persisted independently too.
+/// `TerminalSessionId` is optional attribution metadata and does not participate in either clock.
 type StoredStatus =
     { SessionId: SessionId
+      TerminalSessionId: TerminalSessionId option
       WorktreePath: WorktreePath
       Provider: CodingToolProvider
       Status: SessionStatus
@@ -137,6 +139,7 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
     let contextUsage, contextUsageAt = readContextUsage r 15 16 17
 
     { SessionId = SessionId(r.GetString 0)
+      TerminalSessionId = readOptStr r 20 |> Option.map TerminalSessionId
       WorktreePath = WorktreePath(r.GetString 1)
       Provider = parseProvider (r.GetString 2)
       Status =
@@ -178,7 +181,8 @@ CREATE TABLE IF NOT EXISTS session_status (
     context_token_limit     INTEGER,
     context_usage_at        TEXT,
     awaiting_user_since     TEXT,
-    user_input_completed_at TEXT
+    user_input_completed_at TEXT,
+    terminal_session_id     TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
 CREATE INDEX IF NOT EXISTS ix_status_worktree_activity
@@ -207,7 +211,17 @@ let private additiveColumnMigrations =
       "context_token_limit", "INTEGER"
       "context_usage_at", "TEXT"
       "awaiting_user_since", "TEXT"
-      "user_input_completed_at", "TEXT" ]
+      "user_input_completed_at", "TEXT"
+      "terminal_session_id", "TEXT" ]
+
+// This index must be created only after ensureAdditiveColumns: existing databases gain
+// terminal_session_id through that migration, so putting it in schemaSql would fail startup before
+// the column exists. The key order matches the exact-origin lookup and its deterministic ordering.
+let private terminalSessionIndexSql =
+    """
+CREATE INDEX IF NOT EXISTS ix_status_terminal_activity
+ON session_status(terminal_session_id, updated_at DESC, session_id DESC);
+"""
 
 let rec private readColumnNames (reader: SqliteDataReader) names =
     if reader.Read() then
@@ -257,10 +271,11 @@ INSERT INTO session_status
      last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
      intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
      context_current_tokens, context_token_limit, context_usage_at,
-     awaiting_user_since, user_input_completed_at)
+     awaiting_user_since, user_input_completed_at, terminal_session_id)
 VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats,
         $it, $its, $tt, $tts, $upd, $seen,
-        $contextCurrent, $contextLimit, $contextAt, $awaitingUserSince, $userInputCompletedAt)
+        $contextCurrent, $contextLimit, $contextAt, $awaitingUserSince, $userInputCompletedAt,
+        $terminalSessionId)
 ON CONFLICT(session_id) DO UPDATE SET
     worktree_path = excluded.worktree_path,
     provider      = excluded.provider,
@@ -277,7 +292,8 @@ ON CONFLICT(session_id) DO UPDATE SET
     updated_at    = excluded.updated_at,
     last_seen     = excluded.last_seen,
     awaiting_user_since = excluded.awaiting_user_since,
-    user_input_completed_at = excluded.user_input_completed_at
+    user_input_completed_at = excluded.user_input_completed_at,
+    terminal_session_id = COALESCE(excluded.terminal_session_id, session_status.terminal_session_id)
 WHERE excluded.updated_at >= session_status.updated_at;
 """
 
@@ -292,10 +308,17 @@ VALUES ($eid, $sid, $wt, $prov, $kind, $status, $skill, $ts);
 
 // Liveness-only bump: advance a session's last_seen (openness) without touching updated_at, status,
 // or any message/skill field, and only ever forward. Heartbeats take this path instead of
-// upsert+append, so they refresh openness without moving the last-write-wins clock.
+// upsert+append, so they refresh openness without moving the last-write-wins clock. An omitted
+// terminal origin retains existing attribution; there is no implicit clear operation.
 let private touchSql =
     """
-UPDATE session_status SET last_seen = $seen WHERE session_id = $sid AND last_seen < $seen;
+UPDATE session_status
+SET last_seen = CASE
+        WHEN last_seen < $seen THEN $seen
+        ELSE last_seen
+    END,
+    terminal_session_id = COALESCE($terminalSessionId, terminal_session_id)
+WHERE session_id = $sid;
 """
 
 let private upsertContextUsageSql =
@@ -305,14 +328,16 @@ INSERT INTO session_status
      last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
      intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
      context_current_tokens, context_token_limit, context_usage_at,
-     awaiting_user_since, user_input_completed_at)
+     awaiting_user_since, user_input_completed_at, terminal_session_id)
 VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats,
         $it, $its, $tt, $tts, $upd, $seen,
-        $contextCurrent, $contextLimit, $contextAt, $awaitingUserSince, $userInputCompletedAt)
+        $contextCurrent, $contextLimit, $contextAt, $awaitingUserSince, $userInputCompletedAt,
+        $terminalSessionId)
 ON CONFLICT(session_id) DO UPDATE SET
     context_current_tokens = excluded.context_current_tokens,
     context_token_limit = excluded.context_token_limit,
     context_usage_at = excluded.context_usage_at,
+    terminal_session_id = COALESCE(excluded.terminal_session_id, session_status.terminal_session_id),
     last_seen = CASE
         WHEN session_status.last_seen < excluded.last_seen THEN excluded.last_seen
         ELSE session_status.last_seen
@@ -321,13 +346,18 @@ WHERE session_status.context_usage_at IS NULL
    OR session_status.context_usage_at <= excluded.context_usage_at;
 """
 
-let private loadSql =
+let private storedStatusColumns =
     """
-SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-       intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-       context_current_tokens, context_token_limit, context_usage_at,
-       awaiting_user_since, user_input_completed_at
+session_id, worktree_path, provider, status, current_skill,
+last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
+context_current_tokens, context_token_limit, context_usage_at,
+awaiting_user_since, user_input_completed_at, terminal_session_id
+"""
+
+let private loadSql =
+    $"""
+SELECT {storedStatusColumns}
 FROM session_status
 WHERE last_seen >= $cutoff
 ORDER BY last_seen;
@@ -372,38 +402,41 @@ DELETE FROM session_status WHERE last_seen < $cutoff;
 
 // One durable footer representative per worktree, selected before rows cross the SQLite boundary.
 let private retainedByWorktreeSql =
-    """
+    $"""
 WITH ranked AS (
-    SELECT session_id, worktree_path, provider, status, current_skill,
-           last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-           intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-           context_current_tokens, context_token_limit, context_usage_at,
-           awaiting_user_since, user_input_completed_at,
+    SELECT {storedStatusColumns},
            ROW_NUMBER() OVER (
                PARTITION BY worktree_path
                ORDER BY updated_at DESC, session_id DESC
            ) AS activity_rank
     FROM session_status
 )
-SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-       intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-       context_current_tokens, context_token_limit, context_usage_at,
-       awaiting_user_since, user_input_completed_at
+SELECT {storedStatusColumns}
 FROM ranked
 WHERE activity_rank = 1;
 """
 
 let private statusBySessionSql =
-    """
-SELECT session_id, worktree_path, provider, status, current_skill,
-       last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-       intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-       context_current_tokens, context_token_limit, context_usage_at,
-       awaiting_user_since, user_input_completed_at
+    $"""
+SELECT {storedStatusColumns}
 FROM session_status
 WHERE session_id = $sid
 LIMIT 1;
+"""
+
+let private retainedTerminalSessionIdsSql =
+    """
+SELECT DISTINCT terminal_session_id
+FROM session_status
+WHERE terminal_session_id IS NOT NULL;
+"""
+
+let internal statusesByTerminalSessionIdsSql parameterNames =
+    $"""
+SELECT {storedStatusColumns}
+FROM session_status
+WHERE terminal_session_id IN ({parameterNames})
+ORDER BY terminal_session_id, updated_at DESC, session_id DESC;
 """
 
 // --- Reader / binder helpers ------------------------------------------------------------------
@@ -448,6 +481,11 @@ let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
     cmd.Parameters.AddWithValue("$contextAt", contextAt) |> ignore
     cmd.Parameters.AddWithValue("$awaitingUserSince", timestampToDb s.AwaitingUserSince) |> ignore
     cmd.Parameters.AddWithValue("$userInputCompletedAt", timestampToDb s.UserInputCompletedAt) |> ignore
+    cmd.Parameters.AddWithValue(
+        "$terminalSessionId",
+        stored.TerminalSessionId |> Option.map TerminalSessionId.value |> optToDb
+    )
+    |> ignore
 
 let private readStoredBySession
     (conn: SqliteConnection)
@@ -526,6 +564,8 @@ type SessionActivityStore
         cmd.CommandText <- schemaSql
         cmd.ExecuteNonQuery() |> ignore
         ensureAdditiveColumns c
+        cmd.CommandText <- terminalSessionIndexSql
+        cmd.ExecuteNonQuery() |> ignore
         cmd.CommandText <- migrateSql
         cmd.ExecuteNonQuery() |> ignore
         c
@@ -565,14 +605,26 @@ type SessionActivityStore
         tx.Commit()
         persisted
 
-    /// Advance `last_seen` for openness without moving the lifecycle ordering clock. Stale or equal
-    /// observations are a full no-op.
-    member _.RecordLiveness(sessionId: SessionId, lastSeen: DateTimeOffset) : unit =
+    /// Advance `last_seen` for openness without moving the lifecycle ordering clock. A supplied
+    /// origin follows the reporting process even when the heartbeat timestamp does not advance
+    /// liveness; an omitted origin retains existing attribution.
+    member _.RecordLiveness
+        (
+            sessionId: SessionId,
+            lastSeen: DateTimeOffset,
+            terminalSessionId: TerminalSessionId option
+        )
+        : unit =
         use conn = openConn ()
         use cmd = conn.CreateCommand()
         cmd.CommandText <- touchSql
         cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
         cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
+        cmd.Parameters.AddWithValue(
+            "$terminalSessionId",
+            terminalSessionId |> Option.map TerminalSessionId.value |> optToDb
+        )
+        |> ignore
         cmd.ExecuteNonQuery() |> ignore
 
     /// Persist the latest accepted context-window gauge and last_seen, inserting the full session
@@ -599,6 +651,40 @@ type SessionActivityStore
         cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
         use reader = cmd.ExecuteReader()
         if reader.Read() then Some(readStored reader) else None
+
+    /// Every terminal origin still backed by a retained durable session row. Used by the hourly
+    /// in-memory epoch sweep after durable retention has completed.
+    member internal _.RetainedTerminalSessionIds() : Set<TerminalSessionId> =
+        use conn = openConn ()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- retainedTerminalSessionIdsSql
+        use reader = cmd.ExecuteReader()
+
+        readRows reader (fun row -> TerminalSessionId(row.GetString 0)) []
+        |> Set.ofList
+
+    /// All durable sessions attributed to one of the current authoritative TerminalHost ids.
+    /// Rows outside the live window remain eligible because host replacement may resume them.
+    member _.StatusesByTerminalSessionIds(terminalSessionIds: Set<TerminalSessionId>) : StoredStatus list =
+        if Set.isEmpty terminalSessionIds then
+            []
+        else
+            let parameters =
+                terminalSessionIds
+                |> Set.toList
+                |> List.mapi (fun index terminalSessionId ->
+                    $"$terminalSessionId{index}", TerminalSessionId.value terminalSessionId)
+
+            use conn = openConn ()
+            use cmd = conn.CreateCommand()
+            let parameterNames = parameters |> List.map fst |> String.concat ", "
+            cmd.CommandText <- statusesByTerminalSessionIdsSql parameterNames
+
+            parameters
+            |> List.iter (fun (name, value) -> cmd.Parameters.AddWithValue(name, value) |> ignore)
+
+            use reader = cmd.ExecuteReader()
+            readRows reader readStored []
 
     /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
     /// so cards are correct before any new event arrives.

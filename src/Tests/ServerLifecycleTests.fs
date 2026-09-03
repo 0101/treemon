@@ -5,6 +5,9 @@ open System.Collections.Concurrent
 open System.IO
 open System.Threading
 open System.Threading.Tasks
+open Microsoft.Extensions.DependencyInjection
+open Microsoft.Extensions.Logging
+open Microsoft.Extensions.Options
 open NUnit.Framework
 open Program
 open Shared
@@ -16,10 +19,39 @@ open Tests.SqliteTestDatabase
 let private withDbPath =
     SqliteTestDatabase.withDbPath "treemon-server-lifecycle"
 
+let private serverConfig arguments =
+    match parseArgs arguments with
+    | RunMode.Server config -> config
+    | RunMode.TerminalHostDeploymentPreflight ->
+        Assert.Fail("Expected server run mode")
+        Unchecked.defaultof<_>
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
 type ServerLifecycleTests() =
+
+    [<Test>]
+    member _.``ASP.NET request diagnostics require warning level``() =
+        let services = ServiceCollection()
+        services.AddLogging(Action<ILoggingBuilder>(configureLogging)) |> ignore
+        use provider = services.BuildServiceProvider()
+
+        let options =
+            provider.GetRequiredService<IOptions<LoggerFilterOptions>>().Value
+
+        let rule =
+            options.Rules
+            |> Seq.tryFind (fun candidate ->
+                candidate.CategoryName = "Microsoft.AspNetCore")
+
+        match rule with
+        | Some configured ->
+            Assert.That(
+                configured.LogLevel,
+                Is.EqualTo(Nullable LogLevel.Warning)
+            )
+        | None -> Assert.Fail("Expected a Microsoft.AspNetCore logging filter")
 
     [<Test>]
     member _.``runtime shares one store and ingestion drains before releasing its borrow``() =
@@ -30,6 +62,7 @@ type ServerLifecycleTests() =
 
             let report =
                 { SessionId = SessionId "lifecycle-session"
+                  TerminalSessionId = None
                   WorktreePath =
                     WorktreePath(Path.Combine(Path.GetTempPath(), "lifecycle-worktree"))
                   Provider = CopilotCli
@@ -56,9 +89,13 @@ type ServerLifecycleTests() =
 
     [<Test>]
     member _.``demo and fixture modes do not create the durable activity runtime``() =
-        let real = parseArgs [| "--no-canvas" |]
-        let demo = parseArgs [| "--demo" |]
-        let fixture = parseArgs [| "--test-fixtures"; "worktrees.json"; "--no-canvas" |]
+        let real = serverConfig [| "--no-canvas" |]
+        let demo = serverConfig [| "--demo" |]
+        let fixture =
+            serverConfig
+                [| "--test-fixtures"
+                   "worktrees.json"
+                   "--no-canvas" |]
 
         Assert.Multiple(fun () ->
             Assert.That(usesSessionActivity real, Is.True)

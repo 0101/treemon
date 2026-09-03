@@ -89,6 +89,31 @@ type WrapperTypeSerializationTests() =
 
         let result = roundTrip original
         Assert.That(result.Action, Is.EqualTo(original.Action))
+
+    [<Test>]
+    member _.``Embedded terminal registry snapshot survives JSON round-trip``() =
+        let original =
+            { Tabs =
+                [ { Id = EmbeddedTerminalId "00000000000000000000000000000002"
+                    Worktree = WorktreePath @"Q:\code\running"
+                    ReportedActivity = Some "Implementing terminal titles"
+                    Lifecycle =
+                        EmbeddedTerminalLifecycle.Running
+                            "http://127.0.0.1:61234/" }
+                  { Id = EmbeddedTerminalId "00000000000000000000000000000004"
+                    Worktree = WorktreePath @"Q:\code\interrupted"
+                    ReportedActivity = None
+                    Lifecycle =
+                        EmbeddedTerminalLifecycle.Interrupted
+                            "host exited" } ] }
+
+        Assert.That(
+            roundTrip<EmbeddedTerminalSnapshot> original,
+            Is.EqualTo original
+        )
+
+    [<Test>]
+    member _.``CreateWorktreeRequest survives JSON round-trip``() =
         let original =
             { RepoId = "my-repo"
               BranchName = BranchName.create "feature/new"

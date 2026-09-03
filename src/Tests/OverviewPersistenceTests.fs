@@ -43,3 +43,28 @@ type OverviewPersistenceTests() =
             GlobalConfig.writeOverviewPanelOpen false
             Assert.That(GlobalConfig.readOverviewPanelOpen (), Is.False, "overview stays closed")
             Assert.That(GlobalConfig.readCanvasPaneOpen (), Is.True, "canvas stays open"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type TerminalPanePersistenceTests() =
+
+    [<Test>]
+    member _.``Terminal defaults to closed when the config predates the setting``() =
+        TestUtils.withTempConfigDir "terminal-pane-persist" (fun _ ->
+            Assert.That(GlobalConfig.readTerminalPaneOpen (), Is.False))
+
+    [<Test>]
+    member _.``Terminal pane state survives a reload``() =
+        TestUtils.withTempConfigDir "terminal-pane-persist" (fun _ ->
+            GlobalConfig.writeTerminalPaneOpen true
+            Assert.That(GlobalConfig.readTerminalPaneOpen (), Is.True))
+
+    [<Test>]
+    member _.``Terminal visibility is independent of Canvas visibility``() =
+        TestUtils.withTempConfigDir "terminal-pane-persist" (fun _ ->
+            GlobalConfig.writeTerminalPaneOpen true
+            GlobalConfig.writeCanvasPaneOpen false
+            Assert.That(GlobalConfig.readTerminalPaneOpen (), Is.True)
+            Assert.That(GlobalConfig.readCanvasPaneOpen (), Is.False))

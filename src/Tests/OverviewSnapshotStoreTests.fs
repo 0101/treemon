@@ -233,6 +233,7 @@ END;
             (use legacy = new SessionActivityStore(path)
              let stored =
                  { SessionId = SessionId "session-1"
+                   TerminalSessionId = None
                    WorktreePath = WorktreePath "worktree-1"
                    Provider = CopilotCli
                    Status = { emptyStatus with Status = SessionLevelStatus.Working }

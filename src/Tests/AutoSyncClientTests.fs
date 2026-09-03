@@ -45,6 +45,11 @@ let private model enabled : Model =
       AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      TerminalPaneOpen = false
+      TerminalPaneTarget = None
+      EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+      ActiveEmbeddedTerminals = Map.empty
+      EmbeddedTerminalStarts = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -52,7 +57,8 @@ let private model enabled : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = DateTimeOffset.MinValue
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
 let private enabled (model: Model) =
     findWorktree scopedKey model |> Option.map _.AutoSyncEnabled
@@ -76,10 +82,10 @@ let private response enabled : DashboardResponse =
       EditorName = "VS Code"
       WorktreeSkills = []
       CollapsedRepos = Set.empty
+      TerminalPaneOpen = false
       CanvasPaneOpen = false
       OverviewPanelOpen = false
-      CanvasPosition = CanvasPosition.Right
-      CanvasSize = CanvasSize.Ratio1To1 }
+      WorkspaceWidth = WorkspaceWidth.EqualThirds }
 
 [<TestFixture>]
 [<Category("Unit")>]

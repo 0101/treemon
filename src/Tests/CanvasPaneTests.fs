@@ -890,30 +890,30 @@ type CanvasPaneTests() =
     // ── Toolbar Consolidation ───────────────────────────────────────────
 
     [<Test>]
-    member this.``Position buttons render inside header bar``() =
+    member this.``Width buttons render inside header bar``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
             do! ensureCanvasPaneOpen this.Page
 
-            // Position buttons should be inside .canvas-tab-bar
-            let posButtons = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn")
-            let! count = posButtons.CountAsync()
-            Assert.That(count, Is.EqualTo(4), "Should have 4 position buttons (◧ ◨ ⬒ ⬓) inside the header bar")
+            let widthButtons = this.Page.Locator(".canvas-tab-bar .canvas-width-btn")
+            let! count = widthButtons.CountAsync()
+            Assert.That(count, Is.EqualTo(2), "Should have 2 workspace width buttons inside the header bar")
+            let! dockCount = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn").CountAsync()
+            Assert.That(dockCount, Is.EqualTo(0), "Canvas docking controls are removed")
         }
 
     [<Test>]
-    member this.``Position buttons have low opacity by default``() =
+    member this.``Width buttons have low opacity by default``() =
         task {
             do! focusCanvasCard this.Page FixtureCanvasBranch
             do! ensureCanvasPaneOpen this.Page
 
-            let posBtn = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn").First
-            do! posBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let widthBtn = this.Page.Locator(".canvas-tab-bar .canvas-width-btn").First
+            do! widthBtn.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // Check computed opacity via evaluate
-            let! opacity = posBtn.EvaluateAsync<string>("el => getComputedStyle(el).opacity")
+            let! opacity = widthBtn.EvaluateAsync<string>("el => getComputedStyle(el).opacity")
             let opacityVal = System.Double.Parse(opacity, System.Globalization.CultureInfo.InvariantCulture)
-            Assert.That(opacityVal, Is.LessThanOrEqualTo(0.5), "Position buttons should have low opacity (0.4) by default")
+            Assert.That(opacityVal, Is.LessThanOrEqualTo(0.5), "Width buttons should have low opacity (0.4) by default")
         }
 
     [<Test>]
@@ -925,7 +925,7 @@ type CanvasPaneTests() =
             // The old separate toolbar should not exist
             let toolbar = this.Page.Locator(".canvas-pane .canvas-toolbar")
             let! count = toolbar.CountAsync()
-            Assert.That(count, Is.EqualTo(0), "Separate canvas-toolbar should not exist — position buttons are now in the header bar")
+            Assert.That(count, Is.EqualTo(0), "Separate canvas-toolbar should not exist — width buttons are in the header bar")
         }
 
     // ── Archive Button ──────────────────────────────────────────────────
@@ -943,17 +943,16 @@ type CanvasPaneTests() =
         }
 
     [<Test>]
-    member this.``Header bar renders with position buttons when overview is shown``() =
+    member this.``Header bar renders with width buttons when overview is shown``() =
         task {
             // Focus worktree with no canvas docs — triggers overview
             do! focusCanvasCard this.Page "feature-recent"
             do! (canvasToggleBtn this.Page).ClickAsync()
             do! (canvasPaneOpen this.Page).WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
-            // Header bar should still render with position buttons
-            let posButtons = this.Page.Locator(".canvas-tab-bar .canvas-pos-btn")
-            let! count = posButtons.CountAsync()
-            Assert.That(count, Is.EqualTo(4), "Position buttons should render in header bar even in overview mode")
+            let widthButtons = this.Page.Locator(".canvas-tab-bar .canvas-width-btn")
+            let! count = widthButtons.CountAsync()
+            Assert.That(count, Is.EqualTo(2), "Width buttons should render in header bar even in overview mode")
 
             // Archive button should NOT appear (no active doc)
             let archiveBtn = this.Page.Locator(".canvas-tab-bar .canvas-archive-btn")

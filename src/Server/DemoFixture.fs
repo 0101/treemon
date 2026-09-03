@@ -420,10 +420,10 @@ let private baseDashboard: DashboardResponse =
       EditorName = "VS Code"
       WorktreeSkills = [ "investigate"; "review" ]
       CollapsedRepos = Set.empty
+      TerminalPaneOpen = false
       CanvasPaneOpen = false
       OverviewPanelOpen = false
-      CanvasPosition = CanvasPosition.Right
-      CanvasSize = CanvasSize.Ratio1To1 }
+      WorkspaceWidth = WorkspaceWidth.EqualThirds }
 
 let private baseFixture: FixtureData =
     { Worktrees = baseDashboard

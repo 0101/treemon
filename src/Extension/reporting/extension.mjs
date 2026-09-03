@@ -23,7 +23,7 @@ import {
 //   * only the relevant SDK event types are mapped — everything else is ignored.
 //
 // The wire contract (the single coupling point with the F# handler, Server/SessionActivityService.fs):
-//   { sessionId, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?, toolCallId?, currentTokens?, tokenLimit? }
+//   { sessionId, terminalSessionId?, worktreePath, provider, eventId, occurredAt, kind, message?, skillName?, toolCallId?, currentTokens?, tokenLimit? }
 // where `kind` is one of the closed set mapped 1:1 onto the server's SessionEvent union:
 //   assistant.turn_start   -> turn_started
 //   user.message           -> user_prompt         (message required; server drops system reminders)
@@ -96,7 +96,18 @@ const SUBSCRIBED_TYPES = [
 const log = (msg) => console.error(`[treemon-reporting] ${msg}`);
 
 const worktreePath = process.cwd();
+const terminalSessionId =
+  process.env.TREEMON_TERMINAL_SESSION_ID?.trim() || undefined;
 let sessionId = "";
+
+function reportBaseContext() {
+  return {
+    sessionId,
+    ...(terminalSessionId ? { terminalSessionId } : {}),
+    worktreePath,
+    provider: PROVIDER,
+  };
+}
 
 // --- HTTP forwarding ---------------------------------------------------------------------------
 
@@ -134,7 +145,7 @@ function postReport(report) {
 // trusted source metadata and maps SDK events to wire facts; the server owns lifecycle state.
 function handle(event) {
   const report = reportForSdkEvent(
-    { sessionId, worktreePath, provider: PROVIDER },
+    reportBaseContext(),
     event,
   );
   if (!report) return;
@@ -156,9 +167,7 @@ function handle(event) {
 // mirror. Cadence (60s) stays comfortably under the server openWindow.
 function heartbeatTick() {
   postReport({
-    sessionId,
-    worktreePath,
-    provider: PROVIDER,
+    ...reportBaseContext(),
     eventId: randomUUID(),
     occurredAt: new Date().toISOString(),
     kind: "heartbeat",
@@ -251,9 +260,7 @@ void (async () => {
     const snapshot = await session.rpc.metadata.snapshot();
     const report = buildNonBlankMessageReport(
       {
-        sessionId,
-        worktreePath,
-        provider: PROVIDER,
+        ...reportBaseContext(),
         eventId: randomUUID(),
         occurredAt: new Date().toISOString(),
       },

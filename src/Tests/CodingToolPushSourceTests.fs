@@ -30,6 +30,7 @@ let private storedWithClocks
     (lastSeen: string)
     : StoredStatus =
     { SessionId = SessionId sid
+      TerminalSessionId = None
       WorktreePath = WorktreePath wt
       Provider = CopilotCli
       Status =
@@ -427,6 +428,7 @@ type RetainedSessionsTests() =
         // footer content (its intent line renders), so its retained card must carry the provider.
         let intentOnly: StoredStatus =
             { SessionId = SessionId "i"
+              TerminalSessionId = None
               WorktreePath = WorktreePath "wt-i"
               Provider = CopilotCli
               Status = { emptyStatus with Intent = Some(msg "investigating the fold" "2026-03-01T08:00:00Z") }

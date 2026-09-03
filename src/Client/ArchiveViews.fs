@@ -16,14 +16,22 @@ let update (api: Lazy<IWorktreeApi>) msg : UpdateResult * Cmd<Msg> =
     match msg with
     | Archive path ->
         { RefreshWorktrees = false },
-        Cmd.OfAsync.perform (fun () -> api.Value.archiveWorktree path) () OpCompleted
+        Cmd.OfAsync.either
+            (fun () -> api.Value.archiveWorktree path)
+            ()
+            OpCompleted
+            (fun error -> OpCompleted(Error error.Message))
     | Unarchive path ->
         { RefreshWorktrees = false },
-        Cmd.OfAsync.perform (fun () -> api.Value.unarchiveWorktree path) () OpCompleted
+        Cmd.OfAsync.either
+            (fun () -> api.Value.unarchiveWorktree path)
+            ()
+            OpCompleted
+            (fun error -> OpCompleted(Error error.Message))
     | OpCompleted (Ok _) ->
         { RefreshWorktrees = true }, Cmd.none
     | OpCompleted (Error _) ->
-        { RefreshWorktrees = false }, Cmd.none
+        { RefreshWorktrees = true }, Cmd.none
 
 let archiveIcon =
     Svg.svg [

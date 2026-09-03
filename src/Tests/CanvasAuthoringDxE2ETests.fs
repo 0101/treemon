@@ -697,9 +697,9 @@ type CanvasAuthoringDxPaneE2ETests() =
             let! iframeVisible = (this.Page.Locator(".canvas-pane .canvas-iframe-active").First).IsVisibleAsync()
             Assert.That(iframeVisible, Is.True, "the doc iframe must remain visible (banner must not cover content)")
 
-            // Pane stays interactive while the banner is up: changing the dock position still works.
-            do! (this.Page.Locator(".canvas-tab-bar .canvas-pos-btn").Nth(0)).ClickAsync() // Dock left
-            do! this.Page.Locator(".app-layout.canvas-left").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            // Pane stays interactive while the banner is up: changing the workspace width still works.
+            do! (this.Page.Locator(".canvas-tab-bar .canvas-width-btn").Nth(1)).ClickAsync()
+            do! this.Page.Locator(".app-layout.workspace-wide-canvas").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             // Banner is dismissible.
             do! (this.Page.Locator(".canvas-doc-error-dismiss").First).ClickAsync()

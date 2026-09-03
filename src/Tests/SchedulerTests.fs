@@ -58,7 +58,8 @@ type RefreshGitTaskTests() =
             agent.Post(UpdateBaseBranch(testRepoId, "missing"))
 
             let services =
-                { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
+                { SchedulerServices.StartEmbeddedCommand =
+                    fun _ _ -> async { return Error "Unexpected terminal launch" }
                   ActivityStore = None
                   MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json"))
                   AutoSyncStore = Server.AutoSyncStore.create (Path.Combine(tempDir, "auto-sync.json")) }
@@ -99,7 +100,8 @@ type RefreshGitTaskTests() =
             agent.Post(UpdateBaseBranch(testRepoId, "main"))
 
             let services =
-                { SchedulerServices.SessionAgent = Server.SessionManager.createAgent ()
+                { SchedulerServices.StartEmbeddedCommand =
+                    fun _ _ -> async { return Error "Unexpected terminal launch" }
                   ActivityStore = None
                   MergedPrStore = Server.MergedPrStore.create (Path.Combine(tempDir, "merged-prs.json"))
                   AutoSyncStore = Server.AutoSyncStore.create (Path.Combine(tempDir, "auto-sync.json")) }
@@ -666,6 +668,7 @@ type StateAgentTests() =
             agent.Post(
                 UpdateSessionStatus
                     { SessionId = SessionId "removed-worktree"
+                      TerminalSessionId = None
                       WorktreePath = WorktreePath oldPath
                       Provider = CopilotCli
                       Status = { emptyStatus with Status = SessionLevelStatus.Idle }
@@ -1856,6 +1859,7 @@ type ExpediteRefreshTests() =
 
 let private storedSeen (sid: string) (seen: DateTimeOffset) : StoredStatus =
     { SessionId = SessionId sid
+      TerminalSessionId = None
       WorktreePath = WorktreePath "C:/wt/a"
       Provider = CopilotCli
       Status = { emptyStatus with Status = SessionLevelStatus.Working }

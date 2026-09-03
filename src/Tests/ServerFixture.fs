@@ -3,8 +3,9 @@ module Tests.ServerFixture
 open System
 open System.Diagnostics
 open System.IO
-open System.Threading.Tasks
+open System.Text
 open NUnit.Framework
+open Server
 
 let private repoRoot =
     Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", ".."))
@@ -19,6 +20,7 @@ let private worktreeRoots = [ repoRoot ]
 
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
+let private terminalHostStateDirectory = TestUtils.terminalHostStateDirectory ()
 
 // Pick three distinct free loopback ports up front (TestUtils.getFreeTcpPorts binds :0, reads the
 // assigned ports, then releases them) for the API server, the canvas-doc server, and Vite — so the
@@ -58,41 +60,56 @@ let getMemoryStats () =
       readMemoryStats "Vite" viteProcess.Value ]
     |> List.choose id
 
-let private startProcess fileName args workingDir envVars redirectOutput =
-    TestUtils.startProcess fileName args workingDir envVars redirectOutput
-
 let startServer () =
     task {
         let rootArgs = worktreeRoots |> List.map (fun r -> $"\"{r}\"") |> String.concat " "
 
         let proc =
-            TestUtils.startServerProcess serverProjectPath repoRoot rootArgs apiPort canvasPort fixturesPath
+            TestUtils.startServerProcess serverProjectPath repoRoot rootArgs apiPort canvasPort fixturesPath terminalHostStateDirectory
 
         serverProcess.Value <- Some proc
         do! TestUtils.waitForUrl serverUrl 30000
     }
 
-let compileFable () =
+let internal runFableCompile
+    (capture:
+        ProcessRunner.Spawn
+            -> string list
+            -> Async<Result<ProcessRunner.ArgumentListOutput, ProcessRunner.ArgumentListFailure>>)
+    =
     task {
         let clientDir = Path.Combine("src", "Client")
         let outDir = Path.Combine(clientDir, "output")
 
-        let proc =
-            startProcess "dotnet" $"fable {clientDir} --outDir {outDir}" repoRoot [] true
+        let spawn =
+            { ProcessRunner.Spawn.create "dotnet" with
+                Context = "Fable compilation"
+                Deadline = ProcessRunner.Timeout 60_000
+                WorkingDirectory = Some repoRoot }
 
-        let! stdout = proc.StandardOutput.ReadToEndAsync()
-        let! stderr = proc.StandardError.ReadToEndAsync()
-        let exited = proc.WaitForExit(60_000)
+        let! result =
+            capture
+                spawn
+                [ "fable"; clientDir; "--outDir"; outDir ]
+            |> Async.StartAsTask
 
-        if not exited then
-            proc.Kill(entireProcessTree = true)
+        match result with
+        | Error ProcessRunner.TimedOut ->
             failwith "Fable compilation timed out after 60s"
+        | Error(ProcessRunner.StartFailed message) ->
+            failwith $"Fable compilation failed to start: {message}"
+        | Ok output ->
+            let stdout = Encoding.UTF8.GetString(output.Stdout)
+            let stderr = Encoding.UTF8.GetString(output.Stderr)
 
-        TestContext.Out.WriteLine($"Fable compilation output:{Environment.NewLine}{stdout}")
+            TestContext.Out.WriteLine($"Fable compilation output:{Environment.NewLine}{stdout}")
 
-        if proc.ExitCode <> 0 then
-            failwithf "Fable compilation failed (exit code %d): %s" proc.ExitCode stderr
+            if output.ExitCode <> 0 then
+                failwith $"Fable compilation failed (exit code {output.ExitCode}): {stderr}"
     }
+
+let compileFable () =
+    runFableCompile ProcessRunner.capture
 
 let startVite () =
     task {
@@ -122,6 +139,9 @@ let stopAll () =
     killProc viteProcess.Value
     serverProcess.Value <- None
     viteProcess.Value <- None
+    TestUtils.stopTerminalHostState terminalHostStateDirectory
+    |> fun result ->
+        TestUtils.assertOk result "Dashboard TerminalHost cleanup failed"
 
 [<SetUpFixture>]
 type GlobalSetup() =

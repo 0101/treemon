@@ -9,15 +9,16 @@ open Server.SessionManager
 open Tests.TerminalSessionFixture
 open Tests.TestUtils
 
-let private encodedScript path command =
-    buildScript path command |> Server.SessionManager.encodeCommand
+let private encodedScript path =
+    buildScript path |> Server.SessionManager.encodeCommand
 
 let private encodedCommand path =
-    encodedScript path (Some "copilot --yolo")
+    $"{buildScript path}; copilot --yolo"
+    |> Server.SessionManager.encodeCommand
     |> fun encoded -> $"pwsh -NoExit -EncodedCommand {encoded}"
 
 let private startShell path =
-    let encoded = encodedScript path None
+    let encoded = encodedScript path
 
     let psi =
         ProcessStartInfo(
@@ -81,7 +82,7 @@ type TerminalSessionFixtureTests() =
     [<Test>]
     member _.``ownership matching rejects encoded-command text after another execution mode``() =
         let path = @"C:\Temp\treemon-session-spawn-123\repo"
-        let encoded = encodedScript path None
+        let encoded = encodedScript path
 
         Assert.Multiple(fun () ->
             Assert.That(

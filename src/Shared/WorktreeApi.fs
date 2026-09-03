@@ -9,11 +9,14 @@ open System
 type IWorktreeApi =
     { getWorktrees: unit -> Async<DashboardResponse>
       openTerminal: WorktreePath -> Async<unit>
+      startEmbeddedTerminal: WorktreePath -> Async<Result<EmbeddedTerminalStartResult, string>>
+      getEmbeddedTerminals: unit -> Async<EmbeddedTerminalSnapshot>
+      closeEmbeddedTerminal: EmbeddedTerminalId -> Async<Result<EmbeddedTerminalSnapshot, string>>
       openEditor: WorktreePath -> Async<unit>
       toggleAutoSync: WorktreePath -> bool -> Async<Result<unit, string>>
       getSyncStatus: unit -> Async<Map<string, CardEvent list>>
       deleteWorktree: WorktreePath -> Async<Result<unit, string>>
-      launchSession: LaunchRequest -> Async<Result<unit, string>>
+      launchSession: LaunchRequest -> Async<Result<EmbeddedTerminalStartResult, string>>
       focusSession: WorktreePath -> Async<Result<unit, string>>
       killSession: WorktreePath -> Async<Result<unit, string>>
       archiveWorktree: WorktreePath -> Async<Result<unit, string>>
@@ -21,14 +24,14 @@ type IWorktreeApi =
       getBranches: string -> Async<string list>
       createWorktree: CreateWorktreeRequest -> Async<Result<CreateWorktreeWarnings, string>>
       openNewTab: WorktreePath -> Async<Result<unit, string>>
-      launchAction: ActionRequest -> Async<Result<unit, string>>
+      launchAction: ActionRequest -> Async<Result<EmbeddedTerminalStartResult, string>>
       reportActivity: ActivityLevel -> Async<unit>
       saveCollapsedRepos: RepoId list -> Async<unit>
+      saveTerminalPaneOpen: bool -> Async<unit>
       saveCanvasPaneOpen: bool -> Async<unit>
       saveOverviewPanelOpen: bool -> Async<unit>
-      saveCanvasPosition: CanvasPosition -> Async<unit>
-      saveCanvasSize: CanvasSize -> Async<unit>
-      resumeSession: WorktreePath -> Async<Result<unit, string>>
+      saveWorkspaceWidth: WorkspaceWidth -> Async<unit>
+      resumeSession: WorktreePath -> Async<Result<EmbeddedTerminalStartResult, string>>
       sendCanvasMessage: CanvasMessageRequest -> Async<CanvasMessageResult>
       archiveCanvasDoc: ArchiveCanvasDocRequest -> Async<Result<unit, string>>
       shareCanvasDoc: ShareCanvasDocRequest -> Async<Result<CanvasShareResult, string>>
