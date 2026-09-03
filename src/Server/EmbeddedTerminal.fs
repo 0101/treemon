@@ -412,7 +412,10 @@ let private ask (agent: MailboxProcessor<Message>) build =
     agent.PostAndAsyncReply(build, timeout = 60_000)
 
 let private startCore (Manager(_, agent)) worktreePath command =
-    ask agent (fun reply -> Start(worktreePath, command, reply))
+    agent.PostAndAsyncReply(
+        (fun reply -> Start(worktreePath, command, reply)),
+        timeout = 150_000
+    )
 
 let start manager worktreePath =
     startCore manager worktreePath None
