@@ -15,9 +15,11 @@ let private worktreePath root name =
     Path.Combine(Path.GetFullPath root, name) |> normPath
 
 let private makeWorktree path branch : WorktreeInfo =
+    Directory.CreateDirectory path |> ignore
     { Path = normPath path; Head = "abc123"; Branch = Some branch }
 
 let private makeDetachedWorktree path : WorktreeInfo =
+    Directory.CreateDirectory path |> ignore
     { Path = normPath path; Head = "abc123"; Branch = None }
 
 let private getAgentState (agent: MailboxProcessor<StateMsg>) =
@@ -31,11 +33,12 @@ let private populateAgent (agent: MailboxProcessor<StateMsg>) (repos: (RepoId * 
         do! getAgentState agent |> Async.Ignore
     }
 
-let private createApi agent roots =
+let private createApiWithTerminal agent roots embeddedTerminal =
     WorktreeApi.worktreeApi
         { Agent = agent
           CardLog = CardEventLog.createAgent ()
           SessionAgent = SessionManager.createAgent ()
+          EmbeddedTerminal = embeddedTerminal
           ActivityStore = None
           SnapshotStore = None
           AutoSyncStore = None
@@ -44,9 +47,56 @@ let private createApi agent roots =
           AppVersion = "1.0"
           DeployBranch = None }
 
+let private createApi agent roots =
+    let stateDirectory =
+        Path.Combine(
+            roots |> List.head,
+            $".terminal-test-{Guid.NewGuid():N}"
+        )
+
+    Directory.CreateDirectory stateDirectory |> ignore
+
+    let manager =
+        EmbeddedTerminal.createWithConfig
+            { HostExecutablePath =
+                Path.Combine(stateDirectory, "unused-TerminalHost.exe")
+              HostStateDirectory = stateDirectory
+              TtydExecutablePath = None
+              ShellCommand = "pwsh"
+              AllowedOrigins = []
+              StartupTimeout = TimeSpan.FromSeconds 5.0
+              ControlRequestTimeout = TimeSpan.FromSeconds 5.0
+              ProbeInterval = TimeSpan.FromMilliseconds 25.0
+              LaunchHost =
+                fun _ ->
+                    Error
+                        "This path-resolution test did not expect to launch TerminalHost"
+              ProcessIdentityMatches = fun _ _ -> Ok false
+              ResolveProcessExecutable =
+                fun _ _ ->
+                    Error
+                        "This path-resolution test did not expect to resolve TerminalHost"
+              SendTerminalCommand =
+                fun _ _ ->
+                    async {
+                        return
+                            Error
+                                "This path-resolution test did not expect a terminal command"
+                    } }
+
+    createApiWithTerminal agent roots manager, manager
+
+let private closeThen closeTerminal path operation =
+    async {
+        match! closeTerminal path with
+        | Error error -> return Error error
+        | Ok () -> return! operation ()
+    }
+
 let private deleteWorktree agent worktreeRoots wtPath =
     WorktreeApi.deleteWorktreeWith
         (fun _ _ _ -> async { return Ok () })
+        (closeThen (fun _ -> async { return Ok() }))
         (fun _ -> async { return () })
         agent
         (RefreshScheduler.buildRootPaths worktreeRoots)
@@ -187,6 +237,161 @@ type DeleteWorktreeResolutionTests() =
                 Assert.Fail("Should have returned error for unknown path")
         }
 
+    [<Test>]
+    member _.``deleteWorktree closes its embedded terminal before removing files``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let calls = System.Collections.Generic.List<string>()
+
+            let! result =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ _ _ ->
+                        async {
+                            calls.Add("remove")
+                            return Ok ()
+                        })
+                    (closeThen (fun _ ->
+                        async {
+                            calls.Add("close")
+                            return Ok()
+                        }))
+                    (fun _ ->
+                        async {
+                            calls.Add("state")
+                        })
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (PathUtils.toWorktreePath targetPath)
+
+            match result with
+            | Error error -> Assert.Fail(error)
+            | Ok () ->
+                Assert.That(
+                    calls,
+                    Is.EqualTo(
+                        [ "close"
+                          "remove"
+                          "state" ]
+                    )
+                )
+        }
+
+    [<Test>]
+    member _.``deleteWorktree does not mutate worktree or state when strict terminal close fails``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let calls = System.Collections.Generic.List<string>()
+            let! result =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ _ _ ->
+                        async {
+                            calls.Add("remove")
+                            return Ok ()
+                        })
+                    (closeThen (fun _ ->
+                        async {
+                            calls.Add("close")
+                            return
+                                Error
+                                    "terminal cleanup was not confirmed"
+                        }))
+                    (fun _ ->
+                        async {
+                            calls.Add("state")
+                        })
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (PathUtils.toWorktreePath targetPath)
+
+            let! state = getAgentState agent
+            let retained =
+                state.Repos[repoId].WorktreeList
+                |> List.exists (fun worktree ->
+                    worktree.Path = targetPath)
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Is.EqualTo(
+                            "terminal cleanup was not confirmed"
+                        )
+                    )
+                | Ok () ->
+                    Assert.Fail("Delete should have been aborted")
+
+                Assert.That(calls, Is.EqualTo([ "close" ]))
+                Assert.That(retained, Is.True))
+        }
+
+    [<Test>]
+    member _.``deleteWorktree does not update state when Git removal fails after cleanup``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let calls = System.Collections.Generic.List<string>()
+            let! result =
+                WorktreeApi.deleteWorktreeWith
+                    (fun _ _ _ ->
+                        async {
+                            calls.Add("remove")
+                            return Error "Git removal failed"
+                        })
+                    (closeThen (fun _ ->
+                        async {
+                            calls.Add("close")
+                            return Ok()
+                        }))
+                    (fun _ ->
+                        async {
+                            calls.Add("state")
+                        })
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (PathUtils.toWorktreePath targetPath)
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error ->
+                    Assert.That(error, Is.EqualTo("Git removal failed"))
+                | Ok () -> Assert.Fail("Delete should have failed")
+
+                Assert.That(
+                    calls,
+                    Is.EqualTo([ "close"; "remove" ])
+                ))
+        }
+
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -210,6 +415,7 @@ type ArchiveWorktreeResolutionTests() =
         if Directory.Exists(tempDirB) then Directory.Delete(tempDirB, recursive = true)
 
     [<Test>]
+    [<Platform("Win")>]
     member _.``archiveWorktree with WorktreePath archives correct repo branch when duplicated``() =
         task {
             let agent = SchedulerState.createAgent ()
@@ -225,7 +431,8 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = createApi agent [ tempDirA; tempDirB ]
+            let api, _ =
+                createApi agent [ tempDirA; tempDirB ]
 
             let! result =
                 api.archiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "feature-x"))
@@ -242,6 +449,7 @@ type ArchiveWorktreeResolutionTests() =
         }
 
     [<Test>]
+    [<Platform("Win")>]
     member _.``archiveWorktree for repoB does not affect repoA``() =
         task {
             let agent = SchedulerState.createAgent ()
@@ -257,7 +465,8 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = createApi agent [ tempDirA; tempDirB ]
+            let api, _ =
+                createApi agent [ tempDirA; tempDirB ]
 
             let! result =
                 api.archiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirB "main"))
@@ -292,7 +501,8 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA; repoBId, worktreesB ]
 
-            let api = createApi agent [ tempDirA; tempDirB ]
+            let api, _ =
+                createApi agent [ tempDirA; tempDirB ]
 
             let! result =
                 api.unarchiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "feature-x"))
@@ -319,7 +529,7 @@ type ArchiveWorktreeResolutionTests() =
 
             do! populateAgent agent [ repoAId, worktreesA ]
 
-            let api = createApi agent [ tempDirA ]
+            let api, _ = createApi agent [ tempDirA ]
 
             let! result =
                 api.archiveWorktree (PathUtils.toWorktreePath (worktreePath tempDirA "detached"))
@@ -329,4 +539,50 @@ type ArchiveWorktreeResolutionTests() =
                 Assert.That(msg, Does.Contain("detached HEAD"), "Should mention detached HEAD")
             | Ok () ->
                 Assert.Fail("Should have returned error for detached HEAD worktree")
+        }
+
+    [<Test>]
+    member _.``archiveWorktree does not persist archive state when strict terminal close fails``() =
+        task {
+            let agent = SchedulerState.createAgent ()
+            let repoId = PathUtils.toRepoId (Path.GetFullPath tempDirA)
+            let targetPath = worktreePath tempDirA "feature-x"
+            let target = PathUtils.toWorktreePath targetPath
+
+            do!
+                populateAgent
+                    agent
+                    [ repoId,
+                      [ makeWorktree (worktreePath tempDirA "main") "main"
+                        makeWorktree targetPath "feature-x" ] ]
+
+            let! result =
+                WorktreeApi.updateArchivedBranchesWith
+                    agent
+                    (RefreshScheduler.buildRootPaths [ tempDirA ])
+                    (closeThen (fun _ ->
+                        async {
+                            return
+                                Error
+                                    "terminal cleanup was not confirmed"
+                        }))
+                    Set.add
+                    target
+
+            Assert.Multiple(fun () ->
+                match result with
+                | Error error ->
+                    Assert.That(
+                        error,
+                        Is.EqualTo(
+                            "terminal cleanup was not confirmed"
+                        )
+                    )
+                | Ok () ->
+                    Assert.Fail("Archive should have been aborted")
+
+                Assert.That(
+                    TreemonConfig.readArchivedBranches tempDirA,
+                    Does.Not.Contain("feature-x")
+                ))
         }

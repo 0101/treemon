@@ -771,6 +771,7 @@ type SystemViewInteractionRoutingTests() =
 
     let storedAt sid wt updatedAt : Server.SessionActivityStore.StoredStatus =
         { SessionId = Server.SessionActivity.SessionId sid
+          TerminalSessionId = None
           WorktreePath = WorktreePath wt
           Provider = CopilotCli
           Status = Server.SessionActivity.emptyStatus

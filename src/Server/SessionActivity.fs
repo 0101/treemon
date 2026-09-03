@@ -19,6 +19,13 @@ type SessionId = SessionId of string
 module SessionId =
     let value (SessionId id) = id
 
+/// Exact identity of one TerminalHost-owned terminal. This is deliberately distinct from the
+/// Copilot SessionId because both identifiers are carried through the same ownership queries.
+type TerminalSessionId = TerminalSessionId of string
+
+module TerminalSessionId =
+    let value (TerminalSessionId id) = id
+
 type EventId = EventId of string
 
 module EventId =
@@ -66,11 +73,87 @@ type SessionEvent =
 /// One pushed report: a single event for one session in one worktree.
 type SessionActivityReport =
     { SessionId: SessionId
+      TerminalSessionId: TerminalSessionId option
       WorktreePath: WorktreePath
       Provider: CodingToolProvider
       EventId: EventId
       OccurredAt: DateTimeOffset
       Event: SessionEvent }
+
+// --- Terminal-origin activity ordering ---------------------------------------------------------
+
+/// Raw process-local ordering state for activity attributed to terminal origins. The global counter
+/// is never reset, even when old origins are pruned, so an origin that reappears always receives a
+/// strictly newer epoch.
+type internal TerminalOriginEpochState =
+    private
+        { NextActivityEpoch: int64
+          ActivityEpochs: Map<TerminalSessionId, int64>
+          CurrentTerminalSessionIds: Set<TerminalSessionId> }
+
+let internal emptyTerminalOriginEpochState =
+    { NextActivityEpoch = 0L
+      ActivityEpochs = Map.empty
+      CurrentTerminalSessionIds = Set.empty }
+
+let internal recordTerminalOriginActivity
+    (terminalSessionIds: Set<TerminalSessionId>)
+    (state: TerminalOriginEpochState)
+    =
+    if Set.isEmpty terminalSessionIds then
+        state
+    else
+        let epoch = state.NextActivityEpoch + 1L
+
+        { state with
+            NextActivityEpoch = epoch
+            ActivityEpochs =
+                terminalSessionIds
+                |> Set.fold (fun epochs terminalSessionId ->
+                    Map.add terminalSessionId epoch epochs) state.ActivityEpochs }
+
+let private terminalOriginActivityEpoch
+    (terminalSessionIds: Set<TerminalSessionId>)
+    (activityEpochs: Map<TerminalSessionId, int64>)
+    =
+    terminalSessionIds
+    |> Seq.choose (fun terminalSessionId ->
+        activityEpochs |> Map.tryFind terminalSessionId)
+    |> Seq.fold max 0L
+
+/// Record the complete authoritative terminal registry used by an ownership query and discard
+/// epochs for origins that are no longer in it. The next global epoch remains monotonic.
+let internal observeCurrentTerminalOrigins
+    (terminalSessionIds: Set<TerminalSessionId>)
+    (state: TerminalOriginEpochState)
+    =
+    let currentEpochs =
+        state.ActivityEpochs
+        |> Map.filter (fun terminalSessionId _ ->
+            Set.contains terminalSessionId terminalSessionIds)
+
+    terminalOriginActivityEpoch terminalSessionIds currentEpochs,
+    { state with
+        ActivityEpochs = currentEpochs
+        CurrentTerminalSessionIds = terminalSessionIds }
+
+/// Retain epochs backed by durable rows or by the latest authoritative registry. Keeping current
+/// origins prevents a retention sweep from erasing an epoch between a replacement snapshot and its
+/// atomic recheck.
+let internal pruneTerminalOriginEpochs
+    (retainedTerminalSessionIds: Set<TerminalSessionId>)
+    (state: TerminalOriginEpochState)
+    =
+    let retainedOrCurrent =
+        Set.union
+            retainedTerminalSessionIds
+            state.CurrentTerminalSessionIds
+
+    { state with
+        ActivityEpochs =
+            state.ActivityEpochs
+            |> Map.filter (fun terminalSessionId _ ->
+                Set.contains terminalSessionId retainedOrCurrent) }
 
 // --- Per-session fold -------------------------------------------------------------------------
 

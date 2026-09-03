@@ -549,6 +549,7 @@ type DashboardTests() =
         }
 
     [<TestCase("terminal-btn")>]
+    [<TestCase("embedded-terminal-btn")>]
     [<TestCase("delete-btn")>]
     member this.``Header button present on every full-view card``(btnClass: string) =
         task {
@@ -562,6 +563,7 @@ type DashboardTests() =
         }
 
     [<TestCase("terminal-btn")>]
+    [<TestCase("embedded-terminal-btn")>]
     [<TestCase("delete-btn")>]
     member this.``Header button present on every compact card``(btnClass: string) =
         task {
@@ -577,6 +579,7 @@ type DashboardTests() =
         }
 
     [<TestCase("terminal-btn")>]
+    [<TestCase("embedded-terminal-btn")>]
     [<TestCase("delete-btn")>]
     member this.``Header button is inside card header``(btnClass: string) =
         task {
@@ -590,6 +593,7 @@ type DashboardTests() =
         }
 
     [<TestCase("terminal-btn", ">", "Focus session window (Enter)")>]
+    [<TestCase("embedded-terminal-btn", "", "Open embedded terminal")>]
     [<TestCase("delete-btn", "", "Remove worktree (Del)")>]
     member this.``Header button has correct text and title``(btnClass: string, expectedText: string, expectedTitle: string) =
         task {
@@ -607,6 +611,7 @@ type DashboardTests() =
         }
 
     [<TestCase("terminal-btn")>]
+    [<TestCase("embedded-terminal-btn")>]
     [<TestCase("delete-btn")>]
     member this.``Header button has pointer cursor``(btnClass: string) =
         task {
@@ -2237,15 +2242,131 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
-    member this.``Terminal button still exists on every card``() =
+    member this.``Native and embedded terminal controls coexist on every card``() =
         task {
             let cards = this.Page.Locator(".wt-card")
             let! cardCount = cards.CountAsync()
             Assert.That(cardCount, Is.GreaterThanOrEqualTo(1), "Should have at least one worktree card")
 
-            let terminalBtns = this.Page.Locator(".wt-card .terminal-btn")
-            let! btnCount = terminalBtns.CountAsync()
-            Assert.That(btnCount, Is.EqualTo(cardCount), "Every card should still have a .terminal-btn")
+            let nativeTerminalBtns = this.Page.Locator(".wt-card .terminal-btn")
+            let embeddedTerminalBtns = this.Page.Locator(".wt-card .embedded-terminal-btn")
+            let! nativeCount = nativeTerminalBtns.CountAsync()
+            let! embeddedCount = embeddedTerminalBtns.CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    nativeCount,
+                    Is.EqualTo(cardCount),
+                    "Every card should retain its explicit native terminal control"
+                )
+                Assert.That(
+                    embeddedCount,
+                    Is.EqualTo(cardCount),
+                    "Every card should retain its separate embedded terminal control"
+                ))
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Empty terminal snapshot discovers a background terminal without stealing focus``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            do! page.Clock.InstallAsync()
+
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let terminalId = EmbeddedTerminalId "background-first"
+            let worktreePath = WorktreePath "Q:/code/TestProject/feature-recent"
+            let discovered =
+                { Tabs =
+                    [ { Id = terminalId
+                        Worktree = worktreePath
+                        ReportedActivity = Some "Background agent"
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Running
+                                $"{ServerFixture.canvasUrl}/fixture-terminal" } ] }
+            let serialize (snapshot: EmbeddedTerminalSnapshot) =
+                JsonConvert.SerializeObject(snapshot, converter)
+
+            let emptyBody = serialize EmbeddedTerminalSnapshot.empty
+            let discoveredBody = serialize discovered
+            let mutable terminalRequests = 0
+
+            do!
+                page.RouteAsync(
+                    "**/IWorktreeApi/getEmbeddedTerminals",
+                    fun route ->
+                        terminalRequests <- terminalRequests + 1
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body =
+                                    if terminalRequests = 1 then
+                                        emptyBody
+                                    else
+                                        discoveredBody
+                            )
+                        )
+                )
+
+            let! _ = page.GotoAsync(baseUrl)
+            let targetCard =
+                page.Locator(
+                    ".wt-card:has(.branch-name:text-is('feature-recent'))"
+                )
+            do! targetCard.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+
+            let dashboard = page.Locator(".dashboard")
+            let terminalPane = page.Locator(".terminal-pane")
+            let nativeTerminal = targetCard.Locator(".terminal-btn")
+            let embeddedTerminal = targetCard.Locator(".embedded-terminal-btn")
+
+            do! dashboard.FocusAsync()
+            do! Assertions.Expect(terminalPane).ToBeHiddenAsync()
+            do! Assertions.Expect(nativeTerminal).ToHaveAttributeAsync("title", "Open terminal (Enter)")
+            do! Assertions.Expect(embeddedTerminal).ToHaveCountAsync(1)
+            do! Assertions.Expect(targetCard.Locator(".new-tab-btn")).ToHaveCountAsync(0)
+
+            do! page.Clock.FastForwardAsync(1_000L)
+
+            let iframe =
+                page.Locator(
+                    $"iframe[data-terminal-id='{EmbeddedTerminalId.value terminalId}']"
+                )
+            do!
+                iframe.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Attached,
+                        Timeout = 5000.0f
+                    )
+                )
+
+            let! paneStayedHidden = terminalPane.IsHiddenAsync()
+            let! dashboardKeptFocus =
+                page.EvaluateAsync<bool>(
+                    "() => document.activeElement === document.querySelector('.dashboard')"
+                )
+            let! cardClass = targetCard.GetAttributeAsync("class")
+            let! selectedWorktree =
+                iframe.GetAttributeAsync("data-terminal-worktree")
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    terminalRequests,
+                    Is.GreaterThanOrEqualTo(2),
+                    "an empty initial registry must not disable the next normal poll"
+                )
+                Assert.That(paneStayedHidden, Is.True, "background discovery must not open the terminal pane")
+                Assert.That(dashboardKeptFocus, Is.True, "background discovery must not move dashboard focus")
+                Assert.That(cardClass, Does.Not.Contain("has-session"))
+                Assert.That(
+                    selectedWorktree,
+                    Is.EqualTo(WorktreePath.value worktreePath),
+                    "the discovered terminal should retain its authoritative worktree identity"
+                ))
+
+            do! Assertions.Expect(nativeTerminal).ToHaveAttributeAsync("title", "Open terminal (Enter)")
+            do! Assertions.Expect(targetCard.Locator(".new-tab-btn")).ToHaveCountAsync(0)
+            do! page.CloseAsync()
         }
 
     [<Test>]

@@ -282,8 +282,6 @@ let fetchGithubPrStatuses (remote: GithubRemote) (headOwners: Set<string>) (know
         | _ ->
             let relevant = filterRelevantPrs knownBranches allPrs
 
-            Log.log "GH" $"PRs: {List.length allPrs} fetched, {List.length relevant} relevant to worktrees"
-
             let! entries =
                 relevant
                 |> List.map (fun pr ->

@@ -69,6 +69,11 @@ let private defaultModel : Model =
       AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      TerminalPaneOpen = false
+      TerminalPaneTarget = None
+      EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+      ActiveEmbeddedTerminals = Map.empty
+      EmbeddedTerminalStarts = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -76,32 +81,9 @@ let private defaultModel : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None }
-/// Calls update and returns the model, ignoring the Cmd. Handles the case where
-/// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
-/// build failure (TypeInitializationException for eager static init, or
-/// ArgumentException when the lazy proxy in App.fs is forced during Cmd
-/// construction). The model is computed before the Cmd, so we re-derive it.
-let private tryUpdateModel msg model =
-    try
-        let m, _ = update msg model
-        m
-    with
-    | :? TypeInitializationException | :? ArgumentException ->
-        match msg with
-        | ConfirmMsg confirmMsg ->
-            let confirmModal, action = ConfirmModal.update confirmMsg
-            let m = { model with ConfirmModal = confirmModal }
-            match action with
-            | ConfirmModal.NoAction -> m
-            | ConfirmModal.Delete path -> removeWorktreeByPath path m
-            | ConfirmModal.DeleteAfterKillSession _ -> m
-            | ConfirmModal.Archive _ -> m
-            | ConfirmModal.ArchiveAfterKillSession _ -> m
-        | SessionKilledForDelete path -> removeWorktreeByPath path model
-        | KeyPressed ("Escape", _) when model.ConfirmModal <> ConfirmModal.NoConfirm ->
-            { model with ConfirmModal = ConfirmModal.NoConfirm }
-        | _ -> reraise ()
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
+let private updateModel msg model = update msg model |> fst
 
 
 
@@ -116,7 +98,7 @@ type DeleteWithSessionSequencingTests() =
 
     [<Test>]
     member _.``ConfirmMsg Delete immediately removes worktree from model``() =
-        let model = tryUpdateModel (ConfirmMsg (ConfirmModal.DeleteWorktree testPath)) modelWithConfirmDelete
+        let model = updateModel (ConfirmMsg (ConfirmModal.DeleteWorktree testPath)) modelWithConfirmDelete
 
         let branches =
             model.Repos |> List.collect _.Worktrees |> List.map _.Branch
@@ -125,10 +107,77 @@ type DeleteWithSessionSequencingTests() =
             "Worktree should be removed optimistically from model on direct Delete")
         Assert.That(model.DeletedPaths, Does.Contain(WorktreePath.value testPath),
             "Path should be added to DeletedPaths for ghost suppression")
+        Assert.That(model.ConfirmModal, Is.EqualTo(ConfirmModal.NoConfirm),
+            "Confirming deletion should dismiss the modal")
+
+    [<Test>]
+    member _.``failed delete clears ghost suppression and requests authoritative refresh``() =
+        let pending =
+            updateModel
+                (ConfirmMsg(ConfirmModal.DeleteWorktree testPath))
+                modelWithConfirmDelete
+
+        let recovered, refresh =
+            update
+                (DeleteCompleted(Error "TerminalHost replacement is in progress"))
+                pending
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                recovered.DeletedPaths,
+                Is.Empty,
+                "the next server snapshot must be allowed to restore the worktree"
+            )
+
+            Assert.That(
+                refresh,
+                Is.Not.Empty,
+                "failure must request the authoritative worktree snapshot"
+            ))
+
+    [<Test>]
+    member _.``delete transport failure is dispatched as an explicit result``() =
+        task {
+            let api =
+                { Server.WorktreeApi.readOnlyApi
+                      "test"
+                      (fun () -> failwith "unused")
+                      (fun () -> failwith "unused") with
+                    deleteWorktree =
+                        fun _ ->
+                            async {
+                                return
+                                    raise (
+                                        InvalidOperationException(
+                                            "simulated transport failure"
+                                        )
+                                    )
+                            } }
+
+            let dispatched =
+                System.Threading.Tasks.TaskCompletionSource<Msg>(
+                    System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            deleteWorktreeCmd (lazy api) testPath
+            |> List.iter (fun effect ->
+                effect (fun message ->
+                    dispatched.TrySetResult message |> ignore))
+
+            let! message =
+                dispatched.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            Assert.That(
+                message,
+                Is.EqualTo(
+                    DeleteCompleted(Error "simulated transport failure")
+                )
+            )
+        }
 
     [<Test>]
     member _.``ConfirmMsg DeleteAfterKillSession does NOT remove worktree from model``() =
-        let model = tryUpdateModel (ConfirmMsg (ConfirmModal.DeleteAndCloseSession testPath)) modelWithConfirmDelete
+        let model = updateModel (ConfirmMsg (ConfirmModal.DeleteAndCloseSession testPath)) modelWithConfirmDelete
 
         let branches =
             model.Repos |> List.collect _.Worktrees |> List.map _.Branch
@@ -140,7 +189,7 @@ type DeleteWithSessionSequencingTests() =
 
     [<Test>]
     member _.``SessionKilledForDelete removes worktree from model``() =
-        let model = tryUpdateModel (SessionKilledForDelete testPath) defaultModel
+        let model = updateModel (SessionKilledForDelete testPath) defaultModel
 
         let branches =
             model.Repos |> List.collect _.Worktrees |> List.map _.Branch
@@ -151,7 +200,7 @@ type DeleteWithSessionSequencingTests() =
 
     [<Test>]
     member _.``ConfirmMsg DismissConfirm preserves model repos``() =
-        let model = tryUpdateModel (ConfirmMsg ConfirmModal.DismissConfirm) modelWithConfirmDelete
+        let model = updateModel (ConfirmMsg ConfirmModal.DismissConfirm) modelWithConfirmDelete
 
         let branches =
             model.Repos |> List.collect _.Worktrees |> List.map _.Branch
@@ -163,12 +212,12 @@ type DeleteWithSessionSequencingTests() =
 
     [<Test>]
     member _.``ConfirmMsg DeleteAfterKillSession dismisses modal``() =
-        let model = tryUpdateModel (ConfirmMsg (ConfirmModal.DeleteAndCloseSession testPath)) modelWithConfirmDelete
+        let model = updateModel (ConfirmMsg (ConfirmModal.DeleteAndCloseSession testPath)) modelWithConfirmDelete
         Assert.That(model.ConfirmModal, Is.EqualTo(ConfirmModal.NoConfirm))
 
     [<Test>]
     member _.``Escape while confirm modal open dismisses it without deleting``() =
-        let model = tryUpdateModel (KeyPressed ("Escape", false)) modelWithConfirmDelete
+        let model = updateModel (KeyPressed ("Escape", false)) modelWithConfirmDelete
 
         Assert.That(model.ConfirmModal, Is.EqualTo(ConfirmModal.NoConfirm),
             "Escape should dismiss the confirm modal")

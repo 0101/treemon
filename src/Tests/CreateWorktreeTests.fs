@@ -35,6 +35,11 @@ let private defaultModel : Model =
       AutoSyncPending = Set.empty
       Activity = ActivityState.empty
       Mascot = MascotState.empty
+      TerminalPaneOpen = false
+      TerminalPaneTarget = None
+      EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+      ActiveEmbeddedTerminals = Map.empty
+      EmbeddedTerminalStarts = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -42,33 +47,10 @@ let private defaultModel : Model =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None }
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false }
 
-/// Calls update and returns the model, ignoring the Cmd. Handles the case where
-/// Fable.Remoting.Client proxy initialization fails in .NET by catching the proxy
-/// build failure. Depending on how the proxy is built this surfaces either as a
-/// TypeInitializationException (eager static init) or an ArgumentException (the lazy
-/// proxy in App.fs forced during Cmd construction). In that scenario the model was
-/// already computed (F# evaluates the left side of the tuple first) but the Cmd
-/// construction fails. We re-derive the expected model from the CreateModal state.
-let private tryUpdateModel msg model =
-    try
-        let m, _ = update msg model
-        m
-    with
-    | :? TypeInitializationException | :? ArgumentException ->
-        match msg with
-        | ModalMsg (Modal.OpenCreateWorktree (repoId, skills)) ->
-            { model with CreateModal = Modal.LoadingBranches (repoId, skills) }
-        | ModalMsg Modal.SubmitCreateWorktree ->
-            match model.CreateModal with
-            | Modal.Open form when form.Name.Trim().Length > 0 ->
-                { model with CreateModal = Modal.Creating form.RepoId }
-            | _ -> model
-        | ModalMsg (Modal.CreateWorktreeCompleted (Ok _)) ->
-            let restored = Modal.repoId model.CreateModal |> Option.map RepoHeader
-            { model with CreateModal = Modal.Closed; FocusedElement = restored |> Option.orElse model.FocusedElement }
-        | _ -> reraise ()
+let private updateModel msg model = update msg model |> fst
 
 
 [<TestFixture>]
@@ -78,7 +60,7 @@ type OpenCreateWorktreeTests() =
 
     [<Test>]
     member _.``OpenCreateWorktree transitions to LoadingBranches``() =
-        let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) defaultModel
+        let model = updateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) defaultModel
 
         match model.CreateModal with
         | Modal.LoadingBranches (repoId, _) ->
@@ -88,7 +70,7 @@ type OpenCreateWorktreeTests() =
 
     [<Test>]
     member _.``OpenCreateWorktree does not change other model fields``() =
-        let model = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) defaultModel
+        let model = updateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) defaultModel
 
         Assert.That(model.IsLoading, Is.EqualTo(defaultModel.IsLoading))
         Assert.That(model.HasError, Is.EqualTo(defaultModel.HasError))
@@ -350,7 +332,7 @@ type SubmitCreateWorktreeTests() =
 
     [<Test>]
     member _.``SubmitCreateWorktree transitions to Creating``() =
-        let model = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) openModel
+        let model = updateModel (ModalMsg Modal.SubmitCreateWorktree) openModel
 
         match model.CreateModal with
         | Modal.Creating repoId ->
@@ -391,7 +373,7 @@ type SubmitCreateWorktreeTests() =
     member _.``SubmitCreateWorktree trims name with leading and trailing spaces``() =
         let spacedName =
             Modal.Open { RepoId = testRepoId; Branches = [ "main" ]; Name = " trimmed "; BaseBranch = "main"; Prompt = ""; AvailableSkills = []; Skill = None }
-        let model = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = spacedName }
+        let model = updateModel (ModalMsg Modal.SubmitCreateWorktree) { defaultModel with CreateModal = spacedName }
 
         match model.CreateModal with
         | Modal.Creating _ -> ()
@@ -415,6 +397,9 @@ type SubmitCreateWorktreeRequestMappingTests() =
     let unusedApi : IWorktreeApi =
         { getWorktrees = fun _ -> failwith "unused"
           openTerminal = fun _ -> failwith "unused"
+          startEmbeddedTerminal = fun _ -> failwith "unused"
+          getEmbeddedTerminals = fun _ -> failwith "unused"
+          closeEmbeddedTerminal = fun _ -> failwith "unused"
           openEditor = fun _ -> failwith "unused"
           toggleAutoSync = fun _ _ -> failwith "unused"
           getSyncStatus = fun _ -> failwith "unused"
@@ -430,10 +415,10 @@ type SubmitCreateWorktreeRequestMappingTests() =
           launchAction = fun _ -> failwith "unused"
           reportActivity = fun _ -> failwith "unused"
           saveCollapsedRepos = fun _ -> failwith "unused"
+          saveTerminalPaneOpen = fun _ -> failwith "unused"
           saveCanvasPaneOpen = fun _ -> failwith "unused"
           saveOverviewPanelOpen = fun _ -> failwith "unused"
-          saveCanvasPosition = fun _ -> failwith "unused"
-          saveCanvasSize = fun _ -> failwith "unused"
+          saveWorkspaceWidth = fun _ -> failwith "unused"
           resumeSession = fun _ -> failwith "unused"
           sendCanvasMessage = fun _ -> failwith "unused"
           archiveCanvasDoc = fun _ -> failwith "unused"
@@ -515,7 +500,7 @@ type CreateWorktreeCompletedTests() =
     [<Test>]
     member _.``CreateWorktreeCompleted Ok closes modal``() =
         let creating = { defaultModel with CreateModal = Modal.Creating testRepoId }
-        let model = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok []))) creating
+        let model = updateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok []))) creating
 
         Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed))
 
@@ -665,7 +650,7 @@ type FullStateMachineRoundtripTests() =
     member _.``Full happy path: Open, load branches, fill form, submit, complete``() =
         let m0 = defaultModel
 
-        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) m0
+        let m1 = updateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) m0
         Assert.That((match m1.CreateModal with Modal.LoadingBranches _ -> true | _ -> false), Is.True)
 
         let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main"; "develop" ]))) m1
@@ -681,20 +666,20 @@ type FullStateMachineRoundtripTests() =
         | Modal.Open form -> Assert.That(form.BaseBranch, Is.EqualTo("develop"))
         | _ -> Assert.Fail("Expected Open")
 
-        let m5 = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) m4
+        let m5 = updateModel (ModalMsg Modal.SubmitCreateWorktree) m4
         Assert.That((match m5.CreateModal with Modal.Creating _ -> true | _ -> false), Is.True)
 
-        let m6 = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok []))) m5
+        let m6 = updateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok []))) m5
         Assert.That(m6.CreateModal, Is.EqualTo(Modal.Closed))
 
     [<Test>]
     member _.``Error path: Open, load branches, submit, error, close``() =
         let m0 = defaultModel
 
-        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) m0
+        let m1 = updateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) m0
         let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) m1
         let m3, _ = update (ModalMsg (Modal.SetNewWorktreeName "bad-name")) m2
-        let m4 = tryUpdateModel (ModalMsg Modal.SubmitCreateWorktree) m3
+        let m4 = updateModel (ModalMsg Modal.SubmitCreateWorktree) m3
         let m5, _ = update (ModalMsg (Modal.CreateWorktreeCompleted (Error "branch already exists"))) m4
 
         match m5.CreateModal with
@@ -710,7 +695,7 @@ type FullStateMachineRoundtripTests() =
     member _.``Branch load failure path: Open, load error, close``() =
         let m0 = defaultModel
 
-        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) m0
+        let m1 = updateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) m0
         let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Error (exn "timeout")))) m1
 
         match m2.CreateModal with
@@ -724,7 +709,7 @@ type FullStateMachineRoundtripTests() =
 
     [<Test>]
     member _.``Cancel via Escape during any state returns to Closed``() =
-        let m1 = tryUpdateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) defaultModel
+        let m1 = updateModel (ModalMsg (Modal.OpenCreateWorktree (testRepoId, []))) defaultModel
         let m2, _ = update (ModalMsg (Modal.BranchesLoaded (Ok [ "main" ]))) m1
         let m3, _ = update (ModalMsg (Modal.SetNewWorktreeName "test")) m2
 
@@ -875,7 +860,7 @@ type FocusRestorationTests() =
     [<Test>]
     member _.``CreateWorktreeCompleted Ok restores focus to RepoHeader``() =
         let creating = { modelWithFocusAndModal with CreateModal = Modal.Creating repoId }
-        let model = tryUpdateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok []))) creating
+        let model = updateModel (ModalMsg (Modal.CreateWorktreeCompleted (Ok []))) creating
 
         Assert.That(model.FocusedElement, Is.EqualTo(Some (RepoHeader repoId)),
             "Successful creation should restore focus to RepoHeader")

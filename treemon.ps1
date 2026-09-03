@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo", "add", "remove", "install-skill")]
+    [ValidateSet("start", "stop", "restart", "status", "log", "dev", "deploy", "demo", "add", "remove", "install-skill", "setup-ttyd")]
     [string]$Command,
 
     [Parameter(Position = 1, ValueFromRemainingArguments)]
@@ -29,23 +29,26 @@ if ($env:TREEMON_PORT) {
 # while every canvas doc fails to load.
 $CanvasPort = 5002
 
-if (-not $Command) {
+if (-not $Command -and $MyInvocation.InvocationName -ne ".") {
     Write-Host "Usage: .\treemon.ps1 <command> [worktree-root] [additional-roots...]" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Commands:" -ForegroundColor White
     Write-Host "  start [<path>...]          Start production server (auto-builds if wwwroot/ is empty)"
     Write-Host "                             No path uses the global config roots (~/.treemon/config.json)"
     Write-Host "  stop                       Stop the production server"
-    Write-Host "  restart                    Stop + start (uses the global config roots)"
+    Write-Host "  restart                    Stop + start (uses global roots; run from external PowerShell)"
     Write-Host "  status                     Show production server status (lists roots via 'tm roots')"
     Write-Host "  log                        Tail the production server log"
     Write-Host "  dev [<path>...]            Start dev mode (server :5001 + Vite :5174), Ctrl+C to stop"
     Write-Host "  demo                       Start demo mode with fixture data (server :5001 + Vite :5174)"
-    Write-Host "  deploy                     Build frontend, replace the app on the production port, and start this checkout"
-    Write-Host "  add <path> [<path>...]     Add watched root(s) via 'tm add' (restarts prod if running)"
+    Write-Host "  deploy                     Build and replace production (run from external PowerShell)"
+    Write-Host "  add <path> [<path>...]     Add watched root(s) via 'tm add' (embedded terminals defer restart)"
     Write-Host "    -Upstream <remote>         Set the upstream remote for PR/diff (written to .treemon.json)"
-    Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (restarts prod if running)"
+    Write-Host "  remove <path> [<path>...]  Remove watched root(s) via 'tm remove' (embedded terminals defer restart)"
     Write-Host "  install-skill              Install the tm CLI skill for AI coding agents"
+    Write-Host "  setup-ttyd                 Install the pinned ttyd executable for embedded terminals"
+    Write-Host ""
+    Write-Host "Production launches require an external PowerShell window. Embedded add/remove saves the change but requires an external restart." -ForegroundColor Gray
     exit 0
 }
 
@@ -119,7 +122,7 @@ function Get-RunningPid {
     return $null
 }
 
-function Build-Frontend {
+function Build-Frontend([string]$Destination = $WwwRoot) {
     Push-Location $ScriptDir
     try {
         # Ensure npm is available
@@ -152,9 +155,11 @@ function Build-Frontend {
         $distDir = Join-Path $ScriptDir "dist"
         if (-not (Test-Path $distDir)) { throw "dist/ not found after build" }
 
-        if (-not (Test-Path $WwwRoot)) { New-Item -ItemType Directory -Path $WwwRoot | Out-Null }
-        Get-ChildItem $WwwRoot -Recurse | Remove-Item -Recurse -Force
-        Copy-Item -Path (Join-Path $distDir "*") -Destination $WwwRoot -Recurse -Force
+        if (-not (Test-Path $Destination)) {
+            New-Item -ItemType Directory -Path $Destination | Out-Null
+        }
+        Get-ChildItem $Destination -Force | Remove-Item -Recurse -Force
+        Copy-Item -Path (Join-Path $distDir "*") -Destination $Destination -Recurse -Force
     } finally {
         Pop-Location
     }
@@ -167,6 +172,330 @@ function Ensure-WwwRoot {
     Write-Host "wwwroot/ is empty, building frontend..." -ForegroundColor Yellow
     Build-Frontend
     Write-Host "Frontend built and copied to wwwroot/" -ForegroundColor Green
+}
+
+function New-TerminalHostVersionMatcher([string]$Pattern) {
+    return [Text.RegularExpressions.Regex]::new(
+        $Pattern,
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant,
+        [TimeSpan]::FromSeconds(1))
+}
+
+function ConvertFrom-TerminalHostDeploymentLayout($Value) {
+    $pathValues = @(
+        $Value.stateDirectory,
+        $Value.stagingDirectory,
+        $Value.manifestPath)
+    $fileNames = @(
+        $Value.hostExecutableName,
+        $Value.ttydExecutableName)
+    $requiredBundleFileNames = @($Value.requiredBundleFileNames)
+
+    if ($null -eq $Value -or
+        @($pathValues | Where-Object {
+            $_ -isnot [string] -or
+            -not [IO.Path]::IsPathFullyQualified($_)
+        }).Count -gt 0 -or
+        @($fileNames | Where-Object {
+            $_ -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($_) -or
+            [IO.Path]::GetFileName($_) -cne $_
+        }).Count -gt 0 -or
+        $Value.versionDirectoryPattern -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($Value.versionDirectoryPattern) -or
+        $Value.versionDirectoryPattern.Length -gt 512 -or
+        $requiredBundleFileNames.Count -eq 0 -or
+        @($requiredBundleFileNames | Where-Object {
+            $_ -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($_) -or
+            [IO.Path]::GetFileName($_) -cne $_
+        }).Count -gt 0 -or
+        @($requiredBundleFileNames | Sort-Object -Unique).Count -ne
+            $requiredBundleFileNames.Count -or
+        $Value.hostExecutableName -notin $requiredBundleFileNames -or
+        $Value.ttydExecutableName -notin $requiredBundleFileNames) {
+        throw "Candidate Treemon returned an invalid TerminalHost layout"
+    }
+
+    try {
+        New-TerminalHostVersionMatcher $Value.versionDirectoryPattern | Out-Null
+    } catch {
+        throw "Candidate Treemon returned an invalid TerminalHost version grammar"
+    }
+
+    return [pscustomobject]@{
+        StateDirectory = [IO.Path]::GetFullPath($Value.stateDirectory)
+        StagingDirectory = [IO.Path]::GetFullPath($Value.stagingDirectory)
+        ManifestPath = [IO.Path]::GetFullPath($Value.manifestPath)
+        HostExecutableName = $Value.hostExecutableName
+        TtydExecutableName = $Value.ttydExecutableName
+        VersionDirectoryPattern = $Value.versionDirectoryPattern
+        RequiredBundleFileNames = $requiredBundleFileNames
+    }
+}
+
+function Get-TerminalHostStateDirectory($Layout) {
+    if ($null -eq $Layout -or
+        [string]::IsNullOrWhiteSpace($Layout.StateDirectory)) {
+        throw "TerminalHost layout did not provide a state directory"
+    }
+
+    return $Layout.StateDirectory
+}
+
+function Test-TerminalHostDeployment([string]$PublishedServerDirectory) {
+    $server = Join-Path $PublishedServerDirectory "Treemon.exe"
+    if (-not (Test-Path -LiteralPath $server -PathType Leaf)) {
+        throw "Published Treemon executable was not found at '$server'"
+    }
+
+    # The candidate's own control client is the compatibility authority.
+    $output = @(& $server --terminal-host-deployment-preflight 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        $detail = (($output -join " ") -replace '\p{C}', ' ').Trim()
+        if (-not $detail -or $detail.Length -gt 1000) {
+            $detail = "the candidate could not control the exact live TerminalHost"
+        }
+        throw "Deployment refused: $detail"
+    }
+
+    try {
+        $result = $output -join [Environment]::NewLine | ConvertFrom-Json -Depth 4
+        $layout = ConvertFrom-TerminalHostDeploymentLayout $result.layout
+    } catch {
+        throw "Deployment refused: candidate Treemon returned an invalid preflight result"
+    }
+
+    if ($result.hasLiveHost -eq $false) {
+        return [pscustomobject]@{
+            HasLiveHost = $false
+            Pid = $null
+            ProcessStartTimeUtcTicks = $null
+            TerminalCount = 0
+            ExecutablePath = $null
+            Layout = $layout
+        }
+    }
+
+    if ($result.hasLiveHost -ne $true -or
+        $result.pid -isnot [long] -or
+        $result.pid -le 0 -or
+        $result.pid -gt [int]::MaxValue -or
+        $result.processStartTimeUtcTicks -isnot [long] -or
+        $result.processStartTimeUtcTicks -le 0 -or
+        $result.terminalCount -isnot [long] -or
+        $result.terminalCount -lt 0 -or
+        $result.terminalCount -gt [int]::MaxValue -or
+        $result.executablePath -isnot [string] -or
+        -not [IO.Path]::IsPathFullyQualified($result.executablePath)) {
+        throw "Deployment refused: candidate Treemon returned an invalid preflight result"
+    }
+
+    return [pscustomobject]@{
+        HasLiveHost = $true
+        Pid = [int]$result.pid
+        ProcessStartTimeUtcTicks = $result.processStartTimeUtcTicks
+        TerminalCount = [int]$result.terminalCount
+        ExecutablePath = [IO.Path]::GetFullPath($result.executablePath)
+        Layout = $layout
+    }
+}
+
+function Get-FileFingerprintEntries(
+    [string]$Directory,
+    [IO.FileInfo[]]$Files,
+    [switch]$ExcludePdb
+) {
+    $root = [IO.Path]::GetFullPath($Directory)
+    return @(
+        $Files |
+            Where-Object { -not $ExcludePdb -or $_.Extension -ne ".pdb" } |
+            ForEach-Object {
+                $relative = [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
+                "$relative`0$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
+            } |
+            Sort-Object
+    )
+}
+
+function Get-TerminalHostBundleDigest([string]$Directory, $Layout) {
+    $root = [IO.Path]::GetFullPath($Directory)
+    $rootInfo = Get-Item -LiteralPath $root -Force
+    if (-not $rootInfo.PSIsContainer -or
+        ($rootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Published TerminalHost directory is unsafe at '$root'"
+    }
+    $required = @($Layout.RequiredBundleFileNames)
+    if (@($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $root $_) -PathType Leaf) }).Count -gt 0) {
+        throw "Published TerminalHost output is incomplete at '$root'"
+    }
+
+    $items = @(Get-ChildItem -LiteralPath $root -Recurse -Force)
+    if (@($items | Where-Object {
+        $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+    }).Count -gt 0) {
+        throw "Published TerminalHost output contains a reparse point"
+    }
+
+    $files = @($items | Where-Object { -not $_.PSIsContainer })
+    $entries = @(Get-FileFingerprintEntries $root $files -ExcludePdb)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($entries -join "`n")
+    return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
+function Get-TerminalHostStageVersion(
+    [string]$PublishedHostDirectory,
+    [string]$Digest,
+    $Layout
+) {
+    $executable = Get-Item -LiteralPath (
+        Join-Path $PublishedHostDirectory $Layout.HostExecutableName)
+    $baseVersion = $executable.VersionInfo.ProductVersion
+    $suffix = $Digest.Substring(0, 16)
+    $matcher = New-TerminalHostVersionMatcher $Layout.VersionDirectoryPattern
+
+    while (-not [string]::IsNullOrEmpty($baseVersion)) {
+        $candidate = "$baseVersion-$suffix"
+        if ($matcher.IsMatch($candidate)) { return $candidate }
+        $baseVersion = $baseVersion.Substring(0, $baseVersion.Length - 1)
+    }
+
+    if ($matcher.IsMatch($suffix)) { return $suffix }
+    throw "Candidate TerminalHost layout cannot represent a staged bundle version"
+}
+
+function Wait-TerminalHostStageReport(
+    $LiveHost,
+    $Layout,
+    [string]$Version,
+    [int]$TimeoutSeconds = 15
+) {
+    if (-not $LiveHost.HasLiveHost) { return }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $manifestPath = $Layout.ManifestPath
+
+    while ([DateTime]::UtcNow -lt $deadline) {
+        try {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 4
+        } catch {
+            throw "The live TerminalHost manifest disappeared while staging"
+        }
+        if ([int]$manifest.pid -ne [int]$LiveHost.Pid -or
+            [long]$manifest.processStartTimeUtcTicks -ne [long]$LiveHost.ProcessStartTimeUtcTicks) {
+            throw "The exact live TerminalHost changed while staging"
+        }
+
+        if ($manifest.stagedExecutableVersion -ceq $Version) { return }
+        try {
+            $process = [Diagnostics.Process]::GetProcessById($LiveHost.Pid)
+            try {
+                if ($process.HasExited -or
+                    $process.StartTime.ToUniversalTime().Ticks -ne $LiveHost.ProcessStartTimeUtcTicks) {
+                    return
+                }
+            } finally {
+                $process.Dispose()
+            }
+        } catch [ArgumentException] {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+
+    throw "The live TerminalHost did not report staged executable version '$Version'"
+}
+
+function Stage-TerminalHost(
+    [string]$PublishedHostDirectory,
+    $LiveHost,
+    [string]$Version = ""
+) {
+    $layout = $LiveHost.Layout
+    $stateDirectory = Get-TerminalHostStateDirectory $layout
+    $source = [IO.Path]::GetFullPath($PublishedHostDirectory)
+    $digest = Get-TerminalHostBundleDigest $source $layout
+
+    if ($LiveHost.HasLiveHost) {
+        try {
+            $liveDirectory = Split-Path -Parent $LiveHost.ExecutablePath
+            if ((Get-TerminalHostBundleDigest $liveDirectory $layout) -ceq $digest) {
+                return [pscustomobject]@{
+                    Changed = $false
+                    Version = $null
+                    ExecutablePath = $LiveHost.ExecutablePath
+                }
+            }
+        } catch {
+            # A live bundle that cannot be compared is left untouched; staging the candidate is safe.
+        }
+    }
+
+    if (-not $Version) {
+        $Version = Get-TerminalHostStageVersion $source $digest $layout
+    }
+    $versionGrammar =
+        New-TerminalHostVersionMatcher $layout.VersionDirectoryPattern
+    if (-not $versionGrammar.IsMatch($Version)) {
+        throw "TerminalHost staged executable version '$Version' is invalid"
+    }
+
+    $stagingRoot = $layout.StagingDirectory
+    New-Item -ItemType Directory -Path $stagingRoot -Force | Out-Null
+    $destination = [IO.Path]::GetFullPath((Join-Path $stagingRoot $Version))
+    $destinationParent = [IO.Path]::GetDirectoryName($destination).
+        TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $normalizedStagingRoot = [IO.Path]::GetFullPath($stagingRoot).
+        TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $pathComparison = if ([OperatingSystem]::IsWindows()) {
+        [StringComparison]::OrdinalIgnoreCase
+    } else {
+        [StringComparison]::Ordinal
+    }
+    if (-not [string]::Equals($destinationParent, $normalizedStagingRoot, $pathComparison) -or
+        [IO.Path]::GetFileName($destination) -cne $Version) {
+        throw "TerminalHost staged executable version '$Version' is not a direct version directory"
+    }
+    $temporary =
+        Join-Path $stateDirectory ".terminal-host-stage-$([Guid]::NewGuid().ToString('N'))"
+
+    try {
+        if (Test-Path -LiteralPath $destination) {
+            $destinationInfo = Get-Item -LiteralPath $destination -Force
+            if (-not $destinationInfo.PSIsContainer -or
+                ($destinationInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+                (Get-TerminalHostBundleDigest $destination $layout) -cne $digest) {
+                throw "Existing TerminalHost stage '$destination' does not match the candidate"
+            }
+        } else {
+            New-Item -ItemType Directory -Path $temporary | Out-Null
+            Get-ChildItem -LiteralPath $source -Force |
+                Copy-Item -Destination $temporary -Recurse -Force
+            if ((Get-TerminalHostBundleDigest $temporary $layout) -cne $digest) {
+                throw "TerminalHost stage verification failed"
+            }
+
+            try {
+                [IO.Directory]::Move($temporary, $destination)
+            } catch {
+                if (-not (Test-Path -LiteralPath $destination) -or
+                    (Get-TerminalHostBundleDigest $destination $layout) -cne $digest) {
+                    throw
+                }
+            }
+        }
+
+        (Get-Item -LiteralPath $destination).LastWriteTimeUtc = [DateTime]::UtcNow
+        Wait-TerminalHostStageReport $LiveHost $layout $Version
+        return [pscustomobject]@{
+            Changed = $true
+            Version = $Version
+            ExecutablePath = Join-Path $destination $layout.HostExecutableName
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Recurse -Force
+        }
+    }
 }
 
 # True when a TCP port can be bound on loopback (i.e. nothing is listening). Mirrors how the
@@ -221,39 +550,170 @@ function Remove-OldRunLogs([int]$Keep) {
     }
 }
 
-function Start-ProductionServer([string[]]$Roots) {
-    $runningPid = Get-RunningPid
-    if ($runningPid) {
-        Write-Host "Production server is already running (PID: $runningPid)" -ForegroundColor Yellow
-        Write-Host "  URL: http://localhost:$DefaultPort" -ForegroundColor Gray
-        Write-Host "Use '.\treemon.ps1 stop' first or '.\treemon.ps1 restart'" -ForegroundColor Gray
+function Publish-ServerCandidate {
+    $candidate = "$PublishDir.candidate-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        Write-Host "Publishing server candidate..." -ForegroundColor Cyan
+        dotnet publish -c Release -o $candidate (Join-Path $ScriptDir "src\Server\Server.fsproj") |
+            Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
+
+        if (-not (Test-Path -LiteralPath (Join-Path $candidate "Treemon.exe") -PathType Leaf)) {
+            throw "Published server candidate is missing Treemon.exe"
+        }
+        return $candidate
+    } catch {
+        if (Test-Path -LiteralPath $candidate) {
+            Remove-Item -LiteralPath $candidate -Recurse -Force
+        }
+        throw
+    }
+}
+
+function Test-PathWithin([string]$Path, [string]$Directory) {
+    $comparison = if ([OperatingSystem]::IsWindows()) {
+        [StringComparison]::OrdinalIgnoreCase
+    } else {
+        [StringComparison]::Ordinal
+    }
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $fullDirectory = [IO.Path]::GetFullPath($Directory).
+        TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = "$fullDirectory$([IO.Path]::DirectorySeparatorChar)"
+    return $fullPath.StartsWith($prefix, $comparison)
+}
+
+function Install-PreparedDirectory([string]$Candidate, [string]$Destination) {
+    $backup = "$Destination.backup-$([Guid]::NewGuid().ToString('N'))"
+    $hadDestination = Test-Path -LiteralPath $Destination
+    if ($hadDestination) {
+        [IO.Directory]::Move(
+            [IO.Path]::GetFullPath($Destination),
+            [IO.Path]::GetFullPath($backup))
+    }
+
+    try {
+        [IO.Directory]::Move(
+            [IO.Path]::GetFullPath($Candidate),
+            [IO.Path]::GetFullPath($Destination))
+    } catch {
+        if ($hadDestination -and
+            -not (Test-Path -LiteralPath $Destination) -and
+            (Test-Path -LiteralPath $backup)) {
+            [IO.Directory]::Move(
+                [IO.Path]::GetFullPath($backup),
+                [IO.Path]::GetFullPath($Destination))
+        }
+        throw
+    }
+
+    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Install-ServerPublish(
+    [string]$Candidate,
+    [string]$LiveHostExecutable = ""
+) {
+    $publishedHostDirectory = Join-Path $PublishDir "terminal-host"
+    $preservePublishedHost =
+        $LiveHostExecutable -and
+        (Test-PathWithin $LiveHostExecutable $publishedHostDirectory)
+
+    if ($LiveHostExecutable -and
+        (Test-PathWithin $LiveHostExecutable $PublishDir) -and
+        -not $preservePublishedHost) {
+        throw "The exact live TerminalHost is inside the server publish directory at an unexpected path"
+    }
+
+    if (-not $preservePublishedHost) {
+        Install-PreparedDirectory $Candidate $PublishDir
         return
     }
 
-    Ensure-WwwRoot
+    New-Item -ItemType Directory -Path $PublishDir -Force | Out-Null
+    $backup = "$PublishDir.server-backup-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $backup | Out-Null
+    $oldMoved = $false
+    try {
+        Get-ChildItem -LiteralPath $PublishDir -Force |
+            Where-Object { $_.Name -ne "terminal-host" } |
+            Move-Item -Destination $backup
+        $oldMoved = $true
+        Get-ChildItem -LiteralPath $Candidate -Force |
+            Where-Object { $_.Name -ne "terminal-host" } |
+            Move-Item -Destination $PublishDir
+    } catch {
+        if ($oldMoved) {
+            Get-ChildItem -LiteralPath $PublishDir -Force |
+                Where-Object { $_.Name -ne "terminal-host" } |
+                Remove-Item -Recurse -Force
+        }
+        Get-ChildItem -LiteralPath $backup -Force |
+            Move-Item -Destination $PublishDir
+        Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+
+    Remove-Item -LiteralPath $Candidate -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+function Install-ServerDeployment(
+    [Parameter(Mandatory)]
+    [scriptblock]$OnPreflight
+) {
+    $candidate = $null
+    try {
+        $candidate = Publish-ServerCandidate
+        $preflight = Test-TerminalHostDeployment $candidate
+        & $OnPreflight $preflight | Out-Null
+
+        $publishedHost = Join-Path $candidate "terminal-host"
+        $staged = Stage-TerminalHost $publishedHost $preflight
+        if ($staged.Changed) {
+            Write-Host "TerminalHost staged as $($staged.Version)" -ForegroundColor Green
+        }
+
+        Install-ServerPublish $candidate $preflight.ExecutablePath | Out-Null
+        $candidate = $null
+        if ($staged.Changed) {
+            return $staged.ExecutablePath
+        }
+        return Join-Path (
+            Join-Path $PublishDir "terminal-host"
+        ) $preflight.Layout.HostExecutableName
+    } finally {
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) {
+            Remove-Item -LiteralPath $candidate -Recurse -Force
+        }
+    }
+}
+
+function Test-EmbeddedTerminalContext {
+    return -not [string]::IsNullOrWhiteSpace($env:TREEMON_TERMINAL_SESSION_ID)
+}
+
+function Assert-ExternalProductionLifecycle([string]$Action) {
+    if (Test-EmbeddedTerminalContext) {
+        throw "Cannot $Action from a Treemon embedded terminal because production processes inherit the terminal's shutdown boundary. Run the command from an external PowerShell window."
+    }
+}
+
+function Start-ProductionProcess(
+    [string[]]$Roots,
+    [string]$TerminalHostExecutable
+) {
+    if (-not (Test-Path -LiteralPath $TerminalHostExecutable -PathType Leaf)) {
+        throw "Prepared TerminalHost executable was not found at '$TerminalHostExecutable'"
+    }
 
     if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
     $stamp = Get-Date -Format yyyyMMdd-HHmmss
     $script:LogFile = Join-Path $LogDir "treemon-prod.$stamp.log"
     $stderrLog = Join-Path $LogDir "treemon-prod-stderr.$stamp.log"
 
-    # Resolve the roots to launch with. Explicit roots (from the command line) win.
-    # Filter out any $null/empty entries first: with ValueFromRemainingArguments an
-    # omitted path binds the parameter to $null, and @($null) is a 1-element array.
-    # With no roots, migrate a legacy .treemon.config (one-time) so the server persists
-    # it. Empty is valid: the server then resolves roots from its global config.
     $effectiveRoots = @($Roots | Where-Object { $_ })
-    if ($effectiveRoots.Count -eq 0) {
-        $effectiveRoots = Read-LegacyRoots
-    }
-
-    Write-Host "Publishing server..." -ForegroundColor Cyan
-    dotnet publish -c Release -o $PublishDir src/Server/Server.fsproj
-    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed" }
-
-    $serverExe = Join-Path $PublishDir "Treemon.exe"
-    $rootArgs = ($effectiveRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
-    $serverArgs = if ($rootArgs) { "$rootArgs --port $DefaultPort" } else { "--port $DefaultPort" }
+    if ($effectiveRoots.Count -eq 0) { $effectiveRoots = Read-LegacyRoots }
 
     # The server binds two Kestrel hosts: the dashboard on $DefaultPort and the canvas doc server on
     # $CanvasPort. If a port is still held when we launch — e.g. the previous server hasn't released
@@ -270,15 +730,30 @@ function Start-ProductionServer([string[]]$Roots) {
         }
     }
 
+    $serverExe = Join-Path $PublishDir "Treemon.exe"
+    $rootArgs = ($effectiveRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
+    $serverArgs = if ($rootArgs) { "$rootArgs --port $DefaultPort" } else { "--port $DefaultPort" }
+
     Write-Host "Starting production server on port $DefaultPort..." -ForegroundColor Cyan
-    $process = Start-Process -FilePath $serverExe `
-        -ArgumentList $serverArgs `
-        -WorkingDirectory $ScriptDir `
-        -RedirectStandardOutput $LogFile `
-        -RedirectStandardError $stderrLog `
-        -NoNewWindow:$false `
-        -WindowStyle Hidden `
-        -PassThru
+    $hadHostOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_EXECUTABLE
+    $previousHostOverride = $env:TREEMON_TERMINAL_HOST_EXECUTABLE
+    try {
+        $env:TREEMON_TERMINAL_HOST_EXECUTABLE = $TerminalHostExecutable
+        $process = Start-Process -FilePath $serverExe `
+            -ArgumentList $serverArgs `
+            -WorkingDirectory $ScriptDir `
+            -RedirectStandardOutput $LogFile `
+            -RedirectStandardError $stderrLog `
+            -NoNewWindow:$false `
+            -WindowStyle Hidden `
+            -PassThru
+    } finally {
+        if ($hadHostOverride) {
+            $env:TREEMON_TERMINAL_HOST_EXECUTABLE = $previousHostOverride
+        } else {
+            Remove-Item Env:\TREEMON_TERMINAL_HOST_EXECUTABLE -ErrorAction SilentlyContinue
+        }
+    }
 
     $process.Id | Set-Content $PidFile
 
@@ -328,6 +803,26 @@ function Start-ProductionServer([string[]]$Roots) {
     Write-Host "Log: $LogFile" -ForegroundColor Gray
 }
 
+function Start-ProductionServer([string[]]$Roots) {
+    $runningPid = Get-RunningPid
+    if ($runningPid) {
+        Write-Host "Production server is already running (PID: $runningPid)" -ForegroundColor Yellow
+        Write-Host "  URL: http://localhost:$DefaultPort" -ForegroundColor Gray
+        Write-Host "Use '.\treemon.ps1 stop' first or run '.\treemon.ps1 restart' from an external PowerShell window" -ForegroundColor Gray
+        return
+    }
+
+    Assert-ExternalProductionLifecycle "start Treemon production"
+    Ensure-WwwRoot
+    $terminalHostExecutable = Install-ServerDeployment {
+        param($preflight)
+        if ($preflight.HasLiveHost) {
+            Write-Host "Compatible live TerminalHost found (PID: $($preflight.Pid), terminals: $($preflight.TerminalCount))" -ForegroundColor Green
+        }
+    }
+    Start-ProductionProcess $Roots $terminalHostExecutable
+}
+
 function Stop-ProductionServer {
     $runningPid = Get-RunningPid
     if (-not $runningPid) {
@@ -340,6 +835,14 @@ function Stop-ProductionServer {
     Stop-Process -Id $runningPid -Force -ErrorAction SilentlyContinue
     Remove-Item $PidFile -ErrorAction SilentlyContinue
     Write-Host "Production server stopped" -ForegroundColor Green
+}
+
+function Restart-ProductionServer([string[]]$Roots) {
+    Assert-ExternalProductionLifecycle "restart Treemon production"
+    Write-Host "Restarting server..." -ForegroundColor Cyan
+    Stop-ProductionServer
+    Start-Sleep -Seconds 1
+    Start-ProductionServer $Roots
 }
 
 function Stop-ProductionPortListeners {
@@ -388,7 +891,7 @@ function Show-Status {
     } elseif ($canvasConn) {
         Write-Host "  Canvas:  WARNING - port $CanvasPort is held by PID $($canvasConn.OwningProcess), not this server (PID $runningPid)" -ForegroundColor Yellow
     } else {
-        Write-Host "  Canvas:  DOWN - nothing listening on $CanvasPort; canvas docs will not load. Run '.\treemon.ps1 restart' to rebind." -ForegroundColor Red
+        Write-Host "  Canvas:  DOWN - nothing listening on $CanvasPort; canvas docs will not load. Run '.\treemon.ps1 restart' from an external PowerShell window to rebind." -ForegroundColor Red
     }
 
     # Watched roots come from the server (the single source of truth) via `tm roots`.
@@ -417,9 +920,49 @@ function Show-Log {
     Get-Content $logToTail -Tail 50 -Wait
 }
 
-function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$ServerLabel, [string[]]$MonitorPaths) {
+function Resolve-DevelopmentTerminalHostExecutable {
+    if (-not [string]::IsNullOrWhiteSpace($env:TREEMON_TERMINAL_HOST_EXECUTABLE)) {
+        $configured = $env:TREEMON_TERMINAL_HOST_EXECUTABLE
+        if (-not [IO.Path]::IsPathRooted($configured)) {
+            $configured = Join-Path $ScriptDir $configured
+        }
+        return [IO.Path]::GetFullPath($configured)
+    }
+
+    $candidates = @(
+        (Join-Path $ScriptDir "src\TerminalHost\bin\Debug\net10.0\TerminalHost.exe"),
+        (Join-Path $ScriptDir "src\TerminalHost\bin\Release\net10.0\TerminalHost.exe")
+    )
+    $existing = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+
+    # dotnet watch builds the Debug project reference before starting Treemon on a clean checkout.
+    $selected = if ($existing) { $existing } else { $candidates[0] }
+    return [IO.Path]::GetFullPath($selected)
+}
+
+function Resolve-DevelopmentTerminalHostStateDirectory {
+    # Honors an explicit override the same way Resolve-DevelopmentTerminalHostExecutable does, but
+    # otherwise never falls back to the production state directory: dev/demo must discover and
+    # mutate only their own TerminalHost, never the one a running production instance owns.
+    if (-not [string]::IsNullOrWhiteSpace($env:TREEMON_TERMINAL_HOST_STATE_DIR)) {
+        return [IO.Path]::GetFullPath($env:TREEMON_TERMINAL_HOST_STATE_DIR)
+    }
+
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    return [IO.Path]::GetFullPath((Join-Path $localAppData "Treemon\TerminalHost-Dev"))
+}
+
+function Start-DualProcess(
+    [string]$ServerArgs,
+    [string]$ModeName,
+    [string]$ServerLabel,
+    [string[]]$MonitorPaths,
+    [string]$TerminalHostExecutable
+) {
     $devApiPort = 5001
     $devVitePort = 5174
+    $devTerminalHostStateDirectory = Resolve-DevelopmentTerminalHostStateDirectory
+    New-Item -ItemType Directory -Force -Path $devTerminalHostStateDirectory | Out-Null
 
     Write-Host "Starting $ModeName mode..." -ForegroundColor Cyan
     Write-Host "  Server:  http://localhost:$devApiPort ($ServerLabel)" -ForegroundColor Gray
@@ -430,15 +973,31 @@ function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$Serv
     }
     Write-Host ""
 
+    $hadVitePortOverride = Test-Path Env:\VITE_PORT
+    $previousVitePortOverride = $env:VITE_PORT
     $env:VITE_PORT = $devVitePort
+    $hadApiPortOverride = Test-Path Env:\API_PORT
+    $previousApiPortOverride = $env:API_PORT
     $env:API_PORT = $devApiPort
+    $hadHostOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_EXECUTABLE
+    $previousHostOverride = $env:TREEMON_TERMINAL_HOST_EXECUTABLE
+    $env:TREEMON_TERMINAL_HOST_EXECUTABLE = $TerminalHostExecutable
+    $hadStateDirOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_STATE_DIR
+    $previousStateDirOverride = $env:TREEMON_TERMINAL_HOST_STATE_DIR
+    $env:TREEMON_TERMINAL_HOST_STATE_DIR = $devTerminalHostStateDirectory
+    # The session-status reporting extension (src/Extension/reporting) only reads TREEMON_PORTS /
+    # TREEMON_PORT, defaulting to production's 5000. Without this, every embedded-terminal session
+    # started under dev/demo would silently report its activity to production instead of $devApiPort.
+    $hadPortsOverride = Test-Path Env:\TREEMON_PORTS
+    $previousPortsOverride = $env:TREEMON_PORTS
+    $env:TREEMON_PORTS = $devApiPort
 
     $serverProcess = $null
     $viteProcess = $null
 
     try {
         $serverProcess = Start-Process -FilePath "dotnet" `
-            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- $ServerArgs --port $devApiPort" `
+            -ArgumentList "watch run --project `"$(Join-Path $ScriptDir "src/Server")`" -- $ServerArgs --port $devApiPort --dashboard-port $devVitePort" `
             -WorkingDirectory $ScriptDir `
             -PassThru `
             -NoNewWindow
@@ -465,8 +1024,31 @@ function Start-DualProcess([string]$ServerArgs, [string]$ModeName, [string]$Serv
             Stop-Process -Id $viteProcess.Id -Force -ErrorAction SilentlyContinue
         }
 
-        Remove-Item Env:\VITE_PORT -ErrorAction SilentlyContinue
-        Remove-Item Env:\API_PORT -ErrorAction SilentlyContinue
+        if ($hadVitePortOverride) {
+            $env:VITE_PORT = $previousVitePortOverride
+        } else {
+            Remove-Item Env:\VITE_PORT -ErrorAction SilentlyContinue
+        }
+        if ($hadApiPortOverride) {
+            $env:API_PORT = $previousApiPortOverride
+        } else {
+            Remove-Item Env:\API_PORT -ErrorAction SilentlyContinue
+        }
+        if ($hadHostOverride) {
+            $env:TREEMON_TERMINAL_HOST_EXECUTABLE = $previousHostOverride
+        } else {
+            Remove-Item Env:\TREEMON_TERMINAL_HOST_EXECUTABLE -ErrorAction SilentlyContinue
+        }
+        if ($hadStateDirOverride) {
+            $env:TREEMON_TERMINAL_HOST_STATE_DIR = $previousStateDirOverride
+        } else {
+            Remove-Item Env:\TREEMON_TERMINAL_HOST_STATE_DIR -ErrorAction SilentlyContinue
+        }
+        if ($hadPortsOverride) {
+            $env:TREEMON_PORTS = $previousPortsOverride
+        } else {
+            Remove-Item Env:\TREEMON_PORTS -ErrorAction SilentlyContinue
+        }
 
         Write-Host "$ModeName mode stopped" -ForegroundColor Green
     }
@@ -477,11 +1059,22 @@ function Start-DevMode([string[]]$Roots) {
     # @($null) is a 1-element array that would call .TrimEnd() on $null below.
     $cleanRoots = @($Roots | Where-Object { $_ })
     $rootArgs = ($cleanRoots | ForEach-Object { "`"$($_.TrimEnd('\', '/'))`"" }) -join " "
-    Start-DualProcess -ServerArgs $rootArgs -ModeName "Dev" -ServerLabel "dotnet watch" -MonitorPaths $cleanRoots
+    $terminalHostExecutable = Resolve-DevelopmentTerminalHostExecutable
+    Start-DualProcess `
+        -ServerArgs $rootArgs `
+        -ModeName "Dev" `
+        -ServerLabel "dotnet watch" `
+        -MonitorPaths $cleanRoots `
+        -TerminalHostExecutable $terminalHostExecutable
 }
 
 function Start-DemoMode {
-    Start-DualProcess -ServerArgs "--demo" -ModeName "Demo" -ServerLabel "demo data"
+    $terminalHostExecutable = Resolve-DevelopmentTerminalHostExecutable
+    Start-DualProcess `
+        -ServerArgs "--demo" `
+        -ModeName "Demo" `
+        -ServerLabel "demo data" `
+        -TerminalHostExecutable $terminalHostExecutable
 }
 
 function Set-UpstreamRemote([string]$RepoRoot, [string]$RemoteName) {
@@ -638,26 +1231,50 @@ function Restart-ServerIfRunning {
     # global config at startup, so we restart with empty args (@()).
     $runningPid = Get-RunningPid
     if ($runningPid) {
-        Write-Host "Restarting server to apply changes..." -ForegroundColor Cyan
-        Stop-ProductionServer
-        Start-Sleep -Seconds 1
-        Start-ProductionServer @()
+        if (Test-EmbeddedTerminalContext) {
+            Write-Host "Production was not restarted because this command is running in a Treemon embedded terminal." -ForegroundColor Yellow
+            Write-Host "The root change is saved; run '.\treemon.ps1 restart' from an external PowerShell window to apply it." -ForegroundColor Gray
+        } else {
+            Restart-ProductionServer @()
+        }
     }
 }
 
 function Deploy-Frontend {
-    Write-Host "Building frontend..." -ForegroundColor Cyan
-    Build-Frontend
-    Write-Host "Frontend deployed to wwwroot/" -ForegroundColor Green
+    Assert-ExternalProductionLifecycle "deploy Treemon production"
+    $frontendCandidate = "$WwwRoot.candidate-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        Write-Host "Building frontend candidate..." -ForegroundColor Cyan
+        Build-Frontend $frontendCandidate
+        $terminalHostExecutable = Install-ServerDeployment {
+            param($preflight)
+            if ($preflight.HasLiveHost) {
+                Write-Host "Deployment preflight will reuse TerminalHost PID $($preflight.Pid) with $($preflight.TerminalCount) terminal(s)." -ForegroundColor Green
+            } else {
+                Write-Host "Deployment preflight found no exact live TerminalHost." -ForegroundColor Gray
+            }
 
-    try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
-    try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
-    try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
-    try { Install-ReportingExtension } catch { Write-Host "Warning: reporting extension install failed: $_" -ForegroundColor Yellow }
+            # Nothing active is changed until the candidate can control the exact live host.
+            Stop-ProductionPortListeners
+        }
+        Install-PreparedDirectory $frontendCandidate $WwwRoot
+        $frontendCandidate = $null
+        Write-Host "Frontend deployed to wwwroot/" -ForegroundColor Green
 
-    Stop-ProductionPortListeners
-    Start-ProductionServer @()
+        try { Install-TmCommand } catch { Write-Host "Warning: tm command install failed: $_" -ForegroundColor Yellow }
+        try { Install-Skill } catch { Write-Host "Warning: skill install failed: $_" -ForegroundColor Yellow }
+        try { Install-Extension } catch { Write-Host "Warning: extension install failed: $_" -ForegroundColor Yellow }
+        try { Install-ReportingExtension } catch { Write-Host "Warning: reporting extension install failed: $_" -ForegroundColor Yellow }
+
+        Start-ProductionProcess @() $terminalHostExecutable
+    } finally {
+        if ($frontendCandidate -and (Test-Path -LiteralPath $frontendCandidate)) {
+            Remove-Item -LiteralPath $frontendCandidate -Recurse -Force
+        }
+    }
 }
+
+if ($MyInvocation.InvocationName -eq ".") { return }
 
 switch ($Command) {
     "start" {
@@ -668,9 +1285,7 @@ switch ($Command) {
         Stop-ProductionServer
     }
     "restart" {
-        Stop-ProductionServer
-        Start-Sleep -Seconds 1
-        Start-ProductionServer $WorktreeRoots
+        Restart-ProductionServer $WorktreeRoots
     }
     "status" {
         Show-Status
@@ -734,5 +1349,8 @@ switch ($Command) {
     }
     "install-skill" {
         Install-Skill
+    }
+    "setup-ttyd" {
+        & (Join-Path $ScriptDir "scripts\setup-ttyd.ps1")
     }
 }

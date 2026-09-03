@@ -8,7 +8,8 @@ Add a beads issue dashboard to the canvas pane by integrating Beadspace (`camero
 
 - Any worktree with `.beads/beads.db` **and at least one beads issue** gets a `beads.html` canvas page auto-provisioned. Worktrees with an empty database (zero issues) do not get a dashboard.
 - If a previously-provisioned `beads.html` exists but the database now has zero issues, the dashboard is removed (file deleted) so it doesn't show an empty page.
-- The page renders a single **sortable/filterable issues table** (the "All Issues" view), always visible. There is no separate dashboard view (no status donut, priority/label/type charts, completion %, active-issues or triage panels) and no top navigation bar — these were removed in `tm-canvas48-dsh`.
+- The page renders one always-visible sortable and filterable issues table. It has no separate
+  dashboard view or top navigation bar.
 - Each status **filter chip shows a count badge** of issues in that status (hidden when the count is zero); the `All` chip shows no count.
 - The **default filter on load** is the most actionable non-empty status, chosen in priority order **WIP → open → blocked → closed** (falling back to open when empty). After load, the user's filter choice is preserved across polls.
 - Clicking an issue row expands a **detail panel** showing: full description, all labels, priority badge, type badge, dependency count, dependent count, age

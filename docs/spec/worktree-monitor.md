@@ -25,7 +25,7 @@
 ### Multi-Repo
 
 - Watched roots resolve at server startup by priority: CLI args → the global `worktreeRoots` key in `~/.treemon/config.json` → a one-time import of the legacy orphan `~/.treemon/roots.json`. With roots configured, `treemon.ps1 start`/`dev` no longer require a path; with no args the server uses the global config (an empty list is valid, as in demo mode). A *present* `worktreeRoots` key — even an explicit empty list — is authoritative and never repopulated; the server persists a resolved set only when the key is *absent* (fresh install / migration), so curating every root away stays sticky across restarts.
-- Roots are managed live through the `tm` CLI — `tm add <path>...` (validates the path exists, normalizes it, no-op if already watched), `tm remove <path>...` (errors on an unknown path; removing the last root is allowed), and `tm roots` (list). All three are online-only (require the running server). The server is the single, serialized writer of `config.json`; changes persist immediately and take effect on the next server (re)start. The `treemon.ps1 add`/`remove` shims call `tm` and then restart the production server when it is running.
+- Roots are managed live through the `tm` CLI — `tm add <path>...` (validates the path exists, normalizes it, no-op if already watched), `tm remove <path>...` (errors on an unknown path; removing the last root is allowed), and `tm roots` (list). All three are online-only (require the running server). The server is the single, serialized writer of `config.json`; changes persist immediately and take effect on the next server (re)start. The `treemon.ps1 add`/`remove` shims restart running production outside embedded terminals; inside one, the change stays persisted and requires an external PowerShell restart (see `docs/spec/embedded-terminal.md`).
 - Roots are a per-machine singleton: dev and prod instances on the same machine share one global list. Legacy stores migrate then delete losslessly — `treemon.ps1` migrates a legacy `.treemon.config` (PowerShell-written, plural `WorktreeRoots` or the older singular `WorktreeRoot`) and the server migrates the orphan `roots.json`, each removed only after its roots are safely persisted (a parse failure or unmigrated content is preserved with a warning, never silently dropped).
 - Each root is an independent section — cards never mix across repos
 - Scheduler picks most-overdue task globally across all repos
@@ -52,6 +52,9 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 ### Worktree Identification
 
 - All `IWorktreeApi` methods use `WorktreePath` (filesystem path) as the worktree identifier — no branch name ambiguity across repos
+- Server path boundaries canonicalize to an absolute path, trim trailing separators, and lowercase
+  on Windows before constructing `RepoId` or `WorktreePath`. Raw-string indexes normalize at their
+  own ingress before comparison.
 - Server resolves repo and branch from path internally; archive and auto-sync persistence store branch names per repo in `.treemon.json`
 - Client optimistic state (`DeletedPaths: Set<string>`) filters by path, affecting only the correct repo
 
@@ -88,7 +91,9 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - Dirty state, conflicts, failed aborts, command failures, a worktree that changed branches, and failed pushes all fall back to one agent prompt containing only a closed structured reason. When the worktree has an idle open session, that prompt goes to it rather than launching a second terminal. Raw Git output, paths, filenames, branch text, and commit messages never enter the prompt. Eligibility and the target are both re-read once more before that fallback prompt — a fetch and a merge have run since the pre-mutation check — so a branch disabled or reconciled merged meanwhile is dropped rather than handed to an agent, and a session that resumed while the sync ran receives nothing. The reconciled PR status becomes an explicit push or do-not-push instruction instead of asking the agent to rediscover it; if the post-attempt PR cache read is temporarily unavailable, the prompt keeps the known status from immediately before the mutation. An agent resuming is itself the likeliest cause of the dirty worktree that sends the sync down this path, so the worktree it would be prompted about is exactly the one it is now working in; nothing is recorded either way, so the next observation retries.
 - One per-worktree operation guard covers target selection, mechanical work, and delivery — including any fallback session launch delivery makes — so a later fetch cannot overlap an in-progress sync even if it observes a newer base revision, and no second guard is needed to keep duplicate launches out. It is also what makes the durable record the only deduplication layer needed: no second operation for the worktree can read or write that record concurrently. Only the operation that took the guard releases it, in a `finally`; worktree bookkeeping never prunes it, since a path can disappear from discovery while its sync is still merging and dropping the guard there would license an overlapping one.
 - `SessionBridge` POSTs a typed `{kind,prompt}` envelope. The extension coalesces identical sends that have not started; once `session.send` starts, a later identical prompt is eligible again. See `docs/spec/canvas-pane.md` for the shared queue contract.
-- A selected session whose bridge is not registered gets a bounded registration grace period. If its bridge appears, delivery continues there; only a confirmed absence after the grace period opens a terminal and starts a new session with the sync prompt.
+- A selected session whose bridge is not registered gets a bounded registration grace period. If
+  its bridge appears, delivery continues there; only a confirmed absence after the grace period
+  starts an embedded terminal and submits the sync prompt.
 - A failed POST to a known live bridge queues the session-targeted prompt for retry instead of launching a replacement session.
 - Agent prompt acceptance is observable; completion of agent-owned synchronization is not. Mechanical completion is accepted only after the Git and conditional-push checks above succeed.
 
@@ -97,7 +102,9 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 - An open PR with unresolved review threads shows **Fix PR comments** beside the thread badge. A failed build with a result URL shows **Fix build** beside that build badge. A branch with no PR shows **Create PR**, except on `main` and `master`.
 - The same buttons render in full and compact cards. Clicking one sends an `ActionKind` through `IWorktreeApi.launchAction`; the button stays visible but is disabled for a per-worktree 10-second cooldown to prevent duplicate launches.
 - `FixPr` and `FixBuild` become provider-specific skill prompts; `CreatePr` uses the fixed commit/push/create-PR prompt. The command runs interactively so the user can inspect or continue the session.
-- Session placement is server-owned: an existing tracked Windows Terminal window gets a new action tab; otherwise Treemon opens and tracks a new window. See `docs/spec/native-session-management.md`.
+- Session placement is server-owned: each action starts one embedded terminal, submits the command,
+  and returns the exact new terminal so the client can open the pane and select it. See
+  `docs/spec/embedded-terminal.md`.
 
 ### Coding Tool Detection
 
@@ -144,12 +151,20 @@ A "+" button on each repo header opens a modal to create new worktrees without l
 - Server expedites worktree list refresh for the repo so the new card appears quickly
 - **Optional prompt** — a multi-line textarea below the source-branch dropdown. A non-blank value auto-launches a coding-agent session in the new worktree; **Enter inserts a newline** (it does not submit — the Create button submits, Escape closes), and a blank/whitespace prompt is a no-op (identical to the no-prompt flow). The prompt rides the create request as a `string option`.
 - **Skill selection** — a radio group between the source-branch dropdown and the prompt textarea chooses which skill wraps the prompt on launch. A built-in **None** option (always present) sends the prompt **verbatim**; each configured skill wraps it. The chosen skill rides the create request as a `string option` (`None` ⇒ verbatim). The offered skills are the machine-level `worktreeSkills` list (see below); the first entry is the default selection. When no skills are configured the only option is None, and a subtle hint next to it points at `~/.treemon/config.json` (`worktreeSkills`).
-- On a non-blank prompt the server, after a successful create, **fire-and-forget** spawns a tracked coding-agent window in the new worktree. When a skill was chosen it seeds a provider-aware skill invocation (`use {skill} skill with {prompt}` for Copilot, `/{skill} {prompt}` for Claude); for **None** it seeds the prompt verbatim. It reuses `SessionManager.launchAction` — the same tracked-window launch path as contextual card actions — so there is no bespoke spawn logic; the modal still returns/closes on the create result and does not wait for the window. The launch runs even when create returned a post-fork warning.
+- On a non-blank prompt the server, after a successful create, **fire-and-forget** starts an
+  embedded terminal in the new worktree and submits a provider-aware skill invocation
+  (`use {skill} skill with {prompt}` for Copilot, `/{skill} {prompt}` for Claude); for **None** it
+  sends the prompt verbatim. It uses the same embedded command-launch path as contextual actions;
+  the modal still returns/closes on the create result and does not wait for post-fork setup or the
+  terminal. The launch runs even when create returned a post-fork warning, becomes visible through
+  terminal-registry polling, and does not steal focus.
 - The offered skills are config-driven: the machine-level `~/.treemon/config.json` `worktreeSkills` (a string array, blank entries dropped, **empty by default**), surfaced to the client via `DashboardResponse.WorktreeSkills` (like `EditorName`).
 
 ### Native Session Management
 
-Windows Terminal integration for spawning, tracking, and focusing terminal windows per worktree. See `docs/spec/native-session-management.md` for full details.
+Windows Terminal integration is retained for the card's explicit `>` / Enter terminal action and
+tracked-window `+` action. Prompted and automatic agent sessions use the embedded host. See
+`docs/spec/native-session-management.md` and `docs/spec/embedded-terminal.md`.
 
 ### GitHub PRs
 
@@ -286,7 +301,9 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
 | `src/Server/HttpSecurity.fs` | Shared loopback Origin/Referer guard for state-changing HTTP routes |
-| `src/Server/SessionManager.fs` | MailboxProcessor session agent, spawn/focus/kill, persistence |
+| `src/Server/PathUtils.fs` | Canonical path normalization and `RepoId` / `WorktreePath` construction |
+| `src/Server/SessionManager.fs` | Explicit native card-terminal spawn/focus/new-tab/kill and persistence |
+| `src/Server/TerminalLaunch.fs` | Shared native-versus-embedded terminal launch policy |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
 | `src/Client/App.fs` | Elmish MVU app: `init`, the `update` `match`, `appSubscriptions`, top-level `view` wiring |
 | `src/Client/CardViews.fs` | Worktree card rendering, including the persistent circular two-arrow auto-sync toggle, action buttons, badges, and event-log helpers |
@@ -329,18 +346,28 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 - Generic `SessionBridge` under canvas routing: session registration, liveness, queueing, and prompt forwarding are shared infrastructure; `CanvasBridge` retains only document ownership and canvas-specific message semantics.
 - New session fallback: wait briefly for a selected session's bridge registration, then launch a new prompted session only when no live bridge exists; delivery failures to known live bridges stay queued for that session rather than creating parallel agents.
 - net10.0 with Fable pinned to 5.0.0: Fable 4.x deadlocks when the compiled project targets net10.0, so the client needs Fable 5 (which in turn requires Feliz 3 — the Feliz 2 compiler plugin targets the Fable 4 AST). Later Fable 5 releases each break the client: 5.1.0 made F# reflection report `option` as a union, which `Fable.SimpleJson` classifies before its option case, so every `option` field in a remoting response fails to deserialize; 5.5.0 does the same for `list` and additionally rejects `Fable.Remoting.MsgPack`'s `inline private` helpers with a check stricter than `fsc`'s own. 5.0.0 predates all three. Revisit when `Fable.SimpleJson` and `Fable.Remoting` publish fixes.
-- Windows Terminal per-window tracking via HWND: tabs aren't reliably addressable, one window per worktree is simple and predictable
+- Windows Terminal per-window tracking via HWND is retained only for the explicit native card
+  action; tabs are not independently addressable, so one tracked window per worktree remains the
+  native model.
 - Upstream remote auto-detection over config-only: `upstream` remote name is the universal convention for fork workflows; config override available for non-standard setups
-- Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start (the `treemon.ps1` shims trigger it when prod is running). Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The online-only CLI never writes config files, which removes its cross-process clobber hazard.
+- Watched roots are server-owned and restart-to-apply (not live-updated): `tm add`/`remove` persist to the global config and take effect on the next server (re)start. The `treemon.ps1` shims trigger that restart when production is running outside an embedded terminal; an embedded invocation preserves the change but defers application until an external PowerShell restart. Chosen for simpler code — no per-root scheduler-state machinery; live application remains a clean future extension. The server is the single writer of `config.json` (with an internal write lock); the online-only CLI never writes config files, which removes the cross-process clobber hazard.
 - `GlobalConfig` vs `TreemonConfig` — the machine-level `~/.treemon/config.json` and the repo-local `.treemon.json` (`autoSyncBranches`, `baseBranch`, `upstreamRemote`, `diffCategories`) are deliberately separate stores in separate modules, named so the machine-vs-repo scope is obvious and the two never collide.
-- Create-worktree prompt auto-launch is **fire-and-forget, server-side, and reuses `launchAction`**: repo root, provider, and the new path are all in scope on the server, so it orchestrates the launch there rather than via a client follow-up. A failed spawn is logged, not surfaced (the worktree already exists), and it launches even after a post-fork warning. Provider is read **directly** from the new worktree's `.treemon.json` (it isn't in scheduler state yet, so `resolveProvider` would return `None` there), and the worktree path is single-quote-escaped in `SessionManager.buildScript` so a path containing `'` can't break the launch script.
-- The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The prompt (and skill) are single-quote-escaped at the CLI sink, so an odd skill value is a no-op for the tool, not an injection concern, making validation pure complication.
+- Create-worktree prompt auto-launch is **fire-and-forget, server-side, and reuses the embedded
+  command-launch path**: repo root, provider, and the new path are all in scope on the server, so it
+  orchestrates the launch there rather than via a client follow-up. A failed launch is logged, not
+  surfaced because the worktree already exists, and it launches even after a post-fork warning.
+  Provider is read **directly** from the new worktree's `.treemon.json` because it is not in
+  scheduler state yet.
+- The create-prompt skill is **chosen per-create via a radio group** (offered skills come from the machine-level `worktreeSkills`; built-in **None** sends the prompt verbatim). The chosen skill rides the create request; the server wraps the prompt with `skillInvocation` for a named skill or launches it verbatim for None. The resulting interactive prompt is single-quoted when control-free and otherwise carried as UTF-8/base64 data decoded by a fixed PowerShell expression, so multiline prompt content remains intact without becoming terminal syntax.
+- Create-worktree and delete-confirm MVU updates defer forcing the lazy remoting proxy until their Elmish commands execute. Constructing a command therefore remains separate from evaluating the pure model transition, including under .NET unit tests.
 
 ## Related Specs
 
 - `docs/spec/user-idle-detection.md` — adaptive refresh cadence based on user activity level
 - `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
-- `docs/spec/native-session-management.md` — Windows Terminal spawn/focus/kill via HWND tracking, including the no-live-session auto-sync fallback
-- `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
+- `docs/spec/native-session-management.md` — explicit native card-terminal spawn/focus/new-tab/kill
+  via HWND tracking
+- `docs/spec/embedded-terminal.md` — embedded agent launches, command delivery, and terminal
+  discovery
 - `docs/spec/canvas-pane.md` — interactive HTML docs and the canvas-specific consumer of the generic session bridge
 - `docs/spec/session-status-push.md` — coding-tool session collapse and the related auto-sync target selection

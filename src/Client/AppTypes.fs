@@ -46,6 +46,13 @@ type Model =
       AutoSyncPending: Set<WorktreePath>
       Activity: ActivityState.ActivityState
       Mascot: MascotState.MascotState
+      TerminalPaneOpen: bool
+      // A card's terminal action can target that worktree without changing dashboard/canvas focus.
+      // The next explicit focus transition clears the override and restores normal focus-following.
+      TerminalPaneTarget: WorktreePath option
+      EmbeddedTerminals: EmbeddedTerminalSnapshot
+      ActiveEmbeddedTerminals: Map<WorktreePath, EmbeddedTerminalId>
+      EmbeddedTerminalStarts: Map<WorktreePath, TerminalPane.TerminalStartState>
       Canvas: CanvasState.CanvasState
       OverviewPanelOpen: bool
       OverviewAgentsStuck: bool
@@ -56,7 +63,8 @@ type Model =
       OverviewHistoryWindow: HistoryWindow option
       OverviewHistory: InstalledOverviewHistory option
       OverviewHistoryRequestedAt: System.DateTimeOffset
-      OverviewHistoryRequestInFlight: OverviewHistoryRequest option }
+      OverviewHistoryRequestInFlight: OverviewHistoryRequest option
+      EmbeddedTerminalPollInFlight: bool }
 
 type Msg =
     | DataLoaded of DashboardResponse * now: System.DateTimeOffset
@@ -66,6 +74,21 @@ type Msg =
     | ToggleCollapse of repoId: RepoId
     | Tick of now: float
     | OpenTerminal of WorktreePath
+    | OpenEmbeddedTerminal of WorktreePath
+    | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
+    | EmbeddedTerminalPollFailed
+    | EmbeddedTerminalStarted of
+        WorktreePath *
+        Result<EmbeddedTerminalStartResult, string>
+    | EmbeddedTerminalRequestFailed of WorktreePath * error: string
+    | SelectEmbeddedTerminal of EmbeddedTerminalId
+    | CloseEmbeddedTerminal of EmbeddedTerminalId
+    | EmbeddedTerminalCloseFailed
+    | ToggleTerminalPane
+    | EmbeddedTerminalClosed of
+        EmbeddedTerminalId *
+        before: EmbeddedTerminalSnapshot *
+        after: EmbeddedTerminalSnapshot
     | OpenEditor of WorktreePath
     | ToggleAutoSync of WorktreePath
     | AutoSyncToggleResult of path: WorktreePath * previousEnabled: bool * Result<unit, string>
@@ -84,7 +107,6 @@ type Msg =
     | SetFocusNoRetarget of FocusTarget option
     | ArchiveMsg of ArchiveViews.Msg
     | LaunchAction of path: WorktreePath * action: ActionKind
-    | LaunchActionResult of Result<unit, string>
     | ClearActionCooldown of WorktreePath
     | ResumeSession of WorktreePath
     | ModalMsg of CreateWorktreeModal.Msg
@@ -92,7 +114,7 @@ type Msg =
     | ToggleCanvasPane
     | ToggleOverviewPanel
     | SetOverviewAgentsStuck of bool
-    // Overview drill-down (spec: docs/spec/overview-drilldown.md). SelectOverviewGroup toggles the
+    // Overview drill-down (spec: docs/spec/beads-overview-band.md). SelectOverviewGroup toggles the
     // clicked group's breakdown panel (re-selecting the current group clears it). SelectOverviewWorktree
     // is the arrow-nav-parity handler: it focuses/expands/scrolls the clicked member card WITHOUT
     // opening the Canvas pane (the deliberate difference from FocusOverviewCard).
@@ -104,8 +126,7 @@ type Msg =
     // separate requests for the same window when the user cycles away and back.
     | CycleOverviewChart of now: System.DateTimeOffset
     | OverviewHistoryLoaded of request: OverviewHistoryRequest * response: OverviewHistoryResponse option
-    | SetCanvasPosition of CanvasPosition
-    | SetCanvasSize of CanvasSize
+    | SetWorkspaceWidth of WorkspaceWidth
     | SelectCanvasDoc of scopedKey: string * filename: string
     | FocusOverviewCard of scopedKey: string
     | OpenCanvasDoc of scopedKey: string * filename: string

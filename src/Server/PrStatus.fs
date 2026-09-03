@@ -480,8 +480,6 @@ let fetchPrStatuses (remote: AzDoRemote) (knownBranches: Set<string>) =
         | _ ->
             let relevant = filterRelevantPrs knownBranches allPrs
 
-            Log.log "PR" $"PRs: {List.length allPrs} fetched, {List.length relevant} relevant to worktrees"
-
             if repoGuid.IsNone then
                 Log.log "PR" "No repository GUID found in PR list, builds will be empty"
 

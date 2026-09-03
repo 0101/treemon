@@ -25,6 +25,28 @@ let private awarenessDocs (docs: CanvasDoc list) : CanvasDoc list =
 let findWorktreeByScopedKey (repos: RepoModel list) (scopedKey: string) =
     repos |> List.tryPick (fun r -> r.Worktrees |> List.tryFind (fun wt -> WorktreePath.value wt.Path = scopedKey))
 
+/// Record the current hash for a known canvas doc. Unknown worktrees/docs and already-recorded
+/// hashes leave the map unchanged.
+let markDocViewed
+    (repos: RepoModel list)
+    (lastViewedHashes: Map<string, Map<string, string>>)
+    (scopedKey: string)
+    (filename: string)
+    =
+    findWorktreeByScopedKey repos scopedKey
+    |> Option.bind (fun wt ->
+        wt.CanvasDocs
+        |> List.tryFind (fun doc -> doc.Filename = filename)
+        |> Option.map _.ContentHash)
+    |> Option.map (fun hash ->
+        let viewedHashes =
+            lastViewedHashes
+            |> Map.tryFind scopedKey
+            |> Option.defaultValue Map.empty
+            |> Map.add filename hash
+        lastViewedHashes |> Map.add scopedKey viewedHashes)
+    |> Option.defaultValue lastViewedHashes
+
 let seedLastViewedHashes (repos: RepoModel list) (hashes: Map<string, Map<string, string>>) =
     repos
     |> List.fold (fun acc r ->

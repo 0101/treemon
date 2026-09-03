@@ -16,14 +16,38 @@ open AppTypes
 open OverviewPresentation
 
 let fetchWorktrees () =
-    Cmd.OfAsync.either worktreeApi.Value.getWorktrees () (fun r -> DataLoaded (r, System.DateTimeOffset.Now)) DataFailed
+    Cmd.OfAsync.either
+        (fun () -> worktreeApi.Value.getWorktrees ())
+        ()
+        (fun r -> DataLoaded (r, System.DateTimeOffset.Now))
+        DataFailed
+
+let fetchEmbeddedTerminals (api: Lazy<IWorktreeApi>) =
+    Cmd.OfAsync.either
+        (fun () -> api.Value.getEmbeddedTerminals ())
+        ()
+        EmbeddedTerminalSnapshotChanged
+        (fun _ -> EmbeddedTerminalPollFailed)
 
 let fetchSyncStatus () =
-    Cmd.OfAsync.perform worktreeApi.Value.getSyncStatus () SyncStatusUpdate
+    Cmd.OfAsync.perform (fun () -> worktreeApi.Value.getSyncStatus ()) () SyncStatusUpdate
+
+let deleteWorktreeCmd (api: Lazy<IWorktreeApi>) path =
+    Cmd.OfAsync.either
+        (fun path -> api.Value.deleteWorktree path)
+        path
+        DeleteCompleted
+        (fun error -> DeleteCompleted(Error error.Message))
 
 let fetchOverviewHistory request =
     let loaded response = OverviewHistoryLoaded(request, Some response)
     Cmd.OfAsync.either worktreeApi.Value.getOverviewHistory request.Window loaded (fun _ -> OverviewHistoryLoaded(request, None))
+
+let private saveLastViewedHashesCmd hashes =
+    Cmd.OfAsync.attempt
+        (fun hashes -> worktreeApi.Value.saveLastViewedHashes hashes)
+        hashes
+        (fun _ -> NoOp)
 
 // The in-band history chart is refreshed no more often than this while open. Snapshot capture itself
 // advances on a 30-second grid, so more frequent request attempts cannot reveal newer history.
@@ -81,6 +105,11 @@ let init () =
       AutoSyncPending = Set.empty
       Activity = { ActivityState.empty with LastActivityTime = Fable.Core.JS.Constructors.Date.now () }
       Mascot = MascotState.empty
+      TerminalPaneOpen = false
+      TerminalPaneTarget = None
+      EmbeddedTerminals = EmbeddedTerminalSnapshot.empty
+      ActiveEmbeddedTerminals = Map.empty
+      EmbeddedTerminalStarts = Map.empty
       Canvas = CanvasState.empty
       OverviewPanelOpen = false
       OverviewAgentsStuck = false
@@ -88,8 +117,15 @@ let init () =
       OverviewHistoryWindow = None
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
-      OverviewHistoryRequestInFlight = None },
-    Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp); Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes ]
+      OverviewHistoryRequestInFlight = None
+      EmbeddedTerminalPollInFlight = false },
+    Cmd.batch [
+        fetchWorktrees ()
+        fetchSyncStatus ()
+        Cmd.OfAsync.attempt worktreeApi.Value.reportActivity ActivityLevel.Active (fun _ -> NoOp)
+        Cmd.OfAsync.perform worktreeApi.Value.loadLastViewedHashes () LoadLastViewedHashes
+        fetchEmbeddedTerminals worktreeApi
+    ]
 
 let filterDeletedPaths (deleted: Set<string>) (repos: RepoModel list) =
     if Set.isEmpty deleted then repos
@@ -137,11 +173,49 @@ let removeWorktreeByPath (path: WorktreePath) (model: Model) =
     let updatedModel =
         { model with
             Repos = updatedRepos
-            DeletedPaths = markDeleted path model.DeletedPaths }
+            DeletedPaths = markDeleted path model.DeletedPaths
+            TerminalPaneTarget =
+                if model.TerminalPaneTarget = Some path then None
+                else model.TerminalPaneTarget }
     { updatedModel with FocusedElement = adjustFocusForVisibility updatedModel.Repos updatedModel.FocusedElement }
 
 let terminalAction (wt: WorktreeStatus) =
     if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path
+
+let targetEmbeddedTerminalLaunch path model =
+    { model with
+        TerminalPaneOpen = true
+        TerminalPaneTarget = Some path
+        EmbeddedTerminalStarts =
+            model.EmbeddedTerminalStarts
+            |> TerminalPane.setStartState
+                path
+                TerminalPane.TerminalStartState.Starting }
+
+let beginEmbeddedTerminalStart path model =
+    let alreadyStarting =
+        TerminalPane.isStarting
+            path
+            model.EmbeddedTerminalStarts
+
+    targetEmbeddedTerminalLaunch path model,
+    alreadyStarting
+
+let private saveTerminalPaneOpenCmd isOpen =
+    Cmd.OfAsync.attempt
+        (fun () -> worktreeApi.Value.saveTerminalPaneOpen isOpen)
+        ()
+        (fun _ -> NoOp)
+
+let private launchEmbeddedTerminalCmd path start =
+    Cmd.batch [
+        Cmd.OfAsync.either
+            start
+            ()
+            (fun result -> EmbeddedTerminalStarted(path, result))
+            (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
+        saveTerminalPaneOpenCmd true
+    ]
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
     match focused, key with
@@ -257,10 +331,12 @@ let update msg model =
                 DeletedPaths = stillPending
                 DeployBranch = response.DeployBranch
                 SystemMetrics = response.SystemMetrics
+                TerminalPaneOpen =
+                    if model.AppVersion.IsNone then response.TerminalPaneOpen
+                    else model.TerminalPaneOpen
                 OverviewPanelOpen = if isFirstLoad then response.OverviewPanelOpen else model.OverviewPanelOpen
                 Canvas.CanvasPaneOpen = if isFirstLoad then response.CanvasPaneOpen else model.Canvas.CanvasPaneOpen
-                Canvas.CanvasPosition = if isFirstLoad then response.CanvasPosition else model.Canvas.CanvasPosition
-                Canvas.CanvasSize = if isFirstLoad then response.CanvasSize else model.Canvas.CanvasSize
+                Canvas.WorkspaceWidth = if isFirstLoad then response.WorkspaceWidth else model.Canvas.WorkspaceWidth
                 Canvas.PreviousCanvasHashes = currentCanvasHashes
                 Canvas.CanvasEvents = canvasEvents
                 Canvas.CanvasSendState = canvasSendState }
@@ -298,7 +374,7 @@ let update msg model =
                     else Cmd.none
                 let seedSaveCmd =
                     if updatedModel.Canvas.LastViewedHashes <> model.Canvas.LastViewedHashes then
-                        Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedModel.Canvas.LastViewedHashes (fun _ -> NoOp)
+                        saveLastViewedHashesCmd updatedModel.Canvas.LastViewedHashes
                     else Cmd.none
                 let autoExpandSaveCmd =
                     if autoExpanded then saveCollapsedReposCmd updatedModel.Repos else Cmd.none
@@ -342,6 +418,103 @@ let update msg model =
 
     | OpenTerminal path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openTerminal path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
+    | OpenEmbeddedTerminal path ->
+        let updated, alreadyStarting =
+            beginEmbeddedTerminalStart path model
+
+        updated,
+        if alreadyStarting then
+            saveTerminalPaneOpenCmd true
+        else
+            launchEmbeddedTerminalCmd
+                path
+                (fun () -> worktreeApi.Value.startEmbeddedTerminal path)
+    | EmbeddedTerminalSnapshotChanged snapshot ->
+        { model with
+            EmbeddedTerminals = snapshot
+            ActiveEmbeddedTerminals =
+                TerminalPane.reconcileSelections
+                    model.EmbeddedTerminals
+                    snapshot
+                    model.ActiveEmbeddedTerminals
+            EmbeddedTerminalPollInFlight = false },
+        Cmd.none
+    | EmbeddedTerminalPollFailed ->
+        { model with EmbeddedTerminalPollInFlight = false },
+        Cmd.none
+    | EmbeddedTerminalStarted(path, result) ->
+        match result with
+        | Ok started ->
+            let snapshot = started.Snapshot
+            let selections =
+                model.ActiveEmbeddedTerminals
+                |> TerminalPane.reconcileSelections
+                    model.EmbeddedTerminals
+                    snapshot
+
+            { model with
+                EmbeddedTerminals = snapshot
+                ActiveEmbeddedTerminals =
+                    selections
+                    |> TerminalPane.selectTerminal
+                        started.TerminalId
+                        snapshot
+                EmbeddedTerminalStarts =
+                    TerminalPane.clearStartState
+                        path
+                        model.EmbeddedTerminalStarts },
+            Cmd.none
+        | Error error ->
+            { model with
+                EmbeddedTerminalStarts =
+                    model.EmbeddedTerminalStarts
+                    |> TerminalPane.setStartState
+                        path
+                        (TerminalPane.TerminalStartState.Failed error) },
+            Cmd.none
+    | EmbeddedTerminalRequestFailed (path, error) ->
+        { model with
+            EmbeddedTerminalStarts =
+                model.EmbeddedTerminalStarts
+                |> TerminalPane.setStartState
+                    path
+                    (TerminalPane.TerminalStartState.Failed error) },
+        Cmd.none
+    | SelectEmbeddedTerminal terminalId ->
+        { model with
+            ActiveEmbeddedTerminals =
+                TerminalPane.selectTerminal
+                    terminalId
+                    model.EmbeddedTerminals
+                    model.ActiveEmbeddedTerminals },
+        Cmd.none
+    | CloseEmbeddedTerminal terminalId ->
+        let before = model.EmbeddedTerminals
+
+        model,
+        Cmd.OfAsync.either
+            worktreeApi.Value.closeEmbeddedTerminal
+            terminalId
+            (function
+            | Ok snapshot ->
+                EmbeddedTerminalClosed(terminalId, before, snapshot)
+            | Error _ -> EmbeddedTerminalCloseFailed)
+            (fun _ -> EmbeddedTerminalCloseFailed)
+    | EmbeddedTerminalCloseFailed ->
+        model, fetchEmbeddedTerminals worktreeApi
+    | ToggleTerminalPane ->
+        let isOpen = not model.TerminalPaneOpen
+        { model with TerminalPaneOpen = isOpen },
+        saveTerminalPaneOpenCmd isOpen
+    | EmbeddedTerminalClosed(_, before, snapshot) ->
+        { model with
+            EmbeddedTerminals = snapshot
+            ActiveEmbeddedTerminals =
+                TerminalPane.reconcileSelections
+                    before
+                    snapshot
+                    model.ActiveEmbeddedTerminals },
+        Cmd.none
     | OpenEditor path ->
         model, Cmd.OfAsync.attempt worktreeApi.Value.openEditor path (fun _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
@@ -420,8 +593,18 @@ let update msg model =
                     OverviewHistoryRequestInFlight = Some request }
             | None -> model
 
+        // The registry is authoritative even when the browser currently knows no terminals.
+        // Background and CLI launches can create the first tab, so discovery must stay on the
+        // normal activity cadence without opening or retargeting the pane.
+        let model, terminalCmd =
+            if model.EmbeddedTerminalPollInFlight then
+                model, Cmd.none
+            else
+                { model with EmbeddedTerminalPollInFlight = true },
+                fetchEmbeddedTerminals worktreeApi
+
         { model with Activity = activity; Canvas.CanvasEvents = expiredEvents },
-        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd ]
+        Cmd.batch [ fetchWorktrees (); fetchSyncStatus (); reportCmd; historyCmd; terminalCmd ]
 
     | UserActivity now -> ActivityUpdate.userActivity now model
 
@@ -450,15 +633,23 @@ let update msg model =
             model, focusDashboard
         | ConfirmModal.Delete path ->
             removeWorktreeByPath path model,
-            Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
+            deleteWorktreeCmd worktreeApi path
         | ConfirmModal.DeleteAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.Value.killSession path (function
+            model,
+            Cmd.OfAsync.perform
+                (fun path -> worktreeApi.Value.killSession path)
+                path
+                (function
                 | Ok () -> SessionKilledForDelete path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
         | ConfirmModal.Archive path ->
             model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
         | ConfirmModal.ArchiveAfterKillSession path ->
-            model, Cmd.OfAsync.perform worktreeApi.Value.killSession path (function
+            model,
+            Cmd.OfAsync.perform
+                (fun path -> worktreeApi.Value.killSession path)
+                path
+                (function
                 | Ok () -> SessionKilledForArchive path
                 | Error _ -> Tick(Fable.Core.JS.Constructors.Date.now ()))
 
@@ -470,7 +661,7 @@ let update msg model =
 
     | SessionKilledForDelete path ->
         removeWorktreeByPath path model,
-        Cmd.OfAsync.perform worktreeApi.Value.deleteWorktree path DeleteCompleted
+        deleteWorktreeCmd worktreeApi path
 
     | SessionKilledForArchive path ->
         model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive path))
@@ -482,9 +673,28 @@ let update msg model =
         model, Cmd.OfAsync.perform worktreeApi.Value.openNewTab path SessionResult
 
     | ResumeSession path ->
-        model, Cmd.OfAsync.perform worktreeApi.Value.resumeSession path SessionResult
+        let updated, alreadyStarting =
+            beginEmbeddedTerminalStart path model
 
-    | LaunchCanvasSession scopedKey -> CanvasUpdate.launchCanvasSession scopedKey model
+        updated,
+        if alreadyStarting then
+            saveTerminalPaneOpenCmd true
+        else
+            launchEmbeddedTerminalCmd
+                path
+                (fun () -> worktreeApi.Value.resumeSession path)
+
+    | LaunchCanvasSession scopedKey ->
+        match CanvasUpdate.canvasSessionAction scopedKey model with
+        | Some(path, action) ->
+            targetEmbeddedTerminalLaunch path model,
+            launchEmbeddedTerminalCmd
+                path
+                (fun () ->
+                    worktreeApi.Value.launchAction
+                        { Path = path; Action = action })
+        | None ->
+            model, Cmd.none
 
     | SessionResult _ ->
         model, fetchWorktrees ()
@@ -496,14 +706,16 @@ let update msg model =
             let clearAfter =
                 Cmd.ofEffect (fun dispatch ->
                     Fable.Core.JS.setTimeout (fun () -> dispatch (ClearActionCooldown path)) 10_000 |> ignore)
-            { model with ActionCooldowns = model.ActionCooldowns.Add path },
+            { targetEmbeddedTerminalLaunch path model with
+                ActionCooldowns = model.ActionCooldowns.Add path },
             Cmd.batch [
-                Cmd.OfAsync.perform worktreeApi.Value.launchAction { Path = path; Action = action } LaunchActionResult
+                launchEmbeddedTerminalCmd
+                    path
+                    (fun () ->
+                        worktreeApi.Value.launchAction
+                            { Path = path; Action = action })
                 clearAfter
             ]
-
-    | LaunchActionResult _ ->
-        model, fetchWorktrees ()
 
     | ClearActionCooldown path ->
         { model with ActionCooldowns = model.ActionCooldowns.Remove path }, Cmd.none
@@ -512,7 +724,10 @@ let update msg model =
         CanvasUpdate.applyFocus true target model
 
     | SetFocusNoRetarget target ->
-        CanvasUpdate.applyFocus false target model
+        let focused, cmd =
+            CanvasUpdate.applyFocus false target model
+        // Idle canvas auto-display changes focus internally, not by selecting a card.
+        { focused with TerminalPaneTarget = model.TerminalPaneTarget }, cmd
 
     | ArchiveMsg archiveMsg ->
         let result, archiveCmd = ArchiveViews.update worktreeApi archiveMsg
@@ -683,9 +898,7 @@ let update msg model =
             if expanded then saveCollapsedReposCmd repos
         ]
 
-    | SetCanvasPosition position -> CanvasUpdate.setCanvasPosition position model
-
-    | SetCanvasSize size -> CanvasUpdate.setCanvasSize size model
+    | SetWorkspaceWidth width -> CanvasUpdate.setWorkspaceWidth width model
 
     | SelectCanvasDoc (scopedKey, filename) -> CanvasUpdate.selectCanvasDoc scopedKey filename model
 
@@ -742,31 +955,12 @@ let update msg model =
     | DismissCanvasDocError -> CanvasUpdate.dismissCanvasDocError model
 
     | MarkDocViewed (scopedKey, filename) ->
-        let worktree = findWorktree scopedKey model
-        let currentHash =
-            worktree
-            |> Option.bind (fun wt ->
-                wt.CanvasDocs
-                |> List.tryFind (fun d -> d.Filename = filename)
-                |> Option.map _.ContentHash)
-        match worktree, currentHash with
-        | Some _, Some hash ->
-            let recordedHash =
-                model.Canvas.LastViewedHashes
-                |> Map.tryFind scopedKey
-                |> Option.bind (Map.tryFind filename)
-            if recordedHash = Some hash then
-                model, Cmd.none
-            else
-                let innerMap =
-                    model.Canvas.LastViewedHashes
-                    |> Map.tryFind scopedKey
-                    |> Option.defaultValue Map.empty
-                    |> Map.add filename hash
-                let updatedHashes = model.Canvas.LastViewedHashes |> Map.add scopedKey innerMap
-                { model with Canvas.LastViewedHashes = updatedHashes },
-                Cmd.OfAsync.attempt worktreeApi.Value.saveLastViewedHashes updatedHashes (fun _ -> NoOp)
-        | _ -> model, Cmd.none
+        let updatedHashes = markDocViewed model.Repos model.Canvas.LastViewedHashes scopedKey filename
+        if updatedHashes = model.Canvas.LastViewedHashes then
+            model, Cmd.none
+        else
+            { model with Canvas.LastViewedHashes = updatedHashes },
+            saveLastViewedHashesCmd updatedHashes
 
     | LoadLastViewedHashes hashes ->
         // Merge (don't overwrite) — this races the first `DataLoaded` seeding in `init`, so a plain
@@ -959,6 +1153,13 @@ let viewAppHeader model dispatch =
                                 prop.text "Overview"
                             ]
                             Html.button [
+                                prop.className (if model.TerminalPaneOpen then "ctrl-btn active" else "ctrl-btn")
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleTerminalPane)
+                                prop.title "Toggle terminal pane"
+                                prop.text "Terminal"
+                            ]
+                            Html.button [
                                 prop.className (if model.Canvas.CanvasPaneOpen then "ctrl-btn active" else "ctrl-btn")
                                 yield! noFocusProps
                                 prop.onClick (fun _ -> dispatch ToggleCanvasPane)
@@ -986,27 +1187,24 @@ let private isEditableEventTarget (e: Browser.Types.KeyboardEvent) =
     | None -> false
 
 let view model dispatch =
-    let canvasPositionClass =
-        match model.Canvas.CanvasPosition with
-        | CanvasPosition.Left -> "canvas-left"
-        | CanvasPosition.Right -> "canvas-right"
-        | CanvasPosition.Top -> "canvas-top"
-        | CanvasPosition.Bottom -> "canvas-bottom"
+    let terminalPaneOpen = model.TerminalPaneOpen
 
-    let canvasSizeClass =
-        match model.Canvas.CanvasSize with
-        | CanvasSize.Ratio1To1 -> "canvas-size-1to1"
-        | CanvasSize.Ratio2To1 -> "canvas-size-2to1"
+    let workspaceWidthClass =
+        match model.Canvas.WorkspaceWidth with
+        | WorkspaceWidth.EqualThirds -> "workspace-thirds"
+        | WorkspaceWidth.WideCanvas -> "workspace-wide-canvas"
 
     let dashboardClass =
         match model.Canvas.CanvasPaneOpen with
-        | true -> $"dashboard canvas-open {canvasPositionClass}"
+        | true -> "dashboard canvas-open"
         | false -> "dashboard"
 
     let layoutClass =
-        match model.Canvas.CanvasPaneOpen with
-        | true -> $"app-layout canvas-open {canvasPositionClass} {canvasSizeClass}"
-        | false -> "app-layout"
+        [ "app-layout"
+          if model.Canvas.CanvasPaneOpen then "canvas-open"
+          if model.Canvas.CanvasPaneOpen then workspaceWidthClass
+          if not terminalPaneOpen then "terminal-hidden" ]
+        |> String.concat " "
 
     let cardProps: CardViewProps =
         { EditorName = model.EditorName
@@ -1023,6 +1221,7 @@ let view model dispatch =
           ToggleRepo = fun repoId -> dispatch (ToggleCollapse repoId)
           CreateWorktree = fun repoId -> dispatch (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
           OpenTerminal = fun wt -> dispatch (if wt.HasActiveSession then FocusSession wt.Path else OpenTerminal wt.Path)
+          OpenEmbeddedTerminal = fun wt -> dispatch (OpenEmbeddedTerminal wt.Path)
           OpenEditor = fun wt -> dispatch (OpenEditor wt.Path)
           OpenNewTab = fun wt -> dispatch (OpenNewTab wt.Path)
           ResumeSession = fun wt -> dispatch (ResumeSession wt.Path)
@@ -1082,15 +1281,45 @@ let view model dispatch =
     let canvasEl =
         CanvasView.view model dispatch
 
-    // DOM order is fixed; the dock position is applied by CSS `order` on .app-layout's position
-    // class. Reordering these two same-typed divs instead makes React reconcile them by index, which
-    // silently re-renders each existing node with the other subtree and leaves node-bound resources
-    // (the Overview sticky observers) watching the wrong pane.
+    let terminalEl =
+        let selectedWorktree =
+            TerminalPane.selectedWorktree
+                model.TerminalPaneTarget
+                model.FocusedElement
+
+        let activeTerminal =
+            TerminalPane.activeTerminalId
+                selectedWorktree
+                model.ActiveEmbeddedTerminals
+                model.EmbeddedTerminals
+
+        let startState =
+            selectedWorktree
+            |> Option.bind (fun path ->
+                TerminalPane.tryStartState
+                    path
+                    model.EmbeddedTerminalStarts)
+
+        let state: TerminalPane.TerminalPaneState =
+            { IsOpen = terminalPaneOpen
+              Snapshot = model.EmbeddedTerminals
+              ActiveTerminal = activeTerminal
+              SelectedWorktree = selectedWorktree
+              StartState = startState }
+
+        let callbacks: TerminalPane.TerminalPaneCallbacks =
+            { SelectTab = SelectEmbeddedTerminal >> dispatch
+              CloseTab = CloseEmbeddedTerminal >> dispatch
+              StartTerminal = OpenEmbeddedTerminal >> dispatch }
+
+        TerminalPane.view state callbacks
+
+    // The workspace order is fixed so pane-local DOM state survives visibility and width changes.
     React.Fragment [
         viewAppHeader model dispatch
         Html.div [
             prop.className layoutClass
-            prop.children [ dashboardEl; canvasEl ]
+            prop.children [ terminalEl; canvasEl; dashboardEl ]
         ]
     ]
 

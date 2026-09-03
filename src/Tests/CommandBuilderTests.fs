@@ -1,5 +1,7 @@
 module Tests.CommandBuilderTests
 
+open System
+open System.Text
 open NUnit.Framework
 open Shared
 open Server.CodingToolStatus
@@ -40,9 +42,8 @@ type ResumeCommandTests() =
         let inv = build (Some CodingToolProvider.CopilotCli) (Resume (Some "abc-123"))
         Assert.That(inv.AsShellString, Is.EqualTo("copilot --yolo --resume 'abc-123'"))
 
-    // F9 (security): the resume id is interpolated into a pwsh -EncodedCommand script, so it must be
-    // single-quoted with embedded quotes doubled exactly like the Interactive prompt. Without this a
-    // hostile owner sessionId (planted via /api/canvas/attribute) could inject PowerShell.
+    // The resume id is interpolated into the PowerShell command submitted to the terminal, so a
+    // hostile owner sessionId must remain inside the single-quoted argument.
     [<Test>]
     member _.``Resume single-quotes and escapes the id (no command injection)``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (Resume (Some "$(calc); '"))
@@ -161,16 +162,32 @@ type InvestigateLaunchCommandTests() =
         let cmd = (build (Some CodingToolProvider.CopilotCli) (Interactive wrapped)).AsShellString
         Assert.That(cmd, Is.EqualTo("copilot --yolo -i 'use investigate skill with clean up auth'"))
 
-    // A 3-line prompt survives the whole launch-command construction intact — every line
-    // and the newlines between them remain inside the single-quoted argument (not truncated at the
-    // first newline, no line dropped).
     [<Test>]
-    member _.``multi-line prompt survives launch command construction intact``() =
-        let prompt = "line a\nline b\nline c"
+    member _.``multi-line prompt becomes one control-free command with its UTF-8 payload intact``() =
+        let prompt = "line a\r\nline b\nline c"
         let wrapped = skillInvocation (Some CodingToolProvider.CopilotCli) "investigate" prompt
         let cmd = (build (Some CodingToolProvider.CopilotCli) (Interactive wrapped)).AsShellString
-        Assert.That(cmd, Is.EqualTo("copilot --yolo -i 'use investigate skill with line a\nline b\nline c'"))
-        Assert.That(cmd, Does.Contain("line a"), "first line must be present")
-        Assert.That(cmd, Does.Contain("line b"), "middle line must be present")
-        Assert.That(cmd, Does.Contain("line c"), "last line must be present")
-        Assert.That(cmd, Does.Contain("line a\nline b\nline c"), "newlines between all three lines must be preserved")
+        let prefix =
+            "copilot --yolo -i ([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('"
+        let suffix = "')))"
+
+        Assert.That(cmd, Does.StartWith prefix)
+        Assert.That(cmd, Does.EndWith suffix)
+
+        let payload =
+            cmd.Substring(
+                prefix.Length,
+                cmd.Length - prefix.Length - suffix.Length
+            )
+        let decoded =
+            payload
+            |> Convert.FromBase64String
+            |> Encoding.UTF8.GetString
+
+        Assert.Multiple(fun () ->
+            Assert.That(decoded, Is.EqualTo wrapped)
+            Assert.That(cmd |> Seq.exists Char.IsControl, Is.False)
+            Assert.That(
+                Server.TerminalHostClient.validateTerminalCommand cmd,
+                Is.EqualTo(Ok cmd : Result<string, string>)
+            ))

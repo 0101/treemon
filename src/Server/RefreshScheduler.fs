@@ -9,7 +9,10 @@ open Shared
 open Server.SchedulerState
 
 type SchedulerServices =
-    { SessionAgent: SessionManager.SessionAgent
+    { StartEmbeddedCommand:
+        WorktreePath ->
+        string ->
+        Async<Result<EmbeddedTerminalStartResult, string>>
       ActivityStore: SessionActivityStore.SessionActivityStore option
       MergedPrStore: MergedPrStore.Store
       AutoSyncStore: AutoSyncStore.Store }
@@ -63,15 +66,26 @@ let internal reloadGitData (agent: MailboxProcessor<StateMsg>) (repoId: RepoId) 
 
 let internal autoSyncDependencies
     (agent: MailboxProcessor<StateMsg>)
-    (sessionAgent: SessionManager.SessionAgent)
+    (startEmbeddedCommand:
+        WorktreePath ->
+        string ->
+        Async<Result<EmbeddedTerminalStartResult, string>>)
     (activityStore: SessionActivityStore.SessionActivityStore option)
     (autoSyncStore: AutoSyncStore.Store option)
     : AutoSync.TriggerDependencies =
     let launch worktreePath text =
-        let provider = CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
-        let command =
-            CodingToolCli.build provider (CodingToolCli.Interactive text)
-        SessionManager.launchAction sessionAgent worktreePath command.AsShellString
+        async {
+            let provider = CodingToolStatus.readConfiguredProvider (WorktreePath.value worktreePath)
+            let command =
+                CodingToolCli.build provider (CodingToolCli.Interactive text)
+
+            let! result =
+                startEmbeddedCommand
+                    worktreePath
+                    command.AsShellString
+
+            return result |> Result.map ignore
+        }
 
     // Fixture mode runs without a durable store: nothing is recorded, so every observation of a
     // behind worktree is a first one and the operation guard remains the only serialization.
@@ -414,7 +428,7 @@ let internal executeTask
             AutoSync.triggerInBackground
                 (autoSyncDependencies
                     agent
-                    services.SessionAgent
+                    services.StartEmbeddedCommand
                     services.ActivityStore
                     (Some services.AutoSyncStore))
                 repoRoot
@@ -567,8 +581,9 @@ let private logTaskResult (agent: MailboxProcessor<StateMsg>) (task: RefreshTask
               Duration = duration })
 
     match result with
-    | Ok elapsed ->
+    | Ok elapsed when Log.isSlowOperation elapsed ->
         Log.log "Scheduler" $"{source} {target} completed in {elapsed.TotalMilliseconds:F0}ms"
+    | Ok _ -> ()
     | Error msg ->
         Log.log "Scheduler" $"{source} {target} failed: {msg}"
 

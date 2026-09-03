@@ -24,6 +24,7 @@ let private wtA = "C:/wt/a"
 
 let private storedWt (sid: string) (wt: string) (status: SessionLevelStatus) (seen: DateTimeOffset) : StoredStatus =
     { SessionId = SessionId sid
+      TerminalSessionId = None
       WorktreePath = WorktreePath wt
       Provider = CopilotCli
       Status = { emptyStatus with Status = status }

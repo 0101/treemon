@@ -5,8 +5,10 @@ open Fable.Remoting.Giraffe
 open System
 open System.Threading
 open Microsoft.Extensions.Hosting
+open Microsoft.Extensions.Logging
 open Shared
 open Server
+open Treemon.TerminalHosting
 
 let readDeployBranch () =
     ProcessRunner.text
@@ -40,67 +42,112 @@ let readAppVersion () =
 
     $"{buildTime}|{serverGuid}"
 
+let internal configureLogging (builder: ILoggingBuilder) =
+    builder.AddFilter("Microsoft.AspNetCore", LogLevel.Warning) |> ignore
+
 type ServerConfig =
     { WorktreeRoots: string list
       Port: int
       CanvasPort: int option
+      DashboardPort: int option
       TestFixtures: string option
       Demo: bool }
+
+[<RequireQualifiedAccess>]
+type RunMode =
+    | Server of ServerConfig
+    | TerminalHostDeploymentPreflight
+
+/// JSON contract consumed by Test-TerminalHostDeployment in treemon.ps1. Host fields are absent
+/// when HasLiveHost is false.
+type TerminalHostDeploymentPreflightResponse =
+    { Layout: TerminalHostLayout
+      HasLiveHost: bool
+      Pid: int option
+      ProcessStartTimeUtcTicks: int64 option
+      ExecutablePath: string option
+      TerminalCount: int option }
 
 let private defaultCanvasPort = 5002
 
 let parseArgs (args: string array) =
-    let rec parse roots port canvasPort testFixtures demo remaining =
-        match remaining with
-        | "--port" :: portStr :: rest ->
-            match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots p canvasPort testFixtures demo rest
-            | false, _ ->
-                eprintfn $"Invalid port number: {portStr}"
+    match args |> Array.toList with
+    | [ "--terminal-host-deployment-preflight" ] ->
+        RunMode.TerminalHostDeploymentPreflight
+    | serverArguments ->
+        let rec parse roots port canvasPort dashboardPort testFixtures demo remaining =
+            match remaining with
+            | "--port" :: portStr :: rest ->
+                match System.Int32.TryParse(portStr) with
+                | true, p -> parse roots p canvasPort dashboardPort testFixtures demo rest
+                | false, _ ->
+                    eprintfn $"Invalid port number: {portStr}"
+                    exit 1
+            | "--canvas-port" :: portStr :: rest ->
+                match System.Int32.TryParse(portStr) with
+                | true, p -> parse roots port (Some p) dashboardPort testFixtures demo rest
+                | false, _ ->
+                    eprintfn $"Invalid canvas port number: {portStr}"
+                    exit 1
+            | "--dashboard-port" :: portStr :: rest ->
+                match System.Int32.TryParse(portStr) with
+                | true, p -> parse roots port canvasPort (Some p) testFixtures demo rest
+                | false, _ ->
+                    eprintfn $"Invalid dashboard port number: {portStr}"
+                    exit 1
+            | "--no-canvas" :: rest ->
+                parse roots port None dashboardPort testFixtures demo rest
+            | "--test-fixtures" :: path :: rest ->
+                parse roots port canvasPort dashboardPort (Some path) demo rest
+            | "--demo" :: rest ->
+                parse roots port canvasPort dashboardPort testFixtures true rest
+            | path :: rest when not (path.StartsWith("--")) ->
+                parse (roots @ [ path ]) port canvasPort dashboardPort testFixtures demo rest
+            | [] -> roots, port, canvasPort, dashboardPort, testFixtures, demo
+            | unexpected :: _ ->
+                eprintfn $"Unexpected argument: {unexpected}"
                 exit 1
-        | "--canvas-port" :: portStr :: rest ->
-            match System.Int32.TryParse(portStr) with
-            | true, p -> parse roots port (Some p) testFixtures demo rest
-            | false, _ ->
-                eprintfn $"Invalid canvas port number: {portStr}"
-                exit 1
-        | "--no-canvas" :: rest ->
-            parse roots port None testFixtures demo rest
-        | "--test-fixtures" :: path :: rest ->
-            parse roots port canvasPort (Some path) demo rest
-        | "--demo" :: rest ->
-            parse roots port canvasPort testFixtures true rest
-        | path :: rest when not (path.StartsWith("--")) ->
-            parse (roots @ [ path ]) port canvasPort testFixtures demo rest
-        | [] -> roots, port, canvasPort, testFixtures, demo
-        | unexpected :: _ ->
-            eprintfn $"Unexpected argument: {unexpected}"
-            exit 1
 
-    match args |> Array.toList |> parse [] 5000 (Some defaultCanvasPort) None false with
-    | _, _, _, Some _, true ->
-        eprintfn "--demo and --test-fixtures are mutually exclusive"
-        exit 1
-    | _, port, _, _, true ->
-        { WorktreeRoots = []
-          Port = port
-          CanvasPort = None
-          TestFixtures = None
-          Demo = true }
-    | roots, port, canvasPort, testFixtures, _ ->
-        // Zero positional roots is valid in normal mode: `start`/`dev` no longer require a path.
-        // When no roots are passed the server resolves them from global config (or migrates a
-        // legacy/orphan set) at startup — see resolveWorktreeRoots in main.
-        match canvasPort with
-        | Some cp when cp = port ->
-            eprintfn $"--canvas-port ({cp}) must differ from the main --port ({port})"
+        match
+            serverArguments
+            |> parse [] 5000 (Some defaultCanvasPort) None None false
+        with
+        | _, _, _, _, Some _, true ->
+            eprintfn "--demo and --test-fixtures are mutually exclusive"
             exit 1
-        | _ ->
-            { WorktreeRoots = roots |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
-              Port = port
-              CanvasPort = canvasPort
-              TestFixtures = testFixtures
-              Demo = false }
+        | _, port, _, dashboardPort, _, true ->
+            RunMode.Server
+                { WorktreeRoots = []
+                  Port = port
+                  CanvasPort = None
+                  DashboardPort = dashboardPort
+                  TestFixtures = None
+                  Demo = true }
+        | roots, port, canvasPort, dashboardPort, testFixtures, _ ->
+            // Zero positional roots is valid in normal mode: `start`/`dev` no longer require a path.
+            // When no roots are passed the server resolves them from global config (or migrates a
+            // legacy/orphan set) at startup — see resolveWorktreeRoots in main.
+            match canvasPort with
+            | Some cp when cp = port ->
+                eprintfn $"--canvas-port ({cp}) must differ from the main --port ({port})"
+                exit 1
+            | _ ->
+                RunMode.Server
+                    { WorktreeRoots =
+                        roots
+                        |> List.map (fun r -> r.TrimEnd([| '\\'; '/' |]))
+                      Port = port
+                      CanvasPort = canvasPort
+                      DashboardPort = dashboardPort
+                      TestFixtures = testFixtures
+                      Demo = false }
+
+let internal dashboardOrigins (config: ServerConfig) =
+    match config.DashboardPort with
+    | Some port ->
+        [ $"http://localhost:{port}"
+          $"http://127.0.0.1:{port}" ]
+    | None -> []
 
 let private populateAgentFromFixtures (agent: MailboxProcessor<SchedulerState.StateMsg>) (fixtures: FixtureData) =
     fixtures.Worktrees.Repos
@@ -281,9 +328,61 @@ let internal runHostWithCapture
             stoppingRegistration.Dispose()
             BackgroundLoop.stop "Overview snapshot capture" loop
 
+let private deploymentPreflightResponse
+    (layout: TerminalHostLayout)
+    (result: TerminalHostClient.DeploymentPreflightResult option)
+    =
+    match result with
+    | None ->
+        { Layout = layout
+          HasLiveHost = false
+          Pid = None
+          ProcessStartTimeUtcTicks = None
+          ExecutablePath = None
+          TerminalCount = None }
+    | Some host ->
+        { Layout = layout
+          HasLiveHost = true
+          Pid = Some host.Pid
+          ProcessStartTimeUtcTicks =
+            Some host.ProcessStartTimeUtcTicks
+          ExecutablePath = Some host.ExecutablePath
+          TerminalCount = Some host.TerminalCount }
+
+let private runTerminalHostDeploymentPreflight () =
+    let config = TerminalHostClient.defaultConfig []
+
+    match
+        TerminalHostClient.preflightDeploymentWith config
+        |> Async.RunSynchronously
+    with
+    | Error error ->
+        Console.Error.WriteLine($"TerminalHost deployment preflight failed: {error}")
+        2
+    | Ok result ->
+        let layout =
+            TerminalHostLayout.forStateDirectory config.HostStateDirectory
+
+        let response = deploymentPreflightResponse layout result
+
+        let jsonOptions =
+            System.Text.Json.JsonSerializerOptions(
+                System.Text.Json.JsonSerializerDefaults.Web,
+                DefaultIgnoreCondition =
+                    System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+            )
+
+        System.Text.Json.JsonSerializer.Serialize(response, jsonOptions)
+        |> Console.Out.WriteLine
+        0
+
 [<EntryPoint>]
 let main args =
-    let config = parseArgs args
+    let config =
+        match parseArgs args with
+        | RunMode.TerminalHostDeploymentPreflight ->
+            runTerminalHostDeploymentPreflight () |> exit
+        | RunMode.Server config -> config
 
     let serverUrl = $"http://localhost:{config.Port}"
 
@@ -315,6 +414,13 @@ let main args =
 
     worktreeRoots |> List.iter (fun root -> printfn "Monitoring worktrees under: %s" root)
 
+    let embeddedTerminal =
+        if config.Demo then None
+        else
+            dashboardOrigins config
+            |> EmbeddedTerminal.create serverUrl
+            |> Some
+
     let remotingApi, schedulerAgent, activityRuntime, schedulerLoop, runtimeStoreFlushes =
         if config.Demo then
             Log.log "Startup" "Demo mode: serving cycling fixture frames"
@@ -323,6 +429,10 @@ let main args =
             let agent = SchedulerState.createAgent ()
             let cardLog = CardEventLog.createAgent ()
             let sessionAgent = SessionManager.createAgent ()
+            let terminalLaunch =
+                TerminalLaunch.create
+                    sessionAgent
+                    embeddedTerminal.Value
             CanvasDocOwnership.load ()
 
             match config.TestFixtures with
@@ -335,10 +445,12 @@ let main args =
                     Log.log "Startup" $"ERROR: {msg}"
                     System.Environment.Exit(1)
 
-                WorktreeApi.worktreeApi
+                WorktreeApi.worktreeApiWithLaunch
+                    terminalLaunch
                     { Agent = agent
                       CardLog = cardLog
                       SessionAgent = sessionAgent
+                      EmbeddedTerminal = embeddedTerminal.Value
                       ActivityStore = None
                       SnapshotStore = None
                       AutoSyncStore = None
@@ -375,7 +487,8 @@ let main args =
                         AutoSyncStore.create
 
                 let schedulerServices: RefreshScheduler.SchedulerServices =
-                    { SessionAgent = sessionAgent
+                    { StartEmbeddedCommand =
+                        terminalLaunch.StartEmbeddedCommand
                       ActivityStore = Some store
                       MergedPrStore = mergedStore
                       AutoSyncStore = autoSyncStore }
@@ -396,10 +509,12 @@ let main args =
                     Log.log "Startup" "Session activity ingestion started"
                     Log.log "Startup" "Scheduler background loop started"
 
-                    WorktreeApi.worktreeApi
+                    WorktreeApi.worktreeApiWithLaunch
+                        terminalLaunch
                         { Agent = agent
                           CardLog = cardLog
                           SessionAgent = sessionAgent
+                          EmbeddedTerminal = embeddedTerminal.Value
                           ActivityStore = Some store
                           SnapshotStore = Some activity.SnapshotStore
                           AutoSyncStore = Some autoSyncStore
@@ -464,6 +579,7 @@ let main args =
 
     let app =
         application {
+            logging configureLogging
             use_router combinedRouter
             url serverUrl
             use_static "wwwroot"
@@ -471,29 +587,46 @@ let main args =
         }
 
     try
-        let canvasHost =
-            match schedulerAgent, config.CanvasPort with
-            | Some agent, Some canvasPort -> Some(CanvasDocServer.start agent canvasPort)
+        let replacementLoop =
+            match embeddedTerminal, sessionActivityService with
+            | Some manager, Some service ->
+                EmbeddedTerminal.runReplacementCoordinator
+                    manager
+                    (TerminalSessionActivity.queryReplacementPlan
+                        CodingToolStatus.readConfiguredProvider
+                        (fun terminalSessionIds ->
+                            service.QueryTerminalActivity terminalSessionIds))
+                |> BackgroundLoop.start
+                |> Some
             | _ -> None
 
         try
-            use host = app.Build()
-            let applicationLifetime =
-                host.Services.GetService(typeof<IHostApplicationLifetime>)
-                :?> IHostApplicationLifetime
+            let canvasHost =
+                match schedulerAgent, config.CanvasPort with
+                | Some agent, Some canvasPort -> Some(CanvasDocServer.start agent canvasPort)
+                | _ -> None
 
-            runHostWithCapture
-                (fun () -> host.Start())
-                (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
-                applicationLifetime.ApplicationStopping
-                capture
+            try
+                use host = app.Build()
+                let applicationLifetime =
+                    host.Services.GetService(typeof<IHostApplicationLifetime>)
+                    :?> IHostApplicationLifetime
+
+                runHostWithCapture
+                    (fun () -> host.Start())
+                    (fun () -> host.WaitForShutdownAsync().GetAwaiter().GetResult())
+                    applicationLifetime.ApplicationStopping
+                    capture
+            finally
+                canvasHost
+                |> Option.iter (fun host ->
+                    try
+                        host.StopAsync().GetAwaiter().GetResult()
+                    finally
+                        host.DisposeAsync().GetAwaiter().GetResult())
         finally
-            canvasHost
-            |> Option.iter (fun host ->
-                try
-                    host.StopAsync().GetAwaiter().GetResult()
-                finally
-                    host.DisposeAsync().GetAwaiter().GetResult())
+            replacementLoop
+            |> Option.iter (BackgroundLoop.stop "TerminalHost replacement coordinator")
     finally
         activityRuntime
         |> Option.iter (fun runtime ->

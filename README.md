@@ -49,6 +49,8 @@ Open http://localhost:5000 — install as a PWA from the browser for a native ap
 
 The roots you add are saved to the global config (`~/.treemon/config.json` → `worktreeRoots`, written by the server), so `start`, `restart`, and `dev` do not need a path — omit it to use the saved roots. Manage roots live with the `tm` CLI (`tm add`, `tm remove`, `tm roots`) or the `.\treemon.ps1 add`/`remove` shims; changes apply on the next server restart.
 
+Run production `start`, `restart`, and `deploy` operations from an external PowerShell window, not a Treemon embedded terminal. Embedded `add` and `remove` commands still save root changes, but skip the automatic production restart and require an external `.\treemon.ps1 restart` before the running server uses them.
+
 ### Managing the server
 
 ```powershell
@@ -80,6 +82,7 @@ tm launch --path C:\code\my-project --fix-build <url>      # fix failed build
 tm launch --path C:\code\my-project --create-pr             # create a pull request
 tm new --repo C:\code\my-project --branch feature/foo      # create worktree
 tm worktrees                                                 # list all worktrees
+tm terminals                                                 # list open embedded terminals and session activity
 tm add C:\code\my-project                                   # watch a root (applies on next server restart)
 tm remove C:\code\my-project                                # stop watching a root
 tm roots                                                     # list watched roots

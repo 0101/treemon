@@ -4,6 +4,7 @@ open System.IO
 open System.Text.Json
 open System.Text.Json.Nodes
 open NUnit.Framework
+open Shared
 open Server.GlobalConfig
 open Tests.TestUtils
 
@@ -60,3 +61,37 @@ type UpdateConfigAtPathTests() =
             assertOk (updateConfigAtPath configPath [ "editor", str "vim" ]) "write"
             Assert.That(File.Exists(configPath + ".tmp"), Is.False,
                 "atomic move must consume the temp file"))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type WorkspaceWidthConfigTests() =
+
+    let writeConfig (dir: string) (json: string) =
+        File.WriteAllText(Path.Combine(dir, "config.json"), json)
+
+    [<Test>]
+    member _.``Absent config reads as equal thirds``() =
+        withTempConfigDir "treemon-width-test" (fun _ ->
+            Assert.That(readWorkspaceWidth (), Is.EqualTo(WorkspaceWidth.EqualThirds)))
+
+    [<Test>]
+    member _.``Workspace width round-trips``() =
+        withTempConfigDir "treemon-width-test" (fun _ ->
+            writeWorkspaceWidth WorkspaceWidth.WideCanvas
+            Assert.That(readWorkspaceWidth (), Is.EqualTo(WorkspaceWidth.WideCanvas))
+            writeWorkspaceWidth WorkspaceWidth.EqualThirds
+            Assert.That(readWorkspaceWidth (), Is.EqualTo(WorkspaceWidth.EqualThirds)))
+
+    [<Test>]
+    member _.``Legacy two-to-one canvas size migrates to wide canvas``() =
+        withTempConfigDir "treemon-width-test" (fun dir ->
+            writeConfig dir """{"canvasSize":"2to1","canvasPosition":"bottom"}"""
+            Assert.That(readWorkspaceWidth (), Is.EqualTo(WorkspaceWidth.WideCanvas)))
+
+    [<Test>]
+    member _.``Explicit workspace width wins over legacy canvas size``() =
+        withTempConfigDir "treemon-width-test" (fun dir ->
+            writeConfig dir """{"workspaceWidth":"thirds","canvasSize":"2to1"}"""
+            Assert.That(readWorkspaceWidth (), Is.EqualTo(WorkspaceWidth.EqualThirds)))

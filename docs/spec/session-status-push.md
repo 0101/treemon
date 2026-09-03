@@ -15,6 +15,7 @@ titles, context usage, and session resume all use this shared state; no session-
 - Support multiple concurrent sessions in one worktree without losing per-session activity.
 - Keep a parent session Working while any reported background agent is still active.
 - Keep liveness independent from representative-session selection.
+- Retain an optional exact terminal origin for sessions launched inside a host-owned terminal.
 - Let auto-sync target an existing session through `SessionBridge` before launching another CLI.
 - Filter synthetic user-channel content before it can change durable session state.
 - Bound untrusted input and durable storage while keeping the fold deterministic.
@@ -78,6 +79,26 @@ titles, context usage, and session resume all use this shared state; no session-
   and only then a retained identity when no session is open. That ordering keeps any fallback prompt
   on an existing bridge rather than launching a second CLI.
 
+### Terminal origin
+
+- Activity reports carry an optional `TerminalSessionId` sourced from the reporting process's
+  inherited `TREEMON_TERMINAL_SESSION_ID`. TerminalHost injects that value into each owned
+  terminal, so it is present only for Copilot sessions launched inside that terminal; sessions
+  launched elsewhere omit it.
+- The origin is stored with the per-session row and lets terminal lifecycle code join a Copilot
+  `SessionId` to one exact host-owned terminal. Treemon never infers terminal ownership from the
+  worktree path, so unrelated Copilot sessions in the same worktree remain unrelated.
+- The embedded-terminal API uses the bounded live-session projection to label each tab with the
+  representative exact session's freshest display-safe activity. An active session wins; otherwise
+  the most recently active live session is representative. Activity uses the same reported-intent
+  or session-title choice as the worktree card; when neither exists the tab keeps its numbered
+  fallback.
+- `TerminalSessionId` is attribution metadata for exact host-terminal joins. It does not participate
+  in status folding, ordering, liveness, representative selection, or the existing worktree
+  projection. Resume uses it only after selecting the durable target session: if that exact session
+  is already live in a running terminal, the existing terminal is returned instead of launching a
+  duplicate process.
+
 ### Context usage, resume, and restart
 
 - `session.usage_info` updates a durable per-session context gauge without changing status. Its
@@ -111,6 +132,8 @@ background-agent, and usage events onto the closed wire contract. Background rep
 `background_agent_started` / `background_agent_finished` with an opaque `toolCallId` of at most 512
 UTF-16 code units. It forwards ask-user request, completion, and idle events as facts; the server's
 persisted request/completion clocks resolve their effective status independently of delivery order.
+Every report also carries the optional inherited `TREEMON_TERMINAL_SESSION_ID` as
+`TerminalSessionId`.
 
 After subscriptions and replay are active, the extension reads
 `session.rpc.metadata.snapshot().summary` in a non-blocking background task and emits
@@ -134,6 +157,8 @@ events never replace parent-authored skill, title, intent, or footer messages.
 `POST /api/session/activity` validates the DTO, provider, known worktree, event-specific fields, and
 CSRF origin. Future timestamps beyond five minutes are clamped to server time, and nested message
 timestamps are normalized to that value before ordering. Free text is bounded before persistence.
+An optional terminal origin must be the canonical 32-hex TerminalHost session id and is normalized
+to lowercase; blank values mean no origin.
 
 Runtime `<system_reminder>` messages arrive through the genuine `user.message` channel, so the
 server classifies them after validation and the known-worktree guard but before the single-writer
@@ -163,12 +188,24 @@ needed. This preserves retained state when a heartbeat, usage report, title boot
 report, or later lifecycle event arrives after restart. Before advancing a session after a stale
 gap, the service clears its old process-local background clocks.
 
+The mailbox also maintains a process-local monotonic activity sequence per terminal origin. A
+report stamps both its prior and reported origins, so moving or clearing a session changes the old
+terminal's epoch as well. Its narrow raw query accepts the complete current authoritative terminal
+ID set, filters the bounded live cache before overlaying indexed durable rows, and returns only
+those rows plus their maximum epoch. `TerminalSessionActivity` turns that raw observation into each
+open session's effective state, the greatest-activity durable resume identity per terminal, and the
+opaque replacement policy. Unrelated origins and sessions with no origin cannot change the query's
+epoch or join result. Hourly retention removes stale live rows and epochs not backed by retained
+durable origins or the latest authoritative registry; pruning never resets the global epoch
+sequence.
+
 ### Persistence
 
 `SessionActivityStore` uses SQLite WAL with short-lived connections:
 
 - `session_status` stores the latest folded status, messages, intent, title, context gauge,
-  independent clocks, and session identity for live rebuild, footer data, and resume.
+  independent clocks, session identity, and optional terminal origin for live rebuild, footer data,
+  resume, and exact host-terminal attribution.
 - `activity_events` retains accepted history-bearing events under unique event IDs so duplicate
   reports remain full no-ops. Canonical Overview history uses direct 30-second snapshots and never
   reads this table.
@@ -176,9 +213,11 @@ gap, the service clears its old process-local background clocks.
   `activity_events`; the table remains an idempotency record, not a status-rebuild log.
 
 Store construction creates the current schema, applies missing additive columns idempotently, then
-runs bounded legacy normalization. This order lets databases predating activity, context, or
-ask-user columns start safely. Nullable context fields make legacy rows restore a plain status dot
-until a gauge arrives.
+runs indexes that depend on those columns and bounded legacy normalization. This order lets
+databases predating activity, context, ask-user, or terminal-origin columns start safely. The
+terminal-origin index follows `(terminal_session_id, updated_at DESC, session_id DESC)` so repeated
+replacement queries seek directly to current origins in activity order. Nullable context fields
+make legacy rows restore a plain status dot until a gauge arrives.
 
 Event append/status upsert and context updates are transactional and reread the authoritative
 persisted row. Hourly retention bounds durable session and event data without coordinating with
@@ -207,6 +246,9 @@ session for status/context rendering. Overview snapshot capture uses the same li
 projection but persists the complete count-only aggregate independently; see
 `docs/spec/overview-activity-history.md`.
 
+Terminal origin remains on the per-session record for exact terminal joins and is not folded into
+card or Overview status.
+
 ## Decisions
 
 | Decision | Choice |
@@ -225,7 +267,8 @@ projection but persists the complete count-only aggregate independently; see
 | Persistence | Store latest session state plus idempotent accepted events in SQLite WAL. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
-| Resume | Query durable most-recent activity identity, not the bounded live cache or heartbeat recency. |
+| Resume | Query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
+| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; a focused terminal module derives exact ownership for tab activity, Resume idempotency, and replacement from bounded current-ID projections, never from worktree inference. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 
@@ -233,13 +276,14 @@ projection but persists the complete count-only aggregate independently; see
 
 | File | Role |
 |---|---|
-| `src/Extension/reporting/extension.mjs` | SDK filtering, wire mapping, replay, metadata bootstrap, usage, and heartbeat. |
+| `src/Extension/reporting/extension.mjs` | SDK filtering, wire mapping, terminal-origin reporting, replay, metadata bootstrap, usage, and heartbeat. |
 | `src/Extension/reporting/reporting-core.mjs` | Pure message, usage, and background-lifecycle wire mapping. |
-| `src/Server/SessionActivity.fs` | Event domain, pure fold, background lifecycle, effective activity/status, freshness, and active selection. |
-| `src/Server/SessionActivityService.fs` | Request validation, synthetic filtering, independent ordering paths, mailbox ingestion, and lifecycle. |
+| `src/Server/SessionActivity.fs` | Event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
+| `src/Server/SessionActivityService.fs` | Request validation, synthetic filtering, independent ordering paths, bounded mailbox ingestion, and raw exact-origin queries. |
+| `src/Server/TerminalSessionActivity.fs` | Exact owned-session projection for embedded-terminal tab activity and TerminalHost replacement policy. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
-| `src/Server/SessionActivityStore.fs` | Session persistence, additive migration, idempotent event append, representative queries, and retention. |
+| `src/Server/SessionActivityStore.fs` | Session persistence including optional terminal origin, post-column query index, idempotent event append, representative queries, and retention. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
 | `src/Server/SchedulerState.fs` | Live session state and `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |
@@ -254,9 +298,7 @@ projection but persists the complete count-only aggregate independently; see
 ## Related Specs
 
 - `docs/spec/worktree-monitor.md` - dashboard architecture and refresh model.
-- `docs/spec/beads-overview-band.md` - live task and agent aggregation.
+- `docs/spec/beads-overview-band.md` - live task and agent aggregation with per-group membership.
 - `docs/spec/overview-activity-history.md` - durable canonical Overview snapshots.
-- `docs/spec/overview-drilldown.md` - per-group session details.
 - `docs/spec/resume-last-session.md` - resume command behavior.
-- `docs/spec/worktree-monitor.md` - endpoint origin protection.
 - `docs/spec/native-session-management.md` - terminal/window liveness, distinct from push openness.

@@ -7,10 +7,8 @@ open System.Threading
 open Shared
 
 type private SessionMsg =
-    | Spawn of worktreePath: WorktreePath * command: string * AsyncReplyChannel<Result<unit, string>>
     | SpawnTerminal of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
     | OpenNewTab of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
-    | LaunchAction of worktreePath: WorktreePath * command: string * AsyncReplyChannel<Result<unit, string>>
     | Focus of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
     | Kill of worktreePath: WorktreePath * AsyncReplyChannel<Result<unit, string>>
     | GetActiveSessions of AsyncReplyChannel<Map<string, nativeint>>
@@ -45,13 +43,11 @@ let internal encodeCommand (command: string) =
 
 // internal (not private) so Tests can assert the single-quote path-escaping headlessly
 // (InternalsVisibleTo "Tests"); durable cover for the manual worktree-launch smoke step.
-let internal buildScript (nativePath: string) (command: string option) =
+let internal buildScript (nativePath: string) =
     // Double embedded single quotes so a path containing ' cannot break out of the
-    // single-quoted PowerShell string literal (or inject). Central to every launch path.
+    // single-quoted PowerShell string literal (or inject).
     let escapedPath = nativePath.Replace("'", "''")
-    match command with
-    | Some cmd -> $"Set-Location '{escapedPath}'; {cmd}"
-    | None -> $"Set-Location '{escapedPath}'"
+    $"Set-Location '{escapedPath}'"
 
 let private waitForExitAsync (proc: Process) (timeoutMs: int) =
     async {
@@ -95,18 +91,12 @@ let private spawnWtAndResolve (args: string) (logLabel: string) =
             return Error $"Failed to spawn {logLabel}: {ex.Message}"
     }
 
-let private spawnWithCommand (worktreePath: string) (command: string option) (logLabel: string) =
-    let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
-    let encoded = buildScript nativePath command |> encodeCommand
-    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" logLabel
-
-let private spawnAndResolve (worktreePath: string) (command: string) =
-    spawnWithCommand worktreePath (Some command) "session"
-
 let private spawnTerminalAndResolve (worktreePath: string) =
-    spawnWithCommand worktreePath None "terminal"
+    let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
+    let encoded = buildScript nativePath |> encodeCommand
+    spawnWtAndResolve $"--window new -- pwsh -NoExit -EncodedCommand {encoded}" "terminal"
 
-let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) (command: string option) =
+let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) =
     async {
         let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
 
@@ -116,7 +106,7 @@ let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) (command
             if not (Win32.focusWindow hwnd) then
                 Log.log "SessionManager" $"Failed to focus HWND={hwnd} for new-tab"
 
-            let encoded = buildScript nativePath command |> encodeCommand
+            let encoded = buildScript nativePath |> encodeCommand
 
             let psi =
                 ProcessStartInfo(
@@ -134,13 +124,6 @@ let private openNewTabInWindow (hwnd: nativeint) (worktreePath: string) (command
                 Log.log "SessionManager" $"Failed to open new tab: {ex.Message}"
                 return Error $"Failed to open new tab: {ex.Message}"
     }
-
-let private closeWindowFireAndForget (hwnd: nativeint) =
-    if Win32.isWindowValid hwnd then
-        if Win32.closeWindow hwnd then
-            Log.log "SessionManager" $"Sent WM_CLOSE to HWND={hwnd}"
-        else
-            Log.log "SessionManager" $"Failed to send WM_CLOSE to HWND={hwnd}"
 
 let private killByHwnd (hwnd: nativeint) =
     async {
@@ -216,10 +199,8 @@ let internal loadSessions () =
 
 let private replyError (msg: SessionMsg) (sessions: Map<string, nativeint>) (ex: exn) =
     match msg with
-    | Spawn(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
     | SpawnTerminal(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
     | OpenNewTab(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
-    | LaunchAction(_, _, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
     | Focus(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
     | Kill(_, reply) -> reply.Reply(Error $"Internal error: {ex.Message}")
     | GetActiveSessions reply -> reply.Reply(sessions)
@@ -227,13 +208,21 @@ let private replyError (msg: SessionMsg) (sessions: Map<string, nativeint>) (ex:
 let private pathOf (wtPath: WorktreePath) =
     WorktreePath.value wtPath |> PathUtils.normalizePath
 
+let internal focusTrackedSession focusWindow path (sessions: Map<string, nativeint>) =
+    match sessions |> Map.tryFind path with
+    | Some hwnd ->
+        let result =
+            if focusWindow hwnd then
+                Ok()
+            else
+                Error "Failed to activate tracked terminal window"
+
+        result, sessions
+    | None -> Error "No active session for this worktree", sessions
+
 let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) =
     async {
         match msg with
-        | Spawn(wtPath, command, reply) ->
-            let path = pathOf wtPath
-            return! spawnAndTrack (validateSessions sessions) path (fun () -> spawnAndResolve path command) reply
-
         | SpawnTerminal(wtPath, reply) ->
             let path = pathOf wtPath
             return! spawnAndTrack (validateSessions sessions) path (fun () -> spawnTerminalAndResolve path) reply
@@ -244,40 +233,19 @@ let private processMessage (sessions: Map<string, nativeint>) (msg: SessionMsg) 
 
             match validated |> Map.tryFind path with
             | Some hwnd ->
-                let! result = openNewTabInWindow hwnd path None
+                let! result = openNewTabInWindow hwnd path
                 reply.Reply(result)
                 return validated
             | None ->
                 reply.Reply(Error "No active session for this worktree")
                 return validated
-
-        | LaunchAction(wtPath, command, reply) ->
-            let path = pathOf wtPath
-            let validated = validateSessions sessions
-
-            match validated |> Map.tryFind path with
-            | Some hwnd ->
-                let! result = openNewTabInWindow hwnd path (Some command)
-                reply.Reply(result)
-                return validated
-            | None ->
-                return! spawnAndTrack validated path (fun () -> spawnWithCommand path (Some command) "action") reply
 
         | Focus(wtPath, reply) ->
             let path = pathOf wtPath
             let validated = validateSessions sessions
-
-            match validated |> Map.tryFind path with
-            | Some hwnd ->
-                if Win32.focusWindow hwnd then
-                    reply.Reply(Ok())
-                else
-                    reply.Reply(Error "SetForegroundWindow failed")
-
-                return validated
-            | None ->
-                reply.Reply(Error "No active session for this worktree")
-                return validated
+            let result, unchanged = focusTrackedSession Win32.focusWindow path validated
+            reply.Reply(result)
+            return unchanged
 
         | Kill(wtPath, reply) ->
             let path = pathOf wtPath
@@ -335,9 +303,6 @@ let createAgent () =
 
     { Agent = agent }
 
-let spawnSession (agent: SessionAgent) (worktreePath: WorktreePath) (command: string) =
-    agent.Agent.PostAndAsyncReply((fun reply -> Spawn(worktreePath, command, reply)), timeout = 30_000)
-
 let spawnTerminal (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> SpawnTerminal(worktreePath, reply)), timeout = 30_000)
 
@@ -349,9 +314,6 @@ let killSession (agent: SessionAgent) (worktreePath: WorktreePath) =
 
 let openNewTab (agent: SessionAgent) (worktreePath: WorktreePath) =
     agent.Agent.PostAndAsyncReply((fun reply -> OpenNewTab(worktreePath, reply)), timeout = 10_000)
-
-let launchAction (agent: SessionAgent) (worktreePath: WorktreePath) (command: string) =
-    agent.Agent.PostAndAsyncReply((fun reply -> LaunchAction(worktreePath, command, reply)), timeout = 30_000)
 
 let getActiveSessions (agent: SessionAgent) =
     agent.Agent.PostAndAsyncReply(GetActiveSessions, timeout = 10_000)

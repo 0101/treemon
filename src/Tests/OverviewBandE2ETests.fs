@@ -38,11 +38,12 @@ let private viteUrl = $"http://localhost:{vitePort}"
 
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
+let private terminalHostStateDirectory = TestUtils.terminalHostStateDirectory ()
 
 let private startServer () =
     task {
         let proc =
-            TestUtils.startServerProcess serverProjectPath repoRoot $"\"{repoRoot}\"" serverPort canvasPort fixturePath
+            TestUtils.startServerProcess serverProjectPath repoRoot $"\"{repoRoot}\"" serverPort canvasPort fixturePath terminalHostStateDirectory
         serverProcess.Value <- Some proc
         do! TestUtils.waitForUrl serverUrl 30000
     }
@@ -271,6 +272,9 @@ type OverviewBandE2ETests() =
         TestUtils.killProc viteProcess.Value
         serverProcess.Value <- None
         viteProcess.Value <- None
+        TestUtils.stopTerminalHostState terminalHostStateDirectory
+        |> fun result ->
+            TestUtils.assertOk result "Overview TerminalHost cleanup failed"
 
     // Navigate, wait for the grid, toggle Overview on, wait for the band, then snapshot the DOM once.
     [<SetUp>]
@@ -881,13 +885,20 @@ type OverviewBandE2ETests() =
         task {
             let canvasBtn =
                 this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
-            do! canvasBtn.ClickAsync()
-            do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let investigating =
                 this.Page.Locator(".overview-agents-band .overview-item", PageLocatorOptions(HasText = "Investigating"))
+            // Select the group before narrowing the dashboard for Canvas: at full width the
+            // circle is already on-screen, so the click needs no Playwright auto-scroll. Scrolling
+            // into view here would cross the band's real (early, ~24px) sticky threshold before the
+            // deliberate scroll steps below run, pinning the band prematurely and — since the pinned
+            // transition only clears a selection made *while becoming* pinned, not one made earlier
+            // while already pinned — permanently stranding this drill-down open.
             do! investigating.ClickAsync()
             do! this.Page.Locator(".overview-breakdown").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! canvasBtn.ClickAsync()
+            do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! _ =
                 this.Page.EvaluateAsync(
@@ -899,7 +910,9 @@ type OverviewBandE2ETests() =
 
             // The page clock is faked, so in-page frame counting cannot pace the scroll-driven
             // timeline; a driver-side wait lets real frames commit it before the DOM is sampled.
-            do! this.Page.WaitForTimeoutAsync(250.0f)
+            // A page-side WaitForFunctionAsync is not an alternative here: its polling relies on
+            // requestAnimationFrame/timers, which the fake clock also freezes, so it never re-runs.
+            do! this.Page.WaitForTimeoutAsync(750.0f)
 
             let! morphJson =
                 this.Page.EvaluateAsync<string>(
@@ -998,7 +1011,19 @@ type OverviewBandE2ETests() =
             Assert.That(sticky.Value<string>("groupGap"), Is.EqualTo("22px"))
             Assert.That(sticky.Value<bool>("topEdgeCovered"), Is.True, "pinned chrome must mask cards edge to edge along the dashboard top")
 
-            do! this.Page.SetViewportSizeAsync(700, 800)
+            // A bare viewport narrowing (e.g. 700px) is NOT a guaranteed-narrow dashboard: below the
+            // 900px `.app-layout` breakpoint, panes stop sitting side by side and each pane (including
+            // .dashboard) stretches to the FULL viewport width instead of its usual fractional share —
+            // so shrinking the browser that far actually widens the dashboard pane, and whether the six
+            // agent-group columns (~520px of content, measured via bounding rects since a stretched
+            // block's scrollWidth just mirrors its clientWidth when nothing overflows) overflow becomes
+            // a coin flip on font metrics. Switching to Wide canvas (dashboard -> 1/3 of the layout,
+            // canvas -> 2/3, per the `.workspace-wide-canvas` rule) while staying safely above the
+            // breakpoint keeps the three-pane row layout intact and gives the dashboard only ~333px at
+            // this viewport — comfortably under the content width on both Windows and Linux fonts.
+            do! this.Page.Locator(".canvas-width-btn[title^='Wide canvas']").ClickAsync()
+            do! this.Page.Locator(".app-layout.workspace-wide-canvas").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! this.Page.SetViewportSizeAsync(1000, 800)
             do! this.Page.WaitForTimeoutAsync(250.0f)
             let! narrowJson =
                 this.Page.EvaluateAsync<string>(
@@ -1046,18 +1071,18 @@ type OverviewBandE2ETests() =
             ()
         }
 
-    // Docking left/top used to reverse the two .app-layout children, which React reconciled by
-    // index — the pinned-state observers silently ended up watching the canvas pane, so neither
-    // scroll-closes-drill-down nor pinned-click-scrolls-to-top fired again.
+    // Layout changes must preserve the fixed pane DOM order so the pinned-state observers remain
+    // attached to the dashboard.
     [<Test>]
-    member this.``Docking the canvas left keeps pinned-state detection alive``() =
+    member this.``Widening the canvas keeps pinned-state detection alive``() =
         task {
             let canvasBtn =
                 this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
             do! canvasBtn.ClickAsync()
             do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
-            do! this.Page.Locator(".canvas-pos-btn[title='Dock left']").ClickAsync()
-            do! this.Page.Locator(".app-layout.canvas-left").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! this.Page.Locator(".canvas-width-btn[title^='Wide canvas']").ClickAsync()
+            do! this.Page.Locator(".app-layout.workspace-wide-canvas").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! this.Page.WaitForTimeoutAsync(400.0f)
 
             let! layoutJson =
                 this.Page.EvaluateAsync<string>(
@@ -1066,7 +1091,7 @@ type OverviewBandE2ETests() =
                       const dashboard = document.querySelector('.dashboard');
                       const pane = document.querySelector('.canvas-pane');
                       return JSON.stringify({
-                        firstChildIsDashboard: layout.firstElementChild === dashboard,
+                        lastChildIsDashboard: layout.lastElementChild === dashboard,
                         panePaintsLeft: pane.getBoundingClientRect().left < dashboard.getBoundingClientRect().left
                       });
                     }""")
@@ -1094,8 +1119,8 @@ type OverviewBandE2ETests() =
                     PageWaitForFunctionOptions(Timeout = 5000.0f))
 
             let layout = JObject.Parse(layoutJson)
-            Assert.That(layout.Value<bool>("firstChildIsDashboard"), Is.True, "the dashboard stays layout child #0 in every dock position")
-            Assert.That(layout.Value<bool>("panePaintsLeft"), Is.True, "canvas-left paints the pane left of the dashboard via CSS order")
+            Assert.That(layout.Value<bool>("lastChildIsDashboard"), Is.True, "the dashboard stays the last layout child at every width")
+            Assert.That(layout.Value<bool>("panePaintsLeft"), Is.True, "Canvas is the middle pane, so it paints left of the dashboard")
         }
 
     // A first attach that lands before React has committed the band must not give up silently: the

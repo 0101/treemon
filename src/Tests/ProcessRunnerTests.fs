@@ -88,6 +88,21 @@ type ProcessRunnerArgumentListTests() =
         Directory.CreateDirectory(tempDir) |> ignore
         initRepoOnMain tempDir
 
+    [<TestCase(0, false, 4999, false)>]
+    [<TestCase(1, false, 1, true)>]
+    [<TestCase(0, true, 1, true)>]
+    [<TestCase(0, false, 5000, true)>]
+    member _.``completion logging retains only abnormal or slow process evidence``
+        (exitCode: int, wasTruncated: bool, elapsedMs: int, expected: bool)
+        =
+        Assert.That(
+            ProcessRunner.shouldLogCompletion
+                exitCode
+                wasTruncated
+                (TimeSpan.FromMilliseconds(float elapsedMs)),
+            Is.EqualTo(expected)
+        )
+
     [<TearDown>]
     member _.TearDown() =
         if Directory.Exists(tempDir) then

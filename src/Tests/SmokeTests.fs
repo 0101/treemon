@@ -20,7 +20,7 @@ let private serverProjectPath =
 let private worktreeRoot = @"Q:\code\AITestAgent"
 let private thisRepoName = Path.GetFileName(repoRoot)
 
-let private startSmokeServerProc (configDir: string) (args: string) =
+let private startSmokeServerProc (configDir: string) (terminalHostStateDir: string) (args: string) =
     let psi =
         ProcessStartInfo(
             FileName = "dotnet",
@@ -38,11 +38,14 @@ let private startSmokeServerProc (configDir: string) (args: string) =
     // throwaway dir instead (GlobalConfig.globalConfigDir honors TREEMON_CONFIG_DIR); the fixture
     // deletes it in teardown.
     psi.EnvironmentVariables["TREEMON_CONFIG_DIR"] <- configDir
+    // Isolate TerminalHost discovery/state the same way, so a smoke run never discovers or mutates
+    // the real production TerminalHost; the fixture stops and deletes it in teardown.
+    psi.EnvironmentVariables["TREEMON_TERMINAL_HOST_STATE_DIR"] <- terminalHostStateDir
 
     Process.Start(psi)
 
-let private startSmokeServer (configDir: string) (port: int) =
-    startSmokeServerProc configDir $""""{worktreeRoot}" --port {port} --no-canvas"""
+let private startSmokeServer (configDir: string) (terminalHostStateDir: string) (port: int) =
+    startSmokeServerProc configDir terminalHostStateDir $""""{worktreeRoot}" --port {port} --no-canvas"""
 
 let private startProcess fileName args workingDir envVars redirectOutput =
     TestUtils.startProcess fileName args workingDir envVars redirectOutput
@@ -74,6 +77,7 @@ type SmokeTests() =
     // teardown so a normal-mode smoke run never persists into — or leaves cruft beside — the real
     // ~/.treemon.
     let smokeConfigDir = Path.Combine(Path.GetTempPath(), $"treemon-smoke-{Guid.NewGuid():N}")
+    let smokeTerminalHostStateDir = TestUtils.terminalHostStateDirectory ()
     let mutable serverProc: Process option = None
 
     let killServer () =
@@ -132,7 +136,7 @@ type SmokeTests() =
     [<OneTimeSetUp>]
     member _.StartServer() =
         task {
-            let proc = startSmokeServer smokeConfigDir smokePort
+            let proc = startSmokeServer smokeConfigDir smokeTerminalHostStateDir smokePort
             serverProc <- Some proc
             TestContext.Out.WriteLine($"Smoke server started (PID {proc.Id}) on port {smokePort}")
 
@@ -149,12 +153,18 @@ type SmokeTests() =
     member _.StopServer() =
         killServer ()
         serverProc <- None
+        let terminalHostCleanup =
+            TestUtils.stopTerminalHostState smokeTerminalHostStateDir
 
         try
             if Directory.Exists smokeConfigDir then
                 Directory.Delete(smokeConfigDir, recursive = true)
         with _ ->
             ()
+
+        terminalHostCleanup
+        |> fun result ->
+            TestUtils.assertOk result "Smoke TerminalHost cleanup failed"
 
     [<Test>]
     member _.``Server returns IsReady=true with real data``() =
@@ -237,6 +247,7 @@ type MultiRepoSmokeTests() =
     // Throwaway machine-config dir for this normal-mode server (see startSmokeServerProc); deleted
     // in teardown so startup root-resolution never persists into the real ~/.treemon.
     let multiRepoConfigDir = Path.Combine(Path.GetTempPath(), $"treemon-smoke-{Guid.NewGuid():N}")
+    let multiRepoTerminalHostStateDir = TestUtils.terminalHostStateDirectory ()
 
     let mutable serverProc: Process option = None
     let mutable viteProc: Process option = None
@@ -291,7 +302,7 @@ type MultiRepoSmokeTests() =
                 |> List.map (fun r -> $"\"{r}\"")
                 |> String.concat " "
 
-            let proc = startSmokeServerProc multiRepoConfigDir $"""{rootArgs} --port {multiRepoPort} --no-canvas"""
+            let proc = startSmokeServerProc multiRepoConfigDir multiRepoTerminalHostStateDir $"""{rootArgs} --port {multiRepoPort} --no-canvas"""
             serverProc <- Some proc
             TestContext.Out.WriteLine($"Multi-repo smoke server started (PID {proc.Id}) on port {multiRepoPort}")
 
@@ -342,12 +353,18 @@ type MultiRepoSmokeTests() =
         killProc viteProc
         serverProc <- None
         viteProc <- None
+        let terminalHostCleanup =
+            TestUtils.stopTerminalHostState multiRepoTerminalHostStateDir
 
         try
             if Directory.Exists multiRepoConfigDir then
                 Directory.Delete(multiRepoConfigDir, recursive = true)
         with _ ->
             ()
+
+        terminalHostCleanup
+        |> fun result ->
+            TestUtils.assertOk result "Multi-repo TerminalHost cleanup failed"
 
     [<SetUp>]
     member this.NavigateToDashboard() =

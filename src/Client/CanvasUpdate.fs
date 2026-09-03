@@ -91,7 +91,7 @@ let private revealCanvasDoc
     | Visible -> syncVisibleDocCmd selected
     | Hidden -> Cmd.none
 
-let launchCanvasSession (scopedKey: string) (model: Model) =
+let canvasSessionAction (scopedKey: string) (model: Model) =
     match findWorktree scopedKey model with
     | Some wt ->
         let wtPath = WorktreePath.value wt.Path
@@ -99,10 +99,8 @@ let launchCanvasSession (scopedKey: string) (model: Model) =
             activeVisibleDoc model
             |> Option.map (fun (_, filename) -> CanvasSessionPrompt.forAgentDoc wtPath filename)
             |> Option.defaultValue ""
-        let action = CanvasSession prompt
-        model, Cmd.OfAsync.perform worktreeApi.Value.launchAction { Path = wt.Path; Action = action } LaunchActionResult
-    | None ->
-        model, Cmd.none
+        Some(wt.Path, CanvasSession prompt)
+    | None -> None
 
 let toggleCanvasPane (model: Model) =
     let newState = not model.Canvas.CanvasPaneOpen
@@ -115,13 +113,9 @@ let toggleCanvasPane (model: Model) =
         if newState then syncVisibleDocCmd updated else Cmd.none
     ]
 
-let setCanvasPosition (position: CanvasPosition) (model: Model) =
-    { model with Canvas.CanvasPosition = position },
-    Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPosition position (fun _ -> NoOp)
-
-let setCanvasSize (size: CanvasSize) (model: Model) =
-    { model with Canvas.CanvasSize = size },
-    Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasSize size (fun _ -> NoOp)
+let setWorkspaceWidth (width: WorkspaceWidth) (model: Model) =
+    { model with Canvas.WorkspaceWidth = width },
+    Cmd.OfAsync.attempt worktreeApi.Value.saveWorkspaceWidth width (fun _ -> NoOp)
 
 let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     let targeted =
@@ -136,18 +130,22 @@ let selectCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
         model
         targeted
 
-/// The single chokepoint for setting `FocusedElement`. When `retarget` is set and focus selects a
-/// worktree card, that card's active doc is retargeted to its most recently
+/// The single chokepoint for setting `FocusedElement`. The terminal pane derives its visible tabs
+/// from this focus while retaining each worktree's terminal selection independently. When
+/// `retarget` is set and focus selects a worktree card, that card's active doc is retargeted to its most recently
 /// published *unviewed* AgentDoc (the "select the worktree shows THAT doc" path) — a no-op when the
 /// card was already focused or nothing is unviewed, except that a sticky worktree diff is replaced
 /// by another available doc because Diff is explicit-only. An open pane reveals and synchronizes
-/// the doc; a closed pane selects it without marking it viewed. The idle auto-display passes
-/// `retarget = false` so it never steals its own target. See docs/spec/canvas-pane.md.
+/// the doc; a closed pane selects it without marking it viewed. Idle auto-display and explicit
+/// canvas-doc navigation pass `retarget = false` because they select their own target doc.
+/// Any ordinary focus transition also clears a terminal action's explicit worktree target.
+/// See docs/spec/canvas-pane.md.
 let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : Model * Cmd<Msg> =
     let previousFocus = model.FocusedElement
     let focused =
         { model with
             FocusedElement = newFocus
+            TerminalPaneTarget = None
             Canvas.TargetWorktree = None }
     match retarget, newFocus with
     | true, Some (Card scopedKey) ->
@@ -173,21 +171,23 @@ let applyFocus (retarget: bool) (newFocus: FocusTarget option) (model: Model) : 
 let openCanvasDoc (scopedKey: string) (filename: string) (model: Model) =
     let openPane = not model.Canvas.CanvasPaneOpen
     let repos, expanded = expandRepoOwning scopedKey model.Repos
+    let focused, focusCmd =
+        { model with
+            Repos = repos
+            Canvas.CanvasPaneOpen = true }
+        |> applyFocus false (Some (Card scopedKey))
     let opened, revealCmd =
         revealCanvasDoc
             Visible
             scopedKey
             filename
             model
-            { model with
-                Repos = repos
-                FocusedElement = Some (Card scopedKey)
-                Canvas.CanvasPaneOpen = true
-                Canvas.TargetWorktree = None }
+            focused
     opened,
     Cmd.batch [
         if openPane then Cmd.OfAsync.attempt worktreeApi.Value.saveCanvasPaneOpen true (fun _ -> NoOp)
         if expanded then saveCollapsedReposCmd repos
+        focusCmd
         revealCmd
     ]
 

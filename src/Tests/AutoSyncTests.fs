@@ -20,6 +20,7 @@ let private tempDirectory () =
 
 let private storedSession sessionId worktreePath status updatedAt lastSeen =
     { SessionId = SessionId sessionId
+      TerminalSessionId = None
       WorktreePath = WorktreePath worktreePath
       Provider = CopilotCli
       Status = { emptyStatus with Status = status }
@@ -86,7 +87,9 @@ let private closedPr = prInfo PrState.ClosedUnmerged
 /// overlapping inside the durable-record layer, which the guard serializes in production, and
 /// `AutoSyncMechanicalTests` covers the guard itself.
 let private withAcceptedRecords agent store deliver =
-    { autoSyncDependencies agent (SessionManager.createAgent ()) None (Some store) with
+    let unexpectedLaunch _ _ = async { return Error "Unexpected terminal launch" }
+
+    { autoSyncDependencies agent unexpectedLaunch None (Some store) with
         ReadPrStatus = fun _ -> async { return Some NoPr }
         ReadOwnership = fun _ -> async { return Free(IdleSession "session-a") }
         TryBeginOperation = fun _ -> async { return true }
@@ -1605,6 +1608,45 @@ type AutoSyncDeliveryTests() =
         Assert.That(accepted, Is.False)
 
     [<Test>]
+    member _.``AutoSync fallback uses embedded command launch and rejects failed command delivery``() =
+        let path =
+            Path.Combine("test", $"auto-sync-launch-{Guid.NewGuid():N}")
+            |> WorktreePath
+        let promptText = "Sync with upstream/main."
+        // The injected launch callback is the async effect whose exact operation is under test.
+        let mutable observedLaunch = None
+
+        let launch requestedPath command =
+            async {
+                observedLaunch <- Some(requestedPath, command)
+                return Error "command delivery failed"
+            }
+
+        let dependencies =
+            autoSyncDependencies (createAgent ()) launch None None
+
+        let accepted =
+            dependencies.Deliver
+                { WorktreePath = path
+                  Target = NoOpenSession None
+                  Prompt = promptText }
+            |> Async.RunSynchronously
+
+        let expectedCommand =
+            CodingToolCli.build None (CodingToolCli.Interactive promptText)
+            |> _.AsShellString
+
+        Assert.Multiple(fun () ->
+            Assert.That(accepted, Is.False)
+
+            match observedLaunch with
+            | Some(requestedPath, command) ->
+                Assert.That(command, Is.EqualTo(expectedCommand))
+                Assert.That(requestedPath, Is.EqualTo(path))
+            | None ->
+                Assert.Fail("Expected the AutoSync fallback to invoke the terminal launch boundary"))
+
+    [<Test>]
     member _.``Delivery failure is accepted for queued retry without fallback launch``() =
         let accepted =
             deliver
@@ -1745,6 +1787,7 @@ type AutoSyncEndpointTests() =
                 { Agent = agent
                   CardLog = CardEventLog.createAgent ()
                   SessionAgent = sessionAgent
+                  EmbeddedTerminal = EmbeddedTerminal.create "http://localhost:5000" []
                   ActivityStore = None
                   SnapshotStore = None
                   AutoSyncStore = Some store
@@ -1883,6 +1926,7 @@ type AutoSyncVerificationTests() =
                     { Agent = agent
                       CardLog = CardEventLog.createAgent ()
                       SessionAgent = sessionAgent
+                      EmbeddedTerminal = EmbeddedTerminal.create "http://localhost:5000" []
                       ActivityStore = None
                       SnapshotStore = None
                       AutoSyncStore = None

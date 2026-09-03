@@ -98,7 +98,7 @@ let private encodedCommandLine =
 
 let internal isOwnedPowerShellCommand (worktreePath: string) (commandLine: string) =
     let nativePath = worktreePath.Replace('/', Path.DirectorySeparatorChar)
-    let expectedScriptPrefix = buildScript nativePath None
+    let expectedScriptPrefix = buildScript nativePath
     let matched = encodedCommandLine.Match(commandLine)
 
     if not matched.Success then
@@ -210,7 +210,7 @@ let private requestSessionClosure (agent: SessionAgent) =
             |> Async.Ignore
     }
 
-let private remainingOwnedProcessIds worktreePath =
+let internal ownedPowerShellProcessIds worktreePath =
     async {
         let! processes = ownedPowerShellProcesses worktreePath
 
@@ -230,7 +230,7 @@ let private closeTrackedSessions environment =
         let! fallback = stopOwnedPowerShellProcesses worktreePath
         do! requestSessionClosure environment.Agent
         let! remainingSessions = getActiveSessions environment.Agent
-        let! remainingProcesses = remainingOwnedProcessIds worktreePath
+        let! remainingProcesses = ownedPowerShellProcessIds worktreePath
 
         return
             match fallback, remainingProcesses, remainingSessions.IsEmpty with

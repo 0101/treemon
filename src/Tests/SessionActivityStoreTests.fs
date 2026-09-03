@@ -80,12 +80,16 @@ let private otherWorktree = Path.Combine(Path.GetTempPath(), "treemon-other-work
 
 let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredStatus =
     { SessionId = SessionId sid
+      TerminalSessionId = None
       WorktreePath = WorktreePath wt
       Provider = CopilotCli
       Status = status
       UpdatedAt = ts updatedAt
       LastSeen = ts lastSeen
       ContextUsageAt = None }
+
+let private withTerminalOrigin terminalSessionId (stored: StoredStatus) =
+    { stored with TerminalSessionId = Some terminalSessionId }
 
 let private withUsage (usage: ContextUsage) usageAt lastSeen (stored: StoredStatus) : StoredStatus =
     { stored with
@@ -329,6 +333,8 @@ type LoadLiveStatusesTests() =
     [<Test>]
     member _.``Live state survives a restart (new store instance over the same file)``() =
         withDbPath (fun dbPath ->
+            let terminalSessionId =
+                TerminalSessionId "0123456789abcdef0123456789abcdef"
             let working =
                 { emptyStatus with
                     Status = SessionLevelStatus.Working
@@ -336,13 +342,78 @@ type LoadLiveStatusesTests() =
 
             // First instance writes, then is disposed (checkpoints WAL, releases the file).
             (use store = new SessionActivityStore(dbPath)
-             store.UpsertStatus(storedOf "s1" "C:/wt/a" working "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z"))
+             storedOf
+                 "s1"
+                 "C:/wt/a"
+                 working
+                 "2026-03-01T11:30:00Z"
+                 "2026-03-01T11:30:00Z"
+             |> withTerminalOrigin terminalSessionId
+             |> store.UpsertStatus)
 
             // A fresh instance over the same path rebuilds the live status with no new events.
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
             Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.Working))
-            Assert.That(row.Status.Skill, Is.EqualTo(Some "bd-execute")))
+            Assert.That(row.Status.Skill, Is.EqualTo(Some "bd-execute"))
+            Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
+
+    [<Test>]
+    member _.``Omitted origin updates preserve terminal attribution across restart``() =
+        withDbPath (fun dbPath ->
+            let terminalSessionId =
+                TerminalSessionId "fedcba9876543210fedcba9876543210"
+            let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+
+            (use store = new SessionActivityStore(dbPath)
+             let attributed =
+                 storedOf
+                     "s1"
+                     "C:/wt/a"
+                     { emptyStatus with Status = SessionLevelStatus.Working }
+                     "2026-03-01T11:30:00Z"
+                     "2026-03-01T11:30:00Z"
+                 |> withTerminalOrigin terminalSessionId
+
+             store.UpsertStatus attributed
+             store.RecordLiveness(SessionId "s1", ts "2026-03-01T11:31:00Z", None)
+
+             let afterUsage =
+                 { attributed with TerminalSessionId = None }
+                 |> withUsage usage (ts "2026-03-01T11:32:00Z") (ts "2026-03-01T11:32:00Z")
+                 |> store.UpsertContextUsage
+
+             let afterEvent =
+                 { afterUsage with
+                     TerminalSessionId = None
+                     Status.Status = SessionLevelStatus.Idle
+                     UpdatedAt = ts "2026-03-01T11:33:00Z"
+                     LastSeen = ts "2026-03-01T11:33:00Z" }
+
+             let persisted =
+                 store.AppendAndUpsert(
+                     eventOf
+                         "ended"
+                         "s1"
+                         "turn_ended"
+                         SessionLevelStatus.Idle
+                         None
+                         "2026-03-01T11:33:00Z",
+                     afterEvent
+                 )
+                 |> Option.get
+
+             Assert.Multiple(fun () ->
+                 Assert.That(afterUsage.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
+                 Assert.That(persisted.TerminalSessionId, Is.EqualTo(Some terminalSessionId))))
+
+            use reopened = new SessionActivityStore(dbPath)
+            let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "s1"
+
+            Assert.Multiple(fun () ->
+                Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
+                Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(row.Status.ContextUsage, Is.EqualTo(Some usage))))
 
     [<Test>]
     member _.``Context usage survives a restart with its ordering timestamp``() =
@@ -536,11 +607,139 @@ END;
                     "2025-12-01T10:00:00Z"
                     "2025-12-01T10:00:00Z"
             )
-            store.RecordLiveness(SessionId "s1", ts "2026-03-01T11:59:00Z")
+            store.RecordLiveness(
+                SessionId "s1",
+                ts "2026-03-01T11:59:00Z",
+                None
+            )
 
             store.PruneOld(ts "2026-01-01T00:00:00Z") |> ignore
 
             Assert.That(eventCountById dbPath "e1", Is.EqualTo 1))
+
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type TerminalSessionQueryIndexTests() =
+
+    let insertLargeUnrelatedFixture dbPath terminalSessionId =
+        use connection = SqliteTestDatabase.openConnection dbPath
+        use command = connection.CreateCommand()
+        command.CommandText <-
+            """
+WITH digits(n) AS (
+    VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+),
+numbers(n) AS (
+    SELECT ones.n + (10 * tens.n) + (100 * hundreds.n) + (1000 * thousands.n)
+    FROM digits AS ones
+    CROSS JOIN digits AS tens
+    CROSS JOIN digits AS hundreds
+    CROSS JOIN digits AS thousands
+)
+INSERT INTO session_status
+    (session_id, worktree_path, provider, status, updated_at, last_seen, terminal_session_id)
+SELECT
+    'unrelated-' || printf('%04d', n),
+    'C:/wt/unrelated',
+    'copilot_cli',
+    'idle',
+    $timestamp,
+    $timestamp,
+    $terminalSessionId
+FROM numbers;
+"""
+        command.Parameters.AddWithValue(
+            "$timestamp",
+            (ts "2026-03-01T10:00:00Z").ToUniversalTime().ToString("O")
+        )
+        |> ignore
+        command.Parameters.AddWithValue(
+            "$terminalSessionId",
+            TerminalSessionId.value terminalSessionId
+        )
+        |> ignore
+        Assert.That(command.ExecuteNonQuery(), Is.EqualTo 10000)
+
+    let queryPlan dbPath terminalSessionIds =
+        use connection = SqliteTestDatabase.openConnection dbPath
+        use command = connection.CreateCommand()
+
+        let parameters =
+            terminalSessionIds
+            |> Set.toList
+            |> List.mapi (fun index terminalSessionId ->
+                $"$terminalSessionId{index}", TerminalSessionId.value terminalSessionId)
+
+        let parameterNames =
+            parameters |> List.map fst |> String.concat ", "
+
+        command.CommandText <-
+            "EXPLAIN QUERY PLAN "
+            + statusesByTerminalSessionIdsSql parameterNames
+
+        parameters
+        |> List.iter (fun (name, value) ->
+            command.Parameters.AddWithValue(name, value) |> ignore)
+
+        use reader = command.ExecuteReader()
+
+        let rec read details =
+            if reader.Read() then
+                read (reader.GetString 3 :: details)
+            else
+                details |> List.rev
+
+        read []
+
+    [<Test>]
+    member _.``terminal-origin lookup uses the ordered index with a large unrelated fixture``() =
+        withStoreAndPath (fun dbPath store ->
+            let requestedA =
+                TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+            let requestedB =
+                TerminalSessionId "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+            let unrelated =
+                TerminalSessionId "ffffffffffffffffffffffffffffffff"
+
+            insertLargeUnrelatedFixture dbPath unrelated
+
+            storedOf
+                "owned-a"
+                "C:/wt/a"
+                { emptyStatus with Status = SessionLevelStatus.Idle }
+                "2026-03-01T10:02:00Z"
+                "2026-03-01T10:02:00Z"
+            |> withTerminalOrigin requestedA
+            |> store.UpsertStatus
+
+            storedOf
+                "owned-b"
+                "C:/wt/b"
+                { emptyStatus with Status = SessionLevelStatus.Working }
+                "2026-03-01T10:03:00Z"
+                "2026-03-01T10:03:00Z"
+            |> withTerminalOrigin requestedB
+            |> store.UpsertStatus
+
+            let requested = Set.ofList [ requestedA; requestedB ]
+            let rows = store.StatusesByTerminalSessionIds requested
+            let plan = queryPlan dbPath requested |> String.concat Environment.NewLine
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    rows |> List.map _.SessionId |> Set.ofList,
+                    Is.EqualTo(Set.ofList [ SessionId "owned-a"; SessionId "owned-b" ])
+                )
+                Assert.That(
+                    plan,
+                    Does.Contain("USING INDEX ix_status_terminal_activity")
+                )
+                Assert.That(plan, Does.Not.Contain("SCAN session_status"))
+                Assert.That(plan, Does.Not.Contain("USE TEMP B-TREE FOR ORDER BY"))))
 
 
 [<TestFixture>]
@@ -648,21 +847,40 @@ VALUES
         cmd.Parameters.AddWithValue("$ts", (ts "2026-03-01T11:30:00Z").ToUniversalTime().ToString("O")) |> ignore
         cmd.ExecuteNonQuery() |> ignore
 
+    let indexColumns dbPath indexName =
+        use conn = new SqliteConnection(connStr dbPath)
+        conn.Open()
+        use cmd = conn.CreateCommand()
+        cmd.CommandText <- $"PRAGMA index_info('{indexName}');"
+        use reader = cmd.ExecuteReader()
+
+        let rec read columns =
+            if reader.Read() then
+                read (reader.GetString 2 :: columns)
+            else
+                columns |> List.rev
+
+        read []
+
     [<Test>]
     member _.``Construction adds metadata columns idempotently and preserves legacy rows``() =
         withDbPath (fun dbPath ->
             seedLegacyDatabase dbPath
+            let terminalSessionId =
+                TerminalSessionId "fedcba9876543210fedcba9876543210"
 
             (use store = new SessionActivityStore(dbPath)
              let legacy = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
              Assert.That(legacy.Status.Intent, Is.EqualTo(None))
              Assert.That(legacy.Status.Title, Is.EqualTo(None))
              Assert.That(legacy.Status.BackgroundAgentClocks, Is.Empty)
+             Assert.That(legacy.TerminalSessionId, Is.EqualTo None)
 
              let intent = msg "investigating the fold" "2026-03-01T11:45:00Z"
              let title = msg "Investigate the fold" "2026-03-01T11:46:00Z"
 
              { legacy with
+                 TerminalSessionId = Some terminalSessionId
                  Status.Intent = Some intent
                  Status.Title = Some title
                  UpdatedAt = ts "2026-03-01T11:46:00Z"
@@ -671,8 +889,19 @@ VALUES
 
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
-            Assert.That(row.Status.Intent, Is.EqualTo(Some(msg "investigating the fold" "2026-03-01T11:45:00Z")))
-            Assert.That(row.Status.Title, Is.EqualTo(Some(msg "Investigate the fold" "2026-03-01T11:46:00Z"))))
+            Assert.Multiple(fun () ->
+                Assert.That(row.Status.Intent, Is.EqualTo(Some(msg "investigating the fold" "2026-03-01T11:45:00Z")))
+                Assert.That(row.Status.Title, Is.EqualTo(Some(msg "Investigate the fold" "2026-03-01T11:46:00Z")))
+                Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
+                Assert.That(
+                    indexColumns dbPath "ix_status_terminal_activity",
+                    Is.EqualTo(
+                        [ "terminal_session_id"
+                          "updated_at"
+                          "session_id" ]
+                    ),
+                    "the terminal index must be created after the additive column migration"
+                )))
 
     [<Test>]
     member _.``Construction adds context columns idempotently and preserves legacy rows``() =
