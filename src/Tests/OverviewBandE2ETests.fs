@@ -885,13 +885,20 @@ type OverviewBandE2ETests() =
         task {
             let canvasBtn =
                 this.Page.Locator(".header-controls .ctrl-btn", PageLocatorOptions(HasText = "Canvas"))
-            do! canvasBtn.ClickAsync()
-            do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let investigating =
                 this.Page.Locator(".overview-agents-band .overview-item", PageLocatorOptions(HasText = "Investigating"))
+            // Select the group before narrowing the dashboard for Canvas: at full width the
+            // circle is already on-screen, so the click needs no Playwright auto-scroll. Scrolling
+            // into view here would cross the band's real (early, ~24px) sticky threshold before the
+            // deliberate scroll steps below run, pinning the band prematurely and — since the pinned
+            // transition only clears a selection made *while becoming* pinned, not one made earlier
+            // while already pinned — permanently stranding this drill-down open.
             do! investigating.ClickAsync()
             do! this.Page.Locator(".overview-breakdown").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            do! canvasBtn.ClickAsync()
+            do! this.Page.Locator(".canvas-tab-bar").WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
 
             let! _ =
                 this.Page.EvaluateAsync(
