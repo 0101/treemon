@@ -84,5 +84,8 @@ jobs:
       - name: Publish runtime layout
         run: dotnet publish src/Server/Server.fsproj --configuration Release --no-build --output .agents/ci-publish
 
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
       - name: Verify pinned ttyd runtime
         run: npm run test:ttyd-runtime
