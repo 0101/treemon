@@ -116,6 +116,7 @@ let private recorderExecutable =
     Path.Combine(
         repoRoot,
         "src",
+        "Tests",
         "TestAgentRecorder",
         "bin",
         configuration,
