@@ -436,7 +436,7 @@ let internal documentShellHash (html: string) =
     let bodyStart = tryFindOpeningTag "body" afterHeadIndex html
     let headEnd =
         if headCloseIndex >= 0 then afterHeadIndex
-        else bodyStart |> Option.defaultValue 0
+        else bodyStart |> Option.defaultValue html.Length
     let headSource =
         if headEnd = 0 then ""
         else html[..headEnd - 1]

@@ -489,7 +489,11 @@ type BuildInjectionTests() =
             Assert.That(
                 documentShellHash (doc " lang=\"en\"" "<style>body{color:red}</style>" " data-rule=\"a>b\" class=\"wide\"" "<p>Before</p>"),
                 Is.Not.EqualTo(documentShellHash baseline),
-                "body attributes require reload"))
+                "body attributes require reload")
+            Assert.That(
+                documentShellHash "<style>body{color:blue}</style><h1>Fragment</h1>",
+                Is.Not.EqualTo(documentShellHash "<style>body{color:red}</style><h1>Fragment</h1>"),
+                "a fragment with no explicit head or body must conservatively reload when its leading style changes"))
 
     [<Test>]
     member _.``served AgentDoc exposes the exact raw-byte hash to the response and loaded document``() =
