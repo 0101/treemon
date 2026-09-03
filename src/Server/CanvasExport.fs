@@ -75,17 +75,26 @@ let injectAtHead (injection: string) (html: string) : string =
 let private isTagBoundary character =
     Char.IsWhiteSpace character || character = '>' || character = '/'
 
-let private tryFindOpeningTag tagName startIndex (html: string) =
-    let token = $"<{tagName}"
+let private tryFindTag token startIndex (html: string) =
     let rec find fromIndex =
         let index = html.IndexOf(token, fromIndex, StringComparison.OrdinalIgnoreCase)
         if index < 0 then
             None
         else
-            let nextIndex = index + token.Length
-            if nextIndex = html.Length || isTagBoundary html[nextIndex] then Some index
-            else find nextIndex
+            let commentStart = html.LastIndexOf("<!--", index, StringComparison.Ordinal)
+            let commentEnd = html.LastIndexOf("-->", index, StringComparison.Ordinal)
+            if commentStart > commentEnd then
+                let afterComment = html.IndexOf("-->", index, StringComparison.Ordinal)
+                if afterComment < 0 then None else find (afterComment + "-->".Length)
+            else
+                let nextIndex = index + token.Length
+                if nextIndex = html.Length || isTagBoundary html[nextIndex] then Some index
+                else find nextIndex
     find startIndex
+
+let private tryFindOpeningTag tagName = tryFindTag $"<{tagName}"
+
+let private tryFindClosingTag tagName = tryFindTag $"</{tagName}"
 
 let private tryFindTagEnd startIndex (html: string) =
     let rec find index quote =
@@ -101,18 +110,70 @@ let private tryFindTagEnd startIndex (html: string) =
             | None, _ -> find (index + 1) None
     find startIndex None
 
+let private afterTag startIndex (html: string) =
+    tryFindTagEnd startIndex html
+    |> Option.map ((+) 1)
+    |> Option.defaultValue html.Length
+
+let private javascriptMimeTypes =
+    Set.ofList [
+        "application/ecmascript"
+        "application/javascript"
+        "application/x-ecmascript"
+        "application/x-javascript"
+        "text/ecmascript"
+        "text/javascript"
+        "text/javascript1.0"
+        "text/javascript1.1"
+        "text/javascript1.2"
+        "text/javascript1.3"
+        "text/javascript1.4"
+        "text/javascript1.5"
+        "text/jscript"
+        "text/livescript"
+        "text/x-ecmascript"
+        "text/x-javascript"
+    ]
+
+let private scriptTypePattern =
+    Regex(
+        @"(?:^|\s)type\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))",
+        RegexOptions.IgnoreCase
+    )
+
+let private tryScriptType (openingTag: string) =
+    let result = scriptTypePattern.Match(openingTag)
+    if not result.Success then
+        None
+    else
+        [ result.Groups[1]; result.Groups[2]; result.Groups[3] ]
+        |> List.tryFind _.Success
+        |> Option.map _.Value
+
+let private isBrowserProcessedScriptTag openingTag =
+    match tryScriptType openingTag with
+    | None -> true
+    | Some value ->
+        let parts = value.Trim().ToLowerInvariant().Split(';')
+        let mime = parts[0].Trim()
+        mime = ""
+        || mime = "module"
+        || mime = "importmap"
+        || mime = "speculationrules"
+        || Set.contains mime javascriptMimeTypes
+
 /// Hash the authored document surfaces outside the body-innerHTML morph target: everything through
 /// the closing head plus the quote-aware body opening tag. A fragment with neither marker hashes in
 /// full so browser-hoisted styles cannot fail open as an unchanged shell.
 let internal documentShellHash (html: string) =
-    let headCloseIndex = html.IndexOf("</head>", StringComparison.OrdinalIgnoreCase)
+    let headClose = tryFindClosingTag "head" 0 html
     let afterHeadIndex =
-        if headCloseIndex < 0 then 0
-        else headCloseIndex + "</head>".Length
+        headClose |> Option.map (fun index -> afterTag index html) |> Option.defaultValue 0
     let bodyStart = tryFindOpeningTag "body" afterHeadIndex html
     let headEnd =
-        if headCloseIndex >= 0 then afterHeadIndex
-        else bodyStart |> Option.defaultValue html.Length
+        match headClose with
+        | Some _ -> afterHeadIndex
+        | None -> bodyStart |> Option.defaultValue html.Length
     let headSource =
         if headEnd = 0 then ""
         else html[..headEnd - 1]
@@ -127,6 +188,35 @@ let internal documentShellHash (html: string) =
     (headSource + "\u0000" + bodyTag)
     |> System.Text.Encoding.UTF8.GetBytes
     |> CanvasScanner.contentHash
+
+/// Whether the authored body source contains a script the browser processes. This survives scripts
+/// removing their own live DOM node, so a later source edit can still reload and tear down effects.
+let internal hasBrowserProcessedBodyScript (html: string) =
+    match tryFindOpeningTag "body" 0 html with
+    | None -> false
+    | Some bodyStart ->
+        let bodyContentStart = afterTag bodyStart html
+        let bodyEnd =
+            tryFindClosingTag "body" bodyContentStart html
+            |> Option.defaultValue html.Length
+        let rec scan fromIndex =
+            match tryFindOpeningTag "script" fromIndex html with
+            | Some scriptStart when scriptStart < bodyEnd ->
+                let scriptTagEnd = tryFindTagEnd scriptStart html
+                match scriptTagEnd with
+                | None -> true
+                | Some tagEnd ->
+                    let openingTag = html[scriptStart..tagEnd]
+                    if isBrowserProcessedScriptTag openingTag then
+                        true
+                    else
+                        let nextIndex =
+                            tryFindClosingTag "script" (tagEnd + 1) html
+                            |> Option.map (fun index -> afterTag index html)
+                            |> Option.defaultValue html.Length
+                        scan nextIndex
+            | _ -> false
+        scan bodyContentStart
 
 /// Turn an on-disk canvas doc into a standalone, shareable page: re-inject the shared base theme +
 /// the inert `canvasSend` at `</head>` (or prepend when there is no `</head>`), and nothing else.

@@ -36,6 +36,7 @@
   var CONTENT_HASH_HEADER = 'X-Treemon-Canvas-Content-Hash';
   var CONTENT_HASH_META_NAME = 'treemon-canvas-content-hash';
   var SHELL_HASH_META_NAME = 'treemon-canvas-shell-hash';
+  var BODY_SCRIPT_META_NAME = 'treemon-canvas-has-body-script';
   var RUNTIME_ATTRIBUTE = 'data-treemon-runtime';
   var JAVASCRIPT_MIME_TYPES = new Set([
     'application/ecmascript',
@@ -118,18 +119,32 @@
     });
   }
 
-  function documentMetaHash(root, name) {
-    var meta = root.querySelector(
-      'meta[' + RUNTIME_ATTRIBUTE + '][name="' + name + '"]'
+  function documentMetaValue(root, name) {
+    var metas = root.querySelectorAll(
+      'head meta[' + RUNTIME_ATTRIBUTE + '][name="' + name + '"]'
     );
-    var value = meta && meta.getAttribute('content');
+    var meta = metas.length > 0 ? metas[metas.length - 1] : null;
+    return meta && meta.getAttribute('content');
+  }
+
+  function documentMetaHash(root, name) {
+    var value = documentMetaValue(root, name);
     return isContentHash(value) ? value : null;
   }
 
-  function requiresDocumentReload(current, incoming, loadedShellHash) {
+  function documentMetaBoolean(root, name) {
+    var value = documentMetaValue(root, name);
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return null;
+  }
+
+  function requiresDocumentReload(incoming, loadedShellHash, loadedHasBodyScript) {
     var incomingShellHash = documentMetaHash(incoming, SHELL_HASH_META_NAME);
-    return hasAuthoredProcessedScript(current.body || current) ||
-      hasAuthoredProcessedScript(incoming) ||
+    var incomingHasBodyScript = documentMetaBoolean(incoming, BODY_SCRIPT_META_NAME);
+    return loadedHasBodyScript !== false ||
+      incomingHasBodyScript !== false ||
+      hasAuthoredProcessedScript(incoming.body || incoming) ||
       !loadedShellHash ||
       !incomingShellHash ||
       loadedShellHash !== incomingShellHash;
@@ -445,14 +460,16 @@
   function loadedDocumentState() {
     var contentHash = documentMetaHash(document, CONTENT_HASH_META_NAME);
     var shellHash = documentMetaHash(document, SHELL_HASH_META_NAME);
-    if (!contentHash || !shellHash) return null;
+    var hasBodyScript = documentMetaBoolean(document, BODY_SCRIPT_META_NAME);
+    if (!contentHash || !shellHash || hasBodyScript == null) return null;
 
     var lastSlash = location.pathname.lastIndexOf('/');
     return {
       scopedKey: decodeURIComponent(location.pathname.substring(1, lastSlash)),
       filename: decodeURIComponent(location.pathname.substring(lastSlash + 1)),
       contentHash: contentHash,
-      shellHash: shellHash
+      shellHash: shellHash,
+      hasBodyScript: hasBodyScript
     };
   }
 
@@ -460,6 +477,7 @@
     var loadedDocument = loadedDocumentState();
     var loadedContentHash = loadedDocument && loadedDocument.contentHash;
     var loadedShellHash = loadedDocument && loadedDocument.shellHash;
+    var loadedHasBodyScript = loadedDocument && loadedDocument.hasBodyScript;
     var loadedCompletionSent = false;
     var reloading = false;
     var highlighted = [];
@@ -481,6 +499,8 @@
       };
       if (reloading) return;
       if (loadedContentHash && morph.contentHash === loadedContentHash) {
+        generation++;
+        pendingMorph = null;
         loadedCompletionSent = true;
         postMorphComplete(morph, loadedContentHash);
         return;
@@ -510,7 +530,7 @@
             return;
           }
           var incoming = new DOMParser().parseFromString(refetched.html, 'text/html');
-          if (requiresDocumentReload(document, incoming, loadedShellHash)) {
+          if (requiresDocumentReload(incoming, loadedShellHash, loadedHasBodyScript)) {
             reloading = true;
             location.reload();
             return;
@@ -573,6 +593,7 @@
       isBrowserProcessedScript: isBrowserProcessedScript,
       hasAuthoredProcessedScript: hasAuthoredProcessedScript,
       documentMetaHash: documentMetaHash,
+      documentMetaBoolean: documentMetaBoolean,
       requiresDocumentReload: requiresDocumentReload
     };
   }

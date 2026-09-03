@@ -19,6 +19,9 @@ let internal contentHashMetaName = "treemon-canvas-content-hash"
 [<Literal>]
 let internal shellHashMetaName = "treemon-canvas-shell-hash"
 
+[<Literal>]
+let internal bodyScriptMetaName = "treemon-canvas-has-body-script"
+
 [<CLIMutable>]
 type CanvasRegisterRequest =
     { worktreePath: string
@@ -399,9 +402,11 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
         + CanvasMorphScript.style
         + markTreemonRuntimeScript CanvasMorphScript.script
 
-let internal buildLiveInjection kind filename contentHash shellHash =
+let internal buildLiveInjection kind filename contentHash shellHash hasBodyScript =
+    let hasBodyScriptValue = if hasBodyScript then "true" else "false"
     $"<meta data-treemon-runtime name=\"{contentHashMetaName}\" content=\"{contentHash}\">"
     + $"<meta data-treemon-runtime name=\"{shellHashMetaName}\" content=\"{shellHash}\">"
+    + $"<meta data-treemon-runtime name=\"{bodyScriptMetaName}\" content=\"{hasBodyScriptValue}\">"
     + buildInjection kind filename
 
 /// Serve a canvas doc from disk with the live injection spliced in, or the matching 400/404 for an
@@ -421,8 +426,14 @@ let internal serveCanvasDoc (ctx: HttpContext) (worktreePath: string) (filename:
         let html = System.Text.Encoding.UTF8.GetString(rawBytes)
         let contentHash = CanvasScanner.contentHash rawBytes
         let shellHash = CanvasExport.documentShellHash html
+        let hasBodyScript = CanvasExport.hasBrowserProcessedBodyScript html
         let injection =
-            buildLiveInjection (CanvasDocKinds.classify filename) filename contentHash shellHash
+            buildLiveInjection
+                (CanvasDocKinds.classify filename)
+                filename
+                contentHash
+                shellHash
+                hasBodyScript
         // Same </head> placement the static export uses (CanvasExport.injectAtHead) — one
         // implementation so live-served and published docs can never drift.
         let injected = CanvasExport.injectAtHead injection html

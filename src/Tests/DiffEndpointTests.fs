@@ -986,9 +986,19 @@ type DiffEndpointHttpTests() =
                     let fileUrl = worktreeUrl baseUrl worktree "diff-file"
                     let documentUrl = worktreeUrl baseUrl worktree filename
                     let assetUrl = baseUrl + DiffAssets.cssPath
+                    let rawBytes = System.Text.Encoding.UTF8.GetBytes rawHtml
+                    let contentHash = CanvasScanner.contentHash rawBytes
+                    let shellHash = CanvasExport.documentShellHash rawHtml
+                    let hasBodyScript = CanvasExport.hasBrowserProcessedBodyScript rawHtml
                     let expectedDocument =
                         rawHtml
-                        |> CanvasExport.injectAtHead (CanvasDocServer.buildInjection AgentDoc filename)
+                        |> CanvasExport.injectAtHead (
+                            CanvasDocServer.buildLiveInjection
+                                AgentDoc
+                                filename
+                                contentHash
+                                shellHash
+                                hasBodyScript)
 
                     let expectedAsset =
                         DiffAssets.tryFind DiffAssets.cssPath

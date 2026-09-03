@@ -493,7 +493,31 @@ type BuildInjectionTests() =
             Assert.That(
                 CanvasExport.documentShellHash "<style>body{color:blue}</style><h1>Fragment</h1>",
                 Is.Not.EqualTo(CanvasExport.documentShellHash "<style>body{color:red}</style><h1>Fragment</h1>"),
-                "a fragment with no explicit head or body must conservatively reload when its leading style changes"))
+                "a fragment with no explicit head or body must conservatively reload when its leading style changes")
+            Assert.That(
+                CanvasExport.documentShellHash "<html><head></head><!-- <body class=\"fake\"> --><body class=\"wide\">x</body></html>",
+                Is.Not.EqualTo(
+                    CanvasExport.documentShellHash "<html><head></head><!-- <body class=\"fake\"> --><body class=\"compact\">x</body></html>"),
+                "a body-looking token inside a comment must not hide a real body attribute change"))
+
+    [<Test>]
+    member _.``body script detection preserves browser-processed source state``() =
+        Assert.Multiple(fun () ->
+            Assert.That(
+                CanvasExport.hasBrowserProcessedBodyScript
+                    "<html><body><script type=\"application/json\">{\"value\":\"<script>\"}</script></body></html>",
+                Is.False,
+                "JSON data blocks remain eligible for the body morph path")
+            Assert.That(
+                CanvasExport.hasBrowserProcessedBodyScript
+                    "<html><body><!-- <script>ignored()</script> --><script type=\"module\">run()</script></body></html>",
+                Is.True,
+                "comments are ignored and module scripts require reload")
+            Assert.That(
+                CanvasExport.hasBrowserProcessedBodyScript
+                    "<html><head><script>headOnly()</script></head><body><p>static</p></body></html>",
+                Is.False,
+                "head scripts are represented by the shell hash, not the body-script flag"))
 
     [<Test>]
     member _.``served AgentDoc exposes the exact raw-byte hash to the response and loaded document``() =
@@ -536,7 +560,11 @@ type BuildInjectionTests() =
                 Assert.That(
                     servedHtml,
                     Does.Contain($"<meta data-treemon-runtime name=\"{shellHashMetaName}\" content=\"{expectedShellHash}\">"),
-                    "The reload decision must use an authored source hash rather than the live browser head")))
+                    "The reload decision must use an authored source hash rather than the live browser head")
+                Assert.That(
+                    servedHtml,
+                    Does.Contain($"<meta data-treemon-runtime name=\"{bodyScriptMetaName}\" content=\"false\">"),
+                    "The loaded document must preserve whether its authored body source had an active script")))
 
 // ── injectUrl loopback guard (Finding 10 / SSRF) ──────────────────────────────
 // injectUrl is registered then used as a POST target by SessionBridge, so a non-loopback value

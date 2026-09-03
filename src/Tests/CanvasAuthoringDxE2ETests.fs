@@ -26,8 +26,14 @@ let private injectLive (kind: CanvasDocKind) (filename: string) (docHtml: string
         |> System.Text.Encoding.UTF8.GetBytes
         |> Server.CanvasScanner.contentHash
     let shellHash = Server.CanvasExport.documentShellHash docHtml
+    let hasBodyScript = Server.CanvasExport.hasBrowserProcessedBodyScript docHtml
     let injection =
-        Server.CanvasDocServer.buildLiveInjection kind filename contentHash shellHash
+        Server.CanvasDocServer.buildLiveInjection
+            kind
+            filename
+            contentHash
+            shellHash
+            hasBodyScript
     docHtml |> injectAtHead injection, contentHash
 
 // ============================================================================
@@ -175,8 +181,8 @@ type CanvasInjectionThemeE2ETests() =
                     probe.textContent = 'window.__earlyHeadInjection = true';
                     document.head.append(probe);
                 }, { once: true });""")
-            // The init script models a browser/runtime executable head injection. It must not be
-            // mistaken for authored source and turn a body-only update into a reload.
+            // Mutable because Playwright repeatedly invokes the route callback without an immutable
+            // state channel; the count proves a live head injection did not force navigation.
             let mutable navigationRequests = 0
             do! this.Page.RouteAsync("**/form.html", fun route ->
                 let body, contentHash =
@@ -311,6 +317,135 @@ type CanvasInjectionThemeE2ETests() =
 
             do! Assertions.Expect(styled).ToHaveCSSAsync("color", "rgb(0, 0, 255)")
             Assert.That(navigationRequests, Is.EqualTo(2), "an authored head change must reload the document")
+        }
+
+    [<Test>]
+    member this.``source body script removal reloads after the script removes itself``() =
+        task {
+            let initial, initialHash =
+                """<!doctype html><html><head><title>self-removing</title></head><body>
+                <p id="version">Before</p>
+                <script>
+                window.addEventListener('canvas-probe', () => sessionStorage.setItem('old-listener-fired', 'yes'));
+                document.currentScript.remove();
+                </script>
+                </body></html>"""
+                |> injectLive AgentDoc "self-removing.html"
+            let updated, updatedHash =
+                """<!doctype html><html><head><title>self-removing</title></head><body>
+                <p id="version">After</p>
+                </body></html>"""
+                |> injectLive AgentDoc "self-removing.html"
+
+            // Mutable because Playwright invokes this route callback for every navigation and
+            // refetch; the count distinguishes the required reload from an unsafe body morph.
+            let mutable navigationRequests = 0
+            do! this.Page.RouteAsync("**/self-removing.html", fun route ->
+                let body, contentHash =
+                    if route.Request.IsNavigationRequest then
+                        navigationRequests <- navigationRequests + 1
+                        if navigationRequests = 1 then initial, initialHash
+                        else updated, updatedHash
+                    else
+                        updated, updatedHash
+                route.FulfillAsync(
+                    RouteFulfillOptions(
+                        ContentType = "text/html; charset=utf-8",
+                        Body = body,
+                        Headers =
+                            dict [
+                                Server.CanvasDocServer.contentHashHeaderName, contentHash
+                            ])))
+
+            let! _ =
+                this.Page.GotoAsync(
+                    $"{ServerFixture.canvasUrl}/wt/self-removing.html",
+                    PageGotoOptions(WaitUntil = WaitUntilState.Load))
+            let! liveScriptCount =
+                this.Page.Locator("body").EvaluateAsync<int>(
+                    "body => body.querySelectorAll('script:not([data-treemon-runtime])').length")
+            Assert.That(liveScriptCount, Is.EqualTo(0), "the authored script must remove its live node")
+
+            let hashLiteral = System.Text.Json.JsonSerializer.Serialize(updatedHash)
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => window.postMessage("
+                    + "{action:'content-updated',scopedKey:'wt',filename:'self-removing.html',contentHash:"
+                    + hashLiteral
+                    + "},'*')")
+
+            do! Assertions.Expect(this.Page.Locator("#version")).ToHaveTextAsync("After")
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => window.dispatchEvent(new Event('canvas-probe'))")
+            let! oldListenerFired =
+                this.Page.EvaluateAsync<string>(
+                    "() => sessionStorage.getItem('old-listener-fired')")
+            Assert.Multiple(fun () ->
+                Assert.That(navigationRequests, Is.EqualTo(2), "source script state must force one reload")
+                Assert.That(oldListenerFired, Is.Null, "the removed source script's listener must be torn down"))
+        }
+
+    [<Test>]
+    member this.``loaded-hash acknowledgement cancels an older in-flight refetch``() =
+        task {
+            let loaded, loadedHash =
+                """<!doctype html><html><head><title>race</title></head><body>
+                <p id="version">Loaded</p>
+                </body></html>"""
+                |> injectLive AgentDoc "race.html"
+            let stale, staleHash =
+                """<!doctype html><html><head><title>race</title></head><body>
+                <p id="version">Stale fetch</p>
+                </body></html>"""
+                |> injectLive AgentDoc "race.html"
+            let delayedFetch =
+                System.Threading.Tasks.TaskCompletionSource<IRoute>(
+                    System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously)
+
+            do! this.Page.RouteAsync("**/race.html", fun route ->
+                if route.Request.IsNavigationRequest then
+                    route.FulfillAsync(
+                        RouteFulfillOptions(
+                            ContentType = "text/html; charset=utf-8",
+                            Body = loaded,
+                            Headers =
+                                dict [
+                                    Server.CanvasDocServer.contentHashHeaderName, loadedHash
+                                ]))
+                else
+                    delayedFetch.TrySetResult(route) |> ignore
+                    System.Threading.Tasks.Task.CompletedTask)
+
+            let! _ =
+                this.Page.GotoAsync(
+                    $"{ServerFixture.canvasUrl}/wt/race.html",
+                    PageGotoOptions(WaitUntil = WaitUntilState.Load))
+            let staleHashLiteral = System.Text.Json.JsonSerializer.Serialize(staleHash)
+            let loadedHashLiteral = System.Text.Json.JsonSerializer.Serialize(loadedHash)
+            let signal contentHashLiteral =
+                "() => window.postMessage("
+                + "{action:'content-updated',scopedKey:'wt',filename:'race.html',contentHash:"
+                + contentHashLiteral
+                + "},'*')"
+
+            let! _ = this.Page.EvaluateAsync(signal staleHashLiteral)
+            let! delayedRoute =
+                delayedFetch.Task.WaitAsync(TimeSpan.FromSeconds(5.0))
+            let! _ = this.Page.EvaluateAsync(signal loadedHashLiteral)
+            do! delayedRoute.FulfillAsync(
+                RouteFulfillOptions(
+                    ContentType = "text/html; charset=utf-8",
+                    Body = stale,
+                    Headers =
+                        dict [
+                            Server.CanvasDocServer.contentHashHeaderName, staleHash
+                        ]))
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+
+            do! Assertions.Expect(this.Page.Locator("#version")).ToHaveTextAsync("Loaded")
         }
 
     [<Test>]

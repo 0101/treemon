@@ -26,6 +26,10 @@ Every served canvas doc is rewritten at the `</head>` injection point in
 | `SystemView` (e.g. beads, diff) | `baseStyle` (scrollbar + dark-theme typographic base: 15px/1.55 body, serif heading scale (h1 1.85rem), ~800px single-column page, `:where(:root)` design tokens, quiet table/blockquote/form-control defaults) + link interceptor + Escape focus-reclaim bridge + `canvasSend` + selected-text contextual actions |
 | `AgentDoc` | the above + bridge heartbeat + `canvasSend`/`canvasExpand` helpers + selected-text contextual actions + JS error overlay + idiomorph runtime + morph controller |
 
+Live serving wraps this per-kind runtime with `CanvasDocServer.buildLiveInjection`, which also
+stamps the full content hash, authored document-shell hash, and authored-body active-script flag
+used by the AgentDoc live-update controller. Static exports do not receive those live-only values.
+
 Phases 6 and 8 below have shipped (the table already reflects them); Phase 7 (the authoring
 ecosystem) is the remaining work.
 
