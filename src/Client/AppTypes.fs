@@ -84,7 +84,7 @@ type Msg =
     | SelectEmbeddedTerminal of EmbeddedTerminalId
     | CloseEmbeddedTerminal of EmbeddedTerminalId
     | EmbeddedTerminalCloseFailed
-    | HideTerminalPane
+    | ToggleTerminalPane
     | EmbeddedTerminalClosed of
         EmbeddedTerminalId *
         before: EmbeddedTerminalSnapshot *

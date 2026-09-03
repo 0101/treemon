@@ -30,12 +30,22 @@ type WorkspaceLayoutTests() =
 
     let settle (page: IPage) = page.WaitForTimeoutAsync(400.0f)
 
+    let terminalToggleBtn (page: IPage) =
+        page.Locator(
+            ".header-controls .ctrl-btn",
+            PageLocatorOptions(HasText = "Terminal"))
+
     let showTerminal (page: IPage) =
         task {
-            let! _ =
-                page.EvaluateAsync(
-                    "() => { const pane = document.querySelector('.terminal-pane'); pane.hidden = false; pane.classList.add('open'); document.querySelector('.app-layout').classList.remove('terminal-hidden'); }")
-            return ()
+            let pane = page.Locator(".terminal-pane.open")
+            let! openCount = pane.CountAsync()
+
+            if openCount = 0 then
+                do! (terminalToggleBtn page).ClickAsync()
+
+            do!
+                pane.WaitForAsync(
+                    LocatorWaitForOptions(Timeout = 5000.0f))
         }
 
     let assertShare (actual: float) (total: float) (expected: float) (what: string) =
@@ -62,6 +72,47 @@ type WorkspaceLayoutTests() =
             do! ensureCanvasPaneOpen this.Page
             let! opened = paneOrder this.Page
             Assert.That(opened, Is.EqualTo(closed))
+        }
+
+    [<Test>]
+    member this.``Terminal top-bar button toggles the pane and replaces its local Hide action``() =
+        task {
+            let toggle = terminalToggleBtn this.Page
+            let pane = this.Page.Locator(".terminal-pane")
+            let! initiallyOpen = this.Page.Locator(".terminal-pane.open").CountAsync()
+            let! initiallyActive =
+                toggle.EvaluateAsync<bool>(
+                    "button => button.classList.contains('active')")
+
+            do! toggle.ClickAsync()
+            do!
+                this.Page
+                    .Locator(".terminal-pane.open")
+                    .WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! openActive =
+                toggle.EvaluateAsync<bool>(
+                    "button => button.classList.contains('active')")
+            let! localHideCount =
+                pane
+                    .GetByRole(
+                        AriaRole.Button,
+                        LocatorGetByRoleOptions(Name = "Hide terminal pane"))
+                    .CountAsync()
+
+            do! toggle.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelector('.terminal-pane').hidden")
+            let! closedActive =
+                toggle.EvaluateAsync<bool>(
+                    "button => button.classList.contains('active')")
+
+            Assert.Multiple(fun () ->
+                Assert.That(initiallyOpen, Is.EqualTo(0))
+                Assert.That(initiallyActive, Is.False)
+                Assert.That(openActive, Is.True)
+                Assert.That(localHideCount, Is.EqualTo(0))
+                Assert.That(closedActive, Is.False))
         }
 
     [<Test>]
@@ -593,9 +644,13 @@ type TerminalPaneDomTests() =
         }
 
     [<Test>]
-    member this.``Hide preserves frames while reopening can add another selected-worktree terminal``() =
+    member this.``Top-bar toggle preserves frames while reopening can add another selected-worktree terminal``() =
         task {
             do! rememberFrames this.Page
+            let terminalToggle =
+                this.Page.Locator(
+                    ".header-controls .ctrl-btn",
+                    PageLocatorOptions(HasText = "Terminal"))
             let! _ =
                 this.Page.EvaluateAsync(
                     $"""() => {{
@@ -603,12 +658,7 @@ type TerminalPaneDomTests() =
                             document.querySelector('[data-terminal-id="{EmbeddedTerminalId.value secondTerminalId}"]');
                     }}""")
 
-            do!
-                this.Page
-                    .GetByRole(
-                        AriaRole.Button,
-                        PageGetByRoleOptions(Name = "Hide terminal pane"))
-                    .ClickAsync()
+            do! terminalToggle.ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     "() => document.querySelector('.terminal-pane').hidden")
@@ -623,14 +673,23 @@ type TerminalPaneDomTests() =
                     .Locator(".terminal-tab-label")
                     .TextContentAsync()
 
-            do!
-                (cardFor this.Page "feature-recent")
-                    .Locator(".embedded-terminal-btn")
-                    .ClickAsync()
+            do! terminalToggle.ClickAsync()
             do!
                 this.Page
                     .Locator(".terminal-pane.open")
                     .WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! selectedAfterToggle =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+
+            do!
+                (cardFor this.Page "feature-recent")
+                    .Locator(".embedded-terminal-btn")
+                    .ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelectorAll('.terminal-tab').length === 2")
             let! selectedAfterReopen =
                 (selectedTab this.Page)
                     .Locator(".terminal-tab-label")
@@ -649,6 +708,7 @@ type TerminalPaneDomTests() =
                 Assert.That(hiddenFrameCount, Is.EqualTo(3))
                 Assert.That(mountedWhileHidden, Is.True)
                 Assert.That(selectedWhileHidden, Is.EqualTo("Terminal 1"))
+                Assert.That(selectedAfterToggle, Is.EqualTo("Terminal 1"))
                 Assert.That(startCalls, Is.EqualTo(1))
                 Assert.That(visibleTabsAfterReopen, Is.EqualTo(2))
                 Assert.That(selectedAfterReopen, Is.EqualTo("Terminal 2"))

@@ -201,9 +201,9 @@ let beginEmbeddedTerminalStart path model =
     targetEmbeddedTerminalLaunch path model,
     alreadyStarting
 
-let private saveTerminalPaneOpenCmd () =
+let private saveTerminalPaneOpenCmd isOpen =
     Cmd.OfAsync.attempt
-        (fun () -> worktreeApi.Value.saveTerminalPaneOpen true)
+        (fun () -> worktreeApi.Value.saveTerminalPaneOpen isOpen)
         ()
         (fun _ -> NoOp)
 
@@ -214,7 +214,7 @@ let private launchEmbeddedTerminalCmd path start =
             ()
             (fun result -> EmbeddedTerminalStarted(path, result))
             (fun ex -> EmbeddedTerminalRequestFailed(path, ex.Message))
-        saveTerminalPaneOpenCmd ()
+        saveTerminalPaneOpenCmd true
     ]
 
 let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option =
@@ -424,7 +424,7 @@ let update msg model =
 
         updated,
         if alreadyStarting then
-            saveTerminalPaneOpenCmd ()
+            saveTerminalPaneOpenCmd true
         else
             launchEmbeddedTerminalCmd
                 path
@@ -502,9 +502,10 @@ let update msg model =
             (fun _ -> EmbeddedTerminalCloseFailed)
     | EmbeddedTerminalCloseFailed ->
         model, fetchEmbeddedTerminals worktreeApi
-    | HideTerminalPane ->
-        { model with TerminalPaneOpen = false },
-        Cmd.OfAsync.attempt worktreeApi.Value.saveTerminalPaneOpen false (fun _ -> NoOp)
+    | ToggleTerminalPane ->
+        let isOpen = not model.TerminalPaneOpen
+        { model with TerminalPaneOpen = isOpen },
+        saveTerminalPaneOpenCmd isOpen
     | EmbeddedTerminalClosed(_, before, snapshot) ->
         { model with
             EmbeddedTerminals = snapshot
@@ -677,7 +678,7 @@ let update msg model =
 
         updated,
         if alreadyStarting then
-            saveTerminalPaneOpenCmd ()
+            saveTerminalPaneOpenCmd true
         else
             launchEmbeddedTerminalCmd
                 path
@@ -1152,6 +1153,13 @@ let viewAppHeader model dispatch =
                                 prop.text "Overview"
                             ]
                             Html.button [
+                                prop.className (if model.TerminalPaneOpen then "ctrl-btn active" else "ctrl-btn")
+                                yield! noFocusProps
+                                prop.onClick (fun _ -> dispatch ToggleTerminalPane)
+                                prop.title "Toggle terminal pane"
+                                prop.text "Terminal"
+                            ]
+                            Html.button [
                                 prop.className (if model.Canvas.CanvasPaneOpen then "ctrl-btn active" else "ctrl-btn")
                                 yield! noFocusProps
                                 prop.onClick (fun _ -> dispatch ToggleCanvasPane)
@@ -1302,8 +1310,7 @@ let view model dispatch =
         let callbacks: TerminalPane.TerminalPaneCallbacks =
             { SelectTab = SelectEmbeddedTerminal >> dispatch
               CloseTab = CloseEmbeddedTerminal >> dispatch
-              StartTerminal = OpenEmbeddedTerminal >> dispatch
-              HidePane = fun () -> dispatch HideTerminalPane }
+              StartTerminal = OpenEmbeddedTerminal >> dispatch }
 
         TerminalPane.view state callbacks
 

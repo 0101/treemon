@@ -69,7 +69,8 @@ It remembers the selected terminal independently for each worktree. **New** star
 for the targeted worktree; the empty state offers **Start terminal**. Switching worktrees hides the
 other worktrees' tabs without closing their terminals, and running iframes stay mounted so their
 browser state survives. Closing the last visible tab leaves the pane open in its empty state; only
-**Hide** collapses the pane.
+the persistent top-bar **Terminal** control hides or shows the pane, using the same active treatment
+as the **Canvas** control.
 
 ### Launch routing and command startup
 

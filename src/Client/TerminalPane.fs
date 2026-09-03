@@ -21,8 +21,7 @@ type TerminalPaneState =
 type TerminalPaneCallbacks =
     { SelectTab: EmbeddedTerminalId -> unit
       CloseTab: EmbeddedTerminalId -> unit
-      StartTerminal: WorktreePath -> unit
-      HidePane: unit -> unit }
+      StartTerminal: WorktreePath -> unit }
 
 let private samePath left right =
     Shared.PathUtils.pathEquals
@@ -275,16 +274,7 @@ let private header state callbacks =
             ]
             Html.div [
                 prop.className "terminal-pane-actions"
-                prop.children [
-                    newTerminalButton
-                    Html.button [
-                        prop.className "ctrl-btn terminal-hide-btn"
-                        prop.ariaLabel "Hide terminal pane"
-                        prop.title "Hide terminal pane"
-                        prop.onClick (fun _ -> callbacks.HidePane ())
-                        prop.text "Hide"
-                    ]
-                ]
+                prop.children [ newTerminalButton ]
             ]
         ]
     ]
