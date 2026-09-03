@@ -32,9 +32,9 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
 
 type CodingToolResult =
     { Status: CodingToolStatus
-      /// One SessionDot per open (live) session, ordered Working→Waiting→Idle then most-recently-seen
-      /// first — the per-session status donuts, each carrying its own context usage. Empty ⇔
-      /// Status = NoSession.
+      /// One SessionDot per open (live) session, ordered Working→Waiting→Idle then by stable session
+      /// id — the per-session status donuts, each carrying its own context usage. Empty ⇔ Status =
+      /// NoSession.
       SessionStatuses: SessionDot list
       Provider: CodingToolProvider option
       CurrentSkill: string option
@@ -174,11 +174,11 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
             |> Option.defaultValue Idle
 
     // Per-session dots: every open session's freshness-adjusted status paired with its own running
-    // skill and context usage, ordered Working→Waiting→Idle then most-recently-seen first for a
-    // stable, flicker-free render. Each session keeps its OWN skill + ContextUsage — no footer
-    // collapse — so the Overview band can classify each session's activity independently and a session
-    // that has reported usage renders a donut regardless of which session currently wins status. Empty
-    // ⇔ status = NoSession, so the client reproduces the single grey dot from an empty list.
+    // skill and context usage, ordered Working→Waiting→Idle then by session id. Each session keeps
+    // its OWN skill + ContextUsage — no footer collapse — so the Overview band can classify each
+    // session's activity independently and a session that has reported usage renders a donut
+    // regardless of which session currently wins status. Empty ⇔ status = NoSession, so the client
+    // reproduces the single grey dot from an empty list.
     let sessionStatuses =
         selection.AdjustedOpen
         |> List.map (fun s ->
@@ -188,11 +188,8 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
                 |> SessionActivity.toCodingToolStatus
               Skill = s.Status.Skill
               ContextUsage = s.Status.ContextUsage },
-            s.LastSeen)
-        |> List.sortWith (fun (a, aSeen) (b, bSeen) ->
-            match compare (sessionStatusOrder a.Status) (sessionStatusOrder b.Status) with
-            | 0 -> compare bSeen aSeen
-            | c -> c)
+            SessionId.value s.SessionId)
+        |> List.sortBy (fun (dot, sessionId) -> sessionStatusOrder dot.Status, sessionId)
         |> List.map fst
 
     // Footer source: the active winner if running, else the most-recently-active session of ANY
