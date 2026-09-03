@@ -325,6 +325,18 @@ type TerminalPaneDomTests() =
                     ".terminal-tab-label",
                     PageLocatorOptions(HasText = label))))
 
+    // The close button is a sibling of `.terminal-tab` (not a descendant — it must stay outside
+    // the focusable role="tab" element for accessibility), so it is located via the shared
+    // `.terminal-tab-item` wrapper instead of chaining off tabFor.
+    let closeButtonFor (page: IPage) label =
+        page.Locator(
+            ".terminal-tab-item",
+            PageLocatorOptions(
+                Has = page.Locator(
+                    ".terminal-tab-label",
+                    PageLocatorOptions(HasText = label))))
+            .Locator(".terminal-tab-close")
+
     let cardFor (page: IPage) branch =
         page.Locator(
             ".wt-card",
@@ -726,8 +738,7 @@ type TerminalPaneDomTests() =
                     }}""")
 
             do!
-                (tabFor this.Page firstTerminalActivity)
-                    .Locator(".terminal-tab-close")
+                (closeButtonFor this.Page firstTerminalActivity)
                     .ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
@@ -745,8 +756,7 @@ type TerminalPaneDomTests() =
                     }}""")
 
             do!
-                (tabFor this.Page firstAlternateTerminalActivity)
-                    .Locator(".terminal-tab-close")
+                (closeButtonFor this.Page firstAlternateTerminalActivity)
                     .ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(

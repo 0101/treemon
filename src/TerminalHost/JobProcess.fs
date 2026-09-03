@@ -23,23 +23,12 @@ type OwnedJobProcess =
 
 [<RequireQualifiedAccess>]
 module JobProcess =
-    [<Literal>]
-    let private CreateSuspended = 0x00000004u
-
-    [<Literal>]
-    let private CreateUnicodeEnvironment = 0x00000400u
-
-    [<Literal>]
-    let private JobObjectExtendedLimitInformationClass = 9
-
-    [<Literal>]
-    let private JobObjectLimitKillOnJobClose = 0x00002000u
-
-    [<Literal>]
-    let private WaitObject0 = 0u
-
-    [<Literal>]
-    let private WaitTimeout = 258u
+    let [<Literal>] private CreateSuspended = 0x00000004u
+    let [<Literal>] private CreateUnicodeEnvironment = 0x00000400u
+    let [<Literal>] private JobObjectExtendedLimitInformationClass = 9
+    let [<Literal>] private JobObjectLimitKillOnJobClose = 0x00002000u
+    let [<Literal>] private WaitObject0 = 0u
+    let [<Literal>] private WaitTimeout = 258u
 
     [<Struct; StructLayout(LayoutKind.Sequential)>]
     type private StartupInfo =
@@ -108,26 +97,10 @@ module JobProcess =
     extern SafeFileHandle private CreateJobObject(nativeint jobAttributes, nativeint name)
 
     [<DllImport("kernel32.dll", SetLastError = true)>]
-    extern bool private SetInformationJobObject(
-        SafeFileHandle job,
-        int informationClass,
-        nativeint information,
-        uint32 informationLength
-    )
+    extern bool private SetInformationJobObject(SafeFileHandle job, int informationClass, nativeint information, uint32 informationLength)
 
     [<DllImport("kernel32.dll", EntryPoint = "CreateProcessW", CharSet = CharSet.Unicode, SetLastError = true)>]
-    extern bool private CreateProcess(
-        string applicationName,
-        StringBuilder commandLine,
-        nativeint processAttributes,
-        nativeint threadAttributes,
-        bool inheritHandles,
-        uint32 creationFlags,
-        nativeint environment,
-        string currentDirectory,
-        StartupInfo& startupInfo,
-        ProcessInformation& processInformation
-    )
+    extern bool private CreateProcess(string applicationName, StringBuilder commandLine, nativeint processAttributes, nativeint threadAttributes, bool inheritHandles, uint32 creationFlags, nativeint environment, string currentDirectory, StartupInfo& startupInfo, ProcessInformation& processInformation)
 
     [<DllImport("kernel32.dll", SetLastError = true)>]
     extern bool private AssignProcessToJobObject(SafeFileHandle job, SafeFileHandle processHandle)
@@ -139,13 +112,7 @@ module JobProcess =
     extern bool private TerminateProcess(SafeFileHandle processHandle, uint32 exitCode)
 
     [<DllImport("kernel32.dll", SetLastError = true)>]
-    extern bool private GetProcessTimes(
-        SafeFileHandle processHandle,
-        FileTime& creationTime,
-        FileTime& exitTime,
-        FileTime& kernelTime,
-        FileTime& userTime
-    )
+    extern bool private GetProcessTimes(SafeFileHandle processHandle, FileTime& creationTime, FileTime& exitTime, FileTime& kernelTime, FileTime& userTime)
 
     [<DllImport("kernel32.dll", SetLastError = true)>]
     extern uint32 private WaitForSingleObject(SafeFileHandle handle, uint32 milliseconds)

@@ -13,18 +13,12 @@ open Server.TerminalHostEndpoint
 open Server.TerminalHostManifest
 open Server.TerminalHostProcess
 
-[<Literal>]
-let private controlApiVersion = 2
-
-[<Literal>]
-let private maximumResponseBytes = 1_048_576L
+let [<Literal>] private controlApiVersion = 2
+let [<Literal>] private maximumResponseBytes = 1_048_576L
 
 // Mirrors TerminalHost.Protocol.MaximumAttachmentMessageBytes without coupling the server assembly.
-[<Literal>]
-let private maximumTerminalCommandFrameBytes = 16_384
-
-[<Literal>]
-let private terminalCommandSubprotocol = "treemon-command"
+let [<Literal>] private maximumTerminalCommandFrameBytes = 16_384
+let [<Literal>] private terminalCommandSubprotocol = "treemon-command"
 
 type internal TerminalRecord = { SessionId: string; WorktreePath: string; AttachmentEndpoint: string }
 
@@ -164,11 +158,7 @@ let private parseHealth (manifest: DiscoveryManifest) (text: string) =
                 Ok(ControlCompatibility.Incompatible $"TerminalHost control API version {apiVersion} is not supported (expected {controlApiVersion})")
             else
                 Ok ControlCompatibility.Compatible
-    with
-    | :? JsonException
-    | :? InvalidOperationException
-    | :? FormatException
-    | :? OverflowException ->
+    with MalformedJson ->
         Error "TerminalHost health response is malformed"
 
 let private probe config manifest =
@@ -286,11 +276,7 @@ let private parseRegistrySnapshot (manifest: DiscoveryManifest) (text: string) =
                         Error "TerminalHost registry contains duplicate terminal session IDs"
                     else
                         Ok { Revision = revision; Terminals = terminals })
-    with
-    | :? JsonException
-    | :? InvalidOperationException
-    | :? FormatException
-    | :? OverflowException ->
+    with MalformedJson ->
         Error "TerminalHost registry response is malformed"
 
 let private listTerminalsAtVersion version config manifest =
@@ -303,21 +289,24 @@ let private listTerminalsAtVersion version config manifest =
 
 let internal listTerminals config manifest = listTerminalsAtVersion controlApiVersion config manifest
 
+let private authoritativeRegistry config manifest =
+    listTerminals config manifest
+    |> AsyncResult.mapError (fun error -> MutationUnverified(None, error))
+
 let internal findTerminalById sessionId records =
     records
     |> List.tryFind (fun terminal ->
         String.Equals(terminal.SessionId, sessionId, StringComparison.Ordinal))
 
 let internal confirmTerminalOnHost config manifest sessionId =
-    async {
-        match! listTerminals config manifest with
-        | Error error -> return Error(MutationUnverified(None, error))
-        | Ok registry ->
-            return
-                if findTerminalById sessionId registry.Terminals |> Option.isSome then
-                    Ok registry
-                else
-                    Error(MutationRejected(registry, "TerminalHost did not retain the started terminal after command delivery"))
+    asyncResult {
+        let! registry = authoritativeRegistry config manifest
+
+        if findTerminalById sessionId registry.Terminals |> Option.isSome then
+            return registry
+        else
+            return!
+                Error(MutationRejected(registry, "TerminalHost did not retain the started terminal after command delivery"))
     }
 
 let private authoritativeRelist action lastRegistry config manifest requestResult =
@@ -531,8 +520,8 @@ let internal ensureHost config lastHost =
 
 let internal startTerminalOnHost (config: Config) (manifest: DiscoveryManifest) (path: string) =
     async {
-        match! listTerminals config manifest with
-        | Error error -> return Error(MutationUnverified(None, error))
+        match! authoritativeRegistry config manifest with
+        | Error error -> return Error error
         | Ok before ->
             let body = JsonSerializer.Serialize({| worktreePath = path |})
 
@@ -563,8 +552,8 @@ let internal startTerminalOnHost (config: Config) (manifest: DiscoveryManifest) 
 
 let internal closeTerminalOnHost config manifest sessionId =
     async {
-        match! listTerminals config manifest with
-        | Error error -> return Error(MutationUnverified(None, error))
+        match! authoritativeRegistry config manifest with
+        | Error error -> return Error error
         | Ok before ->
             match findTerminalById sessionId before.Terminals with
             | None -> return Ok before
@@ -589,8 +578,8 @@ let internal closeTerminalOnHost config manifest sessionId =
 
 let internal closeTerminalsForWorktreeOnHost config manifest path =
     async {
-        match! listTerminals config manifest with
-        | Error error -> return Error(MutationUnverified(None, error))
+        match! authoritativeRegistry config manifest with
+        | Error error -> return Error error
         | Ok before ->
             let terminalIds =
                 before.Terminals

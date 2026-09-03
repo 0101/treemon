@@ -4,21 +4,12 @@ open System
 
 [<RequireQualifiedAccess>]
 module Protocol =
-    [<Literal>]
-    let ControlApiVersion = 2
+    let [<Literal>] ControlApiVersion = 2
+    let [<Literal>] MaximumRequestBodyBytes = 16_384L
+    let [<Literal>] MaximumReplayBytes = 1_048_576
+    let [<Literal>] MaximumAttachmentMessageBytes = 16_384
 
-    [<Literal>]
-    let MaximumRequestBodyBytes = 16_384L
-
-    [<Literal>]
-    let MaximumReplayBytes = 1_048_576
-
-    [<Literal>]
-    let MaximumAttachmentMessageBytes = 16_384
-
-type CanonicalWorktree =
-    private
-        { Path: string }
+type CanonicalWorktree = private { Path: string }
 
 type TerminalProcess =
     { ProcessId: int

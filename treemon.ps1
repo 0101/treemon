@@ -940,6 +940,18 @@ function Resolve-DevelopmentTerminalHostExecutable {
     return [IO.Path]::GetFullPath($selected)
 }
 
+function Resolve-DevelopmentTerminalHostStateDirectory {
+    # Honors an explicit override the same way Resolve-DevelopmentTerminalHostExecutable does, but
+    # otherwise never falls back to the production state directory: dev/demo must discover and
+    # mutate only their own TerminalHost, never the one a running production instance owns.
+    if (-not [string]::IsNullOrWhiteSpace($env:TREEMON_TERMINAL_HOST_STATE_DIR)) {
+        return [IO.Path]::GetFullPath($env:TREEMON_TERMINAL_HOST_STATE_DIR)
+    }
+
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    return [IO.Path]::GetFullPath((Join-Path $localAppData "Treemon\TerminalHost-Dev"))
+}
+
 function Start-DualProcess(
     [string]$ServerArgs,
     [string]$ModeName,
@@ -949,6 +961,8 @@ function Start-DualProcess(
 ) {
     $devApiPort = 5001
     $devVitePort = 5174
+    $devTerminalHostStateDirectory = Resolve-DevelopmentTerminalHostStateDirectory
+    New-Item -ItemType Directory -Force -Path $devTerminalHostStateDirectory | Out-Null
 
     Write-Host "Starting $ModeName mode..." -ForegroundColor Cyan
     Write-Host "  Server:  http://localhost:$devApiPort ($ServerLabel)" -ForegroundColor Gray
@@ -964,6 +978,15 @@ function Start-DualProcess(
     $hadHostOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_EXECUTABLE
     $previousHostOverride = $env:TREEMON_TERMINAL_HOST_EXECUTABLE
     $env:TREEMON_TERMINAL_HOST_EXECUTABLE = $TerminalHostExecutable
+    $hadStateDirOverride = Test-Path Env:\TREEMON_TERMINAL_HOST_STATE_DIR
+    $previousStateDirOverride = $env:TREEMON_TERMINAL_HOST_STATE_DIR
+    $env:TREEMON_TERMINAL_HOST_STATE_DIR = $devTerminalHostStateDirectory
+    # The session-status reporting extension (src/Extension/reporting) only reads TREEMON_PORTS /
+    # TREEMON_PORT, defaulting to production's 5000. Without this, every embedded-terminal session
+    # started under dev/demo would silently report its activity to production instead of $devApiPort.
+    $hadPortsOverride = Test-Path Env:\TREEMON_PORTS
+    $previousPortsOverride = $env:TREEMON_PORTS
+    $env:TREEMON_PORTS = $devApiPort
 
     $serverProcess = $null
     $viteProcess = $null
@@ -1003,6 +1026,16 @@ function Start-DualProcess(
             $env:TREEMON_TERMINAL_HOST_EXECUTABLE = $previousHostOverride
         } else {
             Remove-Item Env:\TREEMON_TERMINAL_HOST_EXECUTABLE -ErrorAction SilentlyContinue
+        }
+        if ($hadStateDirOverride) {
+            $env:TREEMON_TERMINAL_HOST_STATE_DIR = $previousStateDirOverride
+        } else {
+            Remove-Item Env:\TREEMON_TERMINAL_HOST_STATE_DIR -ErrorAction SilentlyContinue
+        }
+        if ($hadPortsOverride) {
+            $env:TREEMON_PORTS = $previousPortsOverride
+        } else {
+            Remove-Item Env:\TREEMON_PORTS -ErrorAction SilentlyContinue
         }
 
         Write-Host "$ModeName mode stopped" -ForegroundColor Green

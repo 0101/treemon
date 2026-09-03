@@ -20,6 +20,7 @@ let private worktreeRoots = [ repoRoot ]
 
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
+let private terminalHostStateDirectory = TestUtils.terminalHostStateDirectory ()
 
 // Pick three distinct free loopback ports up front (TestUtils.getFreeTcpPorts binds :0, reads the
 // assigned ports, then releases them) for the API server, the canvas-doc server, and Vite — so the
@@ -64,7 +65,7 @@ let startServer () =
         let rootArgs = worktreeRoots |> List.map (fun r -> $"\"{r}\"") |> String.concat " "
 
         let proc =
-            TestUtils.startServerProcess serverProjectPath repoRoot rootArgs apiPort canvasPort fixturesPath
+            TestUtils.startServerProcess serverProjectPath repoRoot rootArgs apiPort canvasPort fixturesPath terminalHostStateDirectory
 
         serverProcess.Value <- Some proc
         do! TestUtils.waitForUrl serverUrl 30000
@@ -138,6 +139,7 @@ let stopAll () =
     killProc viteProcess.Value
     serverProcess.Value <- None
     viteProcess.Value <- None
+    TestUtils.stopTerminalHostState terminalHostStateDirectory
 
 [<SetUpFixture>]
 type GlobalSetup() =

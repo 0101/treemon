@@ -15,8 +15,7 @@ type internal OwnedSessionSnapshot =
       OpenSessions: OwnedSessionState list
       ResumableSessionIds: Map<TerminalSessionId, SessionId> }
 
-type internal ActivityQuery =
-    Set<TerminalSessionId> -> Result<int64 * StoredStatus list, string>
+type internal ActivityQuery = Set<TerminalSessionId> -> Result<int64 * StoredStatus list, string>
 
 let internal joinOwnedSessions
     (terminalSessionIds: Set<TerminalSessionId>)

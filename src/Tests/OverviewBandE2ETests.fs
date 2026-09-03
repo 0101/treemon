@@ -38,11 +38,12 @@ let private viteUrl = $"http://localhost:{vitePort}"
 
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
+let private terminalHostStateDirectory = TestUtils.terminalHostStateDirectory ()
 
 let private startServer () =
     task {
         let proc =
-            TestUtils.startServerProcess serverProjectPath repoRoot $"\"{repoRoot}\"" serverPort canvasPort fixturePath
+            TestUtils.startServerProcess serverProjectPath repoRoot $"\"{repoRoot}\"" serverPort canvasPort fixturePath terminalHostStateDirectory
         serverProcess.Value <- Some proc
         do! TestUtils.waitForUrl serverUrl 30000
     }
@@ -271,6 +272,7 @@ type OverviewBandE2ETests() =
         TestUtils.killProc viteProcess.Value
         serverProcess.Value <- None
         viteProcess.Value <- None
+        TestUtils.stopTerminalHostState terminalHostStateDirectory
 
     // Navigate, wait for the grid, toggle Overview on, wait for the band, then snapshot the DOM once.
     [<SetUp>]
@@ -899,7 +901,9 @@ type OverviewBandE2ETests() =
 
             // The page clock is faked, so in-page frame counting cannot pace the scroll-driven
             // timeline; a driver-side wait lets real frames commit it before the DOM is sampled.
-            do! this.Page.WaitForTimeoutAsync(250.0f)
+            // A page-side WaitForFunctionAsync is not an alternative here: its polling relies on
+            // requestAnimationFrame/timers, which the fake clock also freezes, so it never re-runs.
+            do! this.Page.WaitForTimeoutAsync(750.0f)
 
             let! morphJson =
                 this.Page.EvaluateAsync<string>(

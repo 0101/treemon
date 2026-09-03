@@ -81,6 +81,14 @@ let internal exactProperties required optional (element: JsonElement) =
         && Set.isSubset required distinct
         && Set.isSubset distinct allowed
 
+let internal (|MalformedJson|_|) (error: exn) =
+    match error with
+    | :? JsonException
+    | :? InvalidOperationException
+    | :? FormatException
+    | :? OverflowException -> Some()
+    | _ -> None
+
 let private optionalString name (element: JsonElement) =
     match element.EnumerateObject() |> Seq.tryFind (fun property -> property.Name = name) with
     | None -> Ok None
@@ -155,11 +163,7 @@ let private parseManifest (text: string) =
                           HostVersion = hostVersion |> Option.get
                           ControlApiVersion = apiVersion
                           StagedExecutableVersion = stagedVersion }
-    with
-    | :? JsonException
-    | :? InvalidOperationException
-    | :? FormatException
-    | :? OverflowException ->
+    with MalformedJson ->
         Error "TerminalHost discovery manifest is malformed"
 
 let internal readManifest config =

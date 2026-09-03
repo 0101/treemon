@@ -16,17 +16,10 @@ type private SocketReceiveMode = Buffered of int | Streaming of (byte array -> A
 
 [<RequireQualifiedAccess>]
 module internal TerminalProxy =
-    [<Literal>]
-    let private AttachmentPathRoot = "/_treemon/"
-
-    [<Literal>]
-    let private TtySubprotocol = "tty"
-
-    [<Literal>]
-    let private CommandSubprotocol = "treemon-command"
-
-    [<Literal>]
-    let private HiddenViewportScrollbarStyle =
+    let [<Literal>] private AttachmentPathRoot = "/_treemon/"
+    let [<Literal>] private TtySubprotocol = "tty"
+    let [<Literal>] private CommandSubprotocol = "treemon-command"
+    let [<Literal>] private HiddenViewportScrollbarStyle =
         "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0

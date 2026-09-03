@@ -161,29 +161,36 @@ let private terminalTab callbacks activeTerminal index tab =
     Html.div [
         prop.key (EmbeddedTerminalId.value terminalId)
         prop.className (
-            [ "terminal-tab"
+            [ "terminal-tab-item"
               lifecycleClass
               if isActive then "selected" ]
             |> String.concat " ")
-        prop.role "tab"
-        prop.ariaSelected isActive
-        prop.ariaLabel $"{label} for {worktreeName}, {lifecycleLabel}"
-        prop.tabIndex (if isActive then 0 else -1)
-        prop.title $"{label} for {worktreeName} — {lifecycleLabel}"
-        prop.onClick (fun _ -> callbacks.SelectTab terminalId)
-        prop.onKeyDown (fun e ->
-            if e.key = "Enter" || e.key = " " then
-                e.preventDefault ()
-                callbacks.SelectTab terminalId)
         prop.children [
-            Html.span [
-                prop.className "terminal-tab-state"
-                prop.ariaHidden true
-                prop.text lifecycleGlyph
-            ]
-            Html.span [
-                prop.className "terminal-tab-label"
-                prop.text label
+            Html.div [
+                prop.className (
+                    [ "terminal-tab"; lifecycleClass; if isActive then "selected" ]
+                    |> String.concat " ")
+                prop.role "tab"
+                prop.ariaSelected isActive
+                prop.ariaLabel $"{label} for {worktreeName}, {lifecycleLabel}"
+                prop.tabIndex (if isActive then 0 else -1)
+                prop.title $"{label} for {worktreeName} — {lifecycleLabel}"
+                prop.onClick (fun _ -> callbacks.SelectTab terminalId)
+                prop.onKeyDown (fun e ->
+                    if e.key = "Enter" || e.key = " " then
+                        e.preventDefault ()
+                        callbacks.SelectTab terminalId)
+                prop.children [
+                    Html.span [
+                        prop.className "terminal-tab-state"
+                        prop.ariaHidden true
+                        prop.text lifecycleGlyph
+                    ]
+                    Html.span [
+                        prop.className "terminal-tab-label"
+                        prop.text label
+                    ]
+                ]
             ]
             Html.button [
                 prop.className "terminal-tab-close"
@@ -218,7 +225,7 @@ let private navigateTabs (e: KeyboardEvent) =
         let tabList = e.currentTarget :?> Element
         let target = e.target :?> Element
         let tabs =
-            tabList.querySelectorAll(":scope > [role=\"tab\"]")
+            tabList.querySelectorAll(":scope > .terminal-tab-item > [role=\"tab\"]")
 
         target.closest("[role=\"tab\"]")
         |> Option.bind (fun current ->

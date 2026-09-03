@@ -242,10 +242,48 @@ let waitForUrl (url: string) (timeoutMs: int) : Task =
     |> Async.StartAsTask
     :> Task
 
+/// Build a unique, isolated TerminalHost state directory for an E2E fixture and create it. Every
+/// generic E2E fixture must pass this to `startServerProcess` so its spawned server never discovers
+/// or mutates the real production TerminalHost (or another fixture's).
+let terminalHostStateDirectory () =
+    let path = uniquePath "e2e-terminal-host-state"
+    Directory.CreateDirectory path |> ignore
+    path
+
+/// Best-effort shutdown of any TerminalHost process an E2E fixture started under its isolated state
+/// directory, verified by exact process identity (PID + start time) before killing so this never
+/// touches an unrelated process, then removes the directory. Call at fixture teardown alongside
+/// killing the fixture's own server/vite processes.
+let stopTerminalHostState (stateDirectory: string) =
+    try
+        let config =
+            { Server.TerminalHostClient.defaultConfig [] with HostStateDirectory = stateDirectory }
+
+        match Server.TerminalHostManifest.readManifest config with
+        | Ok(Some manifest) ->
+            match Server.TerminalHostManifest.processIdentityMatches config manifest with
+            | Ok true ->
+                try
+                    use proc = Process.GetProcessById manifest.Pid
+                    proc.Kill()
+                    proc.WaitForExit(5000) |> ignore
+                with _ ->
+                    ()
+            | _ -> ()
+        | _ -> ()
+    with _ ->
+        ()
+
+    try
+        Directory.Delete(stateDirectory, recursive = true)
+    with _ ->
+        ()
+
 /// Launch the Treemon API server process for an E2E fixture. `rootArgs` is the already-quoted,
 /// space-joined worktree-root list; each fixture keeps its own port / orphan-kill / fixture policy
-/// but shares this launch command.
-let startServerProcess (serverProjectPath: string) (repoRoot: string) (rootArgs: string) (port: int) (canvasPort: int) (fixturePath: string) : Process =
+/// but shares this launch command. `terminalHostStateDirectory` isolates the fixture's TerminalHost
+/// discovery/state from production and from every other fixture.
+let startServerProcess (serverProjectPath: string) (repoRoot: string) (rootArgs: string) (port: int) (canvasPort: int) (fixturePath: string) (terminalHostStateDirectory: string) : Process =
 #if DEBUG
     let configuration = "Debug"
 #else
@@ -256,7 +294,7 @@ let startServerProcess (serverProjectPath: string) (repoRoot: string) (rootArgs:
         "dotnet"
         $"""run --no-build --configuration {configuration} --project "{serverProjectPath}" -- {rootArgs} --port {port} --canvas-port {canvasPort} --test-fixtures "{fixturePath}" """
         repoRoot
-        []
+        [ "TREEMON_TERMINAL_HOST_STATE_DIR", terminalHostStateDirectory ]
         false
 
 /// Launch a Vite dev-server process wired to the given API/canvas ports for an E2E fixture.

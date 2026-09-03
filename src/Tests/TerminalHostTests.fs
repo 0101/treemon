@@ -641,6 +641,63 @@ type TerminalRegistryResilienceTests() =
             with _ ->
                 ()
 
+    [<Test>]
+    member _.``shutdown closes independent terminals with bounded parallelism instead of serially``() =
+        // Each terminal's data-plane Stop() blocks on a shared barrier until every participant has
+        // arrived. A serial shutdown would deadlock (only one terminal's Stop ever runs at a time,
+        // so the barrier never fills) and time out; the fixed, parallel shutdown lets every Stop
+        // reach the barrier together, so it releases well inside the test's own timeout.
+        let participantCount = 4
+        use barrier = new Barrier(participantCount)
+        let reachedTogether = ConcurrentQueue<bool>()
+
+        let starter sessionId _ =
+            async {
+                return
+                    Ok
+                        { ProcessId = 70_000 + reachedTogether.Count
+                          ProcessStartTimeUtcTicks = int64 (80_000 + reachedTogether.Count)
+                          TtydPort = 70_000 + reachedTogether.Count
+                          HasExited = fun () -> false
+                          Close = fun () -> () }
+            }
+
+        let dataPlaneStarter sessionId _ _ =
+            async {
+                return
+                    Ok
+                        { AttachmentEndpoint =
+                            $"http://127.0.0.1:41000/_treemon/{sessionId}/test-token/"
+                          AttachSocket = fun _ _ -> async.Return None
+                          AcceptBrowserFrame = fun _ _ -> async.Return(Ok())
+                          DetachSocket = fun _ -> async.Return()
+                          AcceptUpstreamFrame = fun _ -> async.Return()
+                          UpstreamEnded = fun () -> async.Return()
+                          Stop =
+                            fun () ->
+                                async { reachedTogether.Enqueue(barrier.SignalAndWait 2000) }
+                        }
+            }
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        [ 1..participantCount ]
+        |> List.iter (fun index ->
+            TerminalRegistry.start registry (worktree $"parallel-shutdown-{index}")
+            |> runWithin timeout
+            |> requireOk
+            |> ignore)
+
+        TerminalRegistry.shutdown registry |> runWithin timeout
+
+        Assert.Multiple(fun () ->
+            Assert.That(reachedTogether.Count, Is.EqualTo participantCount)
+            Assert.That(
+                reachedTogether |> Seq.forall id,
+                Is.True,
+                "every terminal's Stop must reach the shutdown barrier concurrently"
+            ))
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
