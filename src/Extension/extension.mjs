@@ -1,6 +1,6 @@
 import { joinSession } from "@github/copilot-sdk/extension";
 import { createServer } from "node:http";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
@@ -16,6 +16,7 @@ import {
   promptForSession,
 } from "./session-prompt.mjs";
 import { createSendQueue } from "./send-queue.mjs";
+import { createShutdownHandler } from "./shutdown-endpoint.mjs";
 
 const TREEMON_PORT = process.env.TREEMON_PORT || "5000";
 const TREEMON_REGISTER_URL = `http://127.0.0.1:${TREEMON_PORT}/api/canvas/register`;
@@ -126,9 +127,21 @@ function serverPort(server) {
 // closed; rejecting a present, non-loopback Origin is defense-in-depth. Legitimate callers comply:
 // Treemon POSTs /inject as application/json with no Origin, and the served-doc shim POSTs /_message
 // same-origin as application/json.
-function startHttpServer(session, state) {
+function startHttpServer(session, state, shutdownCapability) {
   return new Promise((resolvePromise, reject) => {
+    const routineShutdown =
+      typeof session.rpc?.shutdown === "function"
+        ? (request) => session.rpc.shutdown(request)
+        : undefined;
+    const handleShutdown = createShutdownHandler({
+      capability: shutdownCapability,
+      shutdown: routineShutdown,
+      log,
+    });
+
     const server = createServer(async (req, res) => {
+      if (await handleShutdown(req, res)) return;
+
       if (req.method === "POST" && req.url === "/inject") {
         if (!isTrustedInjectionHeaders(req.headers)) {
           log(`/inject rejected: untrusted request (content-type=${req.headers["content-type"] ?? ""}, origin=${req.headers["origin"] ?? ""})`);
@@ -232,16 +245,12 @@ function startHttpServer(session, state) {
   });
 }
 
-async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
+async function registerWithTreemon(registration) {
   try {
     const res = await fetch(TREEMON_REGISTER_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        worktreePath,
-        injectUrl,
-        sessionId,
-      }),
+      body: JSON.stringify(registration),
       signal: AbortSignal.timeout(TREEMON_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
@@ -255,7 +264,7 @@ async function registerWithTreemon(worktreePath, injectUrl, sessionId) {
     } catch {
       // older Treemon returns a non-JSON body — assume monitored to preserve prior behavior
     }
-    log(`registered ${worktreePath} → ${injectUrl} (monitored=${monitored})`);
+    log(`registered ${registration.worktreePath} (monitored=${monitored})`);
     return { reachable: true, monitored };
   } catch (err) {
     log(`could not reach Treemon: ${err.message}`);
@@ -297,7 +306,7 @@ async function declareOwnership(worktreePath, filename, sessionId) {
   }
 }
 
-function startHeartbeat(worktreePath, injectUrl, sessionId) {
+function startHeartbeat(registration) {
   let currentInterval = HEARTBEAT_INTERVAL_MS;
   let wasDisconnected = false;
   /** @type {ReturnType<typeof setTimeout> | null} */
@@ -308,7 +317,7 @@ function startHeartbeat(worktreePath, injectUrl, sessionId) {
   };
 
   const tick = async () => {
-    const { reachable } = await registerWithTreemon(worktreePath, injectUrl, sessionId);
+    const { reachable } = await registerWithTreemon(registration);
     if (reachable) {
       if (wasDisconnected) {
         log("Bridge reconnected to Treemon");
@@ -438,10 +447,25 @@ const sessionId =
 extensionState.sessionId = sessionId;
 const canvasWrites = watchCanvasWrites(session, worktreePath);
 
-const { server, port } = await startHttpServer(session, extensionState);
+const parentProcessId = process.ppid;
+const terminalSessionId =
+  process.env.TREEMON_TERMINAL_SESSION_ID?.trim() || undefined;
+const shutdownCapability = randomBytes(32).toString("base64url");
+const { server, port } =
+  await startHttpServer(session, extensionState, shutdownCapability);
 extensionState.port = port;
 const injectUrl = `http://127.0.0.1:${port}/inject`;
-const registered = await registerWithTreemon(worktreePath, injectUrl, sessionId);
+const shutdownUrl = `http://127.0.0.1:${port}/shutdown`;
+const registration = Object.freeze({
+  worktreePath,
+  injectUrl,
+  shutdownUrl,
+  shutdownCapability,
+  sessionId,
+  parentProcessId,
+  ...(terminalSessionId ? { terminalSessionId } : {}),
+});
+const registered = await registerWithTreemon(registration);
 const browserMode = !registered.reachable || !registered.monitored;
 extensionState.browserMode = browserMode;
 Object.freeze(extensionState);
@@ -459,7 +483,7 @@ if (browserMode) {
 const stopHeartbeat =
   browserMode
     ? () => {}
-    : startHeartbeat(worktreePath, injectUrl, sessionId);
+    : startHeartbeat(registration);
 
 const cleanup = () => {
   canvasWrites.stop();

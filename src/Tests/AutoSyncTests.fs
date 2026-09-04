@@ -3,6 +3,8 @@ module Tests.AutoSyncTests
 open System
 open System.IO
 open System.Net
+open System.Security.Cryptography
+open System.Text
 open System.Threading.Tasks
 open NUnit.Framework
 open Shared
@@ -13,13 +15,58 @@ open Server.SchedulerState
 open Server.SessionActivity
 open Server.SessionActivityStore
 
+let private identityForSessionId (sessionId: string) =
+    let hash =
+        sessionId
+        |> Encoding.UTF8.GetBytes
+        |> SHA256.HashData
+
+    let processId =
+        BitConverter.ToInt32(hash, 0)
+        |> fun value -> value &&& Int32.MaxValue
+        |> max 1
+
+    let startTicks =
+        BitConverter.ToInt64(hash, 8)
+        |> fun value -> value &&& Int64.MaxValue
+        |> max 1L
+
+    ProcessIdentity.create processId startTicks
+    |> Result.defaultWith invalidOp
+
+let private idleTarget sessionId =
+    IdleSession(identityForSessionId sessionId, sessionId)
+
+let private registerBridgeSession path injectUrl sessionId =
+    let identity = identityForSessionId sessionId
+    let processId, startTicks = ProcessIdentity.sortKey identity
+    let suffix = $"{processId:x8}{startTicks:x16}"
+    let capability = String('C', 43 - suffix.Length) + suffix
+    let resolver =
+        ProcessIdentityResolver.create (fun requested ->
+            if requested = processId then Ok(Some identity) else Ok None)
+
+    let request: SessionBridge.RegistrationRequest =
+        { WorktreePath = path
+          InjectUrl = injectUrl
+          ShutdownUrl = "http://127.0.0.1:1/shutdown"
+          ShutdownCapability = capability
+          SessionId = Some sessionId
+          ParentProcessId = processId
+          TerminalSessionId = None }
+
+    SessionBridge.registerSession resolver request
+    |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
+    |> ignore
+
 let private tempDirectory () =
     let path = Path.Combine(Path.GetTempPath(), $"treemon-auto-sync-{Guid.NewGuid():N}")
     Directory.CreateDirectory(path) |> ignore
     path
 
 let private storedSession sessionId worktreePath status updatedAt lastSeen =
-    { SessionId = SessionId sessionId
+    { ProcessIdentity = Some(identityForSessionId sessionId)
+      SessionId = SessionId sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath worktreePath
       Provider = CopilotCli
@@ -56,7 +103,7 @@ let private withoutAcceptedRecords: TriggerDependencies =
       RecordAcceptedRevision = fun _ _ -> async { return () }
       ClearAcceptedRevision = ignore
       ReadPrStatus = fun _ -> async { return Some NoPr }
-      ReadOwnership = fun _ -> async { return Free(IdleSession "session-a") }
+      ReadOwnership = fun _ -> async { return Free(idleTarget "session-a") }
       TryBeginOperation = fun _ -> async { return true }
       CompleteOperation = ignore
       MechanicalSync = fun _ -> async { return Error DirtyWorktree }
@@ -91,7 +138,7 @@ let private withAcceptedRecords agent store deliver =
 
     { autoSyncDependencies agent unexpectedLaunch None (Some store) with
         ReadPrStatus = fun _ -> async { return Some NoPr }
-        ReadOwnership = fun _ -> async { return Free(IdleSession "session-a") }
+        ReadOwnership = fun _ -> async { return Free(idleTarget "session-a") }
         TryBeginOperation = fun _ -> async { return true }
         CompleteOperation = ignore
         MechanicalSync = fun _ -> async { return Error DirtyWorktree }
@@ -198,7 +245,7 @@ type AutoSyncSelectionTests() =
         let settled =
             storedSession "settled" "/repo/wt" SessionLevelStatus.Idle (now - settleWindow) now
 
-        Assert.That(ownershipFromSessions now [ settled ], Is.EqualTo(Free(IdleSession "settled")))
+        Assert.That(ownershipFromSessions now [ settled ], Is.EqualTo(Free(idleTarget "settled")))
 
     [<Test>]
     member _.``A session with no status event yet is not two thousand years settled``() =
@@ -217,7 +264,7 @@ type AutoSyncSelectionTests() =
 
         Assert.That(
             ownershipFromSessions now [ skewed ],
-            Is.EqualTo(Free(IdleSession "skewed")),
+            Is.EqualTo(Free(idleTarget "skewed")),
             "reports are clamped only five minutes into the future, so negative idleness must not defer forever")
 
     [<Test>]
@@ -240,7 +287,7 @@ type AutoSyncSelectionTests() =
 
         Assert.That(
             ownershipFromSessions now [ older; newer ],
-            Is.EqualTo(Free(IdleSession "newer")))
+            Is.EqualTo(Free(idleTarget "newer")))
 
     [<Test>]
     member _.``Greatest activity UpdatedAt supplies a retained id only when no session is open``() =
@@ -276,7 +323,7 @@ type AutoSyncSelectionTests() =
         Assert.Multiple(fun () ->
             Assert.That(
                 openIdle,
-                Is.EqualTo(Free(IdleSession "shared-id")),
+                Is.EqualTo(Free(idleTarget "shared-id")),
                 "an idle CLI inside the openness window is still attached")
             Assert.That(
                 retainedOnly,
@@ -376,7 +423,7 @@ type AutoSyncTriggerTests() =
                                     root
                                     (Set.ofList >> Set.remove "feature-a" >> Set.toList)
 
-                                return Free(IdleSession "session-a")
+                                return Free(idleTarget "session-a")
                             }
                     Deliver =
                         fun _ ->
@@ -414,7 +461,7 @@ type AutoSyncTriggerTests() =
                             async {
                                 // The PR refresh reconciles the merge while the target is chosen.
                                 observedPr <- mergedPr
-                                return Free(IdleSession "session-a")
+                                return Free(idleTarget "session-a")
                             }
                     Deliver =
                         fun _ ->
@@ -942,7 +989,7 @@ type AutoSyncMechanicalTests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     deliveries |> List.map _.Target,
-                    Is.EqualTo([ IdleSession "idle-session" ]),
+                    Is.EqualTo([ idleTarget "idle-session" ]),
                     "the open terminal is where the work should land, not a freshly launched one")
                 Assert.That(
                     deliveries |> List.map _.Prompt,
@@ -969,7 +1016,7 @@ type AutoSyncMechanicalTests() =
                                 // what makes the worktree dirty enough for the merge to refuse.
                                 return
                                     if selections = 1 then
-                                        Free(IdleSession "idle-session")
+                                        Free(idleTarget "idle-session")
                                     else
                                         Busy
                             }
@@ -1364,7 +1411,7 @@ type AutoSyncSchedulerDispatchTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    ReadOwnership = fun _ -> async { return Free(IdleSession "session-a") }
+                    ReadOwnership = fun _ -> async { return Free(idleTarget "session-a") }
                     Deliver =
                         fun _ ->
                             async {
@@ -1425,14 +1472,17 @@ type AutoSyncDeliveryTests() =
 
     let request =
         { WorktreePath = WorktreePath "/repo/wt"
-          Target = IdleSession "session-a"
+          Target = idleTarget "session-a"
           Prompt = "Sync with upstream/main." }
 
     [<Test>]
     member _.``Live selected session receives the agent prompt without fallback launch``() =
         let expected: SessionBridge.SendRequest =
             { WorktreePath = "/repo/wt"
-              SessionId = Some "session-a"
+              Target =
+                SessionBridge.SendTarget.ExactProcess(
+                    identityForSessionId "session-a"
+                )
               Prompt = SessionBridge.Prompt.agentPrompt "Sync with upstream/main." }
 
         let tryDeliver (value: SessionBridge.SendRequest) =
@@ -1482,7 +1532,7 @@ type AutoSyncDeliveryTests() =
                 ProcessIdentity.create 1001 2001L
                 |> Result.defaultWith invalidOp
 
-            store.UpsertInstance
+            let closedInstance: StoredInstance =
                 { ProcessIdentity = identity
                   SessionId = newerClosed.SessionId
                   TerminalSessionId = newerClosed.TerminalSessionId
@@ -1494,6 +1544,8 @@ type AutoSyncDeliveryTests() =
                   LastSeen = newerClosed.LastSeen
                   ContextUsageAt = newerClosed.ContextUsageAt
                   ClosedAt = Some now }
+
+            store.UpsertInstance closedInstance
             |> ignore
 
             let ownership = readOwnership (Some store) [ openIdle ] path
@@ -1505,7 +1557,14 @@ type AutoSyncDeliveryTests() =
 
             let tryDeliver (value: SessionBridge.SendRequest) =
                 async {
-                    Assert.That(value.SessionId, Is.EqualTo(Some "open-idle"))
+                    Assert.That(
+                        value.Target,
+                        Is.EqualTo(
+                            SessionBridge.SendTarget.ExactProcess(
+                                identityForSessionId "open-idle"
+                            )
+                        )
+                    )
                     return SessionBridge.DeliveryResult.Delivered
                 }
 
@@ -1522,7 +1581,7 @@ type AutoSyncDeliveryTests() =
             Assert.Multiple(fun () ->
                 Assert.That(
                     target,
-                    Is.EqualTo(IdleSession "open-idle"),
+                    Is.EqualTo(idleTarget "open-idle"),
                     "an open idle session wins over newer retained identity as an OPEN target")
                 Assert.That(accepted, Is.True))
         finally
@@ -1583,7 +1642,10 @@ type AutoSyncDeliveryTests() =
                 (fun value ->
                     async {
                         deliveryAttempts <- deliveryAttempts + 1
-                        Assert.That(value.SessionId, Is.EqualTo None)
+                        Assert.That(
+                            value.Target,
+                            Is.EqualTo SessionBridge.SendTarget.Unspecified
+                        )
                         return SessionBridge.DeliveryResult.NoLiveSession
                     })
                 (fun () ->
@@ -1687,7 +1749,7 @@ type AutoSyncDeliveryTests() =
         listener.Prefixes.Add($"http://127.0.0.1:{port}/")
         listener.Start()
 
-        SessionBridge.registerSession path $"http://127.0.0.1:{port}/" (Some sessionId)
+        registerBridgeSession path $"http://127.0.0.1:{port}/" sessionId
 
         let firstRequest = listener.GetContextAsync()
         let delivery =
@@ -1701,7 +1763,7 @@ type AutoSyncDeliveryTests() =
                     })
                 { request with
                     WorktreePath = WorktreePath path
-                    Target = IdleSession sessionId }
+                    Target = idleTarget sessionId }
             |> Async.StartAsTask
 
         let firstContext =
@@ -1712,7 +1774,7 @@ type AutoSyncDeliveryTests() =
         let accepted = delivery.GetAwaiter().GetResult()
 
         let retryRequest = listener.GetContextAsync()
-        SessionBridge.registerSession path $"http://127.0.0.1:{port}/" (Some sessionId)
+        registerBridgeSession path $"http://127.0.0.1:{port}/" sessionId
 
         let retryContext =
             retryRequest.WaitAsync(TimeSpan.FromSeconds 5.0).GetAwaiter().GetResult()
@@ -1790,10 +1852,10 @@ type AutoSyncEndpointTests() =
                     (now - settleWindow)
                     now))
 
-        SessionBridge.registerSession
+        registerBridgeSession
             normalizedPath
             $"http://127.0.0.1:{port}/"
-            (Some "session-a")
+            "session-a"
 
         let store = AutoSyncStore.create (Path.Combine(root, "auto-sync.json"))
         store.Load()
@@ -1928,14 +1990,14 @@ type AutoSyncVerificationTests() =
                         (now.AddMinutes(-2.0))
                         now))
 
-            SessionBridge.registerSession
+            registerBridgeSession
                 normalizedPath
                 $"http://127.0.0.1:{selectedPort}/"
-                (Some "selected-idle")
-            SessionBridge.registerSession
+                "selected-idle"
+            registerBridgeSession
                 normalizedPath
                 $"http://127.0.0.1:{otherPort}/"
-                (Some "other-idle")
+                "other-idle"
 
             let api =
                 WorktreeApi.worktreeApi
@@ -2078,7 +2140,7 @@ type AutoSyncVerificationTests() =
                             }
                     ClearAcceptedRevision =
                         fun worktreePath -> acceptedRecords <- Map.remove worktreePath acceptedRecords
-                    ReadOwnership = fun _ -> async { return Free(IdleSession "selected-working") }
+                    ReadOwnership = fun _ -> async { return Free(idleTarget "selected-working") }
                     Deliver =
                         fun request ->
                             async {

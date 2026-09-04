@@ -293,7 +293,9 @@ infrastructure is not part of this store.
 `WorktreeApi` collapses open instances directly and separately selects each worktree's greatest
 durable `(UpdatedAt, SessionId, ProcessIdentity)` representative for footer and explicit Resume
 ownership. `retained_sessions` and closed prior process instances remain eligible only for retained
-content and session identity.
+content and session identity. The temporary one-row-per-durable-session adapter retains the exact
+identity of the physical instance it selected, so AutoSync addresses that process registration
+rather than another live process sharing the same `SessionId`.
 
 The remoting contract exposes `toggleAutoSync`. When enabled and the branch falls behind, `AutoSync`
 uses the same live and retained session state but preserves whether the selected identity is busy,
@@ -357,7 +359,8 @@ into lifecycle status.
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
 | `src/Server/SchedulerState.fs` | Live session state and `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |
-| `src/Server/SessionBridge.fs` | Process-keyed session registration, durable-session indexes, separate poll registration, exact prompt/shutdown delivery, retry queue, and bridge liveness. |
+| `src/Server/SessionBridge.fs` | Process-keyed session registration, durable-session/worktree lookup, separate poll registration, exact prompt/shutdown delivery, retry queue, and bridge liveness. |
+| `src/Extension/extension.mjs` and `shutdown-endpoint.mjs` | Exact bridge identity registration and capability-guarded loopback routine shutdown. |
 | `src/Server/AutoSync.fs` | Delivery-aware session selection and guarded sync-prompt fallback launch. |
 | `src/Shared/Types.fs` | `AgentActivity`, context usage, per-session markers, and worktree wire types. |
 | `src/Shared/WorktreeApi.fs` | Remoting contract, including `toggleAutoSync` and direct Overview history. |

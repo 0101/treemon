@@ -667,7 +667,8 @@ type StateAgentTests() =
 
             agent.Post(
                 UpdateSessionStatus
-                    { SessionId = SessionId "removed-worktree"
+                    { ProcessIdentity = None
+                      SessionId = SessionId "removed-worktree"
                       TerminalSessionId = None
                       WorktreePath = WorktreePath oldPath
                       Provider = CopilotCli
@@ -1858,7 +1859,8 @@ type ExpediteRefreshTests() =
 // in the map, on every UpdateSessionStatus.
 
 let private storedSeen (sid: string) (seen: DateTimeOffset) : StoredStatus =
-    { SessionId = SessionId sid
+    { ProcessIdentity = None
+      SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath "C:/wt/a"
       Provider = CopilotCli

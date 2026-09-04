@@ -43,7 +43,8 @@ let private startResult path id =
       TerminalId = id }
 
 let private liveSession now path terminalId sessionId : SessionActivityStore.StoredStatus =
-    { SessionId = SessionActivity.SessionId sessionId
+    { ProcessIdentity = None
+      SessionId = SessionActivity.SessionId sessionId
       TerminalSessionId =
         terminalId
         |> EmbeddedTerminalId.value

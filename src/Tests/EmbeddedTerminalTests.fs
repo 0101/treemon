@@ -2220,7 +2220,8 @@ type EmbeddedTerminalReplacementTests() =
             let awaitingAt = DateTimeOffset.UtcNow
             let backdatedLastSeen = awaitingAt - TimeSpan.FromMinutes 15.0
             let waitingSession: StoredStatus =
-                { SessionId = SessionId "exact-owned-waiting-session"
+                { ProcessIdentity = None
+                  SessionId = SessionId "exact-owned-waiting-session"
                   TerminalSessionId =
                     Some(TerminalSessionId terminal.SessionId)
                   WorktreePath = target

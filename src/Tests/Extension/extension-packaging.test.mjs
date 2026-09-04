@@ -37,3 +37,22 @@ test("each installed extension keeps its session-id compatibility boundary local
   assert.match(reporting, fallback);
   assert.doesNotMatch(reporting, /session-identity\.mjs/);
 });
+
+test("canvas bridge registration carries exact process and opaque shutdown metadata", () => {
+  const canvas =
+    readFileSync(new URL("../../Extension/extension.mjs", import.meta.url), "utf8");
+
+  assert.match(canvas, /const parentProcessId = process\.ppid;/);
+  assert.match(canvas, /process\.env\.TREEMON_TERMINAL_SESSION_ID/);
+  assert.match(
+    canvas,
+    /const shutdownCapability = randomBytes\(32\)\.toString\("base64url"\);/,
+  );
+  assert.match(canvas, /const shutdownUrl = `http:\/\/127\.0\.0\.1:\$\{port\}\/shutdown`;/);
+  assert.match(canvas, /registerWithTreemon\(registration\)/);
+  assert.doesNotMatch(
+    canvas,
+    /log\(`[^`]*\$\{shutdown(?:Capability|Url)\}/,
+    "shutdown capabilities and URLs must never enter extension diagnostics",
+  );
+});

@@ -8,7 +8,8 @@
     "reporting/reporting-core.mjs",
     "reporting/reporting-runtime.mjs",
     "send-queue.mjs",
-    "session-prompt.mjs"
+    "session-prompt.mjs",
+    "shutdown-endpoint.mjs"
   ],
   "exclude": []
 }

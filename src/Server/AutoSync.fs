@@ -12,7 +12,7 @@ open Server.SessionActivityStore
 type SyncTarget =
     /// A CLI is open and has settled — idle for `settleWindow`, or blocked on a user who is not
     /// there. Treemon syncs the worktree itself and prompts this session only if it could not finish.
-    | IdleSession of sessionId: string
+    | IdleSession of processIdentity: ProcessIdentity * sessionId: string
     /// No CLI is open. A retained/offline identity from a closed CLI may still be known.
     | NoOpenSession of retainedSessionId: string option
 
@@ -21,8 +21,15 @@ module SyncTarget =
     /// that a live agent will act on it.
     let sessionId =
         function
-        | IdleSession sessionId -> Some sessionId
+        | IdleSession(_, sessionId) -> Some sessionId
         | NoOpenSession retainedSessionId -> retainedSessionId
+
+    let sendTarget =
+        function
+        | IdleSession(processIdentity, _) ->
+            SessionBridge.SendTarget.ExactProcess processIdentity
+        | NoOpenSession retainedSessionId ->
+            SessionBridge.SendTarget.ofSessionId retainedSessionId
 
 /// Who — if anyone — is working in a worktree, and therefore what Treemon may do about a sync.
 /// Openness alone is not the question: a CLI that is merely open is a terminal somebody left
@@ -226,7 +233,18 @@ let internal ownershipFromSessions (now: DateTimeOffset) (sessions: StoredStatus
     | None ->
         match openSessions |> StoredStatus.tryMostRecentActivity with
         | Some settled when hasSettled now settled.UpdatedAt ->
-            Free(IdleSession(SessionId.value settled.SessionId))
+            match settled.ProcessIdentity with
+            | Some processIdentity ->
+                Free(
+                    IdleSession(
+                        processIdentity,
+                        SessionId.value settled.SessionId
+                    )
+                )
+            | None ->
+                // An open session without exact provenance cannot be addressed safely. Production
+                // exact-instance projections always carry it; retained history deliberately does not.
+                Busy
         | Some _ -> Busy
         | None ->
             sessions
@@ -294,7 +312,7 @@ let deliver
 
         let sendRequest: SessionBridge.SendRequest =
             { WorktreePath = path
-              SessionId = sessionId
+              Target = SyncTarget.sendTarget request.Target
               Prompt = SessionBridge.Prompt.agentPrompt request.Prompt }
 
         let launchFallback () =

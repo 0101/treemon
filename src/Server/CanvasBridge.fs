@@ -87,8 +87,7 @@ let internal resolveTarget
             let now = DateTime.UtcNow
 
             let liveSessions =
-                SessionBridge.sessionsForWorktree worktreePath
-                |> List.filter (SessionBridge.isSessionAlive now)
+                SessionBridge.canvasSessionsForWorktreeAt now worktreePath
 
             let liveSessionIds = liveSessions |> List.choose _.SessionId |> Set.ofList
 
@@ -125,7 +124,7 @@ let internal sendMessage (sessionStatuses: StoredStatus seq) (request: CanvasMes
         let! sendResult =
             SessionBridge.send
                 { WorktreePath = worktreePath
-                  SessionId = target
+                  Target = SessionBridge.SendTarget.ofSessionId target
                   Prompt = SessionBridge.Prompt.canvasFor request.Filename request.Payload }
 
         let result =
@@ -140,14 +139,6 @@ let internal sendMessage (sessionStatuses: StoredStatus seq) (request: CanvasMes
             | None, SystemView -> QueuedNeedingSession result
             | _ -> Routed result
     }
-
-let registerSession worktreePath injectUrl sessionId =
-    let normalizedSessionId =
-        match sessionId with
-        | Some value when not (String.IsNullOrWhiteSpace value) -> Some value
-        | _ -> None
-
-    SessionBridge.registerSession worktreePath injectUrl normalizedSessionId
 
 let drainPending worktreePath =
     SessionBridge.drainPendingCanvas worktreePath

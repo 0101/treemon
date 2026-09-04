@@ -22,8 +22,10 @@ When the canvas-bridge extension runs in a directory **not monitored by Treemon*
 
 ### Treemon Detection
 
-At startup the extension POSTs `worktreePath`, `injectUrl`, and `sessionId` to
-`/api/canvas/register`. Treemon's response reports whether the worktree is actually monitored:
+At startup the extension POSTs `worktreePath`, `injectUrl`, `sessionId`, its parent Copilot PID,
+optional inherited terminal ID, and its opaque loopback shutdown endpoint/capability to
+`/api/canvas/register`. Treemon validates exact process identity before recording a monitored
+registration. Its response reports whether the worktree is actually monitored:
 `{ registered: bool, monitored: bool }`, always with HTTP 200. The extension enters
 **browser fallback mode** when registration is
 unreachable/fails **or** `monitored === false`. For backward compatibility with older Treemon
@@ -99,7 +101,8 @@ accepts only the bare filename rather than stripping a path down to its final se
 
 ## Key Files
 
-- `src/Extension/extension.mjs` — mode detection, HTTP serving, ownership integration, runtime injection, message endpoint
+- `src/Extension/extension.mjs` — mode detection, exact registration, HTTP serving, ownership integration, runtime injection, message endpoint
+- `src/Extension/shutdown-endpoint.mjs` — capability-guarded loopback routine-shutdown endpoint
 - `src/Extension/canvas-send.js` — canonical `window.canvasSend` runtime shared with the server
 - `src/Extension/canvas-selection-context.js` — canonical selected-text interaction runtime shared with the server
 - `src/Extension/canvas-doc-kinds.json` — canonical SystemView filename list shared with the server

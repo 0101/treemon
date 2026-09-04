@@ -35,25 +35,9 @@ let private parseTerminalSessionId value =
     match value |> Option.filter (String.IsNullOrWhiteSpace >> not) with
     | None -> Ok None
     | Some raw ->
-        match Guid.TryParseExact(raw.Trim(), "N") with
-        | true, terminalSessionId ->
-            Ok(Some(TerminalSessionId(terminalSessionId.ToString("N"))))
-        | false, _ ->
-            Error
-                "terminalSessionId must be a 32-character hexadecimal TerminalHost session id"
+        TerminalSessionId.create raw |> Result.map Some
 
-let internal maxSessionIdLength = 128
-
-let private validSessionId value =
-    not (String.IsNullOrEmpty value)
-    && value.Length <= maxSessionIdLength
-    && value
-       |> Seq.forall (fun character ->
-           Char.IsAsciiLetterOrDigit character
-           || character = '.'
-           || character = '_'
-           || character = ':'
-           || character = '-')
+let internal maxSessionIdLength = SessionId.maxLength
 
 let private tryParseTimestamp (value: string) =
     match
@@ -212,11 +196,6 @@ let parseReport
         Error "missing body"
     elif request.parentProcessId <= 0 then
         Error "missing or invalid parentProcessId"
-    elif String.IsNullOrWhiteSpace request.sessionId then
-        Error "missing sessionId"
-    elif not (validSessionId request.sessionId) then
-        Error
-            $"sessionId must be 1-{maxSessionIdLength} characters from [A-Za-z0-9._:-]"
     elif String.IsNullOrWhiteSpace request.worktreePath then
         Error "missing worktreePath"
     elif String.IsNullOrWhiteSpace request.eventId then
@@ -226,32 +205,34 @@ let parseReport
     elif String.IsNullOrWhiteSpace request.kind then
         Error "missing kind"
     else
-        parseProvider request.provider
-        |> Result.bind (fun provider ->
-            parseTerminalSessionId (Option.ofObj request.terminalSessionId)
-            |> Result.bind (fun terminalSessionId ->
-                tryParseTimestamp request.occurredAt
-                |> Result.bind (fun rawOccurredAt ->
-                    let occurredAt =
-                        clampFutureTimestamp now rawOccurredAt
+        SessionId.create request.sessionId
+        |> Result.bind (fun sessionId ->
+            parseProvider request.provider
+            |> Result.bind (fun provider ->
+                parseTerminalSessionId (Option.ofObj request.terminalSessionId)
+                |> Result.bind (fun terminalSessionId ->
+                    tryParseTimestamp request.occurredAt
+                    |> Result.bind (fun rawOccurredAt ->
+                        let occurredAt =
+                            clampFutureTimestamp now rawOccurredAt
 
-                    parseEvent
-                        occurredAt
-                        request.kind
-                        request.message
-                        request.skillName
-                        request.toolCallId
-                        request.currentTokens
-                        request.tokenLimit
-                    |> Result.map (fun event ->
-                        { ParentProcessId = request.parentProcessId
-                          SessionId = SessionId request.sessionId
-                          TerminalSessionId = terminalSessionId
-                          WorktreePath =
-                            WorktreePath(
-                                PathUtils.normalizePath request.worktreePath
-                            )
-                          Provider = provider
-                          EventId = EventId request.eventId
-                          OccurredAt = occurredAt
-                          Event = withMessageTimestamp occurredAt event }))))
+                        parseEvent
+                            occurredAt
+                            request.kind
+                            request.message
+                            request.skillName
+                            request.toolCallId
+                            request.currentTokens
+                            request.tokenLimit
+                        |> Result.map (fun event ->
+                            { ParentProcessId = request.parentProcessId
+                              SessionId = sessionId
+                              TerminalSessionId = terminalSessionId
+                              WorktreePath =
+                                WorktreePath(
+                                    PathUtils.normalizePath request.worktreePath
+                                )
+                              Provider = provider
+                              EventId = EventId request.eventId
+                              OccurredAt = occurredAt
+                              Event = withMessageTimestamp occurredAt event })))))

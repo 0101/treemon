@@ -21,7 +21,8 @@ open Server.SqliteStorage
 /// Copilot SessionId. It is produced only by ExactInstanceProjection and by retained-history reads;
 /// no runtime writer persists this shape.
 type StoredStatus =
-    { SessionId: SessionId
+    { ProcessIdentity: ProcessIdentity option
+      SessionId: SessionId
       TerminalSessionId: TerminalSessionId option
       WorktreePath: WorktreePath
       Provider: CodingToolProvider
@@ -67,7 +68,8 @@ module StoredInstance =
         ProcessIdentity.sortKey stored.ProcessIdentity
 
     let toStoredStatus (stored: StoredInstance) =
-        { SessionId = stored.SessionId
+        { ProcessIdentity = Some stored.ProcessIdentity
+          SessionId = stored.SessionId
           TerminalSessionId = stored.TerminalSessionId
           WorktreePath = stored.WorktreePath
           Provider = stored.Provider
@@ -327,7 +329,8 @@ let private readProjectedStatus (reader: SqliteDataReader) =
     let contextUsage, contextUsageAt =
         readContextUsage reader 15 16 17
 
-    { SessionId = SessionId(reader.GetString 0)
+    { ProcessIdentity = None
+      SessionId = SessionId(reader.GetString 0)
       TerminalSessionId =
         readOptStr reader 20 |> Option.map TerminalSessionId
       WorktreePath = WorktreePath(reader.GetString 1)

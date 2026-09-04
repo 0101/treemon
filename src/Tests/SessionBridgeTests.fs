@@ -3,25 +3,98 @@ module Tests.SessionBridgeTests
 open System
 open System.IO
 open System.Net
+open System.Text.Json
+open System.Threading
 open System.Threading.Tasks
 open NUnit.Framework
 open Server.SessionBridge
+open Server.SessionActivity
 
 let private uniquePath prefix =
     Path.Combine(Path.GetTempPath(), "treemon-session-bridge-tests", prefix, $"{Guid.NewGuid():N}")
 
 let private clockSnapshot = DateTime(2042, 7, 23, 12, 0, 0, DateTimeKind.Utc)
 
+let private clockIdentity =
+    ProcessIdentity.create 91001 91001001L
+    |> Result.defaultWith invalidOp
+
 let private sessionEntry registeredAt =
-    { WorktreePath = Path.Combine("test", "clock")
+    { ProcessIdentity = clockIdentity
+      WorktreePath = Path.Combine("test", "clock")
       InjectUrl = "http://localhost/inject"
       SessionId = Some "clock-session"
+      TerminalSessionId = None
       RegisteredAt = registeredAt }
 
 let private queuedPrompt enqueuedAt text =
     { EnqueuedAt = enqueuedAt
-      TargetSessionId = None
+      Target = SendTarget.Unspecified
       Prompt = Prompt.agentPrompt text }
+
+// Tests share the module-level bridge registry, so each synthetic physical process needs a unique
+// exact identity even when several tests intentionally reuse one durable SessionId.
+let mutable private nextProcessId = 92000
+
+let private nextIdentity () =
+    let processId = Interlocked.Increment(&nextProcessId)
+    ProcessIdentity.create processId (int64 processId * 1000L + 1L)
+    |> Result.defaultWith invalidOp
+
+let private capabilityFor identity =
+    let processId, startTicks = ProcessIdentity.sortKey identity
+    let suffix = $"{processId:x8}{startTicks:x16}"
+    String('A', 43 - suffix.Length) + suffix
+
+let private resolverFor identity =
+    ProcessIdentityResolver.create (fun processId ->
+        if processId = ProcessIdentity.processId identity then
+            Ok(Some identity)
+        else
+            Ok None)
+
+let private registrationRequest identity path injectUrl sessionId terminalSessionId capability =
+    { WorktreePath = path
+      InjectUrl = injectUrl
+      ShutdownUrl = "http://127.0.0.1:1/shutdown"
+      ShutdownCapability = capability
+      SessionId = sessionId
+      ParentProcessId = ProcessIdentity.processId identity
+      TerminalSessionId = terminalSessionId }
+
+let private registerExactSession identity path injectUrl sessionId =
+    let request =
+        registrationRequest
+            identity
+            path
+            injectUrl
+            sessionId
+            None
+            (capabilityFor identity)
+
+    registerSession (resolverFor identity) request
+    |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
+
+let private registerTestSession path injectUrl sessionId =
+    registerExactSession (nextIdentity ()) path injectUrl sessionId
+    |> ignore
+
+let private assertRegistrationFailure
+    (expected: RegistrationFailure)
+    (actual: Result<SessionEntry, RegistrationFailure>)
+    : unit =
+    match actual with
+    | Error failure -> Assert.That(failure, Is.EqualTo expected)
+    | Ok entry ->
+        Assert.Fail(
+            $"Expected registration failure {expected}, but registered {entry.ProcessIdentity}"
+        )
+
+let private assertShutdownResult
+    (expected: Result<ShutdownCompletion, ShutdownFailure>)
+    (actual: Result<ShutdownCompletion, ShutdownFailure>)
+    =
+    Assert.That(actual, Is.EqualTo expected)
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -67,6 +140,614 @@ type ClockTests() =
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
+type ExactRegistrationTests() =
+
+    [<Test>]
+    member _.``Registration stores the resolver's exact identity and normalized terminal origin``() =
+        let identity = nextIdentity ()
+        let path = uniquePath "exact-registration"
+        let terminal = "ABCDEF0123456789ABCDEF0123456789"
+
+        let entry =
+            registrationRequest
+                identity
+                path
+                "http://127.0.0.1:1234/inject"
+                (Some "session.exact:1")
+                (Some terminal)
+                (capabilityFor identity)
+            |> registerSession (resolverFor identity)
+            |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
+
+        Assert.Multiple(fun () ->
+            Assert.That(entry.ProcessIdentity, Is.EqualTo identity)
+            Assert.That(entry.SessionId, Is.EqualTo(Some "session.exact:1"))
+            Assert.That(
+                entry.TerminalSessionId,
+                Is.EqualTo(
+                    Some(
+                        TerminalSessionId(
+                            terminal.ToLowerInvariant()
+                        )
+                    )
+                )
+            ))
+
+    [<Test>]
+    member _.``Registration rejects missing dead and unresolved parent identities without an entry``() =
+        let identity = nextIdentity ()
+        let path = uniquePath "invalid-parent"
+        let valid =
+            registrationRequest
+                identity
+                path
+                "http://127.0.0.1:1234/inject"
+                (Some "session-parent")
+                None
+                (capabilityFor identity)
+
+        let missing =
+            registerSession
+                (resolverFor identity)
+                { valid with ParentProcessId = 0 }
+
+        let dead =
+            registerSession
+                (ProcessIdentityResolver.create (fun _ -> Ok None))
+                valid
+
+        let unresolved =
+            registerSession
+                (ProcessIdentityResolver.create (fun _ -> Error "probe failed"))
+                valid
+
+        Assert.Multiple(fun () ->
+            assertRegistrationFailure RegistrationFailure.InvalidParentProcessId missing
+            assertRegistrationFailure RegistrationFailure.ParentProcessNotRunning dead
+            assertRegistrationFailure RegistrationFailure.ParentProcessResolutionFailed unresolved
+            Assert.That(sessionsForWorktree path, Is.Empty))
+
+    [<Test>]
+    member _.``Registration rejects invalid terminal identity and shutdown capability``() =
+        let identity = nextIdentity ()
+        let path = uniquePath "invalid-registration-metadata"
+        let valid =
+            registrationRequest
+                identity
+                path
+                "http://127.0.0.1:1234/inject"
+                (Some "session-metadata")
+                None
+                (capabilityFor identity)
+
+        let invalidTerminal =
+            registerSession
+                (resolverFor identity)
+                { valid with TerminalSessionId = Some "not-a-terminal-id" }
+
+        let invalidCapability =
+            registerSession
+                (resolverFor identity)
+                { valid with ShutdownCapability = "too-short" }
+
+        Assert.Multiple(fun () ->
+            assertRegistrationFailure RegistrationFailure.InvalidTerminalSessionId invalidTerminal
+            assertRegistrationFailure RegistrationFailure.InvalidShutdownCapability invalidCapability
+            Assert.That(sessionsForWorktree path, Is.Empty))
+
+    [<Test>]
+    member _.``A reused PID heartbeat cannot re-key one bridge capability to another process``() =
+        let original = nextIdentity ()
+        let processId = ProcessIdentity.processId original
+        let reused =
+            ProcessIdentity.create
+                processId
+                (ProcessIdentity.processStartTimeUtcTicks original + 1L)
+            |> Result.defaultWith invalidOp
+
+        // The mutable value is the injected operating-system resolver state under test.
+        let mutable current = original
+        let resolver =
+            ProcessIdentityResolver.create (fun requested ->
+                if requested = processId then Ok(Some current) else Ok None)
+
+        let path = uniquePath "pid-reuse"
+        let capability = capabilityFor original
+        let request =
+            registrationRequest
+                original
+                path
+                "http://127.0.0.1:1234/inject"
+                (Some "session-reuse")
+                None
+                capability
+
+        registerSession resolver request
+        |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
+        |> ignore
+
+        current <- reused
+        let repeated = registerSession resolver request
+
+        assertRegistrationFailure RegistrationFailure.ParentProcessReused repeated
+        Assert.That(
+            sessionsForWorktree path,
+            Is.Empty,
+            "The stale original registration is not live and the reused process was not inserted"
+        )
+
+    [<Test>]
+    member _.``One exact process cannot change durable identity or worktree on heartbeat``() =
+        let identity = nextIdentity ()
+        let path = uniquePath "identity-mismatch"
+        let request =
+            registrationRequest
+                identity
+                path
+                "http://127.0.0.1:1234/inject"
+                (Some "session-original")
+                None
+                (capabilityFor identity)
+
+        registerSession (resolverFor identity) request
+        |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
+        |> ignore
+
+        let mismatch =
+            registerSession
+                (resolverFor identity)
+                { request with SessionId = Some "session-other" }
+
+        assertRegistrationFailure RegistrationFailure.ParentIdentityMismatch mismatch
+        Assert.That(
+            sessionsForWorktree path |> List.choose _.SessionId,
+            Is.EqualTo [ "session-original" ]
+        )
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type ExactPromptRoutingTests() =
+
+    [<Test>]
+    member _.``Exact prompt targets address two physical processes sharing one durable session``() =
+        let path = uniquePath "exact-prompt"
+        let sessionId = $"shared-{Guid.NewGuid():N}"
+        let firstIdentity = nextIdentity ()
+        let secondIdentity = nextIdentity ()
+        let firstPort, secondPort =
+            match Tests.TestUtils.getFreeTcpPorts 2 with
+            | [ first; second ] -> first, second
+            | ports -> failwith $"expected two free ports, got {ports.Length}"
+
+        use first = new HttpListener()
+        use second = new HttpListener()
+        first.Prefixes.Add($"http://127.0.0.1:{firstPort}/")
+        second.Prefixes.Add($"http://127.0.0.1:{secondPort}/")
+        first.Start()
+        second.Start()
+
+        registerExactSession
+            firstIdentity
+            path
+            $"http://127.0.0.1:{firstPort}/"
+            (Some sessionId)
+        |> ignore
+
+        registerExactSession
+            secondIdentity
+            path
+            $"http://127.0.0.1:{secondPort}/"
+            (Some sessionId)
+        |> ignore
+
+        let firstRequest = first.GetContextAsync()
+        let secondRequest = second.GetContextAsync()
+
+        let firstDelivery =
+            tryDeliver
+                { WorktreePath = path
+                  Target = SendTarget.ExactProcess firstIdentity
+                  Prompt = Prompt.agentPrompt "first" }
+            |> Async.StartAsTask
+
+        let firstCompleted =
+            Task.WhenAny(firstRequest, secondRequest)
+                .WaitAsync(TimeSpan.FromSeconds 5.0)
+                .GetAwaiter()
+                .GetResult()
+
+        Assert.That(
+            Object.ReferenceEquals(firstCompleted, firstRequest),
+            Is.True,
+            "The first exact identity must not deliver to its same-SessionId sibling"
+        )
+
+        let firstContext = firstRequest.GetAwaiter().GetResult()
+        firstContext.Response.StatusCode <- 200
+        firstContext.Response.Close()
+        Assert.That(
+            firstDelivery.GetAwaiter().GetResult(),
+            Is.EqualTo DeliveryResult.Delivered
+        )
+
+        let secondDelivery =
+            tryDeliver
+                { WorktreePath = path
+                  Target = SendTarget.ExactProcess secondIdentity
+                  Prompt = Prompt.agentPrompt "second" }
+            |> Async.StartAsTask
+
+        let secondContext =
+            secondRequest
+                .WaitAsync(TimeSpan.FromSeconds 5.0)
+                .GetAwaiter()
+                .GetResult()
+
+        secondContext.Response.StatusCode <- 200
+        secondContext.Response.Close()
+        Assert.That(
+            secondDelivery.GetAwaiter().GetResult(),
+            Is.EqualTo DeliveryResult.Delivered
+        )
+
+    [<Test>]
+    member _.``An exact queued prompt cannot drain to a same-SessionId sibling``() =
+        let path = uniquePath "exact-queue"
+        let sessionId = $"shared-{Guid.NewGuid():N}"
+        let targetIdentity = nextIdentity ()
+        let siblingIdentity = nextIdentity ()
+        let failedPort, siblingPort, recoveredPort =
+            match Tests.TestUtils.getFreeTcpPorts 3 with
+            | [ failed; sibling; recovered ] -> failed, sibling, recovered
+            | ports -> failwith $"expected three free ports, got {ports.Length}"
+
+        use failed = new HttpListener()
+        use sibling = new HttpListener()
+        use recovered = new HttpListener()
+        failed.Prefixes.Add($"http://127.0.0.1:{failedPort}/")
+        sibling.Prefixes.Add($"http://127.0.0.1:{siblingPort}/")
+        recovered.Prefixes.Add($"http://127.0.0.1:{recoveredPort}/")
+        failed.Start()
+        sibling.Start()
+        recovered.Start()
+
+        registerExactSession
+            targetIdentity
+            path
+            $"http://127.0.0.1:{failedPort}/"
+            (Some sessionId)
+        |> ignore
+
+        registerExactSession
+            siblingIdentity
+            path
+            $"http://127.0.0.1:{siblingPort}/"
+            (Some sessionId)
+        |> ignore
+
+        let failedRequest = failed.GetContextAsync()
+        let firstDelivery =
+            tryDeliver
+                { WorktreePath = path
+                  Target = SendTarget.ExactProcess targetIdentity
+                  Prompt = Prompt.agentPrompt "retry-exact" }
+            |> Async.StartAsTask
+
+        let failedContext =
+            failedRequest
+                .WaitAsync(TimeSpan.FromSeconds 5.0)
+                .GetAwaiter()
+                .GetResult()
+
+        failedContext.Response.StatusCode <- 503
+        failedContext.Response.Close()
+        Assert.That(
+            firstDelivery.GetAwaiter().GetResult(),
+            Is.EqualTo DeliveryResult.DeliveryFailed
+        )
+
+        let siblingRequest = sibling.GetContextAsync()
+        let recoveredRequest = recovered.GetContextAsync()
+
+        registerExactSession
+            siblingIdentity
+            path
+            $"http://127.0.0.1:{siblingPort}/"
+            (Some sessionId)
+        |> ignore
+
+        registerExactSession
+            targetIdentity
+            path
+            $"http://127.0.0.1:{recoveredPort}/"
+            (Some sessionId)
+        |> ignore
+
+        let drained =
+            Task.WhenAny(recoveredRequest, siblingRequest)
+                .WaitAsync(TimeSpan.FromSeconds 5.0)
+                .GetAwaiter()
+                .GetResult()
+
+        Assert.That(
+            Object.ReferenceEquals(drained, recoveredRequest),
+            Is.True,
+            "Re-registering the sibling must leave the exact-target queue untouched"
+        )
+
+        let recoveredContext = recoveredRequest.GetAwaiter().GetResult()
+        recoveredContext.Response.StatusCode <- 200
+        recoveredContext.Response.Close()
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+[<NonParallelizable>]
+type ExactShutdownTests() =
+
+    let options =
+        { Timeout = TimeSpan.FromSeconds 2.0
+          PollInterval = TimeSpan.FromSeconds 1.0 }
+
+    let targetFor (entry: SessionEntry) : ShutdownTarget =
+        { WorktreePath = entry.WorktreePath
+          ProcessIdentity = entry.ProcessIdentity }
+
+    let dependencies send isClosed probe now delay : ShutdownDependencies =
+        { SendShutdown = fun _ _ -> async { return send }
+          IsClosed = isClosed
+          ProbeProcess = fun _ _ -> probe ()
+          Delay = delay
+          UtcNow = now }
+
+    [<Test>]
+    member _.``Missing exact registration is explicit and sends nothing``() =
+        let mutable sent = false
+        let identity = nextIdentity ()
+
+        let runtime =
+            { SendShutdown =
+                fun _ _ ->
+                    async {
+                        sent <- true
+                        return ShutdownRequestOutcome.Accepted
+                    }
+              IsClosed = fun _ -> async { return Ok false }
+              ProbeProcess =
+                fun _ _ -> Ok ExactProcessState.Running
+              Delay = fun _ -> async { return () }
+              UtcNow = fun () -> DateTime.UtcNow }
+
+        let result =
+            shutdownExactWith
+                runtime
+                options
+                { WorktreePath = uniquePath "missing-shutdown"
+                  ProcessIdentity = identity }
+            |> Async.RunSynchronously
+
+        assertShutdownResult
+            (Error ShutdownFailure.MissingRegistration)
+            result
+        Assert.That(sent, Is.False)
+
+    [<Test>]
+    member _.``Stale and reused registrations are rejected before shutdown delivery``() =
+        let entry =
+            registerExactSession
+                (nextIdentity ())
+                (uniquePath "stale-shutdown")
+                "http://127.0.0.1:1/inject"
+                (Some "session-stale")
+
+        let staleRuntime =
+            dependencies
+                ShutdownRequestOutcome.Accepted
+                (fun _ -> async { return Ok false })
+                (fun () -> Ok ExactProcessState.Running)
+                (fun () -> entry.RegisteredAt + TimeSpan.FromSeconds 60.0)
+                (fun _ -> async { return () })
+
+        let reusedRuntime =
+            { staleRuntime with
+                ProbeProcess = fun _ _ -> Ok ExactProcessState.Reused
+                UtcNow = fun () -> entry.RegisteredAt }
+
+        Assert.Multiple(fun () ->
+            assertShutdownResult
+                (Error ShutdownFailure.StaleRegistration)
+                (
+                shutdownExactWith staleRuntime options (targetFor entry)
+                |> Async.RunSynchronously
+                )
+            assertShutdownResult
+                (Error ShutdownFailure.StaleRegistration)
+                (
+                shutdownExactWith reusedRuntime options (targetFor entry)
+                |> Async.RunSynchronously
+                ))
+
+    [<Test>]
+    member _.``Endpoint rejection outcomes remain typed``() =
+        let entry =
+            registerExactSession
+                (nextIdentity ())
+                (uniquePath "shutdown-rejections")
+                "http://127.0.0.1:1/inject"
+                (Some "session-rejections")
+
+        [ ShutdownRequestOutcome.InvalidCapability,
+          ShutdownFailure.InvalidCapability
+          ShutdownRequestOutcome.NonLoopbackRequest,
+          ShutdownFailure.NonLoopbackRequest
+          ShutdownRequestOutcome.Rejected,
+          ShutdownFailure.Rejected
+          ShutdownRequestOutcome.TransportFailed,
+          ShutdownFailure.RequestFailed ]
+        |> List.iter (fun (outcome, expected) ->
+            let runtime =
+                dependencies
+                    outcome
+                    (fun _ -> async { return Ok false })
+                    (fun () -> Ok ExactProcessState.Running)
+                    (fun () -> entry.RegisteredAt)
+                    (fun _ -> async { return () })
+
+            assertShutdownResult
+                (Error expected)
+                (
+                shutdownExactWith runtime options (targetFor entry)
+                |> Async.RunSynchronously
+                ))
+
+    [<Test>]
+    member _.``Accepted shutdown completes from exact closure``() =
+        let entry =
+            registerExactSession
+                (nextIdentity ())
+                (uniquePath "shutdown-closure")
+                "http://127.0.0.1:1/inject"
+                (Some "session-closure")
+
+        let runtime =
+            dependencies
+                ShutdownRequestOutcome.Accepted
+                (fun identity ->
+                    async {
+                        Assert.That(identity, Is.EqualTo entry.ProcessIdentity)
+                        return Ok true
+                    })
+                (fun () -> Ok ExactProcessState.Running)
+                (fun () -> entry.RegisteredAt)
+                (fun _ -> async { return () })
+
+        assertShutdownResult
+            (Ok ShutdownCompletion.ExactClosure)
+            (
+            shutdownExactWith runtime options (targetFor entry)
+            |> Async.RunSynchronously
+            )
+
+    [<Test>]
+    member _.``Production shutdown transport posts the opaque capability and then observes closure``() =
+        let identity = nextIdentity ()
+        let path = uniquePath "shutdown-http"
+        let capability = capabilityFor identity
+        let port = Tests.TestUtils.getFreeTcpPort ()
+
+        use listener = new HttpListener()
+        listener.Prefixes.Add($"http://127.0.0.1:{port}/")
+        listener.Start()
+
+        let request =
+            { registrationRequest
+                identity
+                path
+                "http://127.0.0.1:1/inject"
+                (Some "session-http-shutdown")
+                None
+                capability with
+                ShutdownUrl = $"http://127.0.0.1:{port}/" }
+
+        let entry =
+            registerSession (resolverFor identity) request
+            |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
+
+        let received = listener.GetContextAsync()
+        let shutdown =
+            shutdownExact
+                (fun closedIdentity ->
+                    async {
+                        Assert.That(closedIdentity, Is.EqualTo identity)
+                        return Ok true
+                    })
+                (targetFor entry)
+            |> Async.StartAsTask
+
+        let context =
+            received
+                .WaitAsync(TimeSpan.FromSeconds 5.0)
+                .GetAwaiter()
+                .GetResult()
+
+        use reader = new StreamReader(context.Request.InputStream)
+        use body = JsonDocument.Parse(reader.ReadToEnd())
+        context.Response.StatusCode <- 202
+        context.Response.Close()
+
+        Assert.That(
+            body.RootElement.GetProperty("capability").GetString(),
+            Is.EqualTo capability
+        )
+        assertShutdownResult
+            (Ok ShutdownCompletion.ExactClosure)
+            (shutdown.GetAwaiter().GetResult())
+
+    [<Test>]
+    member _.``Accepted shutdown completes when the exact process exits``() =
+        let entry =
+            registerExactSession
+                (nextIdentity ())
+                (uniquePath "shutdown-exit")
+                "http://127.0.0.1:1/inject"
+                (Some "session-exit")
+
+        // The first probe verifies the registration before delivery; the second observes exit.
+        let mutable probeCount = 0
+        let runtime =
+            dependencies
+                ShutdownRequestOutcome.Accepted
+                (fun _ -> async { return Ok false })
+                (fun () ->
+                    probeCount <- probeCount + 1
+                    if probeCount = 1 then
+                        Ok ExactProcessState.Running
+                    else
+                        Ok ExactProcessState.Exited)
+                (fun () -> entry.RegisteredAt)
+                (fun _ -> async { return () })
+
+        assertShutdownResult
+            (Ok ShutdownCompletion.ProcessExit)
+            (
+            shutdownExactWith runtime options (targetFor entry)
+            |> Async.RunSynchronously
+            )
+
+    [<Test>]
+    member _.``Accepted shutdown times out while closure and process exit remain absent``() =
+        let entry =
+            registerExactSession
+                (nextIdentity ())
+                (uniquePath "shutdown-timeout")
+                "http://127.0.0.1:1/inject"
+                (Some "session-timeout")
+
+        // The injected clock advances only through Delay, making timeout behavior deterministic.
+        let mutable now = entry.RegisteredAt
+        let runtime =
+            dependencies
+                ShutdownRequestOutcome.Accepted
+                (fun _ -> async { return Ok false })
+                (fun () -> Ok ExactProcessState.Running)
+                (fun () -> now)
+                (fun interval ->
+                    async {
+                        now <- now + interval
+                    })
+
+        assertShutdownResult
+            (Error ShutdownFailure.TimedOut)
+            (
+            shutdownExactWith runtime options (targetFor entry)
+            |> Async.RunSynchronously
+            )
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
 type PromptTransportTests() =
 
     [<Test>]
@@ -90,13 +771,13 @@ type PromptTransportTests() =
         use listener = new HttpListener()
         listener.Prefixes.Add($"http://127.0.0.1:{port}/")
         listener.Start()
-        registerSession path $"http://127.0.0.1:{port}/" (Some sessionId)
+        registerTestSession path $"http://127.0.0.1:{port}/" (Some sessionId)
 
         let received = listener.GetContextAsync()
         let delivery =
             tryDeliver
                 { WorktreePath = path
-                  SessionId = None
+                  Target = SendTarget.Unspecified
                   Prompt = Prompt.agentPrompt "sync" }
             |> Async.StartAsTask
 
@@ -120,13 +801,13 @@ type PromptTransportTests() =
         second.Prefixes.Add($"http://127.0.0.1:{secondPort}/")
         first.Start()
         second.Start()
-        registerSession path $"http://127.0.0.1:{firstPort}/" (Some $"first-{Guid.NewGuid():N}")
-        registerSession path $"http://127.0.0.1:{secondPort}/" (Some $"second-{Guid.NewGuid():N}")
+        registerTestSession path $"http://127.0.0.1:{firstPort}/" (Some $"first-{Guid.NewGuid():N}")
+        registerTestSession path $"http://127.0.0.1:{secondPort}/" (Some $"second-{Guid.NewGuid():N}")
 
         let result =
             tryDeliver
                 { WorktreePath = path
-                  SessionId = None
+                  Target = SendTarget.Unspecified
                   Prompt = Prompt.agentPrompt "sync" }
             |> Async.RunSynchronously
 
@@ -141,13 +822,13 @@ type PromptTransportTests() =
         use listener = new HttpListener()
         listener.Prefixes.Add($"http://127.0.0.1:{port}/")
         listener.Start()
-        registerSession path $"http://127.0.0.1:{port}/" (Some $"canvas-{Guid.NewGuid():N}")
+        registerTestSession path $"http://127.0.0.1:{port}/" (Some $"canvas-{Guid.NewGuid():N}")
 
         let unexpectedPost = listener.GetContextAsync()
         let sending =
             send
                 { WorktreePath = path
-                  SessionId = None
+                  Target = SendTarget.Unspecified
                   Prompt = Prompt.canvas payload }
             |> Async.StartAsTask
         let firstCompleted =
@@ -170,7 +851,7 @@ type PromptTransportTests() =
         let result =
             send
                 { WorktreePath = path
-                  SessionId = None
+                  Target = SendTarget.Unspecified
                   Prompt = Prompt.agentPrompt "sync" }
             |> Async.RunSynchronously
 

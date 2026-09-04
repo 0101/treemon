@@ -18,7 +18,31 @@ open Shared
 type SessionId = SessionId of string
 
 module SessionId =
+    [<Literal>]
+    let maxLength = 128
+
     let value (SessionId id) = id
+
+    let create (value: string) =
+        if String.IsNullOrWhiteSpace value then
+            Error "missing sessionId"
+        elif value.Length > maxLength then
+            Error
+                $"sessionId must be 1-{maxLength} characters from [A-Za-z0-9._:-]"
+        elif
+            value
+            |> Seq.forall (fun character ->
+                Char.IsAsciiLetterOrDigit character
+                || character = '.'
+                || character = '_'
+                || character = ':'
+                || character = '-')
+            |> not
+        then
+            Error
+                $"sessionId must be 1-{maxLength} characters from [A-Za-z0-9._:-]"
+        else
+            Ok(SessionId value)
 
 /// Exact identity of one operating-system process. The start timestamp distinguishes a reused PID
 /// from the process that previously owned it.
@@ -72,6 +96,18 @@ type TerminalSessionId = TerminalSessionId of string
 
 module TerminalSessionId =
     let value (TerminalSessionId id) = id
+
+    let create (value: string) =
+        if String.IsNullOrWhiteSpace value then
+            Error
+                "terminalSessionId must be a 32-character hexadecimal TerminalHost session id"
+        else
+            match Guid.TryParseExact(value.Trim(), "N") with
+            | true, terminalSessionId ->
+                Ok(TerminalSessionId(terminalSessionId.ToString("N")))
+            | false, _ ->
+                Error
+                    "terminalSessionId must be a 32-character hexadecimal TerminalHost session id"
 
 type EventId = EventId of string
 

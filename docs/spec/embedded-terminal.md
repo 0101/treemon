@@ -704,7 +704,7 @@ isolated server and fails on incomplete exact process cleanup.
 | `src/Server/TerminalSessionActivity.fs` | Exact process-instance and startup-reconciliation projection for tab activity, all-target non-idle gating, graceful shutdown targets, and one-per-terminal resume policy |
 | `src/Server/SessionActivityStoreSchema.fs` and `SessionActivityStore.fs` | Durable process-instance schema/migration, retained history, event idempotency, and retention |
 | `src/Extension/reporting/extension.mjs` | Acknowledged process presence, passive activity, heartbeat, background lifecycle, and shutdown reports |
-| `src/Extension/extension.mjs` and `src/Server/SessionBridge.fs` | Shared generic registration plus exact-session graceful shutdown capability and bounded typed server control client |
+| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `src/Server/SessionBridge.fs` | Shared exact registration plus capability-guarded graceful shutdown endpoint and bounded typed server control client |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |
 | `src/Server/Program.fs` | Host client and replacement-loop lifecycle without terminal shutdown on server stop |
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |

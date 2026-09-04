@@ -33,7 +33,8 @@ let private worktree path branch : GitWorktree.WorktreeInfo =
       Branch = Some branch }
 
 let private storedStatus sessionId path status skill lastUser seen : SessionActivityStore.StoredStatus =
-    { SessionId = SessionActivity.SessionId sessionId
+    { ProcessIdentity = None
+      SessionId = SessionActivity.SessionId sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath path
       Provider = CopilotCli

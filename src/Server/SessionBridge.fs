@@ -2,12 +2,12 @@ module Server.SessionBridge
 
 open System
 open System.Collections.Concurrent
-open System.Collections.Generic
 open System.IO
 open System.Net.Http
 open System.Text
 open System.Text.Json
 open Shared
+open Server.SessionActivity
 
 let private normalizePath = Server.PathUtils.normalizePath
 
@@ -37,9 +37,25 @@ module Prompt =
           Text = text
           Filename = None }
 
+[<RequireQualifiedAccess>]
+type SendTarget =
+    /// One physical Copilot process. A same-SessionId sibling is never eligible.
+    | ExactProcess of ProcessIdentity
+    /// One durable conversation owner. Duplicate physical registrations collapse to the freshest.
+    | DurableSession of string
+    /// No prior identity is known; generic prompt delivery requires one unambiguous live owner.
+    | Unspecified
+
+module SendTarget =
+    let ofSessionId =
+        function
+        | Some sessionId when not (String.IsNullOrWhiteSpace sessionId) ->
+            SendTarget.DurableSession sessionId
+        | _ -> SendTarget.Unspecified
+
 type SendRequest =
     { WorktreePath: string
-      SessionId: string option
+      Target: SendTarget
       Prompt: Prompt }
 
 [<RequireQualifiedAccess>]
@@ -49,10 +65,32 @@ type DeliveryResult =
     | DeliveryFailed
 
 type SessionEntry =
-    { WorktreePath: string
+    { ProcessIdentity: ProcessIdentity
+      WorktreePath: string
       InjectUrl: string
       SessionId: string option
+      TerminalSessionId: TerminalSessionId option
       RegisteredAt: DateTime }
+
+[<RequireQualifiedAccess>]
+type RegistrationFailure =
+    | InvalidParentProcessId
+    | ParentProcessNotRunning
+    | ParentProcessResolutionFailed
+    | ParentProcessReused
+    | ParentIdentityMismatch
+    | InvalidSessionId
+    | InvalidTerminalSessionId
+    | InvalidShutdownCapability
+
+type RegistrationRequest =
+    { WorktreePath: string
+      InjectUrl: string
+      ShutdownUrl: string
+      ShutdownCapability: string
+      SessionId: string option
+      ParentProcessId: int
+      TerminalSessionId: string option }
 
 [<RequireQualifiedAccess>]
 type SendResult =
@@ -61,7 +99,7 @@ type SendResult =
 
 type internal QueuedPrompt =
     { EnqueuedAt: DateTime
-      TargetSessionId: string option
+      Target: SendTarget
       Prompt: Prompt }
 
 type private DeliveryAttempt =
@@ -69,17 +107,81 @@ type private DeliveryAttempt =
     | AttemptNoLiveSession
     | AttemptFailed of SessionEntry
 
+[<RequireQualifiedAccess>]
+type ShutdownRequestOutcome =
+    | Accepted
+    | InvalidCapability
+    | NonLoopbackRequest
+    | Rejected
+    | TransportFailed
+
+[<RequireQualifiedAccess>]
+type ExactProcessState =
+    | Running
+    | Exited
+    | Reused
+
+[<RequireQualifiedAccess>]
+type ShutdownCompletion =
+    | ExactClosure
+    | ProcessExit
+
+[<RequireQualifiedAccess>]
+type ShutdownFailure =
+    | MissingRegistration
+    | StaleRegistration
+    | InvalidCapability
+    | NonLoopbackRequest
+    | Rejected
+    | RequestFailed
+    | TimedOut
+    | VerificationFailed
+
+type ShutdownTarget =
+    { WorktreePath: string
+      ProcessIdentity: ProcessIdentity }
+
+type ShutdownWaitOptions =
+    { Timeout: TimeSpan
+      PollInterval: TimeSpan }
+
+type internal ShutdownDependencies =
+    { SendShutdown: string -> string -> Async<ShutdownRequestOutcome>
+      IsClosed: ProcessIdentity -> Async<Result<bool, string>>
+      ProbeProcess:
+        ProcessIdentityResolver
+            -> ProcessIdentity
+            -> Result<ExactProcessState, string>
+      Delay: TimeSpan -> Async<unit>
+      UtcNow: unit -> DateTime }
+
+type private RegisteredSession =
+    { Entry: SessionEntry
+      ShutdownUrl: string
+      ShutdownCapability: string
+      ProcessIdentityResolver: ProcessIdentityResolver }
+
 // Mutable: ConcurrentDictionary is the thread-safe boundary for bridge registration and queueing.
 // Separate session and poll maps prevent canvas-document heartbeats from overwriting live sessions.
-let private sessionRegistry = ConcurrentDictionary<string, SessionEntry>(StringComparer.OrdinalIgnoreCase)
+let private sessionRegistry = ConcurrentDictionary<ProcessIdentity, RegisteredSession>()
 let private pollRegistry = ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase)
 let private promptQueue = ConcurrentDictionary<string, QueuedPrompt list>(StringComparer.OrdinalIgnoreCase)
 
 let private httpClient = new HttpClient()
 
+let private shutdownHttpClient =
+    let handler = new HttpClientHandler()
+    handler.AllowAutoRedirect <- false
+    new HttpClient(handler)
+
 let private maxQueueSize = 10
 let private queueTtl = TimeSpan.FromMinutes 5.0
 let private livenessTtl = TimeSpan.FromSeconds 60.0
+let private shutdownRequestTimeout = TimeSpan.FromSeconds 5.0
+
+let private defaultShutdownWaitOptions =
+    { Timeout = TimeSpan.FromSeconds 30.0
+      PollInterval = TimeSpan.FromMilliseconds 100.0 }
 
 let private promptKindName =
     function
@@ -102,10 +204,10 @@ let private capQueue prompts =
     let excess = List.length prompts - maxQueueSize
     if excess > 0 then prompts |> List.skip excess else prompts
 
-let private enqueue now worktreeKey targetSessionId prompt =
+let private enqueue now worktreeKey target prompt =
     let queued =
         { EnqueuedAt = now
-          TargetSessionId = targetSessionId
+          Target = target
           Prompt = prompt }
 
     promptQueue.AddOrUpdate(
@@ -114,27 +216,33 @@ let private enqueue now worktreeKey targetSessionId prompt =
         fun _ existing -> cleanExpired now existing @ [ queued ] |> capQueue)
     |> ignore
 
+let private targetMatches (entry: SessionEntry option) =
+    function
+    | SendTarget.ExactProcess target ->
+        entry |> Option.exists (fun session -> session.ProcessIdentity = target)
+    | SendTarget.DurableSession target ->
+        entry |> Option.exists (fun session -> session.SessionId = Some target)
+    | SendTarget.Unspecified -> true
+
 /// Which registering session a queued prompt may drain to.
 ///
 /// A canvas prompt for an AgentDoc waits for that document's recorded author. A SystemView has no
 /// stored owner: if resolution picked a target before the send failed, the queued copy stays bound
 /// to that session; if nothing was reachable, it drains to the next identified session — the one
 /// the queue caused to launch.
-let private deliverableTo worktreeKey (sessionId: string option) (queued: QueuedPrompt) =
+let private deliverableTo worktreeKey (entry: SessionEntry option) (queued: QueuedPrompt) =
     match queued.Prompt.Kind, queued.Prompt.Filename with
     | PromptKind.Canvas, Some filename ->
         match CanvasDocKinds.classify filename with
         | SystemView ->
-            match queued.TargetSessionId with
-            | Some target -> sessionId = Some target
-            | None -> Option.isSome sessionId
+            match queued.Target with
+            | SendTarget.Unspecified ->
+                entry |> Option.bind _.SessionId |> Option.isSome
+            | target -> targetMatches entry target
         | AgentDoc ->
             let owner = CanvasDocOwnership.getOwnerSync worktreeKey filename
-            Option.isSome sessionId && owner = sessionId
-    | _ ->
-        match queued.TargetSessionId with
-        | None -> true
-        | Some targetSessionId -> sessionId = Some targetSessionId
+            entry |> Option.bind _.SessionId |> Option.exists (fun sessionId -> owner = Some sessionId)
+    | _ -> targetMatches entry queued.Target
 
 let private requeue now (worktreeKey: string) (survivors: QueuedPrompt list) =
     if not (List.isEmpty survivors) then
@@ -175,7 +283,7 @@ let private drainQueue now (worktreeKey: string) (entry: SessionEntry) =
         let deliver, survivors =
             queued
             |> cleanExpired now
-            |> List.partition (deliverableTo worktreeKey entry.SessionId)
+            |> List.partition (deliverableTo worktreeKey (Some entry))
 
         requeue now worktreeKey survivors
 
@@ -206,29 +314,126 @@ let private nextRegisteredAt now =
 
 let private normalizeSessionId =
     function
-    | Some sessionId when not (String.IsNullOrWhiteSpace sessionId) -> Some sessionId
-    | _ -> None
+    | Some sessionId when not (String.IsNullOrWhiteSpace sessionId) ->
+        SessionId.create sessionId
+        |> Result.map (SessionId.value >> Some)
+        |> Result.mapError (fun _ -> RegistrationFailure.InvalidSessionId)
+    | _ -> Ok None
 
-let private registryKeyFor normalizedWorktree sessionId =
-    match normalizeSessionId sessionId with
-    | Some value -> "sid:" + value
-    | None -> "wt:" + normalizedWorktree
+let private normalizeTerminalSessionId =
+    function
+    | Some terminalSessionId when not (String.IsNullOrWhiteSpace terminalSessionId) ->
+        TerminalSessionId.create terminalSessionId
+        |> Result.map Some
+        |> Result.mapError (fun _ -> RegistrationFailure.InvalidTerminalSessionId)
+    | _ -> Ok None
 
-let registerSession (worktreePath: string) (injectUrl: string) (sessionId: string option) =
-    let now = DateTime.UtcNow
-    let sessionId = normalizeSessionId sessionId
-    let worktreeKey = normalizePath worktreePath
-    let registryKey = registryKeyFor worktreeKey sessionId
+let internal isValidShutdownCapability (capability: string) =
+    not (isNull capability)
+    && capability.Length = 43
+    && capability
+       |> Seq.forall (fun character ->
+           Char.IsAsciiLetterOrDigit character
+           || character = '-'
+           || character = '_')
 
-    let entry =
-        { WorktreePath = worktreeKey
-          InjectUrl = injectUrl
-          SessionId = sessionId
-          RegisteredAt = nextRegisteredAt now }
+let private probeExactProcess resolver identity =
+    identity
+    |> ProcessIdentity.processId
+    |> fun processId -> ProcessIdentityResolver.resolve processId resolver
+    |> Result.map (fun current ->
+        match current with
+        | None -> ExactProcessState.Exited
+        | Some resolved when resolved = identity -> ExactProcessState.Running
+        | Some _ -> ExactProcessState.Reused)
 
-    sessionRegistry[registryKey] <- entry
-    Log.log "SessionBridge" $"Session registered for {Path.GetFileName worktreeKey}"
-    drainQueue now worktreeKey entry
+let private sameBridgeSource
+    (request: RegistrationRequest)
+    (registration: RegisteredSession)
+    =
+    String.Equals(
+        registration.ShutdownCapability,
+        request.ShutdownCapability,
+        StringComparison.Ordinal
+    )
+
+let private sameRegistrationMetadata
+    worktreeKey
+    sessionId
+    terminalSessionId
+    (registration: RegisteredSession)
+    =
+    String.Equals(
+        registration.Entry.WorktreePath,
+        worktreeKey,
+        StringComparison.OrdinalIgnoreCase
+    )
+    && registration.Entry.SessionId = sessionId
+    && registration.Entry.TerminalSessionId = terminalSessionId
+
+let registerSession
+    (processIdentityResolver: ProcessIdentityResolver)
+    (request: RegistrationRequest)
+    : Result<SessionEntry, RegistrationFailure> =
+    if request.ParentProcessId <= 0 then
+        Error RegistrationFailure.InvalidParentProcessId
+    elif
+        isNull request.ShutdownCapability
+        || not (isValidShutdownCapability request.ShutdownCapability)
+    then
+        Error RegistrationFailure.InvalidShutdownCapability
+    else
+        match normalizeSessionId request.SessionId, normalizeTerminalSessionId request.TerminalSessionId with
+        | Error failure, _
+        | _, Error failure -> Error failure
+        | Ok sessionId, Ok terminalSessionId ->
+            match ProcessIdentityResolver.resolve request.ParentProcessId processIdentityResolver with
+            | Error _ ->
+                Error RegistrationFailure.ParentProcessResolutionFailed
+            | Ok None ->
+                Error RegistrationFailure.ParentProcessNotRunning
+            | Ok(Some processIdentity) ->
+                let reusedSource =
+                    sessionRegistry.Values
+                    |> Seq.exists (fun registration ->
+                        registration.Entry.ProcessIdentity <> processIdentity
+                        && sameBridgeSource request registration)
+
+                if reusedSource then
+                    Error RegistrationFailure.ParentProcessReused
+                else
+                    let worktreeKey = normalizePath request.WorktreePath
+
+                    match sessionRegistry.TryGetValue processIdentity with
+                    | true, existing
+                        when not (
+                            sameRegistrationMetadata
+                                worktreeKey
+                                sessionId
+                                terminalSessionId
+                                existing
+                        ) ->
+                        Error RegistrationFailure.ParentIdentityMismatch
+                    | _ ->
+                        let now = DateTime.UtcNow
+
+                        let entry =
+                            { ProcessIdentity = processIdentity
+                              WorktreePath = worktreeKey
+                              InjectUrl = request.InjectUrl
+                              SessionId = sessionId
+                              TerminalSessionId = terminalSessionId
+                              RegisteredAt = nextRegisteredAt now }
+
+                        sessionRegistry[processIdentity] <-
+                            { Entry = entry
+                              ShutdownUrl = request.ShutdownUrl
+                              ShutdownCapability = request.ShutdownCapability
+                              ProcessIdentityResolver = processIdentityResolver }
+
+                        Log.log "SessionBridge" $"Session registered for {Path.GetFileName worktreeKey}"
+                        drainQueue now worktreeKey entry
+                        Ok entry
 
 let registerPoll (worktreePath: string) =
     let now = DateTime.UtcNow
@@ -239,14 +444,18 @@ let sessionsForWorktree (worktreePath: string) : SessionEntry list =
     let worktreeKey = normalizePath worktreePath
 
     sessionRegistry.Values
-    |> Seq.filter (fun entry ->
-        String.Equals(entry.WorktreePath, worktreeKey, StringComparison.OrdinalIgnoreCase))
+    |> Seq.filter (fun registration ->
+        String.Equals(
+            registration.Entry.WorktreePath,
+            worktreeKey,
+            StringComparison.OrdinalIgnoreCase
+        )
+        && probeExactProcess
+            registration.ProcessIdentityResolver
+            registration.Entry.ProcessIdentity
+           = Ok ExactProcessState.Running)
+    |> Seq.map _.Entry
     |> Seq.toList
-
-let private freshestSession (worktreePath: string) =
-    sessionsForWorktree worktreePath
-    |> List.sortByDescending _.RegisteredAt
-    |> List.tryHead
 
 let internal isSessionAlive now (entry: SessionEntry) =
     now - entry.RegisteredAt < livenessTtl
@@ -254,12 +463,39 @@ let internal isSessionAlive now (entry: SessionEntry) =
 let internal isPollAlive now (lastHeartbeat: DateTime) =
     now - lastHeartbeat < livenessTtl
 
-let internal selectLiveTarget now promptKind targetSessionId entries =
+let internal collapseLiveRegistrations now entries =
+    entries
+    |> List.filter (isSessionAlive now)
+    |> List.groupBy _.SessionId
+    |> List.map (fun (_, registrations) ->
+        registrations
+        |> List.sortByDescending _.RegisteredAt
+        |> List.head)
+    |> List.sortByDescending _.RegisteredAt
+
+let canvasSessionsForWorktreeAt now worktreePath =
+    sessionsForWorktree worktreePath
+    |> collapseLiveRegistrations now
+
+let canvasSessionsForWorktree worktreePath =
+    canvasSessionsForWorktreeAt DateTime.UtcNow worktreePath
+
+let internal selectLiveTarget now promptKind target entries =
     let live = entries |> List.filter (isSessionAlive now)
 
-    match targetSessionId, promptKind, live with
-    | Some target, _, _ -> live |> List.tryFind (fun entry -> entry.SessionId = Some target)
-    | None, PromptKind.AgentPrompt, [ entry ] -> Some entry
+    match target, promptKind with
+    | SendTarget.ExactProcess processIdentity, _ ->
+        live
+        |> List.tryFind (fun entry -> entry.ProcessIdentity = processIdentity)
+    | SendTarget.DurableSession sessionId, _ ->
+        live
+        |> List.filter (fun entry -> entry.SessionId = Some sessionId)
+        |> List.sortByDescending _.RegisteredAt
+        |> List.tryHead
+    | SendTarget.Unspecified, PromptKind.AgentPrompt ->
+        match collapseLiveRegistrations now entries with
+        | [ entry ] -> Some entry
+        | _ -> None
     | _ -> None
 
 /// Attempt immediate delivery to the selected live session. A failed POST is queued for that
@@ -267,10 +503,9 @@ let internal selectLiveTarget now promptKind targetSessionId entries =
 let private tryDeliverAt now (request: SendRequest) =
     async {
         let worktreeKey = normalizePath request.WorktreePath
-        let targetSessionId = normalizeSessionId request.SessionId
         let target =
             sessionsForWorktree request.WorktreePath
-            |> selectLiveTarget now request.Prompt.Kind targetSessionId
+            |> selectLiveTarget now request.Prompt.Kind request.Target
 
         match target with
         | None -> return AttemptNoLiveSession
@@ -278,7 +513,13 @@ let private tryDeliverAt now (request: SendRequest) =
             match! postPrompt entry request.Prompt worktreeKey with
             | Ok () -> return AttemptDelivered
             | Error () ->
-                enqueue now worktreeKey entry.SessionId request.Prompt
+                let queuedTarget =
+                    match request.Target with
+                    | SendTarget.Unspecified ->
+                        SendTarget.ExactProcess entry.ProcessIdentity
+                    | target -> target
+
+                enqueue now worktreeKey queuedTarget request.Prompt
                 return AttemptFailed entry
     }
 
@@ -296,13 +537,12 @@ let send (request: SendRequest) =
     async {
         let now = DateTime.UtcNow
         let worktreeKey = normalizePath request.WorktreePath
-        let targetSessionId = normalizeSessionId request.SessionId
 
         match! tryDeliverAt now request with
         | AttemptDelivered -> return SendResult.Delivered
         | AttemptFailed _ -> return SendResult.Queued
         | AttemptNoLiveSession ->
-            enqueue now worktreeKey targetSessionId request.Prompt
+            enqueue now worktreeKey request.Target request.Prompt
             return SendResult.Queued
     }
 
@@ -330,6 +570,152 @@ let private drainPending now (kind: PromptKind) (worktreePath: string) : Prompt 
 
 let drainPendingCanvas worktreePath =
     drainPending DateTime.UtcNow PromptKind.Canvas worktreePath
+
+let private sendShutdownRequest
+    (shutdownUrl: string)
+    (shutdownCapability: string)
+    =
+    async {
+        try
+            use timeout = new Threading.CancellationTokenSource(shutdownRequestTimeout)
+            use content =
+                new StringContent(
+                    JsonSerializer.Serialize(
+                        {| capability = shutdownCapability |}
+                    ),
+                    Encoding.UTF8,
+                    "application/json"
+                )
+
+            let! response =
+                shutdownHttpClient.PostAsync(
+                    shutdownUrl,
+                    content,
+                    timeout.Token
+                )
+                |> Async.AwaitTask
+
+            use _ = response
+
+            return
+                match int response.StatusCode with
+                | 202 -> ShutdownRequestOutcome.Accepted
+                | 401 -> ShutdownRequestOutcome.InvalidCapability
+                | 403 -> ShutdownRequestOutcome.NonLoopbackRequest
+                | 409 -> ShutdownRequestOutcome.Rejected
+                | _ -> ShutdownRequestOutcome.Rejected
+        with _ ->
+            return ShutdownRequestOutcome.TransportFailed
+    }
+
+let private defaultShutdownDependencies isClosed =
+    { SendShutdown = sendShutdownRequest
+      IsClosed = isClosed
+      ProbeProcess = fun resolver identity -> probeExactProcess resolver identity
+      Delay =
+        fun interval ->
+            let milliseconds =
+                interval.TotalMilliseconds
+                |> max 0.0
+                |> int
+
+            Async.Sleep milliseconds
+      UtcNow = fun () -> DateTime.UtcNow }
+
+let private shutdownRegistration target =
+    match sessionRegistry.TryGetValue target.ProcessIdentity with
+    | true, registration
+        when String.Equals(
+            registration.Entry.WorktreePath,
+            normalizePath target.WorktreePath,
+            StringComparison.OrdinalIgnoreCase
+        ) ->
+        Some registration
+    | _ -> None
+
+let internal shutdownExactWith
+    (dependencies: ShutdownDependencies)
+    (options: ShutdownWaitOptions)
+    (target: ShutdownTarget)
+    : Async<Result<ShutdownCompletion, ShutdownFailure>> =
+    async {
+        match shutdownRegistration target with
+        | None ->
+            return Error ShutdownFailure.MissingRegistration
+        | Some registration ->
+            match
+                dependencies.ProbeProcess
+                    registration.ProcessIdentityResolver
+                    target.ProcessIdentity
+            with
+            | Error _ ->
+                return Error ShutdownFailure.VerificationFailed
+            | Ok ExactProcessState.Exited ->
+                return Ok ShutdownCompletion.ProcessExit
+            | Ok ExactProcessState.Reused ->
+                return Error ShutdownFailure.StaleRegistration
+            | Ok ExactProcessState.Running
+                when not (
+                    isSessionAlive
+                        (dependencies.UtcNow ())
+                        registration.Entry
+                ) ->
+                return Error ShutdownFailure.StaleRegistration
+            | Ok ExactProcessState.Running ->
+                match!
+                    dependencies.SendShutdown
+                        registration.ShutdownUrl
+                        registration.ShutdownCapability
+                with
+                | ShutdownRequestOutcome.InvalidCapability ->
+                    return Error ShutdownFailure.InvalidCapability
+                | ShutdownRequestOutcome.NonLoopbackRequest ->
+                    return Error ShutdownFailure.NonLoopbackRequest
+                | ShutdownRequestOutcome.Rejected ->
+                    return Error ShutdownFailure.Rejected
+                | ShutdownRequestOutcome.TransportFailed ->
+                    return Error ShutdownFailure.RequestFailed
+                | ShutdownRequestOutcome.Accepted ->
+                    let deadline =
+                        dependencies.UtcNow () + options.Timeout
+
+                    let rec waitForCompletion () =
+                        async {
+                            match! dependencies.IsClosed target.ProcessIdentity with
+                            | Error _ ->
+                                return Error ShutdownFailure.VerificationFailed
+                            | Ok true ->
+                                return Ok ShutdownCompletion.ExactClosure
+                            | Ok false ->
+                                match
+                                    dependencies.ProbeProcess
+                                        registration.ProcessIdentityResolver
+                                        target.ProcessIdentity
+                                with
+                                | Error _ ->
+                                    return Error ShutdownFailure.VerificationFailed
+                                | Ok ExactProcessState.Exited
+                                | Ok ExactProcessState.Reused ->
+                                    return Ok ShutdownCompletion.ProcessExit
+                                | Ok ExactProcessState.Running
+                                    when dependencies.UtcNow () >= deadline ->
+                                    return Error ShutdownFailure.TimedOut
+                                | Ok ExactProcessState.Running ->
+                                    do! dependencies.Delay options.PollInterval
+                                    return! waitForCompletion ()
+                        }
+
+                    return! waitForCompletion ()
+    }
+
+/// Request routine SDK shutdown for one exact registered process. Endpoint acceptance only starts
+/// the wait; success requires the activity owner to report exact closure or the shared process
+/// resolver to prove that exact PID/start identity exited.
+let shutdownExact isClosed target =
+    shutdownExactWith
+        (defaultShutdownDependencies isClosed)
+        defaultShutdownWaitOptions
+        target
 
 let internal computeLiveness now (session: SessionEntry option) (poll: bool * DateTime) =
     match session, poll with
@@ -366,7 +752,9 @@ let internal computeLiveness now (session: SessionEntry option) (poll: bool * Da
 let getStatus (worktreePath: string) =
     let now = DateTime.UtcNow
     let key = normalizePath worktreePath
-    let session = freshestSession worktreePath
+    let session =
+        canvasSessionsForWorktreeAt now worktreePath
+        |> List.tryHead
     let poll = pollRegistry.TryGetValue(key)
 
     match computeLiveness now session poll with
@@ -382,7 +770,9 @@ let getStatus (worktreePath: string) =
            SessionId = None |}
 
 let getSessionForWorktree worktreePath =
-    freshestSession worktreePath |> Option.bind _.SessionId
+    canvasSessionsForWorktree worktreePath
+    |> List.tryHead
+    |> Option.bind _.SessionId
 
 let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
     let now = DateTime.UtcNow
@@ -390,14 +780,12 @@ let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
     worktreePaths
     |> List.choose (fun path ->
         let key = normalizePath path
-        let sessions = sessionsForWorktree path
-        let session = sessions |> List.sortByDescending _.RegisteredAt |> List.tryHead
+        let sessions = canvasSessionsForWorktreeAt now path
+        let session = sessions |> List.tryHead
         let poll = pollRegistry.TryGetValue(key)
         let liveSessionIds =
             sessions
-            |> List.filter (isSessionAlive now)
             |> List.choose _.SessionId
-            |> List.distinct
             |> List.sort
 
         computeLiveness now session poll

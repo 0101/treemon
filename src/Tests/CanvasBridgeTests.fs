@@ -11,14 +11,49 @@ open NUnit.Framework
 open Shared
 open Server.SessionBridge
 open Server.CanvasBridge
+open Server.SessionActivity
 open Server.RefreshScheduler.CanvasWatchers
 open Tests.TestUtils
 
-// Unique session IDs keep tests isolated now that the registry is keyed by sessionId
-// (a shared literal like "s1" would otherwise collide across tests).
+// Unique durable session IDs keep ownership assertions isolated even though physical bridge
+// registrations are now keyed by exact process identity.
 let private uniqueSid prefix =
     let id = Guid.NewGuid().ToString("N")[..7]
     $"{prefix}-{id}"
+
+// The production registry is keyed by exact Copilot process identity. Tests keep the convenient
+// three-argument registration shape while assigning each synthetic physical process a unique key.
+let mutable private nextBridgeProcessId = 93000
+
+let private registerExactSession identity path injectUrl sessionId =
+    let processId = ProcessIdentity.processId identity
+    let _, startTicks = ProcessIdentity.sortKey identity
+    let suffix = $"{processId:x8}{startTicks:x16}"
+    let capability = String('B', 43 - suffix.Length) + suffix
+    let resolver =
+        ProcessIdentityResolver.create (fun requested ->
+            if requested = processId then Ok(Some identity) else Ok None)
+
+    let request: RegistrationRequest =
+        { WorktreePath = path
+          InjectUrl = injectUrl
+          ShutdownUrl = "http://127.0.0.1:1/shutdown"
+          ShutdownCapability = capability
+          SessionId = sessionId
+          ParentProcessId = processId
+          TerminalSessionId = None }
+
+    Server.SessionBridge.registerSession resolver request
+    |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
+
+let private registerSession path injectUrl sessionId =
+    let processId = Interlocked.Increment(&nextBridgeProcessId)
+    let identity =
+        ProcessIdentity.create processId (int64 processId * 1000L + 1L)
+        |> Result.defaultWith invalidOp
+
+    registerExactSession identity path injectUrl sessionId
+    |> ignore
 
 let private canvasWire payload =
     serializePrompt (Prompt.canvas payload)
@@ -481,7 +516,7 @@ type DrainQueueTests() =
         runAsync (cancelPendingLaunch path)
 
 
-// ── multi-session registry (sessionId-keyed re-key) ─────────────────
+// ── exact-process registry with durable-session canvas collapse ──────
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -502,26 +537,68 @@ type MultiSessionRegistryTests() =
         Assert.That(ids, Is.EqualTo(List.sort [ a; b; c ]))
 
     [<Test>]
-    member _.``Re-registering the same sessionId upserts in place (no duplicate)``() =
+    member _.``Two physical processes sharing one sessionId remain independently registered``() =
         let path = uniquePath "multi-upsert"
         let sid = uniqueSid "dup"
         registerSession path "http://localhost:1/inject" (Some sid)
         registerSession path "http://localhost:2/inject" (Some sid)
 
         let sessions = sessionsForWorktree path
-        Assert.That(List.length sessions, Is.EqualTo 1, "Same sessionId must not create a second entry")
-        Assert.That(sessions.Head.InjectUrl, Is.EqualTo "http://localhost:2/inject", "Latest registration wins the slot")
+        let canvasSessions = canvasSessionsForWorktree path
+        let liveness = getAllLiveness [ path ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                List.length sessions,
+                Is.EqualTo 2,
+                "Physical registrations are keyed by exact process identity, not durable SessionId")
+            Assert.That(
+                sessions |> List.map _.ProcessIdentity |> List.distinct |> List.length,
+                Is.EqualTo 2)
+            Assert.That(
+                canvasSessions |> List.length,
+                Is.EqualTo 1,
+                "Canvas owner routing collapses duplicate physical registrations for one durable session")
+            Assert.That(
+                canvasSessions.Head.InjectUrl,
+                Is.EqualTo "http://localhost:2/inject",
+                "The freshest physical registration serves the durable canvas owner")
+            Assert.That(
+                liveness[path].LiveSessionIds,
+                Is.EqualTo [ sid ],
+                "Public canvas liveness exposes one durable owner, not duplicate physical processes"))
 
     [<Test>]
-    member _.``Two None registrations for one worktree collapse to a single slot``() =
+    member _.``Re-registering one exact process updates its single slot``() =
+        let path = uniquePath "multi-exact-upsert"
+        let sid = uniqueSid "same-process"
+        let processId = Interlocked.Increment(&nextBridgeProcessId)
+        let identity =
+            ProcessIdentity.create processId (int64 processId * 1000L + 1L)
+            |> Result.defaultWith invalidOp
+
+        registerExactSession identity path "http://localhost:1/inject" (Some sid)
+        |> ignore
+        registerExactSession identity path "http://localhost:2/inject" (Some sid)
+        |> ignore
+
+        let sessions = sessionsForWorktree path
+        Assert.That(List.length sessions, Is.EqualTo 1)
+        Assert.That(sessions.Head.ProcessIdentity, Is.EqualTo identity)
+        Assert.That(sessions.Head.InjectUrl, Is.EqualTo "http://localhost:2/inject")
+
+    [<Test>]
+    member _.``Two anonymous physical registrations remain exact but collapse for canvas status``() =
         let path = uniquePath "multi-none"
         registerSession path "http://localhost:1/inject" None
         registerSession path "http://localhost:2/inject" None
 
         let sessions = sessionsForWorktree path
-        Assert.That(List.length sessions, Is.EqualTo 1, "None registrations share the per-worktree fallback slot")
-        Assert.That(sessions.Head.InjectUrl, Is.EqualTo "http://localhost:2/inject")
-        Assert.That(sessions.Head.SessionId, Is.EqualTo None)
+        let canvasSessions = canvasSessionsForWorktree path
+        Assert.That(List.length sessions, Is.EqualTo 2)
+        Assert.That(List.length canvasSessions, Is.EqualTo 1)
+        Assert.That(canvasSessions.Head.InjectUrl, Is.EqualTo "http://localhost:2/inject")
+        Assert.That(canvasSessions.Head.SessionId, Is.EqualTo None)
 
     [<Test>]
     member _.``A None registration and a sessionId registration coexist``() =
@@ -770,7 +847,8 @@ type SystemViewInteractionRoutingTests() =
     let ts (s: string) = DateTimeOffset.Parse(s, Globalization.CultureInfo.InvariantCulture)
 
     let storedAt sid wt updatedAt : Server.SessionActivityStore.StoredStatus =
-        { SessionId = Server.SessionActivity.SessionId sid
+        { ProcessIdentity = None
+          SessionId = Server.SessionActivity.SessionId sid
           TerminalSessionId = None
           WorktreePath = WorktreePath wt
           Provider = CopilotCli
@@ -909,11 +987,25 @@ type ScannerFallbackAttributionTests() =
     [<Test>]
     member _.``fallbackOwner attributes only when exactly one session is registered``() =
         let entry sid : SessionEntry =
-            { WorktreePath = "/w"; InjectUrl = "http://localhost/inject"; SessionId = sid; RegisteredAt = DateTime.UtcNow }
+            let processId = Interlocked.Increment(&nextBridgeProcessId)
+            let identity =
+                ProcessIdentity.create processId (int64 processId * 1000L + 1L)
+                |> Result.defaultWith invalidOp
+
+            { ProcessIdentity = identity
+              WorktreePath = "/w"
+              InjectUrl = "http://localhost/inject"
+              SessionId = sid
+              TerminalSessionId = None
+              RegisteredAt = DateTime.UtcNow }
 
         Assert.That(fallbackOwner [], Is.EqualTo None, "Zero sessions -> no fallback owner")
         Assert.That(fallbackOwner [ entry (Some "solo") ], Is.EqualTo(Some "solo"), "Exactly one session -> it is the owner")
         Assert.That(fallbackOwner [ entry None ], Is.EqualTo None, "A single anonymous session has no id to attribute")
+        Assert.That(
+            fallbackOwner [ entry (Some "same"); entry (Some "same") ],
+            Is.EqualTo(Some "same"),
+            "Duplicate physical registrations for one durable session remain one canvas owner")
         Assert.That(fallbackOwner [ entry (Some "a"); entry (Some "b") ], Is.EqualTo None,
             "Two sessions are ambiguous -> leave unowned (the misattribution guard)")
 

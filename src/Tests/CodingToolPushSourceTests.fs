@@ -29,7 +29,8 @@ let private storedWithClocks
     (updatedAt: string)
     (lastSeen: string)
     : StoredStatus =
-    { SessionId = SessionId sid
+    { ProcessIdentity = None
+      SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath wt
       Provider = CopilotCli
@@ -427,7 +428,8 @@ type RetainedSessionsTests() =
         // Regression: hasFooter must count Intent. A session folded from IntentReported alone still has
         // footer content (its intent line renders), so its retained card must carry the provider.
         let intentOnly: StoredStatus =
-            { SessionId = SessionId "i"
+            { ProcessIdentity = None
+              SessionId = SessionId "i"
               TerminalSessionId = None
               WorktreePath = WorktreePath "wt-i"
               Provider = CopilotCli

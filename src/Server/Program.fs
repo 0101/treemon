@@ -558,7 +558,7 @@ let main args =
     let canvasAgentRoutes =
         match schedulerAgent with
         | Some agent ->
-            [ route "/api/canvas/register" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasRegisterHandler agent
+            [ route "/api/canvas/register" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasRegisterHandler processIdentityResolver agent
               route "/api/canvas/attribute" >=> POST >=> HttpSecurity.csrfGuard >=> CanvasDocServer.canvasAttributeHandler agent ]
         | None -> []
 

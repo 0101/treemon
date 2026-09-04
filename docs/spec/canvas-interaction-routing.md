@@ -78,10 +78,12 @@ before allocating an unbounded clone.
 ## Technical Approach
 
 `CanvasDocOwnership` is the mailbox-backed store for AgentDoc ownership, providing assignment,
-lookup, removal, and pruning. `SessionBridge` owns the sessionId-keyed registry, transport queue,
-limits, and liveness shared by canvas and agent prompts. `CanvasBridge` layers target resolution and
-worktree launch policy over that generic transport, and delegates a required spawn to the shared
-embedded command-launch boundary.
+lookup, removal, and pruning. `SessionBridge` owns exact process-keyed registrations, secondary
+worktree and durable-SessionId lookup, the transport queue, limits, and liveness shared by canvas
+and agent prompts. Canvas-facing lookup collapses duplicate physical registrations for one durable
+SessionId to its freshest live registration; exact agent delivery keeps the physical identity.
+`CanvasBridge` layers target resolution and worktree launch policy over that generic transport, and
+delegates a required spawn to the shared embedded command-launch boundary.
 
 `CanvasBridge.resolveTarget` branches on `CanvasDocKinds.classify`: an AgentDoc reads
 `CanvasDocOwnership`, while a SystemView intersects the worktree's live bridge registrations with the

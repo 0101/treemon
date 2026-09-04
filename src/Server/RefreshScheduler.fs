@@ -665,13 +665,14 @@ module CanvasWatchers =
     /// Fallback attribution target for a worktree's scanner. Explicit `/api/canvas/attribute`
     /// declarations are the primary attribution path; the scanner only fills the gap for docs
     /// with no declared owner, and only when it can do so *unambiguously* — i.e. exactly one
-    /// session is registered for the worktree. Zero or many registered sessions (or a single
-    /// anonymous `SessionId = None` registration) leave the doc unowned. This replaces the
-    /// previous last-registered attribution (`getSessionForWorktree`) that credited every
-    /// changed doc to whichever session registered last — the misattribution bug that
-    /// cross-credited docs whenever two sessions shared a worktree.
+    /// durable session owns a live registration for the worktree. Duplicate physical processes
+    /// for that same durable session collapse to their freshest registration; zero or several
+    /// durable sessions (or one anonymous registration) leave the doc unowned.
     let fallbackOwner (sessions: SessionBridge.SessionEntry list) : string option =
-        match sessions with
+        match
+            sessions
+            |> SessionBridge.collapseLiveRegistrations DateTime.UtcNow
+        with
         | [ single ] -> single.SessionId
         | _ -> None
 
