@@ -29,8 +29,8 @@
 
 ### Terminal lifetime and attachments
 
-Opening a terminal always starts a new terminal for the canonical worktree path. Existing terminals
-remain available until explicitly closed. The
+Opening a terminal always starts a new terminal for the canonical worktree path. A terminal remains
+available until its shell exits or it is explicitly closed. The
 `TerminalHost` runs independently from the Treemon server, so a compatible server restart or deploy
 rediscovers the same host, ttyd processes, and terminal tabs instead of replacing them. Server
 shutdown alone never closes the host.
@@ -43,6 +43,8 @@ process names and ancestry are never discovery or cleanup authority.
 The registry mailbox is the sole owner that closes retained process and Job Object handles.
 An upstream exit posts its exact terminal session ID back to that mailbox, so pruning, explicit
 close, shutdown, and stale upstream notices are serialized and cannot close one handle concurrently.
+The next healthy registry reconciliation removes that exact terminal tab and advances its
+worktree-local selection to a remaining sibling when one exists.
 
 For each terminal, the host is ttyd's sole upstream WebSocket client for the terminal lifetime. It
 continuously drains ttyd into a small bounded raw replay buffer and accepts one replaceable browser
@@ -60,23 +62,28 @@ a visible omission notice, and then sends the surviving frames instead of silent
 discontinuous output into the existing state.
 
 The terminal pane normally follows the currently focused worktree card. Clicking a card's embedded
-terminal action explicitly targets that worktree without changing dashboard focus or the Canvas
-pane; the next card selection restores normal focus-following. Its tab strip shows only the targeted
-worktree's terminals and labels each one with the freshest display-safe activity from that exact
-terminal's representative live Copilot session: reported `assistant.intent` or session title.
+terminal action, or pressing `T` while that card is focused, explicitly targets that worktree
+without changing the selected dashboard card or Canvas document. It opens the pane on the remembered
+terminal and moves browser focus into it when that worktree already has one, or starts, selects, and
+focuses a terminal when none exists; the next card selection restores normal focus-following. Its
+tab strip shows only the targeted worktree's terminals and labels each one with the freshest
+display-safe activity from that exact terminal's representative live Copilot session: reported
+`assistant.intent` or session title.
 Until either exists, the label falls back to `Terminal 1`, `Terminal 2`, and so on in opening order.
 It remembers the selected terminal independently for each worktree. **New** starts another terminal
 for the targeted worktree; the empty state offers **Start terminal**. Switching worktrees hides the
 other worktrees' tabs without closing their terminals, and running iframes stay mounted so their
 browser state survives. Closing the last visible tab leaves the pane open in its empty state; only
 the persistent top-bar **Terminal** control hides or shows the pane, using the same active treatment
-as the **Canvas** control.
+as the **Canvas** control. Middle-clicking a tab invokes the same exact-terminal close action as its
+close button.
 
 ### Launch routing and command startup
 
 The card's `>` / Enter action remains the explicit native Windows Terminal choice, and its `+`
 action opens another tab in that tracked native window. The dedicated embedded-terminal action and
-the terminal pane's **New** action continue to start plain embedded PowerShell terminals.
+`T` shortcut reuse that worktree's remembered embedded terminal when one exists and otherwise start
+a plain embedded PowerShell terminal. The terminal pane's **New** action always starts another one.
 
 Every agent-bearing process launch uses an embedded terminal: Resume, contextual card actions,
 explicit Canvas session launch, create-worktree prompt launch, AutoSync fallback, queued Canvas

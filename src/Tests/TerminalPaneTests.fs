@@ -313,6 +313,16 @@ let private focusModel : Model =
 type TerminalFocusTests() =
 
     [<Test>]
+    member _.``T key opens or focuses the embedded terminal for the focused card``() =
+        Assert.That(
+            App.keyBinding
+                (Card (WorktreePath.value first))
+                "t"
+                focusModel,
+            Is.EqualTo(Some(OpenEmbeddedTerminal first))
+        )
+
+    [<Test>]
     member _.``Terminal pane toggle preserves its target while changing visibility``() =
         let model =
             { focusModel with
@@ -331,6 +341,102 @@ type TerminalFocusTests() =
             Assert.That(shown.TerminalPaneOpen, Is.True)
             Assert.That(shown.TerminalPaneTarget, Is.EqualTo(Some second))
             Assert.That(List.length showCmd, Is.EqualTo(1)))
+
+    [<Test>]
+    member _.``Open embedded terminal reuses the selected worktree terminal``() =
+        let model =
+            { focusModel with
+                TerminalPaneOpen = false
+                TerminalPaneTarget = None }
+
+        let updated, cmd =
+            App.update
+                (OpenEmbeddedTerminal first)
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneOpen, Is.True)
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(updated.EmbeddedTerminals, Is.EqualTo(model.EmbeddedTerminals))
+            Assert.That(updated.ActiveEmbeddedTerminals, Is.EqualTo(model.ActiveEmbeddedTerminals))
+            Assert.That(isStarting first updated.EmbeddedTerminalStarts, Is.False)
+            Assert.That(List.length cmd, Is.EqualTo(2)))
+
+    [<Test>]
+    member _.``Open embedded terminal starts one when the worktree has none``() =
+        let updated, cmd =
+            App.update
+                (OpenEmbeddedTerminal third)
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneOpen, Is.True)
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some third))
+            Assert.That(isStarting third updated.EmbeddedTerminalStarts, Is.True)
+            Assert.That(
+                tryStartState third updated.EmbeddedTerminalStarts,
+                Is.EqualTo(Some TerminalStartState.StartingAndFocus)
+            )
+            Assert.That(List.length cmd, Is.EqualTo(2)))
+
+    [<Test>]
+    member _.``Start embedded terminal always creates another tab``() =
+        let updated, cmd =
+            App.update
+                (StartEmbeddedTerminal first)
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneOpen, Is.True)
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(isStarting first updated.EmbeddedTerminalStarts, Is.True)
+            Assert.That(
+                tryStartState first updated.EmbeddedTerminalStarts,
+                Is.EqualTo(Some TerminalStartState.StartingAndFocus)
+            )
+            Assert.That(List.length cmd, Is.EqualTo(2)))
+
+    [<Test>]
+    member _.``Focused start waits for its exact iframe before moving browser focus``() =
+        let exact = terminalId "focused-start"
+        let snapshot =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                @ [ running exact third 61241 ] }
+        let starting =
+            { focusModel with
+                TerminalPaneTarget = Some third
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        third, TerminalStartState.StartingAndFocus
+                    ] }
+
+        let started, startCmd =
+            App.update
+                (EmbeddedTerminalStarted(
+                    third,
+                    Ok
+                        { Snapshot = snapshot
+                          TerminalId = exact }
+                ))
+                starting
+
+        let loaded, loadCmd =
+            App.update
+                (EmbeddedTerminalFrameLoaded(third, exact))
+                started
+
+        Assert.Multiple(fun () ->
+            Assert.That(startCmd, Is.Empty)
+            Assert.That(
+                tryStartState third started.EmbeddedTerminalStarts,
+                Is.EqualTo(Some(TerminalStartState.WaitingForFocus exact))
+            )
+            Assert.That(
+                tryStartState third loaded.EmbeddedTerminalStarts,
+                Is.EqualTo(None)
+            )
+            Assert.That(List.length loadCmd, Is.EqualTo(1)))
 
     [<Test>]
     member _.``Repeated Resume keeps one in-flight launch without an action cooldown``() =

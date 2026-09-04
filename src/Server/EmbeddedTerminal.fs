@@ -66,12 +66,10 @@ let private reconcileSnapshot resetTabs previousHost currentHost (records: Termi
 
         { Tabs =
             (snapshot.Tabs
-             |> List.map (fun tab ->
+             |> List.choose (fun tab ->
                  recordsById
                  |> Map.tryFind tab.Id
-                 |> Option.map tabForRecord
-                 |> Option.defaultWith (fun () ->
-                     interrupted "The terminal is no longer present in the authoritative TerminalHost registry." tab)))
+                 |> Option.map tabForRecord))
             @ (records
                |> List.filter (fun terminal ->
                    not (Set.contains (EmbeddedTerminalId terminal.SessionId) previousIds))

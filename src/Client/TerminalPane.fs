@@ -1,14 +1,18 @@
 module TerminalPane
 
 open System
+open Browser
 open Browser.Types
 open Feliz
+open Fable.Core.JsInterop
 open Shared
 open Navigation
 
 [<RequireQualifiedAccess>]
 type TerminalStartState =
     | Starting
+    | StartingAndFocus
+    | WaitingForFocus of EmbeddedTerminalId
     | Failed of error: string
 
 type TerminalPaneState =
@@ -21,6 +25,7 @@ type TerminalPaneState =
 type TerminalPaneCallbacks =
     { SelectTab: EmbeddedTerminalId -> unit
       CloseTab: EmbeddedTerminalId -> unit
+      FrameLoaded: WorktreePath -> EmbeddedTerminalId -> unit
       StartTerminal: WorktreePath -> unit }
 
 let private samePath left right =
@@ -108,11 +113,16 @@ let setStartState path state states =
 let clearStartState path states =
     removePath path states
 
+let private startInFlight state =
+    match state with
+    | TerminalStartState.Starting
+    | TerminalStartState.StartingAndFocus -> true
+    | TerminalStartState.WaitingForFocus _
+    | TerminalStartState.Failed _ -> false
+
 let isStarting path states =
-    match tryStartState path states with
-    | Some TerminalStartState.Starting -> true
-    | Some (TerminalStartState.Failed _)
-    | None -> false
+    tryStartState path states
+    |> Option.exists startInFlight
 
 let selectedWorktree targetWorktree focusedElement =
     targetWorktree
@@ -137,6 +147,16 @@ let safeEndpoint (endpoint: string) =
         | true, port when port > 0 && port <= 65535 && port <> 5000 ->
             Some endpoint
         | _ -> None
+
+let private terminalFrameId terminalId =
+    $"terminal-iframe-{EmbeddedTerminalId.value terminalId}"
+
+let focusTerminal terminalId =
+    Dom.window?requestAnimationFrame(fun (_: float) ->
+        Dom.document.getElementById(terminalFrameId terminalId)
+        |> Option.ofObj
+        |> Option.iter (fun frame -> frame.focus ()))
+    |> ignore
 
 let private lifecyclePresentation lifecycle =
     match lifecycle with
@@ -175,6 +195,11 @@ let private terminalTab callbacks activeTerminal index tab =
                 prop.ariaLabel $"{label} for {worktreeName}, {lifecycleLabel}"
                 prop.tabIndex (if isActive then 0 else -1)
                 prop.title $"{label} for {worktreeName} — {lifecycleLabel}"
+                prop.onMouseUp (fun e ->
+                    if e.button = 1 then
+                        e.preventDefault ()
+                        e.stopPropagation ()
+                        callbacks.CloseTab terminalId)
                 prop.onClick (fun _ -> callbacks.SelectTab terminalId)
                 prop.onKeyDown (fun e ->
                     if e.key = "Enter" || e.key = " " then
@@ -254,7 +279,7 @@ let private header state callbacks =
         | None -> Html.none
         | Some path ->
             let starting =
-                state.StartState = Some TerminalStartState.Starting
+                state.StartState |> Option.exists startInFlight
 
             Html.button [
                 prop.className "ctrl-btn terminal-new-btn"
@@ -299,8 +324,9 @@ let private terminalAction
 
 let private startFeedback state callbacks =
     match state.SelectedWorktree, state.StartState with
-    | Some _, Some TerminalStartState.Starting
-        when state.ActiveTerminal.IsNone ->
+    | Some _, Some startState
+        when startInFlight startState
+             && state.ActiveTerminal.IsNone ->
         Html.div [
             prop.className "terminal-pane-status"
             prop.text "Starting embedded terminal…"
@@ -360,7 +386,7 @@ let private activeStatus state callbacks =
             prop.text "Select a worktree to view its terminals."
         ]
 
-let private runningIframes state =
+let private runningIframes state callbacks =
     state.Snapshot.Tabs
     |> List.choose (fun tab ->
         match tab.Lifecycle with
@@ -382,6 +408,7 @@ let private runningIframes state =
 
                 Html.iframe [
                     prop.key (EmbeddedTerminalId.value terminalId)
+                    prop.id (terminalFrameId terminalId)
                     prop.className (
                         if isActive then
                             "terminal-iframe terminal-iframe-active"
@@ -395,6 +422,8 @@ let private runningIframes state =
                     prop.custom ("sandbox", "allow-scripts allow-same-origin")
                     prop.custom ("referrerpolicy", "no-referrer")
                     prop.custom ("scrolling", "no")
+                    prop.onLoad (fun _ ->
+                        callbacks.FrameLoaded tab.Worktree terminalId)
                 ])
         | EmbeddedTerminalLifecycle.Interrupted _ ->
             None)
@@ -421,7 +450,7 @@ let view state callbacks =
                         prop.children [
                             startFeedback state callbacks
                             activeStatus state callbacks
-                            yield! runningIframes state
+                            yield! runningIframes state callbacks
                         ]
                     ]
                 ]

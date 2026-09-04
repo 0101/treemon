@@ -75,11 +75,13 @@ type Msg =
     | Tick of now: float
     | OpenTerminal of WorktreePath
     | OpenEmbeddedTerminal of WorktreePath
+    | StartEmbeddedTerminal of WorktreePath
     | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
     | EmbeddedTerminalPollFailed
     | EmbeddedTerminalStarted of
         WorktreePath *
         Result<EmbeddedTerminalStartResult, string>
+    | EmbeddedTerminalFrameLoaded of WorktreePath * EmbeddedTerminalId
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | SelectEmbeddedTerminal of EmbeddedTerminalId
     | CloseEmbeddedTerminal of EmbeddedTerminalId
