@@ -626,6 +626,10 @@ let main args =
                                         CodingToolStatus.readConfiguredProvider
                                         (fun terminalSessionIds ->
                                             service.QueryTerminalActivity terminalSessionIds))
+                                    (fun identity ->
+                                        async {
+                                            return service.IsProcessClosed identity
+                                        })
                                 |> BackgroundLoop.start
                                 |> Some
                             | _ -> None)

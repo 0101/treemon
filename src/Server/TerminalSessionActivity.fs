@@ -161,20 +161,58 @@ let internal replacementSessionPlan
     then
         TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
     else
+        let terminalsById =
+            terminals
+            |> List.map (fun terminal ->
+                TerminalSessionId terminal.TerminalSessionId,
+                terminal)
+            |> Map.ofList
+
+        let shutdownTargets =
+            snapshot.OpenSessions
+            |> List.map (fun session ->
+                let terminal =
+                    terminalsById
+                    |> Map.find session.TerminalSessionId
+
+                let target:
+                    TerminalHostReplacement.ReplacementShutdownTarget =
+                    { TerminalSessionId =
+                        terminal.TerminalSessionId
+                      WorktreePath = terminal.WorktreePath
+                      CopilotSessionId =
+                        SessionId.value
+                            session.CopilotSessionId
+                      ProcessIdentity =
+                        session.ProcessIdentity }
+
+                target)
+
         let resumeCommands =
             terminals
             |> List.choose (fun terminal ->
                 snapshot.ReplacementSessionIds
                 |> Map.tryFind (TerminalSessionId terminal.TerminalSessionId)
                 |> Option.map (fun sessionId ->
+                    let resume:
+                        TerminalHostReplacement.ReplacementResumeCommand =
+                        { CopilotSessionId =
+                            SessionId.value sessionId
+                          Command =
+                            CodingToolCli.build
+                                (resolveProvider terminal.WorktreePath)
+                                (CodingToolCli.Resume(Some(SessionId.value sessionId)))
+                            |> _.AsShellString }
+
                     terminal.TerminalSessionId,
-                    CodingToolCli.build
-                        (resolveProvider terminal.WorktreePath)
-                        (CodingToolCli.Resume(Some(SessionId.value sessionId)))
-                    |> _.AsShellString))
+                    resume))
             |> Map.ofList
 
-        TerminalHostReplacement.ReplacementSessionPlan.Ready(snapshot.ActivityEpoch, resumeCommands)
+        TerminalHostReplacement.ReplacementSessionPlan.Ready(
+            snapshot.ActivityEpoch,
+            shutdownTargets,
+            resumeCommands
+        )
 
 /// Adapt the session-activity service's narrow raw query into the opaque policy consumed by
 /// TerminalHost replacement. All exact ownership, terminal-specific gating, resume selection, and

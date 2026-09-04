@@ -91,6 +91,11 @@ let private replacementTerminal
     { TerminalSessionId = terminalSessionId
       WorktreePath = worktreePath }
 
+let private replacementResume sessionId command:
+    TerminalHostReplacement.ReplacementResumeCommand =
+    { CopilotSessionId = sessionId
+      Command = command }
+
 let private queryReplacementPlanOk
     (service: SessionActivityService)
     now
@@ -110,8 +115,12 @@ let private queryReplacementPlanOk
 
 let private requireReplacementReady =
     function
-    | TerminalHostReplacement.ReplacementSessionPlan.Ready(epoch, commands) ->
-        epoch, commands
+    | TerminalHostReplacement.ReplacementSessionPlan.Ready(
+        epoch,
+        shutdownTargets,
+        commands
+      ) ->
+        epoch, shutdownTargets, commands
     | TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle ->
         Assert.Fail "expected a ready replacement session plan"
         failwith "unreachable"
@@ -2089,7 +2098,7 @@ type TerminalOwnershipQueryTests() =
                     service
                     (ts "2026-03-01T12:01:00Z")
                     (Set.singleton oldTerminal)
-            let _, resumeCommands =
+            let _, shutdownTargets, resumeCommands =
                 queryReplacementPlanOk
                     service
                     (ts "2026-03-01T12:01:00Z")
@@ -2102,6 +2111,7 @@ type TerminalOwnershipQueryTests() =
                     Is.EqualTo([ SessionId "fresh" ])
                 )
                 Assert.That(retained.OpenSessions, Is.Empty)
+                Assert.That(shutdownTargets, Is.Empty)
                 Assert.That(resumeCommands, Is.Empty)))
 
     [<Test>]
@@ -2227,18 +2237,34 @@ type TerminalOwnershipQueryTests() =
 
             Some CopilotCli
 
-        let epoch, commands =
+        let epoch, shutdownTargets, commands =
             replacementSessionPlan resolveProvider terminals snapshot
             |> requireReplacementReady
 
+        let expectedShutdownTarget:
+            TerminalHostReplacement.ReplacementShutdownTarget =
+            { TerminalSessionId =
+                TerminalSessionId.value ownedTerminal
+              WorktreePath = ownedPath
+              CopilotSessionId = "provider-owned-session"
+              ProcessIdentity =
+                identityForSession
+                    "provider-owned-session" }
+
         Assert.Multiple(fun () ->
             Assert.That(epoch, Is.EqualTo snapshot.ActivityEpoch)
+            Assert.That(
+                shutdownTargets,
+                Is.EqualTo([ expectedShutdownTarget ])
+            )
             Assert.That(
                 commands,
                 Is.EqualTo(
                     Map.ofList
                         [ TerminalSessionId.value ownedTerminal,
-                          "copilot --yolo --resume 'provider-owned-session'" ]
+                          replacementResume
+                              "provider-owned-session"
+                              "copilot --yolo --resume 'provider-owned-session'" ]
                 ),
                 "the unrelated terminal remains a plain shell"
             ))
@@ -2261,6 +2287,13 @@ type TerminalOwnershipQueryTests() =
                 (Set.singleton terminal)
                 (19L, [ older; newer ], Set.empty)
 
+        let _, shutdownTargets, resumeCommands =
+            replacementSessionPlan
+                (fun _ -> Some CopilotCli)
+                [ replacementTerminal terminal "C:/wt/a" ]
+                snapshot
+            |> requireReplacementReady
+
         Assert.Multiple(fun () ->
             Assert.That(
                 snapshot.OpenSessions
@@ -2281,6 +2314,28 @@ type TerminalOwnershipQueryTests() =
                           SessionId "newer-conversation" ]
                 ),
                 "only the greatest-activity conversation is selected for automatic Resume"
+            )
+            Assert.That(
+                shutdownTargets
+                |> List.map _.ProcessIdentity
+                |> Set.ofList,
+                Is.EqualTo(
+                    Set.ofList
+                        [ older.ProcessIdentity
+                          newer.ProcessIdentity ]
+                ),
+                "both physical processes must be returned as independent shutdown targets"
+            )
+            Assert.That(
+                resumeCommands,
+                Is.EqualTo(
+                    Map.ofList
+                        [ TerminalSessionId.value terminal,
+                          replacementResume
+                              "newer-conversation"
+                              "copilot --yolo --resume 'newer-conversation'" ]
+                ),
+                "only the selected durable conversation receives an automatic Resume command"
             ))
 
     [<Test>]
@@ -2311,6 +2366,7 @@ type TerminalOwnershipQueryTests() =
                     Ok(
                         TerminalHostReplacement.ReplacementSessionPlan.Ready(
                             7L,
+                            [],
                             Map.empty
                         )
                     )
@@ -2367,7 +2423,7 @@ type TerminalOwnershipQueryTests() =
                 LastSeen = completedAt }
 
         let completedSnapshot = snapshot [ completed; newerIdle ]
-        let epoch, resumeCommands =
+        let epoch, shutdownTargets, resumeCommands =
             replacementSessionPlan
                 (fun _ -> Some CopilotCli)
                 [ replacementTerminal terminalSessionId worktreePath ]
@@ -2376,12 +2432,15 @@ type TerminalOwnershipQueryTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(epoch, Is.EqualTo completedSnapshot.ActivityEpoch)
+            Assert.That(shutdownTargets.Length, Is.EqualTo(2))
             Assert.That(
                 resumeCommands,
                 Is.EqualTo(
                     Map.ofList
                         [ TerminalSessionId.value terminalSessionId,
-                          "copilot --yolo --resume 'newer-idle'" ]
+                          replacementResume
+                              "newer-idle"
+                              "copilot --yolo --resume 'newer-idle'" ]
                 )
             ))
 
@@ -2472,7 +2531,7 @@ type TerminalOwnershipQueryTests() =
 
             let idle =
                 queryOwnedOk service now (Set.singleton terminalA)
-            let policyEpoch, resumeCommands =
+            let policyEpoch, shutdownTargets, resumeCommands =
                 queryReplacementPlanOk service now [ replacementTarget ]
                 |> requireReplacementReady
 
@@ -2481,11 +2540,21 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(idle.OpenSessions |> List.map _.Status, Is.EqualTo([ SessionLevelStatus.Idle ]))
                 Assert.That(policyEpoch, Is.EqualTo idle.ActivityEpoch)
                 Assert.That(
+                    shutdownTargets
+                    |> List.map _.ProcessIdentity,
+                    Is.EqualTo(
+                        idle.OpenSessions
+                        |> List.map _.ProcessIdentity
+                    )
+                )
+                Assert.That(
                     resumeCommands,
                     Is.EqualTo(
                         Map.ofList
                             [ TerminalSessionId.value terminalA,
-                              "copilot --yolo --resume 'owned'" ]
+                              replacementResume
+                                  "owned"
+                                  "copilot --yolo --resume 'owned'" ]
                     ),
                     "the session orchestration layer selects the provider-specific resume command"
                 )
@@ -2500,7 +2569,7 @@ type TerminalOwnershipQueryTests() =
 
             let retained =
                 queryOwnedOk service now (Set.singleton terminalA)
-            let retainedEpoch, retainedCommands =
+            let retainedEpoch, retainedTargets, retainedCommands =
                 queryReplacementPlanOk service now [ replacementTarget ]
                 |> requireReplacementReady
 
@@ -2522,11 +2591,21 @@ type TerminalOwnershipQueryTests() =
                 )
                 Assert.That(retainedEpoch, Is.EqualTo retained.ActivityEpoch)
                 Assert.That(
+                    retainedTargets
+                    |> List.map _.ProcessIdentity,
+                    Is.EqualTo(
+                        retained.OpenSessions
+                        |> List.map _.ProcessIdentity
+                    )
+                )
+                Assert.That(
                     retainedCommands,
                     Is.EqualTo(
                         Map.ofList
                             [ TerminalSessionId.value terminalA,
-                              "copilot --yolo --resume 'owned'" ]
+                              replacementResume
+                                  "owned"
+                                  "copilot --yolo --resume 'owned'" ]
                     )
                 )))
 
@@ -2595,7 +2674,7 @@ type TerminalOwnershipQueryTests() =
                     representedAt
                     (Set.singleton terminalSessionId)
 
-            let policyEpoch, resumeCommands =
+            let policyEpoch, shutdownTargets, resumeCommands =
                 queryReplacementPlanOk
                     service
                     representedAt
@@ -2624,10 +2703,20 @@ type TerminalOwnershipQueryTests() =
                 )
                 Assert.That(policyEpoch, Is.EqualTo snapshot.ActivityEpoch)
                 Assert.That(
+                    shutdownTargets
+                    |> List.map _.ProcessIdentity,
+                    Is.EqualTo(
+                        snapshot.OpenSessions
+                        |> List.map _.ProcessIdentity
+                    )
+                )
+                Assert.That(
                     resumeCommands,
                     Is.EqualTo(
                         Map.ofList
                             [ TerminalSessionId.value terminalSessionId,
-                              "copilot --yolo --resume 'surviving'" ]
+                              replacementResume
+                                  "surviving"
+                                  "copilot --yolo --resume 'surviving'" ]
                     )
                 )))

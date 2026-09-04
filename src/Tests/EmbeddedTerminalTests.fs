@@ -522,6 +522,11 @@ let private noTerminalCommand _ _ =
                 "The test did not expect a terminal command"
     }
 
+let private replacementResume sessionId command:
+    TerminalHostReplacement.ReplacementResumeCommand =
+    { CopilotSessionId = sessionId
+      Command = command }
+
 let private argumentValue name (startInfo: ProcessStartInfo) =
     startInfo.ArgumentList
     |> Seq.toList
@@ -574,6 +579,59 @@ let private replacementManagerConfig
             fun pid startTicks ->
                 host.ResolveExactProcessExecutable(pid, startTicks)
         SendTerminalCommand = sendTerminalCommand }
+
+let private exactIdentity processId startTicks =
+    ProcessIdentity.create processId startTicks
+    |> Result.defaultWith invalidOp
+
+let private runReplacementCommit
+    config
+    query
+    operations
+    =
+    task {
+        let committed =
+            TaskCompletionSource<TerminalHostReplacement.ReplacementCommit>(
+                TaskCreationOptions.RunContinuationsAsynchronously
+            )
+
+        let commit plan activityQuery =
+            async {
+                let! result =
+                    TerminalHostReplacement.commitReplacementWith
+                        operations
+                        config
+                        plan
+                        activityQuery
+
+                committed.TrySetResult result |> ignore
+
+                return
+                    TerminalHostReplacement.replacementCommitOutcome
+                        result
+            }
+
+        let! outcome =
+            TerminalHostReplacement.tryReplaceHostIgnoring
+                None
+                (fun () -> async.Return())
+                query
+                config
+                commit
+            |> Async.StartAsTask
+
+        let! commitResult =
+            committed.Task.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+        return outcome, commitResult
+    }
+
+let private requireReplacementRecovery = function
+    | TerminalHostReplacement.ReplacementCommit.RecoveryRequired recovery ->
+        recovery
+    | other ->
+        Assert.Fail($"Expected replacement recovery input, got {other}")
+        Unchecked.defaultof<_>
 
 let private worktree (root: string) (name: string) =
     let path = Path.Combine(root, name)
@@ -2187,6 +2245,284 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
+    member _.``successful replacement stops every exact process before host launch and resumes once per terminal``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-exact-ordering"
+            let stagedExecutable = host.Stage stagedVersion
+            let launches = ConcurrentQueue<string>()
+            let submitted = ConcurrentQueue<string>()
+
+            let config =
+                replacementManagerConfig
+                    host
+                    (fun startInfo ->
+                        launches.Enqueue startInfo.FileName
+                        host.Activate(startInfo.FileName, stagedVersion)
+                        Ok())
+                    noTerminalCommand
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let first = worktree host.Root "exact-first"
+            let second = worktree host.Root "exact-second"
+
+            for path in [ first; second ] do
+                let! started =
+                    EmbeddedTerminal.start manager path
+                    |> Async.StartAsTask
+
+                requireOk started |> ignore
+
+            let previous = host.CurrentTerminals
+            let firstTerminal = previous[0]
+            let secondTerminal = previous[1]
+            let firstIdentity = exactIdentity 4101 5101L
+            let duplicateIdentity = exactIdentity 4102 5102L
+            let secondIdentity = exactIdentity 4103 5103L
+
+            let target
+                (terminal: FakeTerminal)
+                copilotSessionId
+                identity
+                :
+                TerminalHostReplacement.ReplacementShutdownTarget =
+                { TerminalSessionId = terminal.SessionId
+                  WorktreePath = terminal.WorktreePath
+                  CopilotSessionId = copilotSessionId
+                  ProcessIdentity = identity }
+
+            let shutdownTargets =
+                [ target
+                      firstTerminal
+                      "shared-conversation"
+                      firstIdentity
+                  target
+                      firstTerminal
+                      "shared-conversation"
+                      duplicateIdentity
+                  target
+                      secondTerminal
+                      "second-conversation"
+                      secondIdentity ]
+
+            let resumeCommands =
+                Map.ofList
+                    [ firstTerminal.SessionId,
+                      replacementResume
+                          "shared-conversation"
+                          "resume-first"
+                      secondTerminal.SessionId,
+                      replacementResume
+                          "second-conversation"
+                          "resume-second" ]
+
+            let expectedTerminals:
+                TerminalHostReplacement.ReplacementTerminal list =
+                previous
+                |> List.map (fun terminal ->
+                    { TerminalSessionId = terminal.SessionId
+                      WorktreePath = terminal.WorktreePath })
+
+            let query
+                _
+                (terminals:
+                    TerminalHostReplacement.ReplacementTerminal list)
+                =
+                Assert.That(terminals, Is.EqualTo expectedTerminals)
+
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        44L,
+                        shutdownTargets,
+                        resumeCommands
+                    )
+                )
+
+            let events = ConcurrentQueue<string>()
+
+            let defaults =
+                TerminalHostReplacement.defaultOperations
+                    (fun _ -> async { return Ok false })
+
+            let operations =
+                { defaults with
+                    ShutdownSession =
+                        fun target ->
+                            async {
+                                events.Enqueue(
+                                    $"session-stop:{ProcessIdentity.processId target.ProcessIdentity}"
+                                )
+
+                                return
+                                    Ok
+                                        SessionBridge.ShutdownCompletion.ExactClosure
+                            }
+                    StopOldHost =
+                        fun stopConfig connection ->
+                            async {
+                                events.Enqueue "old-host-stop-started"
+                                let! result =
+                                    defaults.StopOldHost
+                                        stopConfig
+                                        connection
+
+                                if Result.isOk result then
+                                    events.Enqueue "old-host-stop-confirmed"
+
+                                return result
+                            }
+                    LaunchStagedHost =
+                        fun launchConfig ->
+                            async {
+                                events.Enqueue "staged-host-launch"
+
+                                return!
+                                    defaults.LaunchStagedHost
+                                        launchConfig
+                            }
+                    RecreateTerminal =
+                        fun recreateConfig connection terminal ->
+                            async {
+                                events.Enqueue(
+                                    $"terminal-recreate:{terminal.TerminalSessionId}"
+                                )
+
+                                return!
+                                    defaults.RecreateTerminal
+                                        recreateConfig
+                                        connection
+                                        terminal
+                            }
+                    DeliverCommand =
+                        fun _ _ command ->
+                            async {
+                                events.Enqueue $"command-deliver:{command}"
+                                submitted.Enqueue command
+                                return Ok()
+                            } }
+
+            let! outcome, commit =
+                runReplacementCommit
+                    config
+                    query
+                    operations
+
+            let observedEvents = events.ToArray()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    outcome,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementOutcome.Replaced
+                            stagedVersion
+                    )
+                )
+
+                match commit with
+                | TerminalHostReplacement.ReplacementCommit.ApplyRegistry(
+                    _,
+                    registry,
+                    _
+                  ) ->
+                    Assert.That(registry.Terminals.Length, Is.EqualTo 2)
+                | other ->
+                    Assert.Fail($"Expected applied replacement registry, got {other}")
+
+                Assert.That(
+                    observedEvents
+                    |> Array.take shutdownTargets.Length
+                    |> Set.ofArray,
+                    Is.EqualTo(
+                        Set.ofList
+                            [ "session-stop:4101"
+                              "session-stop:4102"
+                              "session-stop:4103" ]
+                    )
+                )
+                Assert.That(
+                    observedEvents
+                    |> Array.skip shutdownTargets.Length,
+                    Is.EqualTo(
+                        [| "old-host-stop-started"
+                           "old-host-stop-confirmed"
+                           "staged-host-launch"
+                           $"terminal-recreate:{firstTerminal.SessionId}"
+                           "command-deliver:resume-first"
+                           $"terminal-recreate:{secondTerminal.SessionId}"
+                           "command-deliver:resume-second" |]
+                    ),
+                    "no staged host, terminal, or Resume command may start before exact shutdown and old-host exit complete"
+                )
+
+                Assert.That(
+                    submitted.ToArray(),
+                    Is.EqualTo([| "resume-first"; "resume-second" |])
+                )
+                Assert.That(
+                    launches.ToArray(),
+                    Is.EqualTo([| stagedExecutable |])
+                )
+                Assert.That(host.ShutdownRequestCount, Is.EqualTo 1)
+                Assert.That(
+                    host.CurrentTerminals
+                    |> List.map _.WorktreePath,
+                    Is.EqualTo(
+                        [ WorktreePath.value first
+                          WorktreePath.value second ]
+                    )
+                ))
+        }
+
+    [<Test>]
+    member _.``waiting policy performs no session shutdown host stop or staged launch``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-waiting"
+            host.Stage stagedVersion |> ignore
+            let launches = ConcurrentQueue<unit>()
+
+            let config =
+                replacementManagerConfig
+                    host
+                    (fun _ ->
+                        launches.Enqueue()
+                        Error "waiting replacement must not launch")
+                    noTerminalCommand
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "waiting-policy"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let query _ _ =
+                Ok
+                    TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHost
+                    query
+                    manager
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    outcome,
+                    Is.EqualTo
+                        TerminalHostReplacement.ReplacementOutcome.WaitingForIdle
+                )
+                Assert.That(host.ShutdownRequestCount, Is.Zero)
+                Assert.That(launches, Is.Empty)
+                Assert.That(host.IsOnline, Is.True)
+                Assert.That(host.CurrentTerminals.Length, Is.EqualTo 1))
+        }
+
+    [<Test>]
     member _.``registry race between snapshot and recheck aborts without side effects``() =
         task {
             use host = new FakeControlHost()
@@ -2218,6 +2554,7 @@ type EmbeddedTerminalReplacementTests() =
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         4L,
+                        [],
                         Map.empty
                     )
                 )
@@ -2293,6 +2630,7 @@ type EmbeddedTerminalReplacementTests() =
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         epoch,
+                        [],
                         Map.empty
                     )
                 )
@@ -2348,6 +2686,7 @@ type EmbeddedTerminalReplacementTests() =
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         5L,
+                        [],
                         Map.empty
                     )
                 )
@@ -2381,18 +2720,8 @@ type EmbeddedTerminalReplacementTests() =
                                 activityQuery
 
                         let outcome =
-                            match commit with
-                            | TerminalHostReplacement.ReplacementCommit.KeepState value
-                            | TerminalHostReplacement.ReplacementCommit.InterruptState(
-                                _,
-                                value
-                              )
-                            | TerminalHostReplacement.ReplacementCommit.ApplyRegistry(
-                                _,
-                                _,
-                                value
-                              ) ->
-                                value
+                            TerminalHostReplacement.replacementCommitOutcome
+                                commit
 
                         reply.Reply outcome
                         commitCompleted.TrySetResult outcome |> ignore
@@ -2515,6 +2844,7 @@ type EmbeddedTerminalReplacementTests() =
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         31L,
+                        [],
                         Map.empty
                     )
                 )
@@ -2809,19 +3139,45 @@ type EmbeddedTerminalReplacementTests() =
             let queriedTerminals =
                 ConcurrentQueue<TerminalHostReplacement.ReplacementTerminal list>()
 
+            let shutdownTarget:
+                TerminalHostReplacement.ReplacementShutdownTarget =
+                { TerminalSessionId = resumedTerminal.SessionId
+                  WorktreePath = resumedTerminal.WorktreePath
+                  CopilotSessionId = "replacement-session"
+                  ProcessIdentity = exactIdentity 4401 5401L }
+
             let query _ terminals =
                 queriedTerminals.Enqueue terminals
 
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         21L,
+                        [ shutdownTarget ],
                         Map.ofList
-                            [ resumedTerminal.SessionId, replacementCommand ]
+                            [ resumedTerminal.SessionId,
+                              replacementResume
+                                  "replacement-session"
+                                  replacementCommand ]
                     )
                 )
 
+            let operations =
+                { TerminalHostReplacement.defaultOperations
+                      (fun _ -> async { return Ok false }) with
+                    ShutdownSession =
+                        fun _ ->
+                            async {
+                                return
+                                    Ok
+                                        SessionBridge.ShutdownCompletion.ExactClosure
+                            } }
+
             let! outcome =
-                EmbeddedTerminal.tryReplaceHost query manager
+                EmbeddedTerminal.tryReplaceHostWithOperations
+                    (fun () -> async.Return())
+                    query
+                    operations
+                    manager
                 |> Async.StartAsTask
 
             let submittedEndpoint, command =
@@ -2884,42 +3240,286 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
-    member _.``staged launch failure explicitly reports failure and recovers the old host``() =
+    member _.``graceful shutdown addresses every exact target and keeps the old host healthy on failure``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-graceful-failure"
+            host.Stage stagedVersion |> ignore
+
+            let config =
+                replacementManagerConfig
+                    host
+                    noLaunch
+                    noTerminalCommand
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let targetPath = worktree host.Root "graceful-failure"
+
+            let! started =
+                EmbeddedTerminal.start manager targetPath
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let terminal =
+                host.CurrentTerminals |> List.exactlyOne
+
+            let target processId:
+                TerminalHostReplacement.ReplacementShutdownTarget =
+                { TerminalSessionId = terminal.SessionId
+                  WorktreePath = terminal.WorktreePath
+                  CopilotSessionId = "duplicate-session"
+                  ProcessIdentity =
+                    exactIdentity
+                        processId
+                        (int64 processId * 10L) }
+
+            let shutdownTargets =
+                [ target 4301
+                  target 4302 ]
+
+            let resume =
+                replacementResume
+                    "duplicate-session"
+                    "resume-duplicate"
+
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        51L,
+                        shutdownTargets,
+                        Map.ofList [ terminal.SessionId, resume ]
+                    )
+                )
+
+            let addressed = ConcurrentQueue<int>()
+            let oldHostStops = ConcurrentQueue<unit>()
+            let stagedLaunches = ConcurrentQueue<unit>()
+
+            let defaults =
+                TerminalHostReplacement.defaultOperations
+                    (fun _ -> async { return Ok false })
+
+            let operations =
+                { defaults with
+                    ShutdownSession =
+                        fun exactTarget ->
+                            async {
+                                let processId =
+                                    ProcessIdentity.processId
+                                        exactTarget.ProcessIdentity
+
+                                addressed.Enqueue processId
+
+                                return
+                                    if processId = 4301 then
+                                        Ok
+                                            SessionBridge.ShutdownCompletion.ExactClosure
+                                    else
+                                        Error
+                                            SessionBridge.ShutdownFailure.TimedOut
+                            }
+                    StopOldHost =
+                        fun _ _ ->
+                            async {
+                                oldHostStops.Enqueue()
+                                return Error "must not run"
+                            }
+                    LaunchStagedHost =
+                        fun _ ->
+                            async {
+                                stagedLaunches.Enqueue()
+                                return
+                                    TerminalHostReplacement.HostLaunchFailed(
+                                        TerminalHostReplacement.LaunchRejected
+                                            "must not run"
+                                    )
+                            } }
+
+            let! outcome, commit =
+                runReplacementCommit
+                    config
+                    query
+                    operations
+
+            let recovery =
+                requireReplacementRecovery commit
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    addressed.ToArray() |> Set.ofArray,
+                    Is.EqualTo(Set.ofList [ 4301; 4302 ]),
+                    "one failed exact target must not prevent the remaining target from being addressed"
+                )
+                Assert.That(addressed.Count, Is.EqualTo 2)
+                Assert.That(oldHostStops, Is.Empty)
+                Assert.That(stagedLaunches, Is.Empty)
+                Assert.That(host.ShutdownRequestCount, Is.Zero)
+                Assert.That(host.IsOnline, Is.True)
+                Assert.That(
+                    recovery.Capture.ShutdownTargets,
+                    Is.EqualTo shutdownTargets
+                )
+                Assert.That(
+                    recovery.Capture.ResumeCommands,
+                    Is.EqualTo(
+                        Map.ofList [ terminal.SessionId, resume ]
+                    )
+                )
+                Assert.That(
+                    recovery.Progress.HostState,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementHostState.OldHostHealthy
+                    )
+                )
+
+                match recovery.Failure with
+                | TerminalHostReplacement.ReplacementFailure.GracefulShutdownFailed attempts ->
+                    Assert.That(attempts.Length, Is.EqualTo 2)
+                    Assert.That(
+                        attempts
+                        |> List.map _.Outcome,
+                        Is.EqualTo(
+                            [ Ok
+                                  SessionBridge.ShutdownCompletion.ExactClosure
+                              Error
+                                  SessionBridge.ShutdownFailure.TimedOut ]
+                        )
+                    )
+                | other ->
+                    Assert.Fail($"Expected typed graceful-shutdown failure, got {other}")
+
+                match outcome with
+                | TerminalHostReplacement.ReplacementOutcome.Failed(
+                    version,
+                    error
+                  ) ->
+                    Assert.That(version, Is.EqualTo stagedVersion)
+                    Assert.That(error, Does.Contain("1 of 2 exact sessions"))
+                    Assert.That(error, Does.Contain("PID 4302"))
+                | other ->
+                    Assert.Fail($"Expected replacement failure, got {other}"))
+        }
+
+    [<Test>]
+    member _.``old host stop failure returns unconfirmed host progress and prevents staged launch``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-old-stop-failure"
+            let stagedExecutable = host.Stage stagedVersion
+
+            let config =
+                replacementManagerConfig
+                    host
+                    noLaunch
+                    noTerminalCommand
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let targetPath = worktree host.Root "old-stop-failure"
+
+            let! started =
+                EmbeddedTerminal.start manager targetPath
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        52L,
+                        [],
+                        Map.empty
+                    )
+                )
+
+            let stagedLaunches = ConcurrentQueue<unit>()
+
+            let defaults =
+                TerminalHostReplacement.defaultOperations
+                    (fun _ -> async { return Ok false })
+
+            let operations =
+                { defaults with
+                    StopOldHost =
+                        fun _ _ ->
+                            async {
+                                return
+                                    Error
+                                        "simulated exact survivor"
+                            }
+                    LaunchStagedHost =
+                        fun _ ->
+                            async {
+                                stagedLaunches.Enqueue()
+                                return
+                                    TerminalHostReplacement.HostLaunchFailed(
+                                        TerminalHostReplacement.LaunchRejected
+                                            "must not run"
+                                    )
+                            } }
+
+            let! outcome, commit =
+                runReplacementCommit
+                    config
+                    query
+                    operations
+
+            let recovery =
+                requireReplacementRecovery commit
+
+            Assert.Multiple(fun () ->
+                Assert.That(stagedLaunches, Is.Empty)
+                Assert.That(host.ShutdownRequestCount, Is.Zero)
+                Assert.That(host.IsOnline, Is.True)
+                Assert.That(
+                    recovery.Capture.StagedExecutablePath,
+                    Is.EqualTo stagedExecutable
+                )
+                Assert.That(
+                    recovery.Progress.HostState,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementHostState.OldHostStopUnconfirmed
+                    )
+                )
+
+                match recovery.Failure with
+                | TerminalHostReplacement.ReplacementFailure.OldHostStopFailed error ->
+                    Assert.That(
+                        error,
+                        Is.EqualTo "simulated exact survivor"
+                    )
+                | other ->
+                    Assert.Fail($"Expected typed old-host-stop failure, got {other}")
+
+                Assert.That(
+                    outcome,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementOutcome.Failed(
+                            stagedVersion,
+                            "The previous TerminalHost could not be confirmed stopped: simulated exact survivor"
+                        )
+                    )
+                ))
+        }
+
+    [<Test>]
+    member _.``staged launch failure returns complete recovery input without relaunching the old host``() =
         task {
             use host = new FakeControlHost()
             host.EnableLogicalReplacement()
             let stagedVersion = "2.0.0-fails"
             let stagedExecutable = host.Stage stagedVersion
-            let launches = ConcurrentQueue<string * string option>()
-            let staleTtyd = Path.Combine(host.Root, "stale", "ttyd.exe")
+            let launches = ConcurrentQueue<string>()
 
-            let launch (startInfo: ProcessStartInfo) =
-                launches.Enqueue(
-                    startInfo.FileName,
-                    argumentValue "--ttyd" startInfo
-                )
+            let config =
+                replacementManagerConfig
+                    host
+                    noLaunch
+                    noTerminalCommand
 
-                if
-                    Shared.PathUtils.pathEquals
-                        startInfo.FileName
-                        stagedExecutable
-                then
-                    Error "simulated staged launch failure"
-                else
-                    host.Activate(
-                        startInfo.FileName,
-                        "1.0.0-test"
-                    )
-
-                    Ok()
-
-            let manager =
-                { replacementManagerConfig
-                      host
-                      launch
-                      (fun _ _ -> async { return Ok() }) with
-                    TtydExecutablePath = Some staleTtyd }
-                |> EmbeddedTerminal.createWithConfig
+            let manager = EmbeddedTerminal.createWithConfig config
 
             let target = worktree host.Root "recover-old"
 
@@ -2929,70 +3529,147 @@ type EmbeddedTerminalReplacementTests() =
 
             requireOk started |> ignore
 
-            let query _ _ =
+            let terminal =
+                host.CurrentTerminals |> List.exactlyOne
+
+            let processIdentity = exactIdentity 4201 5201L
+
+            let shutdownTarget:
+                TerminalHostReplacement.ReplacementShutdownTarget =
+                { TerminalSessionId = terminal.SessionId
+                  WorktreePath = terminal.WorktreePath
+                  CopilotSessionId = "selected-session"
+                  ProcessIdentity = processIdentity }
+
+            let resume =
+                replacementResume
+                    "selected-session"
+                    "resume-selected"
+
+            let query
+                _
+                (terminals:
+                    TerminalHostReplacement.ReplacementTerminal list)
+                =
+                Assert.That(
+                    terminals
+                    |> List.map _.TerminalSessionId,
+                    Is.EqualTo([ terminal.SessionId ])
+                )
+
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         12L,
-                        Map.empty
+                        [ shutdownTarget ],
+                        Map.ofList [ terminal.SessionId, resume ]
                     )
                 )
 
-            let! outcome =
-                EmbeddedTerminal.tryReplaceHost query manager
-                |> Async.StartAsTask
+            let defaults =
+                TerminalHostReplacement.defaultOperations
+                    (fun _ -> async { return Ok false })
 
-            let! recovered =
-                EmbeddedTerminal.get manager
-                |> Async.StartAsTask
+            let operations =
+                { defaults with
+                    ShutdownSession =
+                        fun _ ->
+                            async {
+                                return
+                                    Ok
+                                        SessionBridge.ShutdownCompletion.ExactClosure
+                            }
+                    LaunchStagedHost =
+                        fun launchConfig ->
+                            async {
+                                launches.Enqueue
+                                    launchConfig.HostExecutablePath
 
-            let failure =
-                match outcome with
-                | TerminalHostReplacement.ReplacementOutcome.Failed(
-                    version,
-                    error
-                  ) ->
-                    Assert.That(version, Is.EqualTo stagedVersion)
-                    error
-                | other ->
-                    Assert.Fail($"Expected explicit replacement failure, got {other}")
-                    ""
+                                return
+                                    TerminalHostReplacement.HostLaunchFailed(
+                                        TerminalHostReplacement.LaunchRejected
+                                            "simulated staged launch failure"
+                                    )
+                            } }
+
+            let! outcome, commit =
+                runReplacementCommit
+                    config
+                    query
+                    operations
+
+            let recovery =
+                requireReplacementRecovery commit
+
+            let capturedTerminal:
+                TerminalHostReplacement.ReplacementTerminal =
+                { TerminalSessionId = terminal.SessionId
+                  WorktreePath = terminal.WorktreePath }
 
             Assert.Multiple(fun () ->
-                Assert.That(failure, Does.Contain("recovered"))
                 Assert.That(
-                    launches.ToArray(),
+                    outcome,
                     Is.EqualTo(
-                        [| (stagedExecutable,
-                            TerminalHostLayout.adjacentTtydExecutablePath
-                                stagedExecutable)
-                           (host.OldExecutable,
-                            TerminalHostLayout.adjacentTtydExecutablePath
-                                host.OldExecutable) |]
-                    ),
-                    "staged launch and rollback must each use their own sibling ttyd"
+                        TerminalHostReplacement.ReplacementOutcome.Failed(
+                            stagedVersion,
+                            "The staged host could not be launched: simulated staged launch failure"
+                        )
+                    )
                 )
-                Assert.That(host.ShutdownRequestCount, Is.EqualTo(1))
-                Assert.That(host.IsOnline, Is.True)
                 Assert.That(
-                    host.CurrentExecutable,
+                    recovery.Capture.OldExecutablePath,
                     Is.EqualTo host.OldExecutable
                 )
                 Assert.That(
-                    host.CurrentTerminals |> List.map _.WorktreePath,
-                    Is.EqualTo([ WorktreePath.value target ])
+                    recovery.Capture.StagedExecutablePath,
+                    Is.EqualTo stagedExecutable
                 )
-                Assert.That(recovered.Tabs.Length, Is.EqualTo(1))
+                Assert.That(
+                    recovery.Capture.Terminals,
+                    Is.EqualTo([ capturedTerminal ])
+                )
+                Assert.That(
+                    recovery.Capture.ShutdownTargets,
+                    Is.EqualTo([ shutdownTarget ])
+                )
+                Assert.That(
+                    recovery.Capture.ResumeCommands,
+                    Is.EqualTo(
+                        Map.ofList [ terminal.SessionId, resume ]
+                    )
+                )
+                Assert.That(
+                    recovery.Progress.ShutdownAttempts
+                    |> List.map _.Target,
+                    Is.EqualTo([ shutdownTarget ])
+                )
+                Assert.That(
+                    recovery.Progress.HostState,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementHostState.NoConfirmedHost
+                    )
+                )
+                Assert.That(host.ShutdownRequestCount, Is.EqualTo(1))
+                Assert.That(
+                    launches.ToArray(),
+                    Is.EqualTo([| stagedExecutable |]),
+                    "only the injected staged launch seam may run"
+                )
+                Assert.That(host.IsOnline, Is.False)
 
-                match recovered.Tabs[0].Lifecycle with
-                | EmbeddedTerminalLifecycle.Running _ -> ()
-                | lifecycle ->
-                    Assert.Fail(
-                        $"Expected the recoverably restarted old host, got {lifecycle}"
-                    ))
+                match recovery.Failure with
+                | TerminalHostReplacement.ReplacementFailure.StagedHostLaunchFailed(
+                    TerminalHostReplacement.LaunchRejected error
+                  ) ->
+                    Assert.That(
+                        error,
+                        Is.EqualTo "simulated staged launch failure"
+                    )
+                | other ->
+                    Assert.Fail($"Expected typed staged-launch failure, got {other}"))
         }
 
     [<Test>]
-    member _.``terminal recreation failure on a healthy staged host stops it and recovers every terminal on the old host``() =
+    member _.``terminal recreation failure returns staged-host progress and the full terminal capture``() =
         task {
             use host = new FakeControlHost()
             host.EnableLogicalReplacement()
@@ -3002,25 +3679,16 @@ type EmbeddedTerminalReplacementTests() =
 
             let launch (startInfo: ProcessStartInfo) =
                 launches.Enqueue startInfo.FileName
-
-                if
-                    Shared.PathUtils.pathEquals
-                        startInfo.FileName
-                        stagedExecutable
-                then
-                    host.Activate(startInfo.FileName, stagedVersion)
-                    // Arms the fake host's one-shot rejection so that the very first terminal
-                    // recreation attempt against the newly-healthy staged host fails outright,
-                    // simulating a partial/empty registry after the staged process comes up.
-                    host.RejectNextStartResponse()
-                else
-                    host.Activate(startInfo.FileName, "1.0.0-test")
-
+                host.Activate(startInfo.FileName, stagedVersion)
                 Ok()
 
-            let manager =
-                replacementManagerConfig host launch (fun _ _ -> async { return Ok() })
-                |> EmbeddedTerminal.createWithConfig
+            let config =
+                replacementManagerConfig
+                    host
+                    launch
+                    noTerminalCommand
+
+            let manager = EmbeddedTerminal.createWithConfig config
 
             let first = worktree host.Root "recreate-fails-first"
             let second = worktree host.Root "recreate-fails-second"
@@ -3036,68 +3704,269 @@ type EmbeddedTerminalReplacementTests() =
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         41L,
+                        [],
                         Map.empty
                     )
                 )
 
-            let! outcome =
-                EmbeddedTerminal.tryReplaceHost query manager
-                |> Async.StartAsTask
+            let capturedTerminals =
+                host.CurrentTerminals
 
-            let! recovered =
-                EmbeddedTerminal.get manager
-                |> Async.StartAsTask
+            let attempted =
+                ConcurrentQueue<TerminalHostReplacement.ReplacementTerminal>()
 
-            let failure =
-                match outcome with
-                | TerminalHostReplacement.ReplacementOutcome.Failed(
-                    version,
-                    error
-                  ) ->
-                    Assert.That(version, Is.EqualTo stagedVersion)
-                    error
-                | other ->
-                    Assert.Fail($"Expected explicit replacement failure, got {other}")
-                    ""
+            let defaults =
+                TerminalHostReplacement.defaultOperations
+                    (fun _ -> async { return Ok false })
+
+            let operations =
+                { defaults with
+                    RecreateTerminal =
+                        fun _ _ terminal ->
+                            async {
+                                attempted.Enqueue terminal
+
+                                return
+                                    Error(
+                                        TerminalHostClient.MutationRejected(
+                                            { Revision = 0L
+                                              Terminals = [] },
+                                            "simulated recreation failure"
+                                        )
+                                    )
+                            } }
+
+            let! outcome, commit =
+                runReplacementCommit
+                    config
+                    query
+                    operations
+
+            let recovery =
+                requireReplacementRecovery commit
+
+            let firstCaptured =
+                capturedTerminals |> List.head
+
+            let firstPresentation:
+                TerminalHostReplacement.ReplacementTerminal =
+                { TerminalSessionId = firstCaptured.SessionId
+                  WorktreePath = firstCaptured.WorktreePath }
 
             Assert.Multiple(fun () ->
                 Assert.That(
-                    failure,
-                    Does.Contain("could not recreate its terminals")
+                    outcome,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementOutcome.Failed(
+                            stagedVersion,
+                            $"Could not recreate terminal {firstCaptured.SessionId}: simulated recreation failure"
+                        )
+                    )
                 )
                 Assert.That(
                     launches.ToArray(),
-                    Is.EqualTo([| stagedExecutable; host.OldExecutable |]),
-                    "the staged launch must be followed by exactly one old-host recovery launch"
+                    Is.EqualTo([| stagedExecutable |])
                 )
                 Assert.That(
                     host.ShutdownRequestCount,
-                    Is.EqualTo(2),
-                    "the original host and the failed staged host must each be stopped once"
+                    Is.EqualTo(1)
                 )
                 Assert.That(host.IsOnline, Is.True)
                 Assert.That(
                     host.CurrentExecutable,
-                    Is.EqualTo host.OldExecutable
+                    Is.EqualTo stagedExecutable
                 )
                 Assert.That(
-                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    host.CurrentTerminals,
+                    Is.Empty,
+                    "the staged host remains authoritative input for the recovery task"
+                )
+                Assert.That(
+                    recovery.Capture.Terminals
+                    |> List.map _.WorktreePath,
                     Is.EqualTo(
                         [ WorktreePath.value first
                           WorktreePath.value second ]
                     ),
-                    "no terminal may be permanently lost when the staged host fails to recreate them"
+                    "the complete opening-order presentation must survive recreation failure"
                 )
-                Assert.That(recovered.Tabs.Length, Is.EqualTo(2))
+                Assert.That(
+                    attempted.ToArray(),
+                    Is.EqualTo([| firstPresentation |])
+                )
+                Assert.That(
+                    recovery.Progress.RecreatedTerminals,
+                    Is.Empty
+                )
 
-                recovered.Tabs
-                |> List.iter (fun tab ->
-                    match tab.Lifecycle with
-                    | EmbeddedTerminalLifecycle.Running _ -> ()
-                    | lifecycle ->
-                        Assert.Fail(
-                            $"Expected the recovered old host's terminal to be running, got {lifecycle}"
-                        )))
+                match recovery.Progress.HostState with
+                | TerminalHostReplacement.ReplacementHostState.StagedHostRunning manifest ->
+                    Assert.That(
+                        manifest.HostVersion,
+                        Is.EqualTo stagedVersion
+                    )
+                | other ->
+                    Assert.Fail($"Expected staged-host progress, got {other}")
+
+                match recovery.Failure with
+                | TerminalHostReplacement.ReplacementFailure.TerminalRecreationFailed(
+                    terminal,
+                    TerminalHostClient.MutationRejected(_, error)
+                  ) ->
+                    Assert.That(
+                        terminal.TerminalSessionId,
+                        Is.EqualTo firstCaptured.SessionId
+                    )
+                    Assert.That(
+                        error,
+                        Is.EqualTo "simulated recreation failure"
+                    )
+                | other ->
+                    Assert.Fail($"Expected typed recreation failure, got {other}"))
+        }
+
+    [<Test>]
+    member _.``command delivery failure retains staged host and recreated terminal progress``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-command-fails"
+            let stagedExecutable = host.Stage stagedVersion
+
+            let config =
+                replacementManagerConfig
+                    host
+                    (fun startInfo ->
+                        host.Activate(startInfo.FileName, stagedVersion)
+                        Ok())
+                    noTerminalCommand
+
+            let manager = EmbeddedTerminal.createWithConfig config
+            let targetPath = worktree host.Root "command-fails"
+
+            let! started =
+                EmbeddedTerminal.start manager targetPath
+                |> Async.StartAsTask
+
+            requireOk started |> ignore
+
+            let previous =
+                host.CurrentTerminals |> List.exactlyOne
+
+            let resume =
+                replacementResume
+                    "selected-command-session"
+                    "resume-selected-command"
+
+            let shutdownTarget:
+                TerminalHostReplacement.ReplacementShutdownTarget =
+                { TerminalSessionId = previous.SessionId
+                  WorktreePath = previous.WorktreePath
+                  CopilotSessionId = resume.CopilotSessionId
+                  ProcessIdentity = exactIdentity 4501 5501L }
+
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        53L,
+                        [ shutdownTarget ],
+                        Map.ofList [ previous.SessionId, resume ]
+                    )
+                )
+
+            let deliveries = ConcurrentQueue<string>()
+
+            let defaults =
+                TerminalHostReplacement.defaultOperations
+                    (fun _ -> async { return Ok false })
+
+            let operations =
+                { defaults with
+                    ShutdownSession =
+                        fun _ ->
+                            async {
+                                return
+                                    Ok
+                                        SessionBridge.ShutdownCompletion.ExactClosure
+                            }
+                    DeliverCommand =
+                        fun _ _ command ->
+                            async {
+                                deliveries.Enqueue command
+
+                                return
+                                    Error
+                                        "simulated command delivery failure"
+                            } }
+
+            let! outcome, commit =
+                runReplacementCommit
+                    config
+                    query
+                    operations
+
+            let recovery =
+                requireReplacementRecovery commit
+
+            Assert.Multiple(fun () ->
+                Assert.That(host.ShutdownRequestCount, Is.EqualTo 1)
+                Assert.That(host.IsOnline, Is.True)
+                Assert.That(
+                    host.CurrentExecutable,
+                    Is.EqualTo stagedExecutable
+                )
+                Assert.That(
+                    host.CurrentTerminals.Length,
+                    Is.EqualTo 1
+                )
+                Assert.That(
+                    deliveries.ToArray(),
+                    Is.EqualTo([| "resume-selected-command" |])
+                )
+                Assert.That(
+                    recovery.Progress.RecreatedTerminals
+                    |> List.map _.OriginalTerminalSessionId,
+                    Is.EqualTo([ previous.SessionId ])
+                )
+                Assert.That(
+                    recovery.Progress.DeliveredCommandTerminalIds,
+                    Is.Empty
+                )
+
+                match recovery.Progress.HostState with
+                | TerminalHostReplacement.ReplacementHostState.StagedHostRunning manifest ->
+                    Assert.That(
+                        manifest.HostVersion,
+                        Is.EqualTo stagedVersion
+                    )
+                | other ->
+                    Assert.Fail($"Expected staged-host progress, got {other}")
+
+                match recovery.Failure with
+                | TerminalHostReplacement.ReplacementFailure.CommandDeliveryFailed(
+                    terminal,
+                    error
+                  ) ->
+                    Assert.That(
+                        terminal.TerminalSessionId,
+                        Is.EqualTo previous.SessionId
+                    )
+                    Assert.That(
+                        error,
+                        Is.EqualTo "simulated command delivery failure"
+                    )
+                | other ->
+                    Assert.Fail($"Expected typed command-delivery failure, got {other}")
+
+                Assert.That(
+                    outcome,
+                    Is.EqualTo(
+                        TerminalHostReplacement.ReplacementOutcome.Failed(
+                            stagedVersion,
+                            $"Could not deliver the replacement command for terminal {previous.SessionId}: simulated command delivery failure"
+                        )
+                    )
+                ))
         }
 
     [<Test>]
@@ -3135,6 +4004,7 @@ type EmbeddedTerminalReplacementTests() =
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         13L,
+                        [],
                         Map.empty
                     )
                 )
@@ -3167,7 +4037,7 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
-    member _.``replacement shutdown wait failure interrupts running tabs``() =
+    member _.``unconfirmed old host stop keeps the last authoritative terminal running``() =
         task {
             use host = new FakeControlHost()
             let stagedVersion = "2.0.0-shutdown-wait"
@@ -3199,6 +4069,7 @@ type EmbeddedTerminalReplacementTests() =
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         15L,
+                        [],
                         Map.empty
                     )
                 )
@@ -3233,10 +4104,11 @@ type EmbeddedTerminalReplacementTests() =
                 Assert.That(failure, Does.Not.Contain("retained"))
 
                 match lifecycle with
-                | EmbeddedTerminalLifecycle.Interrupted error ->
-                    Assert.That(error, Does.Contain(failure))
+                | EmbeddedTerminalLifecycle.Running _ -> ()
                 | other ->
-                    Assert.Fail($"Expected interrupted terminal, got {other}"))
+                    Assert.Fail(
+                        $"Expected the last authoritative terminal to remain running, got {other}"
+                    ))
         }
 
 [<TestFixture>]
@@ -3889,6 +4761,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 Ok(
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         32L,
+                        [],
                         Map.empty
                     )
                 )

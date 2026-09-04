@@ -41,7 +41,11 @@ type private Message =
     | ReserveCleanup of CloseTarget * WorktreePath option * Guid * AsyncReplyChannel<Result<CleanupPreparation, string>>
     | ApplyCleanup of CleanupUpdate * AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | ReleaseCleanup of Guid
-    | BeginReplacement of ReplacementPlan * ReplacementPolicyQuery * AsyncReplyChannel<ReplacementOutcome>
+    | BeginReplacement of
+        ReplacementPlan *
+        ReplacementPolicyQuery *
+        ReplacementOperations *
+        AsyncReplyChannel<ReplacementOutcome>
     | FinishReplacement of ReplacementCommit * AsyncReplyChannel<ReplacementOutcome>
 
 type Manager = private | Manager of Config * MailboxProcessor<Message>
@@ -267,8 +271,21 @@ let private startTerminal config (state: ManagerState) worktreePath command =
 let private applyReplacementCommit (state: ManagerState) commit =
     match commit with
     | ReplacementCommit.KeepState outcome -> state, outcome
-    | ReplacementCommit.InterruptState(message, outcome) ->
-        withHostFailure message state, outcome
+    | ReplacementCommit.RecoveryRequired recovery ->
+        let outcome =
+            TerminalHostReplacement.replacementRecoveryOutcome
+                recovery
+
+        match recovery.Progress.HostState with
+        | ReplacementHostState.OldHostHealthy
+        | ReplacementHostState.OldHostStopUnconfirmed ->
+            state, outcome
+        | ReplacementHostState.NoConfirmedHost
+        | ReplacementHostState.StagedHostRunning _ ->
+            let message =
+                $"TerminalHost replacement failed: {TerminalHostReplacement.replacementFailureMessage recovery.Failure}"
+
+            withHostFailure message state, outcome
     | ReplacementCommit.ApplyRegistry(manifest, registry, outcome) ->
         applyRegistryWith true false state manifest registry, outcome
 
@@ -355,13 +372,19 @@ let internal createWithConfig config =
                             |> Map.filter (fun _ current -> current <> token)
 
                         return! loop { state with CleanupReservations = reservations }
-                    | BeginReplacement(_, _, reply)
+                    | BeginReplacement(_, _, _, reply)
                         when state.Phase = ManagerPhase.Replacing
                              || not state.CleanupReservations.IsEmpty ->
                         return! loop (respond reply ReplacementOutcome.RaceLost state)
-                    | BeginReplacement(plan, query, reply) ->
+                    | BeginReplacement(plan, query, operations, reply) ->
                         async {
-                            let! commit = commitReplacement config plan query
+                            let! commit =
+                                commitReplacementWith
+                                    operations
+                                    config
+                                    plan
+                                    query
+
                             inbox.Post(FinishReplacement(commit, reply))
                         }
                         |> Async.Start
@@ -398,7 +421,8 @@ let create serverOrigin configuredOrigins =
         serverOrigin
         configuredOrigins
 
-let private tryReplaceHostIgnoring
+let private tryReplaceHostIgnoringWith
+    operations
     ignoredStagedVersion
     beforeRecheck
     query
@@ -406,11 +430,49 @@ let private tryReplaceHostIgnoring
     =
     let commit plan activityQuery =
         agent.PostAndAsyncReply(
-            (fun reply -> BeginReplacement(plan, activityQuery, reply)),
+            (fun reply ->
+                BeginReplacement(
+                    plan,
+                    activityQuery,
+                    operations,
+                    reply
+                )),
             timeout = 300_000
         )
 
     TerminalHostReplacement.tryReplaceHostIgnoring ignoredStagedVersion beforeRecheck query config commit
+
+let private unavailableClosureQuery _ =
+    async {
+        return Error "Exact closure state is unavailable"
+    }
+
+let private tryReplaceHostIgnoring
+    ignoredStagedVersion
+    beforeRecheck
+    query
+    manager
+    =
+    tryReplaceHostIgnoringWith
+        (TerminalHostReplacement.defaultOperations
+            unavailableClosureQuery)
+        ignoredStagedVersion
+        beforeRecheck
+        query
+        manager
+
+let internal tryReplaceHostWithOperations
+    beforeRecheck
+    query
+    operations
+    manager
+    =
+    tryReplaceHostIgnoringWith
+        operations
+        None
+        beforeRecheck
+        query
+        manager
 
 let internal tryReplaceHostWith beforeRecheck query manager =
     tryReplaceHostIgnoring None beforeRecheck query manager
@@ -421,10 +483,20 @@ let internal tryReplaceHost query manager =
 let internal runReplacementCoordinator
     manager
     query
+    isClosed
     (cancellationToken: System.Threading.CancellationToken)
     =
+    let operations =
+        TerminalHostReplacement.defaultOperations isClosed
+
     TerminalHostReplacement.runCoordinator (fun ignoredStagedVersion ->
-        tryReplaceHostIgnoring ignoredStagedVersion (fun () -> async.Return()) query manager) cancellationToken
+        tryReplaceHostIgnoringWith
+            operations
+            ignoredStagedVersion
+            (fun () -> async.Return())
+            query
+            manager)
+        cancellationToken
 
 let private ask (agent: MailboxProcessor<Message>) build =
     agent.PostAndAsyncReply(build, timeout = 60_000)
