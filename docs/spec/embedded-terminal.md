@@ -355,8 +355,12 @@ server command attachments use the authenticated `treemon-command` subprotocol a
 Windows process creation uses `CREATE_SUSPENDED`, immediate `AssignProcessToJobObject`, and
 `ResumeThread` in the host process. The Job Object uses kill-on-close without a breakaway policy.
 Because externally launched programs can still establish process ownership outside that job,
-terminal teardown also snapshots descendants by exact PID and process-start identity before closing
-the job, then terminates only verified survivors. Process names alone are never cleanup authority.
+terminal teardown captures exact Job membership before stopping the data plane, then recaptures Job
+membership and bounded observed descendants after that graceful stop and before closing the Job
+handle. It waits for captured identities, terminates only survivors whose PID and start ticks still
+match, and retains those identities for a retry when cleanup remains incomplete. The registry
+removes only successfully cleaned terminals; host shutdown requests application exit only after the
+registry is empty. Process names alone are never cleanup authority.
 
 PowerShell explicitly sets its location from `TREEMON_TERMINAL_WORKTREE` at startup because ttyd's
 Windows working-directory option alone does not establish the child shell's location.

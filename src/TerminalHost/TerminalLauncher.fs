@@ -82,7 +82,7 @@ module TerminalLauncher =
             | Ok owned ->
                 match! waitUntilReady config.StartupTimeout port owned with
                 | Error error ->
-                    JobProcess.close owned
+                    JobProcess.close owned |> ignore
                     return Error error
                 | Ok() ->
                     return
@@ -92,5 +92,5 @@ module TerminalLauncher =
                                 JobProcess.processStartTimeUtcTicks owned
                               TtydPort = port
                               HasExited = fun () -> JobProcess.hasExited owned
-                              Close = fun () -> JobProcess.close owned }
+                              BeginClose = fun () -> JobProcess.beginClose owned }
         }
