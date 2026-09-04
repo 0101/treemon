@@ -1633,6 +1633,46 @@ type EmbeddedTerminalControlClientTests() =
                 Assert.That(launches.Count, Is.Zero))
         }
 
+    [<Test>]
+    member _.``an exited terminal disappears without affecting its siblings``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+
+            let target = worktree host.Root "shared-worktree"
+
+            let! firstStarted =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let first = requireOk firstStarted
+
+            let! secondStarted =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let second = requireOk secondStarted
+            host.RemoveTerminal(EmbeddedTerminalId.value first.TerminalId)
+
+            let! afterExit =
+                EmbeddedTerminal.get manager
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    afterExit.Tabs |> List.map _.Id,
+                    Is.EqualTo([ second.TerminalId ])
+                )
+
+                match afterExit.Tabs |> List.exactlyOne |> _.Lifecycle with
+                | EmbeddedTerminalLifecycle.Running _ -> ()
+                | lifecycle ->
+                    Assert.Fail($"Expected the sibling terminal to remain running, got {lifecycle}"))
+        }
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]

@@ -36,6 +36,7 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Context | Key | Action |
 |---------|-----|--------|
 | Card | Enter | Open terminal / focus active session |
+| Card | t | Open or focus embedded terminal input |
 | Card | s | Toggle auto-sync |
 | Card | r | Resume last session (when resumable) |
 | Card | + | Open new tab (when session active) |

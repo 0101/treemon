@@ -656,7 +656,7 @@ type TerminalPaneDomTests() =
         }
 
     [<Test>]
-    member this.``Top-bar toggle preserves frames while reopening can add another selected-worktree terminal``() =
+    member this.``Card terminal action reuses an existing tab while New creates another``() =
         task {
             do! rememberFrames this.Page
             let terminalToggle =
@@ -679,7 +679,7 @@ type TerminalPaneDomTests() =
                 this.Page.Locator(".terminal-iframe").CountAsync()
             let! mountedWhileHidden = framesStillMounted this.Page
 
-            do! focusCanvasCard this.Page "feature-recent"
+            do! focusCanvasCard this.Page "feature-active"
             let! selectedWhileHidden =
                 (selectedTab this.Page)
                     .Locator(".terminal-tab-label")
@@ -701,12 +701,30 @@ type TerminalPaneDomTests() =
                     .ClickAsync()
             let! _ =
                 this.Page.WaitForFunctionAsync(
-                    "() => document.querySelectorAll('.terminal-tab').length === 2")
-            let! selectedAfterReopen =
+                    "() => document.querySelectorAll('.terminal-tab').length === 1")
+            let! selectedAfterCardAction =
                 (selectedTab this.Page)
                     .Locator(".terminal-tab-label")
                     .TextContentAsync()
-            let! visibleTabsAfterReopen =
+            let! visibleTabsAfterCardAction =
+                this.Page.Locator(".terminal-tab").CountAsync()
+            let startCallsAfterCardAction = startCalls
+            let! cardActionFocusedTerminal =
+                this.Page.EvaluateAsync<bool>(
+                    "() => document.activeElement === document.querySelector('.terminal-iframe-active')")
+
+            do! this.Page.Locator(".terminal-new-btn").ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelectorAll('.terminal-tab').length === 2")
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.activeElement === document.querySelector('.terminal-iframe-active')")
+            let! selectedAfterNew =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+            let! visibleTabsAfterNew =
                 this.Page.Locator(".terminal-tab").CountAsync()
             let! originalFramePreserved =
                 this.Page.EvaluateAsync<bool>(
@@ -719,12 +737,75 @@ type TerminalPaneDomTests() =
             Assert.Multiple(fun () ->
                 Assert.That(hiddenFrameCount, Is.EqualTo(3))
                 Assert.That(mountedWhileHidden, Is.True)
-                Assert.That(selectedWhileHidden, Is.EqualTo("Terminal 1"))
-                Assert.That(selectedAfterToggle, Is.EqualTo("Terminal 1"))
+                Assert.That(selectedWhileHidden, Is.EqualTo(firstTerminalActivity))
+                Assert.That(selectedAfterToggle, Is.EqualTo(firstTerminalActivity))
+                Assert.That(startCallsAfterCardAction, Is.Zero)
+                Assert.That(visibleTabsAfterCardAction, Is.EqualTo(1))
+                Assert.That(selectedAfterCardAction, Is.EqualTo("Terminal 1"))
+                Assert.That(cardActionFocusedTerminal, Is.True)
                 Assert.That(startCalls, Is.EqualTo(1))
-                Assert.That(visibleTabsAfterReopen, Is.EqualTo(2))
-                Assert.That(selectedAfterReopen, Is.EqualTo("Terminal 2"))
+                Assert.That(visibleTabsAfterNew, Is.EqualTo(2))
+                Assert.That(selectedAfterNew, Is.EqualTo("Terminal 2"))
                 Assert.That(originalFramePreserved, Is.True))
+        }
+
+    [<Test>]
+    member this.``T focuses an existing terminal or starts one when absent``() =
+        task {
+            let terminalToggle =
+                this.Page.Locator(
+                    ".header-controls .ctrl-btn",
+                    PageLocatorOptions(HasText = "Terminal"))
+
+            do! terminalToggle.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelector('.terminal-pane').hidden")
+
+            do! focusCanvasCard this.Page "feature-recent"
+            do! this.Page.Locator(".dashboard").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("t")
+            do!
+                this.Page
+                    .Locator(".terminal-pane.open")
+                    .WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.activeElement === document.querySelector('.terminal-iframe-active')")
+
+            let! existingTabCount =
+                this.Page.Locator(".terminal-tab").CountAsync()
+            let! existingSelected =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+            let startCallsAfterExisting = startCalls
+
+            do! terminalToggle.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelector('.terminal-pane').hidden")
+
+            do! focusCanvasCard this.Page "feature-multidoc"
+            do! this.Page.Locator(".dashboard").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("t")
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelectorAll('.terminal-tab').length === 1")
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.activeElement === document.querySelector('.terminal-iframe-active')")
+            let! startedSelected =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(startCallsAfterExisting, Is.Zero)
+                Assert.That(existingTabCount, Is.EqualTo(1))
+                Assert.That(existingSelected, Is.EqualTo("Terminal 1"))
+                Assert.That(startCalls, Is.EqualTo(1))
+                Assert.That(startedSelected, Is.EqualTo("Terminal 1")))
         }
 
     [<Test>]
@@ -777,6 +858,36 @@ type TerminalPaneDomTests() =
                 Assert.That(remainingTabs, Is.EqualTo(0))
                 Assert.That(paneHidden, Is.False)
                 Assert.That(emptyText, Does.Contain("feature-active")))
+        }
+
+    [<Test>]
+    member this.``Middle-clicking a terminal tab closes it``() =
+        task {
+            do!
+                (tabFor this.Page firstTerminalActivity)
+                    .ClickAsync(
+                        LocatorClickOptions(Button = MouseButton.Middle)
+                    )
+
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelectorAll('.terminal-tab').length === 1")
+            let! remainingLabels =
+                this.Page
+                    .Locator(".terminal-tab-label")
+                    .AllTextContentsAsync()
+            let! selectedLabel =
+                (selectedTab this.Page)
+                    .Locator(".terminal-tab-label")
+                    .TextContentAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(closeCalls, Is.EqualTo(1))
+                Assert.That(
+                    remainingLabels,
+                    Is.EqualTo([| firstAlternateTerminalActivity |])
+                )
+                Assert.That(selectedLabel, Is.EqualTo(firstAlternateTerminalActivity)))
         }
 
     [<Test>]
