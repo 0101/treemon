@@ -24,8 +24,9 @@ bucket as one shared linear scale.
 
 ### Agent groups
 
-Grouping is per session, not per worktree. One worktree may therefore contribute sessions to several
-groups.
+Grouping is per open physical process instance, not per worktree or durable conversation. Duplicate
+processes for one `SessionId` remain separate markers, and one worktree may contribute instances to
+several groups.
 
 - Working sessions are grouped by `Activity.classify` into Investigating, Planning, Executing,
   Reviewing, PR, or the generic Working fallback.
@@ -90,8 +91,8 @@ logic owns selection clearing, worktree navigation, and persisted open state.
 ## Decisions
 
 - **Aggregate non-archived worktrees only:** archiving removes every task and agent contribution.
-- **Per-session agent grouping:** concurrent sessions in one worktree retain their own status, skill,
-  and context gauge.
+- **Per-instance agent grouping:** concurrent physical processes in one worktree retain their own
+  status, skill, context gauge, and marker identity.
 - **One task scale:** aggregate and drill-down bars remain directly comparable.
 - **Membership with the aggregate:** counts and drill-down rows cannot use different predicates.
 - **Task state, not PR state, decides To land:** slower PR refreshes cannot make task buckets flap.
@@ -106,7 +107,7 @@ logic owns selection clearing, worktree navigation, and persisted open state.
 | `src/Client/OverviewPresentation.fs` | Labels, styles, and selection type |
 | `src/Client/OverviewBand.fs` | Band, sticky behavior, drill-down, and history placement |
 | `src/Client/App.fs` | Toggle, selection, navigation, and history state |
-| `src/Server/SessionActivityService.fs` | Push-based per-session state consumed by the aggregate |
+| `src/Server/SessionActivityService.fs` | Push-based exact process-instance state consumed by the aggregate |
 
 ## Related Specs
 

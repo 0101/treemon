@@ -50,7 +50,11 @@ type OverviewDataTests() =
     let sessionsFor tool skill : SessionDot list =
         match tool with
         | CodingToolStatus.NoSession -> []
-        | _ -> [ { Status = tool; Skill = skill; ContextUsage = None } ]
+        | _ ->
+            [ { InstanceId = SessionInstanceId $"test-{tool}"
+                Status = tool
+                Skill = skill
+                ContextUsage = None } ]
 
     /// A worktree in a given CodingTool state carrying an optional skill, plus a single live session
     /// in that same state/skill — so agent grouping (now per session) sees a session to classify, as
@@ -702,7 +706,11 @@ type OverviewDataTests() =
 
     [<Test>]
     member _.``Agent members carry the worktree's sessions (for the per-session donuts)``() =
-        let sessions = [ { Status = CodingToolStatus.Working; Skill = None; ContextUsage = Some { CurrentTokens = 120000; TokenLimit = 200000 } } ]
+        let sessions =
+            [ { InstanceId = SessionInstanceId "working-1"
+                Status = CodingToolStatus.Working
+                Skill = None
+                ContextUsage = Some { CurrentTokens = 120000; TokenLimit = 200000 } } ]
         let wt = { workingWt None with Sessions = sessions }
         let result = aggregate [ repo [ at "/wt/s1" "w1" wt ] ]
         let members = agentMembers (AgentGroupKind.Activity CurrentActivity.Working) result
@@ -713,9 +721,18 @@ type OverviewDataTests() =
         // One worktree, three sessions doing different things: only the PR session belongs to PR; the
         // two idle ones go to Idle. They no longer clump under the worktree's single collapsed skill.
         let sessions =
-            [ { Status = CodingToolStatus.Working; Skill = Some "pr"; ContextUsage = None }
-              { Status = CodingToolStatus.Idle; Skill = None; ContextUsage = None }
-              { Status = CodingToolStatus.Idle; Skill = None; ContextUsage = None } ]
+            [ { InstanceId = SessionInstanceId "pr-1"
+                Status = CodingToolStatus.Working
+                Skill = Some "pr"
+                ContextUsage = None }
+              { InstanceId = SessionInstanceId "idle-1"
+                Status = CodingToolStatus.Idle
+                Skill = None
+                ContextUsage = None }
+              { InstanceId = SessionInstanceId "idle-2"
+                Status = CodingToolStatus.Idle
+                Skill = None
+                ContextUsage = None } ]
         let result = aggregate [ repo [ at "/wt/x" "multi" { workingWt (Some "pr") with Sessions = sessions } ] ]
         Assert.That(activityCount CurrentActivity.PR result, Is.EqualTo(Some 1))
         Assert.That(agentCount AgentGroupKind.Idle result, Is.EqualTo(Some 2))
@@ -723,8 +740,14 @@ type OverviewDataTests() =
     [<Test>]
     member _.``An agent group Count sums sessions, so a multi-session worktree counts more than once``() =
         let sessions =
-            [ { Status = CodingToolStatus.Working; Skill = Some "investigate"; ContextUsage = None }
-              { Status = CodingToolStatus.Working; Skill = Some "investigate"; ContextUsage = None } ]
+            [ { InstanceId = SessionInstanceId "investigate-1"
+                Status = CodingToolStatus.Working
+                Skill = Some "investigate"
+                ContextUsage = None }
+              { InstanceId = SessionInstanceId "investigate-2"
+                Status = CodingToolStatus.Working
+                Skill = Some "investigate"
+                ContextUsage = None } ]
         let result = aggregate [ repo [ at "/wt/x" "multi" { workingWt (Some "investigate") with Sessions = sessions } ] ]
         Assert.That(activityCount CurrentActivity.Investigating result, Is.EqualTo(Some 2))
         let members = agentMembers (AgentGroupKind.Activity CurrentActivity.Investigating) result
@@ -733,8 +756,17 @@ type OverviewDataTests() =
 
     [<Test>]
     member _.``A member carries only the sessions that belong to its group``() =
-        let prSession = { Status = CodingToolStatus.Working; Skill = Some "pr"; ContextUsage = None }
-        let idleSession = { Status = CodingToolStatus.Idle; Skill = None; ContextUsage = None }
+        let prSession =
+            { InstanceId = SessionInstanceId "pr"
+              Status = CodingToolStatus.Working
+              Skill = Some "pr"
+              ContextUsage = None }
+
+        let idleSession =
+            { InstanceId = SessionInstanceId "idle"
+              Status = CodingToolStatus.Idle
+              Skill = None
+              ContextUsage = None }
         let result = aggregate [ repo [ at "/wt/x" "multi" { workingWt (Some "pr") with Sessions = [ prSession; idleSession ] } ] ]
         let prMembers = agentMembers (AgentGroupKind.Activity CurrentActivity.PR) result
         let idleMembers = agentMembers AgentGroupKind.Idle result
@@ -743,7 +775,13 @@ type OverviewDataTests() =
 
     [<Test>]
     member _.``Task-bucket members always have Sessions = [], even when the worktree carries some``() =
-        let wt = { activeTaskWt (beads 0 2 0 0) BeadsPlanning.zero with Sessions = [ { Status = CodingToolStatus.Working; Skill = None; ContextUsage = Some { CurrentTokens = 1; TokenLimit = 2 } } ] }
+        let wt =
+            { activeTaskWt (beads 0 2 0 0) BeadsPlanning.zero with
+                Sessions =
+                    [ { InstanceId = SessionInstanceId "task-working"
+                        Status = CodingToolStatus.Working
+                        Skill = None
+                        ContextUsage = Some { CurrentTokens = 1; TokenLimit = 2 } } ] }
         let result = aggregate [ repo [ at "/wt/1" "b1" wt ] ]
         let members = taskMembers TaskBucketKind.Underway result
         Assert.That(members |> List.forall (fun m -> m.Sessions = []))

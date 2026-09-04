@@ -406,9 +406,9 @@ type ExactInstanceIsolationTests() =
                     "event idempotency is scoped to exact identity"
                 )
                 Assert.That(
-                    service.LiveSnapshot().Count,
-                    Is.EqualTo 1,
-                    "the temporary application projection is singular by durable SessionId"
+                    service.ExactSnapshot().Count,
+                    Is.EqualTo 2,
+                    "application-visible exact state must not collapse duplicate durable SessionIds"
                 ))
 
             Assert.That(
@@ -562,6 +562,7 @@ type StartupReconciliationTests() =
             queryAtTime
             authoritativeOrigins
             resolvedIdentity
+            expectClosed
             =
             let now = ts "2026-09-04T10:00:00Z"
             let identity = exactIdentity processId (int64 processId + 10_000L)
@@ -581,9 +582,24 @@ type StartupReconciliationTests() =
                 |> ignore
 
                 service.StartAt now
-                let _, _, pending =
+                let activity =
                     queryAt service queryAtTime authoritativeOrigins
-                Assert.That(pending, Is.Empty))
+                let _, _, pending = activity
+                let snapshot =
+                    ownedSessionSnapshot
+                        queryAtTime
+                        authoritativeOrigins
+                        activity
+
+                Assert.Multiple(fun () ->
+                    Assert.That(pending, Is.Empty)
+                    Assert.That(snapshot.OpenSessions, Is.Empty)
+                    Assert.That(
+                        store.InstanceByIdentity identity
+                        |> Option.bind _.ClosedAt
+                        |> Option.isSome,
+                        Is.EqualTo expectClosed
+                    )))
 
         let deadTerminal =
             TerminalSessionId "dddddddddddddddddddddddddddddddd"
@@ -594,6 +610,7 @@ type StartupReconciliationTests() =
             (ts "2026-09-04T10:00:00Z")
             (Set.singleton deadTerminal)
             None
+            true
 
         let missingTerminal =
             TerminalSessionId "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
@@ -605,6 +622,7 @@ type StartupReconciliationTests() =
             (ts "2026-09-04T10:00:00Z")
             Set.empty
             (Some missingIdentity)
+            false
 
         let expiredTerminal =
             TerminalSessionId "ffffffffffffffffffffffffffffffff"
@@ -616,6 +634,7 @@ type StartupReconciliationTests() =
             (ts "2026-09-04T10:03:00Z")
             (Set.singleton expiredTerminal)
             (Some expiredIdentity)
+            false
 
 [<TestFixture>]
 [<Category("Unit")>]

@@ -61,7 +61,10 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 ### Per-Worktree Card
 
 - Branch name header with work metrics (commit grid + diff stats) only when committed history has a net diff from the base
-- Coding tool status dots — one per live session (Working / WaitingForUser / Idle), each a context-usage donut (arc = remaining context) when that session has reported usage, else a plain dot; the last known gauge survives server restart for sessions restored from the durable live window. A worktree with no live session shows the single grey NoSession dot. Tooltip shows the status.
+- Coding tool status dots — one per open physical process instance (Working / WaitingForUser /
+  Idle), each keyed by its opaque exact identity and rendered as a context-usage donut when that
+  process has reported usage, else a plain dot. Duplicate processes for one durable session remain
+  separate markers. A worktree with no open instance shows the single grey NoSession dot.
 - Last commit message + relative time (branch-local, excludes merges from origin/main)
 - "N behind {base}" with an always-visible circular two-arrow auto-sync toggle and tracked staged/unstaged dirty indicator
 - Beads counts (open / in-progress / done) with progress bar
@@ -119,8 +122,8 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 Coding-tool status is **pushed** by the Copilot CLI extension, not parsed from session log files —
 the per-provider log-parsing detectors (`ClaudeDetector`, `CopilotDetector`, `VsCodeCopilotDetector`,
 `getStatusFromFiles`) have been **removed**. The extension observes the SDK session event stream and
-POSTs lifecycle events to the server, which folds them into live per-session state and collapses each
-worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). Explicit background-agent
+POSTs lifecycle events to the server, which folds them into live per-process-instance state and collapses each
+worktree's instances in `CodingToolStatus.fs` (`fromPushInstances`). Explicit background-agent
 lifecycle events are folded into process-local per-tool clocks so a root turn cannot settle Idle
 while delegated agents are still running. Those clocks are persisted per exact process instance,
 so restart retains active delegated work until its terminal event or stale-gap cleanup. See
@@ -294,7 +297,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/RefreshScheduler.fs` | Repo-keyed task scheduling, task execution, merged-PR reconciliation |
 | `src/Server/SessionActivity*.fs` | Push session-status model: pure fold, exact-instance protocol/ingestion, SQLite (WAL) state/history, and acknowledged ingest mailbox (see `docs/spec/session-status-push.md`) |
 | `src/Server/UserMessageFormatting.fs` | Server-owned system-reminder suppression and canvas prompt projection shared by ingestion, activity, and footer fields |
-| `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, and per-worktree provider config |
+| `src/Server/CodingToolStatus.fs` | Collapse exact live process instances into card coding-tool fields (`fromPushInstances`), resume pick, and per-worktree provider config |
 | `src/Server/AutoSync.fs` | Busy-worktree deferral, mechanical-sync orchestration for every free worktree, agent delivery of structured fallback reasons, and base-revision eligibility |
 | `src/Server/AutoSyncStore.fs` | Port-scoped accepted-base-revision persistence used for restart-safe prompt deduplication |
 | `src/Server/CardEventLog.fs` | Transient post-fork lifecycle events surfaced on worktree cards through `getSyncStatus` |

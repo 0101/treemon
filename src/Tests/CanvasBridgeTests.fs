@@ -46,13 +46,19 @@ let private registerExactSession identity path injectUrl sessionId =
     Server.SessionBridge.registerSession resolver request
     |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
 
-let private registerSession path injectUrl sessionId =
+let private registerSessionWithIdentity path injectUrl sessionId =
     let processId = Interlocked.Increment(&nextBridgeProcessId)
     let identity =
         ProcessIdentity.create processId (int64 processId * 1000L + 1L)
         |> Result.defaultWith invalidOp
 
     registerExactSession identity path injectUrl sessionId
+    |> ignore
+
+    identity
+
+let private registerSession path injectUrl sessionId =
+    registerSessionWithIdentity path injectUrl sessionId
     |> ignore
 
 let private canvasWire payload =
@@ -846,16 +852,24 @@ type SystemViewInteractionRoutingTests() =
 
     let ts (s: string) = DateTimeOffset.Parse(s, Globalization.CultureInfo.InvariantCulture)
 
-    let storedAt sid wt updatedAt : Server.SessionActivityStore.StoredStatus =
-        { ProcessIdentity = None
+    let storedAt identity sid wt updatedAt : Server.SessionActivityStore.StoredInstance =
+        { ProcessIdentity = identity
           SessionId = Server.SessionActivity.SessionId sid
           TerminalSessionId = None
           WorktreePath = WorktreePath wt
           Provider = CopilotCli
           Status = Server.SessionActivity.emptyStatus
           UpdatedAt = ts updatedAt
+          LifecycleAt = Some(ts updatedAt)
           LastSeen = ts updatedAt
-          ContextUsageAt = None }
+          ContextUsageAt = None
+          ClosedAt = None }
+
+    let unregisteredIdentity processId =
+        ProcessIdentity.create
+            processId
+            (int64 processId * 1_000L + 1L)
+        |> Result.defaultWith invalidOp
 
     [<Test>]
     member _.``A SystemView routes to the most recently active live session``() =
@@ -864,12 +878,14 @@ type SystemViewInteractionRoutingTests() =
             let older = uniqueSid "older"
             let newer = uniqueSid "newer"
 
-            registerSession path "http://127.0.0.1:1/inject" (Some older)
-            registerSession path "http://127.0.0.1:2/inject" (Some newer)
+            let olderIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some older)
+            let newerIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:2/inject" (Some newer)
 
             let statuses =
-                [ storedAt older path "2026-03-01T12:00:00Z"
-                  storedAt newer path "2026-03-01T12:05:00Z" ]
+                [ storedAt olderIdentity older path "2026-03-01T12:00:00Z"
+                  storedAt newerIdentity newer path "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
             Assert.That(target, Is.EqualTo(Some newer)))
@@ -882,11 +898,12 @@ type SystemViewInteractionRoutingTests() =
             let dead = uniqueSid "dead"
 
             // Only `live` registers with the bridge, so `dead` is unreachable however recent it is.
-            registerSession path "http://127.0.0.1:1/inject" (Some live)
+            let liveIdentity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some live)
 
             let statuses =
-                [ storedAt live path "2026-03-01T12:00:00Z"
-                  storedAt dead path "2026-03-01T12:05:00Z" ]
+                [ storedAt liveIdentity live path "2026-03-01T12:00:00Z"
+                  storedAt (unregisteredIdentity 98001) dead path "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
             Assert.That(target, Is.EqualTo(Some live), "Reachability gates the choice; activity only orders it"))
@@ -897,7 +914,12 @@ type SystemViewInteractionRoutingTests() =
             let path = uniquePath "sv-none"
             let sid = uniqueSid "offline"
 
-            let statuses = [ storedAt sid path "2026-03-01T12:00:00Z" ]
+            let statuses =
+                [ storedAt
+                      (unregisteredIdentity 98002)
+                      sid
+                      path
+                      "2026-03-01T12:00:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
             Assert.That(target, Is.EqualTo(None: string option)))
@@ -909,9 +931,14 @@ type SystemViewInteractionRoutingTests() =
             let otherPath = uniquePath "sv-scope-other"
             let stranger = uniqueSid "stranger"
 
-            registerSession otherPath "http://127.0.0.1:1/inject" (Some stranger)
+            let strangerIdentity =
+                registerSessionWithIdentity
+                    otherPath
+                    "http://127.0.0.1:1/inject"
+                    (Some stranger)
 
-            let statuses = [ storedAt stranger otherPath "2026-03-01T12:05:00Z" ]
+            let statuses =
+                [ storedAt strangerIdentity stranger otherPath "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
             Assert.That(target, Is.EqualTo(None: string option)))
@@ -929,8 +956,8 @@ type SystemViewInteractionRoutingTests() =
 
             // `active` is both live and more recently active, but an AgentDoc has a real author.
             let statuses =
-                [ storedAt owner path "2026-03-01T12:00:00Z"
-                  storedAt active path "2026-03-01T12:05:00Z" ]
+                [ storedAt (unregisteredIdentity 98003) owner path "2026-03-01T12:00:00Z"
+                  storedAt (unregisteredIdentity 98004) active path "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "notes.html")
             Assert.That(target, Is.EqualTo(Some owner)))
@@ -958,8 +985,9 @@ type SystemViewInteractionRoutingTests() =
             let path = uniquePath "sv-no-write"
             let sid = uniqueSid "session"
 
-            registerSession path "http://127.0.0.1:1/inject" (Some sid)
-            let statuses = [ storedAt sid path "2026-03-01T12:00:00Z" ]
+            let identity =
+                registerSessionWithIdentity path "http://127.0.0.1:1/inject" (Some sid)
+            let statuses = [ storedAt identity sid path "2026-03-01T12:00:00Z" ]
 
             runAsync (resolveTarget statuses path "diff.html") |> ignore
 

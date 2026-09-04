@@ -42,8 +42,17 @@ let private startResult path id =
                         $"http://127.0.0.1:41001/{EmbeddedTerminalId.value id}/" } ] }
       TerminalId = id }
 
-let private liveSession now path terminalId sessionId : SessionActivityStore.StoredStatus =
-    { ProcessIdentity = None
+let private liveSession now path terminalId sessionId : SessionActivityStore.StoredInstance =
+    let processId =
+        sessionId
+        |> Seq.fold (fun value character ->
+            (value * 31 + int character) % 1_000_000) 10_000
+
+    { ProcessIdentity =
+        SessionActivity.ProcessIdentity.create
+            processId
+            (int64 processId * 1_000L + 1L)
+        |> Result.defaultWith invalidOp
       SessionId = SessionActivity.SessionId sessionId
       TerminalSessionId =
         terminalId
@@ -54,8 +63,10 @@ let private liveSession now path terminalId sessionId : SessionActivityStore.Sto
       Provider = CodingToolProvider.CopilotCli
       Status = SessionActivity.emptyStatus
       UpdatedAt = now
+      LifecycleAt = Some now
       LastSeen = now
-      ContextUsageAt = None }
+      ContextUsageAt = None
+      ClosedAt = None }
 
 let private createApi
     root
@@ -167,7 +178,7 @@ type WorktreeApiLaunchTests() =
         Assert.That(result, Is.EqualTo None)
 
     [<Test>]
-    member _.``Resume reuses the exact waiting session despite a stale heartbeat``() =
+    member _.``Resume does not reuse an exact waiting session after its heartbeat is stale``() =
         let now = DateTimeOffset.UtcNow
         let path = WorktreePath "C:/wt/resume"
         let existingId =
@@ -191,7 +202,71 @@ type WorktreeApiLaunchTests() =
                 [ staleWaiting ]
                 existing.Snapshot
 
-        Assert.That(result, Is.EqualTo(Some existingId))
+        Assert.That(result, Is.EqualTo None)
+
+    [<Test>]
+    member _.``Resume chooses the greatest-activity exact process when a durable session is duplicated``() =
+        let now = DateTimeOffset.UtcNow
+        let path = WorktreePath "C:/wt/resume"
+        let firstId =
+            terminalId "dddddddddddddddddddddddddddddddd"
+        let secondId =
+            terminalId "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+        let snapshot =
+            { Tabs =
+                [ (startResult path (EmbeddedTerminalId.value firstId)).Snapshot.Tabs
+                  (startResult path (EmbeddedTerminalId.value secondId)).Snapshot.Tabs ]
+                |> List.concat }
+
+        let firstIdentity =
+            SessionActivity.ProcessIdentity.create 6401 7401L
+            |> Result.defaultWith invalidOp
+
+        let secondIdentity =
+            SessionActivity.ProcessIdentity.create 6402 7402L
+            |> Result.defaultWith invalidOp
+
+        let first =
+            { liveSession now path firstId "copilot-session" with
+                ProcessIdentity = firstIdentity
+                UpdatedAt = now.AddMinutes(-2.0) }
+
+        let second =
+            { liveSession now path secondId "copilot-session" with
+                ProcessIdentity = secondIdentity
+                UpdatedAt = now.AddMinutes(-1.0) }
+
+        let result =
+            TerminalSessionActivity.tryFindLiveTerminalId
+                now
+                path
+                (SessionActivity.SessionId "copilot-session")
+                [ first; second ]
+                snapshot
+
+        Assert.That(result, Is.EqualTo(Some secondId))
+
+    [<Test>]
+    member _.``Resume does not reuse a closed exact process even when its terminal still exists``() =
+        let now = DateTimeOffset.UtcNow
+        let path = WorktreePath "C:/wt/resume"
+        let existingId =
+            terminalId "ffffffffffffffffffffffffffffffff"
+        let existing = startResult path (EmbeddedTerminalId.value existingId)
+        let closed =
+            { liveSession now path existingId "copilot-session" with
+                ClosedAt = Some now }
+
+        let result =
+            TerminalSessionActivity.tryFindLiveTerminalId
+                now
+                path
+                (SessionActivity.SessionId "copilot-session")
+                [ closed ]
+                existing.Snapshot
+
+        Assert.That(result, Is.EqualTo None)
 
     [<Test>]
     member _.``Worktree API selects typed launch operations and preserves exact embedded results``() =

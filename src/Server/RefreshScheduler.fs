@@ -116,7 +116,11 @@ let internal autoSyncDependencies
         fun path ->
             async {
                 let! state = agent.PostAndAsyncReply(GetState)
-                return AutoSync.readOwnership activityStore (state.SessionStatuses |> Map.values) path
+                return
+                    AutoSync.readOwnership
+                        activityStore
+                        (state.SessionInstances |> Map.values)
+                        path
             }
       TryBeginOperation =
         fun path -> agent.PostAndAsyncReply(fun reply -> TryBeginAutoSyncOperation(path, reply))

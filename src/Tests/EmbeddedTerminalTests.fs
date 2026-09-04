@@ -2219,8 +2219,12 @@ type EmbeddedTerminalReplacementTests() =
             let terminal = host.CurrentTerminals |> List.exactlyOne
             let awaitingAt = DateTimeOffset.UtcNow
             let backdatedLastSeen = awaitingAt - TimeSpan.FromMinutes 15.0
-            let waitingSession: StoredStatus =
-                { ProcessIdentity = None
+            let identity =
+                ProcessIdentity.create 42 42L
+                |> Result.defaultWith invalidOp
+
+            let waitingSession: StoredInstance =
+                { ProcessIdentity = identity
                   SessionId = SessionId "exact-owned-waiting-session"
                   TerminalSessionId =
                     Some(TerminalSessionId terminal.SessionId)
@@ -2231,8 +2235,10 @@ type EmbeddedTerminalReplacementTests() =
                         Status = SessionLevelStatus.Working
                         AwaitingUserSince = Some awaitingAt }
                   UpdatedAt = awaitingAt
+                  LifecycleAt = Some awaitingAt
                   LastSeen = backdatedLastSeen
-                  ContextUsageAt = None }
+                  ContextUsageAt = None
+                  ClosedAt = None }
 
             let query now terminals =
                 Assert.That(
@@ -2242,7 +2248,6 @@ type EmbeddedTerminalReplacementTests() =
                 )
 
                 queryReplacementPlan
-                    DateTimeOffset.MinValue
                     (fun _ -> Some CopilotCli)
                     (fun terminalSessionIds ->
                         Assert.That(
@@ -2254,27 +2259,7 @@ type EmbeddedTerminalReplacementTests() =
                             )
                         )
 
-                        let identity =
-                            ProcessIdentity.create 42 42L
-                            |> Result.defaultWith invalidOp
-
-                        let exactWaitingSession: StoredInstance =
-                            { ProcessIdentity = identity
-                              SessionId = waitingSession.SessionId
-                              TerminalSessionId =
-                                waitingSession.TerminalSessionId
-                              WorktreePath = waitingSession.WorktreePath
-                              Provider = waitingSession.Provider
-                              Status = waitingSession.Status
-                              UpdatedAt = waitingSession.UpdatedAt
-                              LifecycleAt =
-                                Some waitingSession.UpdatedAt
-                              LastSeen = waitingSession.LastSeen
-                              ContextUsageAt =
-                                waitingSession.ContextUsageAt
-                              ClosedAt = None }
-
-                        Ok(1L, [ exactWaitingSession ], Set.empty))
+                        Ok(1L, [ waitingSession ], Set.empty))
                     now
                     terminals
 

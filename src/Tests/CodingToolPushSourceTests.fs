@@ -19,6 +19,16 @@ let private footerMessage text t : UserFooterMessage =
       Text = text
       Timestamp = ts t }
 
+let private identity sid =
+    sid
+    |> Seq.fold (fun value character ->
+        (value * 31 + int character) % 1_000_000) 10_000
+    |> fun processId ->
+        ProcessIdentity.create
+            processId
+            (int64 processId * 1_000L + 1L)
+    |> Result.defaultWith invalidOp
+
 let private storedWithClocks
     (sid: string)
     (wt: string)
@@ -28,8 +38,8 @@ let private storedWithClocks
     (lastAsst: Message option)
     (updatedAt: string)
     (lastSeen: string)
-    : StoredStatus =
-    { ProcessIdentity = None
+    : StoredInstance =
+    { ProcessIdentity = identity sid
       SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath wt
@@ -41,8 +51,10 @@ let private storedWithClocks
             LastUserMessage = lastUser
             LastAssistantMessage = lastAsst }
       UpdatedAt = ts updatedAt
+      LifecycleAt = Some(ts updatedAt)
       LastSeen = ts lastSeen
-      ContextUsageAt = None }
+      ContextUsageAt = None
+      ClosedAt = None }
 
 let private stored sid wt status skill lastUser lastAsst seen =
     storedWithClocks sid wt status skill lastUser lastAsst seen seen
@@ -50,9 +62,26 @@ let private stored sid wt status skill lastUser lastAsst seen =
 let private now = ts "2026-03-01T12:00:00Z"
 
 /// A stored OPEN session carrying a context-usage snapshot — for the per-session donut tests.
-let private storedUsage sid wt status usage seen : StoredStatus =
+let private storedUsage sid wt status usage seen : StoredInstance =
     let s = stored sid wt status None None None seen
     { s with Status.ContextUsage = usage }
+
+let private fromPushSessions now sessions =
+    fromPushInstances now None sessions
+
+let private collapseByWorktree now sessions =
+    Server.CodingToolStatus.collapseByWorktree
+        now
+        Map.empty
+        sessions
+
+let private retainedFromInstance (instance: StoredInstance) : RetainedSession =
+    { SessionId = instance.SessionId
+      WorktreePath = instance.WorktreePath
+      Provider = instance.Provider
+      Status = instance.Status
+      UpdatedAt = instance.UpdatedAt
+      ContextUsageAt = instance.ContextUsageAt }
 
 
 [<TestFixture>]
@@ -260,10 +289,17 @@ type FromPushSessionsTests() =
             |> fun value -> { value with Status.Title = Some(msg raw timestamp) }
 
         let liveResult = fromPushSessions now [ canvasSession "2026-03-01T11:59:00Z" ]
-        let retained = Map.ofList [ "wt", canvasSession "2026-03-01T08:00:00Z" ]
+        let retained =
+            Map.ofList
+                [ "wt",
+                  canvasSession "2026-03-01T08:00:00Z"
+                  |> retainedFromInstance ]
+
         let retainedResult =
-            includeRetainedSessions retained []
-            |> collapseByWorktree now
+            Server.CodingToolStatus.collapseByWorktree
+                now
+                retained
+                []
             |> Map.find "wt"
 
         [ liveResult; retainedResult ]
@@ -339,6 +375,37 @@ type SessionStatusesTests() =
         Assert.That(result.SessionStatuses |> List.map _.Status, Is.EqualTo [ Working; WaitingForUser; Idle ])
 
     [<Test>]
+    member _.``Two physical instances of one durable session remain two exact markers``() =
+        let firstIdentity =
+            ProcessIdentity.create 6101 7101L
+            |> Result.defaultWith invalidOp
+
+        let secondIdentity =
+            ProcessIdentity.create 6102 7102L
+            |> Result.defaultWith invalidOp
+
+        let first =
+            { stored "shared" "wt" SessionLevelStatus.Working None None None "2026-03-01T11:59:00Z" with
+                ProcessIdentity = firstIdentity }
+
+        let second =
+            { stored "shared" "wt" SessionLevelStatus.Idle None None None "2026-03-01T11:58:00Z" with
+                ProcessIdentity = secondIdentity }
+
+        let result = fromPushSessions now [ second; first ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(result.Status, Is.EqualTo Working)
+            Assert.That(result.SessionStatuses |> List.map _.Status, Is.EqualTo([ Working; Idle ]))
+            Assert.That(
+                result.SessionStatuses
+                |> List.map (_.InstanceId >> SessionInstanceId.value)
+                |> Set.ofList
+                |> Set.count,
+                Is.EqualTo 2
+            ))
+
+    [<Test>]
     member _.``Equal-status dots keep session id order when heartbeat recency changes``() =
         let sessionA seen =
             stored "a" "wt" SessionLevelStatus.Working (Some "session-a") None None seen
@@ -359,9 +426,12 @@ type SessionStatusesTests() =
             Assert.That(skills second, Is.EqualTo [ Some "session-a"; Some "session-b" ]))
 
     [<Test>]
-    member _.``Closed (stale) sessions are excluded from the per-session dots``() =
+    member _.``A freshly seen but closed instance is excluded from the per-session dots``() =
         let openWorking = storedUsage "o" "wt" SessionLevelStatus.Working (usage 10000 200000) "2026-03-01T11:59:00Z"
-        let closed = storedUsage "c" "wt" SessionLevelStatus.Working (usage 99000 200000) "2026-03-01T11:00:00Z"
+        let closed =
+            { storedUsage "c" "wt" SessionLevelStatus.Working (usage 99000 200000) "2026-03-01T11:59:30Z" with
+                ClosedAt = Some(ts "2026-03-01T11:59:45Z") }
+
         let result = fromPushSessions now [ openWorking; closed ]
         Assert.That(result.SessionStatuses |> List.map _.ContextUsage, Is.EqualTo [ usage 10000 200000 ])
 
@@ -401,13 +471,16 @@ type CollapseByWorktreeTests() =
 [<Category("Fast")>]
 type RetainedSessionsTests() =
 
-    let retainedRow sid wt lastUser seen : string * StoredStatus =
-        WorktreePath.value (WorktreePath wt), stored sid wt SessionLevelStatus.Idle None lastUser None seen
+    let retainedRow sid wt lastUser seen : string * RetainedSession =
+        WorktreePath.value (WorktreePath wt),
+        stored sid wt SessionLevelStatus.Idle None lastUser None seen
+        |> retainedFromInstance
 
     let collapseWithRetained at retained live =
-        live
-        |> includeRetainedSessions retained
-        |> collapseByWorktree at
+        Server.CodingToolStatus.collapseByWorktree
+            at
+            retained
+            live
 
     [<Test>]
     member _.``A worktree absent from the live map gets a NoSession card carrying the retained footer``() =
@@ -427,15 +500,12 @@ type RetainedSessionsTests() =
     member _.``An intent-only retained session still carries the provider indicator``() =
         // Regression: hasFooter must count Intent. A session folded from IntentReported alone still has
         // footer content (its intent line renders), so its retained card must carry the provider.
-        let intentOnly: StoredStatus =
-            { ProcessIdentity = None
-              SessionId = SessionId "i"
-              TerminalSessionId = None
+        let intentOnly: RetainedSession =
+            { SessionId = SessionId "i"
               WorktreePath = WorktreePath "wt-i"
               Provider = CopilotCli
               Status = { emptyStatus with Intent = Some(msg "investigating the fold" "2026-03-01T08:00:00Z") }
               UpdatedAt = ts "2026-03-01T08:00:00Z"
-              LastSeen = ts "2026-03-01T08:00:00Z"
               ContextUsageAt = None }
 
         let result = collapseWithRetained now (Map.ofList [ "wt-i", intentOnly ]) [] |> Map.find "wt-i"
@@ -465,6 +535,7 @@ type RetainedSessionsTests() =
                 None
                 "2026-03-01T09:30:00Z"
                 "2026-03-01T09:30:00Z"
+            |> retainedFromInstance
         let heartbeatKeptLive =
             storedWithClocks "heartbeat" "wt" SessionLevelStatus.Idle None None None
                 "2026-03-01T09:00:00Z"

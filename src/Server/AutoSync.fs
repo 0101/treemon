@@ -224,38 +224,44 @@ let internal hasSettled (now: DateTimeOffset) (updatedAt: DateTimeOffset) =
 /// offline identity is consulted only once nothing is open at all, so an open idle CLI can never be
 /// mistaken for one that merely left an id behind. Background agents count as work: `effectiveStatus`
 /// reports Working while one runs, even between the session's own turns.
-let internal ownershipFromSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
-    let openSessions =
-        sessions |> List.filter (fun session -> now - session.LastSeen < openWindow)
+let internal ownershipFromSessions
+    (now: DateTimeOffset)
+    (instances: StoredInstance list)
+    (retained: RetainedSession option)
+    =
+    let openInstances =
+        instances
+        |> List.filter (fun instance ->
+            instance.ClosedAt.IsNone
+            && now - instance.LastSeen < openWindow)
 
-    match openSessions |> pickWorking _.Status StoredStatus.activityOrderKey with
+    match
+        openInstances
+        |> pickWorking _.Status StoredInstance.activityOrderKey
+    with
     | Some _ -> Busy
     | None ->
-        match openSessions |> StoredStatus.tryMostRecentActivity with
+        match
+            openInstances
+            |> StoredInstance.tryMostRecentActivity
+        with
         | Some settled when hasSettled now settled.UpdatedAt ->
-            match settled.ProcessIdentity with
-            | Some processIdentity ->
-                Free(
-                    IdleSession(
-                        processIdentity,
-                        SessionId.value settled.SessionId
-                    )
+            Free(
+                IdleSession(
+                    settled.ProcessIdentity,
+                    SessionId.value settled.SessionId
                 )
-            | None ->
-                // An open session without exact provenance cannot be addressed safely. Production
-                // exact-instance projections always carry it; retained history deliberately does not.
-                Busy
+            )
         | Some _ -> Busy
         | None ->
-            sessions
-            |> StoredStatus.tryMostRecentActivity
+            retained
             |> Option.map (_.SessionId >> SessionId.value)
             |> NoOpenSession
             |> Free
 
 let readOwnership
     (activityStore: SessionActivityStore.SessionActivityStore option)
-    (liveSessions: StoredStatus seq)
+    (liveInstances: StoredInstance seq)
     (path: string)
     =
     let retained =
@@ -263,11 +269,16 @@ let readOwnership
         |> Option.map _.RetainedByWorktree()
         |> Option.defaultValue Map.empty
 
-    liveSessions
-    |> CodingToolStatus.includeRetainedSessions retained
-    |> Seq.filter (fun stored -> WorktreePath.value stored.WorktreePath = path)
-    |> Seq.toList
-    |> ownershipFromSessions DateTimeOffset.UtcNow
+    let instances =
+        liveInstances
+        |> Seq.filter (fun stored ->
+            WorktreePath.value stored.WorktreePath = path)
+        |> Seq.toList
+
+    ownershipFromSessions
+        DateTimeOffset.UtcNow
+        instances
+        (retained |> Map.tryFind path)
 
 let internal registrationGraceMilliseconds = 3000
 

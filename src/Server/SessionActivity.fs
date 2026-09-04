@@ -68,6 +68,10 @@ module ProcessIdentity =
     let sortKey identity =
         processId identity, processStartTimeUtcTicks identity
 
+    let sessionInstanceId identity =
+        let processId, processStartTimeUtcTicks = sortKey identity
+        SessionInstanceId $"{processId:x8}:{processStartTimeUtcTicks:x16}"
+
 /// One injectable operating-system identity boundary. Resolving a PID returns the exact currently
 /// running process identity, or None when that PID is not running. Exact liveness checks deliberately
 /// reuse this same resolver so ingestion, shutdown waiting, and survivor verification cannot disagree
@@ -250,7 +254,8 @@ let internal pruneTerminalOriginEpochs
 /// A single push session's own status. `NoSession` is a *worktree-level* collapse result
 /// (`CodingToolStatus`), never a per-session value — so it is intentionally absent here, making that
 /// illegal state unrepresentable rather than guarding it with a runtime failwith. It is widened to the
-/// four-case `CodingToolStatus` only at the worktree-collapse boundary (`CodingToolStatus.fromPushSessions`).
+/// four-case `CodingToolStatus` only at the worktree-collapse boundary
+/// (`CodingToolStatus.fromPushInstances`).
 [<RequireQualifiedAccess>]
 type SessionLevelStatus =
     | Working
@@ -479,9 +484,9 @@ let idleDebounceWindow = TimeSpan.FromSeconds 10.0
 /// stamp records no prior status), but in practice this is the Working→Idle blink: a parked
 /// WaitingForUser agent normally resumes via `user_prompt`→Working rather than `turn_ended`→Idle, so
 /// a spurious ≤`graceWindow` red hold on a waiting card is only a rare edge, not the common path.
-/// `idleSince` is the frozen "entered Idle" stamp (`CodingToolSinceByWorktree`), which the scheduler
-/// (`SchedulerState.stampIdleSince`) resets on every new Working turn — so each turn restarts the
-/// window. With no stamp there is no reference instant, so the real Idle status falls through. The
+/// `idleSince` is the collapsed status-transition stamp (`CodingToolSinceByWorktree`), which the
+/// scheduler (`SchedulerState.updateCodingToolTransition`) re-stamps whenever that status changes —
+/// so each new Working turn restarts the window. With no stamp there is no reference instant, so the real Idle status falls through. The
 /// classified activity (Reviewing/Investigating/…) is unaffected: it is derived from the retained
 /// skill, so a held-Working worktree keeps its group.
 let debounceIdle

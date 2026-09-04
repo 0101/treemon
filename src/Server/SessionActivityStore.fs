@@ -17,29 +17,16 @@ open Server.SqliteStorage
 
 // --- Row shapes -------------------------------------------------------------------------------
 
-/// Temporary read model for application consumers that still collapse physical instances by durable
-/// Copilot SessionId. It is produced only by ExactInstanceProjection and by retained-history reads;
-/// no runtime writer persists this shape.
-type StoredStatus =
-    { ProcessIdentity: ProcessIdentity option
-      SessionId: SessionId
-      TerminalSessionId: TerminalSessionId option
+/// One durable conversation representative used only for card/footer history and automatic
+/// fallback identity when no physical process is open. It deliberately carries no liveness,
+/// terminal origin, or process identity, so it cannot be mistaken for a live address.
+type RetainedSession =
+    { SessionId: SessionId
       WorktreePath: WorktreePath
       Provider: CodingToolProvider
       Status: SessionStatus
       UpdatedAt: DateTimeOffset
-      LastSeen: DateTimeOffset
       ContextUsageAt: DateTimeOffset option }
-
-module StoredStatus =
-    let activityOrderKey (stored: StoredStatus) =
-        stored.UpdatedAt, SessionId.value stored.SessionId
-
-    /// LastSeen is liveness-only, so it must never decide which session owns shared content.
-    let tryMostRecentActivity sessions =
-        sessions
-        |> List.sortByDescending activityOrderKey
-        |> List.tryHead
 
 /// One exact physical Copilot process. Lifecycle, content, usage, liveness, terminal origin, and
 /// closure retain independent clocks/fields on this row.
@@ -67,16 +54,11 @@ module StoredInstance =
         SessionId.value stored.SessionId,
         ProcessIdentity.sortKey stored.ProcessIdentity
 
-    let toStoredStatus (stored: StoredInstance) =
-        { ProcessIdentity = Some stored.ProcessIdentity
-          SessionId = stored.SessionId
-          TerminalSessionId = stored.TerminalSessionId
-          WorktreePath = stored.WorktreePath
-          Provider = stored.Provider
-          Status = stored.Status
-          UpdatedAt = stored.UpdatedAt
-          LastSeen = stored.LastSeen
-          ContextUsageAt = stored.ContextUsageAt }
+    /// LastSeen is liveness-only, so it must never decide which instance owns shared content.
+    let tryMostRecentActivity instances =
+        instances
+        |> List.sortByDescending activityOrderKey
+        |> List.tryHead
 
 /// One accepted history-bearing event. Event identity is scoped to the exact producer process.
 type ActivityEventRow =
@@ -89,52 +71,6 @@ type ActivityEventRow =
       Status: SessionLevelStatus
       Skill: string option
       Ts: DateTimeOffset }
-
-/// The one temporary exact-to-session projection used by untouched application consumers. Closed
-/// instances never enter it. Within one durable SessionId an open active instance wins, then the
-/// greatest-activity open or otherwise recent nonclosed instance.
-module ExactInstanceProjection =
-    let private choose (now: DateTimeOffset) (instances: StoredInstance list) =
-        let candidates = instances |> List.filter _.ClosedAt.IsNone
-
-        let openInstances =
-            candidates
-            |> List.filter (fun instance -> now - instance.LastSeen < openWindow)
-
-        openInstances
-        |> pickActive _.Status StoredInstance.activityOrderKey
-        |> Option.orElseWith (fun () ->
-            openInstances
-            |> List.sortByDescending StoredInstance.activityOrderKey
-            |> List.tryHead)
-        |> Option.orElseWith (fun () ->
-            candidates
-            |> List.sortByDescending StoredInstance.activityOrderKey
-            |> List.tryHead)
-        |> Option.map StoredInstance.toStoredStatus
-
-    let bySession
-        (now: DateTimeOffset)
-        (instances: StoredInstance seq)
-        =
-        instances
-        |> Seq.groupBy _.SessionId
-        |> Seq.choose (fun (sessionId, grouped) ->
-            grouped
-            |> List.ofSeq
-            |> choose now
-            |> Option.map (fun projected -> sessionId, projected))
-        |> Map.ofSeq
-
-    let tryForSession
-        (now: DateTimeOffset)
-        (sessionId: SessionId)
-        (instances: StoredInstance seq)
-        =
-        instances
-        |> Seq.filter (fun instance -> instance.SessionId = sessionId)
-        |> List.ofSeq
-        |> choose now
 
 // --- Serialization ----------------------------------------------------------------------------
 
@@ -325,14 +261,11 @@ let private readInstance (reader: SqliteDataReader) =
       ContextUsageAt = contextUsageAt
       ClosedAt = readOptTimestamp reader 25 }
 
-let private readProjectedStatus (reader: SqliteDataReader) =
+let private readRetainedSession (reader: SqliteDataReader) =
     let contextUsage, contextUsageAt =
-        readContextUsage reader 15 16 17
+        readContextUsage reader 14 15 16
 
-    { ProcessIdentity = None
-      SessionId = SessionId(reader.GetString 0)
-      TerminalSessionId =
-        readOptStr reader 20 |> Option.map TerminalSessionId
+    { SessionId = SessionId(reader.GetString 0)
       WorktreePath = WorktreePath(reader.GetString 1)
       Provider = parseProvider (reader.GetString 2)
       Status =
@@ -343,11 +276,10 @@ let private readProjectedStatus (reader: SqliteDataReader) =
           Intent = readOptMessage reader 9 10
           Title = readOptMessage reader 11 12
           ContextUsage = contextUsage
-          AwaitingUserSince = readOptTimestamp reader 18
-          UserInputCompletedAt = readOptTimestamp reader 19
+          AwaitingUserSince = readOptTimestamp reader 17
+          UserInputCompletedAt = readOptTimestamp reader 18
           BackgroundAgentClocks = Map.empty }
       UpdatedAt = parseIso (reader.GetString 13)
-      LastSeen = parseIso (reader.GetString 14)
       ContextUsageAt = contextUsageAt }
 
 // --- SQL --------------------------------------------------------------------------------------
@@ -496,10 +428,8 @@ SELECT
     session_id, worktree_path, provider, status, current_skill,
     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
     intent_text, intent_ts, title_text, title_ts, updated_at,
-    $notLive AS last_seen,
     context_current_tokens, context_token_limit, context_usage_at,
-    awaiting_user_since, user_input_completed_at,
-    NULL AS terminal_session_id
+    awaiting_user_since, user_input_completed_at
 FROM ranked
 WHERE activity_rank = 1;
 """
@@ -832,16 +762,15 @@ type SessionActivityStore
         use reader = command.ExecuteReader()
         readRows reader readInstance []
 
-    /// One durable footer representative per worktree across exact and migration-only history. The
-    /// result is deliberately non-live; the scheduler's exact projection supplies openness.
+    /// One durable footer representative per worktree across exact and migration-only history.
+    /// The result has no process/liveness/origin fields and cannot participate in live ownership.
     member _.RetainedByWorktree() =
         use connection = openConnection ()
         use command = connection.CreateCommand()
         command.CommandText <- retainedByWorktreeSql
-        command.Parameters.AddWithValue("$notLive", isoUtc DateTimeOffset.MinValue) |> ignore
         use reader = command.ExecuteReader()
 
-        readRows reader readProjectedStatus []
+        readRows reader readRetainedSession []
         |> List.map (fun status ->
             WorktreePath.value status.WorktreePath, status)
         |> Map.ofList

@@ -8,7 +8,7 @@ missed time, late inputs, or downtime.
 
 ## Goals
 
-- Persist the same task and per-session agent projection shown by the live Overview.
+- Persist the same task and per-physical-instance agent projection shown by the live Overview.
 - Keep captured 12-hour, 24-hour, and 72-hour history available across restart without requiring an
   open browser.
 - Store only task and agent counts, never drill-down membership or session content.

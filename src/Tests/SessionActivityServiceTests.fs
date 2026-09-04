@@ -91,15 +91,13 @@ let private replacementTerminal
     { TerminalSessionId = terminalSessionId
       WorktreePath = worktreePath }
 
-let private queryReplacementPlanAfterOk
-    replacementReadyAt
+let private queryReplacementPlanOk
     (service: SessionActivityService)
     now
     terminals
     =
     match
         queryReplacementPlan
-            replacementReadyAt
             CodingToolStatus.readConfiguredProvider
             (fun ids -> service.QueryTerminalActivity ids)
             now
@@ -109,9 +107,6 @@ let private queryReplacementPlanAfterOk
     | Error error ->
         Assert.Fail $"expected replacement session plan, got Error: {error}"
         failwith "unreachable"
-
-let private queryReplacementPlanOk =
-    queryReplacementPlanAfterOk DateTimeOffset.MinValue
 
 let private requireReplacementReady =
     function
@@ -190,23 +185,26 @@ let private storedWithUsage sid worktree status updatedAt usage usageAt =
 type SessionActivityStore with
     member store.LoadLiveStatuses(now: DateTimeOffset) =
         store.LoadRecentInstances now
-        |> ExactInstanceProjection.bySession now
-        |> Map.values
-        |> List.ofSeq
 
     member store.StatusBySession(sessionId: SessionId) =
-        match store.InstancesBySession sessionId with
-        | head :: _ -> Some(StoredInstance.toStoredStatus head)
-        | [] ->
-            store.RetainedByWorktree()
-            |> Map.values
-            |> Seq.tryFind (fun status -> status.SessionId = sessionId)
+        store.InstancesBySession sessionId
+        |> List.tryHead
 
     member store.UpsertStatus(stored: StoredInstance) =
         store.UpsertInstance stored |> ignore
 
     member store.UpsertContextUsage(stored: StoredInstance) =
         store.UpsertInstance stored
+
+type SessionActivityService with
+    /// Legacy fixture convenience for tests that intentionally create one process per durable
+    /// session. Exact-multiplicity tests use `ExactSnapshot` directly.
+    member service.LiveSnapshot() =
+        service.ExactSnapshot()
+        |> Map.values
+        |> Seq.map (fun instance ->
+            instance.SessionId, instance)
+        |> Map.ofSeq
 
 /// A service over a throwaway temp .db, with `knownWorktree` registered as a monitored path on a
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
@@ -302,11 +300,16 @@ let private persistedEvents dbPath =
 
     read []
 
-/// The scheduler's live status for a session (fed via UpdateSessionStatus). GetState is a barrier,
+/// The scheduler's exact instance for a session. These fixtures create one process per durable
+/// session; exact-multiplicity behavior is covered separately.
 /// so calling it after a LiveSnapshot barrier guarantees the mailbox's feed has been applied.
 let private schedulerStatus (agent: MailboxProcessor<SchedulerState.StateMsg>) sid =
     let state = agent.PostAndReply SchedulerState.GetState
-    state.SessionStatuses |> Map.tryFind (SessionId sid)
+
+    state.SessionInstances
+    |> Map.values
+    |> Seq.tryFind (fun instance ->
+        instance.SessionId = SessionId sid)
 
 let private resumePathEvent path at =
     match path with
@@ -732,7 +735,7 @@ type IngestTests() =
     member _.``an ingested status is fed to the scheduler``() =
         withService "C:/wt/a" (fun (svc, agent, _) ->
             svc.Submit(mkReport "s1" "C:/wt/a" "e1" "2026-03-01T10:00:00Z" TurnStarted)
-            svc.LiveSnapshot() |> ignore // barrier: the mailbox has posted UpdateSessionStatus by now
+            svc.LiveSnapshot() |> ignore // barrier: the mailbox has posted the exact instance by now
             match schedulerStatus agent "s1" with
             | Some stored -> Assert.That(stored.Status.Status, Is.EqualTo SessionLevelStatus.Working)
             | None -> Assert.Fail "scheduler never received the session status")
@@ -837,7 +840,6 @@ type IngestTests() =
                 Assert.That(latestSessionId, Is.EqualTo(Some "s1"))
                 Assert.That(retained.SessionId, Is.EqualTo persisted.SessionId)
                 Assert.That(retained.UpdatedAt, Is.EqualTo persisted.UpdatedAt)
-                Assert.That(retained.LastSeen, Is.EqualTo DateTimeOffset.MinValue)
                 Assert.That(retained.Status.BackgroundAgentClocks, Is.Empty)
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
 
@@ -1984,7 +1986,6 @@ type TerminalOwnershipQueryTests() =
                         Intent = intent
                         Title = title }
                 UpdatedAt = updatedAt }
-            |> StoredInstance.toStoredStatus
 
         let snapshot =
             { Tabs =
@@ -2025,6 +2026,23 @@ type TerminalOwnershipQueryTests() =
                       (ts "2026-03-01T10:04:30Z")
                       None
                       (message "Session title only" (ts "2026-03-01T10:04:00Z"))
+                  { stored
+                        terminalA
+                        "closed-a"
+                        SessionLevelStatus.Working
+                        (ts "2026-03-01T10:04:50Z")
+                        (ts "2026-03-01T10:04:50Z")
+                        (message "Closed terminal activity" (ts "2026-03-01T10:04:50Z"))
+                        None with
+                        ClosedAt = Some(ts "2026-03-01T10:04:55Z") }
+                  stored
+                      terminalB
+                      "stale-b"
+                      SessionLevelStatus.Working
+                      (ts "2026-03-01T10:04:50Z")
+                      (now - openWindow - TimeSpan.FromSeconds 1.0)
+                      (message "Stale terminal activity" (ts "2026-03-01T10:04:50Z"))
+                      None
                   stored
                       unrelated
                       "unrelated"
@@ -2226,42 +2244,69 @@ type TerminalOwnershipQueryTests() =
             ))
 
     [<Test>]
-    member _.``replacement waits through startup reconciliation window``() =
+    member _.``one terminal keeps every exact shutdown target but selects one resume conversation``() =
+        let terminal =
+            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let now = ts "2026-03-01T10:05:00Z"
+        let older =
+            { ownedStored terminal "older-conversation" now with
+                UpdatedAt = now.AddMinutes(-2.0) }
+        let newer =
+            { ownedStored terminal "newer-conversation" now with
+                UpdatedAt = now.AddMinutes(-1.0) }
+
+        let snapshot =
+            ownedSessionSnapshot
+                now
+                (Set.singleton terminal)
+                (19L, [ older; newer ], Set.empty)
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                snapshot.OpenSessions
+                |> List.map _.ProcessIdentity
+                |> Set.ofList,
+                Is.EqualTo(
+                    Set.ofList
+                        [ older.ProcessIdentity
+                          newer.ProcessIdentity ]
+                ),
+                "every physical process remains an exact shutdown target"
+            )
+            Assert.That(
+                snapshot.ReplacementSessionIds,
+                Is.EqualTo(
+                    Map.ofList
+                        [ terminal,
+                          SessionId "newer-conversation" ]
+                ),
+                "only the greatest-activity conversation is selected for automatic Resume"
+            ))
+
+    [<Test>]
+    member _.``replacement queries per-instance reconciliation immediately without a global startup delay``() =
         let now = ts "2026-03-01T10:00:00Z"
-        let replacementReadyAt = now + openWindow
         let terminalSessionId =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         let terminal =
             replacementTerminal terminalSessionId "C:/wt/a"
 
-        let beforeReady =
+        // Test-boundary mutation records whether the policy query was invoked.
+        let mutable queried = false
+
+        let result =
             queryReplacementPlan
-                replacementReadyAt
                 (fun _ -> Some CopilotCli)
                 (fun _ ->
-                    Assert.Fail "activity must not be queried during startup reconciliation"
-                    failwith "unreachable")
+                    queried <- true
+                    Ok(7L, [], Set.empty))
                 now
                 [ terminal ]
 
-        let atReady =
-            queryReplacementPlan
-                replacementReadyAt
-                (fun _ -> Some CopilotCli)
-                (fun _ -> Ok(7L, [], Set.empty))
-                replacementReadyAt
-                [ terminal ]
-
         Assert.Multiple(fun () ->
+            Assert.That(queried, Is.True)
             Assert.That(
-                beforeReady,
-                Is.EqualTo(
-                    Ok TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
-                    : Result<TerminalHostReplacement.ReplacementSessionPlan, string>
-                )
-            )
-            Assert.That(
-                atReady,
+                result,
                 Is.EqualTo(
                     Ok(
                         TerminalHostReplacement.ReplacementSessionPlan.Ready(
@@ -2490,7 +2535,6 @@ type TerminalOwnershipQueryTests() =
         let terminalSessionId =
             TerminalSessionId "cccccccccccccccccccccccccccccccc"
         let now = DateTimeOffset.UtcNow
-        let replacementReadyAt = now + openWindow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-owned-resume-worktree")
         let retained updatedAt lastSeen sessionId =
             { ProcessIdentity = identityForSession sessionId
@@ -2508,24 +2552,16 @@ type TerminalOwnershipQueryTests() =
         let seed (store: SessionActivityStore) =
             store.UpsertStatus(
                 retained
-                    (now.AddHours(-5.0))
-                    (now - idleWindow - TimeSpan.FromMinutes 10.0)
+                    (now.AddMinutes(-1.0))
+                    (now.AddMinutes(-1.0))
                     "surviving"
-            )
-
-            store.UpsertStatus(
-                retained
-                    (now.AddHours(-4.0))
-                    (now - idleWindow - TimeSpan.FromMinutes 10.0)
-                    "newer-stale"
             )
 
         withServiceSeeded worktree seed (fun (service, _, _) ->
             service.Start()
-            Assert.That(service.LiveSnapshot(), Is.Empty)
+            Assert.That(service.ExactSnapshot().Count, Is.EqualTo 1)
             Assert.That(
-                queryReplacementPlanAfterOk
-                    replacementReadyAt
+                queryReplacementPlanOk
                     service
                     now
                     [ replacementTerminal terminalSessionId worktree ],
@@ -2533,28 +2569,36 @@ type TerminalOwnershipQueryTests() =
                     TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
             )
 
+            let representedAt = now.AddMinutes(1.0)
+
             mkReport
                 "surviving"
                 worktree
-                "surviving-heartbeat"
-                (now.AddMinutes(1.0).ToString("O"))
-                Heartbeat
+                "surviving-presence"
+                (representedAt.ToString("O"))
+                SessionPresent
             |> fun report ->
                 { report with TerminalSessionId = Some terminalSessionId }
-            |> service.Submit
+            |> fun report ->
+                match service.Present(report, representedAt) with
+                | PresenceAcknowledge.Recorded _ -> ()
+                | PresenceAcknowledge.NotRecorded(_, reason) ->
+                    Assert.Fail reason
 
             Assert.That(
                 service.LiveSnapshot() |> Map.keys |> Seq.toList,
                 Is.EqualTo([ SessionId "surviving" ])
             )
-
             let snapshot =
-                queryOwnedOk service replacementReadyAt (Set.singleton terminalSessionId)
-            let policyEpoch, resumeCommands =
-                queryReplacementPlanAfterOk
-                    replacementReadyAt
+                queryOwnedOk
                     service
-                    replacementReadyAt
+                    representedAt
+                    (Set.singleton terminalSessionId)
+
+            let policyEpoch, resumeCommands =
+                queryReplacementPlanOk
+                    service
+                    representedAt
                     [ replacementTerminal terminalSessionId worktree ]
                 |> requireReplacementReady
 

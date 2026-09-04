@@ -119,7 +119,7 @@ type ServerLifecycleTests() =
                     agent.PostAndAsyncReply SchedulerState.GetState
                     |> Async.RunSynchronously
 
-                Assert.That(state.SessionStatusesHydrated, Is.True)
+                Assert.That(state.SessionInstancesHydrated, Is.True)
                 Assert.That(runtime.SnapshotStore.LatestAnchor(), Is.EqualTo None)
             finally
                 SessionActivityRuntime.shutdown runtime None)

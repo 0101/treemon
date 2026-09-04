@@ -14,7 +14,7 @@ shared state; no session-log parsing remains.
 - Keep reporting passive: no tools, prompts, or transcript changes.
 - Preserve live status, footer activity, messages, context usage, and resume identity across server
   restarts.
-- Support multiple concurrent sessions in one worktree without losing per-session activity.
+- Support multiple concurrent sessions in one worktree without losing per-process activity.
 - Represent concurrent CLI processes for the same durable Copilot session independently so their
   lifecycle state, liveness, and terminal origins cannot overwrite each other.
 - Keep a parent session Working while any reported background agent is still active.
@@ -85,14 +85,16 @@ shared state; no session-log parsing remains.
 - User-message projection uses `UserMessageFormatting`: runtime `<system_reminder>` content is
   hidden, `[canvas] ` payloads retain a Canvas glyph and readable action text, and the same
   projection is used for duplicate suppression against activity text.
-- `SessionStatuses` contains every open instance after freshness adjustment, ordered
-  Working -> WaitingForUser -> Idle, then by `SessionId` and process identity within an equal
-  status. Each entry retains its own skill and context usage, so concurrent processes remain
-  visible rather than being silently collapsed into one misleading marker.
-- The live Overview counts and groups sessions independently. One worktree can contribute sessions
-  to several activity groups at once.
-- `CodingToolSince` is captured when the collapsed worktree status changes and remains stable while
-  Idle heartbeats advance `last_seen`.
+- `WorktreeStatus.Sessions` contains one marker for every open physical instance after freshness
+  adjustment, ordered Working -> WaitingForUser -> Idle, then by `SessionId` and process identity
+  within an equal status. Each marker carries an opaque exact-instance ID for stable client keys,
+  plus its own skill and context usage, so duplicate processes for one durable conversation remain
+  visible instead of collapsing into one marker.
+- The live Overview counts and groups physical instances independently. One worktree can contribute
+  processes to several activity groups at once.
+- `CodingToolSince` is captured whenever the collapsed worktree status changes and remains stable
+  across liveness-only heartbeats and sibling-instance updates that leave that status unchanged. A
+  process that re-presents after its prior openness window starts a new transition.
 - Auto-sync defers entirely while any open session is mid-turn or has been idle for less than
   `settleWindow` (30 s). Otherwise it takes the greatest-`UpdatedAt` open session that has settled,
   and only then a retained identity when no session is open. That ordering keeps any fallback prompt
@@ -122,7 +124,7 @@ shared state; no session-log parsing remains.
 
 ### Context usage, resume, and restart
 
-- `session.usage_info` updates a durable per-session context gauge without changing status. Its
+- `session.usage_info` updates a durable per-process-instance context gauge without changing status. Its
   ordering clock is separate from lifecycle ordering, so older delayed gauges cannot replace newer
   values and usage cannot block a lifecycle transition.
 - Usage values and their ordering timestamp are stored on `session_instances`; usage is not appended
@@ -139,7 +141,9 @@ shared state; no session-log parsing remains.
   with a current terminal origin remains pending reconciliation until the same process identity
   re-presents, that exact process is proven dead, its terminal origin leaves the authoritative
   registry, or `openWindow` expires. Pending reconciliation gates automatic replacement without
-  introducing another lifecycle status. Retained conversations outside the live window remain
+  introducing another lifecycle status. A process proven dead is monotonically closed and removed
+  from the scheduler's exact live collection; missing-origin and expired rows simply stop
+  participating in terminal ownership. Retained conversations outside the live window remain
   available for footer and explicit Resume selection, and a closed identity cannot reopen.
 - Background-agent clocks are process-instance-local and durable within retention. Restart restores
   unfinished background work for each exact identity, so an Idle parent remains effectively Working
@@ -289,22 +293,23 @@ infrastructure is not part of this store.
 
 ### Worktree projection
 
-`CodingToolStatus.collapseByWorktree` is the single projection from session state to card fields.
-`WorktreeApi` collapses open instances directly and separately selects each worktree's greatest
-durable `(UpdatedAt, SessionId, ProcessIdentity)` representative for footer and explicit Resume
-ownership. `retained_sessions` and closed prior process instances remain eligible only for retained
-content and session identity. The temporary one-row-per-durable-session adapter retains the exact
-identity of the physical instance it selected, so AutoSync addresses that process registration
-rather than another live process sharing the same `SessionId`.
+`SchedulerState.SessionInstances` is keyed by exact process identity and never deduplicates a
+durable `SessionId`. `CodingToolStatus.collapseByWorktree` is the single projection from those
+instances to card fields. `WorktreeApi` derives markers and aggregate status only from open exact
+instances, then separately joins each worktree's greatest durable
+`(UpdatedAt, SessionId, ProcessIdentity)` representative for footer content. `retained_sessions`
+and closed prior process instances remain eligible only for footer and explicit Resume history;
+they have no liveness, terminal-origin, or process-address fields in the application read model.
 
 The remoting contract exposes `toggleAutoSync`. When enabled and the branch falls behind, `AutoSync`
-uses the same live and retained session state but preserves whether the selected identity is busy,
-settled-idle, or offline. A session mid-turn — or one that went idle within the settle window — makes
-the worktree busy, and the observation is deferred without delivering anything. Otherwise — no
-session, or one that has settled or is waiting on its user — AutoSync attempts the bounded mechanical
-path defined in `docs/spec/worktree-monitor.md`, and uses the idle session, retained identity, or a
-guarded launch only when that path requires agent fallback; transient delivery failure queues that
-prompt for retry. The passive reporting extension never originates prompts.
+reads open exact instances separately from retained history. A session mid-turn — or one that went
+idle within the settle window — makes the worktree busy, and the observation is deferred without
+delivering anything. Otherwise — no session, or one that has settled or is waiting on its user —
+AutoSync attempts the bounded mechanical path defined in `docs/spec/worktree-monitor.md`. Agent
+fallback addresses the selected open process through `SessionBridge.SendTarget.ExactProcess`;
+retained identity is consulted only when no process is open and can cause only a guarded launch.
+Transient delivery failure queues the exact-process prompt for retry. The passive reporting
+extension never originates prompts.
 
 The projection keeps the activity source through the `AgentActivity` union and exposes every open
 session for status/context rendering. Overview snapshot capture uses the same live session
@@ -349,24 +354,24 @@ into lifecycle status.
 | `src/Server/SessionActivity.fs` | Exact identity contract, event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
 | `src/Server/ProcessIdentityResolver.fs` | Default operating-system PID/start-time resolver shared by activity and exact process lifecycle checks. |
 | `src/Server/SessionActivityProtocol.fs` | Bounded activity wire DTO parsing and exact-instance event mapping. |
-| `src/Server/SessionActivityIngestion.fs` | Exact-instance fold application, independent ordering paths, temporary session projection, and startup reconciliation. |
+| `src/Server/SessionActivityIngestion.fs` | Exact-instance fold application, independent ordering paths, scheduler publication, and startup reconciliation. |
 | `src/Server/SessionActivityService.fs` | Known-worktree filtering, acknowledged presence, mailbox lifecycle, retention, and raw exact-origin queries. |
 | `src/Server/TerminalSessionActivity.fs` | Exact owned-session and startup-reconciliation projection for embedded-terminal tab activity and TerminalHost replacement policy. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
 | `src/Server/SessionActivityStoreSchema.fs` | Transactional exact-instance schema creation, retained-history migration, legacy retirement, and event-key rebuild. |
-| `src/Server/SessionActivityStore.fs` | Exact process-instance persistence, temporary representative reads, and retention. |
+| `src/Server/SessionActivityStore.fs` | Exact process-instance persistence, non-live retained footer/history reads, and retention. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
-| `src/Server/SchedulerState.fs` | Live session state and `CodingToolSince` transitions. |
+| `src/Server/SchedulerState.fs` | Exact live process-instance state and collapsed `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |
 | `src/Server/SessionBridge.fs` | Process-keyed session registration, durable-session/worktree lookup, separate poll registration, exact prompt/shutdown delivery, retry queue, and bridge liveness. |
 | `src/Extension/extension.mjs` and `shutdown-endpoint.mjs` | Exact bridge identity registration and capability-guarded loopback routine shutdown. |
 | `src/Server/AutoSync.fs` | Delivery-aware session selection and guarded sync-prompt fallback launch. |
-| `src/Shared/Types.fs` | `AgentActivity`, context usage, per-session markers, and worktree wire types. |
+| `src/Shared/Types.fs` | `AgentActivity`, context usage, exact-instance marker IDs, and worktree wire types. |
 | `src/Shared/WorktreeApi.fs` | Remoting contract, including `toggleAutoSync` and direct Overview history. |
-| `src/Shared/OverviewData.fs` | Shared per-session Overview grouping. |
+| `src/Shared/OverviewData.fs` | Shared per-physical-instance Overview grouping. |
 | `src/Client/OverviewPresentation.fs` | Client-only Overview selection and visual mappings. |
-| `src/Client/CardViews.fs` | Status dots, activity/footer text, and per-session context display. |
+| `src/Client/CardViews.fs` | Status dots, activity/footer text, and exact-instance context display. |
 
 ## Related Specs
 

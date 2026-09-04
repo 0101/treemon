@@ -89,22 +89,12 @@ let internal publishInstance
         |> Map.add persisted.ProcessIdentity persisted
         |> evictStaleInstances
 
-    match
-        live
-        |> Map.values
-        |> ExactInstanceProjection.tryForSession
+    scheduler.Post(
+        SchedulerState.UpdateSessionInstance(
+            persisted,
             observedAt
-            persisted.SessionId
-    with
-    | Some projected ->
-        scheduler.Post(SchedulerState.UpdateSessionStatus projected)
-    | None ->
-        scheduler.Post(
-            SchedulerState.RemoveSessionStatus(
-                persisted.SessionId,
-                observedAt
-            )
         )
+    )
 
     { state with
         Live = live
@@ -560,51 +550,79 @@ let internal statusesForTerminalOrigins
 
 let internal reconcilePending
     (resolver: ProcessIdentityResolver)
+    (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
     (now: DateTimeOffset)
     (terminalSessionIds: Set<TerminalSessionId>)
     (store: SessionActivityStore)
     (state: ServiceState)
     =
+    let clear identity origin current =
+        let changedOrigins =
+            origin
+            |> Option.map Set.singleton
+            |> Option.defaultValue Set.empty
+
+        { current with
+            PendingReconciliation =
+                current.PendingReconciliation
+                |> Set.remove identity
+            ActivityEpochState =
+                current.ActivityEpochState
+                |> recordTerminalOriginActivity changedOrigins }
+
+    let closeDead identity instance current =
+        try
+            match
+                store.CloseInstance(
+                    identity,
+                    now,
+                    instance.TerminalSessionId
+                )
+            with
+            | None -> Ok(clear identity instance.TerminalSessionId current)
+            | Some persisted ->
+                let published =
+                    publishInstance
+                        scheduler
+                        now
+                        (Some instance)
+                        current
+                        persisted
+
+                Ok
+                    { published with
+                        PendingReconciliation =
+                            published.PendingReconciliation
+                            |> Set.remove identity }
+        with error ->
+            Error
+                $"Could not close dead startup session identity: {error.Message}"
+
     let folder result identity =
         result
-        |> Result.bind (fun (pending, clearedOrigins) ->
-            match tryPrior store state identity with
+        |> Result.bind (fun current ->
+            match tryPrior store current identity with
             | None ->
-                Ok(Set.remove identity pending, clearedOrigins)
+                Ok(clear identity None current)
             | Some instance ->
-                let clear origin =
-                    Ok(
-                        Set.remove identity pending,
-                        origin
-                        |> Option.map (fun value ->
-                            Set.add value clearedOrigins)
-                        |> Option.defaultValue clearedOrigins
-                    )
-
                 if instance.ClosedAt.IsSome then
-                    clear instance.TerminalSessionId
+                    Ok(clear identity instance.TerminalSessionId current)
                 elif now - instance.LastSeen >= openWindow then
-                    clear instance.TerminalSessionId
+                    Ok(clear identity instance.TerminalSessionId current)
                 else
                     match instance.TerminalSessionId with
-                    | None -> clear None
+                    | None -> Ok(clear identity None current)
                     | Some origin when not (terminalSessionIds.Contains origin) ->
-                        clear (Some origin)
+                        Ok(clear identity (Some origin) current)
                     | Some _ ->
                         ProcessIdentityResolver.isAlive resolver identity
                         |> Result.bind (fun alive ->
                             if alive then
-                                Ok(pending, clearedOrigins)
+                                Ok current
                             else
-                                clear instance.TerminalSessionId))
+                                closeDead identity instance current))
 
     state.PendingReconciliation
     |> Set.fold
         folder
-        (Ok(state.PendingReconciliation, Set.empty))
-    |> Result.map (fun (pending, clearedOrigins) ->
-        { state with
-            PendingReconciliation = pending
-            ActivityEpochState =
-                state.ActivityEpochState
-                |> recordTerminalOriginActivity clearedOrigins })
+        (Ok state)

@@ -65,15 +65,33 @@ let private tempDirectory () =
     path
 
 let private storedSession sessionId worktreePath status updatedAt lastSeen =
-    { ProcessIdentity = Some(identityForSessionId sessionId)
+    { ProcessIdentity = identityForSessionId sessionId
       SessionId = SessionId sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath worktreePath
       Provider = CopilotCli
       Status = { emptyStatus with Status = status }
       UpdatedAt = updatedAt
+      LifecycleAt = Some updatedAt
       LastSeen = lastSeen
-      ContextUsageAt = None }
+      ContextUsageAt = None
+      ClosedAt = None }
+
+let private retainedFromInstance (instance: StoredInstance) : RetainedSession =
+    { SessionId = instance.SessionId
+      WorktreePath = instance.WorktreePath
+      Provider = instance.Provider
+      Status = instance.Status
+      UpdatedAt = instance.UpdatedAt
+      ContextUsageAt = instance.ContextUsageAt }
+
+let private testOwnership now instances =
+    ownershipFromSessions
+        now
+        instances
+        (instances
+         |> StoredInstance.tryMostRecentActivity
+         |> Option.map retainedFromInstance)
 
 let private gitData path branch behind revision dirty : GitWorktree.GitData =
     { Path = path
@@ -223,7 +241,7 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-1.0))
                 (now.AddMinutes(-1.0))
 
-        Assert.That(ownershipFromSessions now [ newerIdle; active ], Is.EqualTo(Busy))
+        Assert.That(testOwnership now [ newerIdle; active ], Is.EqualTo(Busy))
 
     [<Test>]
     member _.``A session that went idle within the settle window is not yet a target``() =
@@ -236,7 +254,7 @@ type AutoSyncSelectionTests() =
                 now
 
         Assert.That(
-            ownershipFromSessions now [ justStopped ],
+            testOwnership now [ justStopped ],
             Is.EqualTo(Busy),
             "status dips to idle between back-to-back turns, so an instant reading would merge under a resuming agent")
 
@@ -245,7 +263,7 @@ type AutoSyncSelectionTests() =
         let settled =
             storedSession "settled" "/repo/wt" SessionLevelStatus.Idle (now - settleWindow) now
 
-        Assert.That(ownershipFromSessions now [ settled ], Is.EqualTo(Free(idleTarget "settled")))
+        Assert.That(testOwnership now [ settled ], Is.EqualTo(Free(idleTarget "settled")))
 
     [<Test>]
     member _.``A session with no status event yet is not two thousand years settled``() =
@@ -253,7 +271,7 @@ type AutoSyncSelectionTests() =
             storedSession "hydrated" "/repo/wt" SessionLevelStatus.Idle DateTimeOffset.MinValue now
 
         Assert.That(
-            ownershipFromSessions now [ hydratedOnly ],
+            testOwnership now [ hydratedOnly ],
             Is.EqualTo(Busy),
             "a title or intent hydration leaves the ordering clock at its sentinel, which is not evidence of idleness")
 
@@ -263,7 +281,7 @@ type AutoSyncSelectionTests() =
             storedSession "skewed" "/repo/wt" SessionLevelStatus.Idle (now.AddMinutes 2.0) now
 
         Assert.That(
-            ownershipFromSessions now [ skewed ],
+            testOwnership now [ skewed ],
             Is.EqualTo(Free(idleTarget "skewed")),
             "reports are clamped only five minutes into the future, so negative idleness must not defer forever")
 
@@ -286,8 +304,89 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-2.0))
 
         Assert.That(
-            ownershipFromSessions now [ older; newer ],
+            testOwnership now [ older; newer ],
             Is.EqualTo(Free(idleTarget "newer")))
+
+    [<Test>]
+    member _.``Duplicate durable session ids select the greatest-activity exact process``() =
+        let olderIdentity =
+            ProcessIdentity.create 6201 7201L
+            |> Result.defaultWith invalidOp
+
+        let newerIdentity =
+            ProcessIdentity.create 6202 7202L
+            |> Result.defaultWith invalidOp
+
+        let older =
+            { storedSession
+                  "shared"
+                  "/repo/wt"
+                  SessionLevelStatus.Idle
+                  (now.AddMinutes(-2.0))
+                  now with
+                ProcessIdentity = olderIdentity }
+
+        let newer =
+            { storedSession
+                  "shared"
+                  "/repo/wt"
+                  SessionLevelStatus.Idle
+                  (now.AddMinutes(-1.0))
+                  now with
+                ProcessIdentity = newerIdentity }
+
+        Assert.That(
+            testOwnership now [ older; newer ],
+            Is.EqualTo(
+                Free(
+                    IdleSession(
+                        newerIdentity,
+                        "shared"
+                    )
+                )
+            )
+        )
+
+    [<Test>]
+    member _.``A closed newer duplicate cannot become the exact auto-sync target``() =
+        let olderIdentity =
+            ProcessIdentity.create 6301 7301L
+            |> Result.defaultWith invalidOp
+
+        let closedIdentity =
+            ProcessIdentity.create 6302 7302L
+            |> Result.defaultWith invalidOp
+
+        let older =
+            { storedSession
+                  "shared"
+                  "/repo/wt"
+                  SessionLevelStatus.Idle
+                  (now.AddMinutes(-2.0))
+                  now with
+                ProcessIdentity = olderIdentity }
+
+        let closed =
+            { storedSession
+                  "shared"
+                  "/repo/wt"
+                  SessionLevelStatus.Idle
+                  (now.AddMinutes(-1.0))
+                  now with
+                ProcessIdentity = closedIdentity
+                ClosedAt = Some now }
+
+        Assert.That(
+            testOwnership now [ older; closed ],
+            Is.EqualTo(
+                Free(
+                    IdleSession(
+                        olderIdentity,
+                        "shared"
+                    )
+                )
+            )
+        )
 
     [<Test>]
     member _.``Greatest activity UpdatedAt supplies a retained id only when no session is open``() =
@@ -308,7 +407,7 @@ type AutoSyncSelectionTests() =
                 (now.AddMinutes(-10.0))
 
         Assert.That(
-            ownershipFromSessions now [ older; newer ],
+            testOwnership now [ older; newer ],
             Is.EqualTo(Free(NoOpenSession(Some "newer"))))
 
     [<Test>]
@@ -317,8 +416,8 @@ type AutoSyncSelectionTests() =
         let session lastSeen =
             storedSession "shared-id" "/repo/wt" SessionLevelStatus.Idle (now.AddMinutes(-1.0)) lastSeen
 
-        let openIdle = ownershipFromSessions now [ session (now.AddSeconds(-30.0)) ]
-        let retainedOnly = ownershipFromSessions now [ session (now.AddMinutes(-10.0)) ]
+        let openIdle = testOwnership now [ session (now.AddSeconds(-30.0)) ]
+        let retainedOnly = testOwnership now [ session (now.AddMinutes(-10.0)) ]
 
         Assert.Multiple(fun () ->
             Assert.That(
@@ -343,7 +442,7 @@ type AutoSyncSelectionTests() =
 
     [<Test>]
     member _.``A worktree with no sessions has no open session and no retained identity``() =
-        Assert.That(ownershipFromSessions now [], Is.EqualTo(Free(NoOpenSession None)))
+        Assert.That(testOwnership now [], Is.EqualTo(Free(NoOpenSession None)))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -864,7 +963,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    ReadOwnership = fun _ -> async { return ownershipFromSessions now [ idleButOpen ] }
+                    ReadOwnership = fun _ -> async { return testOwnership now [ idleButOpen ] }
                     MechanicalSync =
                         fun _ ->
                             async {
@@ -908,7 +1007,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    ReadOwnership = fun _ -> async { return ownershipFromSessions now [ waiting ] }
+                    ReadOwnership = fun _ -> async { return testOwnership now [ waiting ] }
                     MechanicalSync =
                         fun _ ->
                             async {
@@ -938,7 +1037,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    ReadOwnership = fun _ -> async { return ownershipFromSessions now [ working ] }
+                    ReadOwnership = fun _ -> async { return testOwnership now [ working ] }
                     MechanicalSync = fun _ -> failwith "a worktree mid-turn must never be mutated underneath its agent"
                     RecordAcceptedRevision =
                         fun path baseRevision ->
@@ -975,7 +1074,7 @@ type AutoSyncMechanicalTests() =
 
             let dependencies =
                 { withoutAcceptedRecords with
-                    ReadOwnership = fun _ -> async { return ownershipFromSessions now [ idleButOpen ] }
+                    ReadOwnership = fun _ -> async { return testOwnership now [ idleButOpen ] }
                     MechanicalSync = fun _ -> async { return Error DirtyWorktree }
                     Deliver =
                         fun request ->
@@ -1844,13 +1943,15 @@ type AutoSyncEndpointTests() =
         agent.Post(UpdatePr(repoId, Map.empty))
 
         agent.Post(
-            UpdateSessionStatus(
+            let instance =
                 storedSession
                     "session-a"
                     normalizedPath
                     SessionLevelStatus.Idle
                     (now - settleWindow)
-                    now))
+                    now
+
+            UpdateSessionInstance(instance, now))
 
         registerBridgeSession
             normalizedPath
@@ -1974,21 +2075,25 @@ type AutoSyncVerificationTests() =
             // mechanical path requires before it may act; `None` would defer the observation.
             agent.Post(UpdatePr(repoId, Map.empty))
             agent.Post(
-                UpdateSessionStatus(
+                let instance =
                     storedSession
                         "selected-idle"
                         normalizedPath
                         SessionLevelStatus.Idle
                         (now.AddMinutes(-1.0))
-                        now))
+                        now
+
+                UpdateSessionInstance(instance, now))
             agent.Post(
-                UpdateSessionStatus(
+                let instance =
                     storedSession
                         "other-idle"
                         normalizedPath
                         SessionLevelStatus.Idle
                         (now.AddMinutes(-2.0))
-                        now))
+                        now
+
+                UpdateSessionInstance(instance, now))
 
             registerBridgeSession
                 normalizedPath

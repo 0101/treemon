@@ -335,6 +335,7 @@ type SessionActivityService internal
                         match
                             reconcilePending
                                 resolver
+                                scheduler
                                 now
                                 terminalSessionIds
                                 store
@@ -643,13 +644,12 @@ type SessionActivityService internal
 
         let loaded = store.LoadRecentInstances now
 
-        let projected =
-            loaded
-            |> ExactInstanceProjection.bySession now
-            |> Map.values
-            |> List.ofSeq
-
-        scheduler.Post(SchedulerState.SeedSessionStatuses projected)
+        scheduler.Post(
+            SchedulerState.SeedSessionInstances(
+                now,
+                loaded
+            )
+        )
 
         mailbox.PostAndReply(fun reply ->
             Seed(now, loaded, reply))
@@ -667,12 +667,6 @@ type SessionActivityService internal
             raise (ObjectDisposedException(nameof SessionActivityService))
 
         mailbox.PostAndReply Snapshot
-
-    /// Temporary projected snapshot retained for untouched application tests/consumers.
-    member this.LiveSnapshot() =
-        this.ExactSnapshot()
-        |> Map.values
-        |> ExactInstanceProjection.bySession DateTimeOffset.UtcNow
 
     member internal _.QueryTerminalActivityAt
         (

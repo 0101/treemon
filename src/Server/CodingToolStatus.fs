@@ -32,9 +32,9 @@ let internal readConfiguredProvider (worktreePath: string) : CodingToolProvider 
 
 type CodingToolResult =
     { Status: CodingToolStatus
-      /// One SessionDot per open (live) session, ordered Working→Waiting→Idle then by stable session
-      /// id — the per-session status donuts, each carrying its own context usage. Empty ⇔ Status =
-      /// NoSession.
+      /// One SessionDot per open physical instance, ordered Working→Waiting→Idle then by durable
+      /// session ID and exact process identity. Each marker carries its own context usage. Empty ⇔
+      /// Status = NoSession.
       SessionStatuses: SessionDot list
       Provider: CodingToolProvider option
       CurrentSkill: string option
@@ -62,8 +62,9 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
 
 // Push-model live-state sourcing.
 //
-// The card's coding-tool fields come from the push model's live per-session state, not the
-// log-parsing detectors. A worktree's live sessions are collapsed via `fromPushSessions`, which now
+// The card's coding-tool fields come from the push model's exact process-instance state, not the
+// log-parsing detectors. A worktree's exact process instances are collapsed via
+// `fromPushInstances`, which
 // makes TWO decoupled picks:
 //   * the STATUS dot is driven by OPENNESS (only sessions still heartbeating count): open-active →
 //     Working/WaitingForUser, open-but-idle → Idle (blue), no open session → NoSession (grey);
@@ -73,8 +74,8 @@ let actionPrompt (provider: CodingToolProvider option) (action: ActionKind) =
 // of active/idle (the session the user last touched).
 
 /// The blank grey card a worktree shows when it has NO push session at all (never reported, or its
-/// rows pruned). The `fromPushSessions` collapse below reproduces this exact value for an empty
-/// session list, and `WorktreeApi` falls back to it for a worktree absent from the collapse map.
+/// rows pruned). The `fromPushInstances` collapse below reproduces this exact value for an empty
+/// instance list, and `WorktreeApi` falls back to it for a worktree absent from the collapse map.
 /// A worktree with an OPEN-but-idle session collapses to blue `Idle` (not here), and one whose
 /// sessions have all gone stale collapses to `NoSession` but KEEPS its retained footer.
 let noSessionPushResult: CodingToolResult =
@@ -124,8 +125,8 @@ let private toUserFooterMessage (message: Message) =
 ///   (the same activity ordering the durable resume query uses). Going Idle or losing the open
 ///   session does NOT blank the footer: it stays populated while any session for the worktree remains
 ///   in the store (retention / `idleWindow`).
-/// Render order for the per-session dots: Working first, then WaitingForUser, then Idle. NoSession is
-/// never a per-session status (it is the worktree-level collapse of an empty session set).
+/// Render order for exact-instance dots: Working first, then WaitingForUser, then Idle. NoSession is
+/// never an instance status (it is the worktree-level collapse of an empty open set).
 let private sessionStatusOrder =
     function
     | Working -> 0
@@ -134,42 +135,79 @@ let private sessionStatusOrder =
     | NoSession -> 3
 
 type private SessionSelection =
-    { OpenSessions: StoredStatus list
-      AdjustedOpen: StoredStatus list
-      ActiveWinner: StoredStatus option
-      Footer: StoredStatus option }
+    { OpenInstances: StoredInstance list
+      AdjustedOpen: StoredInstance list
+      ActiveWinner: StoredInstance option }
 
-let private selectSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
-    let openSessions =
-        sessions |> List.filter (fun s -> now - s.LastSeen < SessionActivity.openWindow)
+let private selectInstances (now: DateTimeOffset) (instances: StoredInstance list) =
+    let openInstances =
+        instances
+        |> List.filter (fun instance ->
+            instance.ClosedAt.IsNone
+            && now - instance.LastSeen < SessionActivity.openWindow)
 
     let adjustedOpen =
-        openSessions
-        |> List.map (fun s ->
-            { s with Status = SessionActivity.freshnessAdjusted now s.LastSeen s.Status })
+        openInstances
+        |> List.map (fun instance ->
+            { instance with
+                Status =
+                    SessionActivity.freshnessAdjusted
+                        now
+                        instance.LastSeen
+                        instance.Status })
 
     let activeWinner =
         adjustedOpen
-        |> SessionActivity.pickActive _.Status StoredStatus.activityOrderKey
+        |> SessionActivity.pickActive _.Status StoredInstance.activityOrderKey
 
-    { OpenSessions = openSessions
+    { OpenInstances = openInstances
       AdjustedOpen = adjustedOpen
-      ActiveWinner = activeWinner
-      Footer =
-        activeWinner
-        |> Option.orElse (sessions |> StoredStatus.tryMostRecentActivity) }
+      ActiveWinner = activeWinner }
 
-let internal representativeActivityText now sessions =
-    (selectSessions now sessions).Footer
+type private FooterSource =
+    { Provider: CodingToolProvider
+      Status: SessionStatus
+      UpdatedAt: DateTimeOffset
+      SessionId: SessionId }
+
+let private footerFromInstance (instance: StoredInstance) =
+    { Provider = instance.Provider
+      Status = instance.Status
+      UpdatedAt = instance.UpdatedAt
+      SessionId = instance.SessionId }
+
+let private footerFromRetained (retained: RetainedSession) =
+    { Provider = retained.Provider
+      Status = retained.Status
+      UpdatedAt = retained.UpdatedAt
+      SessionId = retained.SessionId }
+
+let private mostRecentFooter sources =
+    sources
+    |> List.sortByDescending (fun source ->
+        source.UpdatedAt, SessionId.value source.SessionId)
+    |> List.tryHead
+
+let internal representativeActivityText now instances =
+    let selection = selectInstances now instances
+
+    selection.ActiveWinner
+    |> Option.orElseWith (fun () ->
+        selection.OpenInstances
+        |> StoredInstance.tryMostRecentActivity)
     |> Option.map _.Status
     |> Option.bind effectiveDisplayActivity
     |> Option.map (AgentActivity.textAndTimestamp >> fst >> _.Trim())
 
-let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : CodingToolResult =
-    let selection = selectSessions now sessions
+let fromPushInstances
+    (now: DateTimeOffset)
+    (retained: RetainedSession option)
+    (instances: StoredInstance list)
+    : CodingToolResult =
+    let selection = selectInstances now instances
 
     let status =
-        match selection.OpenSessions with
+        match selection.OpenInstances with
         | [] -> NoSession
         | _ ->
             selection.ActiveWinner
@@ -179,7 +217,7 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
                 |> SessionActivity.toCodingToolStatus)
             |> Option.defaultValue Idle
 
-    // Per-session dots: every open session's freshness-adjusted status paired with its own running
+    // Exact-instance dots: every open process's freshness-adjusted status paired with its own running
     // skill and context usage, ordered Working→Waiting→Idle then by session id. Each session keeps
     // its OWN skill + ContextUsage — no footer collapse — so the Overview band can classify each
     // session's activity independently and a session that has reported usage renders a donut
@@ -187,60 +225,78 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
     // reproduces the single grey dot from an empty list.
     let sessionStatuses =
         selection.AdjustedOpen
-        |> List.map (fun s ->
-            { Status =
-                s.Status
+        |> List.map (fun instance ->
+            { InstanceId =
+                instance.ProcessIdentity
+                |> ProcessIdentity.sessionInstanceId
+              Status =
+                instance.Status
                 |> SessionActivity.effectiveStatus
                 |> SessionActivity.toCodingToolStatus
-              Skill = s.Status.Skill
-              ContextUsage = s.Status.ContextUsage },
-            SessionId.value s.SessionId)
-        |> List.sortBy (fun (dot, sessionId) -> sessionStatusOrder dot.Status, sessionId)
-        |> List.map fst
+              Skill = instance.Status.Skill
+              ContextUsage = instance.Status.ContextUsage },
+            SessionId.value instance.SessionId,
+            ProcessIdentity.sortKey instance.ProcessIdentity)
+        |> List.sortBy (fun (dot, sessionId, processIdentity) ->
+            sessionStatusOrder dot.Status, sessionId, processIdentity)
+        |> List.map (fun (dot, _, _) -> dot)
 
-    // Footer source: the active winner if running, else the most-recently-active session of ANY
-    // status so the footer survives Idle / NoSession. Reads the raw fold state (idle sessions retain
-    // their last messages + skill), NOT a freshness-adjusted one — freshness only rewrites the dot.
-    let footer = selection.Footer |> Option.map _.Status
+    // Footer source: the active winner if running. Otherwise use the greatest durable activity
+    // representative across exact and migration-only history. The exact cache remains a fallback
+    // for store-less fixtures, but liveness and terminal origin never come from retained history.
+    let footer =
+        selection.ActiveWinner
+        |> Option.map footerFromInstance
+        |> Option.orElseWith (fun () ->
+            [ instances
+              |> StoredInstance.tryMostRecentActivity
+              |> Option.map footerFromInstance
+              retained |> Option.map footerFromRetained ]
+            |> List.choose id
+            |> mostRecentFooter)
 
     { Status = status
       SessionStatuses = sessionStatuses
-      // Single push provider today (Copilot CLI); a future provider threads its own value here.
-      Provider = footer |> Option.map (fun _ -> CopilotCli)
-      CurrentSkill = footer |> Option.bind _.Skill
+      Provider = footer |> Option.map _.Provider
+      CurrentSkill = footer |> Option.bind (_.Status >> _.Skill)
       AgentActivity =
         footer
-        |> Option.bind effectiveDisplayActivity
+        |> Option.bind (_.Status >> effectiveDisplayActivity)
       LastUserMessage =
         footer
-        |> Option.bind _.LastUserMessage
+        |> Option.bind (_.Status >> _.LastUserMessage)
         |> Option.bind toUserFooterMessage
       LastAssistantMessage =
         footer
-        |> Option.bind _.LastAssistantMessage
+        |> Option.bind (_.Status >> _.LastAssistantMessage)
         |> Option.map (toFooterMessage 80)
       LastActivity = selection.ActiveWinner |> Option.map _.LastSeen }
 
-/// Add each worktree's durable representative to the live candidate set. Live rows win duplicate
-/// session ids; retained rows with distinct ids remain available for footer and auto-sync fallback
-/// selection, while their own `LastSeen` still independently determines whether they contribute an
-/// open status dot.
-let includeRetainedSessions (retained: Map<string, StoredStatus>) (live: StoredStatus seq) : StoredStatus seq =
-    let addSession (sessions: Map<SessionId, StoredStatus>) (session: StoredStatus) =
-        Map.add session.SessionId session sessions
-    let retainedBySession = retained |> Map.values |> Seq.fold addSession Map.empty
-    live
-    |> Seq.fold addSession retainedBySession
-    |> Map.toSeq
-    |> Seq.map snd
-
-/// Group a flat set of live push session-statuses by worktree path and collapse each group into the
+/// Group exact process instances by worktree path and collapse each group into the
 /// card's coding-tool fields (the openness-driven status dot + the decoupled footer). Keyed by the
-/// normalised worktree path stored on each session, so callers look it up by the (already-normalised)
-/// `WorktreeInfo.Path`. The single place the push live state becomes card fields — both the worktree
-/// assembly and the recent-messages endpoint read from the result.
-let collapseByWorktree (now: DateTimeOffset) (sessions: StoredStatus seq) : Map<string, CodingToolResult> =
-    sessions
-    |> Seq.groupBy (_.WorktreePath >> WorktreePath.value)
-    |> Seq.map (fun (path, group) -> path, fromPushSessions now (List.ofSeq group))
+/// normalised worktree path stored on each instance, so callers look it up by the
+/// (already-normalised) `WorktreeInfo.Path`. Retained history is joined only after exact live
+/// selection and can therefore populate footer fields without creating a marker or live address.
+let collapseByWorktree
+    (now: DateTimeOffset)
+    (retainedByWorktree: Map<string, RetainedSession>)
+    (instances: StoredInstance seq)
+    : Map<string, CodingToolResult> =
+    let instancesByWorktree =
+        instances
+        |> Seq.groupBy (_.WorktreePath >> WorktreePath.value)
+        |> Seq.map (fun (path, grouped) -> path, List.ofSeq grouped)
+        |> Map.ofSeq
+
+    Set.union
+        (instancesByWorktree |> Map.keys |> Set.ofSeq)
+        (retainedByWorktree |> Map.keys |> Set.ofSeq)
+    |> Seq.map (fun path ->
+        path,
+        fromPushInstances
+            now
+            (retainedByWorktree |> Map.tryFind path)
+            (instancesByWorktree
+             |> Map.tryFind path
+             |> Option.defaultValue []))
     |> Map.ofSeq

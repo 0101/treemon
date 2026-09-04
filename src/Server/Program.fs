@@ -597,9 +597,6 @@ let main args =
     let mutable replacementLoop: BackgroundLoop.Running option = None
 
     try
-        let replacementReadyAt =
-            DateTimeOffset.UtcNow + SessionActivity.openWindow
-
         try
             let canvasHost =
                 match schedulerAgent, config.CanvasPort with
@@ -622,7 +619,6 @@ let main args =
                                 EmbeddedTerminal.runReplacementCoordinator
                                     manager
                                     (TerminalSessionActivity.queryReplacementPlan
-                                        replacementReadyAt
                                         CodingToolStatus.readConfiguredProvider
                                         (fun terminalSessionIds ->
                                             service.QueryTerminalActivity terminalSessionIds))

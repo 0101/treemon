@@ -32,8 +32,18 @@ let private worktree path branch : GitWorktree.WorktreeInfo =
       Head = "abc123"
       Branch = Some branch }
 
-let private storedStatus sessionId path status skill lastUser seen : SessionActivityStore.StoredStatus =
-    { ProcessIdentity = None
+let private identity sessionId =
+    sessionId
+    |> Seq.fold (fun value character ->
+        (value * 31 + int character) % 1_000_000) 10_000
+    |> fun processId ->
+        SessionActivity.ProcessIdentity.create
+            processId
+            (int64 processId * 1_000L + 1L)
+    |> Result.defaultWith invalidOp
+
+let private storedStatus sessionId path status skill lastUser seen : SessionActivityStore.StoredInstance =
+    { ProcessIdentity = identity sessionId
       SessionId = SessionActivity.SessionId sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath path
@@ -48,8 +58,34 @@ let private storedStatus sessionId path status skill lastUser seen : SessionActi
                     { SessionActivity.Message.Text = text
                       At = seen }) }
       UpdatedAt = seen
+      LifecycleAt = Some seen
       LastSeen = seen
-      ContextUsageAt = None }
+      ContextUsageAt = None
+      ClosedAt = None }
+
+let private retainedSession
+    sessionId
+    path
+    status
+    skill
+    lastUser
+    seen
+    : SessionActivityStore.RetainedSession =
+    let instance =
+        storedStatus
+            sessionId
+            path
+            status
+            skill
+            lastUser
+            seen
+
+    { SessionId = instance.SessionId
+      WorktreePath = instance.WorktreePath
+      Provider = instance.Provider
+      Status = instance.Status
+      UpdatedAt = instance.UpdatedAt
+      ContextUsageAt = instance.ContextUsageAt }
 
 let private overview =
     { Tasks =
@@ -228,7 +264,12 @@ type OverviewSnapshotCaptureTests() =
 
         let scheduler = SchedulerState.createAgent()
         scheduler.Post(SchedulerState.InitializeRepo repoId)
-        scheduler.Post(SchedulerState.UpdateSessionStatus beforeBoundary)
+        scheduler.Post(
+            SchedulerState.UpdateSessionInstance(
+                beforeBoundary,
+                beforeBoundary.LastSeen
+            )
+        )
         scheduler.PostAndReply SchedulerState.GetState |> ignore
 
         let clock = ControllableClock(initial)
@@ -236,7 +277,7 @@ type OverviewSnapshotCaptureTests() =
             TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
         let releaseCapture =
             TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
-        let capturedStatuses = ConcurrentQueue<SessionActivityStore.StoredStatus>()
+        let capturedStatuses = ConcurrentQueue<SessionActivityStore.StoredInstance>()
         let inserted = Channel.CreateUnbounded<OverviewSnapshot>()
 
         let dependencies =
@@ -252,8 +293,8 @@ type OverviewSnapshotCaptureTests() =
                     }
                 AssembleRepos =
                     fun _ state ->
-                        state.SessionStatuses
-                        |> Map.find beforeBoundary.SessionId
+                        state.SessionInstances
+                        |> Map.find beforeBoundary.ProcessIdentity
                         |> capturedStatuses.Enqueue
 
                         [] }
@@ -266,7 +307,12 @@ type OverviewSnapshotCaptureTests() =
         stateCaptured.Task.WaitAsync(timeout).GetAwaiter().GetResult()
 
         clock.AdvanceTo afterBoundary.LastSeen
-        scheduler.Post(SchedulerState.UpdateSessionStatus afterBoundary)
+        scheduler.Post(
+            SchedulerState.UpdateSessionInstance(
+                afterBoundary,
+                afterBoundary.LastSeen
+            )
+        )
         let liveState = scheduler.PostAndReply SchedulerState.GetState
         releaseCapture.SetResult()
 
@@ -281,7 +327,8 @@ type OverviewSnapshotCaptureTests() =
                 Is.EqualTo [| beforeBoundary |]
             )
             Assert.That(
-                liveState.SessionStatuses |> Map.find afterBoundary.SessionId,
+                liveState.SessionInstances
+                |> Map.find afterBoundary.ProcessIdentity,
                 Is.EqualTo afterBoundary
             )
             Assert.That(snapshot.Timestamp, Is.EqualTo boundary))
@@ -384,7 +431,7 @@ type OverviewSnapshotCaptureTests() =
         let state repo sessionStatusesHydrated =
             { SchedulerState.DashboardState.empty with
                 Repos = Map.ofList [ repoId, repo ]
-                SessionStatusesHydrated = sessionStatusesHydrated }
+                SessionInstancesHydrated = sessionStatusesHydrated }
 
         let taskReadyRepo =
             { repo with
@@ -423,7 +470,7 @@ type OverviewSnapshotCaptureTests() =
                     Map.empty
                     None
                     { SchedulerState.DashboardState.empty with
-                        SessionStatusesHydrated = true },
+                        SessionInstancesHydrated = true },
                 Is.True,
                 "an intentionally empty root set is ready after the session seed"
             ))
@@ -502,7 +549,7 @@ type OverviewSnapshotCaptureTests() =
                 (boundary.AddSeconds(-1.0))
 
         let retainedFooter =
-            storedStatus
+            retainedSession
                 "retained"
                 retainedPath
                 SessionActivity.SessionLevelStatus.Idle
@@ -574,10 +621,10 @@ type OverviewSnapshotCaptureTests() =
         let state =
             { SchedulerState.DashboardState.empty with
                 Repos = Map.ofList [ repoId, repo ]
-                SessionStatuses =
+                SessionInstances =
                     Map.ofList
-                        [ activeSession.SessionId, activeSession
-                          waitingSession.SessionId, waitingSession ] }
+                        [ activeSession.ProcessIdentity, activeSession
+                          waitingSession.ProcessIdentity, waitingSession ] }
 
         let rootPaths = Map.ofList [ repoId, root ]
         let archivedBranches = Map.ofList [ repoId, Set.singleton "archived" ]

@@ -193,8 +193,14 @@ let private wtRetryLogic: WorktreeStatus =
       Branch = "feature/retry-logic"
       LastCommitMessage = "Add exponential backoff to blob storage retries"
       Sessions =
-        [ { Status = Working; Skill = Some "pr"; ContextUsage = Some { CurrentTokens = 142000; TokenLimit = 200000 } }
-          { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 47000; TokenLimit = 200000 } } ]
+        [ { InstanceId = SessionInstanceId "demo-retry-pr"
+            Status = Working
+            Skill = Some "pr"
+            ContextUsage = Some { CurrentTokens = 142000; TokenLimit = 200000 } }
+          { InstanceId = SessionInstanceId "demo-retry-idle"
+            Status = Idle
+            Skill = None
+            ContextUsage = Some { CurrentTokens = 47000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-2.0)
       Beads = { Open = 3; InProgress = 1; Blocked = 0; Closed = 5 }
       Planning = planning 3 1 0 5
@@ -220,7 +226,11 @@ let private wtConfigLoading: WorktreeStatus =
     { Path = azDoPath "refactor-config"
       Branch = "refactor/config-loading"
       LastCommitMessage = "Extract config validation into separate module"
-      Sessions = [ { Status = Working; Skill = Some "refactor"; ContextUsage = Some { CurrentTokens = 38000; TokenLimit = 200000 } } ]
+      Sessions =
+        [ { InstanceId = SessionInstanceId "demo-config"
+            Status = Working
+            Skill = Some "refactor"
+            ContextUsage = Some { CurrentTokens = 38000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-12.0)
       Beads = { Open = 1; InProgress = 1; Blocked = 0; Closed = 3 }
       Planning = planning 1 1 0 3
@@ -246,7 +256,11 @@ let private wtAuthMiddleware: WorktreeStatus =
     { Path = azDoPath "feature-auth"
       Branch = "feature/auth-middleware"
       LastCommitMessage = "Add JWT validation and claims extraction"
-      Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ]
+      Sessions =
+        [ { InstanceId = SessionInstanceId "demo-auth"
+            Status = Idle
+            Skill = None
+            ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-8.0)
       Beads = { Open = 1; InProgress = 0; Blocked = 0; Closed = 5 }
       Planning = planning 1 0 0 5
@@ -325,9 +339,18 @@ let private wtStreaming: WorktreeStatus =
       Branch = "feature/streaming-agg"
       LastCommitMessage = "Add windowed aggregation with tumbling windows"
       Sessions =
-        [ { Status = Working; Skill = Some "bd-execute"; ContextUsage = Some { CurrentTokens = 92000; TokenLimit = 200000 } }
-          { Status = Working; Skill = Some "review"; ContextUsage = Some { CurrentTokens = 150000; TokenLimit = 200000 } }
-          { Status = Idle; Skill = None; ContextUsage = None } ]
+        [ { InstanceId = SessionInstanceId "demo-stream-execute"
+            Status = Working
+            Skill = Some "bd-execute"
+            ContextUsage = Some { CurrentTokens = 92000; TokenLimit = 200000 } }
+          { InstanceId = SessionInstanceId "demo-stream-review"
+            Status = Working
+            Skill = Some "review"
+            ContextUsage = Some { CurrentTokens = 150000; TokenLimit = 200000 } }
+          { InstanceId = SessionInstanceId "demo-stream-idle"
+            Status = Idle
+            Skill = None
+            ContextUsage = None } ]
       LastCommitTime = baseTimestamp.AddMinutes(-1.0)
       Beads = { Open = 2; InProgress = 2; Blocked = 0; Closed = 4 }
       Planning = planning 2 2 0 4
@@ -353,7 +376,11 @@ let private wtCsvFix: WorktreeStatus =
     { Path = githubPath "csv-fix"
       Branch = "fix/csv-parser"
       LastCommitMessage = "Handle quoted newlines in CSV field parser"
-      Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 5000; TokenLimit = 200000 } } ]
+      Sessions =
+        [ { InstanceId = SessionInstanceId "demo-csv"
+            Status = Idle
+            Skill = None
+            ContextUsage = Some { CurrentTokens = 5000; TokenLimit = 200000 } } ]
       LastCommitTime = baseTimestamp.AddMinutes(-60.0)
       Beads = { Open = 0; InProgress = 0; Blocked = 0; Closed = 2 }
       Planning = planning 0 0 0 2
@@ -460,7 +487,11 @@ let private f3 =
         { wt with
             CodingTool = Working
             CodingToolSince = Some baseTimestamp
-            Sessions = [ { Status = Working; Skill = Some "investigate"; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
+            Sessions =
+                [ { InstanceId = SessionInstanceId "demo-auth"
+                    Status = Working
+                    Skill = Some "investigate"
+                    ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
     |> withCpu 45.0 14800
 
 // F4 (6-8s): Retry build fails (red badge appears)
@@ -499,7 +530,11 @@ let private f8 =
         { wt with
             CodingTool = Idle
             CodingToolSince = Some baseTimestamp
-            Sessions = [ { Status = Idle; Skill = None; ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
+            Sessions =
+                [ { InstanceId = SessionInstanceId "demo-auth"
+                    Status = Idle
+                    Skill = None
+                    ContextUsage = Some { CurrentTokens = 176000; TokenLimit = 200000 } } ] })
     |> withCpu 52.0 15800
 
 // F9 (16-18s): Retry build passes

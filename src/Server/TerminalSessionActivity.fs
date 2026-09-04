@@ -24,17 +24,6 @@ type internal ActivityQuery =
             string
          >
 
-let internal joinOwnedSessions
-    (terminalSessionIds: Set<TerminalSessionId>)
-    (sessions: StoredStatus seq)
-    : (TerminalSessionId * StoredStatus) list =
-    sessions
-    |> Seq.choose (fun session ->
-        session.TerminalSessionId
-        |> Option.filter terminalSessionIds.Contains
-        |> Option.map (fun terminalId -> terminalId, session))
-    |> Seq.toList
-
 let internal joinOwnedInstances
     (terminalSessionIds: Set<TerminalSessionId>)
     (instances: StoredInstance seq)
@@ -108,7 +97,7 @@ let internal tryFindLiveTerminalId
     (now: DateTimeOffset)
     (worktreePath: WorktreePath)
     (copilotSessionId: SessionId)
-    (sessions: StoredStatus seq)
+    (instances: StoredInstance seq)
     (snapshot: EmbeddedTerminalSnapshot)
     : EmbeddedTerminalId option =
     let runningTerminals =
@@ -120,31 +109,31 @@ let internal tryFindLiveTerminalId
             | _ -> None)
         |> Map.ofList
 
-    sessions
-    |> Seq.filter (fun session -> session.WorktreePath = worktreePath)
-    |> joinOwnedSessions (runningTerminals |> Map.keys |> Set.ofSeq)
-    |> List.tryPick (fun (terminalSessionId, session) ->
-        let reusable =
-            session.SessionId = copilotSessionId
-            && match effectiveStatus session.Status with
-               | SessionLevelStatus.WaitingForUser -> true
-               | _ -> now - session.LastSeen < openWindow
-
-        if reusable then
-            runningTerminals |> Map.tryFind terminalSessionId
-        else
-            None)
+    instances
+    |> Seq.filter (fun instance ->
+        instance.WorktreePath = worktreePath
+        && instance.SessionId = copilotSessionId
+        && instance.ClosedAt.IsNone
+        && now - instance.LastSeen < openWindow)
+    |> joinOwnedInstances
+        (runningTerminals |> Map.keys |> Set.ofSeq)
+    |> List.sortByDescending (snd >> StoredInstance.activityOrderKey)
+    |> List.tryPick (fun (terminalSessionId, _) ->
+        runningTerminals |> Map.tryFind terminalSessionId)
 
 let internal withReportedActivity
     (now: DateTimeOffset)
-    (sessions: StoredStatus seq)
+    (instances: StoredInstance seq)
     (snapshot: EmbeddedTerminalSnapshot)
     =
     let terminalSessionIds = snapshot.Tabs |> List.map terminalOrigin |> Set.ofList
 
     let reportedActivity =
-        sessions
-        |> joinOwnedSessions terminalSessionIds
+        instances
+        |> Seq.filter (fun instance ->
+            instance.ClosedAt.IsNone
+            && now - instance.LastSeen < openWindow)
+        |> joinOwnedInstances terminalSessionIds
         |> List.groupBy fst
         |> List.choose (fun (terminalSessionId, ownedSessions) ->
             ownedSessions
@@ -191,16 +180,15 @@ let internal replacementSessionPlan
 /// TerminalHost replacement. All exact ownership, terminal-specific gating, resume selection, and
 /// provider command construction stays in this terminal-focused module.
 let internal queryReplacementPlan
-    replacementReadyAt
     resolveProvider
     (queryActivity: ActivityQuery)
     (now: DateTimeOffset)
     (terminals: TerminalHostReplacement.ReplacementTerminal list)
     =
-    if now < replacementReadyAt then
-        Ok TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
-    else
-        let terminalSessionIds = terminals |> List.map (_.TerminalSessionId >> TerminalSessionId) |> Set.ofList
+    let terminalSessionIds =
+        terminals
+        |> List.map (_.TerminalSessionId >> TerminalSessionId)
+        |> Set.ofList
 
-        queryOwnedSessions queryActivity now terminalSessionIds
-        |> Result.map (replacementSessionPlan resolveProvider terminals)
+    queryOwnedSessions queryActivity now terminalSessionIds
+    |> Result.map (replacementSessionPlan resolveProvider terminals)

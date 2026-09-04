@@ -76,7 +76,7 @@ let internal cancelPendingLaunch worktreePath =
 /// status row for another worktree carries a session id this worktree never registered — so the
 /// snapshot is consumed unfiltered.
 let internal resolveTarget
-    (sessionStatuses: StoredStatus seq)
+    (sessionInstances: StoredInstance seq)
     (worktreePath: string)
     (filename: string)
     =
@@ -89,14 +89,19 @@ let internal resolveTarget
             let liveSessions =
                 SessionBridge.canvasSessionsForWorktreeAt now worktreePath
 
-            let liveSessionIds = liveSessions |> List.choose _.SessionId |> Set.ofList
+            let liveSessionIds =
+                liveSessions
+                |> List.choose _.SessionId
+                |> Set.ofList
 
             let mostRecentlyActive =
-                sessionStatuses
+                sessionInstances
                 |> Seq.filter (fun stored ->
-                    liveSessionIds |> Set.contains (SessionId.value stored.SessionId))
+                    stored.ClosedAt.IsNone
+                    && WorktreePath.value stored.WorktreePath = worktreePath
+                    && liveSessionIds.Contains(SessionId.value stored.SessionId))
                 |> List.ofSeq
-                |> StoredStatus.tryMostRecentActivity
+                |> StoredInstance.tryMostRecentActivity
                 |> Option.map (_.SessionId >> SessionId.value)
 
             let freshestReachable () =
@@ -116,10 +121,10 @@ type internal CanvasSendOutcome =
     | QueuedNeedingSession of CanvasMessageResult
 
 /// Route one canvas interaction.
-let internal sendMessage (sessionStatuses: StoredStatus seq) (request: CanvasMessageRequest) =
+let internal sendMessage (sessionInstances: StoredInstance seq) (request: CanvasMessageRequest) =
     async {
         let worktreePath = WorktreePath.value request.WorktreePath
-        let! target = resolveTarget sessionStatuses worktreePath request.Filename
+        let! target = resolveTarget sessionInstances worktreePath request.Filename
 
         let! sendResult =
             SessionBridge.send

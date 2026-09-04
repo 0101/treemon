@@ -176,11 +176,13 @@ let private overviewWorktreeFields
       CodingToolData = codingToolData
       CodingTool = displayStatus
       CodingToolSince =
-        match displayStatus with
-        | Idle -> codingToolSince |> Map.tryFind wt.Path
-        | Working
-        | WaitingForUser
-        | NoSession -> None
+        if
+            displayStatus = codingToolData.Status
+            && displayStatus <> NoSession
+        then
+            codingToolSince |> Map.tryFind wt.Path
+        else
+            None
       IsArchived =
         wt.Branch
         |> Option.map (fun b -> Set.contains b archivedBranches)
@@ -276,7 +278,7 @@ let internal detachedBranchLabel (path: string) = $"(detached@{path})"
 type RepoAssemblyInputs =
     { Now: DateTimeOffset
       IgnorePredicate: string -> bool
-      RetainedByWorktree: Map<string, SessionActivityStore.StoredStatus>
+      RetainedByWorktree: Map<string, SessionActivityStore.RetainedSession>
       ArchivedBranches: Map<RepoId, Set<string>>
       AutoSyncBranches: Map<RepoId, Set<string>> }
 
@@ -319,7 +321,7 @@ let internal isOverviewCaptureReady
                 && Map.containsKey wt.Path repo.PlanningData)
         | _ -> false
 
-    state.SessionStatusesHydrated
+    state.SessionInstancesHydrated
     && (match inputs with
         | Some inputs -> rootPaths |> Map.forall (fun repoId _ -> repoReady inputs repoId)
         | None -> Map.isEmpty rootPaths)
@@ -390,10 +392,11 @@ let assembleRepos
     (state: SchedulerState.DashboardState)
     : RepoWorktrees list =
     let pushByWorktree =
-        state.SessionStatuses
+        state.SessionInstances
         |> Map.values
-        |> CodingToolStatus.includeRetainedSessions inputs.RetainedByWorktree
-        |> CodingToolStatus.collapseByWorktree inputs.Now
+        |> CodingToolStatus.collapseByWorktree
+            inputs.Now
+            inputs.RetainedByWorktree
 
     assembleReposCore
         inputs.IgnorePredicate
@@ -457,7 +460,9 @@ let assembleOverviewRepos
     (state: SchedulerState.DashboardState)
     : RepoWorktrees list =
     let pushByWorktree =
-        CodingToolStatus.collapseByWorktree inputs.Now (state.SessionStatuses |> Map.values)
+        state.SessionInstances
+        |> Map.values
+        |> CodingToolStatus.collapseByWorktree inputs.Now Map.empty
 
     assembleReposCore
         inputs.IgnorePredicate
@@ -774,7 +779,7 @@ let internal worktreeApiWithLaunch
                 snapshot
                 |> TerminalSessionActivity.withReportedActivity
                     DateTimeOffset.UtcNow
-                    (state.SessionStatuses |> Map.values)
+                    (state.SessionInstances |> Map.values)
         }
 
     let terminalMutation operation =
@@ -1077,7 +1082,9 @@ let internal worktreeApiWithLaunch
                           let! state =
                               agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
                           let sessions =
-                              state.SessionStatuses |> Map.values |> Seq.toList
+                              state.SessionInstances
+                              |> Map.values
+                              |> Seq.toList
 
                           let now = DateTimeOffset.UtcNow
 
@@ -1107,7 +1114,9 @@ let internal worktreeApiWithLaunch
                       let! state = agent.PostAndAsyncReply(SchedulerState.StateMsg.GetState)
 
                       let! outcome =
-                          CanvasBridge.sendMessage (state.SessionStatuses |> Map.values) request
+                          CanvasBridge.sendMessage
+                              (state.SessionInstances |> Map.values)
+                              request
 
                       match outcome with
                       | CanvasBridge.Routed result -> return result

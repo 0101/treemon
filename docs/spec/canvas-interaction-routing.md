@@ -25,8 +25,8 @@ or control character is rejected before ownership state is touched.
 A **SystemView** is server-generated and has no author, so nothing is persisted for it. Each
 interaction resolves, at send time, to the most recently active session that currently holds a live
 bridge registration for that worktree. Liveness and activity are separate inputs, fed by two
-independent extensions: the bridge registry says which sessions can receive a prompt at all, and
-`StoredStatus.UpdatedAt` only *orders* them. A reachable session that has not reported activity is
+independent extensions: the bridge registry says which exact processes can receive a prompt at all,
+and `StoredInstance.UpdatedAt` only *orders* them. A reachable session that has not reported activity is
 therefore still a valid target — resolution falls back to the freshest registration rather than
 reporting "no target", so Treemon does not spawn a second session beside a usable one. Heartbeat and
 usage timestamps never decide the target, preserving the rule that `LastSeen` is liveness-only.
@@ -86,9 +86,10 @@ SessionId to its freshest live registration; exact agent delivery keeps the phys
 delegates a required spawn to the shared embedded command-launch boundary.
 
 `CanvasBridge.resolveTarget` branches on `CanvasDocKinds.classify`: an AgentDoc reads
-`CanvasDocOwnership`, while a SystemView intersects the worktree's live bridge registrations with the
-scheduler's `SessionStatuses` snapshot, takes the most recent by `StoredStatus.activityOrderKey`, and
-falls back to the freshest live registration when no reachable session has an activity row.
+`CanvasDocOwnership`, while a SystemView takes the durable session IDs from the worktree's
+canvas-collapsed live registrations, orders their exact rows from
+`SchedulerState.SessionInstances` by `StoredInstance.activityOrderKey`, and falls back to the
+freshest live registration when no reachable session has an activity row.
 `CanvasBridge.sendMessage` returns the resolved target alongside the outcome so the caller can
 distinguish "queued because nothing is reachable" from "queued behind a known session".
 
