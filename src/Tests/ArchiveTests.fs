@@ -422,8 +422,9 @@ type ArchiveE2ETests() =
 
     let baseUrl = ServerFixture.viteUrl
 
-    let makeWorktreeJsonWithMetrics (branch: string) (isArchived: bool) (workMetrics: string) =
+    let makeWorktreeJsonWithState (branch: string) (isArchived: bool) (workMetrics: string) (hasActiveSession: bool) =
         let archived = if isArchived then "true" else "false"
+        let activeSession = if hasActiveSession then "true" else "false"
         $"""{{
             "Path":{{"WorktreePath":"Q:/test/{branch}"}},"Branch":"{branch}",
             "LastCommitMessage":"test commit","LastCommitTime":"2026-02-16T22:30:00+00:00",
@@ -431,12 +432,18 @@ type ArchiveE2ETests() =
             "Planning":{{"Planned":0,"Queued":0,"Loose":0,"InProgress":0,"Blocked":0,"Closed":0}},
             "CodingTool":"Idle","CodingToolProvider":null,"LastUserMessage":null,
             "Pr":"NoPr","MainBehindCount":0,"AutoSyncEnabled":false,"IsDirty":false,
-            "HasDiff":false,"WorkMetrics":{workMetrics},"HasActiveSession":false,
+            "HasDiff":false,"WorkMetrics":{workMetrics},"HasActiveSession":{activeSession},
             "IsArchived":{archived},"IsMainWorktree":false,"CanvasDocs":[],"Sessions":[]
         }}"""
 
+    let makeWorktreeJsonWithMetrics (branch: string) (isArchived: bool) (workMetrics: string) =
+        makeWorktreeJsonWithState branch isArchived workMetrics false
+
     let makeWorktreeJson (branch: string) (isArchived: bool) =
         makeWorktreeJsonWithMetrics branch isArchived "null"
+
+    let makeWorktreeJsonWithActiveSession (branch: string) =
+        makeWorktreeJsonWithState branch false "null" true
 
     let makeDashboardJson (worktrees: string list) =
         let wts = worktrees |> String.concat ","
@@ -484,7 +491,42 @@ type ArchiveE2ETests() =
             let archiveBtns = page.Locator(".wt-card .archive-btn")
             do! archiveBtns.First.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
             let! count = archiveBtns.CountAsync()
-            Assert.That(count, Is.EqualTo(2), "Each active card should have an archive button")
+            let! title = archiveBtns.First.GetAttributeAsync("title")
+            Assert.Multiple(fun () ->
+                Assert.That(count, Is.EqualTo(2), "Each active card should have an archive button")
+                Assert.That(title, Is.EqualTo("Archive worktree"), "Archive should not advertise a keyboard shortcut"))
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    member this.``A key leaves archive as a mouse-only action``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let archiveCalls = System.Collections.Generic.List<string>()
+            let json = makeDashboardJson [ makeWorktreeJsonWithActiveSession "feature-a" ]
+
+            do! setupMockedPage page (fun () -> json) archiveCalls (System.Collections.Generic.List())
+            let! _ = page.GotoAsync(baseUrl)
+
+            let card = page.Locator(".wt-card:not(.skeleton)").First
+            do! card.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let dashboard = page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! page.Keyboard.PressAsync("ArrowDown")
+            do! page.Keyboard.PressAsync("ArrowDown")
+            do! page.Keyboard.PressAsync("a")
+            let! _ =
+                page.WaitForFunctionAsync(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))).then(() => true)",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f))
+
+            let! modalCount = page.Locator(".modal-overlay").CountAsync()
+            Assert.Multiple(fun () ->
+                Assert.That(modalCount, Is.Zero, "Pressing A must not open archive confirmation")
+                Assert.That(archiveCalls, Is.Empty, "Pressing A must not archive the worktree"))
 
             do! page.CloseAsync()
         }
