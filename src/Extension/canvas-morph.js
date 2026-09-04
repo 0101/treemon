@@ -1,10 +1,15 @@
 /**
  * Canvas doc morph controller.
  *
- * Listens for the pane's `content-updated` signal, re-fetches the doc, and morphs it into place
- * with idiomorph so scroll position and focus survive an update. Dirty input and textarea values,
- * plus checkbox/radio checked state, are snapshotted immediately before the morph and restored
- * afterward; untouched controls still receive the new authored state.
+ * Listens for the pane's `content-updated` signal and re-fetches the doc. Static documents morph in
+ * place with idiomorph so scroll position and focus survive an update. Changes outside the morph
+ * target — authored head elements or html/body attributes — reload so styles and document metadata
+ * do not stay stale. Documents with authored browser-processed scripts reload too: parser-created
+ * scripts do not execute after a body morph, and explicitly rerunning arbitrary author code could
+ * duplicate listeners and side effects.
+ * Dirty input and textarea values, plus checkbox/radio checked state, are snapshotted immediately
+ * before a static morph and restored afterward; untouched controls still receive the new authored
+ * state.
  *
  * It also marks what the update changed. Idiomorph is mutation-minimal — it writes a text node or
  * an attribute only when the value actually differs — so a MutationObserver wrapped around the
@@ -29,6 +34,28 @@
 
   var HIGHLIGHT_CLASS = 'canvas-updated';
   var CONTENT_HASH_HEADER = 'X-Treemon-Canvas-Content-Hash';
+  var CONTENT_HASH_META_NAME = 'treemon-canvas-content-hash';
+  var SHELL_HASH_META_NAME = 'treemon-canvas-shell-hash';
+  var BODY_SCRIPT_META_NAME = 'treemon-canvas-has-body-script';
+  var RUNTIME_ATTRIBUTE = 'data-treemon-runtime';
+  var JAVASCRIPT_MIME_TYPES = new Set([
+    'application/ecmascript',
+    'application/javascript',
+    'application/x-ecmascript',
+    'application/x-javascript',
+    'text/ecmascript',
+    'text/javascript',
+    'text/javascript1.0',
+    'text/javascript1.1',
+    'text/javascript1.2',
+    'text/javascript1.3',
+    'text/javascript1.4',
+    'text/javascript1.5',
+    'text/jscript',
+    'text/livescript',
+    'text/x-ecmascript',
+    'text/x-javascript'
+  ]);
 
   /** Beyond this share of the doc's blocks the edit is a whole-file rewrite, and highlighting
    *  everything says nothing — so highlight nothing instead. */
@@ -74,6 +101,53 @@
 
   function nodesOf(list) {
     return list ? Array.prototype.slice.call(list) : [];
+  }
+
+  function isBrowserProcessedScript(script) {
+    var type = text(script.getAttribute('type')).toLowerCase().split(';')[0].trim();
+    return type === '' ||
+      type === 'module' ||
+      type === 'importmap' ||
+      type === 'speculationrules' ||
+      JAVASCRIPT_MIME_TYPES.has(type);
+  }
+
+  function hasAuthoredProcessedScript(root) {
+    return nodesOf(root.querySelectorAll('script')).some(function (script) {
+      return !script.hasAttribute(RUNTIME_ATTRIBUTE) &&
+        isBrowserProcessedScript(script);
+    });
+  }
+
+  function documentMetaValue(root, name) {
+    var metas = root.querySelectorAll(
+      'head meta[' + RUNTIME_ATTRIBUTE + '][name="' + name + '"]'
+    );
+    var meta = metas.length > 0 ? metas[metas.length - 1] : null;
+    return meta && meta.getAttribute('content');
+  }
+
+  function documentMetaHash(root, name) {
+    var value = documentMetaValue(root, name);
+    return isContentHash(value) ? value : null;
+  }
+
+  function documentMetaBoolean(root, name) {
+    var value = documentMetaValue(root, name);
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return null;
+  }
+
+  function requiresDocumentReload(incoming, loadedShellHash, loadedHasBodyScript) {
+    var incomingShellHash = documentMetaHash(incoming, SHELL_HASH_META_NAME);
+    var incomingHasBodyScript = documentMetaBoolean(incoming, BODY_SCRIPT_META_NAME);
+    return loadedHasBodyScript !== false ||
+      incomingHasBodyScript !== false ||
+      hasAuthoredProcessedScript(incoming.body || incoming) ||
+      !loadedShellHash ||
+      !incomingShellHash ||
+      loadedShellHash !== incomingShellHash;
   }
 
   function isEditableControl(control) {
@@ -216,9 +290,13 @@
     });
   }
 
+  function isContentHash(value) {
+    return /^[0-9a-f]{64}$/.test(value || '');
+  }
+
   function servedContentHash(response) {
     var contentHash = response.headers.get(CONTENT_HASH_HEADER);
-    if (!/^[0-9a-f]{64}$/.test(contentHash || '')) {
+    if (!isContentHash(contentHash)) {
       throw new Error('Canvas refetch returned no valid content hash');
     }
     return contentHash;
@@ -370,7 +448,38 @@
     return applyHighlight(selectTargets(records, root, previous), previous);
   }
 
+  function postMorphComplete(morph, contentHash) {
+    parent.postMessage({
+      action: 'morph-complete',
+      scopedKey: morph.scopedKey,
+      filename: morph.filename,
+      contentHash: contentHash
+    }, '*');
+  }
+
+  function loadedDocumentState() {
+    var contentHash = documentMetaHash(document, CONTENT_HASH_META_NAME);
+    var shellHash = documentMetaHash(document, SHELL_HASH_META_NAME);
+    var hasBodyScript = documentMetaBoolean(document, BODY_SCRIPT_META_NAME);
+    if (!contentHash || !shellHash || hasBodyScript == null) return null;
+
+    var lastSlash = location.pathname.lastIndexOf('/');
+    return {
+      scopedKey: decodeURIComponent(location.pathname.substring(1, lastSlash)),
+      filename: decodeURIComponent(location.pathname.substring(lastSlash + 1)),
+      contentHash: contentHash,
+      shellHash: shellHash,
+      hasBodyScript: hasBodyScript
+    };
+  }
+
   function install() {
+    var loadedDocument = loadedDocumentState();
+    var loadedContentHash = loadedDocument && loadedDocument.contentHash;
+    var loadedShellHash = loadedDocument && loadedDocument.shellHash;
+    var loadedHasBodyScript = loadedDocument && loadedDocument.hasBodyScript;
+    var loadedCompletionSent = false;
+    var reloading = false;
     var highlighted = [];
     // Signals overlap (a tab re-select racing a poll delta, or several queued behind one slow
     // morph) and two fetches have no completion order, so only the newest response may morph —
@@ -388,6 +497,15 @@
         filename: event.data.filename,
         contentHash: event.data.contentHash
       };
+      if (reloading) return;
+      if (loadedContentHash && morph.contentHash === loadedContentHash) {
+        generation++;
+        pendingMorph = null;
+        loadedCompletionSent = true;
+        postMorphComplete(morph, loadedContentHash);
+        return;
+      }
+
       var key = [morph.scopedKey, morph.filename, morph.contentHash].join('\u0000');
       if (pendingMorph && pendingMorph.key === key) return;
 
@@ -406,21 +524,40 @@
         .then(function (refetched) {
           if (mine !== generation) return;
           pendingMorph = null;
+          if (refetched.contentHash === loadedContentHash) {
+            loadedCompletionSent = true;
+            postMorphComplete(morph, refetched.contentHash);
+            return;
+          }
           var incoming = new DOMParser().parseFromString(refetched.html, 'text/html');
+          if (requiresDocumentReload(incoming, loadedShellHash, loadedHasBodyScript)) {
+            reloading = true;
+            location.reload();
+            return;
+          }
           highlighted = morphAndHighlight(document.body, incoming.body.innerHTML, highlighted);
+          loadedContentHash = refetched.contentHash;
+          loadedCompletionSent = true;
           window.dispatchEvent(new Event('canvas-morph-complete'));
-          parent.postMessage({
-            action: 'morph-complete',
-            scopedKey: morph.scopedKey,
-            filename: morph.filename,
-            contentHash: refetched.contentHash
-          }, '*');
+          postMorphComplete(morph, refetched.contentHash);
         })
         .catch(function (err) {
           if (mine === generation) pendingMorph = null;
           console.error('Morph failed:', err);
         });
     });
+
+    function completeLoadedDocument() {
+      if (!loadedDocument || !loadedContentHash || loadedCompletionSent) return;
+      loadedCompletionSent = true;
+      postMorphComplete(loadedDocument, loadedContentHash);
+    }
+
+    if (document.readyState === 'loading') {
+      window.addEventListener('DOMContentLoaded', completeLoadedDocument, { once: true });
+    } else {
+      completeLoadedDocument();
+    }
   }
 
   if (typeof window !== 'undefined' && typeof document !== 'undefined') {
@@ -433,7 +570,7 @@
   }
 
   // Outside a browser there is nothing to install, so hand the pure selection logic to the test
-  // runner instead. `export` is not an option: this file ships as a classic <script> injected into
+  // runner instead. `export` is not an option: this file ships as a classic script injected into
   // every agent doc, where an export statement is a syntax error.
   if (typeof document === 'undefined') {
     globalThis.canvasMorphInternals = {
@@ -452,7 +589,12 @@
       applyHighlight: applyHighlight,
       captureEditableState: captureEditableState,
       restoreEditableState: restoreEditableState,
-      servedContentHash: servedContentHash
+      servedContentHash: servedContentHash,
+      isBrowserProcessedScript: isBrowserProcessedScript,
+      hasAuthoredProcessedScript: hasAuthoredProcessedScript,
+      documentMetaHash: documentMetaHash,
+      documentMetaBoolean: documentMetaBoolean,
+      requiresDocumentReload: requiresDocumentReload
     };
   }
 })();

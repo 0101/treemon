@@ -21,6 +21,11 @@ const {
   captureEditableState,
   restoreEditableState,
   servedContentHash,
+  isBrowserProcessedScript,
+  hasAuthoredProcessedScript,
+  documentMetaHash,
+  documentMetaBoolean,
+  requiresDocumentReload,
 } = morph;
 
 /** Minimal node stand-ins — the selection logic only needs tree shape, tag names, and classes. */
@@ -119,6 +124,111 @@ function editableRoot(...controls) {
   root.querySelectorAll = (selector) => selector === "input, textarea" ? controls : [];
   return root;
 }
+
+function script(type = null, runtime = false) {
+  return {
+    getAttribute: (name) => name === "type" ? type : null,
+    hasAttribute: (name) => name === "data-treemon-runtime" && runtime,
+  };
+}
+
+const SHELL_HASH = "c".repeat(64);
+
+function meta(name, content) {
+  return {
+    getAttribute: (attribute) => {
+      if (attribute === "name") return name;
+      if (attribute === "content") return content;
+      return null;
+    },
+  };
+}
+
+function documentWithState(shellHash, hasBodyScript, scripts = [], authoredMetas = []) {
+  const queryScripts = (selector) => selector === "script" ? scripts : [];
+  const serverMetas = [
+    meta("treemon-canvas-shell-hash", shellHash),
+    meta("treemon-canvas-has-body-script", String(hasBodyScript)),
+  ];
+  return {
+    body: { querySelectorAll: queryScripts },
+    querySelectorAll: (selector) => {
+      if (selector === "script") return scripts;
+      const name = selector.match(/name="([^"]+)"/)?.[1];
+      return name
+        ? authoredMetas.concat(serverMetas).filter((candidate) =>
+            candidate.getAttribute("name") === name)
+        : [];
+    },
+  };
+}
+
+function scriptDocument(...scripts) {
+  return documentWithState(SHELL_HASH, false, scripts);
+}
+
+test("only authored browser-processed scripts require document reload", () => {
+  const classic = script();
+  const module = script("module");
+  const legacyMime = script(" TEXT/JAVASCRIPT ; charset=utf-8");
+  const importMap = script("importmap");
+  const speculationRules = script("speculationrules");
+  const json = script("application/json");
+  const template = script("text/plain");
+  const runtime = script(null, true);
+
+  assert.equal(isBrowserProcessedScript(classic), true);
+  assert.equal(isBrowserProcessedScript(module), true);
+  assert.equal(isBrowserProcessedScript(legacyMime), true);
+  assert.equal(isBrowserProcessedScript(importMap), true);
+  assert.equal(isBrowserProcessedScript(speculationRules), true);
+  assert.equal(isBrowserProcessedScript(json), false);
+  assert.equal(isBrowserProcessedScript(template), false);
+  assert.equal(hasAuthoredProcessedScript(scriptDocument(runtime, json)), false);
+  assert.equal(hasAuthoredProcessedScript(scriptDocument(runtime, classic)), true);
+});
+
+test("script removal and addition both select reload while static documents stay morphable", () => {
+  const staticDoc = scriptDocument(script("application/json"), script(null, true));
+  const scriptedDoc = scriptDocument(script());
+
+  assert.equal(requiresDocumentReload(staticDoc, SHELL_HASH, false), false);
+  assert.equal(requiresDocumentReload(scriptedDoc, SHELL_HASH, false), true);
+});
+
+test("server shell hashes control reload without reading live head mutations", () => {
+  const changedHash = "d".repeat(64);
+  const sameSource = documentWithState(SHELL_HASH, false);
+  const changedSource = documentWithState(changedHash, false);
+  const missingSourceHash = documentWithState(null, false);
+  const staleAuthoredMeta = meta("treemon-canvas-shell-hash", "a".repeat(64));
+  const authoritativeSource =
+    documentWithState(SHELL_HASH, false, [], [staleAuthoredMeta]);
+
+  assert.equal(documentMetaHash(sameSource, "treemon-canvas-shell-hash"), SHELL_HASH);
+  assert.equal(
+    documentMetaHash(authoritativeSource, "treemon-canvas-shell-hash"),
+    SHELL_HASH,
+    "the final server stamp must win over authored metadata"
+  );
+  assert.equal(
+    documentMetaBoolean(sameSource, "treemon-canvas-has-body-script"),
+    false
+  );
+  assert.equal(requiresDocumentReload(sameSource, SHELL_HASH, false), false);
+  assert.equal(requiresDocumentReload(changedSource, SHELL_HASH, false), true);
+  assert.equal(requiresDocumentReload(missingSourceHash, SHELL_HASH, false), true);
+  assert.equal(requiresDocumentReload(sameSource, null, false), true);
+});
+
+test("served source remembers a body script after it removes itself", () => {
+  const sourceWithoutScript = documentWithState(SHELL_HASH, false);
+
+  assert.equal(
+    requiresDocumentReload(sourceWithoutScript, SHELL_HASH, true),
+    true
+  );
+});
 
 test("a whitespace-only text change is not a change", () => {
   assert.equal(isWhitespaceOnlyChange("  hello  ", "hello"), true);
