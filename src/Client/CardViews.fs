@@ -172,11 +172,11 @@ let mainBehindIndicator (baseBranch: string) (count: int) =
             prop.text ($"{count} behind {baseBranch}")
         ]
 
-/// Post-fork setup is routine when it works, so a successful or still-running run is noise on the
-/// card — only its failures (including timeouts) are worth surfacing.
+/// Post-fork setup stays visible while it is running or failed, then disappears on success.
 let isVisibleCardEvent (evt: CardEvent) =
-    evt.Source <> EventSource.PostFork
-    || (match evt.Status with Some (StepStatus.Failed _) -> true | _ -> false)
+    match evt.Source, evt.Status with
+    | EventSource.PostFork, Some StepStatus.Succeeded -> false
+    | _ -> true
 
 let private providerDisplayName (provider: CodingToolProvider option) =
     match provider with
