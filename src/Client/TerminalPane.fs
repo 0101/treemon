@@ -12,7 +12,6 @@ open Navigation
 type TerminalStartState =
     | Starting
     | StartingAndFocus
-    | WaitingForFocus of EmbeddedTerminalId
     | Failed of error: string
 
 type TerminalPaneState =
@@ -25,7 +24,6 @@ type TerminalPaneState =
 type TerminalPaneCallbacks =
     { SelectTab: EmbeddedTerminalId -> unit
       CloseTab: EmbeddedTerminalId -> unit
-      FrameLoaded: WorktreePath -> EmbeddedTerminalId -> unit
       StartTerminal: WorktreePath -> unit }
 
 let private samePath left right =
@@ -117,7 +115,6 @@ let private startInFlight state =
     match state with
     | TerminalStartState.Starting
     | TerminalStartState.StartingAndFocus -> true
-    | TerminalStartState.WaitingForFocus _
     | TerminalStartState.Failed _ -> false
 
 let isStarting path states =
@@ -151,12 +148,40 @@ let safeEndpoint (endpoint: string) =
 let private terminalFrameId terminalId =
     $"terminal-iframe-{EmbeddedTerminalId.value terminalId}"
 
+let private withTerminalFrame terminalId action =
+    let rec tryResolve remainingAttempts =
+        Dom.window?requestAnimationFrame(fun (_: float) ->
+            match
+                Dom.document.getElementById(terminalFrameId terminalId)
+                |> Option.ofObj
+            with
+            | Some frame -> action frame
+            | None when remainingAttempts > 1 ->
+                tryResolve (remainingAttempts - 1)
+            | None -> ())
+        |> ignore
+
+    tryResolve 2
+
 let focusTerminal terminalId =
-    Dom.window?requestAnimationFrame(fun (_: float) ->
-        Dom.document.getElementById(terminalFrameId terminalId)
-        |> Option.ofObj
-        |> Option.iter (fun frame -> frame.focus ()))
-    |> ignore
+    withTerminalFrame terminalId _.focus()
+
+let focusTerminalWhenReady terminalId =
+    withTerminalFrame terminalId (fun frame ->
+        let focusOnLoad (_: Event) = frame.focus ()
+
+        frame?addEventListener(
+            "load",
+            focusOnLoad,
+            createObj [ "once" ==> true ])
+
+        Fable.Core.JS.setTimeout
+            (fun () ->
+                frame?removeEventListener("load", focusOnLoad))
+            10_000
+        |> ignore
+
+        frame.focus ())
 
 let private lifecyclePresentation lifecycle =
     match lifecycle with
@@ -422,8 +447,6 @@ let private runningIframes state callbacks =
                     prop.custom ("sandbox", "allow-scripts allow-same-origin")
                     prop.custom ("referrerpolicy", "no-referrer")
                     prop.custom ("scrolling", "no")
-                    prop.onLoad (fun _ ->
-                        callbacks.FrameLoaded tab.Worktree terminalId)
                 ])
         | EmbeddedTerminalLifecycle.Interrupted _ ->
             None)

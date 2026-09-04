@@ -234,6 +234,10 @@ let private saveTerminalPaneOpenCmd isOpen =
 let private focusEmbeddedTerminalCmd terminalId =
     Cmd.ofEffect (fun _ -> TerminalPane.focusTerminal terminalId)
 
+let private focusEmbeddedTerminalWhenReadyCmd terminalId =
+    Cmd.ofEffect (fun _ ->
+        TerminalPane.focusTerminalWhenReady terminalId)
+
 let private launchEmbeddedTerminalCmd path start =
     Cmd.batch [
         Cmd.OfAsync.either
@@ -458,7 +462,6 @@ let update msg model =
                 |> TerminalPane.setStartState
                     path
                     TerminalPane.TerminalStartState.Starting
-            | Some (TerminalPane.TerminalStartState.WaitingForFocus _)
             | Some (TerminalPane.TerminalStartState.Failed _) ->
                 model.EmbeddedTerminalStarts
                 |> TerminalPane.clearStartState path
@@ -513,21 +516,14 @@ let update msg model =
                     model.EmbeddedTerminals
                     snapshot
 
-            let startStates =
+            let shouldFocus =
                 match
                     TerminalPane.tryStartState
                         path
                         model.EmbeddedTerminalStarts
                 with
-                | Some TerminalPane.TerminalStartState.StartingAndFocus ->
-                    model.EmbeddedTerminalStarts
-                    |> TerminalPane.setStartState
-                        path
-                        (TerminalPane.TerminalStartState.WaitingForFocus
-                            started.TerminalId)
-                | _ ->
-                    model.EmbeddedTerminalStarts
-                    |> TerminalPane.clearStartState path
+                | Some TerminalPane.TerminalStartState.StartingAndFocus -> true
+                | _ -> false
 
             let updated =
                 { model with
@@ -537,9 +533,15 @@ let update msg model =
                         |> TerminalPane.selectTerminal
                             started.TerminalId
                             snapshot
-                    EmbeddedTerminalStarts = startStates }
+                    EmbeddedTerminalStarts =
+                        model.EmbeddedTerminalStarts
+                        |> TerminalPane.clearStartState path }
 
-            updated, Cmd.none
+            updated,
+            if shouldFocus then
+                focusEmbeddedTerminalWhenReadyCmd started.TerminalId
+            else
+                Cmd.none
         | Error error ->
             { model with
                 EmbeddedTerminalStarts =
@@ -548,39 +550,6 @@ let update msg model =
                         path
                         (TerminalPane.TerminalStartState.Failed error) },
             Cmd.none
-    | EmbeddedTerminalFrameLoaded(path, terminalId) ->
-        match
-            TerminalPane.tryStartState
-                path
-                model.EmbeddedTerminalStarts
-        with
-        | Some (TerminalPane.TerminalStartState.WaitingForFocus expected)
-            when expected = terminalId ->
-            let updated =
-                { model with
-                    EmbeddedTerminalStarts =
-                        model.EmbeddedTerminalStarts
-                        |> TerminalPane.clearStartState path }
-            let selectedWorktree =
-                TerminalPane.selectedWorktree
-                    updated.TerminalPaneTarget
-                    updated.FocusedElement
-            let activeTerminal =
-                TerminalPane.activeTerminalId
-                    selectedWorktree
-                    updated.ActiveEmbeddedTerminals
-                    updated.EmbeddedTerminals
-            let focusCmd =
-                if updated.TerminalPaneOpen
-                   && selectedWorktree = Some path
-                   && activeTerminal = Some terminalId then
-                    focusEmbeddedTerminalCmd terminalId
-                else
-                    Cmd.none
-
-            updated, focusCmd
-        | _ ->
-            model, Cmd.none
     | EmbeddedTerminalRequestFailed (path, error) ->
         { model with
             EmbeddedTerminalStarts =
@@ -1419,8 +1388,6 @@ let view model dispatch =
         let callbacks: TerminalPane.TerminalPaneCallbacks =
             { SelectTab = SelectEmbeddedTerminal >> dispatch
               CloseTab = CloseEmbeddedTerminal >> dispatch
-              FrameLoaded = fun path terminalId ->
-                  dispatch (EmbeddedTerminalFrameLoaded(path, terminalId))
               StartTerminal = StartEmbeddedTerminal >> dispatch }
 
         TerminalPane.view state callbacks

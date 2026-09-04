@@ -81,7 +81,6 @@ type Msg =
     | EmbeddedTerminalStarted of
         WorktreePath *
         Result<EmbeddedTerminalStartResult, string>
-    | EmbeddedTerminalFrameLoaded of WorktreePath * EmbeddedTerminalId
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | SelectEmbeddedTerminal of EmbeddedTerminalId
     | CloseEmbeddedTerminal of EmbeddedTerminalId

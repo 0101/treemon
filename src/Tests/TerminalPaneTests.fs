@@ -397,7 +397,7 @@ type TerminalFocusTests() =
             Assert.That(List.length cmd, Is.EqualTo(2)))
 
     [<Test>]
-    member _.``Focused start waits for its exact iframe before moving browser focus``() =
+    member _.``Polled terminal before start response still schedules exact focus``() =
         let exact = terminalId "focused-start"
         let snapshot =
             { Tabs =
@@ -411,7 +411,45 @@ type TerminalFocusTests() =
                         third, TerminalStartState.StartingAndFocus
                     ] }
 
+        let polled, pollCmd =
+            App.update
+                (EmbeddedTerminalSnapshotChanged snapshot)
+                starting
+
         let started, startCmd =
+            App.update
+                (EmbeddedTerminalStarted(
+                    third,
+                    Ok
+                        { Snapshot = snapshot
+                          TerminalId = exact }
+                ))
+                polled
+
+        Assert.Multiple(fun () ->
+            Assert.That(pollCmd, Is.Empty)
+            Assert.That(
+                tryStartState third started.EmbeddedTerminalStarts,
+                Is.EqualTo(None)
+            )
+            Assert.That(List.length startCmd, Is.EqualTo(1)))
+
+    [<Test>]
+    member _.``Terminal disappearance after focused start leaves no pending state``() =
+        let exact = terminalId "disappearing-start"
+        let snapshot =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                @ [ running exact third 61241 ] }
+        let starting =
+            { focusModel with
+                TerminalPaneTarget = Some third
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        third, TerminalStartState.StartingAndFocus
+                    ] }
+
+        let started, _ =
             App.update
                 (EmbeddedTerminalStarted(
                     third,
@@ -421,22 +459,24 @@ type TerminalFocusTests() =
                 ))
                 starting
 
-        let loaded, loadCmd =
+        let removed, cmd =
             App.update
-                (EmbeddedTerminalFrameLoaded(third, exact))
+                (EmbeddedTerminalSnapshotChanged focusModel.EmbeddedTerminals)
                 started
 
         Assert.Multiple(fun () ->
-            Assert.That(startCmd, Is.Empty)
             Assert.That(
-                tryStartState third started.EmbeddedTerminalStarts,
-                Is.EqualTo(Some(TerminalStartState.WaitingForFocus exact))
-            )
-            Assert.That(
-                tryStartState third loaded.EmbeddedTerminalStarts,
+                tryStartState third removed.EmbeddedTerminalStarts,
                 Is.EqualTo(None)
             )
-            Assert.That(List.length loadCmd, Is.EqualTo(1)))
+            Assert.That(
+                activeTerminalId
+                    (Some third)
+                    removed.ActiveEmbeddedTerminals
+                    removed.EmbeddedTerminals,
+                Is.EqualTo(None)
+            )
+            Assert.That(cmd, Is.Empty))
 
     [<Test>]
     member _.``Repeated Resume keeps one in-flight launch without an action cooldown``() =

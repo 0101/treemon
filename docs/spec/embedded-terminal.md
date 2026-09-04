@@ -29,7 +29,7 @@
 
 ### Terminal lifetime and attachments
 
-Opening a terminal always starts a new terminal for the canonical worktree path. A terminal remains
+Starting a terminal creates a new terminal for the canonical worktree path. A terminal remains
 available until its shell exits or it is explicitly closed. The
 `TerminalHost` runs independently from the Treemon server, so a compatible server restart or deploy
 rediscovers the same host, ttyd processes, and terminal tabs instead of replacing them. Server
