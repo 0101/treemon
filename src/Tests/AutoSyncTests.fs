@@ -1478,7 +1478,23 @@ type AutoSyncDeliveryTests() =
                     (now.AddMinutes(-10.0))
 
             use store = new SessionActivityStore(Path.Combine(root, "session-activity.db"))
-            store.UpsertStatus newerClosed
+            let identity =
+                ProcessIdentity.create 1001 2001L
+                |> Result.defaultWith invalidOp
+
+            store.UpsertInstance
+                { ProcessIdentity = identity
+                  SessionId = newerClosed.SessionId
+                  TerminalSessionId = newerClosed.TerminalSessionId
+                  WorktreePath = newerClosed.WorktreePath
+                  Provider = newerClosed.Provider
+                  Status = newerClosed.Status
+                  UpdatedAt = newerClosed.UpdatedAt
+                  LifecycleAt = Some newerClosed.UpdatedAt
+                  LastSeen = newerClosed.LastSeen
+                  ContextUsageAt = newerClosed.ContextUsageAt
+                  ClosedAt = Some now }
+            |> ignore
 
             let ownership = readOwnership (Some store) [ openIdle ] path
 

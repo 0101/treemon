@@ -240,8 +240,15 @@ VALUES
     command.Parameters.AddWithValue("$eventId", eventId) |> ignore
     command.ExecuteNonQuery() |> ignore
 
+let private currentWriterIdentity =
+    ProcessIdentity.create 7300 8300L
+    |> Result.defaultWith invalidOp
+
 let private currentWriterStatus updatedAt =
-    { SessionId = SessionId "legacy-session"
+    let updated = ts updatedAt
+
+    { ProcessIdentity = currentWriterIdentity
+      SessionId = SessionId "legacy-session"
       TerminalSessionId = None
       WorktreePath = WorktreePath "C:/wt/legacy"
       Provider = CopilotCli
@@ -249,9 +256,11 @@ let private currentWriterStatus updatedAt =
         { emptyStatus with
             Status = SessionLevelStatus.Idle
             Title = Some(msg "Updated legacy title" updatedAt) }
-      UpdatedAt = ts updatedAt
-      LastSeen = ts updatedAt
-      ContextUsageAt = None }
+      UpdatedAt = updated
+      LifecycleAt = Some updated
+      LastSeen = updated
+      ContextUsageAt = None
+      ClosedAt = None }
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -322,6 +331,76 @@ type ProcessIdentitySchemaTests() =
                 )
                 Assert.That(scalarInt path "SELECT count(*) FROM activity_events;", Is.EqualTo 2)))
 
+    [<Test>]
+    member _.``Intermediate sentinel event lane is retired while exact rows survive``() =
+        withDbPath (fun path ->
+            SqliteTestDatabase.execute
+                path
+                """
+CREATE TABLE activity_events (
+    process_id          INTEGER NOT NULL DEFAULT 0,
+    process_start_ticks INTEGER NOT NULL DEFAULT 0,
+    event_id            TEXT NOT NULL,
+    session_id          TEXT NOT NULL,
+    worktree_path       TEXT NOT NULL,
+    provider            TEXT NOT NULL,
+    kind                TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    skill               TEXT,
+    ts                  TEXT NOT NULL,
+    PRIMARY KEY (process_id, process_start_ticks, event_id),
+    CHECK (
+        (process_id = 0 AND process_start_ticks = 0)
+        OR (process_id > 0 AND process_start_ticks > 0)
+    )
+);
+
+INSERT INTO activity_events
+    (process_id, process_start_ticks, event_id, session_id, worktree_path,
+     provider, kind, status, skill, ts)
+VALUES
+    (0, 0, 'legacy-event', 'legacy-session', 'C:/wt/legacy',
+     'copilot_cli', 'turn_started', 'working', NULL,
+     '2026-09-04T09:00:00.0000000+00:00'),
+    (7400, 8400, 'exact-event', 'exact-session', 'C:/wt/exact',
+     'copilot_cli', 'turn_started', 'working', NULL,
+     '2026-09-04T10:00:00.0000000+00:00');
+"""
+
+            use _store = new SessionActivityStore(path)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    scalarInt
+                        path
+                        "SELECT count(*) FROM activity_events
+                         WHERE process_id = 7400 AND process_start_ticks = 8400;",
+                    Is.EqualTo 1
+                )
+                Assert.That(
+                    scalarInt
+                        path
+                        "SELECT count(*) FROM activity_events
+                         WHERE process_id <= 0 OR process_start_ticks <= 0;",
+                    Is.Zero
+                ))
+
+            Assert.Throws<SqliteException>(
+                TestDelegate(fun () ->
+                    SqliteTestDatabase.execute
+                        path
+                        """
+INSERT INTO activity_events
+    (process_id, process_start_ticks, event_id, session_id, worktree_path,
+     provider, kind, status, skill, ts)
+VALUES
+    (0, 0, 'invalid', 'invalid', 'C:/wt/invalid',
+     'copilot_cli', 'turn_started', 'working', NULL,
+     '2026-09-04T10:00:00.0000000+00:00');
+""")
+            )
+            |> ignore)
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -369,14 +448,21 @@ type SessionHistoryMigrationTests() =
                 Assert.That(Set.contains "terminal_session_id" columns, Is.False)
                 Assert.That(Set.contains "closed_at" columns, Is.False)
                 Assert.That(scalarInt path "SELECT count(*) FROM activity_events;", Is.EqualTo 0)
-                Assert.That(scalarInt path "SELECT count(*) FROM session_status;", Is.EqualTo 1)
+                Assert.That(
+                    scalarInt
+                        path
+                        "SELECT count(*) FROM sqlite_master
+                         WHERE type = 'table' AND name = 'session_status';",
+                    Is.Zero
+                )
                 Assert.That(
                     primaryKeyColumns path "activity_events",
                     Is.EqualTo([ "process_id"; "process_start_ticks"; "event_id" ])
                 ))
 
             let eventRow =
-                { EventId = EventId "current-writer-event"
+                { ProcessIdentity = currentWriterIdentity
+                  EventId = EventId "current-writer-event"
                   SessionId = SessionId "legacy-session"
                   WorktreePath = WorktreePath "C:/wt/legacy"
                   Provider = CopilotCli
@@ -392,17 +478,18 @@ type SessionHistoryMigrationTests() =
                 scalarInt
                     path
                     "SELECT count(*) FROM activity_events
-                     WHERE process_id = 0 AND process_start_ticks = 0;",
+                     WHERE process_id = 7300 AND process_start_ticks = 8300;",
                 Is.EqualTo 1
             ))
 
     [<Test>]
-    member _.``Retained copy refreshes idempotently and excludes exact-only sessions``() =
+    member _.``Retained copy remains migration-only and excludes exact sessions``() =
         withDbPath (fun path ->
             createLegacyDatabase path
 
             (use store = new SessionActivityStore(path)
-             store.UpsertStatus(currentWriterStatus "2026-09-04T10:00:00Z"))
+             store.UpsertInstance(currentWriterStatus "2026-09-04T10:00:00Z")
+             |> ignore)
 
             insertExactInstance path 7100 8100L "exact-only-session"
 
@@ -410,10 +497,10 @@ type SessionHistoryMigrationTests() =
              let retained = retainedSnapshot path "legacy-session"
 
              Assert.Multiple(fun () ->
-                 Assert.That(retained.Title, Is.EqualTo(Some "Updated legacy title"))
+                 Assert.That(retained.Title, Is.EqualTo(Some "Review storage"))
                  Assert.That(
                      retained.UpdatedAt,
-                     Is.EqualTo "2026-09-04T10:00:00.0000000+00:00"
+                     Is.EqualTo "2026-09-01T10:04:00.0000000+00:00"
                  )
                  Assert.That(scalarInt path "SELECT count(*) FROM retained_sessions;", Is.EqualTo 1)
                  Assert.That(
@@ -432,8 +519,6 @@ type SessionHistoryMigrationTests() =
             (use _store = new SessionActivityStore(path)
              ())
 
-            SqliteTestDatabase.execute path "DELETE FROM session_status;"
-
             use reopened = new SessionActivityStore(path)
             Assert.That(scalarInt path "SELECT count(*) FROM retained_sessions;", Is.EqualTo 1)
 
@@ -443,37 +528,12 @@ type SessionHistoryMigrationTests() =
     [<Test>]
     member _.``Partially migrated schema resumes and removes stale rebuild state``() =
         withDbPath (fun path ->
-            (use _store = new SessionActivityStore(path)
-             ())
+            createLegacyDatabase path
 
             use connection = SqliteTestDatabase.openConnection path
             use command = connection.CreateCommand()
             command.CommandText <-
                 """
-INSERT INTO session_status
-    (session_id, worktree_path, provider, status, updated_at, last_seen)
-VALUES
-    ('partial-session', 'C:/wt/partial', 'copilot_cli', 'idle',
-     '2026-09-04T10:00:00.0000000+00:00',
-     '2026-09-04T10:00:00.0000000+00:00');
-
-DROP TABLE activity_events;
-CREATE TABLE activity_events (
-    event_id      TEXT PRIMARY KEY,
-    session_id    TEXT NOT NULL,
-    worktree_path TEXT NOT NULL,
-    provider      TEXT NOT NULL,
-    kind          TEXT NOT NULL,
-    status        TEXT NOT NULL,
-    skill         TEXT,
-    ts            TEXT NOT NULL
-);
-INSERT INTO activity_events
-    (event_id, session_id, worktree_path, provider, kind, status, skill, ts)
-VALUES
-    ('partial-event', 'partial-session', 'C:/wt/partial', 'copilot_cli',
-     'turn_ended', 'idle', NULL, '2026-09-04T10:00:00.0000000+00:00');
-
 CREATE TABLE activity_events_migration (stale TEXT);
 """
             command.ExecuteNonQuery() |> ignore

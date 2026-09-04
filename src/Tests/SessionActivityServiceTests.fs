@@ -6,6 +6,8 @@ open NUnit.Framework
 open Shared
 open Server
 open Server.SessionActivity
+open Server.SessionActivityIngestion
+open Server.SessionActivityProtocol
 open Server.SessionActivityStore
 open Server.SessionActivityService
 open Server.TerminalSessionActivity
@@ -28,7 +30,8 @@ let private noMsg: MessageDto = Unchecked.defaultof<MessageDto>
 let private msgDto text at : MessageDto = { text = text; at = at }
 
 let private baseReq kind : SessionActivityRequest =
-    { sessionId = "s1"
+    { parentProcessId = 10_001
+      sessionId = "s1"
       terminalSessionId = null
       worktreePath = "C:/wt/a"
       provider = "copilot_cli"
@@ -74,9 +77,9 @@ let private queryOwnedOk
 let private queryActivityOk
     (service: SessionActivityService)
     terminalSessionIds
-    : int64 * StoredStatus list =
+    : int64 * StoredInstance list =
     match service.QueryTerminalActivity terminalSessionIds with
-    | Ok snapshot -> snapshot
+    | Ok(epoch, instances, _) -> epoch, instances
     | Error error ->
         Assert.Fail $"expected terminal activity snapshot, got Error: {error}"
         failwith "unreachable"
@@ -120,8 +123,28 @@ let private requireReplacementReady =
 
 // --- Service / store fixture -------------------------------------------------------------------
 
+let private processIdForSession sessionId =
+    sessionId
+    |> Seq.fold (fun value character ->
+        (value * 31 + int character) % 1_000_000) 10_000
+
+let private identityForProcessId processId =
+    ProcessIdentity.create processId (int64 processId * 1_000L + 1L)
+    |> Result.defaultWith invalidOp
+
+let private identityForSession sessionId =
+    sessionId |> processIdForSession |> identityForProcessId
+
+let private processIdentityResolver =
+    ProcessIdentityResolver.create (fun processId ->
+        processId
+        |> identityForProcessId
+        |> Some
+        |> Ok)
+
 let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
-    { SessionId = SessionId sid
+    { ParentProcessId = processIdForSession sid
+      SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath(PathUtils.normalizePath wt)
       Provider = CopilotCli
@@ -129,15 +152,61 @@ let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
       OccurredAt = ts t
       Event = ev }
 
+let private present
+    (service: SessionActivityService)
+    sid
+    worktree
+    (receivedAt: DateTimeOffset)
+    =
+    let report =
+        mkReport
+            sid
+            worktree
+            $"presence-{receivedAt.UtcTicks}"
+            (receivedAt.ToString("O"))
+            SessionPresent
+
+    match service.Present(report, receivedAt) with
+    | PresenceAcknowledge.Recorded identity -> identity
+    | PresenceAcknowledge.NotRecorded(_, reason) ->
+        Assert.Fail $"expected acknowledged presence, got: {reason}"
+        failwith "unreachable"
+
 let private storedWithUsage sid worktree status updatedAt usage usageAt =
-    { SessionId = SessionId sid
+    let sessionId = SessionId sid
+
+    { ProcessIdentity = identityForSession sid
+      SessionId = sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
       Provider = CopilotCli
       Status = { status with ContextUsage = Some usage }
       UpdatedAt = updatedAt
+      LifecycleAt = Some updatedAt
       LastSeen = usageAt
-      ContextUsageAt = Some usageAt }
+      ContextUsageAt = Some usageAt
+      ClosedAt = None }
+
+type SessionActivityStore with
+    member store.LoadLiveStatuses(now: DateTimeOffset) =
+        store.LoadRecentInstances now
+        |> ExactInstanceProjection.bySession now
+        |> Map.values
+        |> List.ofSeq
+
+    member store.StatusBySession(sessionId: SessionId) =
+        match store.InstancesBySession sessionId with
+        | head :: _ -> Some(StoredInstance.toStoredStatus head)
+        | [] ->
+            store.RetainedByWorktree()
+            |> Map.values
+            |> Seq.tryFind (fun status -> status.SessionId = sessionId)
+
+    member store.UpsertStatus(stored: StoredInstance) =
+        store.UpsertInstance stored |> ignore
+
+    member store.UpsertContextUsage(stored: StoredInstance) =
+        store.UpsertInstance stored
 
 /// A service over a throwaway temp .db, with `knownWorktree` registered as a monitored path on a
 /// fresh scheduler agent. `seed` runs against the store before the service is constructed (used by
@@ -168,7 +237,12 @@ let private withServiceSeededAndPath
 
     agent.Post(SchedulerState.UpdateWorktreeList(RepoId "svc-test-repo", [ info ]))
 
-    let svc = new SessionActivityService(store, agent)
+    let svc =
+        new SessionActivityService(
+            store,
+            agent,
+            processIdentityResolver
+        )
 
     try
         action (svc, agent, store, dbPath)
@@ -759,16 +833,12 @@ type IngestTests() =
                                 FinishedAt = None } ]))
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
-                Assert.That(persisted.Status.BackgroundAgentClocks, Is.Empty)
-                Assert.That(
-                    persisted,
-                    Is.EqualTo(
-                        { live with
-                            Status.BackgroundAgentClocks = Map.empty }
-                    )
-                )
+                Assert.That(persisted, Is.EqualTo live)
                 Assert.That(latestSessionId, Is.EqualTo(Some "s1"))
-                Assert.That(retained, Is.EqualTo persisted)
+                Assert.That(retained.SessionId, Is.EqualTo persisted.SessionId)
+                Assert.That(retained.UpdatedAt, Is.EqualTo persisted.UpdatedAt)
+                Assert.That(retained.LastSeen, Is.EqualTo DateTimeOffset.MinValue)
+                Assert.That(retained.Status.BackgroundAgentClocks, Is.Empty)
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
 
     [<Test>]
@@ -802,13 +872,7 @@ type IngestTests() =
                           FinishedAt = Some(ts "2026-03-01T10:00:05Z") }))
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"))
-                Assert.That(
-                    persisted,
-                    Is.EqualTo(
-                        { live with
-                            Status.BackgroundAgentClocks = Map.empty }
-                    )
-                )
+                Assert.That(persisted, Is.EqualTo live)
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))
                 Assert.That(events |> List.map _.Status, Is.EqualTo([ "working"; "idle" ]))))
 
@@ -894,7 +958,10 @@ type IngestTests() =
                           FinishedAt = Some(ts "2026-03-01T10:00:05Z") }))
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:06Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z"))
-                Assert.That(persisted.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(
+                    persisted.Status.BackgroundAgentClocks,
+                    Is.EqualTo live.Status.BackgroundAgentClocks
+                )
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))
                 Assert.That(events |> List.map _.Status, Is.EqualTo([ "idle"; "working" ]))))
 
@@ -908,6 +975,13 @@ type IngestTests() =
                     "bg-start"
                     "2026-03-01T10:55:00Z"
                     (BackgroundAgentStarted("tool-1", ts "2026-03-01T10:55:00Z")))
+            svc.Submit(
+                mkReport
+                    "s1"
+                    "C:/wt/a"
+                    "heartbeat"
+                    "2026-03-01T10:59:00Z"
+                    Heartbeat)
             svc.Submit(mkReport "s1" "C:/wt/a" "root-start" "2026-03-01T11:00:00Z" TurnStarted)
             svc.Submit(mkReport "s1" "C:/wt/a" "root-skill" "2026-03-01T11:00:01Z" (SkillInvoked "review"))
             svc.Submit(
@@ -935,14 +1009,8 @@ type IngestTests() =
                         { StartedAt = Some(ts "2026-03-01T10:55:00Z")
                           FinishedAt = Some(ts "2026-03-01T10:56:00Z") }))
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T11:00:01Z"))
-                Assert.That(
-                    persisted,
-                    Is.EqualTo(
-                        { live with
-                            Status.BackgroundAgentClocks = Map.empty }
-                    )
-                )
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:59:00Z"))
+                Assert.That(persisted, Is.EqualTo live)
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
 
     [<Test>]
@@ -1006,6 +1074,7 @@ type IngestTests() =
                     (oldStart.ToString("O"))
                     (BackgroundAgentStarted("crashed-tool", oldStart)))
             svc.LiveSnapshot() |> ignore
+            present svc "s1" worktree now |> ignore
             svc.Submit(mkReport "s1" worktree "resume" (now.ToString("O")) (resumePathEvent resumePath now))
             let resumed = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             let durableAfterResume = store.StatusBySession(SessionId "s1") |> Option.get
@@ -1017,7 +1086,10 @@ type IngestTests() =
                     Is.False,
                     "the live fold drops the crashed agent"
                 )
-                Assert.That(durableAfterResume.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(
+                    durableAfterResume.Status.BackgroundAgentClocks,
+                    Is.EqualTo resumed.Status.BackgroundAgentClocks
+                )
                 Assert.That(resumed.LastSeen, Is.EqualTo now, "the resume report refreshes liveness only after cleanup")
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some resumed)))
 
@@ -1065,7 +1137,10 @@ type IngestTests() =
                               { StartedAt = Some startedAt
                                 FinishedAt = None } ])
                 )
-                Assert.That(durable.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(
+                    durable.Status.BackgroundAgentClocks,
+                    Is.EqualTo live.Status.BackgroundAgentClocks
+                )
                 Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)))
 
     [<Test>]
@@ -1114,12 +1189,16 @@ type IngestTests() =
             Assert.Multiple(fun () ->
                 Assert.That(effectiveStatus settled.Status, Is.EqualTo SessionLevelStatus.Idle)
                 Assert.That(effectiveStatus durable.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(durable.Status.BackgroundAgentClocks, Is.Empty)))
+                Assert.That(
+                    durable.Status.BackgroundAgentClocks,
+                    Is.EqualTo settled.Status.BackgroundAgentClocks
+                )))
 
     [<Test>]
     member _.``background lifecycle preserves parent activity and footer fields``() =
         let parent =
-            { SessionId = SessionId "s1"
+            { ProcessIdentity = identityForSession "s1"
+              SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
               Provider = CopilotCli
@@ -1135,8 +1214,10 @@ type IngestTests() =
                   UserInputCompletedAt = None
                   BackgroundAgentClocks = Map.empty }
               UpdatedAt = ts "2026-03-01T09:59:00Z"
+              LifecycleAt = Some(ts "2026-03-01T09:59:00Z")
               LastSeen = ts "2026-03-01T09:59:00Z"
-              ContextUsageAt = Some(ts "2026-03-01T09:58:30Z") }
+              ContextUsageAt = Some(ts "2026-03-01T09:58:30Z")
+              ClosedAt = None }
 
         withServiceSeeded
             "C:/wt/a"
@@ -1163,14 +1244,8 @@ type IngestTests() =
                     Assert.That(live.ContextUsageAt, Is.EqualTo parent.ContextUsageAt)
                     Assert.That(effectiveStatus live.Status, Is.EqualTo SessionLevelStatus.Working)
                     Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
-                    Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
-                    Assert.That(
-                        persisted,
-                        Is.EqualTo(
-                            { live with
-                                Status.BackgroundAgentClocks = Map.empty }
-                        )
-                    )
+                    Assert.That(live.LastSeen, Is.EqualTo parent.LastSeen)
+                    Assert.That(persisted, Is.EqualTo live)
                     Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some live))))
 
     [<Test>]
@@ -1249,7 +1324,7 @@ type IngestTests() =
             Assert.That(hydrated.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "a bootstrap-only session is retained durably")
             Assert.That(eventCount dbPath, Is.Zero, "bootstrap is not an activity event")
             let durable = store.LoadLiveStatuses(ts "2026-03-01T09:00:00Z") |> List.find (fun s -> s.SessionId = SessionId "s1")
-            Assert.That(durable.Status.Title, Is.EqualTo(Some title), "bootstrap title is persisted in session_status")
+            Assert.That(durable.Status.Title, Is.EqualTo(Some title), "bootstrap title is persisted on the exact instance")
 
             // A replayed lifecycle event has an older SDK timestamp but must still apply after the
             // newer join-time hydration report.
@@ -1264,7 +1339,8 @@ type IngestTests() =
     [<Test>]
     member _.``title bootstrap revives a retained durable session without losing footer state``() =
         let retained =
-            { SessionId = SessionId "s1"
+            { ProcessIdentity = identityForSession "s1"
+              SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
               Provider = CopilotCli
@@ -1280,14 +1356,22 @@ type IngestTests() =
                   UserInputCompletedAt = None
                   BackgroundAgentClocks = Map.empty }
               UpdatedAt = ts "2026-03-01T08:00:00Z"
+              LifecycleAt = Some(ts "2026-03-01T08:00:00Z")
               LastSeen = ts "2026-03-01T08:00:00Z"
-              ContextUsageAt = None }
+              ContextUsageAt = None
+              ClosedAt = None }
 
         withServiceSeededAndPath
             "C:/wt/a"
             (fun store -> store.UpsertStatus retained)
             (fun (svc, _, store, dbPath) ->
                 let title = msg "Current metadata title" "2026-03-01T10:30:00Z"
+                present
+                    svc
+                    "s1"
+                    "C:/wt/a"
+                    (ts "2026-03-01T10:30:00Z")
+                |> ignore
                 svc.Submit(mkReport "s1" "C:/wt/a" "tb1" "2026-03-01T10:30:00Z" (TitleBootstrap title))
 
                 let hydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
@@ -1320,7 +1404,7 @@ type IngestTests() =
 
             let s = svc.LiveSnapshot() |> Map.find (SessionId "s1")
             Assert.That(s.Status.Title, Is.EqualTo(Some liveTitle))
-            Assert.That(s.UpdatedAt, Is.EqualTo DateTimeOffset.MinValue, "title reports do not advance the lifecycle clock")
+            Assert.That(s.UpdatedAt, Is.EqualTo liveTitle.At, "title activity advances only the activity clock")
             Assert.That(eventCount dbPath, Is.EqualTo 1))
 
     [<Test>]
@@ -1334,7 +1418,7 @@ type IngestTests() =
             Assert.Multiple(fun () ->
                 Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
                 Assert.That(live.Status.Intent, Is.EqualTo(Some intent))
-                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "intent must not advance the lifecycle clock")
+                Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:06Z"), "intent advances activity without blocking the older lifecycle event")
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z"), "the newer report still advances openness"))
             Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some live))
             Assert.That(eventCount dbPath, Is.EqualTo 2))
@@ -1353,7 +1437,7 @@ type IngestTests() =
                 Assert.That(live.Status.Status, Is.EqualTo SessionLevelStatus.Working)
                 Assert.That(live.Status.Title, Is.EqualTo(Some newTitle))
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:06Z"), "title must preserve the lifecycle clock")
-                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:06Z")))
+                Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:04Z"), "activity and lifecycle reports do not refresh presence"))
             Assert.That(store.StatusBySession(SessionId "s1"), Is.EqualTo(Some live))
             Assert.That(eventCount dbPath, Is.EqualTo 3))
 
@@ -1429,7 +1513,8 @@ type IngestTests() =
     [<Test>]
     member _.``a heartbeat rehydrates a retained durable session after restart``() =
         let retained =
-            { SessionId = SessionId "s1"
+            { ProcessIdentity = identityForSession "s1"
+              SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
               Provider = CopilotCli
@@ -1438,8 +1523,10 @@ type IngestTests() =
                     Status = SessionLevelStatus.WaitingForUser
                     LastAssistantMessage = Some(msg "Which option?" "2026-03-01T08:00:00Z") }
               UpdatedAt = ts "2026-03-01T08:00:00Z"
+              LifecycleAt = Some(ts "2026-03-01T08:00:00Z")
               LastSeen = ts "2026-03-01T08:00:00Z"
-              ContextUsageAt = None }
+              ContextUsageAt = None
+              ClosedAt = None }
 
         withServiceSeeded
             "C:/wt/a"
@@ -1517,7 +1604,7 @@ type IngestTests() =
             Assert.That(s.Status.ContextUsage, Is.EqualTo(Some { CurrentTokens = 120000; TokenLimit = 200000 }), "the gauge is recorded")
             Assert.That(s.Status.Status, Is.EqualTo SessionLevelStatus.Working, "a gauge never changes status")
             Assert.That(s.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"), "a gauge must not move the status last-write-wins clock")
-            Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:05Z"), "the gauge bumps openness")
+            Assert.That(s.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"), "usage never establishes or refreshes presence")
             Assert.That(eventCount dbPath, Is.EqualTo 1, "a usage_info must not append to activity_events")
             // The card path (scheduler) sees the gauge.
             match schedulerStatus agent "s1" with
@@ -1527,7 +1614,8 @@ type IngestTests() =
     [<Test>]
     member _.``usage rehydrates a retained durable session after restart``() =
         let retained =
-            { SessionId = SessionId "s1"
+            { ProcessIdentity = identityForSession "s1"
+              SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
               Provider = CopilotCli
@@ -1536,8 +1624,10 @@ type IngestTests() =
                     Status = SessionLevelStatus.WaitingForUser
                     LastAssistantMessage = Some(msg "Which option?" "2026-03-01T08:00:00Z") }
               UpdatedAt = ts "2026-03-01T08:00:00Z"
+              LifecycleAt = Some(ts "2026-03-01T08:00:00Z")
               LastSeen = ts "2026-03-01T08:00:00Z"
-              ContextUsageAt = None }
+              ContextUsageAt = None
+              ClosedAt = None }
         let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
 
         withServiceSeeded
@@ -1551,6 +1641,12 @@ type IngestTests() =
                     "the restart rebuild excludes retained sessions outside the idle window"
                 )
 
+                present
+                    svc
+                    "s1"
+                    "C:/wt/a"
+                    (ts "2026-03-01T10:30:00Z")
+                |> ignore
                 svc.Submit(mkReport "s1" "C:/wt/a" "u1" "2026-03-01T10:30:00Z" (UsageInfo(usage.CurrentTokens, usage.TokenLimit)))
                 let rehydrated = svc.LiveSnapshot() |> Map.find (SessionId "s1")
 
@@ -1616,7 +1712,8 @@ type IngestTests() =
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-pruned-context-worktree")
         let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
         let report eventId occurredAt event =
-            { SessionId = SessionId "s1"
+            { ParentProcessId = processIdForSession "s1"
+              SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = normalizedWorktree
               Provider = CopilotCli
@@ -1673,7 +1770,7 @@ type RestartRebuildTests() =
             | None -> Assert.Fail "restart rebuild did not feed the scheduler")
 
     [<Test>]
-    member _.``Start forgets background lifecycle and publishes the persisted base status``() =
+    member _.``Start restores exact background lifecycle with the persisted base status``() =
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-restart-background-worktree")
         let status =
@@ -1683,14 +1780,17 @@ type RestartRebuildTests() =
 
         let seed (store: SessionActivityStore) =
             store.UpsertStatus
-                { SessionId = SessionId "s1"
+                { ProcessIdentity = identityForSession "s1"
+                  SessionId = SessionId "s1"
                   TerminalSessionId = None
                   WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
                   Provider = CopilotCli
                   Status = status
                   UpdatedAt = now.AddMinutes(-1.0)
+                  LifecycleAt = Some(now.AddMinutes(-1.0))
                   LastSeen = now.AddSeconds(-30.0)
-                  ContextUsageAt = None }
+                  ContextUsageAt = None
+                  ClosedAt = None }
 
         withServiceSeeded worktree seed (fun (svc, agent, _) ->
             svc.Start()
@@ -1698,8 +1798,11 @@ type RestartRebuildTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(effectiveStatus restored.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(restored.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(effectiveStatus restored.Status, Is.EqualTo SessionLevelStatus.Working)
+                Assert.That(
+                    restored.Status.BackgroundAgentClocks,
+                    Is.EqualTo status.BackgroundAgentClocks
+                )
                 Assert.That(schedulerStatus agent "s1", Is.EqualTo(Some restored))))
 
     [<Test>]
@@ -1718,7 +1821,8 @@ type RestartRebuildTests() =
         withServiceSeeded worktree seed (fun (svc, _, _) ->
             svc.Start()
             svc.Submit
-                { SessionId = SessionId "s1"
+                { ParentProcessId = processIdForSession "s1"
+                  SessionId = SessionId "s1"
                   TerminalSessionId = None
                   WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
                   Provider = CopilotCli
@@ -1759,7 +1863,8 @@ type RestartRebuildTests() =
             Assert.That((svc.LiveSnapshot()).ContainsKey(SessionId "s1"), Is.False)
 
             svc.Submit
-                { SessionId = SessionId "s1"
+                { ParentProcessId = processIdForSession "s1"
+                  SessionId = SessionId "s1"
                   TerminalSessionId = None
                   WorktreePath = normalizedWorktree
                   Provider = CopilotCli
@@ -1784,14 +1889,18 @@ type RestartRebuildTests() =
 
         let seed (store: SessionActivityStore) =
             store.UpsertStatus
-                { SessionId = SessionId "stale"
+                { ProcessIdentity = identityForSession "stale"
+                  SessionId = SessionId "stale"
                   TerminalSessionId = None
                   WorktreePath = WorktreePath "C:/wt/a"
                   Provider = CopilotCli
                   Status = { emptyStatus with Status = SessionLevelStatus.Working }
                   UpdatedAt = now - idleWindow - TimeSpan.FromMinutes 5.0
+                  LifecycleAt =
+                    Some(now - idleWindow - TimeSpan.FromMinutes 5.0)
                   LastSeen = now - idleWindow - TimeSpan.FromMinutes 5.0
-                  ContextUsageAt = None }
+                  ContextUsageAt = None
+                  ClosedAt = None }
 
         withServiceSeeded "C:/wt/a" seed (fun (svc, _, _) ->
             svc.Start()
@@ -1805,14 +1914,17 @@ type RestartRebuildTests() =
 type TerminalOwnershipQueryTests() =
 
     let ownedStored terminalSessionId sessionId lastSeen =
-        { SessionId = SessionId sessionId
+        { ProcessIdentity = identityForSession sessionId
+          SessionId = SessionId sessionId
           TerminalSessionId = Some terminalSessionId
           WorktreePath = WorktreePath "C:/wt/a"
           Provider = CopilotCli
           Status = { emptyStatus with Status = SessionLevelStatus.Idle }
           UpdatedAt = lastSeen
+          LifecycleAt = Some lastSeen
           LastSeen = lastSeen
-          ContextUsageAt = None }
+          ContextUsageAt = None
+          ClosedAt = None }
 
     [<Test>]
     member _.``terminal activity projection materializes only requested origins from a large live map``() =
@@ -1828,11 +1940,17 @@ type TerminalOwnershipQueryTests() =
             [ 1..5000 ]
             |> List.map (fun index ->
                 let sessionId = $"unrelated-{index}"
-                SessionId sessionId, ownedStored unrelated sessionId at)
+                let instance = ownedStored unrelated sessionId at
+                instance.ProcessIdentity, instance)
             |> Map.ofList
-            |> Map.add
-                (SessionId "requested")
-                (ownedStored requested "requested" at)
+            |> fun instances ->
+                let requestedInstance =
+                    ownedStored requested "requested" at
+
+                instances
+                |> Map.add
+                    requestedInstance.ProcessIdentity
+                    requestedInstance
 
         let projected =
             statusesForTerminalOrigins
@@ -1866,6 +1984,7 @@ type TerminalOwnershipQueryTests() =
                         Intent = intent
                         Title = title }
                 UpdatedAt = updatedAt }
+            |> StoredInstance.toStoredStatus
 
         let snapshot =
             { Tabs =
@@ -2070,9 +2189,12 @@ type TerminalOwnershipQueryTests() =
         let snapshot: OwnedSessionSnapshot =
             { ActivityEpoch = 17L
               OpenSessions =
-                [ { TerminalSessionId = ownedTerminal
+                [ { ProcessIdentity =
+                        identityForSession "provider-owned-session"
+                    TerminalSessionId = ownedTerminal
                     CopilotSessionId = SessionId "provider-owned-session"
                     Status = SessionLevelStatus.Idle } ]
+              PendingReconciliation = Set.empty
               ReplacementSessionIds =
                 Map.ofList
                     [ ownedTerminal,
@@ -2126,7 +2248,7 @@ type TerminalOwnershipQueryTests() =
             queryReplacementPlan
                 replacementReadyAt
                 (fun _ -> Some CopilotCli)
-                (fun _ -> Ok(7L, []))
+                (fun _ -> Ok(7L, [], Set.empty))
                 replacementReadyAt
                 [ terminal ]
 
@@ -2176,7 +2298,7 @@ type TerminalOwnershipQueryTests() =
             ownedSessionSnapshot
                 now
                 (Set.singleton terminalSessionId)
-                (31L, sessions)
+                (31L, sessions, Set.empty)
 
         let waitingSnapshot = snapshot [ waiting; newerIdle ]
 
@@ -2255,7 +2377,8 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(
                     working.OpenSessions,
                     Is.EqualTo(
-                        [ { TerminalSessionId = terminalA
+                        [ { ProcessIdentity = identityForSession "owned"
+                            TerminalSessionId = terminalA
                             CopilotSessionId = SessionId "owned"
                             Status = SessionLevelStatus.Working } ]
                     )
@@ -2341,7 +2464,8 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(
                     retained.OpenSessions,
                     Is.EqualTo(
-                        [ { TerminalSessionId = terminalA
+                        [ { ProcessIdentity = identityForSession "owned"
+                            TerminalSessionId = terminalA
                             CopilotSessionId = SessionId "owned"
                             Status = SessionLevelStatus.Idle } ]
                     ),
@@ -2369,14 +2493,17 @@ type TerminalOwnershipQueryTests() =
         let replacementReadyAt = now + openWindow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-owned-resume-worktree")
         let retained updatedAt lastSeen sessionId =
-            { SessionId = SessionId sessionId
+            { ProcessIdentity = identityForSession sessionId
+              SessionId = SessionId sessionId
               TerminalSessionId = Some terminalSessionId
               WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
               Provider = CopilotCli
               Status = { emptyStatus with Status = SessionLevelStatus.Idle }
               UpdatedAt = updatedAt
+              LifecycleAt = Some updatedAt
               LastSeen = lastSeen
-              ContextUsageAt = None }
+              ContextUsageAt = None
+              ClosedAt = None }
 
         let seed (store: SessionActivityStore) =
             store.UpsertStatus(
@@ -2436,7 +2563,9 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(
                     snapshot.OpenSessions,
                     Is.EqualTo(
-                        [ { TerminalSessionId = terminalSessionId
+                        [ { ProcessIdentity =
+                                identityForSession "surviving"
+                            TerminalSessionId = terminalSessionId
                             CopilotSessionId = SessionId "surviving"
                             Status = SessionLevelStatus.Idle } ]
                     )

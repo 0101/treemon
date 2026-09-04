@@ -5,8 +5,9 @@ open Shared
 
 // The push-model status domain. The server owns this domain; the Copilot CLI extension is a thin
 // forwarder that maps SDK events onto the wire contract, and the handler maps that onto SessionEvent.
-// Everything here is pure — no IO, no mutation — so it can be unit-tested in isolation and folded
-// incrementally (a later batch onto an earlier result == the whole stream at once).
+// The domain transformations and fold here are pure — the resolver is only an injected contract,
+// while its operating-system implementation lives separately. The fold can therefore be unit-tested
+// in isolation and applied incrementally (a later batch onto an earlier result == the whole stream).
 //
 // This is the SAME state machine as the old CopilotDetector.foldForwardEvent, MINUS transport
 // classification. The extension drops sub-agent and <skill-context> events, while the server
@@ -43,6 +44,28 @@ module ProcessIdentity =
     let sortKey identity =
         processId identity, processStartTimeUtcTicks identity
 
+/// One injectable operating-system identity boundary. Resolving a PID returns the exact currently
+/// running process identity, or None when that PID is not running. Exact liveness checks deliberately
+/// reuse this same resolver so ingestion, shutdown waiting, and survivor verification cannot disagree
+/// about PID reuse.
+type ProcessIdentityResolver =
+    { Resolve: int -> Result<ProcessIdentity option, string> }
+
+module ProcessIdentityResolver =
+    let create resolve = { Resolve = resolve }
+
+    let resolve processId resolver =
+        if processId <= 0 then
+            Error "processId must be positive"
+        else
+            resolver.Resolve processId
+
+    let isAlive resolver identity =
+        identity
+        |> ProcessIdentity.processId
+        |> fun processId -> resolve processId resolver
+        |> Result.map (Option.contains identity)
+
 /// Exact identity of one TerminalHost-owned terminal. This is deliberately distinct from the
 /// Copilot SessionId because both identifiers are carried through the same ownership queries.
 type TerminalSessionId = TerminalSessionId of string
@@ -64,6 +87,12 @@ type Message = { Text: string; At: DateTimeOffset }
 /// else the extension never sends, so the server has no "irrelevant event" branch to carry. These
 /// map 1:1 onto the wire `kind` values (see the handler).
 type SessionEvent =
+    /// Acknowledged bootstrap proving that this exact process instance exists. Presence owns
+    /// receipt-time liveness and is persisted before its caller receives success.
+    | SessionPresent
+    /// Monotonic closure of this exact process instance. It does not erase durable conversation
+    /// content and cannot be reversed by a later report from the same process.
+    | SessionClosed
     | TurnStarted
     /// A genuine user prompt after transport-level synthetic messages are filtered.
     | UserPrompt of Message
@@ -87,7 +116,7 @@ type SessionEvent =
     | TurnEnded
     | WentIdle
     /// A liveness-only heartbeat: re-asserts the CLI is still open WITHOUT bearing on status. Handled
-    /// specially by the ingestion service — it only bumps the session's `last_seen` (openness), never
+    /// specially by the ingestion service — it only bumps the exact instance's `last_seen` (openness), never
     /// folds into status and never appends to the event history. Timer-generated (no SDK event source).
     | Heartbeat
     /// A context-window usage snapshot (currentTokens, tokenLimit) from the SDK `session.usage_info`
@@ -96,7 +125,8 @@ type SessionEvent =
 
 /// One pushed report: a single event for one session in one worktree.
 type SessionActivityReport =
-    { SessionId: SessionId
+    { ParentProcessId: int
+      SessionId: SessionId
       TerminalSessionId: TerminalSessionId option
       WorktreePath: WorktreePath
       Provider: CodingToolProvider
@@ -275,6 +305,8 @@ let private updateBackgroundAgent toolCallId update status =
 /// stream, which is what the durable-mirror + live-Map ingestion relies on.
 let fold (s: SessionStatus) (e: SessionEvent) : SessionStatus =
     match e with
+    | SessionPresent
+    | SessionClosed -> s
     | TurnStarted -> { s with Status = SessionLevelStatus.Working }
     | AssistantMessage m ->
         { s with

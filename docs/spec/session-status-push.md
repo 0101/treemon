@@ -141,8 +141,9 @@ shared state; no session-log parsing remains.
   registry, or `openWindow` expires. Pending reconciliation gates automatic replacement without
   introducing another lifecycle status. Retained conversations outside the live window remain
   available for footer and explicit Resume selection, and a closed identity cannot reopen.
-- Background-agent clocks are intentionally process-local. Restart restores the durable parent/base
-  state but not unfinished background work; a new lifecycle report establishes new in-memory state.
+- Background-agent clocks are process-instance-local and durable within retention. Restart restores
+  unfinished background work for each exact identity, so an Idle parent remains effectively Working
+  until its matching terminal event or stale-gap cleanup.
 
 ## Technical Approach
 
@@ -168,7 +169,8 @@ does not enter a retry storm. Reports from pre-deploy extensions that omit the p
 rejected and do not gate replacement. The server acknowledges `session_present` only after its
 mailbox has persisted the exact instance; ordinary event delivery remains idempotent and
 best-effort after that bootstrap. The live `session.shutdown` event stops heartbeat emission before
-reporting exact instance closure. Historical shutdown events are not replayed as current closure.
+reporting `session_closed` for the exact instance. Historical shutdown events are not replayed as
+current closure.
 
 After subscriptions and replay are active, the extension reads
 `session.rpc.metadata.snapshot().summary` in a non-blocking background task and emits
@@ -269,13 +271,12 @@ rejected rather than folded under a synthetic identity.
 - Background-agent start/finish clocks are stored on the process instance so server restart cannot
   misclassify an Idle parent with active delegated work.
 
-Store construction first adds `session_instances` and `retained_sessions` without changing the
-current runtime writer, then copies one-row-per-session history idempotently so the intermediate
-branch remains buildable. Exact ingestion switches the writer and retires the obsolete
-`session_status` path in the next dependent task. The bounded structural migration transactionally
-rebuilds `activity_events` with a process-instance key; legacy event rows are discarded because
-their exact producer identity cannot be recovered and their folded state is already preserved in
-`retained_sessions`. Dependent indexes are created last. The terminal-origin index follows
+Store construction creates `session_instances`, copies legacy one-row-per-session history
+idempotently into `retained_sessions`, transactionally rebuilds `activity_events` with a
+process-instance key, and then drops the obsolete `session_status` table. Legacy event rows are
+discarded because their exact producer identity cannot be recovered and their folded state is
+already preserved in `retained_sessions`. Runtime writes target only exact instances; dependent
+indexes are created last. The terminal-origin index follows
 `(terminal_session_id, updated_at DESC, session_id DESC)`; its leading origin key supports
 retained-origin scans used when pruning process-local activity epochs.
 
@@ -323,7 +324,7 @@ into lifecycle status.
 | Multiple instances | Preserve concurrent CLI processes for one durable session as separate full fold rows; never let one event or heartbeat replace another instance's status, origin, or closure. |
 | Ownership boundary | Session activity owns reporting, exact-instance state, liveness, and monotonic closure; embedded-terminal orchestration owns shutdown policy, authoritative teardown, rollback, and survivor cleanup. |
 | Startup reconciliation | Keep each recently open terminal-owned instance pending until that exact identity re-presents, dies, loses its terminal origin, or reaches `openWindow`; never use one global startup delay. |
-| Background agents | Keep per-tool start/finish clocks in memory; WaitingForUser outranks background Working; restart clears the clocks. |
+| Background agents | Persist per-tool start/finish clocks on each exact instance; WaitingForUser outranks background Working; stale-gap cleanup bounds abandoned clocks. |
 | Footer | Decouple from the status dot and merge a retained durable representative. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |
 | Context usage | Persist the last-known gauge and ordering timestamp; do not append it to activity events. |
@@ -341,12 +342,16 @@ into lifecycle status.
 |---|---|
 | `src/Extension/reporting/extension.mjs` | SDK filtering, wire mapping, terminal-origin reporting, replay, metadata bootstrap, usage, and heartbeat. |
 | `src/Extension/reporting/reporting-core.mjs` | Pure message, usage, and background-lifecycle wire mapping. |
-| `src/Server/SessionActivity.fs` | Event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
-| `src/Server/SessionActivityService.fs` | Request validation, synthetic filtering, independent ordering paths, bounded mailbox ingestion, and raw exact-origin queries. |
+| `src/Server/SessionActivity.fs` | Exact identity contract, event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
+| `src/Server/ProcessIdentityResolver.fs` | Default operating-system PID/start-time resolver shared by activity and exact process lifecycle checks. |
+| `src/Server/SessionActivityProtocol.fs` | Bounded activity wire DTO parsing and exact-instance event mapping. |
+| `src/Server/SessionActivityIngestion.fs` | Exact-instance fold application, independent ordering paths, temporary session projection, and startup reconciliation. |
+| `src/Server/SessionActivityService.fs` | Known-worktree filtering, acknowledged presence, mailbox lifecycle, retention, and raw exact-origin queries. |
 | `src/Server/TerminalSessionActivity.fs` | Exact owned-session and startup-reconciliation projection for embedded-terminal tab activity and TerminalHost replacement policy. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
-| `src/Server/SessionActivityStore.fs` | Exact process-instance persistence, retained-history migration, instance-scoped event-key rebuild, representative queries, and retention. |
+| `src/Server/SessionActivityStoreSchema.fs` | Transactional exact-instance schema creation, retained-history migration, legacy retirement, and event-key rebuild. |
+| `src/Server/SessionActivityStore.fs` | Exact process-instance persistence, temporary representative reads, and retention. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
 | `src/Server/SchedulerState.fs` | Live session state and `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |

@@ -43,13 +43,9 @@ type DashboardState =
       /// Overview capture uses this to distinguish "no live sessions" from "startup has not loaded
       /// session state yet".
       SessionStatusesHydrated: bool
-      // Push-model live session status, keyed by SessionId. Fed by the SessionActivity mailbox
-      // (single writer) via UpdateSessionStatus and rebuilt from SQLite on restart. Kept bounded by
-      // evicting entries older than the idle window (relative to the newest LastSeen) on each update
-      // (evictStaleStatuses), so it mirrors the store's live cache (LoadLiveStatuses) rather than
-      // growing append-only. This is the substrate the worktree card's coding-tool fields collapse
-      // over (pickActive) — see the push-only repoint task; today it is populated but not yet read by
-      // WorktreeApi.
+      // Temporary read-only exact-to-session projection keyed by durable SessionId. The activity
+      // mailbox owns exact instances and publishes this singular adapter for application consumers
+      // that have not yet migrated. It stays bounded by the idle window.
       SessionStatuses: Map<SessionActivity.SessionId, SessionActivityStore.StoredStatus>
       // Per-worktree "entered Idle" timestamp for the time-since-idle chip (WorktreeStatus.CodingToolSince).
       // Keyed by the (normalised) worktree path. Stamped ONCE when a worktree's collapsed coding-tool
@@ -98,14 +94,13 @@ type StateMsg =
     | ExpediteRefresh of RepoId
     | ClearExpedite of RepoId
     | ReportClientActivity of ActivityLevel * DateTimeOffset
-    /// Push-model live status for one session, produced by the SessionActivity single-writer
-    /// mailbox after folding an ingested event. Stored keyed by SessionId so a worktree's live
-    /// sessions can later be collapsed (pickActive) into the card's coding-tool fields.
+    /// One value from the temporary exact-to-session projection.
     | UpdateSessionStatus of SessionActivityStore.StoredStatus
-    /// Restart rebuild: seed the whole live-status map in one shot (rows arrive oldest-first from
-    /// LoadLiveStatuses) and stamp each worktree's time-since-idle from its NEWEST session — never the
-    /// oldest-replayed row, which the per-row UpdateSessionStatus path would freeze in, overstating the
-    /// chip for the whole post-restart idle span (F11/C-14).
+    /// The temporary exact-to-session projection no longer has an open physical instance for this
+    /// durable SessionId (for example after monotonic exact closure).
+    | RemoveSessionStatus of SessionActivity.SessionId * observedAt: DateTimeOffset
+    /// Restart rebuild: seed the complete temporary projection in one shot and stamp each worktree's
+    /// time-since-idle from its newest projected session.
     | SeedSessionStatuses of SessionActivityStore.StoredStatus list
     /// The per-worktree operation guard `AutoSync.trigger` holds for a whole sync attempt.
     | TryBeginAutoSyncOperation of path: string * AsyncReplyChannel<bool>
@@ -141,9 +136,8 @@ let private removeWorktreeData (path: string) (repo: PerRepoState) =
         PlanningData = repo.PlanningData |> Map.remove path
         CanvasData = repo.CanvasData |> Map.remove path }
 
-/// Evict live session-status entries older than the idle window. `SessionStatuses` is otherwise
-/// append-only, so without this it grows unboundedly and drifts from the store's live cache
-/// (`LoadLiveStatuses`, same `idleWindow` cutoff) — long-dead sessions would linger in memory forever.
+/// Evict projected session entries older than the exact activity cache's idle window.
+/// `SessionStatuses` is otherwise append-only, so long-dead projections would linger indefinitely.
 /// The window is measured against the NEWEST `LastSeen` in the map (the freshest heartbeat observed)
 /// rather than wall-clock, so it stays deterministic and replay-safe (events can carry historical
 /// timestamps) and never drops the entry that was just added. Applied on every `UpdateSessionStatus`.
@@ -323,9 +317,7 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
         { state with ClientActivity = activity; ClientActivityAt = timestamp }
 
     | UpdateSessionStatus stored ->
-        // Add the fresh report, then evict entries past the idle window (measured against the newest
-        // LastSeen) so the map stays bounded and mirrors the store's live cache instead of growing
-        // append-only.
+        // Add the fresh projection, then evict entries past the exact cache's idle window.
         let newStatuses =
             state.SessionStatuses
             |> Map.add stored.SessionId stored
@@ -349,15 +341,39 @@ let private processMessage (state: DashboardState) (msg: StateMsg) =
             CodingToolSinceByWorktree =
                 stampIdleSince stored.LastSeen worktreePath collapsed.Status state.CodingToolSinceByWorktree }
 
+    | RemoveSessionStatus(sessionId, observedAt) ->
+        match state.SessionStatuses |> Map.tryFind sessionId with
+        | None -> state
+        | Some removed ->
+            let newStatuses = state.SessionStatuses |> Map.remove sessionId
+            let worktreePath = WorktreePath.value removed.WorktreePath
+
+            let remaining =
+                newStatuses
+                |> Map.values
+                |> Seq.filter (fun status ->
+                    status.WorktreePath = removed.WorktreePath)
+                |> List.ofSeq
+
+            let status =
+                match remaining with
+                | [] -> NoSession
+                | sessions ->
+                    CodingToolStatus.fromPushSessions observedAt sessions
+                    |> _.Status
+
+            { state with
+                SessionStatuses = newStatuses
+                CodingToolSinceByWorktree =
+                    stampIdleSince
+                        observedAt
+                        worktreePath
+                        status
+                        state.CodingToolSinceByWorktree }
+
     | SeedSessionStatuses stored ->
-        // Restart rebuild. LoadLiveStatuses replays rows OLDEST-first; feeding them one-by-one through
-        // UpdateSessionStatus lets the oldest idle row stamp+FREEZE the chip, so a long-stale idle
-        // session's timestamp gets locked in instead of the current open session's — the chip then
-        // OVERSTATES time-since-idle for the whole post-restart idle span (F11/C-14). Instead seed the
-        // map in one shot (same final set as replaying each row: evict measures against the global
-        // newest), then stamp each worktree's chip from its NEWEST session's last_seen, collapsed at
-        // that time. That yields the accepted "chip resets on restart" behaviour (Decision #8) rather
-        // than an overstated old stamp — WITHOUT reversing the seed order to DESC.
+        // Seed the complete projection before deriving per-worktree idle stamps, so list order cannot
+        // freeze an older session's timestamp for the whole worktree.
         let seeded =
             (state.SessionStatuses, stored)
             ||> List.fold (fun m s -> Map.add s.SessionId s m)

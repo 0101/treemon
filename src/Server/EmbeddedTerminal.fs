@@ -370,10 +370,21 @@ let internal createWithConfig config =
 
     Manager(config, agent)
 
-let create serverOrigin configuredOrigins =
+let createWithProcessIdentityResolver
+    processIdentityResolver
+    serverOrigin
+    configuredOrigins
+    =
     originsFor serverOrigin configuredOrigins
-    |> TerminalHostClient.defaultConfig
+    |> TerminalHostClient.defaultConfigWithProcessIdentityResolver
+        processIdentityResolver
     |> createWithConfig
+
+let create serverOrigin configuredOrigins =
+    createWithProcessIdentityResolver
+        ProcessIdentityResolverRuntime.defaultResolver
+        serverOrigin
+        configuredOrigins
 
 let private tryReplaceHostIgnoring
     ignoredStagedVersion

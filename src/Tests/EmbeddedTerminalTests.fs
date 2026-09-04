@@ -464,6 +464,13 @@ type private FakeControlHost
     member this.ExactProcessIsLive(pid: int, startTicks: int64) =
         Ok(this.IsCurrentProcessLive(pid, startTicks))
 
+    member this.ResolveProcessIdentity(pid: int) =
+        if this.IsCurrentProcessLive(pid, currentStartTicks) then
+            ProcessIdentity.create pid currentStartTicks
+            |> Result.map Some
+        else
+            Ok None
+
     member this.ResolveExactProcessExecutable(pid: int, startTicks: int64) =
         if this.IsCurrentProcessLive(pid, startTicks) then
             Ok(lock gate (fun () -> currentExecutable))
@@ -535,8 +542,8 @@ let private managerConfig
       ControlRequestTimeout = TimeSpan.FromMilliseconds 500.0
       ProbeInterval = TimeSpan.FromMilliseconds 20.0
       LaunchHost = launchHost
-      ProcessIdentityMatches =
-        TerminalHostProcess.processIdentityMatchesDefault
+      ProcessIdentityResolver =
+        ProcessIdentityResolverRuntime.defaultResolver
       ResolveProcessExecutable =
         fun pid startTicks ->
             match
@@ -559,9 +566,9 @@ let private replacementManagerConfig
     =
     { managerConfig host launchHost with
         StartupTimeout = TimeSpan.FromSeconds 1.0
-        ProcessIdentityMatches =
-            fun pid startTicks ->
-                host.ExactProcessIsLive(pid, startTicks)
+        ProcessIdentityResolver =
+            ProcessIdentityResolver.create
+                host.ResolveProcessIdentity
         ResolveProcessExecutable =
             fun pid startTicks ->
                 host.ResolveExactProcessExecutable(pid, startTicks)
@@ -2246,7 +2253,27 @@ type EmbeddedTerminalReplacementTests() =
                             )
                         )
 
-                        Ok(1L, [ waitingSession ]))
+                        let identity =
+                            ProcessIdentity.create 42 42L
+                            |> Result.defaultWith invalidOp
+
+                        let exactWaitingSession: StoredInstance =
+                            { ProcessIdentity = identity
+                              SessionId = waitingSession.SessionId
+                              TerminalSessionId =
+                                waitingSession.TerminalSessionId
+                              WorktreePath = waitingSession.WorktreePath
+                              Provider = waitingSession.Provider
+                              Status = waitingSession.Status
+                              UpdatedAt = waitingSession.UpdatedAt
+                              LifecycleAt =
+                                Some waitingSession.UpdatedAt
+                              LastSeen = waitingSession.LastSeen
+                              ContextUsageAt =
+                                waitingSession.ContextUsageAt
+                              ClosedAt = None }
+
+                        Ok(1L, [ exactWaitingSession ], Set.empty))
                     now
                     terminals
 

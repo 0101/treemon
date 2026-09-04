@@ -699,9 +699,10 @@ isolated server and fails on incomplete exact process cleanup.
 | `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, command-capable start, authoritative snapshot reconciliation, and public start/get/close surface |
 | `src/Server/SessionActivity.fs` | Per-process instance lifecycle fold, exact process identity, liveness, and closure |
-| `src/Server/SessionActivityService.fs` | Acknowledged presence, instance-scoped activity ingestion, bounded live state, and mailbox-serialized terminal ownership queries |
+| `src/Server/ProcessIdentityResolver.fs` | Shared default PID/start-time resolution used by activity ingress and exact process liveness checks |
+| `src/Server/SessionActivityProtocol.fs`, `SessionActivityIngestion.fs`, and `SessionActivityService.fs` | Exact activity wire parsing, fold application, acknowledged presence, bounded live state, startup reconciliation, and mailbox-serialized terminal ownership queries |
 | `src/Server/TerminalSessionActivity.fs` | Exact process-instance and startup-reconciliation projection for tab activity, all-target non-idle gating, graceful shutdown targets, and one-per-terminal resume policy |
-| `src/Server/SessionActivityStore.fs` | Durable process-instance state, bounded retained-history migration, event idempotency, and retention |
+| `src/Server/SessionActivityStoreSchema.fs` and `SessionActivityStore.fs` | Durable process-instance schema/migration, retained history, event idempotency, and retention |
 | `src/Extension/reporting/extension.mjs` | Acknowledged process presence, passive activity, heartbeat, background lifecycle, and shutdown reports |
 | `src/Extension/extension.mjs` and `src/Server/SessionBridge.fs` | Shared generic registration plus exact-session graceful shutdown capability and bounded typed server control client |
 | `src/Server/CodingToolCli.fs` | Provider-specific exact-session resume command construction |

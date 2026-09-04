@@ -71,7 +71,9 @@ let private createApi agent roots =
                 fun _ ->
                     Error
                         "This path-resolution test did not expect to launch TerminalHost"
-              ProcessIdentityMatches = fun _ _ -> Ok false
+              ProcessIdentityResolver =
+                SessionActivity.ProcessIdentityResolver.create
+                    (fun _ -> Ok None)
               ResolveProcessExecutable =
                 fun _ _ ->
                     Error

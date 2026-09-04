@@ -6,16 +6,23 @@ open Server.SessionActivity
 open Server.SessionActivityStore
 
 type internal OwnedSessionState =
-    { TerminalSessionId: TerminalSessionId
+    { ProcessIdentity: ProcessIdentity
+      TerminalSessionId: TerminalSessionId
       CopilotSessionId: SessionId
       Status: SessionLevelStatus }
 
 type internal OwnedSessionSnapshot =
     { ActivityEpoch: int64
       OpenSessions: OwnedSessionState list
+      PendingReconciliation: Set<ProcessIdentity>
       ReplacementSessionIds: Map<TerminalSessionId, SessionId> }
 
-type internal ActivityQuery = Set<TerminalSessionId> -> Result<int64 * StoredStatus list, string>
+type internal ActivityQuery =
+    Set<TerminalSessionId>
+        -> Result<
+            int64 * StoredInstance list * Set<ProcessIdentity>,
+            string
+         >
 
 let internal joinOwnedSessions
     (terminalSessionIds: Set<TerminalSessionId>)
@@ -28,41 +35,62 @@ let internal joinOwnedSessions
         |> Option.map (fun terminalId -> terminalId, session))
     |> Seq.toList
 
+let internal joinOwnedInstances
+    (terminalSessionIds: Set<TerminalSessionId>)
+    (instances: StoredInstance seq)
+    : (TerminalSessionId * StoredInstance) list =
+    instances
+    |> Seq.choose (fun instance ->
+        instance.TerminalSessionId
+        |> Option.filter terminalSessionIds.Contains
+        |> Option.map (fun terminalId -> terminalId, instance))
+    |> Seq.toList
+
 let internal ownedSessionSnapshot
     (now: DateTimeOffset)
     (terminalSessionIds: Set<TerminalSessionId>)
-    (activityEpoch: int64, sessions: StoredStatus list)
+    (
+        activityEpoch: int64,
+        instances: StoredInstance list,
+        pendingReconciliation: Set<ProcessIdentity>
+    )
     : OwnedSessionSnapshot =
-    let liveOwnedSessions =
-        sessions
-        |> joinOwnedSessions terminalSessionIds
-        |> List.filter (fun (_, session) ->
-            now - session.LastSeen < openWindow)
+    let liveOwnedInstances =
+        instances
+        |> joinOwnedInstances terminalSessionIds
+        |> List.filter (fun (_, instance) ->
+            instance.ClosedAt.IsNone
+            && now - instance.LastSeen < openWindow)
 
     let openSessions =
-        liveOwnedSessions
-        |> List.map (fun (terminalId, session) ->
-            { TerminalSessionId = terminalId
-              CopilotSessionId = session.SessionId
+        liveOwnedInstances
+        |> List.map (fun (terminalId, instance) ->
+            { ProcessIdentity = instance.ProcessIdentity
+              TerminalSessionId = terminalId
+              CopilotSessionId = instance.SessionId
               Status =
-                session.Status
-                |> freshnessAdjusted now session.LastSeen
+                instance.Status
+                |> freshnessAdjusted now instance.LastSeen
                 |> effectiveStatus })
         |> List.sortBy (fun session ->
-            TerminalSessionId.value session.TerminalSessionId, SessionId.value session.CopilotSessionId)
+            TerminalSessionId.value session.TerminalSessionId,
+            SessionId.value session.CopilotSessionId,
+            ProcessIdentity.sortKey session.ProcessIdentity)
 
     let replacementSessionIds =
-        liveOwnedSessions
+        liveOwnedInstances
         |> List.groupBy fst
-        |> List.choose (fun (terminalId, terminalSessions) ->
-            terminalSessions
+        |> List.choose (fun (terminalId, terminalInstances) ->
+            terminalInstances
             |> List.map snd
-            |> StoredStatus.tryMostRecentActivity
+            |> List.sortByDescending StoredInstance.activityOrderKey
+            |> List.tryHead
             |> Option.map (fun latest -> terminalId, latest.SessionId))
         |> Map.ofList
 
     { ActivityEpoch = activityEpoch
       OpenSessions = openSessions
+      PendingReconciliation = pendingReconciliation
       ReplacementSessionIds = replacementSessionIds }
 
 let internal queryOwnedSessions
@@ -136,7 +164,12 @@ let internal replacementSessionPlan
     (terminals: TerminalHostReplacement.ReplacementTerminal list)
     (snapshot: OwnedSessionSnapshot)
     =
-    if snapshot.OpenSessions |> List.exists (fun session -> session.Status <> SessionLevelStatus.Idle) then
+    if
+        not (Set.isEmpty snapshot.PendingReconciliation)
+        || snapshot.OpenSessions
+           |> List.exists (fun session ->
+               session.Status <> SessionLevelStatus.Idle)
+    then
         TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
     else
         let resumeCommands =

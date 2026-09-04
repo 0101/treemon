@@ -194,7 +194,13 @@ let internal readManifest config =
         Error $"Could not read the TerminalHost discovery manifest: {error.Message}"
 
 let internal processIdentityMatches config (manifest: DiscoveryManifest) =
-    config.ProcessIdentityMatches manifest.Pid manifest.ProcessStartTimeUtcTicks
+    SessionActivity.ProcessIdentity.create
+        manifest.Pid
+        manifest.ProcessStartTimeUtcTicks
+    |> Result.bind (
+        SessionActivity.ProcessIdentityResolver.isAlive
+            config.ProcessIdentityResolver
+    )
 
 let internal resolveProcessExecutable config (manifest: DiscoveryManifest) =
     config.ResolveProcessExecutable manifest.Pid manifest.ProcessStartTimeUtcTicks

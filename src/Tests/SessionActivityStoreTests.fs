@@ -63,9 +63,17 @@ let private insertEvent dbPath (row: ActivityEventRow) =
     cmd.CommandText <-
         """
 INSERT INTO activity_events
-    (event_id, session_id, worktree_path, provider, kind, status, skill, ts)
-VALUES ($eventId, $sessionId, $worktreePath, 'copilot_cli', $kind, $status, $skill, $ts);
+    (process_id, process_start_ticks, event_id, session_id, worktree_path,
+     provider, kind, status, skill, ts)
+VALUES ($processId, $processStartTicks, $eventId, $sessionId, $worktreePath,
+        'copilot_cli', $kind, $status, $skill, $ts);
 """
+    cmd.Parameters.AddWithValue("$processId", ProcessIdentity.processId row.ProcessIdentity) |> ignore
+    cmd.Parameters.AddWithValue(
+        "$processStartTicks",
+        ProcessIdentity.processStartTimeUtcTicks row.ProcessIdentity
+    )
+    |> ignore
     cmd.Parameters.AddWithValue("$eventId", EventId.value row.EventId) |> ignore
     cmd.Parameters.AddWithValue("$sessionId", SessionId.value row.SessionId) |> ignore
     cmd.Parameters.AddWithValue("$worktreePath", WorktreePath.value row.WorktreePath) |> ignore
@@ -78,28 +86,51 @@ VALUES ($eventId, $sessionId, $worktreePath, 'copilot_cli', $kind, $status, $ski
 let private contextWorktree = Path.Combine(Path.GetTempPath(), "treemon-context-worktree")
 let private otherWorktree = Path.Combine(Path.GetTempPath(), "treemon-other-worktree")
 
-let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredStatus =
-    { SessionId = SessionId sid
+let private identityForSessionId (SessionId sessionId) =
+    let processId =
+        sessionId
+        |> Seq.fold (fun value character ->
+            (value * 31 + int character) % 1_000_000) 10_000
+
+    ProcessIdentity.create processId (int64 processId * 1_000L + 1L)
+    |> Result.defaultWith invalidOp
+
+let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredInstance =
+    let sessionId = SessionId sid
+    let updated = ts updatedAt
+
+    { ProcessIdentity = identityForSessionId sessionId
+      SessionId = sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath wt
       Provider = CopilotCli
       Status = status
-      UpdatedAt = ts updatedAt
+      UpdatedAt = updated
+      LifecycleAt = Some updated
       LastSeen = ts lastSeen
-      ContextUsageAt = None }
+      ContextUsageAt = None
+      ClosedAt = None }
 
-let private withTerminalOrigin terminalSessionId (stored: StoredStatus) =
+let private withTerminalOrigin terminalSessionId (stored: StoredInstance) =
     { stored with TerminalSessionId = Some terminalSessionId }
 
-let private withUsage (usage: ContextUsage) usageAt lastSeen (stored: StoredStatus) : StoredStatus =
+let private withUsage
+    (usage: ContextUsage)
+    usageAt
+    lastSeen
+    (stored: StoredInstance)
+    : StoredInstance =
     { stored with
         Status.ContextUsage = Some usage
         ContextUsageAt = Some usageAt
         LastSeen = lastSeen }
 
 let private eventOf eid sid kind status skill t : ActivityEventRow =
-    { EventId = EventId eid
-      SessionId = SessionId sid
+    let sessionId = SessionId sid
+
+    { ProcessIdentity = identityForSessionId sessionId
+      EventId = EventId eid
+      SessionId = sessionId
       WorktreePath = WorktreePath "C:/wt/a"
       Provider = CopilotCli
       Kind = kind
@@ -109,6 +140,83 @@ let private eventOf eid sid kind status skill t : ActivityEventRow =
 
 let private find sid (rows: StoredStatus list) =
     rows |> List.find (fun r -> r.SessionId = SessionId sid)
+
+let private exactFromProjected (stored: StoredStatus) =
+    { ProcessIdentity = identityForSessionId stored.SessionId
+      SessionId = stored.SessionId
+      TerminalSessionId = stored.TerminalSessionId
+      WorktreePath = stored.WorktreePath
+      Provider = stored.Provider
+      Status = stored.Status
+      UpdatedAt = stored.UpdatedAt
+      LifecycleAt = Some stored.UpdatedAt
+      LastSeen = stored.LastSeen
+      ContextUsageAt = stored.ContextUsageAt
+      ClosedAt = None }
+
+type SessionActivityStore with
+    member store.LoadLiveStatuses(now: DateTimeOffset) =
+        store.LoadRecentInstances now
+        |> ExactInstanceProjection.bySession now
+        |> Map.values
+        |> List.ofSeq
+
+    member store.StatusBySession(sessionId: SessionId) =
+        match store.InstancesBySession sessionId with
+        | head :: _ -> Some(StoredInstance.toStoredStatus head)
+        | [] ->
+            store.RetainedByWorktree()
+            |> Map.values
+            |> Seq.tryFind (fun status -> status.SessionId = sessionId)
+
+    member store.UpsertStatus(stored: StoredInstance) =
+        let merged =
+            match store.InstanceByIdentity stored.ProcessIdentity with
+            | Some current when stored.UpdatedAt < current.UpdatedAt ->
+                current
+            | Some current ->
+                { stored with
+                    TerminalSessionId =
+                        stored.TerminalSessionId
+                        |> Option.orElse current.TerminalSessionId
+                    Status.ContextUsage =
+                        stored.Status.ContextUsage
+                        |> Option.orElse current.Status.ContextUsage
+                    ContextUsageAt =
+                        stored.ContextUsageAt
+                        |> Option.orElse current.ContextUsageAt }
+            | None -> stored
+
+        store.UpsertInstance merged |> ignore
+
+    member store.UpsertContextUsage(stored: StoredInstance) =
+        match store.InstanceByIdentity stored.ProcessIdentity with
+        | Some current
+            when current.ContextUsageAt > stored.ContextUsageAt ->
+            current
+        | Some current ->
+            { current with
+                TerminalSessionId =
+                    stored.TerminalSessionId
+                    |> Option.orElse current.TerminalSessionId
+                Status.ContextUsage = stored.Status.ContextUsage
+                ContextUsageAt = stored.ContextUsageAt
+                LastSeen = max current.LastSeen stored.LastSeen }
+            |> store.UpsertInstance
+        | None -> store.UpsertInstance stored
+
+    member store.RecordLiveness
+        (
+            sessionId: SessionId,
+            lastSeen: DateTimeOffset,
+            terminalSessionId: TerminalSessionId option
+        ) =
+        store.RecordHeartbeat(
+            identityForSessionId sessionId,
+            lastSeen,
+            terminalSessionId
+        )
+        |> ignore
 
 
 [<TestFixture>]
@@ -267,7 +375,7 @@ type ContextUsagePersistenceTests() =
             Assert.That(recreated.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:00Z")))
 
             let row = store.LoadLiveStatuses(ts "2026-03-01T10:00:00Z") |> find "s1"
-            Assert.That(row, Is.EqualTo(recreated)))
+            Assert.That(row, Is.EqualTo(StoredInstance.toStoredStatus recreated)))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -385,7 +493,6 @@ type LoadLiveStatusesTests() =
 
              let afterEvent =
                  { afterUsage with
-                     TerminalSessionId = None
                      Status.Status = SessionLevelStatus.Idle
                      UpdatedAt = ts "2026-03-01T11:33:00Z"
                      LastSeen = ts "2026-03-01T11:33:00Z" }
@@ -444,7 +551,7 @@ type LoadLiveStatusesTests() =
             Assert.That(store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z"), Is.Empty))
 
     [<Test>]
-    member _.``Restart forgets lifecycle clocks and falls back to the persisted base status``() =
+    member _.``Restart restores background clocks over the persisted base status``() =
         withDbPath (fun dbPath ->
             let withActiveAgent =
                 fold
@@ -464,9 +571,12 @@ type LoadLiveStatusesTests() =
             use reopened = new SessionActivityStore(dbPath)
             let restored = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "active"
             Assert.Multiple(fun () ->
-                Assert.That(restored.Status.BackgroundAgentClocks, Is.Empty)
+                Assert.That(
+                    restored.Status.BackgroundAgentClocks,
+                    Is.EqualTo withActiveAgent.BackgroundAgentClocks
+                )
                 Assert.That(restored.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
-                Assert.That(effectiveStatus restored.Status, Is.EqualTo SessionLevelStatus.Idle)))
+                Assert.That(effectiveStatus restored.Status, Is.EqualTo SessionLevelStatus.Working)))
 
 
 [<TestFixture>]
@@ -583,7 +693,7 @@ type PruneOldTests() =
             cmd.CommandText <-
                 """
 CREATE TRIGGER fail_status_prune
-BEFORE DELETE ON session_status
+BEFORE DELETE ON session_instances
 BEGIN
     SELECT RAISE(ABORT, 'forced prune failure');
 END;
@@ -636,7 +746,20 @@ type LegacyDoneStatusTests() =
         use cmd = conn.CreateCommand()
 
         cmd.CommandText <-
-            "INSERT INTO session_status (session_id, worktree_path, provider, status, updated_at, last_seen)
+            "CREATE TABLE IF NOT EXISTS session_status (
+                 session_id TEXT PRIMARY KEY,
+                 worktree_path TEXT NOT NULL,
+                 provider TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 current_skill TEXT,
+                 last_user_msg TEXT,
+                 last_user_ts TEXT,
+                 last_asst_msg TEXT,
+                 last_asst_ts TEXT,
+                 updated_at TEXT NOT NULL,
+                 last_seen TEXT NOT NULL
+             );
+             INSERT INTO session_status (session_id, worktree_path, provider, status, updated_at, last_seen)
              VALUES ($sid, $wt, 'copilot_cli', $status, $ts, $ts);"
 
         cmd.Parameters.AddWithValue("$sid", sessionId) |> ignore
@@ -645,43 +768,41 @@ type LegacyDoneStatusTests() =
         cmd.Parameters.AddWithValue("$ts", (ts tsStr).ToUniversalTime().ToString("O")) |> ignore
         cmd.ExecuteNonQuery() |> ignore
 
-    let readRawStatus (dbPath: string) (sessionId: string) : string =
-        use conn = new SqliteConnection(connStr dbPath)
-        conn.Open()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- "SELECT status FROM session_status WHERE session_id = $sid;"
-        cmd.Parameters.AddWithValue("$sid", sessionId) |> ignore
-        cmd.ExecuteScalar() :?> string
-
     [<Test>]
-    member _.``LoadLiveStatuses does not crash on a legacy 'done' row (startup rehydrate)``() =
+    member _.``Legacy done history migrates to retained idle history``() =
         withDbPath (fun dbPath ->
-            (use _ = new SessionActivityStore(dbPath)
-             insertRawStatus dbPath "legacy" "C:/wt/a" "done" "2026-03-01T11:30:00Z")
-
-            // Fresh instance = a server restart: LoadLiveStatuses is the unguarded startup read.
-            use reopened = new SessionActivityStore(dbPath)
-            let rows = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z")
-            Assert.That(rows |> List.map _.Status.Status, Is.EqualTo([ SessionLevelStatus.Idle ])))
-
-    [<Test>]
-    member _.``Construction migrates legacy 'done' status rows to 'idle' in place``() =
-        withDbPath (fun dbPath ->
-            // Seed a 'done' row, dispose, then reopen: the second construction runs the migration.
-            (use _ = new SessionActivityStore(dbPath)
-             insertRawStatus dbPath "legacy" "C:/wt/a" "done" "2026-03-01T11:00:00Z")
+            insertRawStatus dbPath "legacy" "C:/wt/a" "done" "2026-03-01T11:30:00Z"
 
             use reopened = new SessionActivityStore(dbPath)
-            Assert.That(readRawStatus dbPath "legacy", Is.EqualTo("idle"), "stored row should be rewritten to 'idle'"))
+            let retained = reopened.StatusBySession(SessionId "legacy") |> Option.get
+            Assert.Multiple(fun () ->
+                Assert.That(retained.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z"), Is.Empty)))
 
     [<Test>]
-    member _.``Construction migrates legacy waiting rows to persisted user-input state``() =
+    member _.``Construction retires legacy done rows after preserving idle history``() =
         withDbPath (fun dbPath ->
-            (use _ = new SessionActivityStore(dbPath)
-             insertRawStatus dbPath "legacy" "C:/wt/a" "waiting_for_user" "2026-03-01T11:00:00Z")
+            insertRawStatus dbPath "legacy" "C:/wt/a" "done" "2026-03-01T11:00:00Z"
 
             use reopened = new SessionActivityStore(dbPath)
-            let row = reopened.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+            let retained = reopened.StatusBySession(SessionId "legacy") |> Option.get
+            Assert.Multiple(fun () ->
+                Assert.That(retained.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
+                Assert.That(
+                    SqliteTestDatabase.scalarInt
+                        dbPath
+                        "SELECT count(*) FROM sqlite_master
+                         WHERE type = 'table' AND name = 'session_status';",
+                    Is.Zero
+                )))
+
+    [<Test>]
+    member _.``Construction preserves legacy waiting state as retained user-input clocks``() =
+        withDbPath (fun dbPath ->
+            insertRawStatus dbPath "legacy" "C:/wt/a" "waiting_for_user" "2026-03-01T11:00:00Z"
+
+            use reopened = new SessionActivityStore(dbPath)
+            let row = reopened.StatusBySession(SessionId "legacy") |> Option.get
             Assert.Multiple(fun () ->
                 Assert.That(row.Status.Status, Is.EqualTo SessionLevelStatus.Idle)
                 Assert.That(row.Status.AwaitingUserSince, Is.EqualTo(Some(ts "2026-03-01T11:00:00Z")))
@@ -746,7 +867,9 @@ VALUES
                 TerminalSessionId "fedcba9876543210fedcba9876543210"
 
             (use store = new SessionActivityStore(dbPath)
-             let legacy = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+             let legacy =
+                 store.StatusBySession(SessionId "legacy")
+                 |> Option.get
              Assert.That(legacy.Status.Intent, Is.EqualTo(None))
              Assert.That(legacy.Status.Title, Is.EqualTo(None))
              Assert.That(legacy.Status.BackgroundAgentClocks, Is.Empty)
@@ -761,6 +884,7 @@ VALUES
                  Status.Title = Some title
                  UpdatedAt = ts "2026-03-01T11:46:00Z"
                  LastSeen = ts "2026-03-01T11:50:00Z" }
+             |> exactFromProjected
              |> store.UpsertStatus)
 
             use reopened = new SessionActivityStore(dbPath)
@@ -770,7 +894,7 @@ VALUES
                 Assert.That(row.Status.Title, Is.EqualTo(Some(msg "Investigate the fold" "2026-03-01T11:46:00Z")))
                 Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
                 Assert.That(
-                    indexColumns dbPath "ix_status_terminal_activity",
+                    indexColumns dbPath "ix_instances_terminal_activity",
                     Is.EqualTo(
                         [ "terminal_session_id"
                           "updated_at"
@@ -787,7 +911,9 @@ VALUES
             let usageAt = ts "2026-03-01T11:45:00Z"
 
             (use store = new SessionActivityStore(dbPath)
-             let legacy = store.LoadLiveStatuses(ts "2026-03-01T12:00:00Z") |> find "legacy"
+             let legacy =
+                 store.StatusBySession(SessionId "legacy")
+                 |> Option.get
              Assert.That(legacy.Status.ContextUsage, Is.EqualTo(None))
              Assert.That(legacy.ContextUsageAt, Is.EqualTo(None))
 
@@ -796,6 +922,7 @@ VALUES
                      Status.ContextUsage = Some usage
                      ContextUsageAt = Some usageAt
                      LastSeen = usageAt }
+                 |> exactFromProjected
                  |> store.UpsertContextUsage
 
              Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some usage))

@@ -61,7 +61,8 @@ type ServerLifecycleTests() =
             let occurredAt = DateTimeOffset.UtcNow
 
             let report =
-                { SessionId = SessionId "lifecycle-session"
+                { ParentProcessId = Environment.ProcessId
+                  SessionId = SessionId "lifecycle-session"
                   TerminalSessionId = None
                   WorktreePath =
                     WorktreePath(Path.Combine(Path.GetTempPath(), "lifecycle-worktree"))

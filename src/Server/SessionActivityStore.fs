@@ -1,36 +1,25 @@
 module Server.SessionActivityStore
 
 open System
+open System.Buffers
 open System.IO
+open System.Text
+open System.Text.Json
 open Microsoft.Data.Sqlite
 open Shared
 open Server.SessionActivity
+open Server.SessionActivityStoreSchema
 open Server.SqliteStorage
 
-// The durable mirror behind the push-model live state. session_status remains the current runtime
-// writer until exact-process ingestion takes over. Construction also creates the exact
-// session_instances model, migrates durable conversation history into retained_sessions, and
-// upgrades activity_events to process-instance-scoped idempotency.
-//
-// The legacy session_status writer still omits background-agent clocks; session_instances reserves
-// their durable representation for the exact-process writer.
-//
-// WAL journalling lets restart/resume reads run concurrently with the mailbox writer with no lock
-// contention; the writer being single means status upserts never race each other. The SQLite file
-// path is instance-specific (keyed by the server's data dir / port) so a side-by-side validation
-// instance never collides with main. Overview history is stored independently in overview_snapshots.
+// SQLite is the durable single-writer mirror behind exact process-instance activity. Legacy
+// session_status rows are copied once into migration-only retained_sessions and the legacy table is
+// then retired. Runtime writes target only session_instances and process-scoped activity_events.
 
 // --- Row shapes -------------------------------------------------------------------------------
 
-/// One session_status row: the per-session fold result plus the timestamps the store needs —
-/// `UpdatedAt` (the OccurredAt of the last applied STATUS event; drives status last-write-wins) and
-/// `LastSeen` (the last heartbeat; drives freshness + the live window on restart). `ContextUsageAt`
-/// is the OccurredAt of the last applied `usage_info` gauge — a SEPARATE last-write-wins clock so the
-/// context donut is ordered independently of status and never shares the status LWW clock (a usage
-/// report must not block a slightly-earlier status transition, nor be discarded by one). It is
-/// server-internal ordering state persisted alongside `ContextUsage`, but never sent on the wire.
-/// Ask-user request/completion clocks live in `SessionStatus` and are persisted independently too.
-/// `TerminalSessionId` is optional attribution metadata and does not participate in either clock.
+/// Temporary read model for application consumers that still collapse physical instances by durable
+/// Copilot SessionId. It is produced only by ExactInstanceProjection and by retained-history reads;
+/// no runtime writer persists this shape.
 type StoredStatus =
     { SessionId: SessionId
       TerminalSessionId: TerminalSessionId option
@@ -45,16 +34,52 @@ module StoredStatus =
     let activityOrderKey (stored: StoredStatus) =
         stored.UpdatedAt, SessionId.value stored.SessionId
 
-    /// `LastSeen` is liveness-only, so it must never decide which session owns shared content.
+    /// LastSeen is liveness-only, so it must never decide which session owns shared content.
     let tryMostRecentActivity sessions =
         sessions
         |> List.sortByDescending activityOrderKey
         |> List.tryHead
 
-/// One activity_events row: a single accepted event. `Status`/`Skill` retain the fold result after
-/// applying it, preserving the existing durable event shape while event_id supplies idempotency.
+/// One exact physical Copilot process. Lifecycle, content, usage, liveness, terminal origin, and
+/// closure retain independent clocks/fields on this row.
+type StoredInstance =
+    { ProcessIdentity: ProcessIdentity
+      SessionId: SessionId
+      TerminalSessionId: TerminalSessionId option
+      WorktreePath: WorktreePath
+      Provider: CodingToolProvider
+      Status: SessionStatus
+      /// Greatest accepted conversation-activity timestamp. Presence, heartbeat, usage, bootstrap,
+      /// and closure do not move it.
+      UpdatedAt: DateTimeOffset
+      /// Last accepted base-lifecycle event timestamp. Intent/title, ask-user clocks, background
+      /// clocks, usage, presence, heartbeat, and closure are ordered independently.
+      LifecycleAt: DateTimeOffset option
+      /// Server receipt time of the latest acknowledged presence or accepted heartbeat.
+      LastSeen: DateTimeOffset
+      ContextUsageAt: DateTimeOffset option
+      ClosedAt: DateTimeOffset option }
+
+module StoredInstance =
+    let activityOrderKey (stored: StoredInstance) =
+        stored.UpdatedAt,
+        SessionId.value stored.SessionId,
+        ProcessIdentity.sortKey stored.ProcessIdentity
+
+    let toStoredStatus (stored: StoredInstance) =
+        { SessionId = stored.SessionId
+          TerminalSessionId = stored.TerminalSessionId
+          WorktreePath = stored.WorktreePath
+          Provider = stored.Provider
+          Status = stored.Status
+          UpdatedAt = stored.UpdatedAt
+          LastSeen = stored.LastSeen
+          ContextUsageAt = stored.ContextUsageAt }
+
+/// One accepted history-bearing event. Event identity is scoped to the exact producer process.
 type ActivityEventRow =
-    { EventId: EventId
+    { ProcessIdentity: ProcessIdentity
+      EventId: EventId
       SessionId: SessionId
       WorktreePath: WorktreePath
       Provider: CodingToolProvider
@@ -63,7 +88,53 @@ type ActivityEventRow =
       Skill: string option
       Ts: DateTimeOffset }
 
-// --- Serialisation helpers --------------------------------------------------------------------
+/// The one temporary exact-to-session projection used by untouched application consumers. Closed
+/// instances never enter it. Within one durable SessionId an open active instance wins, then the
+/// greatest-activity open or otherwise recent nonclosed instance.
+module ExactInstanceProjection =
+    let private choose (now: DateTimeOffset) (instances: StoredInstance list) =
+        let candidates = instances |> List.filter _.ClosedAt.IsNone
+
+        let openInstances =
+            candidates
+            |> List.filter (fun instance -> now - instance.LastSeen < openWindow)
+
+        openInstances
+        |> pickActive _.Status StoredInstance.activityOrderKey
+        |> Option.orElseWith (fun () ->
+            openInstances
+            |> List.sortByDescending StoredInstance.activityOrderKey
+            |> List.tryHead)
+        |> Option.orElseWith (fun () ->
+            candidates
+            |> List.sortByDescending StoredInstance.activityOrderKey
+            |> List.tryHead)
+        |> Option.map StoredInstance.toStoredStatus
+
+    let bySession
+        (now: DateTimeOffset)
+        (instances: StoredInstance seq)
+        =
+        instances
+        |> Seq.groupBy _.SessionId
+        |> Seq.choose (fun (sessionId, grouped) ->
+            grouped
+            |> List.ofSeq
+            |> choose now
+            |> Option.map (fun projected -> sessionId, projected))
+        |> Map.ofSeq
+
+    let tryForSession
+        (now: DateTimeOffset)
+        (sessionId: SessionId)
+        (instances: StoredInstance seq)
+        =
+        instances
+        |> Seq.filter (fun instance -> instance.SessionId = sessionId)
+        |> List.ofSeq
+        |> choose now
+
+// --- Serialization ----------------------------------------------------------------------------
 
 let private statusText =
     function
@@ -76,7 +147,7 @@ let private parseStatus =
     | "working" -> SessionLevelStatus.Working
     | "waiting_for_user" -> SessionLevelStatus.WaitingForUser
     | "idle" -> SessionLevelStatus.Idle
-    | other -> failwithf "SessionActivityStore: unknown status text %A" other
+    | other -> failwith $"SessionActivityStore: unknown status text '{other}'"
 
 let private providerText =
     function
@@ -85,275 +156,227 @@ let private providerText =
 let private parseProvider =
     function
     | "copilot_cli" -> CopilotCli
-    | other -> failwithf "SessionActivityStore: unknown provider text %A" other
+    | other -> failwith $"SessionActivityStore: unknown provider text '{other}'"
 
-/// A `string option` as a parameter value: `Some s` binds the text, `None` binds SQL NULL.
-let private optToDb (o: string option) : obj =
-    match o with
-    | Some s -> box s
-    | None -> box DBNull.Value
+let private optToDb =
+    Option.map box >> Option.defaultValue (box DBNull.Value)
 
 let private timestampToDb =
     Option.map isoUtc >> optToDb
 
-/// A `Message option` as two parameter values (text, iso-ts); `None` binds NULL for both.
-let private msgToDb (m: Message option) : obj * obj =
-    match m with
-    | Some x -> box x.Text, box (isoUtc x.At)
+let private msgToDb =
+    function
+    | Some message -> box message.Text, box (isoUtc message.At)
     | None -> box DBNull.Value, box DBNull.Value
 
-let private contextToDb (stored: StoredStatus) : obj * obj * obj =
+let private contextToDb (stored: StoredInstance) =
     match stored.Status.ContextUsage, stored.ContextUsageAt with
     | None, None -> box DBNull.Value, box DBNull.Value, box DBNull.Value
-    | Some usage, Some usageAt -> box usage.CurrentTokens, box usage.TokenLimit, box (isoUtc usageAt)
-    | _ -> invalidArg (nameof stored) "ContextUsage and ContextUsageAt must both be present or absent"
+    | Some usage, Some usageAt ->
+        box usage.CurrentTokens, box usage.TokenLimit, box (isoUtc usageAt)
+    | _ ->
+        invalidArg
+            (nameof stored)
+            "ContextUsage and ContextUsageAt must both be present or absent"
 
-let private readOptStr (r: SqliteDataReader) (i: int) =
-    if r.IsDBNull i then None else Some(r.GetString i)
+let private readOptStr (reader: SqliteDataReader) index =
+    if reader.IsDBNull index then None else Some(reader.GetString index)
 
-let private readOptTimestamp (r: SqliteDataReader) i =
-    readOptStr r i |> Option.map parseIso
+let private readOptTimestamp
+    (reader: SqliteDataReader)
+    index
+    =
+    readOptStr reader index |> Option.map parseIso
 
-let private readContextUsage (r: SqliteDataReader) currentTokensIndex tokenLimitIndex usageAtIndex =
-    match r.IsDBNull currentTokensIndex, r.IsDBNull tokenLimitIndex, r.IsDBNull usageAtIndex with
-    | true, true, true -> None, None
-    | false, false, false ->
-        let usage =
-            { CurrentTokens = r.GetInt32 currentTokensIndex
-              TokenLimit = r.GetInt32 tokenLimitIndex }
-
-        Some usage, Some(parseIso (r.GetString usageAtIndex))
-    | _ -> failwith $"{nameof StoredStatus}: incomplete persisted context usage"
-
-/// Reconstruct a `Message option` from a text column + a timestamp column; present only when both
-/// are non-NULL (they are written together, so this is really an all-or-nothing pair).
-let private readOptMsg (r: SqliteDataReader) (iText: int) (iTs: int) : Message option =
-    match readOptStr r iText, readOptStr r iTs with
-    | Some t, Some ts -> Some { Text = t; At = parseIso ts }
+let private readOptMessage
+    (reader: SqliteDataReader)
+    textIndex
+    timestampIndex
+    =
+    match readOptStr reader textIndex, readOptStr reader timestampIndex with
+    | Some text, Some timestamp ->
+        Some
+            { Text = text
+              At = parseIso timestamp }
     | _ -> None
 
-let private readStored (r: SqliteDataReader) : StoredStatus =
-    let contextUsage, contextUsageAt = readContextUsage r 15 16 17
+let private readContextUsage
+    (reader: SqliteDataReader)
+    currentIndex
+    limitIndex
+    timestampIndex
+    =
+    match
+        reader.IsDBNull currentIndex,
+        reader.IsDBNull limitIndex,
+        reader.IsDBNull timestampIndex
+    with
+    | true, true, true -> None, None
+    | false, false, false ->
+        Some
+            { CurrentTokens = reader.GetInt32 currentIndex
+              TokenLimit = reader.GetInt32 limitIndex },
+        Some(parseIso (reader.GetString timestampIndex))
+    | _ -> failwith $"{nameof StoredInstance}: incomplete persisted context usage"
 
-    { SessionId = SessionId(r.GetString 0)
-      TerminalSessionId = readOptStr r 20 |> Option.map TerminalSessionId
-      WorktreePath = WorktreePath(r.GetString 1)
-      Provider = parseProvider (r.GetString 2)
+let private writeTimestampProperty
+    (writer: Utf8JsonWriter)
+    (name: string)
+    (timestamp: DateTimeOffset option)
+    =
+    match timestamp with
+    | Some value -> writer.WriteString(name, isoUtc value)
+    | None -> writer.WriteNull name
+
+let private serializeBackgroundAgentClocks
+    (clocks: Map<string, BackgroundAgentLifecycle>)
+    =
+    let buffer = ArrayBufferWriter<byte>()
+
+    use writer =
+        new Utf8JsonWriter(
+            buffer,
+            JsonWriterOptions(Indented = false, SkipValidation = false)
+        )
+
+    writer.WriteStartArray()
+
+    clocks
+    |> Map.toSeq
+    |> Seq.iter (fun (toolCallId, lifecycle) ->
+        writer.WriteStartObject()
+        writer.WriteString("toolCallId", toolCallId)
+        writeTimestampProperty writer "startedAt" lifecycle.StartedAt
+        writeTimestampProperty writer "finishedAt" lifecycle.FinishedAt
+        writer.WriteEndObject())
+
+    writer.WriteEndArray()
+    writer.Flush()
+    Encoding.UTF8.GetString(buffer.WrittenSpan)
+
+let private parseOptionalJsonTimestamp
+    (element: JsonElement)
+    (propertyName: string)
+    =
+    let property = element.GetProperty propertyName
+
+    match property.ValueKind with
+    | JsonValueKind.Null -> None
+    | JsonValueKind.String ->
+        property.GetString()
+        |> Option.ofObj
+        |> Option.map parseIso
+    | _ ->
+        failwith
+            $"{nameof StoredInstance}: malformed background-agent timestamp"
+
+let private parseBackgroundAgentClocks (json: string) =
+    use document = JsonDocument.Parse json
+
+    if document.RootElement.ValueKind <> JsonValueKind.Array then
+        failwith $"{nameof StoredInstance}: malformed background-agent clocks"
+
+    document.RootElement.EnumerateArray()
+    |> Seq.map (fun element ->
+        let toolCallId =
+            element.GetProperty("toolCallId").GetString()
+            |> Option.ofObj
+            |> Option.filter (String.IsNullOrWhiteSpace >> not)
+            |> Option.defaultWith (fun () ->
+                failwith
+                    $"{nameof StoredInstance}: malformed background-agent tool-call identity")
+
+        toolCallId,
+        { StartedAt = parseOptionalJsonTimestamp element "startedAt"
+          FinishedAt = parseOptionalJsonTimestamp element "finishedAt" })
+    |> Map.ofSeq
+
+let private readInstance (reader: SqliteDataReader) =
+    let identity =
+        ProcessIdentity.create (reader.GetInt32 0) (reader.GetInt64 1)
+        |> Result.defaultWith invalidOp
+
+    let contextUsage, contextUsageAt =
+        readContextUsage reader 18 19 20
+
+    { ProcessIdentity = identity
+      SessionId = SessionId(reader.GetString 2)
+      TerminalSessionId =
+        readOptStr reader 23 |> Option.map TerminalSessionId
+      WorktreePath = WorktreePath(reader.GetString 3)
+      Provider = parseProvider (reader.GetString 4)
       Status =
-        { Status = parseStatus (r.GetString 3)
-          Skill = readOptStr r 4
-          Intent = readOptMsg r 9 10
-          Title = readOptMsg r 11 12
-          LastUserMessage = readOptMsg r 5 6
-          LastAssistantMessage = readOptMsg r 7 8
+        { Status = parseStatus (reader.GetString 5)
+          Skill = readOptStr reader 6
+          LastUserMessage = readOptMessage reader 7 8
+          LastAssistantMessage = readOptMessage reader 9 10
+          Intent = readOptMessage reader 11 12
+          Title = readOptMessage reader 13 14
           ContextUsage = contextUsage
-          AwaitingUserSince = readOptTimestamp r 18
-          UserInputCompletedAt = readOptTimestamp r 19
+          AwaitingUserSince = readOptTimestamp reader 21
+          UserInputCompletedAt = readOptTimestamp reader 22
+          BackgroundAgentClocks =
+            reader.GetString 24 |> parseBackgroundAgentClocks }
+      UpdatedAt = parseIso (reader.GetString 15)
+      LifecycleAt = readOptTimestamp reader 16
+      LastSeen = parseIso (reader.GetString 17)
+      ContextUsageAt = contextUsageAt
+      ClosedAt = readOptTimestamp reader 25 }
+
+let private readProjectedStatus (reader: SqliteDataReader) =
+    let contextUsage, contextUsageAt =
+        readContextUsage reader 15 16 17
+
+    { SessionId = SessionId(reader.GetString 0)
+      TerminalSessionId =
+        readOptStr reader 20 |> Option.map TerminalSessionId
+      WorktreePath = WorktreePath(reader.GetString 1)
+      Provider = parseProvider (reader.GetString 2)
+      Status =
+        { Status = parseStatus (reader.GetString 3)
+          Skill = readOptStr reader 4
+          LastUserMessage = readOptMessage reader 5 6
+          LastAssistantMessage = readOptMessage reader 7 8
+          Intent = readOptMessage reader 9 10
+          Title = readOptMessage reader 11 12
+          ContextUsage = contextUsage
+          AwaitingUserSince = readOptTimestamp reader 18
+          UserInputCompletedAt = readOptTimestamp reader 19
           BackgroundAgentClocks = Map.empty }
-      UpdatedAt = parseIso (r.GetString 13)
-      LastSeen = parseIso (r.GetString 14)
+      UpdatedAt = parseIso (reader.GetString 13)
+      LastSeen = parseIso (reader.GetString 14)
       ContextUsageAt = contextUsageAt }
 
 // --- SQL --------------------------------------------------------------------------------------
 
-// The current session_status writer has no process identity, so (0, 0) is its temporary event lane.
-// Exact process rows use positive values, and session_instances never accepts the legacy sentinel.
-let private activityEventsTableSql createClause tableName =
-    $"""
-{createClause} {tableName} (
-    process_id         INTEGER NOT NULL DEFAULT 0,
-    process_start_ticks INTEGER NOT NULL DEFAULT 0,
-    event_id           TEXT NOT NULL,
-    session_id         TEXT NOT NULL,
-    worktree_path      TEXT NOT NULL,
-    provider           TEXT NOT NULL,
-    kind               TEXT NOT NULL,
-    status             TEXT NOT NULL,
-    skill              TEXT,
-    ts                 TEXT NOT NULL,
-    PRIMARY KEY (process_id, process_start_ticks, event_id),
-    CHECK (
-        (process_id = 0 AND process_start_ticks = 0)
-        OR (process_id > 0 AND process_start_ticks > 0)
-    )
-);
-"""
-
-let private schemaSql =
-    $"""
-CREATE TABLE IF NOT EXISTS session_status (
-    session_id    TEXT PRIMARY KEY,
-    worktree_path TEXT NOT NULL,
-    provider      TEXT NOT NULL,
-    status        TEXT NOT NULL,
-    current_skill TEXT,
-    last_user_msg TEXT,
-    last_user_ts  TEXT,
-    last_asst_msg TEXT,
-    last_asst_ts  TEXT,
-    intent_text   TEXT,
-    intent_ts     TEXT,
-    title_text    TEXT,
-    title_ts      TEXT,
-    updated_at    TEXT NOT NULL,
-    last_seen     TEXT NOT NULL,
-    context_current_tokens INTEGER,
-    context_token_limit     INTEGER,
-    context_usage_at        TEXT,
-    awaiting_user_since     TEXT,
-    user_input_completed_at TEXT,
-    terminal_session_id     TEXT
-);
-
-CREATE TABLE IF NOT EXISTS session_instances (
-    process_id                 INTEGER NOT NULL CHECK (process_id > 0),
-    process_start_ticks        INTEGER NOT NULL CHECK (process_start_ticks > 0),
-    session_id                 TEXT NOT NULL,
-    worktree_path              TEXT NOT NULL,
-    provider                   TEXT NOT NULL,
-    status                     TEXT NOT NULL,
-    current_skill              TEXT,
-    last_user_msg              TEXT,
-    last_user_ts               TEXT,
-    last_asst_msg              TEXT,
-    last_asst_ts               TEXT,
-    intent_text                TEXT,
-    intent_ts                  TEXT,
-    title_text                 TEXT,
-    title_ts                   TEXT,
-    updated_at                 TEXT NOT NULL,
-    last_seen                  TEXT NOT NULL,
-    context_current_tokens     INTEGER,
-    context_token_limit        INTEGER,
-    context_usage_at           TEXT,
-    awaiting_user_since        TEXT,
-    user_input_completed_at    TEXT,
-    terminal_session_id        TEXT,
-    background_agent_clocks    TEXT NOT NULL DEFAULT '[]',
-    closed_at                  TEXT,
-    PRIMARY KEY (process_id, process_start_ticks)
-);
-
-CREATE TABLE IF NOT EXISTS retained_sessions (
-    session_id                 TEXT PRIMARY KEY,
-    worktree_path              TEXT NOT NULL,
-    provider                   TEXT NOT NULL,
-    status                     TEXT NOT NULL,
-    current_skill              TEXT,
-    last_user_msg              TEXT,
-    last_user_ts               TEXT,
-    last_asst_msg              TEXT,
-    last_asst_ts               TEXT,
-    intent_text                TEXT,
-    intent_ts                  TEXT,
-    title_text                 TEXT,
-    title_ts                   TEXT,
-    updated_at                 TEXT NOT NULL,
-    context_current_tokens     INTEGER,
-    context_token_limit        INTEGER,
-    context_usage_at           TEXT,
-    awaiting_user_since        TEXT,
-    user_input_completed_at    TEXT
-);
-
-{activityEventsTableSql "CREATE TABLE IF NOT EXISTS" "activity_events"}
-"""
-
-let private additiveColumnMigrations =
-    [ "intent_text", "TEXT"
-      "intent_ts", "TEXT"
-      "title_text", "TEXT"
-      "title_ts", "TEXT"
-      "context_current_tokens", "INTEGER"
-      "context_token_limit", "INTEGER"
-      "context_usage_at", "TEXT"
-      "awaiting_user_since", "TEXT"
-      "user_input_completed_at", "TEXT"
-      "terminal_session_id", "TEXT" ]
-
-let private indexSql =
+let private instanceColumns =
     """
-CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
-CREATE INDEX IF NOT EXISTS ix_status_worktree_activity
-ON session_status(worktree_path, updated_at DESC, session_id DESC);
-CREATE INDEX IF NOT EXISTS ix_status_terminal_activity
-ON session_status(terminal_session_id, updated_at DESC, session_id DESC);
-
-CREATE INDEX IF NOT EXISTS ix_instances_worktree_activity
-ON session_instances(worktree_path, updated_at DESC, session_id DESC);
-CREATE INDEX IF NOT EXISTS ix_instances_session_activity
-ON session_instances(session_id, updated_at DESC, process_id, process_start_ticks);
-CREATE INDEX IF NOT EXISTS ix_instances_terminal_activity
-ON session_instances(terminal_session_id, updated_at DESC, session_id DESC);
-CREATE INDEX IF NOT EXISTS ix_instances_last_seen
-ON session_instances(last_seen);
-
-CREATE INDEX IF NOT EXISTS ix_retained_worktree_activity
-ON retained_sessions(worktree_path, updated_at DESC, session_id DESC);
-
-CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
-CREATE INDEX IF NOT EXISTS ix_events_session_ts ON activity_events(session_id, ts);
-CREATE INDEX IF NOT EXISTS ix_events_instance_ts
-ON activity_events(process_id, process_start_ticks, ts);
+process_id, process_start_ticks, session_id, worktree_path, provider, status,
+current_skill, last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+intent_text, intent_ts, title_text, title_ts, updated_at, lifecycle_at, last_seen,
+context_current_tokens, context_token_limit, context_usage_at,
+awaiting_user_since, user_input_completed_at, terminal_session_id,
+background_agent_clocks, closed_at
 """
 
-let rec private readColumnNames (reader: SqliteDataReader) names =
-    if reader.Read() then
-        readColumnNames reader (Set.add (reader.GetString 1) names)
-    else
-        names
-
-let private ensureAdditiveColumns (conn: SqliteConnection) (tx: SqliteTransaction) =
-    let existingColumns =
-        use cmd = conn.CreateCommand()
-        cmd.Transaction <- tx
-        cmd.CommandText <- "PRAGMA table_info(session_status);"
-        use reader = cmd.ExecuteReader()
-        readColumnNames reader Set.empty
-
-    let migrationSql =
-        additiveColumnMigrations
-        |> List.choose (fun (columnName, declaration) ->
-            if Set.contains columnName existingColumns then
-                None
-            else
-                Some $"ALTER TABLE session_status ADD COLUMN %s{columnName} %s{declaration};")
-        |> String.concat Environment.NewLine
-
-    if migrationSql <> "" then
-        use cmd = conn.CreateCommand()
-        cmd.Transaction <- tx
-        cmd.CommandText <- migrationSql
-        cmd.ExecuteNonQuery() |> ignore
-
-// Bounded normalisation of legacy rows. Retired "done" values become idle; pre-clock waiting rows
-// become an idle base plus an open request at their lifecycle timestamp. Both updates are idempotent.
-let private normalizeLegacySql =
+let private upsertInstanceSql =
     """
-UPDATE session_status SET status = 'idle' WHERE status = 'done';
-UPDATE activity_events SET status = 'idle' WHERE status = 'done';
-UPDATE session_status
-SET status = 'idle', awaiting_user_since = updated_at
-WHERE status = 'waiting_for_user' AND awaiting_user_since IS NULL;
-"""
-
-let private copyRetainedSessionsSql =
-    """
-INSERT INTO retained_sessions
-    (session_id, worktree_path, provider, status, current_skill,
-     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-     intent_text, intent_ts, title_text, title_ts, updated_at,
+INSERT INTO session_instances
+    (process_id, process_start_ticks, session_id, worktree_path, provider, status,
+     current_skill, last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+     intent_text, intent_ts, title_text, title_ts, updated_at, lifecycle_at, last_seen,
      context_current_tokens, context_token_limit, context_usage_at,
-     awaiting_user_since, user_input_completed_at)
-SELECT
-    session_id, worktree_path, provider, status, current_skill,
-    last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-    intent_text, intent_ts, title_text, title_ts, updated_at,
-    context_current_tokens, context_token_limit, context_usage_at,
-    awaiting_user_since, user_input_completed_at
-FROM session_status
-WHERE true
-ON CONFLICT(session_id) DO UPDATE SET
+     awaiting_user_since, user_input_completed_at, terminal_session_id,
+     background_agent_clocks, closed_at)
+VALUES
+    ($processId, $processStartTicks, $sessionId, $worktreePath, $provider, $status,
+     $skill, $userMessage, $userMessageAt, $assistantMessage, $assistantMessageAt,
+     $intent, $intentAt, $title, $titleAt, $updatedAt, $lifecycleAt, $lastSeen,
+     $contextCurrent, $contextLimit, $contextAt,
+     $awaitingUserSince, $userInputCompletedAt, $terminalSessionId,
+     $backgroundAgentClocks, $closedAt)
+ON CONFLICT(process_id, process_start_ticks) DO UPDATE SET
+    session_id = excluded.session_id,
     worktree_path = excluded.worktree_path,
     provider = excluded.provider,
     status = excluded.status,
@@ -367,198 +390,161 @@ ON CONFLICT(session_id) DO UPDATE SET
     title_text = excluded.title_text,
     title_ts = excluded.title_ts,
     updated_at = excluded.updated_at,
+    lifecycle_at = excluded.lifecycle_at,
+    last_seen = excluded.last_seen,
     context_current_tokens = excluded.context_current_tokens,
     context_token_limit = excluded.context_token_limit,
     context_usage_at = excluded.context_usage_at,
     awaiting_user_since = excluded.awaiting_user_since,
-    user_input_completed_at = excluded.user_input_completed_at
-WHERE excluded.updated_at >= retained_sessions.updated_at;
-"""
-
-let rec private readPrimaryKeyColumns (reader: SqliteDataReader) columns =
-    if reader.Read() then
-        let primaryKeyOrder = reader.GetInt32 5
-
-        let next =
-            if primaryKeyOrder = 0 then
-                columns
-            else
-                (primaryKeyOrder, reader.GetString 1) :: columns
-
-        readPrimaryKeyColumns reader next
-    else
-        columns
-        |> List.sortBy fst
-        |> List.map snd
-
-let private activityEventsUsesProcessKey (conn: SqliteConnection) (tx: SqliteTransaction) =
-    use cmd = conn.CreateCommand()
-    cmd.Transaction <- tx
-    cmd.CommandText <- "PRAGMA table_info(activity_events);"
-    use reader = cmd.ExecuteReader()
-
-    readPrimaryKeyColumns reader []
-    = [ "process_id"; "process_start_ticks"; "event_id" ]
-
-let private executeMigrationSql (conn: SqliteConnection) (tx: SqliteTransaction) sql =
-    use cmd = conn.CreateCommand()
-    cmd.Transaction <- tx
-    cmd.CommandText <- sql
-    cmd.ExecuteNonQuery() |> ignore
-
-let private rebuildActivityEventsIfNeeded (conn: SqliteConnection) (tx: SqliteTransaction) =
-    let migrationTable = "activity_events_migration"
-
-    if activityEventsUsesProcessKey conn tx then
-        executeMigrationSql conn tx $"DROP TABLE IF EXISTS {migrationTable};"
-    else
-        executeMigrationSql
-            conn
-            tx
-            $"""
-DROP TABLE IF EXISTS {migrationTable};
-{activityEventsTableSql "CREATE TABLE" migrationTable}
-DROP TABLE activity_events;
-ALTER TABLE {migrationTable} RENAME TO activity_events;
-"""
-
-let private initializeSchema (conn: SqliteConnection) =
-    use tx = conn.BeginTransaction()
-    executeMigrationSql conn tx schemaSql
-    ensureAdditiveColumns conn tx
-    executeMigrationSql conn tx normalizeLegacySql
-    executeMigrationSql conn tx copyRetainedSessionsSql
-    rebuildActivityEventsIfNeeded conn tx
-    executeMigrationSql conn tx indexSql
-    tx.Commit()
-
-// Last-write-wins: on a session_id conflict the incoming row overwrites only when its updated_at is
-// at least as new (>= so an idempotent replay with the same timestamp still lands identically). A
-// stale/out-of-order report is a no-op.
-let private upsertSql =
-    """
-INSERT INTO session_status
-    (session_id, worktree_path, provider, status, current_skill,
-     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-     intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-     context_current_tokens, context_token_limit, context_usage_at,
-     awaiting_user_since, user_input_completed_at, terminal_session_id)
-VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats,
-        $it, $its, $tt, $tts, $upd, $seen,
-        $contextCurrent, $contextLimit, $contextAt, $awaitingUserSince, $userInputCompletedAt,
-        $terminalSessionId)
-ON CONFLICT(session_id) DO UPDATE SET
-    worktree_path = excluded.worktree_path,
-    provider      = excluded.provider,
-    status        = excluded.status,
-    current_skill = excluded.current_skill,
-    last_user_msg = excluded.last_user_msg,
-    last_user_ts  = excluded.last_user_ts,
-    last_asst_msg = excluded.last_asst_msg,
-    last_asst_ts  = excluded.last_asst_ts,
-    intent_text   = excluded.intent_text,
-    intent_ts     = excluded.intent_ts,
-    title_text    = excluded.title_text,
-    title_ts      = excluded.title_ts,
-    updated_at    = excluded.updated_at,
-    last_seen     = excluded.last_seen,
-    awaiting_user_since = excluded.awaiting_user_since,
     user_input_completed_at = excluded.user_input_completed_at,
-    terminal_session_id = COALESCE(excluded.terminal_session_id, session_status.terminal_session_id)
-WHERE excluded.updated_at >= session_status.updated_at;
+    terminal_session_id = excluded.terminal_session_id,
+    background_agent_clocks = excluded.background_agent_clocks,
+    closed_at = COALESCE(session_instances.closed_at, excluded.closed_at);
 """
 
-// event_id is the PK; OR IGNORE makes a duplicate POST (same event_id) a silent no-op — the
-// idempotency guarantee for the raw stream.
 let private appendSql =
     """
 INSERT OR IGNORE INTO activity_events
-    (event_id, session_id, worktree_path, provider, kind, status, skill, ts)
-VALUES ($eid, $sid, $wt, $prov, $kind, $status, $skill, $ts);
+    (process_id, process_start_ticks, event_id, session_id, worktree_path,
+     provider, kind, status, skill, ts)
+VALUES
+    ($processId, $processStartTicks, $eventId, $sessionId, $worktreePath,
+     $provider, $kind, $status, $skill, $timestamp);
 """
 
-// Liveness-only bump: advance a session's last_seen (openness) without touching updated_at, status,
-// or any message/skill field, and only ever forward. Heartbeats take this path instead of
-// upsert+append, so they refresh openness without moving the last-write-wins clock. An omitted
-// terminal origin retains existing attribution; there is no implicit clear operation.
-let private touchSql =
+let private heartbeatSql =
     """
-UPDATE session_status
-SET last_seen = CASE
-        WHEN last_seen < $seen THEN $seen
-        ELSE last_seen
-    END,
+UPDATE session_instances
+SET last_seen =
+        CASE WHEN last_seen < $lastSeen THEN $lastSeen ELSE last_seen END,
     terminal_session_id = COALESCE($terminalSessionId, terminal_session_id)
-WHERE session_id = $sid;
+WHERE process_id = $processId
+  AND process_start_ticks = $processStartTicks
+  AND closed_at IS NULL;
 """
 
-let private upsertContextUsageSql =
+let private closeSql =
     """
-INSERT INTO session_status
-    (session_id, worktree_path, provider, status, current_skill,
-     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-     intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-     context_current_tokens, context_token_limit, context_usage_at,
-     awaiting_user_since, user_input_completed_at, terminal_session_id)
-VALUES ($sid, $wt, $prov, $status, $skill, $um, $uts, $am, $ats,
-        $it, $its, $tt, $tts, $upd, $seen,
-        $contextCurrent, $contextLimit, $contextAt, $awaitingUserSince, $userInputCompletedAt,
-        $terminalSessionId)
-ON CONFLICT(session_id) DO UPDATE SET
-    context_current_tokens = excluded.context_current_tokens,
-    context_token_limit = excluded.context_token_limit,
-    context_usage_at = excluded.context_usage_at,
-    terminal_session_id = COALESCE(excluded.terminal_session_id, session_status.terminal_session_id),
-    last_seen = CASE
-        WHEN session_status.last_seen < excluded.last_seen THEN excluded.last_seen
-        ELSE session_status.last_seen
-    END
-WHERE session_status.context_usage_at IS NULL
-   OR session_status.context_usage_at <= excluded.context_usage_at;
+UPDATE session_instances
+SET closed_at = COALESCE(closed_at, $closedAt),
+    terminal_session_id = COALESCE($terminalSessionId, terminal_session_id)
+WHERE process_id = $processId
+  AND process_start_ticks = $processStartTicks;
 """
 
-let private storedStatusColumns =
-    """
-session_id, worktree_path, provider, status, current_skill,
-last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-intent_text, intent_ts, title_text, title_ts, updated_at, last_seen,
-context_current_tokens, context_token_limit, context_usage_at,
-awaiting_user_since, user_input_completed_at, terminal_session_id
-"""
-
-let private loadSql =
+let private instanceByIdentitySql =
     $"""
-SELECT {storedStatusColumns}
-FROM session_status
-WHERE last_seen >= $cutoff
-ORDER BY last_seen;
-"""
-
-// Resume only needs the durable identity, not the full status aggregate.
-let private latestSessionIdForWorktreeSql =
-    """
-SELECT session_id
-FROM session_status
-WHERE worktree_path = $wt
-ORDER BY updated_at DESC, session_id DESC
+SELECT {instanceColumns}
+FROM session_instances
+WHERE process_id = $processId
+  AND process_start_ticks = $processStartTicks
 LIMIT 1;
 """
 
-// Preserve the established retention behavior: events older than the cutoff are deleted except for
-// the latest old event belonging to a session row that is itself still retained.
+let private instancesBySessionSql =
+    $"""
+SELECT {instanceColumns}
+FROM session_instances
+WHERE session_id = $sessionId
+ORDER BY updated_at DESC, process_id DESC, process_start_ticks DESC;
+"""
+
+let private loadRecentInstancesSql =
+    $"""
+SELECT {instanceColumns}
+FROM session_instances
+WHERE last_seen >= $cutoff
+ORDER BY last_seen, process_id, process_start_ticks;
+"""
+
+let private retainedByWorktreeSql =
+    $"""
+WITH candidates AS (
+    SELECT
+        session_id, worktree_path, provider, status, current_skill,
+        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+        intent_text, intent_ts, title_text, title_ts, updated_at,
+        context_current_tokens, context_token_limit, context_usage_at,
+        awaiting_user_since, user_input_completed_at,
+        process_id, process_start_ticks
+    FROM session_instances
+
+    UNION ALL
+
+    SELECT
+        session_id, worktree_path, provider, status, current_skill,
+        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+        intent_text, intent_ts, title_text, title_ts, updated_at,
+        context_current_tokens, context_token_limit, context_usage_at,
+        awaiting_user_since, user_input_completed_at,
+        0 AS process_id, 0 AS process_start_ticks
+    FROM retained_sessions
+),
+ranked AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY worktree_path
+               ORDER BY updated_at DESC, session_id DESC,
+                        process_id DESC, process_start_ticks DESC
+           ) AS activity_rank
+    FROM candidates
+)
+SELECT
+    session_id, worktree_path, provider, status, current_skill,
+    last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+    intent_text, intent_ts, title_text, title_ts, updated_at,
+    $notLive AS last_seen,
+    context_current_tokens, context_token_limit, context_usage_at,
+    awaiting_user_since, user_input_completed_at,
+    NULL AS terminal_session_id
+FROM ranked
+WHERE activity_rank = 1;
+"""
+
+let private latestSessionIdForWorktreeSql =
+    """
+SELECT session_id
+FROM (
+    SELECT session_id, updated_at, process_id, process_start_ticks
+    FROM session_instances
+    WHERE worktree_path = $worktreePath
+
+    UNION ALL
+
+    SELECT session_id, updated_at, 0 AS process_id, 0 AS process_start_ticks
+    FROM retained_sessions
+    WHERE worktree_path = $worktreePath
+)
+ORDER BY updated_at DESC, session_id DESC, process_id DESC, process_start_ticks DESC
+LIMIT 1;
+"""
+
+let private retainedTerminalSessionIdsSql =
+    """
+SELECT DISTINCT terminal_session_id
+FROM session_instances
+WHERE terminal_session_id IS NOT NULL;
+"""
+
 let private pruneSql =
     """
 WITH retained_event_baselines AS (
     SELECT event.rowid
     FROM activity_events AS event
-    JOIN session_status AS status
-      ON status.session_id = event.session_id
-     AND status.last_seen >= $cutoff
+    JOIN session_instances AS instance
+      ON instance.process_id = event.process_id
+     AND instance.process_start_ticks = event.process_start_ticks
     WHERE event.ts < $cutoff
+      AND (
+          instance.updated_at >= $cutoff
+          OR instance.last_seen >= $cutoff
+          OR instance.closed_at >= $cutoff
+      )
       AND event.rowid = (
           SELECT baseline.rowid
           FROM activity_events AS baseline
-          WHERE baseline.session_id = event.session_id
+          WHERE baseline.process_id = event.process_id
+            AND baseline.process_start_ticks = event.process_start_ticks
             AND baseline.ts < $cutoff
           ORDER BY baseline.ts DESC, baseline.rowid DESC
           LIMIT 1
@@ -568,121 +554,111 @@ DELETE FROM activity_events
 WHERE ts < $cutoff
   AND rowid NOT IN (SELECT rowid FROM retained_event_baselines);
 
-DELETE FROM session_status WHERE last_seen < $cutoff;
-DELETE FROM retained_sessions WHERE updated_at < $cutoff;
+DELETE FROM session_instances
+WHERE updated_at < $cutoff
+  AND last_seen < $cutoff
+  AND (closed_at IS NULL OR closed_at < $cutoff);
+
+DELETE FROM retained_sessions
+WHERE updated_at < $cutoff;
 """
 
-// One durable footer representative per worktree, selected before rows cross the SQLite boundary.
-let private retainedByWorktreeSql =
-    $"""
-WITH ranked AS (
-    SELECT {storedStatusColumns},
-           ROW_NUMBER() OVER (
-               PARTITION BY worktree_path
-               ORDER BY updated_at DESC, session_id DESC
-           ) AS activity_rank
-    FROM session_status
-)
-SELECT {storedStatusColumns}
-FROM ranked
-WHERE activity_rank = 1;
-"""
+// --- Bind/read helpers ------------------------------------------------------------------------
 
-let private statusBySessionSql =
-    $"""
-SELECT {storedStatusColumns}
-FROM session_status
-WHERE session_id = $sid
-LIMIT 1;
-"""
-
-let private retainedTerminalSessionIdsSql =
-    """
-SELECT DISTINCT terminal_session_id
-FROM session_status
-WHERE terminal_session_id IS NOT NULL;
-"""
-
-// --- Reader / binder helpers ------------------------------------------------------------------
-
-// Bind an activity_events row's parameters for the transactional AppendAndUpsert path.
-let private bindAppend (cmd: SqliteCommand) (row: ActivityEventRow) =
-    cmd.Parameters.AddWithValue("$eid", EventId.value row.EventId) |> ignore
-    cmd.Parameters.AddWithValue("$sid", SessionId.value row.SessionId) |> ignore
-    cmd.Parameters.AddWithValue("$wt", WorktreePath.value row.WorktreePath) |> ignore
-    cmd.Parameters.AddWithValue("$prov", providerText row.Provider) |> ignore
-    cmd.Parameters.AddWithValue("$kind", row.Kind) |> ignore
-    cmd.Parameters.AddWithValue("$status", statusText row.Status) |> ignore
-    cmd.Parameters.AddWithValue("$skill", optToDb row.Skill) |> ignore
-    cmd.Parameters.AddWithValue("$ts", isoUtc row.Ts) |> ignore
-
-// Bind a session_status row's parameters onto a prepared command — shared by UpsertStatus and the
-// transactional AppendAndUpsert.
-let private bindUpsert (cmd: SqliteCommand) (stored: StoredStatus) =
-    let s = stored.Status
-    let umText, umTs = msgToDb s.LastUserMessage
-    let amText, amTs = msgToDb s.LastAssistantMessage
-    let itText, itTs = msgToDb s.Intent
-    let ttText, ttTs = msgToDb s.Title
-    let contextCurrent, contextLimit, contextAt = contextToDb stored
-    cmd.Parameters.AddWithValue("$sid", SessionId.value stored.SessionId) |> ignore
-    cmd.Parameters.AddWithValue("$wt", WorktreePath.value stored.WorktreePath) |> ignore
-    cmd.Parameters.AddWithValue("$prov", providerText stored.Provider) |> ignore
-    cmd.Parameters.AddWithValue("$status", statusText s.Status) |> ignore
-    cmd.Parameters.AddWithValue("$skill", optToDb s.Skill) |> ignore
-    cmd.Parameters.AddWithValue("$um", umText) |> ignore
-    cmd.Parameters.AddWithValue("$uts", umTs) |> ignore
-    cmd.Parameters.AddWithValue("$am", amText) |> ignore
-    cmd.Parameters.AddWithValue("$ats", amTs) |> ignore
-    cmd.Parameters.AddWithValue("$it", itText) |> ignore
-    cmd.Parameters.AddWithValue("$its", itTs) |> ignore
-    cmd.Parameters.AddWithValue("$tt", ttText) |> ignore
-    cmd.Parameters.AddWithValue("$tts", ttTs) |> ignore
-    cmd.Parameters.AddWithValue("$upd", isoUtc stored.UpdatedAt) |> ignore
-    cmd.Parameters.AddWithValue("$seen", isoUtc stored.LastSeen) |> ignore
-    cmd.Parameters.AddWithValue("$contextCurrent", contextCurrent) |> ignore
-    cmd.Parameters.AddWithValue("$contextLimit", contextLimit) |> ignore
-    cmd.Parameters.AddWithValue("$contextAt", contextAt) |> ignore
-    cmd.Parameters.AddWithValue("$awaitingUserSince", timestampToDb s.AwaitingUserSince) |> ignore
-    cmd.Parameters.AddWithValue("$userInputCompletedAt", timestampToDb s.UserInputCompletedAt) |> ignore
-    cmd.Parameters.AddWithValue(
-        "$terminalSessionId",
-        stored.TerminalSessionId |> Option.map TerminalSessionId.value |> optToDb
+let private bindIdentity (command: SqliteCommand) identity =
+    command.Parameters.AddWithValue(
+        "$processId",
+        ProcessIdentity.processId identity
     )
     |> ignore
 
-let private readStoredBySession
-    (conn: SqliteConnection)
-    (tx: SqliteTransaction)
-    (sessionId: SessionId)
-    : StoredStatus
+    command.Parameters.AddWithValue(
+        "$processStartTicks",
+        ProcessIdentity.processStartTimeUtcTicks identity
+    )
+    |> ignore
+
+let private bindInstance (command: SqliteCommand) (stored: StoredInstance) =
+    let status = stored.Status
+    let userMessage, userMessageAt = msgToDb status.LastUserMessage
+    let assistantMessage, assistantMessageAt =
+        msgToDb status.LastAssistantMessage
+    let intent, intentAt = msgToDb status.Intent
+    let title, titleAt = msgToDb status.Title
+    let contextCurrent, contextLimit, contextAt = contextToDb stored
+
+    bindIdentity command stored.ProcessIdentity
+    command.Parameters.AddWithValue("$sessionId", SessionId.value stored.SessionId) |> ignore
+    command.Parameters.AddWithValue("$worktreePath", WorktreePath.value stored.WorktreePath) |> ignore
+    command.Parameters.AddWithValue("$provider", providerText stored.Provider) |> ignore
+    command.Parameters.AddWithValue("$status", statusText status.Status) |> ignore
+    command.Parameters.AddWithValue("$skill", optToDb status.Skill) |> ignore
+    command.Parameters.AddWithValue("$userMessage", userMessage) |> ignore
+    command.Parameters.AddWithValue("$userMessageAt", userMessageAt) |> ignore
+    command.Parameters.AddWithValue("$assistantMessage", assistantMessage) |> ignore
+    command.Parameters.AddWithValue("$assistantMessageAt", assistantMessageAt) |> ignore
+    command.Parameters.AddWithValue("$intent", intent) |> ignore
+    command.Parameters.AddWithValue("$intentAt", intentAt) |> ignore
+    command.Parameters.AddWithValue("$title", title) |> ignore
+    command.Parameters.AddWithValue("$titleAt", titleAt) |> ignore
+    command.Parameters.AddWithValue("$updatedAt", isoUtc stored.UpdatedAt) |> ignore
+    command.Parameters.AddWithValue("$lifecycleAt", timestampToDb stored.LifecycleAt) |> ignore
+    command.Parameters.AddWithValue("$lastSeen", isoUtc stored.LastSeen) |> ignore
+    command.Parameters.AddWithValue("$contextCurrent", contextCurrent) |> ignore
+    command.Parameters.AddWithValue("$contextLimit", contextLimit) |> ignore
+    command.Parameters.AddWithValue("$contextAt", contextAt) |> ignore
+    command.Parameters.AddWithValue("$awaitingUserSince", timestampToDb status.AwaitingUserSince) |> ignore
+    command.Parameters.AddWithValue("$userInputCompletedAt", timestampToDb status.UserInputCompletedAt) |> ignore
+    command.Parameters.AddWithValue(
+        "$terminalSessionId",
+        stored.TerminalSessionId
+        |> Option.map TerminalSessionId.value
+        |> optToDb
+    )
+    |> ignore
+    command.Parameters.AddWithValue(
+        "$backgroundAgentClocks",
+        serializeBackgroundAgentClocks status.BackgroundAgentClocks
+    )
+    |> ignore
+    command.Parameters.AddWithValue("$closedAt", timestampToDb stored.ClosedAt) |> ignore
+
+let private bindEvent (command: SqliteCommand) (row: ActivityEventRow) =
+    bindIdentity command row.ProcessIdentity
+    command.Parameters.AddWithValue("$eventId", EventId.value row.EventId) |> ignore
+    command.Parameters.AddWithValue("$sessionId", SessionId.value row.SessionId) |> ignore
+    command.Parameters.AddWithValue("$worktreePath", WorktreePath.value row.WorktreePath) |> ignore
+    command.Parameters.AddWithValue("$provider", providerText row.Provider) |> ignore
+    command.Parameters.AddWithValue("$kind", row.Kind) |> ignore
+    command.Parameters.AddWithValue("$status", statusText row.Status) |> ignore
+    command.Parameters.AddWithValue("$skill", optToDb row.Skill) |> ignore
+    command.Parameters.AddWithValue("$timestamp", isoUtc row.Ts) |> ignore
+
+let private readInstanceByIdentity
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction option)
+    identity
     =
-    use cmd = conn.CreateCommand()
-    cmd.Transaction <- tx
-    cmd.CommandText <- statusBySessionSql
-    cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-    use reader = cmd.ExecuteReader()
+    use command = connection.CreateCommand()
+    transaction |> Option.iter (fun value -> command.Transaction <- value)
+    command.CommandText <- instanceByIdentitySql
+    bindIdentity command identity
+    use reader = command.ExecuteReader()
+    if reader.Read() then Some(readInstance reader) else None
 
-    if reader.Read() then
-        readStored reader
-    else
-        failwith $"{nameof StoredStatus}: persisted session row missing"
-
-let private appendEvent (conn: SqliteConnection) (tx: SqliteTransaction) row =
-    use cmd = conn.CreateCommand()
-    cmd.Transaction <- tx
-    cmd.CommandText <- appendSql
-    bindAppend cmd row
-    cmd.ExecuteNonQuery() = 1
+let private upsertInstance
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction option)
+    stored
+    =
+    use command = connection.CreateCommand()
+    transaction |> Option.iter (fun value -> command.Transaction <- value)
+    command.CommandText <- upsertInstanceSql
+    bindInstance command stored
+    command.ExecuteNonQuery() |> ignore
 
 // --- Store ------------------------------------------------------------------------------------
 
-/// SQLite (WAL) persistence for push-model session activity. Construct once per Treemon instance with
-/// an instance-specific `dbPath` (created if its directory is missing). Thread-safe: every operation
-/// runs on its own short-lived connection, so the single-writer mailbox and concurrent WAL readers
-/// (restart rebuild, resume lookup, prune timer) never share a connection. The optional observer runs
-/// after connection-local PRAGMAs and before store SQL so diagnostics can attach per connection
-/// without changing production callers. Dispose on shutdown.
 type SessionActivityStore
     (
         dbPath: string,
@@ -690,184 +666,213 @@ type SessionActivityStore
     ) =
 
     do
-        let dir = Path.GetDirectoryName dbPath
+        let directory = Path.GetDirectoryName dbPath
 
-        if not (String.IsNullOrEmpty dir) then
-            Directory.CreateDirectory dir |> ignore
+        if not (String.IsNullOrEmpty directory) then
+            Directory.CreateDirectory directory |> ignore
 
     let connectionOpened = defaultArg connectionOpened ignore
 
-    // Pooling is off so each connection fully releases its file handle on close — reliable teardown on
-    // Windows (which locks open DB files) and no pooled-connection surprises. The keep-alive below
-    // keeps the file open (and WAL active) for the store's lifetime instead.
-    let connString =
-        SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
+    let connectionString =
+        SqliteConnectionStringBuilder(
+            DataSource = dbPath,
+            Pooling = false
+        ).ConnectionString
 
-    // journal_mode=WAL is persisted in the DB header (set once, survives reopen); synchronous and
-    // busy_timeout are per-connection, so they are (re)applied on every open. Re-asserting WAL each
-    // time is a cheap no-op once the header says WAL.
-    let openConn () =
-        let c = new SqliteConnection(connString)
-        c.Open()
-        use cmd = c.CreateCommand()
-        cmd.CommandText <- "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;"
-        cmd.ExecuteNonQuery() |> ignore
+    let openConnection () =
+        let connection = new SqliteConnection(connectionString)
+        connection.Open()
+
+        use command = connection.CreateCommand()
+        command.CommandText <-
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;"
+        command.ExecuteNonQuery() |> ignore
 
         try
-            connectionOpened c
-            c
+            connectionOpened connection
+            connection
         with _ ->
-            c.Dispose()
+            connection.Dispose()
             reraise ()
 
-    // Held open for the store's lifetime: keeps the DB file (and its WAL) live between operations and
-    // owns schema creation. Never used for queries (that would share one connection across threads).
     let keepAlive =
-        let c = openConn ()
+        let connection = openConnection ()
 
         try
-            initializeSchema c
-            c
+            initializeSchema connection
+            connection
         with _ ->
-            c.Dispose()
+            connection.Dispose()
             reraise ()
 
-    /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
-    /// for an existing session is silently ignored (see upsertSql).
-    member _.UpsertStatus(stored: StoredStatus) : unit =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- upsertSql
-        bindUpsert cmd stored
-        cmd.ExecuteNonQuery() |> ignore
+    /// Insert or replace one exact process-instance snapshot. Closure is monotonic at the SQL
+    /// boundary even if a caller accidentally supplies ClosedAt=None after the row was closed.
+    member _.UpsertInstance(stored: StoredInstance) =
+        use connection = openConnection ()
+        upsertInstance connection None stored
 
-    /// Atomically append the accepted event AND upsert the session's live row in ONE transaction on
-    /// ONE connection, so the durable status can never diverge from the idempotency record. With the
-    /// two on separate connections a failed upsert AFTER a committed append left the event_id
-    /// permanently deduped on replay while the status never recovered; here a mid-pair failure rolls
-    /// both back.
-    /// Returns the authoritative persisted status when the event was newly inserted, or None when
-    /// the event_id already existed (a full idempotent no-op — nothing appended or upserted).
-    member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredStatus) : StoredStatus option =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction()
-        let inserted = appendEvent conn tx row
+        readInstanceByIdentity connection None stored.ProcessIdentity
+        |> Option.defaultWith (fun () ->
+            failwith $"{nameof StoredInstance}: persisted instance row missing")
+
+    /// Atomically append one process-scoped event and persist its folded exact-instance state.
+    /// A duplicate event ID for the same process is a complete no-op.
+    member _.AppendAndUpsert(row: ActivityEventRow, stored: StoredInstance) =
+        use connection = openConnection ()
+        use transaction = connection.BeginTransaction()
+
+        let inserted =
+            use command = connection.CreateCommand()
+            command.Transaction <- transaction
+            command.CommandText <- appendSql
+            bindEvent command row
+            command.ExecuteNonQuery() = 1
 
         let persisted =
             if inserted then
-                use upsertCmd = conn.CreateCommand()
-                upsertCmd.Transaction <- tx
-                upsertCmd.CommandText <- upsertSql
-                bindUpsert upsertCmd stored
-                upsertCmd.ExecuteNonQuery() |> ignore
-                Some(readStoredBySession conn tx stored.SessionId)
+                upsertInstance connection (Some transaction) stored
+
+                readInstanceByIdentity
+                    connection
+                    (Some transaction)
+                    stored.ProcessIdentity
             else
                 None
 
-        tx.Commit()
+        transaction.Commit()
         persisted
 
-    /// Advance `last_seen` for openness without moving the lifecycle ordering clock. A supplied
-    /// origin follows the reporting process even when the heartbeat timestamp does not advance
-    /// liveness; an omitted origin retains existing attribution.
-    member _.RecordLiveness
+    /// Refresh liveness only for an already-known, still-open exact identity.
+    member _.RecordHeartbeat
         (
-            sessionId: SessionId,
+            identity: ProcessIdentity,
             lastSeen: DateTimeOffset,
             terminalSessionId: TerminalSessionId option
-        )
-        : unit =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- touchSql
-        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-        cmd.Parameters.AddWithValue("$seen", isoUtc lastSeen) |> ignore
-        cmd.Parameters.AddWithValue(
+        ) =
+        use connection = openConnection ()
+        use transaction = connection.BeginTransaction()
+        use command = connection.CreateCommand()
+        command.Transaction <- transaction
+        command.CommandText <- heartbeatSql
+        bindIdentity command identity
+        command.Parameters.AddWithValue("$lastSeen", isoUtc lastSeen) |> ignore
+        command.Parameters.AddWithValue(
             "$terminalSessionId",
-            terminalSessionId |> Option.map TerminalSessionId.value |> optToDb
+            terminalSessionId
+            |> Option.map TerminalSessionId.value
+            |> optToDb
         )
         |> ignore
-        cmd.ExecuteNonQuery() |> ignore
 
-    /// Persist the latest accepted context-window gauge and last_seen, inserting the full session
-    /// snapshot when a retained in-memory session outlives its pruned row. Returns the authoritative
-    /// persisted state, including a newer gauge that may already have won the independent usage clock.
-    member _.UpsertContextUsage(stored: StoredStatus) : StoredStatus =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction()
-        use cmd = conn.CreateCommand()
-        cmd.Transaction <- tx
-        cmd.CommandText <- upsertContextUsageSql
-        bindUpsert cmd stored
-        cmd.ExecuteNonQuery() |> ignore
+        let updated = command.ExecuteNonQuery() = 1
 
-        let persisted = readStoredBySession conn tx stored.SessionId
-        tx.Commit()
+        let persisted =
+            if updated then
+                readInstanceByIdentity connection (Some transaction) identity
+            else
+                None
+
+        transaction.Commit()
         persisted
 
-    /// Read one durable session row regardless of the live idle-window cutoff.
-    member _.StatusBySession(sessionId: SessionId) : StoredStatus option =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- statusBySessionSql
-        cmd.Parameters.AddWithValue("$sid", SessionId.value sessionId) |> ignore
-        use reader = cmd.ExecuteReader()
-        if reader.Read() then Some(readStored reader) else None
+    /// Monotonically close one known exact identity. Repeated closes retain the first closure time.
+    member _.CloseInstance
+        (
+            identity: ProcessIdentity,
+            closedAt: DateTimeOffset,
+            terminalSessionId: TerminalSessionId option
+        ) =
+        use connection = openConnection ()
+        use transaction = connection.BeginTransaction()
+        use command = connection.CreateCommand()
+        command.Transaction <- transaction
+        command.CommandText <- closeSql
+        bindIdentity command identity
+        command.Parameters.AddWithValue("$closedAt", isoUtc closedAt) |> ignore
+        command.Parameters.AddWithValue(
+            "$terminalSessionId",
+            terminalSessionId
+            |> Option.map TerminalSessionId.value
+            |> optToDb
+        )
+        |> ignore
 
-    /// Every terminal origin still backed by a retained durable session row. Used by the hourly
-    /// in-memory epoch sweep after durable retention has completed.
-    member internal _.RetainedTerminalSessionIds() : Set<TerminalSessionId> =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- retainedTerminalSessionIdsSql
-        use reader = cmd.ExecuteReader()
+        let updated = command.ExecuteNonQuery() = 1
+
+        let persisted =
+            if updated then
+                readInstanceByIdentity connection (Some transaction) identity
+            else
+                None
+
+        transaction.Commit()
+        persisted
+
+    member _.InstanceByIdentity(identity: ProcessIdentity) =
+        use connection = openConnection ()
+        readInstanceByIdentity connection None identity
+
+    member _.InstancesBySession(sessionId: SessionId) =
+        use connection = openConnection ()
+        use command = connection.CreateCommand()
+        command.CommandText <- instancesBySessionSql
+        command.Parameters.AddWithValue("$sessionId", SessionId.value sessionId) |> ignore
+        use reader = command.ExecuteReader()
+        readRows reader readInstance []
+
+    /// Restart rebuild: exact rows whose receipt-time liveness is still within the in-memory window.
+    member _.LoadRecentInstances(now: DateTimeOffset) =
+        use connection = openConnection ()
+        use command = connection.CreateCommand()
+        command.CommandText <- loadRecentInstancesSql
+        command.Parameters.AddWithValue("$cutoff", isoUtc (now - idleWindow)) |> ignore
+        use reader = command.ExecuteReader()
+        readRows reader readInstance []
+
+    /// One durable footer representative per worktree across exact and migration-only history. The
+    /// result is deliberately non-live; the scheduler's exact projection supplies openness.
+    member _.RetainedByWorktree() =
+        use connection = openConnection ()
+        use command = connection.CreateCommand()
+        command.CommandText <- retainedByWorktreeSql
+        command.Parameters.AddWithValue("$notLive", isoUtc DateTimeOffset.MinValue) |> ignore
+        use reader = command.ExecuteReader()
+
+        readRows reader readProjectedStatus []
+        |> List.map (fun status ->
+            WorktreePath.value status.WorktreePath, status)
+        |> Map.ofList
+
+    member _.LatestSessionIdForWorktree(worktreePath: WorktreePath) =
+        use connection = openConnection ()
+        use command = connection.CreateCommand()
+        command.CommandText <- latestSessionIdForWorktreeSql
+        command.Parameters.AddWithValue(
+            "$worktreePath",
+            WorktreePath.value worktreePath
+        )
+        |> ignore
+        use reader = command.ExecuteReader()
+        if reader.Read() then Some(reader.GetString 0) else None
+
+    member internal _.RetainedTerminalSessionIds() =
+        use connection = openConnection ()
+        use command = connection.CreateCommand()
+        command.CommandText <- retainedTerminalSessionIdsSql
+        use reader = command.ExecuteReader()
 
         readRows reader (fun row -> TerminalSessionId(row.GetString 0)) []
         |> Set.ofList
 
-    /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
-    /// so cards are correct before any new event arrives.
-    member _.LoadLiveStatuses(now: DateTimeOffset) : StoredStatus list =
-        let cutoff = now - idleWindow
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- loadSql
-        cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-        use reader = cmd.ExecuteReader()
-        readRows reader readStored []
-
-    /// The most recently active stored session per worktree across ALL rows, IGNORING the idle
-    /// window (unlike LoadLiveStatuses). This is the durable footer and resume-button-visibility
-    /// substrate for cards whose sessions have aged out of the live map. Keyed by worktree_path.
-    member _.RetainedByWorktree() : Map<string, StoredStatus> =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- retainedByWorktreeSql
-        use reader = cmd.ExecuteReader()
-
-        readRows reader readStored []
-        |> List.map (fun session -> WorktreePath.value session.WorktreePath, session)
-        |> Map.ofList
-
-    /// Resume identity for a worktree, independent of the idle window and retained until pruning.
-    member _.LatestSessionIdForWorktree(worktreePath: WorktreePath) : string option =
-        use conn = openConn ()
-        use cmd = conn.CreateCommand()
-        cmd.CommandText <- latestSessionIdForWorktreeSql
-        cmd.Parameters.AddWithValue("$wt", WorktreePath.value worktreePath) |> ignore
-        use reader = cmd.ExecuteReader()
-        if reader.Read() then Some(reader.GetString 0) else None
-
-    /// Retention: drop old events and dead sessions. Returns the number of deleted rows.
-    member _.PruneOld(cutoff: DateTimeOffset) : int =
-        use conn = openConn ()
-        use tx = conn.BeginTransaction()
-        use cmd = conn.CreateCommand()
-        cmd.Transaction <- tx
-        cmd.CommandText <- pruneSql
-        cmd.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
-        let deleted = cmd.ExecuteNonQuery()
-        tx.Commit()
+    member _.PruneOld(cutoff: DateTimeOffset) =
+        use connection = openConnection ()
+        use transaction = connection.BeginTransaction()
+        use command = connection.CreateCommand()
+        command.Transaction <- transaction
+        command.CommandText <- pruneSql
+        command.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
+        let deleted = command.ExecuteNonQuery()
+        transaction.Commit()
         deleted
 
     interface IDisposable with

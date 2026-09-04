@@ -114,8 +114,8 @@ the per-provider log-parsing detectors (`ClaudeDetector`, `CopilotDetector`, `Vs
 POSTs lifecycle events to the server, which folds them into live per-session state and collapses each
 worktree's sessions in `CodingToolStatus.fs` (`fromPushSessions`). Explicit background-agent
 lifecycle events are folded into process-local per-tool clocks so a root turn cannot settle Idle
-while delegated agents are still running. The clocks are intentionally forgotten on a Treemon
-restart in exchange for a much simpler persistence model. See
+while delegated agents are still running. Those clocks are persisted per exact process instance,
+so restart retains active delegated work until its terminal event or stale-gap cleanup. See
 `docs/spec/session-status-push.md` for the full model.
 
 - Status vocabulary is `CodingToolStatus = Working | WaitingForUser | Idle | NoSession`; the dot is a
@@ -284,7 +284,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Shared/EventUtils.fs` | Event processing: branch extraction, pinning, deduplication |
 | `src/Server/SchedulerState.fs` | Dashboard state model, `StateMsg` protocol, and the MailboxProcessor state agent |
 | `src/Server/RefreshScheduler.fs` | Repo-keyed task scheduling, task execution, merged-PR reconciliation |
-| `src/Server/SessionActivity.fs` / `SessionActivityStore.fs` / `SessionActivityService.fs` | Push session-status model: pure live fold, SQLite (WAL) base-state/history store, ingest endpoint + mailbox (see `docs/spec/session-status-push.md`) |
+| `src/Server/SessionActivity*.fs` | Push session-status model: pure fold, exact-instance protocol/ingestion, SQLite (WAL) state/history, and acknowledged ingest mailbox (see `docs/spec/session-status-push.md`) |
 | `src/Server/UserMessageFormatting.fs` | Server-owned system-reminder suppression and canvas prompt projection shared by ingestion, activity, and footer fields |
 | `src/Server/CodingToolStatus.fs` | Collapse live push session-status into card coding-tool fields (`fromPushSessions`), resume pick, and per-worktree provider config |
 | `src/Server/AutoSync.fs` | Busy-worktree deferral, mechanical-sync orchestration for every free worktree, agent delivery of structured fallback reasons, and base-revision eligibility |

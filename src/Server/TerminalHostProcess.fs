@@ -3,6 +3,7 @@ module Server.TerminalHostProcess
 open System
 open System.Diagnostics
 open System.IO
+open Server.SessionActivity
 open Treemon.TerminalHosting
 
 type internal Config =
@@ -15,26 +16,16 @@ type internal Config =
       ControlRequestTimeout: TimeSpan
       ProbeInterval: TimeSpan
       LaunchHost: ProcessStartInfo -> Result<unit, string>
-      ProcessIdentityMatches: int -> int64 -> Result<bool, string>
+      ProcessIdentityResolver: ProcessIdentityResolver
       ResolveProcessExecutable: int -> int64 -> Result<string, string>
       SendTerminalCommand: string -> string -> Async<Result<unit, string>> }
 
 let internal processIdentityMatchesDefault pid processStartTimeUtcTicks =
-    try
-        use child = Process.GetProcessById pid
-
-        if child.HasExited then
-            Ok false
-        else
-            let startTicks =
-                child.StartTime.ToUniversalTime().Ticks
-
-            Ok(startTicks = processStartTimeUtcTicks)
-    with
-    | :? ArgumentException
-    | :? InvalidOperationException -> Ok false
-    | error ->
-        Error $"Could not verify TerminalHost process identity: {error.Message}"
+    ProcessIdentity.create pid processStartTimeUtcTicks
+    |> Result.bind (
+        ProcessIdentityResolver.isAlive
+            ProcessIdentityResolverRuntime.defaultResolver
+    )
 
 let internal resolveProcessExecutableDefault pid processStartTimeUtcTicks =
     try
@@ -136,7 +127,11 @@ let internal probeDelayMilliseconds config =
     |> min (float Int32.MaxValue)
     |> int
 
-let internal defaultConfig allowedOrigins sendTerminalCommand =
+let internal defaultConfigWithProcessIdentityResolver
+    processIdentityResolver
+    allowedOrigins
+    sendTerminalCommand
+    =
     let layout = TerminalHostLayout.current ()
     let hostExecutable =
         Environment.GetEnvironmentVariable("TREEMON_TERMINAL_HOST_EXECUTABLE")
@@ -153,6 +148,12 @@ let internal defaultConfig allowedOrigins sendTerminalCommand =
       ControlRequestTimeout = TimeSpan.FromSeconds 10.0
       ProbeInterval = TimeSpan.FromMilliseconds 100.0
       LaunchHost = launchDetached
-      ProcessIdentityMatches = processIdentityMatchesDefault
+      ProcessIdentityResolver = processIdentityResolver
       ResolveProcessExecutable = resolveProcessExecutableDefault
       SendTerminalCommand = sendTerminalCommand }
+
+let internal defaultConfig allowedOrigins sendTerminalCommand =
+    defaultConfigWithProcessIdentityResolver
+        ProcessIdentityResolverRuntime.defaultResolver
+        allowedOrigins
+        sendTerminalCommand

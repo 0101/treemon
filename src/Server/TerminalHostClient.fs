@@ -422,7 +422,19 @@ let internal sendTerminalCommandDefault attachmentEndpoint command =
                     return Error "Could not submit the terminal command"
     }
 
-let internal defaultConfig allowedOrigins = TerminalHostProcess.defaultConfig allowedOrigins sendTerminalCommandDefault
+let internal defaultConfigWithProcessIdentityResolver
+    processIdentityResolver
+    allowedOrigins
+    =
+    TerminalHostProcess.defaultConfigWithProcessIdentityResolver
+        processIdentityResolver
+        allowedOrigins
+        sendTerminalCommandDefault
+
+let internal defaultConfig allowedOrigins =
+    TerminalHostProcess.defaultConfig
+        allowedOrigins
+        sendTerminalCommandDefault
 
 let private preflightIncompatibleHost config manifest incompatibility =
     async {
