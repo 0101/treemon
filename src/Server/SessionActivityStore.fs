@@ -216,7 +216,7 @@ let private additiveColumnMigrations =
 
 // This index must be created only after ensureAdditiveColumns: existing databases gain
 // terminal_session_id through that migration, so putting it in schemaSql would fail startup before
-// the column exists. The key order matches the exact-origin lookup and its deterministic ordering.
+// the column exists. Its leading origin column supports retained-origin scans for epoch pruning.
 let private terminalSessionIndexSql =
     """
 CREATE INDEX IF NOT EXISTS ix_status_terminal_activity
@@ -429,14 +429,6 @@ let private retainedTerminalSessionIdsSql =
 SELECT DISTINCT terminal_session_id
 FROM session_status
 WHERE terminal_session_id IS NOT NULL;
-"""
-
-let internal statusesByTerminalSessionIdsSql parameterNames =
-    $"""
-SELECT {storedStatusColumns}
-FROM session_status
-WHERE terminal_session_id IN ({parameterNames})
-ORDER BY terminal_session_id, updated_at DESC, session_id DESC;
 """
 
 // --- Reader / binder helpers ------------------------------------------------------------------
@@ -662,29 +654,6 @@ type SessionActivityStore
 
         readRows reader (fun row -> TerminalSessionId(row.GetString 0)) []
         |> Set.ofList
-
-    /// All durable sessions attributed to one of the current authoritative TerminalHost ids.
-    /// TerminalSessionActivity applies the replacement liveness policy after this indexed read.
-    member _.StatusesByTerminalSessionIds(terminalSessionIds: Set<TerminalSessionId>) : StoredStatus list =
-        if Set.isEmpty terminalSessionIds then
-            []
-        else
-            let parameters =
-                terminalSessionIds
-                |> Set.toList
-                |> List.mapi (fun index terminalSessionId ->
-                    $"$terminalSessionId{index}", TerminalSessionId.value terminalSessionId)
-
-            use conn = openConn ()
-            use cmd = conn.CreateCommand()
-            let parameterNames = parameters |> List.map fst |> String.concat ", "
-            cmd.CommandText <- statusesByTerminalSessionIdsSql parameterNames
-
-            parameters
-            |> List.iter (fun (name, value) -> cmd.Parameters.AddWithValue(name, value) |> ignore)
-
-            use reader = cmd.ExecuteReader()
-            readRows reader readStored []
 
     /// Restart rebuild: every session whose `last_seen` is within the idle window (i.e. still live),
     /// so cards are correct before any new event arrives.

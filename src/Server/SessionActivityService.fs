@@ -299,27 +299,15 @@ let internal retentionPeriod = TimeSpan.FromDays 60.0
 /// How often the retention timer fires.
 let internal pruneInterval = TimeSpan.FromHours 1.0
 
-let internal mergeCurrentAndDurableStatuses
+let internal statusesForTerminalOrigins
     (terminalSessionIds: Set<TerminalSessionId>)
     (live: Map<SessionId, StoredStatus>)
-    (durable: StoredStatus seq)
     : StoredStatus list =
-    let requestedLive =
-        live
-        |> Map.filter (fun _ status ->
-            status.TerminalSessionId
-            |> Option.exists terminalSessionIds.Contains)
-
-    durable
+    live
+    |> Map.values
     |> Seq.filter (fun status ->
         status.TerminalSessionId
         |> Option.exists terminalSessionIds.Contains)
-    |> Seq.fold (fun sessions status -> Map.add status.SessionId status sessions) Map.empty
-    |> fun sessions ->
-        requestedLive
-        |> Map.fold (fun merged sessionId status ->
-            Map.add sessionId status merged) sessions
-    |> Map.values
     |> Seq.toList
 
 // --- Service -----------------------------------------------------------------------------------
@@ -690,17 +678,12 @@ type SessionActivityService internal
                         state.ActivityEpochState
                         |> observeCurrentTerminalOrigins terminalSessionIds
 
-                    let result =
-                        try
-                            let sessions =
-                                store.StatusesByTerminalSessionIds terminalSessionIds
-                                |> mergeCurrentAndDurableStatuses terminalSessionIds state.Live
-
-                            Ok(activityEpoch, sessions)
-                        with ex ->
-                            Error $"Could not query terminal-owned sessions: {ex.Message}"
-
-                    reply.Reply result
+                    reply.Reply(
+                        Ok(
+                            activityEpoch,
+                            statusesForTerminalOrigins terminalSessionIds state.Live
+                        )
+                    )
                     return!
                         loop
                             { state with
@@ -808,8 +791,8 @@ type SessionActivityService internal
         mailbox.PostAndReply Snapshot
 
     /// Raw activity for the complete current TerminalHost registry. The mailbox serializes the
-    /// durable read with ingestion so the filtered status rows and process-local activity epoch
-    /// describe one observation; terminal-specific policy is derived by TerminalSessionActivity.
+    /// filtered live rows with the process-local activity epoch so they describe one observation;
+    /// terminal-specific policy is derived by TerminalSessionActivity.
     member internal _.QueryTerminalActivity
         (terminalSessionIds: Set<TerminalSessionId>)
         : Result<int64 * StoredStatus list, string> =

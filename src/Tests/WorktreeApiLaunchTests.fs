@@ -166,6 +166,33 @@ type WorktreeApiLaunchTests() =
         Assert.That(result, Is.EqualTo None)
 
     [<Test>]
+    member _.``Resume reuses the exact waiting session despite a stale heartbeat``() =
+        let now = DateTimeOffset.UtcNow
+        let path = WorktreePath "C:/wt/resume"
+        let existingId =
+            terminalId "cccccccccccccccccccccccccccccccc"
+        let existing = startResult path (EmbeddedTerminalId.value existingId)
+        let awaitingAt = now - TimeSpan.FromMinutes 10.0
+        let staleWaiting =
+            { liveSession now path existingId "copilot-session" with
+                Status =
+                    SessionActivity.fold
+                        SessionActivity.emptyStatus
+                        (SessionActivity.AwaitingUserInput(None, awaitingAt))
+                UpdatedAt = awaitingAt
+                LastSeen = awaitingAt }
+
+        let result =
+            TerminalSessionActivity.tryFindLiveTerminalId
+                now
+                path
+                (SessionActivity.SessionId "copilot-session")
+                [ staleWaiting ]
+                existing.Snapshot
+
+        Assert.That(result, Is.EqualTo(Some existingId))
+
+    [<Test>]
     member _.``Worktree API selects typed launch operations and preserves exact embedded results``() =
         withTempDir "treemon-worktree-api-launch" (fun root ->
             let path =

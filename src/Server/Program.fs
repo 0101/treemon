@@ -587,12 +587,16 @@ let main args =
         }
 
     try
+        let replacementReadyAt =
+            DateTimeOffset.UtcNow + SessionActivity.openWindow
+
         let replacementLoop =
             match embeddedTerminal, sessionActivityService with
             | Some manager, Some service ->
                 EmbeddedTerminal.runReplacementCoordinator
                     manager
                     (TerminalSessionActivity.queryReplacementPlan
+                        replacementReadyAt
                         CodingToolStatus.readConfiguredProvider
                         (fun terminalSessionIds ->
                             service.QueryTerminalActivity terminalSessionIds))

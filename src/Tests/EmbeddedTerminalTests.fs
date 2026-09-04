@@ -2234,6 +2234,7 @@ type EmbeddedTerminalReplacementTests() =
                 )
 
                 queryReplacementPlan
+                    DateTimeOffset.MinValue
                     (fun _ -> Some CopilotCli)
                     (fun terminalSessionIds ->
                         Assert.That(

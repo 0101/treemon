@@ -187,6 +187,11 @@ A newly published host executable is staged in a simple versioned directory whil
 and terminals continue normally. Treemon does not mark the old host drain-only and does not refuse,
 queue, delay, or proactively block new terminals, prompts, or Copilot sessions.
 
+After a Treemon server start, replacement waits one `openWindow` before its first policy evaluation.
+This reconciliation period lets Copilot processes that survived with the standalone TerminalHost
+reassert their liveness before any destructive host update can begin. Later staged versions do not
+repeat the delay because the server has already been observing activity continuously.
+
 Whenever all currently owned Copilot sessions are naturally idle, Treemon captures the authoritative
 host registry revision and the owned-session activity epoch, then immediately rechecks both. It
 commits replacement only when the registry and activity are unchanged and no owned session is
@@ -402,8 +407,8 @@ The reporting extension reads `TREEMON_TERMINAL_SESSION_ID` and adds it as optio
 `SessionActivityService` and `SessionActivityStore` retain that value without changing status
 folding, representative selection, liveness, or worktree projection. The activity mailbox maintains
 a bounded live-status cache and a process-local monotonic counter per terminal origin. Its narrow
-terminal query filters the live cache to the caller's complete authoritative terminal-ID set before
-overlaying indexed durable rows, and returns only those raw rows plus their maximum epoch.
+terminal query filters the live cache to the caller's complete authoritative terminal-ID set and
+returns those raw rows plus their maximum epoch.
 `TerminalSessionActivity` owns the terminal-specific projection and returns an opaque replacement
 policy plus the optional display-safe activity for each terminal. The remoting API enriches host
 registry snapshots from the scheduler's bounded live-session map; the TerminalHost registry and
@@ -477,7 +482,10 @@ ports, and state.
 - **Bounded ownership-query state:** terminal replacement consumes a focused projection over only
   current authoritative terminal IDs. Live status follows the existing idle-window bound,
   per-origin epochs are pruned by durable retention and current registry membership without
-  resetting the global sequence, and SQLite uses the terminal-origin/activity-order index.
+  resetting the global sequence.
+- **Startup activity reconciliation:** a server waits one `openWindow` before replacing a connected
+  host, allowing surviving Copilot processes to refresh the live cache. The delay is server-start
+  scoped, so a later staged version can use continuously observed activity immediately.
 - **Opportunistic replacement, not draining:** normal work is never rejected in anticipation of an
   update. A race cancels the attempt rather than delaying the work.
 - **Live-session replacement gate:** every heartbeat-fresh `Working` or `WaitingForUser` session

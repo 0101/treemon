@@ -88,13 +88,15 @@ let private replacementTerminal
     { TerminalSessionId = terminalSessionId
       WorktreePath = worktreePath }
 
-let private queryReplacementPlanOk
+let private queryReplacementPlanAfterOk
+    replacementReadyAt
     (service: SessionActivityService)
     now
     terminals
     =
     match
         queryReplacementPlan
+            replacementReadyAt
             CodingToolStatus.readConfiguredProvider
             (fun ids -> service.QueryTerminalActivity ids)
             now
@@ -104,6 +106,9 @@ let private queryReplacementPlanOk
     | Error error ->
         Assert.Fail $"expected replacement session plan, got Error: {error}"
         failwith "unreachable"
+
+let private queryReplacementPlanOk =
+    queryReplacementPlanAfterOk DateTimeOffset.MinValue
 
 let private requireReplacementReady =
     function
@@ -1810,7 +1815,7 @@ type TerminalOwnershipQueryTests() =
           ContextUsageAt = None }
 
     [<Test>]
-    member _.``terminal activity merge materializes only requested origins from a large live map``() =
+    member _.``terminal activity projection materializes only requested origins from a large live map``() =
         let requested =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -1829,14 +1834,13 @@ type TerminalOwnershipQueryTests() =
                 (SessionId "requested")
                 (ownedStored requested "requested" at)
 
-        let merged =
-            mergeCurrentAndDurableStatuses
+        let projected =
+            statusesForTerminalOrigins
                 (Set.singleton requested)
                 live
-                Seq.empty
 
         Assert.That(
-            merged |> List.map _.SessionId,
+            projected |> List.map _.SessionId,
             Is.EqualTo([ SessionId "requested" ])
         )
 
@@ -2068,8 +2072,11 @@ type TerminalOwnershipQueryTests() =
               OpenSessions =
                 [ { TerminalSessionId = ownedTerminal
                     CopilotSessionId = SessionId "provider-owned-session"
-                    Status = SessionLevelStatus.Idle
-                    UpdatedAt = ts "2026-03-01T10:00:00Z" } ] }
+                    Status = SessionLevelStatus.Idle } ]
+              ReplacementSessionIds =
+                Map.ofList
+                    [ ownedTerminal,
+                      SessionId "provider-owned-session" ] }
 
         let resolveProvider (path: string) =
             Assert.That(
@@ -2094,6 +2101,54 @@ type TerminalOwnershipQueryTests() =
                           "copilot --yolo --resume 'provider-owned-session'" ]
                 ),
                 "the unrelated terminal remains a plain shell"
+            ))
+
+    [<Test>]
+    member _.``replacement waits through startup reconciliation window``() =
+        let now = ts "2026-03-01T10:00:00Z"
+        let replacementReadyAt = now + openWindow
+        let terminalSessionId =
+            TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        let terminal =
+            replacementTerminal terminalSessionId "C:/wt/a"
+
+        let beforeReady =
+            queryReplacementPlan
+                replacementReadyAt
+                (fun _ -> Some CopilotCli)
+                (fun _ ->
+                    Assert.Fail "activity must not be queried during startup reconciliation"
+                    failwith "unreachable")
+                now
+                [ terminal ]
+
+        let atReady =
+            queryReplacementPlan
+                replacementReadyAt
+                (fun _ -> Some CopilotCli)
+                (fun _ -> Ok(7L, []))
+                replacementReadyAt
+                [ terminal ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                beforeReady,
+                Is.EqualTo(
+                    Ok TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+                    : Result<TerminalHostReplacement.ReplacementSessionPlan, string>
+                )
+            )
+            Assert.That(
+                atReady,
+                Is.EqualTo(
+                    Ok(
+                        TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                            7L,
+                            Map.empty
+                        )
+                    )
+                    : Result<TerminalHostReplacement.ReplacementSessionPlan, string>
+                )
             ))
 
     [<Test>]
@@ -2202,9 +2257,12 @@ type TerminalOwnershipQueryTests() =
                     Is.EqualTo(
                         [ { TerminalSessionId = terminalA
                             CopilotSessionId = SessionId "owned"
-                            Status = SessionLevelStatus.Working
-                            UpdatedAt = ts "2026-03-01T10:00:05Z" } ]
+                            Status = SessionLevelStatus.Working } ]
                     )
+                )
+                Assert.That(
+                    working.ReplacementSessionIds,
+                    Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
                 )
                 Assert.That(
                     queryReplacementPlanOk service now [ replacementTarget ],
@@ -2285,10 +2343,13 @@ type TerminalOwnershipQueryTests() =
                     Is.EqualTo(
                         [ { TerminalSessionId = terminalA
                             CopilotSessionId = SessionId "owned"
-                            Status = SessionLevelStatus.Idle
-                            UpdatedAt = ts "2026-03-01T10:00:20Z" } ]
+                            Status = SessionLevelStatus.Idle } ]
                     ),
                     "an omitted origin keeps the session attached to its exact terminal"
+                )
+                Assert.That(
+                    retained.ReplacementSessionIds,
+                    Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
                 )
                 Assert.That(retainedEpoch, Is.EqualTo retained.ActivityEpoch)
                 Assert.That(
@@ -2301,10 +2362,11 @@ type TerminalOwnershipQueryTests() =
                 )))
 
     [<Test>]
-    member _.``fresh owned session wins replacement after restart over newer stale history``() =
+    member _.``startup reconciliation lets a surviving session reassert before replacement``() =
         let terminalSessionId =
             TerminalSessionId "cccccccccccccccccccccccccccccccc"
         let now = DateTimeOffset.UtcNow
+        let replacementReadyAt = now + openWindow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-owned-resume-worktree")
         let retained updatedAt lastSeen sessionId =
             { SessionId = SessionId sessionId
@@ -2320,8 +2382,8 @@ type TerminalOwnershipQueryTests() =
             store.UpsertStatus(
                 retained
                     (now.AddHours(-5.0))
-                    (now.AddMinutes(-1.0))
-                    "fresh"
+                    (now - idleWindow - TimeSpan.FromMinutes 10.0)
+                    "surviving"
             )
 
             store.UpsertStatus(
@@ -2333,37 +2395,66 @@ type TerminalOwnershipQueryTests() =
 
         withServiceSeeded worktree seed (fun (service, _, _) ->
             service.Start()
+            Assert.That(service.LiveSnapshot(), Is.Empty)
+            Assert.That(
+                queryReplacementPlanAfterOk
+                    replacementReadyAt
+                    service
+                    now
+                    [ replacementTerminal terminalSessionId worktree ],
+                Is.EqualTo
+                    TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+            )
+
+            mkReport
+                "surviving"
+                worktree
+                "surviving-heartbeat"
+                (now.AddMinutes(1.0).ToString("O"))
+                Heartbeat
+            |> fun report ->
+                { report with TerminalSessionId = Some terminalSessionId }
+            |> service.Submit
+
             Assert.That(
                 service.LiveSnapshot() |> Map.keys |> Seq.toList,
-                Is.EqualTo([ SessionId "fresh" ])
+                Is.EqualTo([ SessionId "surviving" ])
             )
 
             let snapshot =
-                queryOwnedOk service now (Set.singleton terminalSessionId)
+                queryOwnedOk service replacementReadyAt (Set.singleton terminalSessionId)
             let policyEpoch, resumeCommands =
-                queryReplacementPlanOk
+                queryReplacementPlanAfterOk
+                    replacementReadyAt
                     service
-                    now
+                    replacementReadyAt
                     [ replacementTerminal terminalSessionId worktree ]
                 |> requireReplacementReady
 
             Assert.Multiple(fun () ->
-                Assert.That(snapshot.ActivityEpoch, Is.Zero)
+                Assert.That(snapshot.ActivityEpoch, Is.GreaterThan 0L)
                 Assert.That(
                     snapshot.OpenSessions,
                     Is.EqualTo(
                         [ { TerminalSessionId = terminalSessionId
-                            CopilotSessionId = SessionId "fresh"
-                            Status = SessionLevelStatus.Idle
-                            UpdatedAt = now.AddHours(-5.0) } ]
+                            CopilotSessionId = SessionId "surviving"
+                            Status = SessionLevelStatus.Idle } ]
                     )
                 )
-                Assert.That(policyEpoch, Is.Zero)
+                Assert.That(
+                    snapshot.ReplacementSessionIds,
+                    Is.EqualTo(
+                        Map.ofList
+                            [ terminalSessionId,
+                              SessionId "surviving" ]
+                    )
+                )
+                Assert.That(policyEpoch, Is.EqualTo snapshot.ActivityEpoch)
                 Assert.That(
                     resumeCommands,
                     Is.EqualTo(
                         Map.ofList
                             [ TerminalSessionId.value terminalSessionId,
-                              "copilot --yolo --resume 'fresh'" ]
+                              "copilot --yolo --resume 'surviving'" ]
                     )
                 )))

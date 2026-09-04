@@ -8,12 +8,12 @@ open Server.SessionActivityStore
 type internal OwnedSessionState =
     { TerminalSessionId: TerminalSessionId
       CopilotSessionId: SessionId
-      Status: SessionLevelStatus
-      UpdatedAt: DateTimeOffset }
+      Status: SessionLevelStatus }
 
 type internal OwnedSessionSnapshot =
     { ActivityEpoch: int64
-      OpenSessions: OwnedSessionState list }
+      OpenSessions: OwnedSessionState list
+      ReplacementSessionIds: Map<TerminalSessionId, SessionId> }
 
 type internal ActivityQuery = Set<TerminalSessionId> -> Result<int64 * StoredStatus list, string>
 
@@ -28,57 +28,42 @@ let internal joinOwnedSessions
         |> Option.map (fun terminalId -> terminalId, session))
     |> Seq.toList
 
-let private liveOwnedSessions
-    (now: DateTimeOffset)
-    (ownedSessions: (TerminalSessionId * StoredStatus) list)
-    =
-    ownedSessions
-    |> List.filter (fun (_, session) ->
-        now - session.LastSeen < openWindow)
-
-let private ownedSessionStates
-    (ownedSessions: (TerminalSessionId * StoredStatus) list)
-    : OwnedSessionState list =
-    ownedSessions
-    |> List.map (fun (terminalId, session) ->
-        { TerminalSessionId = terminalId
-          CopilotSessionId = session.SessionId
-          Status = effectiveStatus session.Status
-          UpdatedAt = session.UpdatedAt })
-    |> List.sortBy (fun session ->
-        TerminalSessionId.value session.TerminalSessionId, SessionId.value session.CopilotSessionId)
-
-let internal effectiveOwnedSessionStates
-    (now: DateTimeOffset)
-    (ownedSessions: (TerminalSessionId * StoredStatus) list)
-    : OwnedSessionState list =
-    ownedSessions
-    |> liveOwnedSessions now
-    |> ownedSessionStates
-
-let internal replacementSessionIds
-    (openSessions: OwnedSessionState list)
-    : Map<TerminalSessionId, SessionId> =
-    openSessions
-    |> List.groupBy _.TerminalSessionId
-    |> List.map (fun (terminalId, sessions) ->
-        let latest =
-            sessions
-            |> List.maxBy (fun session ->
-                session.UpdatedAt, SessionId.value session.CopilotSessionId)
-
-        terminalId, latest.CopilotSessionId)
-    |> Map.ofList
-
 let internal ownedSessionSnapshot
     (now: DateTimeOffset)
     (terminalSessionIds: Set<TerminalSessionId>)
     (activityEpoch: int64, sessions: StoredStatus list)
     : OwnedSessionSnapshot =
-    let ownedSessions = joinOwnedSessions terminalSessionIds sessions
+    let liveOwnedSessions =
+        sessions
+        |> joinOwnedSessions terminalSessionIds
+        |> List.filter (fun (_, session) ->
+            now - session.LastSeen < openWindow)
+
+    let openSessions =
+        liveOwnedSessions
+        |> List.map (fun (terminalId, session) ->
+            { TerminalSessionId = terminalId
+              CopilotSessionId = session.SessionId
+              Status =
+                session.Status
+                |> freshnessAdjusted now session.LastSeen
+                |> effectiveStatus })
+        |> List.sortBy (fun session ->
+            TerminalSessionId.value session.TerminalSessionId, SessionId.value session.CopilotSessionId)
+
+    let replacementSessionIds =
+        liveOwnedSessions
+        |> List.groupBy fst
+        |> List.choose (fun (terminalId, terminalSessions) ->
+            terminalSessions
+            |> List.map snd
+            |> StoredStatus.tryMostRecentActivity
+            |> Option.map (fun latest -> terminalId, latest.SessionId))
+        |> Map.ofList
 
     { ActivityEpoch = activityEpoch
-      OpenSessions = effectiveOwnedSessionStates now ownedSessions }
+      OpenSessions = openSessions
+      ReplacementSessionIds = replacementSessionIds }
 
 let internal queryOwnedSessions
     (queryActivity: ActivityQuery)
@@ -110,10 +95,17 @@ let internal tryFindLiveTerminalId
     sessions
     |> Seq.filter (fun session -> session.WorktreePath = worktreePath)
     |> joinOwnedSessions (runningTerminals |> Map.keys |> Set.ofSeq)
-    |> effectiveOwnedSessionStates now
-    |> List.tryFind (fun session -> session.CopilotSessionId = copilotSessionId)
-    |> Option.bind (fun session ->
-        runningTerminals |> Map.tryFind session.TerminalSessionId)
+    |> List.tryPick (fun (terminalSessionId, session) ->
+        let reusable =
+            session.SessionId = copilotSessionId
+            && match effectiveStatus session.Status with
+               | SessionLevelStatus.WaitingForUser -> true
+               | _ -> now - session.LastSeen < openWindow
+
+        if reusable then
+            runningTerminals |> Map.tryFind terminalSessionId
+        else
+            None)
 
 let internal withReportedActivity
     (now: DateTimeOffset)
@@ -147,12 +139,10 @@ let internal replacementSessionPlan
     if snapshot.OpenSessions |> List.exists (fun session -> session.Status <> SessionLevelStatus.Idle) then
         TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
     else
-        let sessionIds = replacementSessionIds snapshot.OpenSessions
-
         let resumeCommands =
             terminals
             |> List.choose (fun terminal ->
-                sessionIds
+                snapshot.ReplacementSessionIds
                 |> Map.tryFind (TerminalSessionId terminal.TerminalSessionId)
                 |> Option.map (fun sessionId ->
                     terminal.TerminalSessionId,
@@ -168,12 +158,16 @@ let internal replacementSessionPlan
 /// TerminalHost replacement. All exact ownership, terminal-specific gating, resume selection, and
 /// provider command construction stays in this terminal-focused module.
 let internal queryReplacementPlan
+    replacementReadyAt
     resolveProvider
     (queryActivity: ActivityQuery)
     (now: DateTimeOffset)
     (terminals: TerminalHostReplacement.ReplacementTerminal list)
     =
-    let terminalSessionIds = terminals |> List.map (_.TerminalSessionId >> TerminalSessionId) |> Set.ofList
+    if now < replacementReadyAt then
+        Ok TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
+    else
+        let terminalSessionIds = terminals |> List.map (_.TerminalSessionId >> TerminalSessionId) |> Set.ofList
 
-    queryOwnedSessions queryActivity now terminalSessionIds
-    |> Result.map (replacementSessionPlan resolveProvider terminals)
+        queryOwnedSessions queryActivity now terminalSessionIds
+        |> Result.map (replacementSessionPlan resolveProvider terminals)

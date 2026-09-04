@@ -193,13 +193,14 @@ gap, the service clears its old process-local background clocks.
 The mailbox also maintains a process-local monotonic activity sequence per terminal origin. A
 report stamps both its prior and reported origins, so moving or clearing a session changes the old
 terminal's epoch as well. Its narrow raw query accepts the complete current authoritative terminal
-ID set, filters the bounded live cache before overlaying indexed durable rows, and returns only
-those rows plus their maximum epoch. `TerminalSessionActivity` applies `openWindow`, derives each
-live session's effective state, and selects the greatest-activity live replacement identity per
-terminal. Unrelated origins, stale sessions, and sessions with no origin cannot change the
-replacement join result. Hourly retention removes stale live rows and epochs not backed by retained
-durable origins or the latest authoritative registry; pruning never resets the global epoch
-sequence.
+ID set, filters the bounded live cache, and returns those rows plus their maximum epoch.
+`TerminalSessionActivity` applies `openWindow`, derives each live session's freshness-adjusted
+effective state, and selects the greatest-activity live replacement identity per terminal. A
+server-start reconciliation window lets surviving sessions heartbeat back into that live cache
+before replacement begins. Unrelated origins, stale sessions, and sessions with no origin cannot
+change the replacement join result. Hourly retention removes stale live rows and epochs not backed
+by retained durable origins or the latest authoritative registry; pruning never resets the global
+epoch sequence.
 
 ### Persistence
 
@@ -217,9 +218,9 @@ sequence.
 Store construction creates the current schema, applies missing additive columns idempotently, then
 runs indexes that depend on those columns and bounded legacy normalization. This order lets
 databases predating activity, context, ask-user, or terminal-origin columns start safely. The
-terminal-origin index follows `(terminal_session_id, updated_at DESC, session_id DESC)` so repeated
-replacement queries seek directly to current origins in activity order. Nullable context fields
-make legacy rows restore a plain status dot until a gauge arrives.
+terminal-origin index follows `(terminal_session_id, updated_at DESC, session_id DESC)`; its leading
+origin key supports retained-origin scans used when pruning process-local activity epochs. Nullable
+context fields make legacy rows restore a plain status dot until a gauge arrives.
 
 Event append/status upsert and context updates are transactional and reread the authoritative
 persisted row. Hourly retention bounds durable session and event data without coordinating with
