@@ -37,6 +37,7 @@ type Model =
       EditorName: string
       WorktreeSkills: string list
       FocusedElement: FocusTarget option
+      WorktreeSearch: WorktreeSearch.State
       CreateModal: CreateWorktreeModal.ModalState
       ConfirmModal: ConfirmModal.ConfirmModal
       DeletedPaths: Set<string>
@@ -102,6 +103,7 @@ type Msg =
     | FocusSession of path: WorktreePath
     | OpenNewTab of path: WorktreePath
     | SessionResult of Result<unit, string>
+    | WorktreeSearchMsg of WorktreeSearch.Msg
     | KeyPressed of key: string * hasModifier: bool
     | SetFocus of FocusTarget option
     | SetFocusNoRetarget of FocusTarget option

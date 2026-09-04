@@ -96,6 +96,7 @@ let init () =
       EditorName = "VS Code"
       WorktreeSkills = []
       FocusedElement = None
+      WorktreeSearch = WorktreeSearch.initial
       CreateModal = CreateWorktreeModal.Closed
       ConfirmModal = ConfirmModal.NoConfirm
       DeletedPaths = Set.empty
@@ -236,6 +237,25 @@ let private focusDashboard: Cmd<Msg> =
         Dom.document.querySelector ".dashboard"
         |> Option.ofObj
         |> Option.iter (fun el -> el?focus()))
+
+/// Expands the owning repository before focus so hidden cards become valid targets; archived paths
+/// remain no-ops because they do not render as focusable dashboard cards.
+let private focusWorktreeCard scopedKey model =
+    if not (resolvesToFocusableCard scopedKey model.Repos) then
+        model, Cmd.none
+    else
+        let repos, expanded = expandRepoOwning scopedKey model.Repos
+        let focus = Some (Card scopedKey)
+        let retargetedModel, retargetCmd =
+            { model with Repos = repos }
+            |> CanvasUpdate.applyFocus true focus
+
+        retargetedModel,
+        Cmd.batch [
+            retargetCmd
+            Cmd.ofEffect (fun _ -> scrollFocusedIntoView Normal focus)
+            if expanded then saveCollapsedReposCmd repos
+        ]
 
 let update msg model =
     match msg with
@@ -745,10 +765,38 @@ let update msg model =
         { model with CreateModal = result.Modal; FocusedElement = focus },
         Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd; refocusCmd ]
 
+    | WorktreeSearchMsg WorktreeSearch.Msg.Open
+        when model.ConfirmModal <> ConfirmModal.NoConfirm
+             || CreateWorktreeModal.isOpen model.CreateModal ->
+        model, Cmd.none
+
+    | WorktreeSearchMsg searchMsg ->
+        let searchState, action =
+            WorktreeSearch.update model.Repos searchMsg model.WorktreeSearch
+
+        let updated = { model with WorktreeSearch = searchState }
+
+        match action with
+        | WorktreeSearch.Action.NoAction ->
+            updated, Cmd.none
+        | WorktreeSearch.Action.RefocusDashboard ->
+            updated, focusDashboard
+        | WorktreeSearch.Action.FocusWorktree path ->
+            let focused, focusCmd =
+                focusWorktreeCard (WorktreePath.value path) updated
+
+            focused, Cmd.batch [ focusDashboard; focusCmd ]
+
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus hint newFocus =
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView hint newFocus)
-        if model.ConfirmModal <> ConfirmModal.NoConfirm then
+        if WorktreeSearch.isOpen model.WorktreeSearch then
+            match key with
+            | "Escape" ->
+                model,
+                Cmd.ofMsg (WorktreeSearchMsg WorktreeSearch.Msg.Close)
+            | _ -> model, Cmd.none
+        elif model.ConfirmModal <> ConfirmModal.NoConfirm then
             match key with
             | "Escape" ->
                 { model with ConfirmModal = ConfirmModal.NoConfirm }, focusDashboard
@@ -877,26 +925,7 @@ let update msg model =
             model, Cmd.none
 
     | SelectOverviewWorktree scopedKey ->
-        // Arrow-nav parity: uncollapse the owning repo, focus the card (retarget chokepoint), and
-        // scroll it into view — WITHOUT opening the Canvas pane (the deliberate difference from
-        // FocusOverviewCard). Persist collapsed-repo state only when an expand actually changed it.
-        // Guard: archived worktrees can appear in non-Done breakdown buckets, but they have no
-        // focusable card (they render in the separate archive section, never with .focused). Setting
-        // FocusedElement to such a key produces no visible focus/scroll and gets reset on the next
-        // refresh — so a non-focusable scopedKey is a no-op rather than an invalid focus target.
-        if not (resolvesToFocusableCard scopedKey model.Repos) then
-            model, Cmd.none
-        else
-        let repos, expanded = expandRepoOwning scopedKey model.Repos
-        let focus = Some (Card scopedKey)
-        let retargetedModel, retargetCmd =
-            { model with Repos = repos } |> CanvasUpdate.applyFocus true focus
-        retargetedModel,
-        Cmd.batch [
-            retargetCmd
-            Cmd.ofEffect (fun _ -> scrollFocusedIntoView Normal focus)
-            if expanded then saveCollapsedReposCmd repos
-        ]
+        focusWorktreeCard scopedKey model
 
     | SetWorkspaceWidth width -> CanvasUpdate.setWorkspaceWidth width model
 
@@ -1001,20 +1030,19 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Fable.Core.JS.clearInterval intervalId }
 
-    // Global "reclaim navigation focus" shortcut. The dashboard's own onKeyDown only fires while
-    // DOM focus is on (or inside) the dashboard subtree; once focus escapes to a sibling (canvas
-    // pane, header, mascot) or <body>, arrow navigation goes dead. This document-level listener
-    // catches Escape from anywhere outside the dashboard and routes it through the normal handler,
-    // which refocuses the dashboard and restores a focus target. Skips when focus is already inside
-    // the dashboard (its onKeyDown handles it) or in an editable field (which owns its own Escape).
-    let focusReclaim (dispatch: Dispatch<Msg>) =
+    // Document-level shortcuts remain available when focus is in the header, canvas pane, or body.
+    // Editable fields retain Escape, while Ctrl+P intentionally opens search from any app input.
+    let globalKeyboard (dispatch: Dispatch<Msg>) =
         let insideDashboard (el: Browser.Types.Element) =
             let ancestor: Browser.Types.Element = el?closest(".dashboard")
             ancestor |> Option.ofObj |> Option.isSome
         let handler =
             fun (e: Browser.Types.Event) ->
                 let ke = e :?> Browser.Types.KeyboardEvent
-                if ke.key = "Escape" then
+                if WorktreeSearch.isOpenShortcut ke.key ke.ctrlKey ke.metaKey ke.altKey then
+                    ke.preventDefault()
+                    dispatch (WorktreeSearchMsg WorktreeSearch.Msg.Open)
+                elif ke.key = "Escape" then
                     match Option.ofObj Dom.document.activeElement with
                     | Some el when insideDashboard el || isEditableElement el -> ()
                     | _ -> dispatch (KeyPressed ("Escape", false))
@@ -1029,7 +1057,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
           [ "canvas-messages" ], CanvasUpdate.messageListener
-          [ "focus-reclaim" ], focusReclaim ]
+          [ "global-keyboard" ], globalKeyboard ]
 
     let subs =
         if model.OverviewPanelOpen && OverviewBand.hasAgentGroups model.Repos then
@@ -1273,6 +1301,10 @@ let view model dispatch =
 
                 OverviewViews.schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
 
+                WorktreeSearch.view
+                    (WorktreeSearchMsg >> dispatch)
+                    model.Repos
+                    model.WorktreeSearch
                 CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
                 ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
             ]

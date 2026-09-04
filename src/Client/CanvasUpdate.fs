@@ -588,4 +588,6 @@ let messageListener (dispatch: Dispatch<Msg>) =
           OnMorphComplete = MorphComplete >> dispatch
           OnDocError = fun scopedKey filename message -> dispatch (CanvasDocError (scopedKey, filename, message))
           OnMalformedMessage = fun () -> dispatch CanvasMalformedDocMessage
-          OnReclaimFocus = fun () -> dispatch (KeyPressed ("Escape", false)) }
+          OnReclaimFocus = fun () -> dispatch (KeyPressed ("Escape", false))
+          OnOpenWorktreeSearch = fun () ->
+              dispatch (WorktreeSearchMsg WorktreeSearch.Msg.Open) }

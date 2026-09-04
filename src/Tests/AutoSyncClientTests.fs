@@ -58,6 +58,7 @@ let private model enabled : Model =
       OverviewHistory = None
       OverviewHistoryRequestedAt = DateTimeOffset.MinValue
       OverviewHistoryRequestInFlight = None
+      WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
 
 let private enabled (model: Model) =

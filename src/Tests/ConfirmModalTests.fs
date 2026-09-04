@@ -82,6 +82,7 @@ let private defaultModel : Model =
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
       OverviewHistoryRequestInFlight = None
+      WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
 let private updateModel msg model = update msg model |> fst
 
@@ -95,6 +96,17 @@ type DeleteWithSessionSequencingTests() =
 
     let modelWithConfirmDelete =
         { defaultModel with ConfirmModal = ConfirmModal.ConfirmDelete ("feature-branch", testPath, true) }
+
+    [<Test>]
+    member _.``Worktree search does not stack over confirmation modal``() =
+        let model =
+            updateModel
+                (WorktreeSearchMsg WorktreeSearch.Msg.Open)
+                modelWithConfirmDelete
+
+        Assert.Multiple(fun () ->
+            Assert.That(model.WorktreeSearch, Is.EqualTo(WorktreeSearch.State.Closed))
+            Assert.That(model.ConfirmModal, Is.EqualTo(modelWithConfirmDelete.ConfirmModal)))
 
     [<Test>]
     member _.``ConfirmMsg Delete immediately removes worktree from model``() =

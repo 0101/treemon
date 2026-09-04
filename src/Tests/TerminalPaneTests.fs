@@ -305,6 +305,7 @@ let private focusModel : Model =
       OverviewHistory = None
       OverviewHistoryRequestedAt = DateTimeOffset.MinValue
       OverviewHistoryRequestInFlight = None
+      WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
 
 [<TestFixture>]

@@ -97,6 +97,7 @@ let private defaultModel : Model =
       OverviewHistory = None
       OverviewHistoryRequestedAt = System.DateTimeOffset.Now
       OverviewHistoryRequestInFlight = None
+      WorktreeSearch = WorktreeSearch.initial
       EmbeddedTerminalPollInFlight = false }
 
 let private dispatchedMsgs cmd : Msg list =

@@ -4140,6 +4140,106 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Ctrl P finds a worktree across repository and branch then reveals its collapsed card``() =
+        task {
+            let expandedSection = this.Page.Locator(".repo-section:has(.wt-card)").First
+            let! sectionIndex =
+                expandedSection.EvaluateAsync<int>(
+                    "element => Array.from(element.parentElement.children).indexOf(element)"
+                )
+            let section = this.Page.Locator(".repo-section").Nth(sectionIndex)
+            let header = section.Locator(".repo-header")
+            let! repository = header.Locator(".repo-name").TextContentAsync()
+            let! branch = section.Locator(".wt-card .branch-name").First.TextContentAsync()
+
+            do! header.ClickAsync()
+            do!
+                section.Locator(".card-grid").WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+            let! collapsedGridCount = section.Locator(".card-grid").CountAsync()
+            Assert.That(collapsedGridCount, Is.Zero, "The target repository should be collapsed before search")
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { const input = document.createElement('input'); input.id = 'worktree-search-shortcut-probe'; document.body.appendChild(input); input.focus(); }")
+
+            do! this.Page.Keyboard.PressAsync("Control+P")
+
+            let dialog = this.Page.Locator(".worktree-search-dialog")
+            let input = this.Page.Locator("#worktree-search-input")
+            do! dialog.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! inputFocused =
+                input.EvaluateAsync<bool>("element => document.activeElement === element")
+            Assert.That(inputFocused, Is.True, "Ctrl+P should focus the search input from outside the dashboard")
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => document.getElementById('worktree-search-shortcut-probe').remove()")
+
+            do! input.FillAsync(repository + branch)
+
+            let result = this.Page.Locator(".worktree-search-result").First
+            do! result.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! resultRepository = result.Locator(".worktree-search-repository").TextContentAsync()
+            let! resultBranch = result.Locator(".worktree-search-branch").TextContentAsync()
+            let! resultPath = result.Locator(".worktree-search-path").TextContentAsync()
+            let! detailDisplay = result.Locator(".worktree-search-detail") |> computedStyle "display"
+
+            Assert.Multiple(fun () ->
+                Assert.That(resultRepository, Is.EqualTo(repository))
+                Assert.That(resultBranch, Is.EqualTo(branch))
+                Assert.That(resultPath, Is.Not.Empty)
+                Assert.That(
+                    detailDisplay,
+                    Is.EqualTo("flex"),
+                    "The worktree and path should share the compact detail row"
+                ))
+
+            do! this.Page.Keyboard.PressAsync("Enter")
+            do!
+                dialog.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+
+            let focusedCard = section.Locator(".wt-card.focused")
+            do! focusedCard.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            let! focusedBranch = focusedCard.Locator(".branch-name").TextContentAsync()
+            let! expandedGridCount = section.Locator(".card-grid").CountAsync()
+            let! dashboardFocused =
+                this.Page.EvaluateAsync<bool>(
+                    "() => document.activeElement === document.querySelector('.dashboard')"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    expandedGridCount,
+                    Is.EqualTo(1),
+                    "Search selection should expand the target repository"
+                )
+                Assert.That(
+                    focusedBranch,
+                    Is.EqualTo(branch),
+                    "Search selection should focus the target card"
+                )
+                Assert.That(
+                    dashboardFocused,
+                    Is.True,
+                    "Search selection should restore dashboard keyboard focus"
+                ))
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Cancel button closes modal and restores focus for arrow key nav``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")

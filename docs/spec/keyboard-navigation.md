@@ -4,6 +4,7 @@
 
 - Enable full keyboard-driven workflow: alt-tab to treemon, arrow-key to a card, press a key to act
 - Navigation covers both repo headers (collapsible) and worktree cards
+- Find and reveal any active worktree across repositories without first navigating the grid
 - Extensible key binding system so new shortcuts are trivial to add
 
 ## Expected Behavior
@@ -44,29 +45,46 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Card | Delete | Delete worktree (non-main only) |
 | Repo header | Enter | Toggle collapse/expand |
 | Repo header | + | Create new worktree |
+| Global | Ctrl+P | Open fuzzy worktree search |
 | Global | Escape | Reclaim keyboard focus to the worktree navigation (also closes an open modal) |
 
-Adding new bindings = adding a match arm in `keyBinding`.
+Focused card/header bindings live in `keyBinding`; global bindings live in the document keyboard
+subscription and the canvas iframe bridge.
 
 ### Edge Cases
 
 - Collapsing a repo while a child card is focused: focus moves to the repo header
-- Modifier keys (Ctrl/Alt/Cmd) suppress letter bindings
+- Modifier keys (Ctrl/Alt/Cmd) suppress focused letter bindings; Ctrl+P is the explicit global exception
 - `onKeyDown` on `.dashboard` div with `tabIndex 0`, auto-focused on mount
 
-### Reclaiming Focus
+### Worktree Search
+
+Ctrl+P opens a command palette from anywhere in the top-level app, including editable fields. It is
+suppressed while a create-worktree or confirmation modal is active so overlays never stack.
+
+The palette searches every non-archived worktree by repository name, branch, and full path.
+Characters match in order without requiring adjacency. Space-separated terms can match different
+fields, while a compact term can continue from repository into branch in display order
+(`tremokb` matches `treemon` / `kb-navigation`). Results show repository above a compact
+branch-and-path row and highlight the matched characters.
+
+Up/Down wraps through results; hover also changes selection. Enter or click closes the palette,
+expands a collapsed owning repository, focuses the card through the normal focus chokepoint, and
+scrolls it into view without launching a terminal. Escape closes without changing card focus.
+Selection is stored by `WorktreePath`, not list index, so polling-driven reorder does not move the
+user to a different worktree.
+
+### Global Shortcut Reach
 
 Navigation only works while DOM focus is on (or inside) the `.dashboard` div, since that element
-owns the `onKeyDown` handler. When focus escapes to a sibling (canvas pane, header, mascot) or
-`<body>`, arrow keys go dead. A global document-level `keydown` subscription catches **Escape** from
-anywhere outside the dashboard and refocuses it, restoring the focus target
-(`Navigation.reclaimFocusTarget`). It is skipped when focus is already inside the dashboard (its own
-handler applies) or in an editable field. Escape while the caret is inside the cross-origin canvas
-doc iframe (`127.0.0.1:5002`) can't reach this listener directly (the keystroke does not cross the
-origin boundary), so the doc server injects a keydown bridge (`CanvasDocServer.reclaimFocusScript`)
-that posts `{action:'reclaim-focus'}` to the pane on Escape; `CanvasPane.messageListener` routes it to
-the same reclaim (honored only from the active doc). The bridge is likewise skipped when the caret is
-in an editable field inside the doc.
+owns the `onKeyDown` handler. The document-level `globalKeyboard` subscription catches Ctrl+P from
+the top-level app and catches Escape when focus has left the dashboard. Escape refocuses the
+dashboard through `Navigation.reclaimFocusTarget`; editable fields retain their own Escape.
+
+Canvas docs run in a cross-origin iframe, so the server injects `CanvasDocServer.globalKeyboardScript`.
+It posts `open-worktree-search` for Ctrl+P (including from editable fields) and `reclaim-focus` for
+Escape outside an editable. `CanvasPane.messageListener` accepts either action only from the active
+canvas iframe before routing it into the same Elmish messages as top-level shortcuts.
 
 ## Technical Approach
 
@@ -82,8 +100,9 @@ bridge needed for the same action inside a document.
 
 ## Key Files
 
-- `src/Client/App.fs` — `keyBinding`, `KeyPressed` handler (incl. Escape reclaim), `focusReclaim` global subscription, view focus rendering
+- `src/Client/WorktreeSearch.fs` — fuzzy matching, identity-stable selection state, keyboard update, and palette view
+- `src/Client/App.fs` — focused bindings, `globalKeyboard`, modal gating, and shared focus/reveal orchestration
 - `src/Client/Navigation.fs` — `FocusTarget` DU, `navigateSpatial`, `reclaimFocusTarget` (focus target to restore on Escape)
-- `src/Server/CanvasDocServer.fs` — `reclaimFocusScript` (Escape→`reclaim-focus` bridge injected into every canvas doc)
-- `src/Client/CanvasPane.fs` — routes the `reclaim-focus` doc message to the Escape reclaim
-- `src/Client/index.html` — `.focused` CSS class (outline: 2px solid #4a9eff), `.nav-hint` footer hint
+- `src/Server/CanvasDocServer.fs` — global keyboard bridge injected into every canvas doc
+- `src/Client/CanvasPane.fs` — validates and routes active-canvas global shortcut messages
+- `src/Client/index.html` — focused-card, command-palette, and keyboard-hint styling

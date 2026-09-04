@@ -411,22 +411,41 @@ type CanvasAuthoringDxPaneE2ETests() =
                 "a well-formed string action must route normally and never raise the missing-action banner")
         }
 
+    [<Test>]
+    member this.``active canvas doc can open global worktree search``() =
+        task {
+            do! this.RouteDocs ""
+            do! this.OpenMultiDocPane()
+
+            let activeDoc = this.Page.FrameLocator(".canvas-iframe-active").Locator("body")
+            let! _ =
+                activeDoc.EvaluateAsync(
+                    "element => window.parent.postMessage({action:'open-worktree-search'},'*')"
+                )
+
+            let searchInput = this.Page.Locator("#worktree-search-input")
+            do! searchInput.WaitForAsync(LocatorWaitForOptions(Timeout = 10000.0f))
+
+            let! focused =
+                searchInput.EvaluateAsync<bool>(
+                    "element => document.activeElement === element"
+                )
+
+            Assert.That(focused, Is.True, "The active canvas doc should open and focus worktree search")
+        }
+
 
 // ============================================================================
-// Escape focus-reclaim bridge (reclaimFocusScript)
+// Canvas global-keyboard bridge
 //
-// The doc-side half of the cross-origin Escape reclaim: the injected keydown
-// listener must post {action:'reclaim-focus'} to the parent ONLY for Escape and
-// ONLY when the key did not originate in an editable field. Served top-level
-// (parent === self), so the page can capture the message it posts to itself —
-// this exercises the real injected script in a browser, catching regressions the
-// injection-string unit test can't (non-Escape keys, broken editable exemption).
+// Served top-level (parent === self), so the page can capture messages posted by
+// the real injected script without substituting a test implementation.
 // ============================================================================
 [<TestFixture>]
 [<Category("E2E")>]
 [<Category("Canvas")>]
 [<Category("AuthoringDxE2E")>]
-type CanvasReclaimBridgeE2ETests() =
+type CanvasGlobalKeyboardBridgeE2ETests() =
     inherit PageTest()
 
     override this.ContextOptions() =
@@ -434,9 +453,7 @@ type CanvasReclaimBridgeE2ETests() =
         opts.IgnoreHTTPSErrors <- true
         opts
 
-    /// Serve the injected doc top-level and install a counter for the reclaim-focus messages the
-    /// injected bridge posts to `parent` (the page itself when loaded top-level). A `__sentinel`
-    /// flag lets tests settle deterministically (see Settle).
+    /// Serve the injected doc top-level and count global-keyboard messages posted to `parent`.
     member private this.ServeDoc() =
         task {
             let doc =
@@ -446,8 +463,10 @@ type CanvasReclaimBridgeE2ETests() =
             do! this.Page.RouteAsync("**/reclaim.html", fun route ->
                 route.FulfillAsync(RouteFulfillOptions(ContentType = "text/html; charset=utf-8", Body = served)))
             let! _ = this.Page.GotoAsync($"{ServerFixture.canvasUrl}/wt/reclaim.html", PageGotoOptions(WaitUntil = WaitUntilState.Load))
-            let! _ = this.Page.EvaluateAsync(
-                        "() => { window.__reclaims = 0; window.__sentinelSeen = false; window.addEventListener('message', function(e){ if (e.data && e.data.action === 'reclaim-focus') window.__reclaims++; if (e.data && e.data.action === '__sentinel') window.__sentinelSeen = true; }); }")
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { window.__reclaims = 0; window.__searches = 0; window.__sentinelSeen = false; window.addEventListener('message', function(e){ if (e.data && e.data.action === 'reclaim-focus') window.__reclaims++; if (e.data && e.data.action === 'open-worktree-search') window.__searches++; if (e.data && e.data.action === '__sentinel') window.__sentinelSeen = true; }); }"
+                )
             ()
         }
 
@@ -484,14 +503,33 @@ type CanvasReclaimBridgeE2ETests() =
         }
 
     [<Test>]
-    member this.``a non-Escape key does not post reclaim-focus``() =
+    member this.``Ctrl P inside an editable field posts open-worktree-search``() =
+        task {
+            do! this.ServeDoc()
+            do! this.Page.Locator("#field").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Control+P")
+            do! this.Settle()
+            let! searches = this.Page.EvaluateAsync<int>("() => window.__searches")
+            let! reclaims = this.Page.EvaluateAsync<int>("() => window.__reclaims")
+
+            Assert.Multiple(fun () ->
+                Assert.That(searches, Is.EqualTo(1), "Ctrl+P must remain global inside canvas inputs")
+                Assert.That(reclaims, Is.Zero, "Ctrl+P must not also trigger focus reclaim"))
+        }
+
+    [<Test>]
+    member this.``an unrelated key posts no global-keyboard message``() =
         task {
             do! this.ServeDoc()
             do! this.Page.Locator("#btn").FocusAsync()
             do! this.Page.Keyboard.PressAsync("ArrowDown")
             do! this.Settle()
-            let! n = this.Page.EvaluateAsync<int>("() => window.__reclaims")
-            Assert.That(n, Is.EqualTo(0), "Only Escape may post reclaim-focus")
+            let! reclaims = this.Page.EvaluateAsync<int>("() => window.__reclaims")
+            let! searches = this.Page.EvaluateAsync<int>("() => window.__searches")
+
+            Assert.Multiple(fun () ->
+                Assert.That(reclaims, Is.Zero)
+                Assert.That(searches, Is.Zero))
         }
 // Selected-text contextual actions
 type private SelectionHost =

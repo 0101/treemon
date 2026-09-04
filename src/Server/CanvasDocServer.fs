@@ -256,13 +256,12 @@ let private bridgeScript =
 /// with .html.
 let private linkInterceptor = "<script>document.addEventListener('click',function(e){var a=e.target.closest('a');if(!a)return;var h=a.getAttribute('href');if(!h||h.startsWith('#'))return;e.preventDefault();if((h.endsWith('.html')&&!h.includes('://'))||(a.origin===location.origin&&a.pathname.endsWith('.html'))){var f=(a.pathname||h).split('/').pop();parent.postMessage({action:'navigate-canvas-doc',filename:f},'*')}else{window.open(a.href,'_blank')}})</script>"
 
-/// Bridge Escape from a cross-origin canvas doc back to the dashboard's focus reclaim. The doc is a
-/// separate origin, so its keydown never reaches the pane's document-level focus-reclaim listener;
-/// this injected listener posts {action:'reclaim-focus'} on Escape (unless the key originated in an
-/// editable field — checked across the composed event path so inputs inside an injected shadow root
-/// keep their own Escape). The pane routes it to the same Escape reclaim. Injected into both doc kinds.
-let private reclaimFocusScript =
+/// Bridge global dashboard shortcuts out of the cross-origin canvas iframe. Ctrl+P always opens
+/// worktree search; Escape reclaims dashboard focus only when the doc caret is not in an editable.
+let private globalKeyboardScript =
     [ "<script>document.addEventListener('keydown',function(e){"
+      "var search=(e.ctrlKey||e.metaKey)&&!e.altKey&&e.key.toLowerCase()==='p';"
+      "if(search){e.preventDefault();parent.postMessage({action:'open-worktree-search'},'*');return}"
       "if(e.key!=='Escape')return;"
       "var p=e.composedPath?e.composedPath():[e.target];"
       "if(p.some(function(t){if(!t)return false;var n=(t.tagName||'').toUpperCase();"
@@ -363,13 +362,13 @@ let buildInjection (kind: CanvasDocKind) (filename: string) : string =
     | SystemView ->
         CanvasExport.baseStyle
         + linkInterceptor
-        + reclaimFocusScript
+        + globalKeyboardScript
         + CanvasSendScript.script
         + CanvasSelectionScript.script
     | AgentDoc ->
         CanvasExport.baseStyle
         + linkInterceptor
-        + reclaimFocusScript
+        + globalKeyboardScript
         + bridgeScript
         + CanvasSendScript.script
         + canvasExpandStyle
