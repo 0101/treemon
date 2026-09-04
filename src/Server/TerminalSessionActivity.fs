@@ -8,12 +8,12 @@ open Server.SessionActivityStore
 type internal OwnedSessionState =
     { TerminalSessionId: TerminalSessionId
       CopilotSessionId: SessionId
-      Status: SessionLevelStatus }
+      Status: SessionLevelStatus
+      UpdatedAt: DateTimeOffset }
 
 type internal OwnedSessionSnapshot =
     { ActivityEpoch: int64
-      OpenSessions: OwnedSessionState list
-      ResumableSessionIds: Map<TerminalSessionId, SessionId> }
+      OpenSessions: OwnedSessionState list }
 
 type internal ActivityQuery = Set<TerminalSessionId> -> Result<int64 * StoredStatus list, string>
 
@@ -28,42 +28,46 @@ let internal joinOwnedSessions
         |> Option.map (fun terminalId -> terminalId, session))
     |> Seq.toList
 
+let private liveOwnedSessions
+    (now: DateTimeOffset)
+    (ownedSessions: (TerminalSessionId * StoredStatus) list)
+    =
+    ownedSessions
+    |> List.filter (fun (_, session) ->
+        now - session.LastSeen < openWindow)
+
+let private ownedSessionStates
+    (ownedSessions: (TerminalSessionId * StoredStatus) list)
+    : OwnedSessionState list =
+    ownedSessions
+    |> List.map (fun (terminalId, session) ->
+        { TerminalSessionId = terminalId
+          CopilotSessionId = session.SessionId
+          Status = effectiveStatus session.Status
+          UpdatedAt = session.UpdatedAt })
+    |> List.sortBy (fun session ->
+        TerminalSessionId.value session.TerminalSessionId, SessionId.value session.CopilotSessionId)
+
 let internal effectiveOwnedSessionStates
     (now: DateTimeOffset)
     (ownedSessions: (TerminalSessionId * StoredStatus) list)
     : OwnedSessionState list =
     ownedSessions
-    |> List.choose (fun (terminalId, session) ->
-        // Generic openness and crash-freshness windows are display/liveness heuristics. An exact
-        // ask_user wait is a durable replacement gate until its request/completion clocks say that
-        // input completed, even when heartbeats stop updating LastSeen.
-        let owned status =
-            Some
-                { TerminalSessionId = terminalId
-                  CopilotSessionId = session.SessionId
-                  Status = status }
+    |> liveOwnedSessions now
+    |> ownedSessionStates
 
-        match effectiveStatus session.Status with
-        | SessionLevelStatus.WaitingForUser as status -> owned status
-        | _ when now - session.LastSeen < openWindow ->
-            session.Status
-            |> freshnessAdjusted now session.LastSeen
-            |> effectiveStatus
-            |> owned
-        | _ -> None)
-    |> List.sortBy (fun session ->
-        TerminalSessionId.value session.TerminalSessionId, SessionId.value session.CopilotSessionId)
-
-let internal resumableSessionIds
-    (ownedSessions: (TerminalSessionId * StoredStatus) list)
+let internal replacementSessionIds
+    (openSessions: OwnedSessionState list)
     : Map<TerminalSessionId, SessionId> =
-    ownedSessions
-    |> List.groupBy fst
-    |> List.choose (fun (terminalId, sessions) ->
-        sessions
-        |> List.map snd
-        |> StoredStatus.tryMostRecentActivity
-        |> Option.map (fun latest -> terminalId, latest.SessionId))
+    openSessions
+    |> List.groupBy _.TerminalSessionId
+    |> List.map (fun (terminalId, sessions) ->
+        let latest =
+            sessions
+            |> List.maxBy (fun session ->
+                session.UpdatedAt, SessionId.value session.CopilotSessionId)
+
+        terminalId, latest.CopilotSessionId)
     |> Map.ofList
 
 let internal ownedSessionSnapshot
@@ -74,8 +78,7 @@ let internal ownedSessionSnapshot
     let ownedSessions = joinOwnedSessions terminalSessionIds sessions
 
     { ActivityEpoch = activityEpoch
-      OpenSessions = effectiveOwnedSessionStates now ownedSessions
-      ResumableSessionIds = resumableSessionIds ownedSessions }
+      OpenSessions = effectiveOwnedSessionStates now ownedSessions }
 
 let internal queryOwnedSessions
     (queryActivity: ActivityQuery)
@@ -144,10 +147,12 @@ let internal replacementSessionPlan
     if snapshot.OpenSessions |> List.exists (fun session -> session.Status <> SessionLevelStatus.Idle) then
         TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
     else
+        let sessionIds = replacementSessionIds snapshot.OpenSessions
+
         let resumeCommands =
             terminals
             |> List.choose (fun terminal ->
-                snapshot.ResumableSessionIds
+                sessionIds
                 |> Map.tryFind (TerminalSessionId terminal.TerminalSessionId)
                 |> Option.map (fun sessionId ->
                     terminal.TerminalSessionId,

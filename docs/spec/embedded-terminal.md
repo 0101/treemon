@@ -152,11 +152,11 @@ it as the optional `TerminalSessionId` origin on activity reports. Session activ
 origin, allowing Treemon to join a Copilot `SessionId` to one host-owned terminal without guessing
 from worktree path.
 
-Only Copilot sessions whose `TerminalSessionId` appears in the current authoritative host registry
-participate in host-update gating. A session is non-idle when its existing `SessionActivity`
-effective per-session state is `Working` or `WaitingForUser`. `Idle`, closed, missing, and
-non-Copilot sessions do not gate. An unrelated Copilot session in the same worktree does not gate
-unless it carries that terminal's exact origin.
+Only heartbeat-fresh Copilot sessions whose `TerminalSessionId` appears in the current authoritative
+host registry participate in host-update gating and automatic replacement resume. A live session is
+non-idle when its existing `SessionActivity` effective per-session state is `Working` or
+`WaitingForUser`. `Idle`, closed, stale, missing, and non-Copilot sessions do not gate. An unrelated
+Copilot session in the same worktree does not gate unless it carries that terminal's exact origin.
 
 The same exact-origin join supplies terminal tab titles. Among the live sessions attributed to one
 terminal, the active session wins; otherwise the most recently active live session is
@@ -164,8 +164,8 @@ representative. Its freshest reported intent or session title is exposed through
 selection and display formatting used by the worktree card. An unrelated session in the same
 worktree cannot label the tab.
 
-`WaitingForUser` remains non-idle without a timeout. There is no forced replacement or operator
-override that discards a waiting Copilot session.
+A heartbeat-fresh `WaitingForUser` remains non-idle without an operator override. Once its liveness
+expires, it no longer gates replacement or supplies an automatic resume command.
 
 Arbitrary shell commands, child or background jobs, terminal output, browser attachment state, and
 other non-Copilot activity never gate an update. Treemon neither inspects nor warns about foreground
@@ -202,11 +202,14 @@ During that phase registry reads return the last authoritative snapshot without 
 between generations, while start and close requests fail immediately with a retryable error rather
 than waiting or remaining queued after their caller has gone away.
 
-Before committing replacement, Treemon captures for every terminal the latest open or resumable
-Copilot `SessionId` whose stored `TerminalSessionId` exactly matches that terminal. It then shuts
-down the old host, starts the staged host, and recreates terminals in their worktree directories.
-For a terminal with a resumable session, Treemon uses the existing provider-specific
-`CodingToolCli` resume command. A terminal without one restarts as a plain PowerShell shell.
+Before committing replacement, Treemon captures for every terminal the heartbeat-fresh Copilot
+`SessionId` with the greatest `(UpdatedAt, SessionId)` whose stored `TerminalSessionId` exactly
+matches that terminal. It then shuts down the old host, starts the staged host, and recreates
+terminals in their worktree directories. For a terminal with a live session, Treemon uses the
+existing provider-specific `CodingToolCli` resume command. A terminal without one restarts as a
+plain PowerShell shell. This automatic continuity policy is intentionally narrower than explicit
+worktree Resume, which can select retained durable history as defined in
+`docs/spec/resume-last-session.md`.
 
 Stopping the old host may discard arbitrary shell state, running commands, raw replay, and
 scrollback. Recreated terminals keep the captured opening order, and the client remaps each
@@ -405,25 +408,26 @@ overlaying indexed durable rows, and returns only those raw rows plus their maxi
 policy plus the optional display-safe activity for each terminal. The remoting API enriches host
 registry snapshots from the scheduler's bounded live-session map; the TerminalHost registry and
 control API remain unaware of agent activity. Replacement policy remains opaque: wait, or proceed
-with the epoch and optional shell command keyed by exact terminal session ID. It applies generic
-openness and freshness decay only to non-waiting states; an effective
-`WaitingForUser` remains non-idle from its request/completion clocks regardless of `last_seen`, while
-exact terminal-ID filtering keeps the query bounded. It owns provider selection and `CodingToolCli`
-command construction; terminal replacement only rechecks the epoch, recreates terminals, and
-delivers supplied commands. Hourly retention prunes live status and origin epochs, retaining epochs
-only for durable origins or the latest authoritative host registry; observing a registry immediately
-discards epochs for terminals no longer in it while the global counter remains monotonic.
+with the epoch and optional shell command keyed by exact terminal session ID. It applies the
+existing `openWindow` before deriving both the non-idle gate and automatic resume identity, so a
+stale durable `WaitingForUser` record neither blocks replacement nor reopens a conversation. Within
+the live set, effective status controls the gate and `(UpdatedAt, SessionId)` selects one resume
+identity per terminal. It owns provider selection and `CodingToolCli` command construction;
+terminal replacement only rechecks the epoch, recreates terminals, and delivers supplied commands.
+Hourly retention prunes live status and origin epochs, retaining epochs only for durable origins or
+the latest authoritative host registry; observing a registry immediately discards epochs for
+terminals no longer in it while the global counter remains monotonic.
 Once a session has an exact terminal origin, a later report that omits the optional origin retains
 the known value in memory and durable storage; there is no implicit clear operation.
 Activity ingestion accepts a Copilot `SessionId` only when it is 1–128 ASCII characters from
 `[A-Za-z0-9._:-]`, so the persisted resume identity is bounded and cannot carry terminal control
 input.
 
-Replacement snapshots terminal presentation and exact resumable Copilot ownership before stopping
-the old host. `TerminalSessionActivity` uses `CodingToolCli` to prepare provider-specific commands;
-terminal replacement delivers those opaque commands in captured opening order. The replacement
-registry receives fresh session IDs, so the client preserves each worktree's selection by sibling
-ordinal rather than by stale identity.
+Replacement snapshots terminal presentation and exact heartbeat-fresh Copilot ownership before
+stopping the old host. `TerminalSessionActivity` uses `CodingToolCli` to prepare provider-specific
+commands; terminal replacement delivers those opaque commands in captured opening order. The
+replacement registry receives fresh session IDs, so the client preserves each worktree's selection
+by sibling ordinal rather than by stale identity.
 
 ### Deliberate simplicity
 
@@ -476,9 +480,10 @@ ports, and state.
   resetting the global sequence, and SQLite uses the terminal-origin/activity-order index.
 - **Opportunistic replacement, not draining:** normal work is never rejected in anticipation of an
   update. A race cancels the attempt rather than delaying the work.
-- **No replacement escape hatches:** `WaitingForUser` gates indefinitely for every session owned by
-  a current terminal; most-recent selection applies only to the resume identity. Non-Copilot work is
-  deliberately ignored and may be terminated without warning once the Copilot gate is idle.
+- **Live-session replacement gate:** every heartbeat-fresh `Working` or `WaitingForUser` session
+  owned by a current terminal gates replacement, while stale durable records do not. Most-recent
+  selection applies only within the live resume candidates. Non-Copilot work is deliberately
+  ignored and may be terminated without warning once the Copilot gate is idle.
 - **Stable API over compatibility layers:** compatible servers reconnect; an incompatible deploy
   waits until no terminals exist instead of carrying old protocol clients or migrating live state.
 - **Explicit versioned wire contracts:** the candidate deployment preflight is a parsed server run
@@ -519,8 +524,9 @@ ports, and state.
   preserving wheel, keyboard, and programmatic scrollback.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the opaque command
-  selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no
-  input and remains a plain PowerShell shell. Submitted terminal input is a raw shell boundary:
+  selected by `TerminalSessionActivity`. A terminal without an exact heartbeat-fresh session
+  receives no input and remains a plain PowerShell shell. Submitted terminal input is a raw shell
+  boundary:
   direct commands carrying a control character are rejected rather than written, while
   `CodingToolCli` first converts control-bearing prompt data to a control-free UTF-8/base64 form.
   A stored Copilot `SessionId` therefore cannot inject an extra command line into a recreated shell.

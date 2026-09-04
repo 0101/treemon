@@ -2178,20 +2178,27 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
-    member _.``aged WaitingForUser on an exact owned session prevents replacement commit``() =
+    member _.``stale WaitingForUser is neither a replacement gate nor a resume candidate``() =
         task {
             use host = new FakeControlHost()
             host.EnableLogicalReplacement()
-            host.Stage "2.0.0-waiting" |> ignore
+            let stagedVersion = "2.0.0-stale-waiting"
+            let stagedExecutable = host.Stage stagedVersion
             let launches = ConcurrentQueue<string>()
+            let submitted = ConcurrentQueue<string>()
 
             let manager =
                 replacementManagerConfig
                     host
                     (fun startInfo ->
                         launches.Enqueue startInfo.FileName
-                        Error "WaitingForUser must prevent launch")
-                    (fun _ _ -> async { return Ok() })
+                        host.Activate(startInfo.FileName, stagedVersion)
+                        Ok())
+                    (fun _ command ->
+                        async {
+                            submitted.Enqueue command
+                            return Ok()
+                        })
                 |> EmbeddedTerminal.createWithConfig
 
             let target = worktree host.Root "waiting"
@@ -2250,11 +2257,16 @@ type EmbeddedTerminalReplacementTests() =
                 Assert.That(
                     outcome,
                     Is.EqualTo
-                        TerminalHostReplacement.ReplacementOutcome.WaitingForIdle
+                        (TerminalHostReplacement.ReplacementOutcome.Replaced stagedVersion)
                 )
 
-                Assert.That(host.ShutdownRequestCount, Is.Zero)
-                Assert.That(launches, Is.Empty)
+                Assert.That(host.ShutdownRequestCount, Is.EqualTo(1))
+                Assert.That(launches.ToArray(), Is.EqualTo([| stagedExecutable |]))
+                Assert.That(submitted, Is.Empty)
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EqualTo([ WorktreePath.value target ])
+                )
                 Assert.That(host.IsOnline, Is.True))
         }
 

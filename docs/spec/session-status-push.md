@@ -107,9 +107,11 @@ titles, context usage, and session resume all use this shared state; no session-
 - Usage values and their ordering timestamp are stored on `session_status`; usage is not appended to
   `activity_events`. A usage report can rehydrate retained durable state outside the live window,
   preserving its status, messages, activity, and lifecycle clock.
-- Resume selects the greatest `(UpdatedAt, SessionId)` from all durable sessions for the worktree,
-  regardless of current status or heartbeat recency. Sessions older than the live window remain
-  resumable until retention removes them.
+- Explicit worktree Resume selects the greatest `(UpdatedAt, SessionId)` from all durable sessions
+  for the worktree, regardless of current status or heartbeat recency. Sessions older than the live
+  window remain manually resumable until retention removes them. Automatic TerminalHost replacement
+  is narrower: it resumes only an exact-origin session whose `LastSeen` is within `openWindow`, as
+  defined in `docs/spec/embedded-terminal.md`.
 - On server start, still-live rows are loaded from SQLite and published to the scheduler before new
   events arrive. Durable titles, intents, skill, footer messages, context gauges, and their ordering
   clocks are restored. Retained rows outside the live window remain available for footer and resume
@@ -180,8 +182,8 @@ activity, interaction, usage, bootstrap, and liveness reports use independent or
   window; stale lifecycle reports are ignored so an old start cannot resurrect a finished agent.
 - Title bootstrap hydrates durable state without appending an event or advancing lifecycle time.
 - Usage persists only the latest gauge on its own ordering clock and advances `last_seen` forward.
-- Heartbeats only advance `last_seen`; because representative selection uses `UpdatedAt`, they
-  affect openness but not footer or resume ownership.
+- Heartbeats only advance `last_seen`; they affect openness and automatic replacement eligibility
+  but never order footer selection or explicit Resume ownership, which use `UpdatedAt`.
 
 Ingestion paths consult the live map and then the durable row by session id whenever prior state is
 needed. This preserves retained state when a heartbeat, usage report, title bootstrap, activity
@@ -192,10 +194,10 @@ The mailbox also maintains a process-local monotonic activity sequence per termi
 report stamps both its prior and reported origins, so moving or clearing a session changes the old
 terminal's epoch as well. Its narrow raw query accepts the complete current authoritative terminal
 ID set, filters the bounded live cache before overlaying indexed durable rows, and returns only
-those rows plus their maximum epoch. `TerminalSessionActivity` turns that raw observation into each
-open session's effective state, the greatest-activity durable resume identity per terminal, and the
-opaque replacement policy. Unrelated origins and sessions with no origin cannot change the query's
-epoch or join result. Hourly retention removes stale live rows and epochs not backed by retained
+those rows plus their maximum epoch. `TerminalSessionActivity` applies `openWindow`, derives each
+live session's effective state, and selects the greatest-activity live replacement identity per
+terminal. Unrelated origins, stale sessions, and sessions with no origin cannot change the
+replacement join result. Hourly retention removes stale live rows and epochs not backed by retained
 durable origins or the latest authoritative registry; pruning never resets the global epoch
 sequence.
 
@@ -230,7 +232,8 @@ infrastructure is not part of this store.
 `CodingToolStatus.collapseByWorktree` is the single projection from session state to card fields.
 `WorktreeApi` merges each worktree's greatest-`UpdatedAt` durable representative into the live
 candidate set before collapsing it. The representative's own `LastSeen` still decides whether it
-contributes an open dot, while its `UpdatedAt` keeps it eligible for footer and resume ownership.
+contributes an open dot, while its `UpdatedAt` keeps it eligible for footer and explicit Resume
+ownership.
 
 The remoting contract exposes `toggleAutoSync`. When enabled and the branch falls behind, `AutoSync`
 uses the same live and retained session state but preserves whether the selected identity is busy,
@@ -258,7 +261,7 @@ card or Overview status.
 | Synthetic messages | Filter server-side before ingestion with the shared user-message classifier. |
 | Ask-user ordering | Persist independent request/completion clocks; do not keep lifecycle state in the extension. |
 | Liveness | Heartbeats and accepted usage update `last_seen` without lifecycle event writes. |
-| Representative ordering | Use `(UpdatedAt, SessionId)`; never let heartbeat-only `LastSeen` choose footer or resume ownership. |
+| Representative ordering | Use `(UpdatedAt, SessionId)`; `LastSeen` gates openness and automatic replacement eligibility but never orders footer or Resume candidates. |
 | Multiple sessions | Preserve per-session status, skill, and context usage; order markers by status then `SessionId` so heartbeats cannot move them; collapse only card-level fields. |
 | Background agents | Keep per-tool start/finish clocks in memory; WaitingForUser outranks background Working; restart clears the clocks. |
 | Footer | Decouple from the status dot and merge a retained durable representative. |
@@ -267,8 +270,8 @@ card or Overview status.
 | Persistence | Store latest session state plus idempotent accepted events in SQLite WAL. |
 | Overview history | Capture canonical direct snapshots every 30 seconds; never reconstruct from activity events. |
 | Auto-sync | Wait while any open session is working or has not settled; otherwise prefer the settled open bridged session, then retained identity only when no session is open; launch only when delivery has no live target. |
-| Resume | Query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
-| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; a focused terminal module derives exact ownership for tab activity, Resume idempotency, and replacement from bounded current-ID projections, never from worktree inference. |
+| Explicit Resume | Query durable most-recent activity identity, then use bounded live exact-origin state only to reuse that target's running terminal instead of launching a duplicate process. |
+| Terminal origin | Validate and persist optional `TerminalSessionId` from `TREEMON_TERMINAL_SESSION_ID` as attribution metadata; a focused terminal module derives exact ownership for tab activity, Resume idempotency, and heartbeat-fresh replacement from bounded current-ID projections, never from worktree inference. |
 | Explicit close | Not required; heartbeat expiry handles clean exit and crashes uniformly. |
 | Window state | Keep terminal/window `HasActiveSession` separate from push-session openness. |
 

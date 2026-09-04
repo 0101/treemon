@@ -664,7 +664,7 @@ type SessionActivityStore
         |> Set.ofList
 
     /// All durable sessions attributed to one of the current authoritative TerminalHost ids.
-    /// Rows outside the live window remain eligible because host replacement may resume them.
+    /// TerminalSessionActivity applies the replacement liveness policy after this indexed read.
     member _.StatusesByTerminalSessionIds(terminalSessionIds: Set<TerminalSessionId>) : StoredStatus list =
         if Set.isEmpty terminalSessionIds then
             []

@@ -1923,7 +1923,7 @@ type TerminalOwnershipQueryTests() =
         )
 
     [<Test>]
-    member _.``service live cache evicts sessions outside the idle window``() =
+    member _.``stale durable terminal history is not a replacement candidate``() =
         let oldTerminal =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -1948,6 +1948,12 @@ type TerminalOwnershipQueryTests() =
                     service
                     (ts "2026-03-01T12:01:00Z")
                     (Set.singleton oldTerminal)
+            let _, resumeCommands =
+                queryReplacementPlanOk
+                    service
+                    (ts "2026-03-01T12:01:00Z")
+                    [ replacementTerminal oldTerminal "C:/wt/a" ]
+                |> requireReplacementReady
 
             Assert.Multiple(fun () ->
                 Assert.That(
@@ -1955,10 +1961,7 @@ type TerminalOwnershipQueryTests() =
                     Is.EqualTo([ SessionId "fresh" ])
                 )
                 Assert.That(retained.OpenSessions, Is.Empty)
-                Assert.That(
-                    retained.ResumableSessionIds,
-                    Is.EqualTo(Map.ofList [ oldTerminal, SessionId "old" ])
-                )))
+                Assert.That(resumeCommands, Is.Empty)))
 
     [<Test>]
     member _.``epoch pruning keeps retained and current origins and never reuses sequence values``() =
@@ -2062,17 +2065,17 @@ type TerminalOwnershipQueryTests() =
 
         let snapshot: OwnedSessionSnapshot =
             { ActivityEpoch = 17L
-              OpenSessions = []
-              ResumableSessionIds =
-                Map.ofList
-                    [ ownedTerminal,
-                      SessionId "provider-owned-session" ] }
+              OpenSessions =
+                [ { TerminalSessionId = ownedTerminal
+                    CopilotSessionId = SessionId "provider-owned-session"
+                    Status = SessionLevelStatus.Idle
+                    UpdatedAt = ts "2026-03-01T10:00:00Z" } ] }
 
         let resolveProvider (path: string) =
             Assert.That(
                 path,
                 Is.EqualTo ownedPath,
-                "only the resumable terminal selects a provider from its own worktree"
+                "only the live replacement terminal selects a provider from its own worktree"
             )
 
             Some CopilotCli
@@ -2094,13 +2097,13 @@ type TerminalOwnershipQueryTests() =
             ))
 
     [<Test>]
-    member _.``every exact waiting session gates past freshness until input completes``() =
+    member _.``fresh waiting session gates until input completes``() =
         let terminalSessionId =
             TerminalSessionId "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         let worktreePath = "C:/wt/a"
         let awaitingAt = ts "2026-03-01T10:00:00Z"
         let completedAt = ts "2026-03-01T10:01:00Z"
-        let now = ts "2026-03-01T10:20:00Z"
+        let now = ts "2026-03-01T10:02:30Z"
         let waiting =
             { ownedStored terminalSessionId "waiting" awaitingAt with
                 Status =
@@ -2129,7 +2132,7 @@ type TerminalOwnershipQueryTests() =
                 waitingSnapshot,
             Is.EqualTo
                 TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle,
-            "most-recent selection applies to resume identity, not to the all-session idle gate"
+            "most-recent selection applies to the live resume identity, not to the all-session idle gate"
         )
 
         let completed =
@@ -2199,12 +2202,9 @@ type TerminalOwnershipQueryTests() =
                     Is.EqualTo(
                         [ { TerminalSessionId = terminalA
                             CopilotSessionId = SessionId "owned"
-                            Status = SessionLevelStatus.Working } ]
+                            Status = SessionLevelStatus.Working
+                            UpdatedAt = ts "2026-03-01T10:00:05Z" } ]
                     )
-                )
-                Assert.That(
-                    working.ResumableSessionIds,
-                    Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
                 )
                 Assert.That(
                     queryReplacementPlanOk service now [ replacementTarget ],
@@ -2285,13 +2285,10 @@ type TerminalOwnershipQueryTests() =
                     Is.EqualTo(
                         [ { TerminalSessionId = terminalA
                             CopilotSessionId = SessionId "owned"
-                            Status = SessionLevelStatus.Idle } ]
+                            Status = SessionLevelStatus.Idle
+                            UpdatedAt = ts "2026-03-01T10:00:20Z" } ]
                     ),
                     "an omitted origin keeps the session attached to its exact terminal"
-                )
-                Assert.That(
-                    retained.ResumableSessionIds,
-                    Is.EqualTo(Map.ofList [ terminalA, SessionId "owned" ])
                 )
                 Assert.That(retainedEpoch, Is.EqualTo retained.ActivityEpoch)
                 Assert.That(
@@ -2304,28 +2301,42 @@ type TerminalOwnershipQueryTests() =
                 )))
 
     [<Test>]
-    member _.``retained owned session remains resumable after restart without becoming open``() =
+    member _.``fresh owned session wins replacement after restart over newer stale history``() =
         let terminalSessionId =
             TerminalSessionId "cccccccccccccccccccccccccccccccc"
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-owned-resume-worktree")
-        let retained updatedAt sessionId =
+        let retained updatedAt lastSeen sessionId =
             { SessionId = SessionId sessionId
               TerminalSessionId = Some terminalSessionId
               WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
               Provider = CopilotCli
               Status = { emptyStatus with Status = SessionLevelStatus.Idle }
               UpdatedAt = updatedAt
-              LastSeen = now - idleWindow - TimeSpan.FromMinutes 10.0
+              LastSeen = lastSeen
               ContextUsageAt = None }
 
         let seed (store: SessionActivityStore) =
-            store.UpsertStatus(retained (now.AddHours(-5.0)) "older")
-            store.UpsertStatus(retained (now.AddHours(-4.0)) "latest")
+            store.UpsertStatus(
+                retained
+                    (now.AddHours(-5.0))
+                    (now.AddMinutes(-1.0))
+                    "fresh"
+            )
+
+            store.UpsertStatus(
+                retained
+                    (now.AddHours(-4.0))
+                    (now - idleWindow - TimeSpan.FromMinutes 10.0)
+                    "newer-stale"
+            )
 
         withServiceSeeded worktree seed (fun (service, _, _) ->
             service.Start()
-            Assert.That(service.LiveSnapshot(), Is.Empty)
+            Assert.That(
+                service.LiveSnapshot() |> Map.keys |> Seq.toList,
+                Is.EqualTo([ SessionId "fresh" ])
+            )
 
             let snapshot =
                 queryOwnedOk service now (Set.singleton terminalSessionId)
@@ -2338,10 +2349,14 @@ type TerminalOwnershipQueryTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(snapshot.ActivityEpoch, Is.Zero)
-                Assert.That(snapshot.OpenSessions, Is.Empty)
                 Assert.That(
-                    snapshot.ResumableSessionIds,
-                    Is.EqualTo(Map.ofList [ terminalSessionId, SessionId "latest" ])
+                    snapshot.OpenSessions,
+                    Is.EqualTo(
+                        [ { TerminalSessionId = terminalSessionId
+                            CopilotSessionId = SessionId "fresh"
+                            Status = SessionLevelStatus.Idle
+                            UpdatedAt = now.AddHours(-5.0) } ]
+                    )
                 )
                 Assert.That(policyEpoch, Is.Zero)
                 Assert.That(
@@ -2349,6 +2364,6 @@ type TerminalOwnershipQueryTests() =
                     Is.EqualTo(
                         Map.ofList
                             [ TerminalSessionId.value terminalSessionId,
-                              "copilot --yolo --resume 'latest'" ]
+                              "copilot --yolo --resume 'fresh'" ]
                     )
                 )))
