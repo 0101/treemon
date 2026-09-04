@@ -10,8 +10,9 @@
   `src/TerminalHostLayout`, `src/Server/TerminalHost*.fs`,
   `src/Server/TerminalSessionActivity.fs`, `src/Server/EmbeddedTerminal.fs`, and any terminal-specific
   runtime script) stays at or below 4,000 nonblank production lines. Product-level launch policy
-  (`TerminalLaunch.fs`, `SessionManager.fs`, `WorktreeApi.fs`) routes to that runtime and is outside
-  both it and the budget.
+  and user-authorized lifecycle policy (`TerminalLaunch.fs`, `WorktreeCleanup.fs`,
+  `SessionManager.fs`, `WorktreeApi.fs`) route to that runtime and are outside both it and the
+  budget.
 - Give every terminal an exact kernel-owned process boundary established before ttyd executes.
 - Keep lifecycle control loopback-only, authenticated, versioned, and limited to the five endpoints
   listed below.
@@ -423,12 +424,12 @@ configuration, launch, and exact identity defaults; `TerminalHostEndpoint` owns 
 loopback-HTTP endpoint shape; `TerminalHostManifest` validates discovery; `TerminalHostClient` owns
 authenticated control and attachment requests; `TerminalHostReplacement` coordinates replacement;
 and `TerminalSessionActivity` derives the exact owned-session replacement policy from raw activity
-facts. `Server.EmbeddedTerminal` retains only the mailbox, authoritative snapshot
-reconciliation, and public terminal lifecycle surface. It lazily starts a host only when none is
-healthy, and ambiguous start or close responses are resolved by listing the registry again.
-Its cleanup bracket records only exact canonical paths and opaque operation tokens in mailbox state;
-the delete/archive operation runs outside the mailbox so unrelated paths remain concurrent, and a
-`finally` release prevents failed or cancelled mutations from leaving a path busy.
+facts. `Server.EmbeddedTerminal` retains the mailbox, cleanup reservation, authoritative snapshot
+reconciliation, and public start/get surface. `WorktreeCleanup` owns user-authorized close policy:
+it acquires the canonical-path reservation, queries and gracefully stops exact sessions, performs
+host I/O outside the mailbox, applies the authoritative registry transition, records exact closure,
+and only then invokes delete/archive mutation. A `finally` release prevents failed or cancelled
+mutations from leaving a path busy while unrelated paths remain concurrent.
 The mailbox grants one replacement phase, keeps serving cached reads and bounded rejection replies
 while replacement runs asynchronously, then alone applies the replacement's registry transition.
 The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes
@@ -697,7 +698,8 @@ isolated server and fails on incomplete exact process cleanup.
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
 | `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, and replacement coordination |
 | `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
-| `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, command-capable start, authoritative snapshot reconciliation, and public start/get/close surface |
+| `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, cleanup reservation, command-capable start, and authoritative snapshot reconciliation |
+| `src/Server/WorktreeCleanup.fs` | Product-level explicit terminal/worktree teardown, graceful exact-session coordination, host close, and closure publication |
 | `src/Server/SessionActivity.fs` | Per-process instance lifecycle fold, exact process identity, liveness, and closure |
 | `src/Server/ProcessIdentityResolver.fs` | Shared default PID/start-time resolution used by activity ingress and exact process liveness checks |
 | `src/Server/SessionActivityProtocol.fs`, `SessionActivityIngestion.fs`, and `SessionActivityService.fs` | Exact activity wire parsing, fold application, acknowledged presence, bounded live state, startup reconciliation, and mailbox-serialized terminal ownership queries |

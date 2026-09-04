@@ -601,6 +601,7 @@ let internal deleteWorktreeWith
 let private deleteWorktree
     agent
     embeddedTerminal
+    terminalSessionCleanup
     (clearAcceptedSync: string -> unit)
     rootPaths
     wtPath
@@ -614,7 +615,9 @@ let private deleteWorktree
 
     deleteWorktreeWith
         GitWorktree.removeWorktree
-        (EmbeddedTerminal.withReservedCleanup embeddedTerminal)
+        (WorktreeCleanup.withTerminalCleanup
+            terminalSessionCleanup
+            embeddedTerminal)
         removeWorktreeState
         agent
         rootPaths
@@ -700,6 +703,7 @@ type WorktreeApiDependencies =
       CardLog: MailboxProcessor<CardEventLog.CardEventLogMsg>
       SessionAgent: SessionManager.SessionAgent
       EmbeddedTerminal: EmbeddedTerminal.Manager
+      TerminalSessionCleanup: WorktreeCleanup.PrepareSessionClose
       ActivityStore: SessionActivityStore.SessionActivityStore option
       SnapshotStore: OverviewSnapshotStore.OverviewSnapshotStore option
       AutoSyncStore: AutoSyncStore.Store option
@@ -716,6 +720,7 @@ let internal worktreeApiWithLaunch
           CardLog = cardLog
           SessionAgent = sessionAgent
           EmbeddedTerminal = embeddedTerminal
+          TerminalSessionCleanup = terminalSessionCleanup
           ActivityStore = activityStore
           SnapshotStore = snapshotStore
           AutoSyncStore = autoSyncStore
@@ -816,7 +821,10 @@ let internal worktreeApiWithLaunch
         }
 
     let closeEmbeddedTerminal terminalId =
-        EmbeddedTerminal.close embeddedTerminal terminalId
+        WorktreeCleanup.closeEmbeddedTerminalWith
+            terminalSessionCleanup
+            embeddedTerminal
+            terminalId
         |> terminalMutation
 
     match fixtures with
@@ -915,7 +923,13 @@ let internal worktreeApiWithLaunch
                           | _ -> None)
                       |> Map.ofList
               }
-          deleteWorktree = deleteWorktree agent embeddedTerminal clearAcceptedRecord rootPaths
+          deleteWorktree =
+            deleteWorktree
+                agent
+                embeddedTerminal
+                terminalSessionCleanup
+                clearAcceptedRecord
+                rootPaths
           launchSession = fun req ->
               withValidatedPath req.Path "launchSession" (fun () ->
                   async {
@@ -936,7 +950,9 @@ let internal worktreeApiWithLaunch
               updateArchivedBranchesWith
                   agent
                   rootPaths
-                  (EmbeddedTerminal.withReservedCleanup embeddedTerminal)
+                  (WorktreeCleanup.withTerminalCleanup
+                      terminalSessionCleanup
+                      embeddedTerminal)
                   Set.add
           unarchiveWorktree =
               updateArchivedBranchesWith

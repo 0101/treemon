@@ -21,6 +21,7 @@ open NUnit.Framework
 open global.Server
 open global.Server.GitWorktree
 open global.Server.SessionActivity
+open global.Server.SessionActivityService
 open global.Server.SessionActivityStore
 open global.Server.SchedulerState
 open global.Server.TerminalSessionActivity
@@ -592,6 +593,19 @@ let private requireError result =
     | Ok _ ->
         Assert.Fail("Expected an error")
         ""
+
+let private closeManagedTerminal manager terminalId =
+    WorktreeCleanup.closeEmbeddedTerminalWith
+        WorktreeCleanup.noSessionClose
+        manager
+        terminalId
+
+let private withManagedTerminalCleanup manager worktreePath operation =
+    WorktreeCleanup.withTerminalCleanup
+        WorktreeCleanup.noSessionClose
+        manager
+        worktreePath
+        operation
 
 let private runningEndpoint (tab: EmbeddedTerminalTab) =
     match tab.Lifecycle with
@@ -1468,13 +1482,445 @@ type EmbeddedTerminalControlClientTests() =
             host.FailNextCloseResponse()
 
             let! closed =
-                EmbeddedTerminal.close manager firstTerminalId
+                closeManagedTerminal manager firstTerminalId
                 |> Async.StartAsTask
 
             Assert.Multiple(fun () ->
                 Assert.That((requireOk closed).Tabs.Length, Is.EqualTo(1))
                 Assert.That(host.CloseRequestCount, Is.EqualTo(1))
                 Assert.That(host.ListRequestCount, Is.GreaterThanOrEqualTo(5)))
+        }
+
+    [<Test>]
+    member _.``explicit close monotonically closes only exact terminal instances and refreshes final no-session state``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+            let target = worktree host.Root "exact-close"
+
+            let! firstStart =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let! secondStart =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let firstTerminalId =
+                requireOk firstStart |> _.TerminalId
+
+            let secondTerminalId =
+                requireOk secondStart |> _.TerminalId
+
+            let processIdentities =
+                [ 61_001; 61_002; 61_003; 61_004 ]
+                |> List.map (fun processId ->
+                    processId,
+                    ProcessIdentity.create
+                        processId
+                        (int64 processId * 1_000L)
+                    |> Result.defaultWith invalidOp)
+                |> Map.ofList
+
+            let resolver =
+                ProcessIdentityResolver.create (fun processId ->
+                    processIdentities
+                    |> Map.tryFind processId
+                    |> Ok)
+
+            let agent = SchedulerState.createAgent()
+            let repoId = PathUtils.toRepoId host.Root
+
+            do!
+                populateAgent
+                    agent
+                    repoId
+                    [ { Path = WorktreePath.value target
+                        Head = "exact-close-head"
+                        Branch = Some "exact-close" } ]
+
+            use store =
+                new SessionActivityStore(
+                    Path.Combine(host.Root, "exact-close.db")
+                )
+
+            use service =
+                new SessionActivityService(
+                    store,
+                    agent,
+                    resolver
+                )
+
+            service.Start()
+            let now = DateTimeOffset.UtcNow
+
+            let recordSession index processId sessionId terminalId eventAt =
+                let at = now.AddMilliseconds(float index)
+                let origin =
+                    terminalId
+                    |> EmbeddedTerminalId.value
+                    |> TerminalSessionId
+
+                let report suffix event =
+                    { ParentProcessId = processId
+                      SessionId = SessionId sessionId
+                      TerminalSessionId = Some origin
+                      WorktreePath = target
+                      Provider = CopilotCli
+                      EventId = EventId $"{suffix}-{processId}"
+                      OccurredAt = at
+                      Event = event }
+
+                match service.Present(report "presence" SessionPresent, at) with
+                | PresenceAcknowledge.Recorded identity ->
+                    service.Submit(report "activity" (eventAt at))
+                    identity
+                | PresenceAcknowledge.NotRecorded(_, error) ->
+                    Assert.Fail(error)
+                    Unchecked.defaultof<_>
+
+            let targetIdentities =
+                [ recordSession
+                      1
+                      61_001
+                      "shared-session"
+                      firstTerminalId
+                      (fun _ -> TurnStarted)
+                  recordSession
+                      2
+                      61_002
+                      "waiting-session"
+                      firstTerminalId
+                      (fun at -> AwaitingUserInput(None, at))
+                  recordSession
+                      3
+                      61_003
+                      "idle-session"
+                      firstTerminalId
+                      (fun _ -> WentIdle) ]
+
+            let siblingIdentity =
+                recordSession
+                    4
+                    61_004
+                    "shared-session"
+                    secondTerminalId
+                    (fun _ -> TurnStarted)
+
+            service.ExactSnapshot() |> ignore
+            let cleanup =
+                SessionActivityRuntime.terminalSessionCleanup service
+
+            let! firstClose =
+                WorktreeCleanup.closeEmbeddedTerminalWith
+                    cleanup
+                    manager
+                    firstTerminalId
+                |> Async.StartAsTask
+
+            requireOk firstClose |> ignore
+
+            let! stateAfterFirst =
+                agent.PostAndAsyncReply(GetState)
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                targetIdentities
+                |> List.iter (fun identity ->
+                    Assert.That(
+                        store.InstanceByIdentity identity
+                        |> Option.bind _.ClosedAt,
+                        Is.Not.EqualTo(None)
+                    ))
+
+                Assert.That(
+                    store.InstanceByIdentity siblingIdentity
+                    |> Option.bind _.ClosedAt,
+                    Is.EqualTo(None),
+                    "the same durable SessionId in another exact terminal must remain open"
+                )
+                Assert.That(stateAfterFirst.SessionInstances.Count, Is.EqualTo(1))
+                Assert.That(host.CurrentTerminals.Length, Is.EqualTo(1)))
+
+            let! secondClose =
+                WorktreeCleanup.closeEmbeddedTerminalWith
+                    cleanup
+                    manager
+                    secondTerminalId
+                |> Async.StartAsTask
+
+            requireOk secondClose |> ignore
+
+            let! finalState =
+                agent.PostAndAsyncReply(GetState)
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    store.InstanceByIdentity siblingIdentity
+                    |> Option.bind _.ClosedAt,
+                    Is.Not.EqualTo(None)
+                )
+                Assert.That(finalState.SessionInstances, Is.Empty)
+                Assert.That(
+                    finalState.CodingToolStatusByWorktree.ContainsKey(
+                        WorktreePath.value target
+                    ),
+                    Is.False,
+                    "the final exact closure must publish NoSession before close returns"
+                )
+                Assert.That(host.CurrentTerminals, Is.Empty))
+        }
+
+    [<Test>]
+    member _.``graceful close wait leaves unrelated lifecycle requests available and host close remains authoritative``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+            let target = worktree host.Root "graceful-target"
+            let unrelated = worktree host.Root "graceful-unrelated"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let terminalId = requireOk started |> _.TerminalId
+            let terminalOrigin =
+                terminalId
+                |> EmbeddedTerminalId.value
+                |> TerminalSessionId
+
+            let shutdownEntered =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let releaseShutdown =
+                TaskCompletionSource<unit>(
+                    TaskCreationOptions.RunContinuationsAsynchronously
+                )
+
+            let beforeCalls = ConcurrentQueue<Set<TerminalSessionId>>()
+            let afterCalls = ConcurrentQueue<Set<TerminalSessionId>>()
+
+            let prepare
+                (_: Map<TerminalSessionId, WorktreePath>)
+                : WorktreeCleanup.SessionClosePlan =
+                { BeforeHostClose =
+                    fun terminalIds ->
+                        async {
+                            beforeCalls.Enqueue terminalIds
+                            shutdownEntered.TrySetResult() |> ignore
+                            do! releaseShutdown.Task |> Async.AwaitTask
+                            raise (
+                                InvalidOperationException(
+                                    "simulated graceful shutdown failure"
+                                )
+                            )
+                        }
+                  AfterHostClose =
+                    fun terminalIds ->
+                        afterCalls.Enqueue terminalIds
+                        Ok() }
+
+            let close =
+                WorktreeCleanup.closeEmbeddedTerminalWith
+                    prepare
+                    manager
+                    terminalId
+                |> Async.StartAsTask
+
+            do!
+                shutdownEntered.Task.WaitAsync(
+                    TimeSpan.FromSeconds 5.0
+                )
+
+            let! samePathStart =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            let! unrelatedStart =
+                EmbeddedTerminal.start manager unrelated
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    requireError samePathStart,
+                    Does.Contain("cleanup is in progress")
+                )
+                requireOk unrelatedStart |> ignore
+                Assert.That(
+                    host.CloseRequestCount,
+                    Is.Zero,
+                    "TerminalHost close must wait for the graceful attempt"
+                ))
+
+            releaseShutdown.TrySetResult() |> ignore
+
+            let! result =
+                close.WaitAsync(TimeSpan.FromSeconds 5.0)
+
+            Assert.Multiple(fun () ->
+                requireOk result |> ignore
+                Assert.That(
+                    beforeCalls.ToArray(),
+                    Is.EqualTo [| Set.singleton terminalOrigin |]
+                )
+                Assert.That(
+                    afterCalls.ToArray(),
+                    Is.EqualTo [| Set.singleton terminalOrigin |]
+                )
+                Assert.That(host.CloseRequestCount, Is.EqualTo(1))
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EqualTo [ WorktreePath.value unrelated ]
+                ))
+        }
+
+    [<Test>]
+    member _.``cleanup reconciliation preserves a newer unrelated terminal``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let config = managerConfig host noLaunch
+            let manager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "stale-cleanup-target"
+            let unrelated = worktree host.Root "stale-cleanup-unrelated"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let terminalId = requireOk started |> _.TerminalId
+
+            let! reservation =
+                EmbeddedTerminal.reserveCleanup
+                    manager
+                    (EmbeddedTerminal.OneTerminal terminalId)
+                    None
+                |> Async.StartAsTask
+
+            let lease =
+                match reservation with
+                | Ok(EmbeddedTerminal.CleanupReserved lease) -> lease
+                | other ->
+                    Assert.Fail($"Expected cleanup reservation, got {other}")
+                    Unchecked.defaultof<_>
+
+            try
+                let! connection =
+                    async {
+                        match! TerminalHostClient.discoverHost config with
+                        | TerminalHostClient.HealthyHost connection -> return connection
+                        | discovery ->
+                            return
+                                failwith
+                                    $"Expected healthy fixture host, got {discovery}"
+                    }
+                    |> Async.StartAsTask
+
+                host.RemoveTerminal(EmbeddedTerminalId.value terminalId)
+
+                let! staleRegistry =
+                    TerminalHostClient.listTerminals config connection
+                    |> Async.StartAsTask
+
+                let staleRegistry = requireOk staleRegistry
+
+                let! unrelatedStart =
+                    EmbeddedTerminal.start manager unrelated
+                    |> Async.StartAsTask
+
+                let unrelatedId = requireOk unrelatedStart |> _.TerminalId
+
+                let! reconciled =
+                    EmbeddedTerminal.applyCleanup
+                        manager
+                        (EmbeddedTerminal.ReconcileCleanup(
+                            connection,
+                            staleRegistry,
+                            EmbeddedTerminal.RemoveCleanupTarget(
+                                EmbeddedTerminal.OneTerminal terminalId
+                            )
+                        ))
+                    |> Async.StartAsTask
+
+                let unrelatedTab =
+                    reconciled.Tabs
+                    |> List.find (fun tab -> tab.Id = unrelatedId)
+
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        reconciled.Tabs |> List.map _.Id,
+                        Is.EqualTo [ unrelatedId ]
+                    )
+
+                    match unrelatedTab.Lifecycle with
+                    | EmbeddedTerminalLifecycle.Running _ -> ()
+                    | lifecycle ->
+                        Assert.Fail(
+                            $"The newer unrelated terminal was regressed to {lifecycle}"
+                        ))
+            finally
+                EmbeddedTerminal.releaseCleanup manager lease
+        }
+
+    [<Test>]
+    member _.``unresolved terminal survivor keeps registry entry and skips exact closure``() =
+        task {
+            use host =
+                new FakeControlHost(
+                    onTerminalClosing = fun _ ->
+                        raise (
+                            InvalidOperationException(
+                                "simulated unresolved survivor"
+                            )
+                        )
+                )
+
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+            let target = worktree host.Root "unresolved-close"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let terminalId = requireOk started |> _.TerminalId
+            let closureCalls = ConcurrentQueue<Set<TerminalSessionId>>()
+
+            let prepare
+                (_: Map<TerminalSessionId, WorktreePath>)
+                : WorktreeCleanup.SessionClosePlan =
+                { BeforeHostClose = fun _ -> async.Return()
+                  AfterHostClose =
+                    fun terminalIds ->
+                        closureCalls.Enqueue terminalIds
+                        Ok() }
+
+            let! result =
+                WorktreeCleanup.closeEmbeddedTerminalWith
+                    prepare
+                    manager
+                    terminalId
+                |> Async.StartAsTask
+
+            let! cached =
+                EmbeddedTerminal.getCached manager
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That(requireError result, Is.Not.Empty)
+                Assert.That(host.CurrentTerminals.Length, Is.EqualTo(1))
+                Assert.That(cached.Tabs.Length, Is.EqualTo(1))
+                Assert.That(closureCalls, Is.Empty))
         }
 
     [<Test>]
@@ -1593,6 +2039,32 @@ type EmbeddedTerminalControlClientTests() =
 
                 Assert.That(endpointsAfter, Is.EqualTo endpointsBefore)
                 Assert.That(host.StartRequestCount, Is.EqualTo(2)))
+        }
+
+    [<Test>]
+    member _.``explicit close discovers a live terminal before a cold manager has polled``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let config = managerConfig host noLaunch
+            let firstManager = EmbeddedTerminal.createWithConfig config
+            let target = worktree host.Root "cold-close"
+
+            let! started =
+                EmbeddedTerminal.start firstManager target
+                |> Async.StartAsTask
+
+            let terminalId = requireOk started |> _.TerminalId
+            let coldManager = EmbeddedTerminal.createWithConfig config
+
+            let! closed =
+                closeManagedTerminal coldManager terminalId
+                |> Async.StartAsTask
+
+            Assert.Multiple(fun () ->
+                Assert.That((requireOk closed).Tabs, Is.Empty)
+                Assert.That(host.CurrentTerminals, Is.Empty)
+                Assert.That(host.CloseRequestCount, Is.EqualTo(1)))
         }
 
     [<Test>]
@@ -2076,7 +2548,7 @@ type EmbeddedTerminalReplacementTests() =
                             |> Async.StartAsTask
 
                         let closeTask =
-                            EmbeddedTerminal.close
+                            closeManagedTerminal
                                 manager
                                 originalRunningTerminalId
                             |> Async.StartAsTask
@@ -2172,7 +2644,7 @@ type EmbeddedTerminalReplacementTests() =
                 |> _.Id
 
             let! retriedClose =
-                EmbeddedTerminal.close manager runningTerminalId
+                closeManagedTerminal manager runningTerminalId
                 |> Async.StartAsTask
 
             requireOk retriedClose |> ignore
@@ -2805,7 +3277,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 )
 
             let firstCleanup =
-                EmbeddedTerminal.withReservedCleanup
+                withManagedTerminalCleanup
                     manager
                     target
                     (fun () ->
@@ -2833,7 +3305,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 )
 
             let! secondCleanup =
-                EmbeddedTerminal.withReservedCleanup
+                withManagedTerminalCleanup
                     manager
                     alias
                     (fun () ->
@@ -2917,7 +3389,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
             requireOk initial |> ignore
 
             let! failed =
-                EmbeddedTerminal.withReservedCleanup
+                withManagedTerminalCleanup
                     manager
                     target
                     (fun () ->
@@ -2967,7 +3439,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
             use cancellation = new System.Threading.CancellationTokenSource()
 
             let cleanup =
-                EmbeddedTerminal.withReservedCleanup
+                withManagedTerminalCleanup
                     manager
                     target
                     (fun () ->
@@ -3017,10 +3489,10 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                     onTerminalClosing = fun _ ->
                         closeAttempts <- closeAttempts + 1
 
-                        if closeAttempts = 2 then
+                        if closeAttempts = 1 then
                             raise (
                                 InvalidOperationException(
-                                    "simulated second terminal close failure"
+                                    "simulated first terminal close failure"
                                 )
                             )
                 )
@@ -3043,7 +3515,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 )
 
             let! result =
-                EmbeddedTerminal.withReservedCleanup
+                withManagedTerminalCleanup
                     manager
                     target
                     (fun () ->
@@ -3096,7 +3568,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 )
 
             let! failed =
-                EmbeddedTerminal.withReservedCleanup
+                withManagedTerminalCleanup
                     manager
                     target
                     (fun () ->
@@ -3133,7 +3605,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
 
             let! malformedClose =
-                EmbeddedTerminal.close
+                closeManagedTerminal
                     manager
                     (EmbeddedTerminalId invalidId)
                 |> Async.StartAsTask
@@ -3248,7 +3720,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                     )
 
                 let cleanup =
-                    EmbeddedTerminal.withReservedCleanup
+                    withManagedTerminalCleanup
                         manager
                         target
                         (fun () ->
@@ -3396,7 +3868,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                             removeCalls.Enqueue path
                             return Ok()
                         })
-                    (EmbeddedTerminal.withReservedCleanup manager)
+                    (withManagedTerminalCleanup manager)
                     (fun path ->
                         async {
                             stateCleanupCalls.Enqueue path
@@ -3409,7 +3881,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 WorktreeApi.updateArchivedBranchesWith
                     agent
                     (Map.ofList [ repoId, repoRoot ])
-                    (EmbeddedTerminal.withReservedCleanup manager)
+                    (withManagedTerminalCleanup manager)
                     Set.add
                     archiveTarget
 
@@ -3592,7 +4064,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                             return Ok()
                         })
                     (fun path operation ->
-                        EmbeddedTerminal.withReservedCleanup
+                        withManagedTerminalCleanup
                             manager
                             path
                             (fun () ->
@@ -3660,7 +4132,7 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 WorktreeApi.updateArchivedBranchesWith
                     agent
                     (Map.ofList [ repoId, repoRoot ])
-                    (EmbeddedTerminal.withReservedCleanup manager)
+                    (withManagedTerminalCleanup manager)
                     Set.add
                     target
                 |> Async.StartAsTask

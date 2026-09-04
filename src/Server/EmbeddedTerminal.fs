@@ -1,5 +1,6 @@
 module Server.EmbeddedTerminal
 
+open System
 open Shared
 open Server.TerminalHostClient
 open Server.TerminalHostManifest
@@ -15,17 +16,31 @@ type private ManagerState =
       Phase: ManagerPhase
       CleanupReservations: Map<string, System.Guid> }
 
-type private CleanupReservation = CleanupReservation of pathKey: string * token: System.Guid
+type internal CloseTarget = OneTerminal of EmbeddedTerminalId | WorktreeTerminals of WorktreePath
 
-type private CloseTarget = OneTerminal of EmbeddedTerminalId | WorktreeTerminals of WorktreePath
+type internal CleanupLease =
+    { Token: Guid; Target: CloseTarget
+      WorktreePath: WorktreePath
+      CachedTerminalIds: Set<EmbeddedTerminalId>
+      LastHost: DiscoveryManifest option }
+
+type internal CleanupPreparation = NoCleanupNeeded of EmbeddedTerminalSnapshot | CleanupReserved of CleanupLease
+
+type internal CleanupRemoval = KeepCleanupTargets | RemoveCleanupTarget of CloseTarget | RemoveClosedTerminals of Set<EmbeddedTerminalId>
+
+type internal CleanupUpdate =
+    | ReconcileCleanup of DiscoveryManifest * RegistrySnapshot * CleanupRemoval
+    | UnverifiedCleanup of DiscoveryManifest * RegistrySnapshot option * Set<EmbeddedTerminalId> * string
+    | UnavailableCleanup of string * CloseTarget
+    | FailedCleanup of string
 
 type private Message =
     | Start of WorktreePath * command: string option * AsyncReplyChannel<Result<EmbeddedTerminalStartResult, string>>
-    | Close of EmbeddedTerminalId * AsyncReplyChannel<Result<EmbeddedTerminalSnapshot, string>>
     | Get of AsyncReplyChannel<EmbeddedTerminalSnapshot>
     | GetCached of AsyncReplyChannel<EmbeddedTerminalSnapshot>
-    | ReserveCleanup of WorktreePath * CleanupReservation * AsyncReplyChannel<Result<CleanupReservation, string>>
-    | ReleaseCleanup of CleanupReservation
+    | ReserveCleanup of CloseTarget * WorktreePath option * Guid * AsyncReplyChannel<Result<CleanupPreparation, string>>
+    | ApplyCleanup of CleanupUpdate * AsyncReplyChannel<EmbeddedTerminalSnapshot>
+    | ReleaseCleanup of Guid
     | BeginReplacement of ReplacementPlan * ReplacementPolicyQuery * AsyncReplyChannel<ReplacementOutcome>
     | FinishReplacement of ReplacementCommit * AsyncReplyChannel<ReplacementOutcome>
 
@@ -48,7 +63,7 @@ let private tabForRecord (terminal: TerminalHostClient.TerminalRecord) =
       ReportedActivity = None
       Lifecycle = EmbeddedTerminalLifecycle.Running terminal.AttachmentEndpoint }
 
-let private reconcileSnapshot resetTabs previousHost currentHost (records: TerminalHostClient.TerminalRecord list) (snapshot: EmbeddedTerminalSnapshot) =
+let private reconcileSnapshot resetTabs preserveMissing previousHost currentHost (records: TerminalHostClient.TerminalRecord list) (snapshot: EmbeddedTerminalSnapshot) =
     let resetTabs =
         resetTabs
         || (previousHost |> Option.exists (fun previous -> not (hostIdentityMatches previous currentHost)))
@@ -71,24 +86,25 @@ let private reconcileSnapshot resetTabs previousHost currentHost (records: Termi
                  |> Map.tryFind tab.Id
                  |> Option.map tabForRecord
                  |> Option.defaultWith (fun () ->
-                     interrupted "The terminal is no longer present in the authoritative TerminalHost registry." tab)))
+                     if preserveMissing then tab
+                     else interrupted "The terminal is no longer present in the authoritative TerminalHost registry." tab)))
             @ (records
                |> List.filter (fun terminal ->
                    not (Set.contains (EmbeddedTerminalId terminal.SessionId) previousIds))
                |> List.map tabForRecord) }
 
-let private applyRegistryWith rebindTerminals (state: ManagerState) (manifest: DiscoveryManifest) (registry: RegistrySnapshot) =
+let private applyRegistryWith rebindTerminals preserveMissing (state: ManagerState) (manifest: DiscoveryManifest) (registry: RegistrySnapshot) =
     { state with
         LastSnapshot =
-            reconcileSnapshot rebindTerminals state.LastHost manifest registry.Terminals state.LastSnapshot
+            reconcileSnapshot rebindTerminals preserveMissing state.LastHost manifest registry.Terminals state.LastSnapshot
         LastHost = Some manifest }
 
-let private applyRegistry = applyRegistryWith false
+let private applyRegistry = applyRegistryWith false false
 
-let private withHostFailure error state =
+let private withHostFailure error (state: ManagerState) =
     { state with LastSnapshot = interruptSnapshot error state.LastSnapshot }
 
-let private getTerminals config state =
+let private getTerminals config (state: ManagerState) =
     async {
         match! discoverHost config with
         | HealthyHost connection ->
@@ -101,7 +117,7 @@ let private getTerminals config state =
         | UnusableHost error -> return withHostFailure error state
     }
 
-let private mutationFailure state connection = function
+let private mutationFailure (state: ManagerState) connection = function
     | MutationUnverified(lastRegistry, error) ->
         let current =
             lastRegistry
@@ -112,25 +128,13 @@ let private mutationFailure state connection = function
     | MutationRejected(registry, error) ->
         applyRegistry state connection registry, error
 
-let private mutationResult prepare state connection = function
+let private mutationResult prepare (state: ManagerState) connection = function
     | Error failure ->
         let next, error = mutationFailure state connection failure
         next, Error error
     | Ok registry ->
         let next = applyRegistry (prepare state) connection registry
         next, Ok next.LastSnapshot
-
-let private safeWithoutHealthyHost config state discovery =
-    match discovery with
-    | DeadHost _ -> Ok()
-    | MissingHost ->
-        match knownHostIsStillLive config state.LastHost with
-        | Ok false -> Ok()
-        | Ok true -> Error "The TerminalHost manifest is missing while the exact recorded host is still running"
-        | Error error -> Error error
-    | IncompatibleHost(_, error)
-    | UnusableHost error -> Error error
-    | HealthyHost _ -> failwith "unreachable"
 
 let private withoutTarget target snapshot =
     let keep tab =
@@ -141,8 +145,52 @@ let private withoutTarget target snapshot =
 
     { Tabs = snapshot.Tabs |> List.filter keep }
 
-let private removeTarget target state =
+let private removeTarget target (state: ManagerState) =
     { state with LastSnapshot = withoutTarget target state.LastSnapshot }
+
+let private targetTerminalIds target fallback (snapshot: EmbeddedTerminalSnapshot) =
+    let cached =
+        snapshot.Tabs
+        |> List.choose (fun tab ->
+            match target with
+            | OneTerminal terminalId when tab.Id = terminalId -> Some tab.Id
+            | WorktreeTerminals path when samePath (WorktreePath.value tab.Worktree) (WorktreePath.value path) -> Some tab.Id
+            | _ -> None)
+        |> Set.ofList
+
+    match target, fallback with
+    | OneTerminal terminalId, Some _ -> Set.add terminalId cached
+    | _ -> cached
+
+let private targetWorktree (state: ManagerState) target fallback =
+    match target with
+    | WorktreeTerminals path -> Some path
+    | OneTerminal terminalId ->
+        state.LastSnapshot.Tabs |> List.tryFind (fun tab -> tab.Id = terminalId)
+        |> Option.map _.Worktree |> Option.orElse fallback
+
+let private removeTerminalIds (terminalIds: Set<EmbeddedTerminalId>) (state: ManagerState) =
+    { state with
+        LastSnapshot.Tabs =
+            state.LastSnapshot.Tabs
+            |> List.filter (fun tab -> not (terminalIds.Contains tab.Id)) }
+
+let private applyCleanupRemoval removal (state: ManagerState) =
+    match removal with
+    | KeepCleanupTargets -> state
+    | RemoveCleanupTarget target -> removeTarget target state
+    | RemoveClosedTerminals terminalIds -> removeTerminalIds terminalIds state
+
+let private applyCleanupUpdate (state: ManagerState) = function
+    | ReconcileCleanup(connection, registry, removal) ->
+        applyRegistryWith false true (applyCleanupRemoval removal state) connection registry
+    | UnverifiedCleanup(connection, registry, closedTerminalIds, error) ->
+        MutationUnverified(registry, error)
+        |> mutationFailure (removeTerminalIds closedTerminalIds state) connection
+        |> fst
+    | UnavailableCleanup(reason, target) ->
+        { state with LastSnapshot = state.LastSnapshot |> interruptSnapshot reason |> withoutTarget target }
+    | FailedCleanup error -> withHostFailure error state
 
 let private deliverCommand config attachmentEndpoint command =
     async {
@@ -152,28 +200,22 @@ let private deliverCommand config attachmentEndpoint command =
             return Error "Could not submit the terminal command"
     }
 
-let private closeOnHost config state connection target =
+let private closeStartedTerminal config (state: ManagerState) connection terminalId =
     async {
         let! result =
-            match target with
-            | OneTerminal terminalId ->
-                closeTerminalOnHost config connection (EmbeddedTerminalId.value terminalId)
-            | WorktreeTerminals path ->
-                closeTerminalsForWorktreeOnHost config connection (WorktreePath.value path)
+            closeTerminalOnHost config connection (EmbeddedTerminalId.value terminalId)
 
         return
             result
-            |> mutationResult (removeTarget target) state connection
+            |> mutationResult (removeTarget (OneTerminal terminalId)) state connection
     }
 
-let private startTerminal config state worktreePath command =
+let private startTerminal config (state: ManagerState) worktreePath command =
     async {
         let validatedCommand =
             match command with
             | None -> Ok None
-            | Some value ->
-                validateTerminalCommand value
-                |> Result.map Some
+            | Some value -> validateTerminalCommand value |> Result.map Some
 
         match validatedCommand with
         | Error error -> return state, Error error
@@ -196,7 +238,7 @@ let private startTerminal config state worktreePath command =
                     let fail current error =
                         async {
                             let! afterCleanup, cleanupResult =
-                                closeOnHost config current connection (OneTerminal terminalId)
+                                closeStartedTerminal config current connection terminalId
 
                             let message =
                                 match cleanupResult with
@@ -222,43 +264,13 @@ let private startTerminal config state worktreePath command =
                                 return! fail current error
     }
 
-let private closeTerminals config state target =
-    async {
-        match target with
-        | OneTerminal terminalId
-            when not (validSessionId (EmbeddedTerminalId.value terminalId)) ->
-            return state, Error "Invalid embedded terminal ID"
-        | _ ->
-            match! discoverHost config with
-            | HealthyHost connection ->
-                return! closeOnHost config state connection target
-            | discovery ->
-                match safeWithoutHealthyHost config state discovery with
-                | Error error -> return withHostFailure error state, Error error
-                | Ok() ->
-                    let reason =
-                        match discovery with
-                        | DeadHost error -> $"{error}. Its terminals were interrupted."
-                        | MissingHost -> "TerminalHost is not running; no live terminal remains to close."
-                        | _ -> failwith "unreachable"
-
-                    let next =
-                        { state with
-                            LastSnapshot =
-                                state.LastSnapshot
-                                |> interruptSnapshot reason
-                                |> withoutTarget target }
-
-                    return next, Ok next.LastSnapshot
-    }
-
-let private applyReplacementCommit state commit =
+let private applyReplacementCommit (state: ManagerState) commit =
     match commit with
     | ReplacementCommit.KeepState outcome -> state, outcome
     | ReplacementCommit.InterruptState(message, outcome) ->
         withHostFailure message state, outcome
     | ReplacementCommit.ApplyRegistry(manifest, registry, outcome) ->
-        applyRegistryWith true state manifest registry, outcome
+        applyRegistryWith true false state manifest registry, outcome
 
 let private replacementInProgressError = "TerminalHost replacement is in progress; try again when it completes."
 let private cleanupInProgressError = "Terminal cleanup is in progress for this worktree; try again when it completes."
@@ -273,13 +285,8 @@ let private cleanupPathKey worktreePath =
 
 let private respond (channel: AsyncReplyChannel<'value>) value state = channel.Reply value; state
 
-let private cleanupReserved state path =
+let private cleanupReserved (state: ManagerState) path =
     state.CleanupReservations |> Map.containsKey (cleanupPathKey path)
-
-let private terminalCleanupReserved state terminalId =
-    state.LastSnapshot.Tabs
-    |> List.tryFind (fun tab -> tab.Id = terminalId)
-    |> Option.exists (fun tab -> cleanupReserved state tab.Worktree)
 
 let internal createWithConfig config =
     let agent =
@@ -298,54 +305,59 @@ let internal createWithConfig config =
                         return! loop (respond reply state.LastSnapshot state)
                     | Start(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
                         return! loop (respond reply (Error replacementInProgressError) state)
-                    | Close(_, reply) when state.Phase = ManagerPhase.Replacing ->
-                        return! loop (respond reply (Error replacementInProgressError) state)
                     | Start(worktreePath, _, reply)
                         when cleanupReserved state worktreePath ->
-                        return! loop (respond reply (Error cleanupInProgressError) state)
-                    | Close(terminalId, reply)
-                        when terminalCleanupReserved state terminalId ->
                         return! loop (respond reply (Error cleanupInProgressError) state)
                     | Start(worktreePath, command, reply) ->
                         let! next, result =
                             startTerminal config state worktreePath command
 
                         return! loop (respond reply result next)
-                    | Close(terminalId, reply) ->
-                        let! next, result =
-                            closeTerminals config state (OneTerminal terminalId)
-
-                        return! loop (respond reply result next)
-                    | ReserveCleanup(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
+                    | ReserveCleanup(_, _, _, reply) when state.Phase = ManagerPhase.Replacing ->
                         return! loop (respond reply (Error replacementInProgressError) state)
-                    | ReserveCleanup(worktreePath, (CleanupReservation(key, token) as reservation), reply) ->
-                        match state.CleanupReservations |> Map.tryFind key with
-                        | Some _ ->
-                            return! loop (respond reply (Error cleanupInProgressError) state)
+                    | ReserveCleanup(OneTerminal terminalId, _, _, reply)
+                        when not (validSessionId (EmbeddedTerminalId.value terminalId)) ->
+                        return! loop (respond reply (Error "Invalid embedded terminal ID") state)
+                    | ReserveCleanup(target, fallback, token, reply) ->
+                        match targetWorktree state target fallback with
                         | None ->
-                            let reserved =
-                                { state with
-                                    CleanupReservations = state.CleanupReservations |> Map.add key token }
+                            return!
+                                loop (
+                                    respond reply (Ok(NoCleanupNeeded state.LastSnapshot)) state
+                                )
+                        | Some worktreePath ->
+                            let key = cleanupPathKey worktreePath
 
-                            let! next, result =
-                                closeTerminals config reserved (WorktreeTerminals worktreePath)
+                            if state.CleanupReservations.ContainsKey key then
+                                return! loop (respond reply (Error cleanupInProgressError) state)
+                            else
+                                let lease =
+                                    { Token = token
+                                      Target = target
+                                      WorktreePath = worktreePath
+                                      CachedTerminalIds =
+                                        targetTerminalIds target fallback state.LastSnapshot
+                                      LastHost = state.LastHost }
 
-                            match result with
-                            | Error error ->
-                                let released =
-                                    { next with CleanupReservations = next.CleanupReservations |> Map.remove key }
+                                let next =
+                                    { state with
+                                        CleanupReservations =
+                                            state.CleanupReservations
+                                            |> Map.add key token }
 
-                                return! loop (respond reply (Error error) released)
-                            | Ok _ -> return! loop (respond reply (Ok reservation) next)
-                    | ReleaseCleanup(CleanupReservation(key, token)) ->
+                                return! loop (respond reply (Ok(CleanupReserved lease)) next)
+                    | ApplyCleanup(update, reply) ->
+                        let next = applyCleanupUpdate state update
+                        return! loop (respond reply next.LastSnapshot next)
+                    | ReleaseCleanup token ->
                         let reservations =
-                            match state.CleanupReservations |> Map.tryFind key with
-                            | Some current when current = token ->
-                                state.CleanupReservations |> Map.remove key
-                            | _ -> state.CleanupReservations
+                            state.CleanupReservations
+                            |> Map.filter (fun _ current -> current <> token)
 
                         return! loop { state with CleanupReservations = reservations }
-                    | BeginReplacement(_, _, reply) when state.Phase = ManagerPhase.Replacing ->
+                    | BeginReplacement(_, _, reply)
+                        when state.Phase = ManagerPhase.Replacing
+                             || not state.CleanupReservations.IsEmpty ->
                         return! loop (respond reply ReplacementOutcome.RaceLost state)
                     | BeginReplacement(plan, query, reply) ->
                         async {
@@ -429,50 +441,24 @@ let start manager worktreePath =
 let startWithCommand manager worktreePath command =
     startCore manager worktreePath (Some command)
 
-let get (Manager(_, agent)) =
-    ask agent Get
+let get (Manager(_, agent)) = ask agent Get
 
 /// The current manager snapshot without host I/O (test seam for lifecycle transitions).
-let internal getCached (Manager(_, agent)) =
-    ask agent GetCached
+let internal getCached (Manager(_, agent)) = ask agent GetCached
 
-let close (Manager(_, agent)) terminalId =
-    ask agent (fun reply -> Close(terminalId, reply))
+let internal clientConfig (Manager(config, _)) = config
 
-let private asTask cancellation workflow =
-    Async.StartAsTask(workflow, cancellationToken = cancellation)
+let internal applyCleanup (Manager(_, agent)) update = ask agent (fun reply -> ApplyCleanup(update, reply))
 
-let internal withReservedCleanup
-    (Manager(_, agent))
-    worktreePath
-    operation
-    =
+let internal reserveCleanup (Manager(_, agent)) target fallback =
     async {
-        let! callerCancellation = Async.CancellationToken
-        let requested =
-            CleanupReservation(cleanupPathKey worktreePath, System.Guid.NewGuid())
+        let token = Guid.NewGuid()
 
-        let reservation =
-            async {
-                try
-                    return! ask agent (fun reply -> ReserveCleanup(worktreePath, requested, reply))
-                with _ ->
-                    agent.Post(ReleaseCleanup requested)
-                    return Error "Terminal cleanup could not start within 60 seconds; try again."
-            }
-            |> asTask System.Threading.CancellationToken.None
-
-        return!
-            task {
-                let! reservation = reservation
-
-                match reservation with
-                | Error error -> return Error error
-                | Ok acquired ->
-                    try
-                        return! operation () |> asTask callerCancellation
-                    finally
-                        agent.Post(ReleaseCleanup acquired)
-            }
-            |> Async.AwaitTask
+        try
+            return! ask agent (fun reply -> ReserveCleanup(target, fallback, token, reply))
+        with _ ->
+            agent.Post(ReleaseCleanup token)
+            return Error "Terminal cleanup could not start within 60 seconds; try again."
     }
+
+let internal releaseCleanup (Manager(_, agent)) lease = agent.Post(ReleaseCleanup lease.Token)

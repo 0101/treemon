@@ -456,6 +456,7 @@ let main args =
                       CardLog = cardLog
                       SessionAgent = sessionAgent
                       EmbeddedTerminal = embeddedTerminal.Value
+                      TerminalSessionCleanup = WorktreeCleanup.noSessionClose
                       ActivityStore = None
                       SnapshotStore = None
                       AutoSyncStore = None
@@ -521,6 +522,9 @@ let main args =
                           CardLog = cardLog
                           SessionAgent = sessionAgent
                           EmbeddedTerminal = embeddedTerminal.Value
+                          TerminalSessionCleanup =
+                            SessionActivityRuntime.terminalSessionCleanup
+                                activity.Components.Service
                           ActivityStore = Some store
                           SnapshotStore = Some activity.SnapshotStore
                           AutoSyncStore = Some autoSyncStore

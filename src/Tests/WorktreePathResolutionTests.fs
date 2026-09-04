@@ -39,6 +39,7 @@ let private createApiWithTerminal agent roots embeddedTerminal =
           CardLog = CardEventLog.createAgent ()
           SessionAgent = SessionManager.createAgent ()
           EmbeddedTerminal = embeddedTerminal
+          TerminalSessionCleanup = WorktreeCleanup.noSessionClose
           ActivityStore = None
           SnapshotStore = None
           AutoSyncStore = None

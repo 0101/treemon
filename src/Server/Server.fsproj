@@ -72,6 +72,7 @@
     <Compile Include="TerminalHostReplacement.fs" />
     <Compile Include="TerminalSessionActivity.fs" />
     <Compile Include="EmbeddedTerminal.fs" />
+    <Compile Include="WorktreeCleanup.fs" />
     <Compile Include="TerminalLaunch.fs" />
     <Compile Include="RefreshScheduler.fs" />
     <Compile Include="WorktreeApi.fs" />

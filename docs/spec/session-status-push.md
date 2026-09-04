@@ -365,6 +365,7 @@ into lifecycle status.
 | `src/Server/SchedulerState.fs` | Exact live process-instance state and collapsed `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |
 | `src/Server/SessionBridge.fs` | Process-keyed session registration, durable-session/worktree lookup, separate poll registration, exact prompt/shutdown delivery, retry queue, and bridge liveness. |
+| `src/Server/WorktreeCleanup.fs` | User-authorized terminal/worktree teardown ordering from exact graceful shutdown through host cleanup and monotonic closure. |
 | `src/Extension/extension.mjs` and `shutdown-endpoint.mjs` | Exact bridge identity registration and capability-guarded loopback routine shutdown. |
 | `src/Server/AutoSync.fs` | Delivery-aware session selection and guarded sync-prompt fallback launch. |
 | `src/Shared/Types.fs` | `AgentActivity`, context usage, exact-instance marker IDs, and worktree wire types. |

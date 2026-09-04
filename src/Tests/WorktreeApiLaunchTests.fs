@@ -96,6 +96,7 @@ let private createApi
           // the injected TerminalLaunch boundary or fail loudly by dereferencing the test sentinel.
           SessionAgent = Unchecked.defaultof<SessionManager.SessionAgent>
           EmbeddedTerminal = Unchecked.defaultof<EmbeddedTerminal.Manager>
+          TerminalSessionCleanup = WorktreeCleanup.noSessionClose
           ActivityStore = activityStore
           SnapshotStore = None
           AutoSyncStore = None

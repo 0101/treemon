@@ -587,25 +587,3 @@ let internal closeTerminalOnHost config manifest sessionId =
 
                         return Error(MutationRejected(after, error))
     }
-
-let internal closeTerminalsForWorktreeOnHost config manifest path =
-    async {
-        match! authoritativeRegistry config manifest with
-        | Error error -> return Error error
-        | Ok before ->
-            let terminalIds =
-                before.Terminals
-                |> List.filter (fun terminal -> samePath terminal.WorktreePath path)
-                |> List.map _.SessionId
-
-            let rec closeAll latest = function
-                | [] -> async.Return(Ok latest)
-                | sessionId :: remaining ->
-                    async {
-                        match! closeTerminalOnHost config manifest sessionId with
-                        | Error error -> return Error error
-                        | Ok after -> return! closeAll after remaining
-                    }
-
-            return! closeAll before terminalIds
-    }

@@ -638,6 +638,17 @@ type SessionActivityService internal
                 ClosureAcknowledge.Failed
                     "exact session closure failed"
 
+    member internal _.IsProcessClosed(identity: ProcessIdentity) =
+        if isDisposed () then
+            Error "session activity service is stopped"
+        else
+            try
+                store.InstanceByIdentity identity
+                |> Option.exists _.ClosedAt.IsSome
+                |> Ok
+            with _ ->
+                Error "exact session closure state could not be read"
+
     member internal _.StartAt(now: DateTimeOffset) =
         if isDisposed () then
             raise (ObjectDisposedException(nameof SessionActivityService))
