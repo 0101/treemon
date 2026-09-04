@@ -146,6 +146,7 @@ type CardCallbacks =
       /// Primary terminal action: focuses the active session when one exists, else opens a terminal.
       /// Intent-named (not a 1:1 Msg mirror) — do not "simplify" to always dispatch OpenTerminal.
       OpenTerminal: WorktreeStatus -> unit
+      /// Opens the pane on this worktree's selected embedded terminal, starting one only when none exists.
       OpenEmbeddedTerminal: WorktreeStatus -> unit
       OpenEditor: WorktreeStatus -> unit
       OpenNewTab: WorktreeStatus -> unit
@@ -402,7 +403,7 @@ let embeddedTerminalIcon =
 let embeddedTerminalButton (callbacks: CardCallbacks) (wt: WorktreeStatus) =
     Html.button [
         prop.className "embedded-terminal-btn"
-        prop.title "Open embedded terminal"
+        prop.title "Open or focus embedded terminal (T)"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); callbacks.OpenEmbeddedTerminal wt)
         prop.children [ embeddedTerminalIcon ]

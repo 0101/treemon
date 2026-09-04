@@ -76,6 +76,7 @@ type Msg =
     | Tick of now: float
     | OpenTerminal of WorktreePath
     | OpenEmbeddedTerminal of WorktreePath
+    | StartEmbeddedTerminal of WorktreePath
     | EmbeddedTerminalSnapshotChanged of EmbeddedTerminalSnapshot
     | EmbeddedTerminalPollFailed
     | EmbeddedTerminalStarted of
