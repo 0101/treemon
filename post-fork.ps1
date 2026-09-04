@@ -51,6 +51,6 @@ if (Get-Command bd -ErrorAction SilentlyContinue) {
 }
 
 Write-Host "Installing npm dependencies..."
-npm install
+npm install --no-audit --no-fund
 
 Write-Host "Done! Worktree ready at: $WorktreePath"
