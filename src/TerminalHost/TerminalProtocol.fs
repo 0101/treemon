@@ -25,17 +25,10 @@ type internal ReplaySlice =
 
 [<RequireQualifiedAccess>]
 module internal TerminalProtocol =
-    [<Literal>]
-    let private DefaultColumns = 120
-
-    [<Literal>]
-    let private DefaultRows = 30
-
-    [<Literal>]
-    let private MaximumColumns = 1_000
-
-    [<Literal>]
-    let private MaximumRows = 500
+    let [<Literal>] private DefaultColumns = 120
+    let [<Literal>] private DefaultRows = 30
+    let [<Literal>] private MaximumColumns = 1_000
+    let [<Literal>] private MaximumRows = 500
 
     let defaultSize =
         { Columns = DefaultColumns

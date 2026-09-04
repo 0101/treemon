@@ -71,8 +71,7 @@ Browser-mode AgentDocs receive four scripts injected before `</head>`:
 ### Canvas-write detection (session events)
 
 The native runtime no longer supports SDK hook callbacks (`joinSession({ hooks })` fails the
-internal `session.resume`), so canvas writes are observed via **session events** instead of the old
-`onPostToolUse` hook. The extension calls `joinSession()` (no hooks) and subscribes with
+internal `session.resume`), so Canvas writes are observed via **session events**. The extension calls `joinSession()` and subscribes with
 `session.on("tool.execution_start", …)` / `session.on("tool.execution_complete", …)`. The completion
 event carries neither the tool name nor its arguments, so supported canvas targets are captured from
 the **start** event (keyed by `toolCallId`) and acted on once the matching completion reports success.
@@ -92,7 +91,8 @@ accepts only the bare filename rather than stripping a path down to its final se
 
 ## Decisions
 
-- **Event-driven, not file-watcher**: `session.on("tool.execution_*")` detects writes instead of `fs.watch`. Simpler, no OS-specific edge cases. (Was `onPostToolUse`; the native runtime dropped SDK hook callbacks, so detection moved to session events.)
+- **Event-driven, not file-watcher**: `session.on("tool.execution_*")` detects writes instead of
+  `fs.watch`, avoiding OS-specific watcher behavior.
 - **No auto-open**: When Treemon is unreachable, the agent opens the browser or outputs the URL. An explicitly unmonitored directory produces no fallback prompt.
 - **Content polling over SSE**: 3s polling is simpler than SSE and adequate for agent file writes.
 - **Detect once at startup**: v1 does not switch modes mid-session. If Treemon starts later, it won't be detected until the extension restarts.

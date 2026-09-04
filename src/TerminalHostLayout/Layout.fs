@@ -15,20 +15,12 @@ type TerminalHostLayout =
 
 [<RequireQualifiedAccess>]
 module TerminalHostLayout =
-    [<Literal>]
-    let StateDirectoryEnvironmentVariable = "TREEMON_TERMINAL_HOST_STATE_DIR"
-
-    [<Literal>]
-    let ManifestFileName = "host.json"
-
-    [<Literal>]
-    let StagingDirectoryName = "staged"
-
-    [<Literal>]
-    let TtydExecutableName = "ttyd.exe"
-
-    [<Literal>]
-    let VersionDirectoryPattern = @"\A[A-Za-z0-9._-]{1,128}\z"
+    let [<Literal>] StateDirectoryEnvironmentVariable = "TREEMON_TERMINAL_HOST_STATE_DIR"
+    let [<Literal>] ManifestFileName = "host.json"
+    let [<Literal>] StagingDirectoryName = "staged"
+    let [<Literal>] TtydExecutableName = "ttyd.exe"
+    let [<Literal>] TtydLicenseFileName = "ttyd-LICENSE.txt"
+    let [<Literal>] VersionDirectoryPattern = @"\A[A-Za-z0-9._-]{1,128}\z"
 
     let HostExecutableName = if OperatingSystem.IsWindows() then "TerminalHost.exe" else "TerminalHost"
 
@@ -39,7 +31,8 @@ module TerminalHostLayout =
           "TerminalHost.runtimeconfig.json"
           "TerminalHostLayout.dll"
           "FSharp.Core.dll"
-          TtydExecutableName ]
+          TtydExecutableName
+          TtydLicenseFileName ]
 
     let private versionDirectoryRegex =
         Regex(VersionDirectoryPattern, RegexOptions.CultureInvariant ||| RegexOptions.NonBacktracking, TimeSpan.FromSeconds 1.0)

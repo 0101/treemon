@@ -58,9 +58,23 @@ The beads dashboard sits in three layers relative to the generic pane, which is 
 
 - **Genuinely shared (kept):** scan + hash (`CanvasScanner`), serve + inject (`CanvasDocServer` on `:5002`), the pane shell (tabs, iframe, workspace width, overview), and disk-as-source-of-truth.
 - **Beads-specific (already special):** auto-provisioning (`BeadspaceProvisioner`) and the private `/beads-data` JSON endpoint.
-- **Inherited but a misfit (gated off for `SystemView`):** author liveness, the authored-doc Start-session control, content-hash awareness, and morph. SystemViews do receive the generic interaction transport and selected-text actions; those messages use the shared persistent target store without exposing an authored owner.
+- **Inherited but a misfit (gated off for `SystemView`):** author liveness, the authored-doc
+  Start-session control, content-hash awareness, and morph. SystemViews still receive generic
+  interactions and selected-text actions, but resolve a live target per interaction without storing
+  or exposing an authored owner.
 
 A `SystemView` drives its own updates, so it needs neither morph nor the author heartbeat bridge.
+
+### Authoring runtime
+
+Every served document receives a zero-specificity dark typographic base, design tokens,
+`canvasSend`, link interception, Escape focus reclaim, and the selected-text
+Explain/Remove/Comment runtime. Authored rules always override the base theme.
+
+AgentDocs additionally receive author heartbeat, `canvasExpand`, JavaScript error reporting, and
+in-place morphing. A doc-side error is attributed to the emitting worktree and filename and appears
+as a dismissible banner only while that document is focused. Static shared exports receive the base
+theme and an inert `canvasSend` so author controls remain harmless outside Treemon.
 
 ### Doc Lifecycle
 
@@ -80,7 +94,7 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
   hidden. Narrow screens stack the same order and ignore the desktop ratio.
 - The pane normally follows the focused worktree. An explicit card-level SystemView action may target another worktree without moving dashboard card focus; the next explicit card selection clears that override.
 - The worktree diff is explicit-only when another canvas document exists. Automatic fallback and explicit card selection prefer another document; `diff.html` is selected automatically only when it is the worktree's sole canvas document. The card Diff action and direct tab selection still open it. The server omits the generated `diff.html` from a confirmed-clean worktree's inventory (`docs/spec/worktree-diff-viewer.md`), so a clean worktree shows no diff tab — the tab strip needs no per-view visibility rule of its own.
-- Worktrees with multiple docs show tab buttons. The active doc's tab always renders — a lone `AgentDoc` gets a labeled tab instead of a bare iframe, and a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible. Each `AgentDoc` tab reserves a fixed-width metadata slot: it shows compact last-modified age normally, then swaps in an outlined Copy button only while hovered. Copy writes the doc's full on-disk path using the worktree path's separator; success replaces the rectangles with a green checkmark for 1.2 seconds, while failure uses the existing actionable error banner. Path copy and Canvas Share disable each other until the active clipboard workflow settles. The overlay changes opacity only, so tab dimensions stay fixed. (See also `docs/spec/canvas-authoring-dx.md`.)
+- Worktrees with multiple docs show tab buttons. The active doc's tab always renders — a lone `AgentDoc` gets a labeled tab instead of a bare iframe, and a lone `SystemView` still shows its `.canvas-system-tab` entry so its beads-count badge stays visible. Each `AgentDoc` tab reserves a fixed-width metadata slot: it shows compact last-modified age normally, then swaps in an outlined Copy button only while hovered. Copy writes the doc's full on-disk path using the worktree path's separator; success replaces the rectangles with a green checkmark for 1.2 seconds, while failure uses the existing actionable error banner. Path copy and Canvas Share disable each other until the active clipboard workflow settles. The overlay changes opacity only, so tab dimensions stay fixed.
 - Selecting a tab marks that doc viewed.
 - Viewed but inactive tabs render at 0.5 opacity. The active tab stays full opacity.
 - The archive button moves the active doc to `.agents/canvas/archive/`. It is shown only when the active doc is an `AgentDoc` — a `SystemView` is server-regenerated, not user-owned, so it has no archive button.
@@ -190,6 +204,9 @@ A `SystemView` drives its own updates, so it needs neither morph nor the author 
 - `</head>` replacement is case-insensitive by using `StringComparison.OrdinalIgnoreCase`.
 - If no `<head>` close tag exists, the injected content is prepended.
 - Running the docs on `:5002` isolates doc JavaScript from the app API on `:5000`.
+- Production uses the stable canvas port 5002. Test fixtures allocate API, Canvas, and Vite ports
+  from the OS and pass `CANVAS_PORT` into the Vite build, so the compiled iframe origin matches the
+  fixture without binding or killing a process on a shared port.
 
 ### DOM Morph and State Persistence
 
@@ -338,4 +355,4 @@ changed rows already use).
 - `docs/spec/canvas-sharing.md` — one-click Share of a focused `AgentDoc` to an unguessable, auto-expiring authenticated-viewer URL (the tab-bar Share button, private-Blob publisher, and clipboard rich link)
 - `docs/spec/canvas-interaction-routing.md` — ownership, generated-view affinity, queueing, and session routing
 - `docs/spec/worktree-diff-viewer.md` — generated worktree diff SystemView
-- `docs/spec/future/canvas-roadmap.md` — remaining canvas work (authoring DX, templates)
+- `docs/spec/future/canvas-templates.md` — proposed reusable AgentDoc templates and scaffolding

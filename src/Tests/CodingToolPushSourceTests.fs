@@ -338,6 +338,26 @@ type SessionStatusesTests() =
         Assert.That(result.SessionStatuses |> List.map _.Status, Is.EqualTo [ Working; WaitingForUser; Idle ])
 
     [<Test>]
+    member _.``Equal-status dots keep session id order when heartbeat recency changes``() =
+        let sessionA seen =
+            stored "a" "wt" SessionLevelStatus.Working (Some "session-a") None None seen
+        let sessionB seen =
+            stored "b" "wt" SessionLevelStatus.Working (Some "session-b") None None seen
+        let first =
+            fromPushSessions now
+                [ sessionB "2026-03-01T11:59:00Z"
+                  sessionA "2026-03-01T11:58:00Z" ]
+        let second =
+            fromPushSessions now
+                [ sessionA "2026-03-01T11:59:00Z"
+                  sessionB "2026-03-01T11:58:00Z" ]
+        let skills result = result.SessionStatuses |> List.map _.Skill
+
+        Assert.Multiple(fun () ->
+            Assert.That(skills first, Is.EqualTo [ Some "session-a"; Some "session-b" ])
+            Assert.That(skills second, Is.EqualTo [ Some "session-a"; Some "session-b" ]))
+
+    [<Test>]
     member _.``Closed (stale) sessions are excluded from the per-session dots``() =
         let openWorking = storedUsage "o" "wt" SessionLevelStatus.Working (usage 10000 200000) "2026-03-01T11:59:00Z"
         let closed = storedUsage "c" "wt" SessionLevelStatus.Working (usage 99000 200000) "2026-03-01T11:00:00Z"

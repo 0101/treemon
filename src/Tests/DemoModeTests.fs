@@ -24,6 +24,7 @@ let private demoViteUrl = $"http://localhost:{demoVitePort}"
 
 let private serverProcess: Process option ref = ref None
 let private viteProcess: Process option ref = ref None
+let private terminalHostStateDirectory = TestUtils.terminalHostStateDirectory ()
 
 let private converter = Fable.Remoting.Json.FableJsonConverter()
 
@@ -66,7 +67,7 @@ let private startDemoServer () =
                 "dotnet"
                 $"""run --project "{serverProjectPath}" -- --demo --port {demoServerPort}"""
                 repoRoot
-                []
+                [ "TREEMON_TERMINAL_HOST_STATE_DIR", terminalHostStateDirectory ]
                 false
         serverProcess.Value <- Some proc
         do! waitForUrl demoServerUrl 30000
@@ -93,6 +94,9 @@ let private stopDemoProcesses () =
     TestUtils.killProc viteProcess.Value
     serverProcess.Value <- None
     viteProcess.Value <- None
+    TestUtils.stopTerminalHostState terminalHostStateDirectory
+    |> fun result ->
+        TestUtils.assertOk result "Demo TerminalHost cleanup failed"
 
 [<TestFixture>]
 [<Category("Unit")>]

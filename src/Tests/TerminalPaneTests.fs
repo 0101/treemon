@@ -313,6 +313,26 @@ let private focusModel : Model =
 type TerminalFocusTests() =
 
     [<Test>]
+    member _.``Terminal pane toggle preserves its target while changing visibility``() =
+        let model =
+            { focusModel with
+                TerminalPaneTarget = Some second }
+
+        let hidden, hideCmd =
+            App.update ToggleTerminalPane model
+
+        let shown, showCmd =
+            App.update ToggleTerminalPane hidden
+
+        Assert.Multiple(fun () ->
+            Assert.That(hidden.TerminalPaneOpen, Is.False)
+            Assert.That(hidden.TerminalPaneTarget, Is.EqualTo(Some second))
+            Assert.That(List.length hideCmd, Is.EqualTo(1))
+            Assert.That(shown.TerminalPaneOpen, Is.True)
+            Assert.That(shown.TerminalPaneTarget, Is.EqualTo(Some second))
+            Assert.That(List.length showCmd, Is.EqualTo(1)))
+
+    [<Test>]
     member _.``Repeated Resume keeps one in-flight launch without an action cooldown``() =
         let model =
             { focusModel with

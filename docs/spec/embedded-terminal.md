@@ -69,7 +69,8 @@ It remembers the selected terminal independently for each worktree. **New** star
 for the targeted worktree; the empty state offers **Start terminal**. Switching worktrees hides the
 other worktrees' tabs without closing their terminals, and running iframes stay mounted so their
 browser state survives. Closing the last visible tab leaves the pane open in its empty state; only
-**Hide** collapses the pane.
+the persistent top-bar **Terminal** control hides or shows the pane, using the same active treatment
+as the **Canvas** control.
 
 ### Launch routing and command startup
 
@@ -132,6 +133,10 @@ Registry and data-plane mailbox calls have bounded replies. Each message failure
 the next message is processed, so a cleanup failure cannot wedge later list, close, or shutdown
 requests. Mailbox diagnostics identify only the mailbox and exception type, never terminal content,
 paths, environment values, or credentials.
+Start has a 150-second reply budget because its serialized workflow may include host startup,
+terminal creation, command delivery, authoritative confirmation, and compensating close. Other
+ordinary get, close, and cleanup operations retain the shared 60-second budget; replacement commit
+keeps its separate 300-second budget.
 
 A machine-level discovery manifest contains only the exact host identity (PID and process start
 identity), loopback endpoint and bearer token, host version, control API version, and the version of
@@ -578,7 +583,7 @@ ports, and state.
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus real proxy command delivery, control rejection, UTF-8 frame boundaries, replacement, crash, security, and cleanup coverage |
 | `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
-| `src/Tests/EmbeddedLaunchEndToEndTests.fs`, `src/TestAgentRecorder`, and `scripts/verify-embedded-launch-routing.ps1` | Reproducible isolated real-host launch matrix, exact argv recorder, raw route evidence, forced-delivery rollback, native HWND preservation, and exact cleanup |
+| `src/Tests/EmbeddedLaunchEndToEndTests.fs`, `src/Tests/TestAgentRecorder`, and `scripts/verify-embedded-launch-routing.ps1` | Reproducible isolated real-host launch matrix, exact argv recorder, raw route evidence, forced-delivery rollback, native HWND preservation, and exact cleanup |
 | `src/Tests/TerminalPaneTests.fs` | Exact server-returned terminal selection and direct Canvas launch routing |
 | `src/Tests/SessionActivityServiceTests.fs` | Exact terminal ownership, idle policy, and provider-specific resume-plan coverage |
 | `scripts/treemon-deployment.test.ps1` | Isolated staging, compatibility-preflight, candidate-first ordering, and embedded-terminal lifecycle refusal coverage |

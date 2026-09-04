@@ -7,9 +7,7 @@ open Server.TerminalHostProcess
 open Server.TerminalHostReplacement
 
 [<RequireQualifiedAccess>]
-type private ManagerPhase =
-    | Steady
-    | Replacing
+type private ManagerPhase = Steady | Replacing
 
 type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
@@ -17,12 +15,9 @@ type private ManagerState =
       Phase: ManagerPhase
       CleanupReservations: Map<string, System.Guid> }
 
-type private CleanupReservation =
-    | CleanupReservation of pathKey: string * token: System.Guid
+type private CleanupReservation = CleanupReservation of pathKey: string * token: System.Guid
 
-type private CloseTarget =
-    | OneTerminal of EmbeddedTerminalId
-    | WorktreeTerminals of WorktreePath
+type private CloseTarget = OneTerminal of EmbeddedTerminalId | WorktreeTerminals of WorktreePath
 
 type private Message =
     | Start of WorktreePath * command: string option * AsyncReplyChannel<Result<EmbeddedTerminalStartResult, string>>
@@ -412,7 +407,10 @@ let private ask (agent: MailboxProcessor<Message>) build =
     agent.PostAndAsyncReply(build, timeout = 60_000)
 
 let private startCore (Manager(_, agent)) worktreePath command =
-    ask agent (fun reply -> Start(worktreePath, command, reply))
+    agent.PostAndAsyncReply(
+        (fun reply -> Start(worktreePath, command, reply)),
+        timeout = 150_000
+    )
 
 let start manager worktreePath =
     startCore manager worktreePath None

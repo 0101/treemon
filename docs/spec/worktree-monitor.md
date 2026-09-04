@@ -52,6 +52,9 @@ Machine-level state persists in `~/.treemon/config.json` (or `$TREEMON_CONFIG_DI
 ### Worktree Identification
 
 - All `IWorktreeApi` methods use `WorktreePath` (filesystem path) as the worktree identifier — no branch name ambiguity across repos
+- Server path boundaries canonicalize to an absolute path, trim trailing separators, and lowercase
+  on Windows before constructing `RepoId` or `WorktreePath`. Raw-string indexes normalize at their
+  own ingress before comparison.
 - Server resolves repo and branch from path internally; archive and auto-sync persistence store branch names per repo in `.treemon.json`
 - Client optimistic state (`DeletedPaths: Set<string>`) filters by path, affecting only the correct repo
 
@@ -298,6 +301,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 | `src/Server/GlobalConfig.fs` | Machine-level `config.json` store + typed accessors (watched roots, canvas, collapsed repos, last-viewed hashes, editor) |
 | `src/Server/WorktreeApi.fs` | `IWorktreeApi` wiring + `DashboardResponse` assembly |
 | `src/Server/HttpSecurity.fs` | Shared loopback Origin/Referer guard for state-changing HTTP routes |
+| `src/Server/PathUtils.fs` | Canonical path normalization and `RepoId` / `WorktreePath` construction |
 | `src/Server/SessionManager.fs` | Explicit native card-terminal spawn/focus/new-tab/kill and persistence |
 | `src/Server/TerminalLaunch.fs` | Shared native-versus-embedded terminal launch policy |
 | `src/Server/Win32.fs` | P/Invoke: EnumWindows, SetForegroundWindow, WM_CLOSE |
@@ -365,6 +369,5 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
   via HWND tracking
 - `docs/spec/embedded-terminal.md` — embedded agent launches, command delivery, and terminal
   discovery
-- `docs/spec/future/strong-typed-paths.md` — `AbsolutePath` wrapper type (deferred: entry-point normalization sufficient)
 - `docs/spec/canvas-pane.md` — interactive HTML docs and the canvas-specific consumer of the generic session bridge
 - `docs/spec/session-status-push.md` — coding-tool session collapse and the related auto-sync target selection

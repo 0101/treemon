@@ -49,18 +49,8 @@ Interactive UI launches (terminal, editor) are a different concern and are **not
 
 Everything about a run except its arguments lives in a `Spawn` record — `FileName`, `Context`,
 `Limits`, `Deadline`, `WorkingDirectory`. A module builds one per command with
-`Spawn.create fileName` and overrides individual fields at the call sites that differ, so a call
-site names only what is unusual about it:
-
-```fsharp
-let private git = { Spawn.create "git" with Context = "Git" }
-
-ProcessRunner.text git ("-C" :: workingDir :: arguments)
-
-ProcessRunner.capture
-    { git with Limits = CaptureLimits.tiny; Deadline = InteractiveDeadline }
-    [ "-C"; worktreePath; "status"; "--porcelain" ]
-```
+`Spawn.create fileName` and overrides only the fields that differ, so each call site names what is
+unusual without positional configuration.
 
 Four functions in `src/Server/ProcessRunner.fs` take a `Spawn` and a `string list`, and differ only
 in what they return: `capture` (exit code plus raw stdout/stderr bytes and which streams were
@@ -114,22 +104,14 @@ UTF-8 decoder because malformed output is a domain error there.
 - **Timeout policy is per call site, not unified.** It is a separate question from argv safety, so
   every call site keeps the timeout it has. The result is deliberately uneven: part of refresh-timer
   status collection runs on the interactive 10 s deadline while the rest runs on the 60 s default.
-- **Open question: should the refresh-path 10 s probes move to the 60 s default?** A 10 s cap on a
-  refresh-timer collector can make refresh flakier under load, which is why the bulk of status
-  collection sits on the 60 s default; `localComparisonContent` and `probeRef` do not follow that
-  reasoning. Aligning them is a behavioural change to `GitWorktree`, not a documentation fix.
-  Decide it from evidence about refresh timeouts on large repos rather than from symmetry.
 - **Byte caps are named policies, not per-caller constants.** The right cap depends on the
   operation — a probe asking "was there output" needs 1 KiB, a JSON collector up to 16 MiB — so a
   single universal default would be wrong in both directions. Naming the three policies in
   `CaptureLimits` keeps that intent explicit at each call site while removing the twelve
   near-duplicate constants the per-caller form had accumulated. A genuinely different cap is a
   one-field override.
-- **Run configuration is a record, not positional parameters or a class.** The previous form passed
-  seven positional arguments of which one typically varied, with two adjacent `int`s and two
-  adjacent `string`s that could be swapped without a compile error. A record makes each value
-  named at the site that sets it; copy-and-update comes free, which a class with optional
-  parameters would need a hand-written `With` member to imitate.
+- **Run configuration is a record, not positional parameters or a class.** Each value is named at
+  the call site and copy-and-update expresses the few settings that vary.
 - **`buildRemoteUrlArgs` returns `string list`.** It exists to be unit-tested independently of
   process spawning; returning the argument list keeps that property while making the assertions
   exact element equality instead of substring matches against a concatenated command line.

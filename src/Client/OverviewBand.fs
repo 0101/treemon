@@ -24,7 +24,7 @@ module OverviewBand
 //
 // Empty categories never reach the view (aggregate omits them), so nothing ever renders a 0, and a
 // fully-empty roll-up collapses to Html.none. Group columns toggle the drill-down described by
-// docs/spec/overview-drilldown.md.
+// docs/spec/beads-overview-band.md.
 
 open Shared
 open Navigation

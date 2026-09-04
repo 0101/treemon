@@ -27,14 +27,13 @@ type TerminalRegistry =
 
 [<RequireQualifiedAccess>]
 module TerminalRegistry =
-    [<Literal>]
-    let private ReplyTimeoutMilliseconds = 60_000
+    let [<Literal>] private ReplyTimeoutMilliseconds = 60_000
+    let [<Literal>] private ShutdownReplyTimeoutMilliseconds = 300_000
 
-    [<Literal>]
-    let private ShutdownReplyTimeoutMilliseconds = 300_000
-
-    [<Literal>]
-    let private MaximumTerminals = 1024
+    // Bounds concurrent terminal teardowns during shutdown/pruning, so closing many terminals stays
+    // well inside the server's replacement wait instead of running serially.
+    let [<Literal>] private ShutdownParallelism = 16
+    let [<Literal>] private MaximumTerminals = 1024
 
     let private snapshot state =
         { Revision = state.Revision
@@ -56,7 +55,7 @@ module TerminalRegistry =
         entries
         |> Map.values
         |> Seq.map (fun terminal -> stopAndClose terminal.DataPlane terminal.Process)
-        |> Async.Sequential
+        |> fun computations -> Async.Parallel(computations, maxDegreeOfParallelism = ShutdownParallelism)
         |> Async.Ignore
 
     let private removeAfterClose state (key, terminal) =

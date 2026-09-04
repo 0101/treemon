@@ -94,7 +94,7 @@
 
         .card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
         .header-info { display: flex; flex: 1 1 auto; min-width: 0; overflow: hidden; align-items: center; gap: 8px; }
-        .header-info .branch-name { flex: 1 1 auto; min-width: 100px; }
+        .header-info .branch-name { flex: 1 1 auto; min-width: 64px; }
         .fit-or-hide { flex-shrink: 0; display: flex; align-items: center; gap: 4px; }
         .fit-or-hide > span { flex-shrink: 0; display: flex; align-items: center; gap: 2px; }
         .branch-name { font-weight: 600; font-size: var(--fs-lg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #cdd6f4; }
@@ -805,10 +805,10 @@
             scrollbar-width: none;
         }
         .terminal-tabs::-webkit-scrollbar { display: none; }
-        .terminal-tab {
+        .terminal-tab-item {
             display: flex;
             align-items: center;
-            gap: 4px;
+            gap: 2px;
             padding: 2px 4px 2px 6px;
             max-width: 190px;
             min-width: 0;
@@ -817,14 +817,22 @@
             background: #1e1e2e;
             color: #9399b2;
             font-size: var(--fs-base);
-            cursor: pointer;
             flex: 0 0 auto;
         }
-        .terminal-tab:hover { background: #313244; }
-        .terminal-tab.selected {
+        .terminal-tab-item:hover { background: #313244; }
+        .terminal-tab-item.selected {
             background: #2e3452;
             border-color: #89b4fa;
             color: #cdd6f4;
+        }
+        .terminal-tab {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            min-width: 0;
+            flex: 1 1 auto;
+            color: inherit;
+            cursor: pointer;
         }
         .terminal-tab:focus-visible {
             outline: 1px solid #89b4fa;
@@ -854,8 +862,8 @@
             opacity: 0;
             transition: opacity 0.1s ease;
         }
-        .terminal-tab:hover .terminal-tab-close,
-        .terminal-tab.selected .terminal-tab-close,
+        .terminal-tab-item:hover .terminal-tab-close,
+        .terminal-tab-item.selected .terminal-tab-close,
         .terminal-tab-close:focus-visible { opacity: 0.75; }
         .terminal-tab-close:hover { opacity: 1; color: #f38ba8; }
         .terminal-pane-actions {

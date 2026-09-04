@@ -1,7 +1,12 @@
 module Tests.ServerFixtureTests
 
+open System
+open System.Diagnostics
+open System.IO
 open NUnit.Framework
 open Server
+open Tests.TestUtils
+open Treemon.TerminalHosting
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -45,3 +50,65 @@ type FableCompileTests() =
                 Is.EqualTo(Some "Fable compilation timed out after 60s")
             )
         }
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type TerminalHostStateCleanupTests() =
+
+    [<Test>]
+    member _.``cleanup removes isolated state when no host exists``() =
+        let stateDirectory = terminalHostStateDirectory ()
+
+        stopTerminalHostState stateDirectory
+        |> fun result ->
+            assertOk result "Empty TerminalHost state cleanup should succeed"
+
+        Assert.That(Directory.Exists stateDirectory, Is.False)
+
+    [<Test>]
+    member _.``cleanup preserves invalid manifest evidence and reports the error``() =
+        let stateDirectory = terminalHostStateDirectory ()
+        let manifestPath =
+            Path.Combine(stateDirectory, TerminalHostLayout.ManifestFileName)
+
+        try
+            File.WriteAllText(manifestPath, "{}")
+
+            match stopTerminalHostState stateDirectory with
+            | Ok() ->
+                Assert.Fail("Invalid TerminalHost state cleanup unexpectedly succeeded")
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(
+                        error,
+                        Does.Contain("TerminalHost discovery manifest has an invalid shape")
+                    )
+
+                    Assert.That(Directory.Exists stateDirectory, Is.True))
+        finally
+            if Directory.Exists stateDirectory then
+                Directory.Delete(stateDirectory, recursive = true)
+
+    [<Test>]
+    member _.``cleanup never kills a process whose start time does not match``() =
+        let stateDirectory = terminalHostStateDirectory ()
+        let manifestPath =
+            Path.Combine(stateDirectory, TerminalHostLayout.ManifestFileName)
+        use currentProcess = Process.GetCurrentProcess()
+        let mismatchedStartTime =
+            currentProcess.StartTime.ToUniversalTime().Ticks + 1L
+        let bearerToken = String('a', 32)
+
+        File.WriteAllText(
+            manifestPath,
+            $"""{{"pid":{currentProcess.Id},"processStartTimeUtcTicks":{mismatchedStartTime},"endpoint":"http://127.0.0.1:1/","bearerToken":"{bearerToken}","hostVersion":"test","controlApiVersion":2}}"""
+        )
+
+        stopTerminalHostState stateDirectory
+        |> fun result ->
+            assertOk result "Mismatched TerminalHost identity cleanup should succeed"
+
+        Assert.Multiple(fun () ->
+            Assert.That(currentProcess.HasExited, Is.False)
+            Assert.That(Directory.Exists stateDirectory, Is.False))

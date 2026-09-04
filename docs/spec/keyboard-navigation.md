@@ -68,6 +68,18 @@ that posts `{action:'reclaim-focus'}` to the pane on Escape; `CanvasPane.message
 the same reclaim (honored only from the active doc). The bridge is likewise skipped when the caret is
 in an editable field inside the doc.
 
+## Technical Approach
+
+`Navigation.FocusTarget` stores stable repository or worktree identity rather than a rendered index.
+`navigateSpatial` is a pure transition over the visible repository/card layout and the measured grid
+column count. `App.keyBinding` maps context-sensitive keys to Elmish messages, while the dashboard
+event handler owns only keyboard plumbing and dispatch.
+
+The client reads `.card-grid` computed columns when navigation runs, then focuses and scrolls the
+resolved element after React has rendered the new model state. A document-level Escape subscription
+reclaims focus from sibling dashboard UI, and the Canvas doc server injects the cross-origin iframe
+bridge needed for the same action inside a document.
+
 ## Key Files
 
 - `src/Client/App.fs` — `keyBinding`, `KeyPressed` handler (incl. Escape reclaim), `focusReclaim` global subscription, view focus rendering

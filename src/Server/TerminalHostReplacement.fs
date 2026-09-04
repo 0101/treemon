@@ -16,10 +16,7 @@ type internal ReplacementSessionPlan =
     | WaitingForIdle
     | Ready of activityEpoch: int64 * resumeCommands: Map<string, string>
 
-type internal ReplacementPolicyQuery =
-    DateTimeOffset
-        -> ReplacementTerminal list
-        -> Result<ReplacementSessionPlan, string>
+type internal ReplacementPolicyQuery = DateTimeOffset -> ReplacementTerminal list -> Result<ReplacementSessionPlan, string>
 
 [<RequireQualifiedAccess>]
 type internal ReplacementOutcome =
@@ -253,8 +250,6 @@ let internal commitReplacement
                         match!
                             activateHost stagedConfig plan.StagedExecutablePath replacement plan.Terminals resumeCommands
                         with
-                        | Error error ->
-                            return replacementFailure plan.StagedVersion error
                         | Ok(replacementHost, registry) ->
                             return
                                 ReplacementCommit.ApplyRegistry(
@@ -262,6 +257,18 @@ let internal commitReplacement
                                     registry,
                                     ReplacementOutcome.Replaced plan.StagedVersion
                                 )
+                        | Error error ->
+                            // The staged host cannot stay authoritative with a partial registry;
+                            // its identity is proven, so stop it before recovering the full plan.
+                            match! shutdownAndWait stagedConfig replacement with
+                            | Ok() ->
+                                return!
+                                    recoverOldHost config plan resumeCommands
+                                        $"The staged host started but could not recreate its terminals: {error}"
+                            | Error stopError ->
+                                return
+                                    replacementFailure plan.StagedVersion
+                                        $"The staged host could not recreate its terminals ({error}), and it could not be confirmed stopped afterward ({stopError}); the previous host was not restarted to avoid two live hosts."
         with error ->
             return
                 replacementFailure plan.StagedVersion

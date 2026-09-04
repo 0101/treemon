@@ -68,8 +68,8 @@ titles, context usage, and session resume all use this shared state; no session-
   hidden, `[canvas] ` payloads retain a Canvas glyph and readable action text, and the same
   projection is used for duplicate suppression against activity text.
 - `SessionStatuses` contains every open session after freshness adjustment, ordered
-  Working -> WaitingForUser -> Idle. Each entry retains its own skill and context usage; `LastSeen`
-  may order equal-status markers but never the shared footer or resume identity.
+  Working -> WaitingForUser -> Idle, then by `SessionId` within an equal status. Each entry retains
+  its own skill and context usage; liveness-only `LastSeen` never changes marker order.
 - The live Overview counts and groups sessions independently. One worktree can contribute sessions
   to several activity groups at once.
 - `CodingToolSince` is captured when the collapsed worktree status changes and remains stable while
@@ -259,7 +259,7 @@ card or Overview status.
 | Ask-user ordering | Persist independent request/completion clocks; do not keep lifecycle state in the extension. |
 | Liveness | Heartbeats and accepted usage update `last_seen` without lifecycle event writes. |
 | Representative ordering | Use `(UpdatedAt, SessionId)`; never let heartbeat-only `LastSeen` choose footer or resume ownership. |
-| Multiple sessions | Preserve per-session status, skill, and context usage; collapse only card-level fields. |
+| Multiple sessions | Preserve per-session status, skill, and context usage; order markers by status then `SessionId` so heartbeats cannot move them; collapse only card-level fields. |
 | Background agents | Keep per-tool start/finish clocks in memory; WaitingForUser outranks background Working; restart clears the clocks. |
 | Footer | Decouple from the status dot and merge a retained durable representative. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |
@@ -298,9 +298,7 @@ card or Overview status.
 ## Related Specs
 
 - `docs/spec/worktree-monitor.md` - dashboard architecture and refresh model.
-- `docs/spec/beads-overview-band.md` - live task and agent aggregation.
+- `docs/spec/beads-overview-band.md` - live task and agent aggregation with per-group membership.
 - `docs/spec/overview-activity-history.md` - durable canonical Overview snapshots.
-- `docs/spec/overview-drilldown.md` - per-group session details.
 - `docs/spec/resume-last-session.md` - resume command behavior.
-- `docs/spec/worktree-monitor.md` - endpoint origin protection.
 - `docs/spec/native-session-management.md` - terminal/window liveness, distinct from push openness.

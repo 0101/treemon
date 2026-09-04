@@ -2494,6 +2494,115 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
+    member _.``terminal recreation failure on a healthy staged host stops it and recovers every terminal on the old host``() =
+        task {
+            use host = new FakeControlHost()
+            host.EnableLogicalReplacement()
+            let stagedVersion = "2.0.0-recreate-fails"
+            let stagedExecutable = host.Stage stagedVersion
+            let launches = ConcurrentQueue<string>()
+
+            let launch (startInfo: ProcessStartInfo) =
+                launches.Enqueue startInfo.FileName
+
+                if
+                    Shared.PathUtils.pathEquals
+                        startInfo.FileName
+                        stagedExecutable
+                then
+                    host.Activate(startInfo.FileName, stagedVersion)
+                    // Arms the fake host's one-shot rejection so that the very first terminal
+                    // recreation attempt against the newly-healthy staged host fails outright,
+                    // simulating a partial/empty registry after the staged process comes up.
+                    host.RejectNextStartResponse()
+                else
+                    host.Activate(startInfo.FileName, "1.0.0-test")
+
+                Ok()
+
+            let manager =
+                replacementManagerConfig host launch (fun _ _ -> async { return Ok() })
+                |> EmbeddedTerminal.createWithConfig
+
+            let first = worktree host.Root "recreate-fails-first"
+            let second = worktree host.Root "recreate-fails-second"
+
+            for path in [ first; second ] do
+                let! started =
+                    EmbeddedTerminal.start manager path
+                    |> Async.StartAsTask
+
+                requireOk started |> ignore
+
+            let query _ _ =
+                Ok(
+                    TerminalHostReplacement.ReplacementSessionPlan.Ready(
+                        41L,
+                        Map.empty
+                    )
+                )
+
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHost query manager
+                |> Async.StartAsTask
+
+            let! recovered =
+                EmbeddedTerminal.get manager
+                |> Async.StartAsTask
+
+            let failure =
+                match outcome with
+                | TerminalHostReplacement.ReplacementOutcome.Failed(
+                    version,
+                    error
+                  ) ->
+                    Assert.That(version, Is.EqualTo stagedVersion)
+                    error
+                | other ->
+                    Assert.Fail($"Expected explicit replacement failure, got {other}")
+                    ""
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    failure,
+                    Does.Contain("could not recreate its terminals")
+                )
+                Assert.That(
+                    launches.ToArray(),
+                    Is.EqualTo([| stagedExecutable; host.OldExecutable |]),
+                    "the staged launch must be followed by exactly one old-host recovery launch"
+                )
+                Assert.That(
+                    host.ShutdownRequestCount,
+                    Is.EqualTo(2),
+                    "the original host and the failed staged host must each be stopped once"
+                )
+                Assert.That(host.IsOnline, Is.True)
+                Assert.That(
+                    host.CurrentExecutable,
+                    Is.EqualTo host.OldExecutable
+                )
+                Assert.That(
+                    host.CurrentTerminals |> List.map _.WorktreePath,
+                    Is.EqualTo(
+                        [ WorktreePath.value first
+                          WorktreePath.value second ]
+                    ),
+                    "no terminal may be permanently lost when the staged host fails to recreate them"
+                )
+                Assert.That(recovered.Tabs.Length, Is.EqualTo(2))
+
+                recovered.Tabs
+                |> List.iter (fun tab ->
+                    match tab.Lifecycle with
+                    | EmbeddedTerminalLifecycle.Running _ -> ()
+                    | lifecycle ->
+                        Assert.Fail(
+                            $"Expected the recovered old host's terminal to be running, got {lifecycle}"
+                        )))
+        }
+
+    [<Test>]
     member _.``incomplete staged bundle is rejected before the live host is stopped``() =
         task {
             use host = new FakeControlHost()

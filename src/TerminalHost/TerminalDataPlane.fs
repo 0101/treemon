@@ -51,8 +51,7 @@ type TerminalDataPlane =
 module TerminalDataPlane =
     let private socketOperationTimeout = TimeSpan.FromSeconds 2.0
 
-    [<Literal>]
-    let private ReplyTimeoutMilliseconds = 60_000
+    let [<Literal>] private ReplyTimeoutMilliseconds = 60_000
 
     let private replayGapFrame =
         Encoding.UTF8.GetBytes(

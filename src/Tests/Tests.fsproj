@@ -132,7 +132,7 @@
     <ProjectReference Include="..\TerminalHost\TerminalHost.fsproj" />
     <ProjectReference Include="..\Client\Client.fsproj" />
     <ProjectReference Include="..\Cli\Cli.fsproj" />
-    <ProjectReference Include="..\TestAgentRecorder\TestAgentRecorder.fsproj"
+    <ProjectReference Include="TestAgentRecorder\TestAgentRecorder.fsproj"
                       ReferenceOutputAssembly="false" />
   </ItemGroup>
 
