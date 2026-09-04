@@ -149,12 +149,13 @@ shared state; no session-log parsing remains.
 
 ### Reporting extension
 
-`src/Extension/reporting/extension.mjs` joins the current Copilot session passively, resolves the
-parent Copilot process identity through the server, establishes acknowledged instance presence,
-replays prior events for that instance, and subscribes to live events. It forwards `subagent.started`,
-`subagent.completed`, and `subagent.failed` as explicit background lifecycle, then drops all other
-sub-agent content. It also drops skill-context injections, blank messages, invalid usage gauges, and
-invalid or overlong background tool-call IDs before sending.
+The passive reporting package joins the current Copilot session and sends the parent process PID.
+`extension.mjs` owns the process/environment and bounded HTTP boundary;
+`reporting-runtime.mjs` owns per-endpoint acknowledged presence, replay, reconnect, heartbeat, and
+live shutdown. It forwards `subagent.started`, `subagent.completed`, and `subagent.failed` as
+explicit background lifecycle, then drops all other sub-agent content. It also drops skill-context
+injections, blank messages, invalid usage gauges, and invalid or overlong background tool-call IDs
+before sending.
 
 The extension maps lifecycle, skill, message, `assistant.intent`, `session.title_changed`, ask-user,
 background-agent, and usage events onto the closed wire contract. Background reports use
@@ -340,8 +341,9 @@ into lifecycle status.
 
 | File | Role |
 |---|---|
-| `src/Extension/reporting/extension.mjs` | SDK filtering, wire mapping, terminal-origin reporting, replay, metadata bootstrap, usage, and heartbeat. |
-| `src/Extension/reporting/reporting-core.mjs` | Pure message, usage, and background-lifecycle wire mapping. |
+| `src/Extension/reporting/extension.mjs` | Copilot SDK join, parent-PID/environment capture, and bounded HTTP transport. |
+| `src/Extension/reporting/reporting-runtime.mjs` | Independent endpoint presence/retry state, reconnect replay, heartbeat, metadata bootstrap, and live shutdown. |
+| `src/Extension/reporting/reporting-core.mjs` | Pure wire mapping plus compact current-process replay state. |
 | `src/Server/SessionActivity.fs` | Exact identity contract, event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
 | `src/Server/ProcessIdentityResolver.fs` | Default operating-system PID/start-time resolver shared by activity and exact process lifecycle checks. |
 | `src/Server/SessionActivityProtocol.fs` | Bounded activity wire DTO parsing and exact-instance event mapping. |

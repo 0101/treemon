@@ -3,12 +3,16 @@ import assert from "node:assert/strict";
 import {
   buildNonBlankMessageReport,
   buildReport,
+  createCurrentProcessState,
   MAX_TOOL_CALL_ID_CHARS,
   mapSdkEvent,
+  mergeReplayReports,
+  reportForReplaySdkEvent,
   reportForSdkEvent,
 } from "../../../Extension/reporting/reporting-core.mjs";
 
 const context = {
+  parentProcessId: 4321,
   sessionId: "session-1",
   worktreePath: "worktree",
   provider: "copilot_cli",
@@ -39,6 +43,7 @@ test("terminal origin is carried on every mapped report and omitted when absent"
   assert.deepEqual(
     reportForSdkEvent({ ...context, terminalSessionId }, event),
     {
+      parentProcessId: 4321,
       sessionId: "session-1",
       terminalSessionId,
       worktreePath: "worktree",
@@ -56,6 +61,7 @@ test("terminal origin is carried on every mapped report and omitted when absent"
 
 test("metadata summary maps to title_bootstrap without a live title event", () => {
   assert.deepEqual(buildNonBlankMessageReport(context, "title_bootstrap", "Investigate Intent Title Runtime"), {
+    parentProcessId: 4321,
     sessionId: "session-1",
     worktreePath: "worktree",
     provider: "copilot_cli",
@@ -77,6 +83,7 @@ test("subagent.started maps before agentId filtering", () => {
     agentId: "agent-1",
     data: { toolCallId: "tool-1" },
   }), {
+    parentProcessId: 4321,
     sessionId: "session-1",
     worktreePath: "worktree",
     provider: "copilot_cli",
@@ -105,6 +112,7 @@ test("subagent.completed and subagent.failed map to terminal lifecycle reports",
     }),
   ], [
     {
+      parentProcessId: 4321,
       sessionId: "session-1",
       worktreePath: "worktree",
       provider: "copilot_cli",
@@ -114,6 +122,7 @@ test("subagent.completed and subagent.failed map to terminal lifecycle reports",
       toolCallId: "tool-1",
     },
     {
+      parentProcessId: 4321,
       sessionId: "session-1",
       worktreePath: "worktree",
       provider: "copilot_cli",
@@ -254,6 +263,56 @@ test("live and replay mapping preserve the same source identity", () => {
   assert.deepEqual(map(liveEvent), map(replayedEvent));
 });
 
+test("session shutdown is reported live but never replayed into a resumed process", () => {
+  const shutdown = {
+    id: "old-process-shutdown",
+    timestamp: "2026-09-04T16:00:00.000Z",
+    type: "session.shutdown",
+    data: { shutdownType: "routine" },
+  };
+
+  assert.deepEqual(reportForSdkEvent(context, shutdown), {
+    parentProcessId: 4321,
+    sessionId: "session-1",
+    worktreePath: "worktree",
+    provider: "copilot_cli",
+    eventId: "old-process-shutdown",
+    occurredAt: "2026-09-04T16:00:00.000Z",
+    kind: "session_closed",
+  });
+  assert.equal(reportForReplaySdkEvent(context, shutdown), null);
+});
+
+test("current-process replay preserves waiting and background truth across reconnect", () => {
+  const state = createCurrentProcessState();
+  const reports = [
+    buildReport({
+      ...context,
+      eventId: "turn-ended",
+      occurredAt: "2026-09-04T16:00:00.000Z",
+    }, "turn_ended"),
+    buildReport({
+      ...context,
+      eventId: "awaiting-user",
+      occurredAt: "2026-09-04T16:00:01.000Z",
+    }, "awaiting_user_input"),
+    {
+      ...buildReport({
+        ...context,
+        eventId: "background-start",
+        occurredAt: "2026-09-04T16:00:02.000Z",
+      }, "background_agent_started"),
+      toolCallId: "tool-current",
+    },
+  ];
+  reports.forEach(state.observe);
+
+  assert.deepEqual(
+    mergeReplayReports([reports[0]], state.snapshot()).map((report) => report.eventId),
+    ["turn-ended", "awaiting-user", "background-start"],
+  );
+});
+
 test("blank metadata summary emits no title report", () => {
   assert.equal(buildNonBlankMessageReport(context, "title_bootstrap", "   "), null);
   assert.equal(buildNonBlankMessageReport(context, "title_bootstrap", undefined), null);
@@ -270,6 +329,7 @@ test("message blankness is checked before the stored text is capped", () => {
 
 test("live and bootstrap messages share the canonical report shape", () => {
   assert.deepEqual(buildNonBlankMessageReport(context, "title_reported", "Live title"), {
+    parentProcessId: 4321,
     sessionId: "session-1",
     worktreePath: "worktree",
     provider: "copilot_cli",
@@ -322,6 +382,7 @@ test("usage mapping accepts finite numeric strings but rejects blank and structu
 
 test("the production event boundary drops malformed identities before mapping", () => {
   const baseContext = {
+    parentProcessId: context.parentProcessId,
     sessionId: context.sessionId,
     worktreePath: context.worktreePath,
     provider: context.provider,
@@ -342,6 +403,7 @@ test("the production event boundary drops malformed identities before mapping", 
     type: "assistant.turn_start",
     data: {},
   }), {
+    parentProcessId: context.parentProcessId,
     sessionId: context.sessionId,
     worktreePath: context.worktreePath,
     provider: context.provider,
@@ -353,6 +415,7 @@ test("the production event boundary drops malformed identities before mapping", 
 
 test("a rejected live title produces no title report", () => {
   const baseContext = {
+    parentProcessId: context.parentProcessId,
     sessionId: context.sessionId,
     worktreePath: context.worktreePath,
     provider: context.provider,
