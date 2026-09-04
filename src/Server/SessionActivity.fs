@@ -19,6 +19,30 @@ type SessionId = SessionId of string
 module SessionId =
     let value (SessionId id) = id
 
+/// Exact identity of one operating-system process. The start timestamp distinguishes a reused PID
+/// from the process that previously owned it.
+[<Struct>]
+type ProcessIdentity =
+    private
+    | ProcessIdentity of processId: int * processStartTimeUtcTicks: int64
+
+module ProcessIdentity =
+    let create processId processStartTimeUtcTicks =
+        if processId <= 0 then
+            Error "processId must be positive"
+        elif processStartTimeUtcTicks <= 0L then
+            Error "processStartTimeUtcTicks must be positive"
+        else
+            Ok(ProcessIdentity(processId, processStartTimeUtcTicks))
+
+    let processId (ProcessIdentity(processId, _)) = processId
+
+    let processStartTimeUtcTicks (ProcessIdentity(_, processStartTimeUtcTicks)) =
+        processStartTimeUtcTicks
+
+    let sortKey identity =
+        processId identity, processStartTimeUtcTicks identity
+
 /// Exact identity of one TerminalHost-owned terminal. This is deliberately distinct from the
 /// Copilot SessionId because both identifiers are carried through the same ownership queries.
 type TerminalSessionId = TerminalSessionId of string

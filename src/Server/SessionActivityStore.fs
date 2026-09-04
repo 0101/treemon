@@ -7,16 +7,13 @@ open Shared
 open Server.SessionActivity
 open Server.SqliteStorage
 
-// The durable mirror behind the push-model live state. The SessionActivity mailbox (single writer)
-// upserts the per-session fold result and appends accepted lifecycle events:
+// The durable mirror behind the push-model live state. session_status remains the current runtime
+// writer until exact-process ingestion takes over. Construction also creates the exact
+// session_instances model, migrates durable conversation history into retained_sessions, and
+// upgrades activity_events to process-instance-scoped idempotency.
 //
-//   session_status  — one row per session: the latest persisted base fold state. Read back on
-//                     restart to rebuild the live Map before serving, so cards are correct
-//                     immediately.
-//   activity_events — accepted lifecycle events keyed by event_id. INSERT OR IGNORE makes a replay a
-//                     full no-op while retention bounds the durable idempotency window.
-//
-// Background-agent ordering clocks are deliberately process-local and are not persisted.
+// The legacy session_status writer still omits background-agent clocks; session_instances reserves
+// their durable representation for the exact-process writer.
 //
 // WAL journalling lets restart/resume reads run concurrently with the mailbox writer with no lock
 // contention; the writer being single means status upserts never race each other. The SQLite file
@@ -159,8 +156,31 @@ let private readStored (r: SqliteDataReader) : StoredStatus =
 
 // --- SQL --------------------------------------------------------------------------------------
 
+// The current session_status writer has no process identity, so (0, 0) is its temporary event lane.
+// Exact process rows use positive values, and session_instances never accepts the legacy sentinel.
+let private activityEventsTableSql createClause tableName =
+    $"""
+{createClause} {tableName} (
+    process_id         INTEGER NOT NULL DEFAULT 0,
+    process_start_ticks INTEGER NOT NULL DEFAULT 0,
+    event_id           TEXT NOT NULL,
+    session_id         TEXT NOT NULL,
+    worktree_path      TEXT NOT NULL,
+    provider           TEXT NOT NULL,
+    kind               TEXT NOT NULL,
+    status             TEXT NOT NULL,
+    skill              TEXT,
+    ts                 TEXT NOT NULL,
+    PRIMARY KEY (process_id, process_start_ticks, event_id),
+    CHECK (
+        (process_id = 0 AND process_start_ticks = 0)
+        OR (process_id > 0 AND process_start_ticks > 0)
+    )
+);
+"""
+
 let private schemaSql =
-    """
+    $"""
 CREATE TABLE IF NOT EXISTS session_status (
     session_id    TEXT PRIMARY KEY,
     worktree_path TEXT NOT NULL,
@@ -184,22 +204,59 @@ CREATE TABLE IF NOT EXISTS session_status (
     user_input_completed_at TEXT,
     terminal_session_id     TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
-CREATE INDEX IF NOT EXISTS ix_status_worktree_activity
-ON session_status(worktree_path, updated_at DESC, session_id DESC);
 
-CREATE TABLE IF NOT EXISTS activity_events (
-    event_id      TEXT PRIMARY KEY,
-    session_id    TEXT NOT NULL,
-    worktree_path TEXT NOT NULL,
-    provider      TEXT NOT NULL,
-    kind          TEXT NOT NULL,
-    status        TEXT NOT NULL,
-    skill         TEXT,
-    ts            TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS session_instances (
+    process_id                 INTEGER NOT NULL CHECK (process_id > 0),
+    process_start_ticks        INTEGER NOT NULL CHECK (process_start_ticks > 0),
+    session_id                 TEXT NOT NULL,
+    worktree_path              TEXT NOT NULL,
+    provider                   TEXT NOT NULL,
+    status                     TEXT NOT NULL,
+    current_skill              TEXT,
+    last_user_msg              TEXT,
+    last_user_ts               TEXT,
+    last_asst_msg              TEXT,
+    last_asst_ts               TEXT,
+    intent_text                TEXT,
+    intent_ts                  TEXT,
+    title_text                 TEXT,
+    title_ts                   TEXT,
+    updated_at                 TEXT NOT NULL,
+    last_seen                  TEXT NOT NULL,
+    context_current_tokens     INTEGER,
+    context_token_limit        INTEGER,
+    context_usage_at           TEXT,
+    awaiting_user_since        TEXT,
+    user_input_completed_at    TEXT,
+    terminal_session_id        TEXT,
+    background_agent_clocks    TEXT NOT NULL DEFAULT '[]',
+    closed_at                  TEXT,
+    PRIMARY KEY (process_id, process_start_ticks)
 );
-CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
-CREATE INDEX IF NOT EXISTS ix_events_session_ts ON activity_events(session_id, ts);
+
+CREATE TABLE IF NOT EXISTS retained_sessions (
+    session_id                 TEXT PRIMARY KEY,
+    worktree_path              TEXT NOT NULL,
+    provider                   TEXT NOT NULL,
+    status                     TEXT NOT NULL,
+    current_skill              TEXT,
+    last_user_msg              TEXT,
+    last_user_ts               TEXT,
+    last_asst_msg              TEXT,
+    last_asst_ts               TEXT,
+    intent_text                TEXT,
+    intent_ts                  TEXT,
+    title_text                 TEXT,
+    title_ts                   TEXT,
+    updated_at                 TEXT NOT NULL,
+    context_current_tokens     INTEGER,
+    context_token_limit        INTEGER,
+    context_usage_at           TEXT,
+    awaiting_user_since        TEXT,
+    user_input_completed_at    TEXT
+);
+
+{activityEventsTableSql "CREATE TABLE IF NOT EXISTS" "activity_events"}
 """
 
 let private additiveColumnMigrations =
@@ -214,13 +271,30 @@ let private additiveColumnMigrations =
       "user_input_completed_at", "TEXT"
       "terminal_session_id", "TEXT" ]
 
-// This index must be created only after ensureAdditiveColumns: existing databases gain
-// terminal_session_id through that migration, so putting it in schemaSql would fail startup before
-// the column exists. Its leading origin column supports retained-origin scans for epoch pruning.
-let private terminalSessionIndexSql =
+let private indexSql =
     """
+CREATE INDEX IF NOT EXISTS ix_status_worktree ON session_status(worktree_path);
+CREATE INDEX IF NOT EXISTS ix_status_worktree_activity
+ON session_status(worktree_path, updated_at DESC, session_id DESC);
 CREATE INDEX IF NOT EXISTS ix_status_terminal_activity
 ON session_status(terminal_session_id, updated_at DESC, session_id DESC);
+
+CREATE INDEX IF NOT EXISTS ix_instances_worktree_activity
+ON session_instances(worktree_path, updated_at DESC, session_id DESC);
+CREATE INDEX IF NOT EXISTS ix_instances_session_activity
+ON session_instances(session_id, updated_at DESC, process_id, process_start_ticks);
+CREATE INDEX IF NOT EXISTS ix_instances_terminal_activity
+ON session_instances(terminal_session_id, updated_at DESC, session_id DESC);
+CREATE INDEX IF NOT EXISTS ix_instances_last_seen
+ON session_instances(last_seen);
+
+CREATE INDEX IF NOT EXISTS ix_retained_worktree_activity
+ON retained_sessions(worktree_path, updated_at DESC, session_id DESC);
+
+CREATE INDEX IF NOT EXISTS ix_events_ts ON activity_events(ts);
+CREATE INDEX IF NOT EXISTS ix_events_session_ts ON activity_events(session_id, ts);
+CREATE INDEX IF NOT EXISTS ix_events_instance_ts
+ON activity_events(process_id, process_start_ticks, ts);
 """
 
 let rec private readColumnNames (reader: SqliteDataReader) names =
@@ -229,9 +303,10 @@ let rec private readColumnNames (reader: SqliteDataReader) names =
     else
         names
 
-let private ensureAdditiveColumns (conn: SqliteConnection) =
+let private ensureAdditiveColumns (conn: SqliteConnection) (tx: SqliteTransaction) =
     let existingColumns =
         use cmd = conn.CreateCommand()
+        cmd.Transaction <- tx
         cmd.CommandText <- "PRAGMA table_info(session_status);"
         use reader = cmd.ExecuteReader()
         readColumnNames reader Set.empty
@@ -247,12 +322,13 @@ let private ensureAdditiveColumns (conn: SqliteConnection) =
 
     if migrationSql <> "" then
         use cmd = conn.CreateCommand()
+        cmd.Transaction <- tx
         cmd.CommandText <- migrationSql
         cmd.ExecuteNonQuery() |> ignore
 
 // Bounded normalisation of legacy rows. Retired "done" values become idle; pre-clock waiting rows
 // become an idle base plus an open request at their lifecycle timestamp. Both updates are idempotent.
-let private migrateSql =
+let private normalizeLegacySql =
     """
 UPDATE session_status SET status = 'idle' WHERE status = 'done';
 UPDATE activity_events SET status = 'idle' WHERE status = 'done';
@@ -260,6 +336,101 @@ UPDATE session_status
 SET status = 'idle', awaiting_user_since = updated_at
 WHERE status = 'waiting_for_user' AND awaiting_user_since IS NULL;
 """
+
+let private copyRetainedSessionsSql =
+    """
+INSERT INTO retained_sessions
+    (session_id, worktree_path, provider, status, current_skill,
+     last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+     intent_text, intent_ts, title_text, title_ts, updated_at,
+     context_current_tokens, context_token_limit, context_usage_at,
+     awaiting_user_since, user_input_completed_at)
+SELECT
+    session_id, worktree_path, provider, status, current_skill,
+    last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+    intent_text, intent_ts, title_text, title_ts, updated_at,
+    context_current_tokens, context_token_limit, context_usage_at,
+    awaiting_user_since, user_input_completed_at
+FROM session_status
+WHERE true
+ON CONFLICT(session_id) DO UPDATE SET
+    worktree_path = excluded.worktree_path,
+    provider = excluded.provider,
+    status = excluded.status,
+    current_skill = excluded.current_skill,
+    last_user_msg = excluded.last_user_msg,
+    last_user_ts = excluded.last_user_ts,
+    last_asst_msg = excluded.last_asst_msg,
+    last_asst_ts = excluded.last_asst_ts,
+    intent_text = excluded.intent_text,
+    intent_ts = excluded.intent_ts,
+    title_text = excluded.title_text,
+    title_ts = excluded.title_ts,
+    updated_at = excluded.updated_at,
+    context_current_tokens = excluded.context_current_tokens,
+    context_token_limit = excluded.context_token_limit,
+    context_usage_at = excluded.context_usage_at,
+    awaiting_user_since = excluded.awaiting_user_since,
+    user_input_completed_at = excluded.user_input_completed_at
+WHERE excluded.updated_at >= retained_sessions.updated_at;
+"""
+
+let rec private readPrimaryKeyColumns (reader: SqliteDataReader) columns =
+    if reader.Read() then
+        let primaryKeyOrder = reader.GetInt32 5
+
+        let next =
+            if primaryKeyOrder = 0 then
+                columns
+            else
+                (primaryKeyOrder, reader.GetString 1) :: columns
+
+        readPrimaryKeyColumns reader next
+    else
+        columns
+        |> List.sortBy fst
+        |> List.map snd
+
+let private activityEventsUsesProcessKey (conn: SqliteConnection) (tx: SqliteTransaction) =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- "PRAGMA table_info(activity_events);"
+    use reader = cmd.ExecuteReader()
+
+    readPrimaryKeyColumns reader []
+    = [ "process_id"; "process_start_ticks"; "event_id" ]
+
+let private executeMigrationSql (conn: SqliteConnection) (tx: SqliteTransaction) sql =
+    use cmd = conn.CreateCommand()
+    cmd.Transaction <- tx
+    cmd.CommandText <- sql
+    cmd.ExecuteNonQuery() |> ignore
+
+let private rebuildActivityEventsIfNeeded (conn: SqliteConnection) (tx: SqliteTransaction) =
+    let migrationTable = "activity_events_migration"
+
+    if activityEventsUsesProcessKey conn tx then
+        executeMigrationSql conn tx $"DROP TABLE IF EXISTS {migrationTable};"
+    else
+        executeMigrationSql
+            conn
+            tx
+            $"""
+DROP TABLE IF EXISTS {migrationTable};
+{activityEventsTableSql "CREATE TABLE" migrationTable}
+DROP TABLE activity_events;
+ALTER TABLE {migrationTable} RENAME TO activity_events;
+"""
+
+let private initializeSchema (conn: SqliteConnection) =
+    use tx = conn.BeginTransaction()
+    executeMigrationSql conn tx schemaSql
+    ensureAdditiveColumns conn tx
+    executeMigrationSql conn tx normalizeLegacySql
+    executeMigrationSql conn tx copyRetainedSessionsSql
+    rebuildActivityEventsIfNeeded conn tx
+    executeMigrationSql conn tx indexSql
+    tx.Commit()
 
 // Last-write-wins: on a session_id conflict the incoming row overwrites only when its updated_at is
 // at least as new (>= so an idempotent replay with the same timestamp still lands identically). A
@@ -398,6 +569,7 @@ WHERE ts < $cutoff
   AND rowid NOT IN (SELECT rowid FROM retained_event_baselines);
 
 DELETE FROM session_status WHERE last_seen < $cutoff;
+DELETE FROM retained_sessions WHERE updated_at < $cutoff;
 """
 
 // One durable footer representative per worktree, selected before rows cross the SQLite boundary.
@@ -552,15 +724,13 @@ type SessionActivityStore
     // owns schema creation. Never used for queries (that would share one connection across threads).
     let keepAlive =
         let c = openConn ()
-        use cmd = c.CreateCommand()
-        cmd.CommandText <- schemaSql
-        cmd.ExecuteNonQuery() |> ignore
-        ensureAdditiveColumns c
-        cmd.CommandText <- terminalSessionIndexSql
-        cmd.ExecuteNonQuery() |> ignore
-        cmd.CommandText <- migrateSql
-        cmd.ExecuteNonQuery() |> ignore
-        c
+
+        try
+            initializeSchema c
+            c
+        with _ ->
+            c.Dispose()
+            reraise ()
 
     /// Insert-or-update a session's live row. Last-write-wins on `UpdatedAt`: a stale (older) report
     /// for an existing session is silently ignored (see upsertSql).
