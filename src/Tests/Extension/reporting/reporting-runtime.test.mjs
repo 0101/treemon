@@ -848,6 +848,103 @@ test("ordinary ignored responses stay ready while unmonitored responses terminat
   runtime.stop();
 });
 
+test("shutdown waits for an in-flight presence acknowledgement before exact closure", async () => {
+  const pendingPresence = deferred();
+  const fake = createFakeSession();
+  const scheduler = createManualScheduler();
+  const heartbeat = createManualHeartbeat();
+  const url = "http://127.0.0.1:5291/api/session/activity";
+  const calls = [];
+
+  const post = async (target, report) => {
+    calls.push({ url: target, report });
+    return report.kind === "session_present" ? pendingPresence.promise : acknowledged;
+  };
+
+  const runtime = createReportingRuntime(runtimeOptions(
+    fake,
+    post,
+    scheduler,
+    heartbeat,
+    [url],
+  ));
+  const startTask = runtime.start();
+
+  assert.deepEqual(calls.map(({ report }) => report.kind), ["session_present"]);
+  fake.emit(sdkEvent(
+    "shutdown-during-presence",
+    "2026-09-04T17:00:01.000Z",
+    "session.shutdown",
+  ));
+  assert.equal(runtime.snapshot().endpoints[0].phase, "presence");
+
+  pendingPresence.resolve(acknowledged);
+  await startTask;
+  await runtime.flush();
+
+  assert.deepEqual(
+    calls.map(({ report }) => report.kind),
+    ["session_present", "session_closed"],
+  );
+  assert.equal(runtime.snapshot().closed, true);
+  assert.equal(runtime.snapshot().endpoints[0].phase, "terminal");
+});
+
+test("shutdown retries ambiguous presence with the same event before exact closure", async () => {
+  const pendingPresence = deferred();
+  const fake = createFakeSession();
+  const scheduler = createManualScheduler();
+  const heartbeat = createManualHeartbeat();
+  const url = "http://127.0.0.1:5292/api/session/activity";
+  const calls = [];
+  let presenceAttempts = 0;
+
+  const post = async (target, report) => {
+    calls.push({ url: target, report });
+    if (report.kind !== "session_present") return acknowledged;
+
+    presenceAttempts += 1;
+    return presenceAttempts === 1 ? pendingPresence.promise : acknowledged;
+  };
+
+  const runtime = createReportingRuntime(runtimeOptions(
+    fake,
+    post,
+    scheduler,
+    heartbeat,
+    [url],
+  ));
+  const startTask = runtime.start();
+
+  fake.emit(sdkEvent(
+    "shutdown-before-presence-retry",
+    "2026-09-04T17:00:01.000Z",
+    "session.shutdown",
+  ));
+  pendingPresence.resolve({
+    ok: false,
+    status: 503,
+    statusText: "Unavailable",
+  });
+  await startTask;
+
+  assert.equal(runtime.snapshot().endpoints[0].phase, "retry_wait");
+  assert.equal(scheduler.pending().length, 1);
+  assert.deepEqual(calls.map(({ report }) => report.kind), ["session_present"]);
+
+  await scheduler.runAll();
+  await runtime.flush();
+
+  assert.deepEqual(
+    calls.map(({ report }) => report.kind),
+    ["session_present", "session_present", "session_closed"],
+  );
+  const presenceReports = calls.filter(({ report }) => report.kind === "session_present");
+  assert.equal(new Set(presenceReports.map(({ report }) => report.eventId)).size, 1);
+  assert.equal(runtime.snapshot().closed, true);
+  assert.equal(runtime.snapshot().endpoints[0].phase, "terminal");
+});
+
 test("live shutdown stops heartbeats before exact closure and historical shutdown is ignored", async () => {
   const order = [];
   const fake = createFakeSession(async () => [

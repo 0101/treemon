@@ -180,8 +180,11 @@ best-effort delivery, preserving intentionally ignored reports such as system re
 from pre-deploy extensions that omit the parent PID are rejected and do not gate replacement. The
 server acknowledges `session_present` only after its mailbox has persisted the exact instance;
 ordinary event delivery remains idempotent after that bootstrap. The live `session.shutdown` event
-stops heartbeat emission before reporting `session_closed` for the exact instance. Historical
-shutdown events are not replayed as current closure.
+stops heartbeat emission and retains `session_closed` behind any in-flight unacknowledged presence.
+Acknowledged presence is followed immediately by closure; transport or retryable outcomes continue
+the same idempotent presence report until definitive, while a permanent or unmonitored rejection
+terminates that destination without closure. Historical shutdown events are not replayed as current
+closure.
 
 Subscriptions are attached before replay. The first successful `getEvents()` result is mapped
 through one runtime-scoped compact last-write-wins accumulator and cached for the process lifetime.

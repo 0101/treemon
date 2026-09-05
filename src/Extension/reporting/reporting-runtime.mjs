@@ -173,6 +173,8 @@ function createReportingFanout(options) {
     let replayBuffer = [];
     let stopped = false;
     let closing = false;
+    /** @type {ActivityReport | undefined} */
+    let pendingCloseReport;
     let everAcknowledged = false;
     let attemptVersion = 0;
     /** @type {Promise<void>} */
@@ -207,7 +209,7 @@ function createReportingFanout(options) {
     /** @param {string} reason */
     function schedulePresenceRetry(reason) {
       clearRetry();
-      if (stopped || closing) {
+      if (stopped || (closing && pendingCloseReport === undefined)) {
         stopHeartbeat();
         phase = "terminal";
         return;
@@ -335,7 +337,7 @@ function createReportingFanout(options) {
     async function attemptPresence() {
       if (
         stopped
-        || closing
+        || (closing && pendingCloseReport === undefined)
         || phase === "presence"
         || phase === "replaying"
         || phase === "ready"
@@ -359,13 +361,19 @@ function createReportingFanout(options) {
         return;
       }
 
-      if (stopped || closing || version !== attemptVersion) return;
+      if (stopped || version !== attemptVersion) return;
 
       const outcome = classifyPresenceResult(result);
       if (outcome.kind === "acknowledged") {
         everAcknowledged = true;
         retryAttempt = 0;
-        await replayAfterPresence(version);
+        if (pendingCloseReport !== undefined) {
+          phase = "closing";
+          await sendOrdinary(pendingCloseReport);
+          if (!stopped && version === attemptVersion) phase = "terminal";
+        } else {
+          await replayAfterPresence(version);
+        }
       } else if (outcome.kind === "retry") {
         schedulePresenceRetry(outcome.reason);
       } else {
@@ -436,9 +444,14 @@ function createReportingFanout(options) {
     function close(report) {
       if (stopped || closing || phase === "terminal") return activeTask;
       closing = true;
-      clearRetry();
       stopHeartbeat();
 
+      if (phase === "presence" || (phase === "retry_wait" && !everAcknowledged)) {
+        pendingCloseReport = report;
+        return activeTask;
+      }
+
+      clearRetry();
       if (phase === "replaying") {
         replayBuffer.push(report);
         return activeTask;
