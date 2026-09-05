@@ -350,6 +350,138 @@ test("an active endpoint re-establishes presence and replays after transport los
   runtime.stop();
 });
 
+test("a retryable ordinary rejection re-establishes presence and replays the report", async () => {
+  let history = [];
+  const fake = createFakeSession(async () => history);
+  const scheduler = createManualScheduler();
+  const heartbeat = createManualHeartbeat();
+  const url = "http://127.0.0.1:5251/api/session/activity";
+  const calls = [];
+  let rejectLiveTurn = true;
+
+  const post = async (target, report) => {
+    calls.push({ url: target, report });
+    if (report.kind === "turn_started" && rejectLiveTurn) {
+      rejectLiveTurn = false;
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          recorded: false,
+          monitored: true,
+          retryable: true,
+          reason: "mailbox unavailable",
+        },
+      };
+    }
+    return acknowledged;
+  };
+
+  const runtime = createReportingRuntime(runtimeOptions(
+    fake,
+    post,
+    scheduler,
+    heartbeat,
+    [url],
+  ));
+  await runtime.start();
+  await runtime.flush();
+
+  const liveTurn = sdkEvent(
+    "live-turn",
+    "2026-09-04T16:45:00.000Z",
+    "assistant.turn_start",
+  );
+  history = [liveTurn];
+  fake.emit(liveTurn);
+  await runtime.flush();
+
+  assert.equal(runtime.snapshot().endpoints[0].phase, "retry_wait");
+  assert.equal(scheduler.pending().length, 1);
+
+  await scheduler.runAll();
+  await runtime.flush();
+
+  const presenceReports = calls.filter(({ report }) => report.kind === "session_present");
+  const turnReports = calls.filter(({ report }) => report.kind === "turn_started");
+  assert.equal(presenceReports.length, 2);
+  assert.equal(new Set(presenceReports.map(({ report }) => report.eventId)).size, 1);
+  assert.deepEqual(turnReports.map(({ report }) => report.eventId), ["live-turn", "live-turn"]);
+  assert.equal(fake.getEventsCalls(), 2);
+  assert.equal(runtime.snapshot().endpoints[0].phase, "ready");
+  runtime.stop();
+});
+
+test("ordinary ignored responses stay ready while unmonitored responses terminate", async () => {
+  const fake = createFakeSession();
+  const scheduler = createManualScheduler();
+  const heartbeat = createManualHeartbeat();
+  const url = "http://127.0.0.1:5252/api/session/activity";
+  const calls = [];
+
+  const post = async (target, report) => {
+    calls.push({ url: target, report });
+    if (report.kind === "turn_started") {
+      return {
+        ok: true,
+        status: 200,
+        body: { recorded: false, monitored: true, retryable: false },
+      };
+    }
+    if (report.kind === "turn_ended") {
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          recorded: false,
+          monitored: false,
+          retryable: false,
+          reason: "worktree removed",
+        },
+      };
+    }
+    return acknowledged;
+  };
+
+  const runtime = createReportingRuntime(runtimeOptions(
+    fake,
+    post,
+    scheduler,
+    heartbeat,
+    [url],
+  ));
+  await runtime.start();
+  await runtime.flush();
+
+  fake.emit(sdkEvent(
+    "ignored-turn",
+    "2026-09-04T16:50:00.000Z",
+    "assistant.turn_start",
+  ));
+  await runtime.flush();
+  assert.equal(runtime.snapshot().endpoints[0].phase, "ready");
+
+  fake.emit(sdkEvent(
+    "unmonitored-turn",
+    "2026-09-04T16:50:01.000Z",
+    "assistant.turn_end",
+  ));
+  await runtime.flush();
+
+  assert.equal(runtime.snapshot().endpoints[0].phase, "terminal");
+  assert.equal(scheduler.pending().length, 0);
+  const callCount = calls.length;
+
+  fake.emit(sdkEvent(
+    "after-terminal",
+    "2026-09-04T16:50:02.000Z",
+    "assistant.turn_start",
+  ));
+  await runtime.flush();
+  assert.equal(calls.length, callCount);
+  runtime.stop();
+});
+
 test("live shutdown stops heartbeats before exact closure and historical shutdown is ignored", async () => {
   const order = [];
   const fake = createFakeSession(async () => [

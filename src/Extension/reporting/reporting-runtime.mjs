@@ -58,6 +58,43 @@ function responseDescription(result) {
 }
 
 /**
+ * @param {Record<string, unknown> | null} body
+ * @returns {{ kind: "terminal", reason: string } | null}
+ */
+function unmonitoredTerminalOutcome(body) {
+  return body?.monitored === false
+    ? {
+      kind: "terminal",
+      reason: reasonText(body.reason, "worktree is not monitored by this endpoint"),
+    }
+    : null;
+}
+
+/**
+ * @param {PostResult} result
+ * @returns {OrdinaryOutcome}
+ */
+function classifyOrdinaryResult(result) {
+  if (!result.ok) {
+    return isTransientHttpStatus(result.status)
+      ? { kind: "transport", reason: responseDescription(result) }
+      : { kind: "sent" };
+  }
+
+  const body = isRecord(result.body) ? result.body : null;
+  const unmonitored = unmonitoredTerminalOutcome(body);
+  if (unmonitored) return unmonitored;
+  if (body?.recorded === false && body.retryable === true) {
+    return {
+      kind: "transport",
+      reason: reasonText(body.reason, "report was not recorded"),
+    };
+  }
+
+  return { kind: "sent" };
+}
+
+/**
  * Presence is acknowledged only by `recorded: true`. Logical negative responses retry only when
  * the presence acknowledgement explicitly says so; unmonitored and other permanent negatives stop.
  *
@@ -72,12 +109,8 @@ export function classifyPresenceResult(result) {
   }
 
   const body = isRecord(result.body) ? result.body : null;
-  if (body?.monitored === false) {
-    return {
-      kind: "terminal",
-      reason: reasonText(body.reason, "worktree is not monitored by this endpoint"),
-    };
-  }
+  const unmonitored = unmonitoredTerminalOutcome(body);
+  if (unmonitored) return unmonitored;
   if (body?.recorded === true) return { kind: "acknowledged" };
   if (body?.retryable === true) {
     return {
@@ -164,19 +197,11 @@ function createReportingFanout(options) {
     async function sendOrdinary(report) {
       try {
         const result = await options.post(url, report);
-        if (!result.ok && isTransientHttpStatus(result.status)) {
-          return { kind: "transport", reason: responseDescription(result) };
-        }
-        if (result.ok && isRecord(result.body) && result.body.monitored === false) {
-          return {
-            kind: "terminal",
-            reason: reasonText(result.body.reason, "worktree is not monitored by this endpoint"),
-          };
-        }
-        if (!result.ok) {
+        const outcome = classifyOrdinaryResult(result);
+        if (!result.ok && outcome.kind === "sent") {
           log(`POST ${url} -> ${responseDescription(result)}`);
         }
-        return { kind: "sent" };
+        return outcome;
       } catch (error) {
         return { kind: "transport", reason: errorText(error) };
       }

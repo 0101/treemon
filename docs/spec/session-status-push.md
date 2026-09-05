@@ -169,14 +169,16 @@ UTF-16 code units. It forwards ask-user request, completion, and idle events as 
 persisted request/completion clocks resolve their effective status independently of delivery order.
 Every report carries the parent Copilot PID and the optional inherited
 `TREEMON_TERMINAL_SESSION_ID`. Each configured Treemon endpoint tracks presence independently:
-transport failure or a presence-specific negative acknowledgement retries only that endpoint,
-while an unmonitored endpoint or an unresolvable parent process is terminal for that destination and
-does not enter a retry storm. Reports from pre-deploy extensions that omit the parent PID are
-rejected and do not gate replacement. The server acknowledges `session_present` only after its
-mailbox has persisted the exact instance; ordinary event delivery remains idempotent and
-best-effort after that bootstrap. The live `session.shutdown` event stops heartbeat emission before
-reporting `session_closed` for the exact instance. Historical shutdown events are not replayed as
-current closure.
+transport failure, an explicitly retryable presence acknowledgement, or an ordinary
+`recorded=false, retryable=true` result re-establishes presence and replays only that endpoint.
+An unmonitored endpoint or an unresolvable parent process is terminal for that destination and does
+not enter a retry storm. A monitored ordinary `recorded=false, retryable=false` result remains
+best-effort delivery, preserving intentionally ignored reports such as system reminders. Reports
+from pre-deploy extensions that omit the parent PID are rejected and do not gate replacement. The
+server acknowledges `session_present` only after its mailbox has persisted the exact instance;
+ordinary event delivery remains idempotent after that bootstrap. The live `session.shutdown` event
+stops heartbeat emission before reporting `session_closed` for the exact instance. Historical
+shutdown events are not replayed as current closure.
 
 After subscriptions and replay are active, the extension reads
 `session.rpc.metadata.snapshot().summary` in a non-blocking background task and emits
