@@ -72,25 +72,38 @@ module TerminalLauncher =
 
         wait ()
 
+    let private toTerminalProcess port owned =
+        { ProcessId = JobProcess.processId owned
+          ProcessStartTimeUtcTicks =
+            JobProcess.processStartTimeUtcTicks owned
+          TtydPort = port
+          HasExited = fun () -> JobProcess.hasExited owned
+          BeginClose = fun () -> JobProcess.beginClose owned }
+
     let start config sessionId worktree =
         async {
             let port = freeLoopbackPort ()
             let specification = startSpecification config sessionId worktree port
 
             match JobProcess.start specification with
-            | Error error -> return Error error
+            | Error error ->
+                return Error(TerminalLaunchFailure.LaunchFailed error)
             | Ok owned ->
+                let terminalProcess = toTerminalProcess port owned
+
                 match! waitUntilReady config.StartupTimeout port owned with
                 | Error error ->
-                    JobProcess.close owned |> ignore
-                    return Error error
-                | Ok() ->
                     return
-                        Ok
-                            { ProcessId = JobProcess.processId owned
-                              ProcessStartTimeUtcTicks =
-                                JobProcess.processStartTimeUtcTicks owned
-                              TtydPort = port
-                              HasExited = fun () -> JobProcess.hasExited owned
-                              BeginClose = fun () -> JobProcess.beginClose owned }
+                        match JobProcess.close owned with
+                        | Ok() ->
+                            Error(TerminalLaunchFailure.LaunchFailed error)
+                        | Error cleanupError ->
+                            Error(
+                                TerminalLaunchFailure.CleanupPending(
+                                    error,
+                                    cleanupError,
+                                    terminalProcess
+                                )
+                            )
+                | Ok() -> return Ok terminalProcess
         }

@@ -654,6 +654,249 @@ type TerminalRegistryResilienceTests() =
                 ()
 
     [<Test>]
+    member _.``launcher cleanup failure remains owned until registry maintenance succeeds``() =
+        use allowCleanup = new ManualResetEventSlim()
+        let cleanupAttempts = ConcurrentQueue<unit>()
+
+        let completeCleanup () =
+            cleanupAttempts.Enqueue()
+
+            if allowCleanup.IsSet then
+                Ok()
+            else
+                Error "exact survivor remains"
+
+        let terminalProcess =
+            { ProcessId = 23_200
+              ProcessStartTimeUtcTicks = 33_200L
+              TtydPort = 43_200
+              HasExited = fun () -> true
+              BeginClose = fun () -> Ok completeCleanup }
+
+        let starter _ _ =
+            async {
+                match terminalProcess.BeginClose() |> Result.bind (fun complete -> complete()) with
+                | Error cleanupError ->
+                    return
+                        Error(
+                            TerminalLaunchFailure.CleanupPending(
+                                "startup failed",
+                                cleanupError,
+                                terminalProcess
+                            )
+                        )
+                | Ok() ->
+                    return
+                        Error(
+                            TerminalLaunchFailure.LaunchFailed(
+                                "cleanup unexpectedly succeeded"
+                            )
+                        )
+            }
+
+        let dataPlaneStarter _ _ _ =
+            async.Return(Error "data plane must not start")
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        try
+            let started =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-launcher-cleanup")
+                |> runWithin timeout
+
+            match started with
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(error, Does.Contain("startup failed"))
+                    Assert.That(error, Does.Contain("exact survivor remains")))
+            | Ok _ ->
+                Assert.Fail("Startup unexpectedly succeeded")
+
+            Assert.That(
+                cleanupAttempts.Count,
+                Is.EqualTo(1),
+                "the failed launcher cleanup must not be retried inside the start request"
+            )
+
+            allowCleanup.Set()
+
+            let listed =
+                TerminalRegistry.list registry
+                |> runWithin timeout
+
+            let clean =
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(listed.Terminals, Is.Empty)
+                Assert.That(cleanupAttempts.Count, Is.EqualTo(2))
+                Assert.That(clean, Is.True))
+        finally
+            allowCleanup.Set()
+
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+                |> ignore
+            with _ ->
+                ()
+
+    [<Test>]
+    member _.``data plane startup failure retains process when close preparation initially fails``() =
+        use allowPreparation = new ManualResetEventSlim()
+        let preparationAttempts = ConcurrentQueue<unit>()
+
+        let starter _ _ =
+            async {
+                return
+                    Ok
+                        { ProcessId = 23_300
+                          ProcessStartTimeUtcTicks = 33_300L
+                          TtydPort = 43_300
+                          HasExited = fun () -> false
+                          BeginClose =
+                            fun () ->
+                                preparationAttempts.Enqueue()
+
+                                if allowPreparation.IsSet then
+                                    Ok(fun () -> Ok())
+                                else
+                                    Error "cleanup preparation failed" }
+            }
+
+        let dataPlaneStarter _ _ _ =
+            async.Return(Error "data plane startup failed")
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        try
+            let started =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-preparation-failure")
+                |> runWithin timeout
+
+            match started with
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(error, Does.Contain("data plane startup failed"))
+                    Assert.That(error, Does.Contain("cleanup preparation failed")))
+            | Ok _ ->
+                Assert.Fail("Startup unexpectedly succeeded")
+
+            Assert.That(preparationAttempts.Count, Is.EqualTo(1))
+            allowPreparation.Set()
+
+            let listed =
+                TerminalRegistry.list registry
+                |> runWithin timeout
+
+            let clean =
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(listed.Terminals, Is.Empty)
+                Assert.That(preparationAttempts.Count, Is.EqualTo(2))
+                Assert.That(clean, Is.True))
+        finally
+            allowPreparation.Set()
+
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+                |> ignore
+            with _ ->
+                ()
+
+    [<Test>]
+    member _.``startup exit retains process and data plane until survivor cleanup succeeds``() =
+        use allowCleanup = new ManualResetEventSlim()
+        let exitChecks = ConcurrentQueue<unit>()
+        let cleanupAttempts = ConcurrentQueue<unit>()
+        let stopAttempts = ConcurrentQueue<unit>()
+
+        let completeCleanup () =
+            cleanupAttempts.Enqueue()
+
+            if allowCleanup.IsSet then
+                Ok()
+            else
+                Error "exact survivor remains"
+
+        let starter _ _ =
+            async {
+                return
+                    Ok
+                        { ProcessId = 23_400
+                          ProcessStartTimeUtcTicks = 33_400L
+                          TtydPort = 43_400
+                          HasExited =
+                            fun () ->
+                                exitChecks.Enqueue()
+                                exitChecks.Count >= 2
+                          BeginClose = fun () -> Ok completeCleanup }
+            }
+
+        let dataPlaneStarter sessionId _ _ =
+            async {
+                let dataPlane =
+                    inertDataPlane
+                        $"http://127.0.0.1:43400/_treemon/{sessionId}/test-token/"
+
+                return
+                    Ok
+                        { dataPlane with
+                            Stop =
+                                fun () ->
+                                    async { stopAttempts.Enqueue() } }
+            }
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        try
+            let started =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-startup-exit")
+                |> runWithin timeout
+
+            match started with
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(error, Does.Contain("ttyd exited during terminal startup"))
+                    Assert.That(error, Does.Contain("exact survivor remains")))
+            | Ok _ ->
+                Assert.Fail("Startup unexpectedly succeeded")
+
+            Assert.Multiple(fun () ->
+                Assert.That(cleanupAttempts.Count, Is.EqualTo(1))
+                Assert.That(stopAttempts.Count, Is.EqualTo(1)))
+
+            allowCleanup.Set()
+
+            let clean =
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(cleanupAttempts.Count, Is.EqualTo(2))
+                Assert.That(stopAttempts.Count, Is.EqualTo(2))
+                Assert.That(clean, Is.True))
+        finally
+            allowCleanup.Set()
+
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+                |> ignore
+            with _ ->
+                ()
+
+    [<Test>]
     member _.``shutdown closes independent terminals with bounded parallelism instead of serially``() =
         // Each terminal's data-plane Stop() blocks on a shared barrier until every participant has
         // arrived. A serial shutdown would deadlock (only one terminal's Stop ever runs at a time,

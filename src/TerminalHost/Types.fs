@@ -12,6 +12,10 @@ module Protocol =
 type CanonicalWorktree = private { Path: string }
 
 type TerminalProcess = { ProcessId: int; ProcessStartTimeUtcTicks: int64; TtydPort: int; HasExited: unit -> bool; BeginClose: unit -> Result<(unit -> Result<unit, string>), string> }
+[<RequireQualifiedAccess>]
+type TerminalLaunchFailure =
+    | LaunchFailed of string
+    | CleanupPending of startupError: string * cleanupError: string * terminalProcess: TerminalProcess
 type TerminalRecord = { SessionId: string; WorktreePath: string; AttachmentEndpoint: string }
 type RegistrySnapshot = { Revision: int64; Terminals: TerminalRecord list }
 type HostIdentity = { Pid: int; ProcessStartTimeUtcTicks: int64; Endpoint: string; HostVersion: string; ControlApiVersion: int }
