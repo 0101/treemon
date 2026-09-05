@@ -14,8 +14,6 @@ open Server.SessionActivityStore
 // to an exact process identity, and hands it to the single-writer mailbox. Presence is the one
 // synchronous wire operation: success is returned only after session_instances was persisted.
 
-// --- Request guard ----------------------------------------------------------------------------
-
 let private allKnownPaths
     (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
     =
@@ -71,8 +69,6 @@ let tryAcceptReport
                     Accepted report
     }
 
-// --- Exact ingestion --------------------------------------------------------------------------
-
 let internal retentionPeriod = TimeSpan.FromDays 60.0
 let internal pruneInterval = TimeSpan.FromHours 1.0
 let internal acknowledgedWriteTimeout = 5_000
@@ -90,7 +86,6 @@ type ClosureAcknowledge =
 
 type private ServiceMsg =
     | Ingest of ExactReport
-    | IngestForTest of ExactReport
     | PersistPresence of
         ExactReport *
         AsyncReplyChannel<PresenceAcknowledge>
@@ -257,29 +252,6 @@ type SessionActivityService internal
                                     "Activity"
                                     $"Ingest failed (report dropped, mailbox kept alive): {error.Message}"
 
-                                state
-
-                        return! loop next
-                    | IngestForTest exact ->
-                        let next =
-                            try
-                                let seeded =
-                                    ensureTestPresence
-                                        store
-                                        scheduler
-                                        state
-                                        exact
-
-                                match
-                                    applyKnownReport
-                                        store
-                                        scheduler
-                                        seeded
-                                        exact
-                                with
-                                | Ok applied -> applied
-                                | Error _ -> seeded
-                            with _ ->
                                 state
 
                         return! loop next
@@ -562,111 +534,19 @@ type SessionActivityService internal
     member this.Handler: HttpHandler =
         fun next context ->
             task {
-                try
-                    let! body =
-                        context.BindJsonAsync<SessionActivityRequest>()
+                let! bound =
+                    task {
+                        try
+                            let! body =
+                                context.BindJsonAsync<SessionActivityRequest>()
 
-                    let! outcome =
-                        tryAcceptReport scheduler body
-                        |> Async.StartAsTask
+                            return Ok body
+                        with error ->
+                            return Error error
+                    }
 
-                    match outcome with
-                    | Rejected reason ->
-                        Log.log "Activity" $"Rejected report: {reason}"
-                        return!
-                            RequestErrors.BAD_REQUEST reason next context
-                    | Unmonitored path ->
-                        Log.log
-                            "Activity"
-                            $"Report for unmonitored worktree — {path} (ignored)"
-
-                        return!
-                            Successful.ok
-                                (json
-                                    {| recorded = false
-                                       monitored = false
-                                       retryable = false |})
-                                next
-                                context
-                    | IgnoredSystemReminder ->
-                        return!
-                            Successful.ok
-                                (json
-                                    {| recorded = false
-                                       monitored = true
-                                       retryable = false |})
-                                next
-                                context
-                    | Accepted report ->
-                        match report.Event with
-                        | SessionPresent ->
-                            match
-                                persistPresence
-                                    DateTimeOffset.UtcNow
-                                    report
-                            with
-                            | PresenceAcknowledge.Recorded _ ->
-                                return!
-                                    Successful.ok
-                                        (json
-                                            {| recorded = true
-                                               monitored = true
-                                               retryable = false |})
-                                        next
-                                        context
-                            | PresenceAcknowledge.NotRecorded(
-                                retryable,
-                                reason
-                              ) ->
-                                return!
-                                    Successful.ok
-                                        (json
-                                            {| recorded = false
-                                               monitored = true
-                                               retryable = retryable
-                                               reason = reason |})
-                                        next
-                                        context
-                        | _ ->
-                            match
-                                resolveReport
-                                    DateTimeOffset.UtcNow
-                                    report
-                            with
-                            | Error(retryable, reason) ->
-                                return!
-                                    Successful.ok
-                                        (json
-                                            {| recorded = false
-                                               monitored = true
-                                               retryable = retryable
-                                               reason = reason |})
-                                        next
-                                        context
-                            | Ok exact ->
-                                if isDisposed () then
-                                    return!
-                                        Successful.ok
-                                            (json
-                                                {| recorded = false
-                                                   monitored = true
-                                                   retryable = true
-                                                   reason =
-                                                    "session activity service is stopped" |})
-                                            next
-                                            context
-                                else
-                                    mailbox.Post(Ingest exact)
-
-                                    return!
-                                        Successful.ok
-                                            (json
-                                                {| recorded = true
-                                                   monitored = true
-                                                   retryable = false |})
-                                            next
-                                            context
-                with error ->
+                match bound with
+                | Error error ->
                     Log.log
                         "Activity"
                         $"Report failed: malformed JSON — {error.Message}"
@@ -676,6 +556,124 @@ type SessionActivityService internal
                             $"malformed JSON: {error.Message}"
                             next
                             context
+                | Ok body ->
+                    try
+                        let! outcome =
+                            tryAcceptReport scheduler body
+                            |> Async.StartAsTask
+
+                        match outcome with
+                        | Rejected reason ->
+                            Log.log "Activity" $"Rejected report: {reason}"
+                            return!
+                                RequestErrors.BAD_REQUEST reason next context
+                        | Unmonitored path ->
+                            Log.log
+                                "Activity"
+                                $"Report for unmonitored worktree — {path} (ignored)"
+
+                            return!
+                                Successful.ok
+                                    (json
+                                        {| recorded = false
+                                           monitored = false
+                                           retryable = false |})
+                                    next
+                                    context
+                        | IgnoredSystemReminder ->
+                            return!
+                                Successful.ok
+                                    (json
+                                        {| recorded = false
+                                           monitored = true
+                                           retryable = false |})
+                                    next
+                                    context
+                        | Accepted report ->
+                            match report.Event with
+                            | SessionPresent ->
+                                match
+                                    persistPresence
+                                        DateTimeOffset.UtcNow
+                                        report
+                                with
+                                | PresenceAcknowledge.Recorded _ ->
+                                    return!
+                                        Successful.ok
+                                            (json
+                                                {| recorded = true
+                                                   monitored = true
+                                                   retryable = false |})
+                                            next
+                                            context
+                                | PresenceAcknowledge.NotRecorded(
+                                    retryable,
+                                    reason
+                                  ) ->
+                                    return!
+                                        Successful.ok
+                                            (json
+                                                {| recorded = false
+                                                   monitored = true
+                                                   retryable = retryable
+                                                   reason = reason |})
+                                            next
+                                            context
+                            | _ ->
+                                match
+                                    resolveReport
+                                        DateTimeOffset.UtcNow
+                                        report
+                                with
+                                | Error(retryable, reason) ->
+                                    return!
+                                        Successful.ok
+                                            (json
+                                                {| recorded = false
+                                                   monitored = true
+                                                   retryable = retryable
+                                                   reason = reason |})
+                                            next
+                                            context
+                                | Ok exact ->
+                                    if isDisposed () then
+                                        return!
+                                            Successful.ok
+                                                (json
+                                                    {| recorded = false
+                                                       monitored = true
+                                                       retryable = true
+                                                       reason =
+                                                        "session activity service is stopped" |})
+                                                next
+                                                context
+                                    else
+                                        mailbox.Post(Ingest exact)
+
+                                        return!
+                                            Successful.ok
+                                                (json
+                                                    {| recorded = true
+                                                       monitored = true
+                                                       retryable = false |})
+                                                next
+                                                context
+                    with error ->
+                        Log.log
+                            "Activity"
+                            $"Session activity processing failed: {error.Message}"
+
+                        context.Response.StatusCode <-
+                            StatusCodes.Status500InternalServerError
+
+                        return!
+                            json
+                                {| recorded = false
+                                   monitored = true
+                                   retryable = true
+                                   reason = "session activity processing failed" |}
+                                next
+                                context
             }
 
     /// Deterministic acknowledged presence seam used by HTTP and focused tests.
@@ -686,16 +684,14 @@ type SessionActivityService internal
         ) =
         persistPresence receivedAt report
 
-    /// Lower-level fold test seam. Production ingestion requires session_present first; this helper
-    /// creates a test-only presence shell for a first history-bearing event so the existing pure fold
-    /// tests remain focused on ordering rather than HTTP bootstrap ceremony.
+    /// Lower-level asynchronous ingestion seam used after explicit presence in focused tests.
     member internal _.Submit(report: SessionActivityReport) =
         if isDisposed () then
             raise (ObjectDisposedException(nameof SessionActivityService))
 
         match resolveReport report.OccurredAt report with
         | Error(_, reason) -> invalidOp reason
-        | Ok exact -> mailbox.Post(IngestForTest exact)
+        | Ok exact -> mailbox.Post(Ingest exact)
 
     member internal _.CloseProcess
         (

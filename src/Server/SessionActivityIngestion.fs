@@ -495,30 +495,6 @@ let internal applyKnownReport
     | event, Some _ ->
         Error $"unexpected session activity event: {event}"
 
-let internal ensureTestPresence
-    (store: SessionActivityStore)
-    (scheduler: MailboxProcessor<SchedulerState.StateMsg>)
-    (state: ServiceState)
-    (exact: ExactReport)
-    =
-    match tryPrior store state exact.ProcessIdentity with
-    | Some _ -> state
-    | None ->
-        match exact.Report.Event with
-        | Heartbeat
-        | UsageInfo _
-        | SessionClosed
-        | SessionPresent -> state
-        | _ ->
-            let presence =
-                { exact with
-                    ReceivedAt = exact.Report.OccurredAt
-                    Report.Event = SessionPresent }
-
-            match applyPresence store scheduler state presence with
-            | Ok(next, _) -> next
-            | Error _ -> state
-
 let internal statusesForTerminalOrigins
     (terminalSessionIds: Set<TerminalSessionId>)
     (live: Map<ProcessIdentity, StoredInstance>)

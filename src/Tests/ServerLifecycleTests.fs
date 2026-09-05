@@ -13,6 +13,7 @@ open Program
 open Shared
 open Server
 open Server.SessionActivity
+open Server.SessionActivityService
 open Server.SessionActivityStore
 open Tests.SqliteTestDatabase
 
@@ -75,6 +76,17 @@ type ServerLifecycleTests() =
                 try
                     Assert.Multiple(fun () ->
                         Assert.That(Object.ReferenceEquals(components.Store, components.Service.Store), Is.True))
+
+                    let presence =
+                        { report with
+                            EventId = EventId "lifecycle-presence"
+                            Event = SessionPresent }
+
+                    match components.Service.Present(presence, occurredAt) with
+                    | PresenceAcknowledge.Recorded _ -> ()
+                    | PresenceAcknowledge.NotRecorded(_, reason) ->
+                        Assert.Fail $"Expected acknowledged presence, got: {reason}"
+
                     components.Service.Submit report
                 finally
                     (components.Service :> IDisposable).Dispose()

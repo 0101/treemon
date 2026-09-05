@@ -187,6 +187,19 @@ let private withMessageTimestamp timestamp =
     | UserInputCompleted _ -> UserInputCompleted timestamp
     | event -> event
 
+let private parseWorktreePath path =
+    try
+        path
+        |> PathUtils.normalizePath
+        |> WorktreePath
+        |> Ok
+    with
+    | :? ArgumentException
+    | :? NotSupportedException
+    | :? System.IO.IOException
+    | :? System.Security.SecurityException ->
+        Error "invalid worktreePath"
+
 let parseReport
     (now: DateTimeOffset)
     (request: SessionActivityRequest)
@@ -211,30 +224,29 @@ let parseReport
             |> Result.bind (fun sessionId ->
                 parseProvider request.provider
                 |> Result.bind (fun provider ->
-                    parseTerminalSessionId (Option.ofObj request.terminalSessionId)
-                    |> Result.bind (fun terminalSessionId ->
-                        tryParseTimestamp request.occurredAt
-                        |> Result.bind (fun rawOccurredAt ->
-                            let occurredAt =
-                                clampFutureTimestamp now rawOccurredAt
+                    parseWorktreePath request.worktreePath
+                    |> Result.bind (fun worktreePath ->
+                        parseTerminalSessionId (Option.ofObj request.terminalSessionId)
+                        |> Result.bind (fun terminalSessionId ->
+                            tryParseTimestamp request.occurredAt
+                            |> Result.bind (fun rawOccurredAt ->
+                                let occurredAt =
+                                    clampFutureTimestamp now rawOccurredAt
 
-                            parseEvent
-                                occurredAt
-                                request.kind
-                                message
-                                request.skillName
-                                request.toolCallId
-                                request.currentTokens
-                                request.tokenLimit
-                            |> Result.map (fun event ->
-                                { ParentProcessId = request.parentProcessId
-                                  SessionId = sessionId
-                                  TerminalSessionId = terminalSessionId
-                                  WorktreePath =
-                                    WorktreePath(
-                                        PathUtils.normalizePath request.worktreePath
-                                    )
-                                  Provider = provider
-                                  EventId = EventId request.eventId
-                                  OccurredAt = occurredAt
-                                  Event = withMessageTimestamp occurredAt event })))))
+                                parseEvent
+                                    occurredAt
+                                    request.kind
+                                    message
+                                    request.skillName
+                                    request.toolCallId
+                                    request.currentTokens
+                                    request.tokenLimit
+                                |> Result.map (fun event ->
+                                    { ParentProcessId = request.parentProcessId
+                                      SessionId = sessionId
+                                      TerminalSessionId = terminalSessionId
+                                      WorktreePath = worktreePath
+                                      Provider = provider
+                                      EventId = EventId request.eventId
+                                      OccurredAt = occurredAt
+                                      Event = withMessageTimestamp occurredAt event }))))))
