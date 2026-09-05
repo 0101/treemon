@@ -689,12 +689,46 @@ type OverviewDataTests() =
         Assert.That(agentCount AgentGroupKind.Idle result, Is.EqualTo(Some(members |> List.length)))
 
     [<Test>]
-    member _.``Agent members carry the worktree's CodingToolSince (time in category)``() =
+    member _.``Single-instance agent members carry the worktree's CodingToolSince``() =
         let since = System.DateTimeOffset(2025, 1, 1, 12, 0, 0, System.TimeSpan.Zero)
         let idle = { agentWt CodingToolStatus.Idle None with CodingToolSince = Some since }
         let result = aggregate [ repo [ at "/wt/s1" "idle-1" idle ] ]
         let members = agentMembers AgentGroupKind.Idle result
         Assert.That(members |> List.map _.Since, Is.EqualTo([ Some since ]))
+
+    [<Test>]
+    member _.``Heartbeat-current Idle and newly Working siblings omit the collapsed worktree duration``() =
+        let workingSince = System.DateTimeOffset(2025, 1, 1, 12, 5, 0, System.TimeSpan.Zero)
+
+        let idleSession =
+            { InstanceId = SessionInstanceId "heartbeat-current-idle"
+              Status = CodingToolStatus.Idle
+              Skill = None
+              ContextUsage = None }
+
+        let workingSession =
+            { InstanceId = SessionInstanceId "newly-working"
+              Status = CodingToolStatus.Working
+              Skill = Some "bd-execute"
+              ContextUsage = None }
+
+        let worktree =
+            { workingWt (Some "bd-execute") with
+                CodingToolSince = Some workingSince
+                Sessions = [ idleSession; workingSession ] }
+
+        let result = aggregate [ repo [ at "/wt/multi" "multi" worktree ] ]
+        let executing = agentMembers (AgentGroupKind.Activity CurrentActivity.Executing) result
+        let idle = agentMembers AgentGroupKind.Idle result
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                executing |> List.map _.Since,
+                Is.EqualTo([ (None: System.DateTimeOffset option) ]))
+            Assert.That(
+                idle |> List.map _.Since,
+                Is.EqualTo([ (None: System.DateTimeOffset option) ]),
+                "the newly Working sibling's worktree transition is not the Idle process's duration"))
 
     [<Test>]
     member _.``Task-bucket members always have Since = None, even when the worktree carries one``() =

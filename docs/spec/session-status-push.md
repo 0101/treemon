@@ -97,7 +97,10 @@ shared state; no session-log parsing remains.
   processes to several activity groups at once.
 - `CodingToolSince` is captured whenever the collapsed worktree status changes and remains stable
   across liveness-only heartbeats and sibling-instance updates that leave that status unchanged. A
-  process that re-presents after its prior openness window starts a new transition.
+  process that re-presents after its prior openness window starts a new transition. The Overview
+  drill-down shows that timestamp only when the worktree has exactly one open instance; members of a
+  multi-instance worktree omit duration because a collapsed worktree transition cannot represent
+  each physical process's category transition.
 - Auto-sync defers entirely while any open session is mid-turn or has been idle for less than
   `settleWindow` (30 s). Otherwise it takes the greatest-`UpdatedAt` open session that has settled,
   and only then a retained identity when no session is open. That ordering keeps any fallback prompt

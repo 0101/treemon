@@ -257,7 +257,9 @@ type RegisterAndStatusTests() =
 
         // The downstream scanner fallback therefore finds no id to credit: a single anonymous
         // session leaves docs unowned instead of stamping the sticky, unroutable owner "".
-        Assert.That(fallbackOwner (sessionsForWorktree path), Is.EqualTo(None: string option),
+        let sessions = sessionsForWorktree path
+        let observedAt = sessions |> List.maxBy _.RegisteredAt |> _.RegisteredAt
+        Assert.That(fallbackOwner observedAt sessions, Is.EqualTo(None: string option),
                     "A single blank-id session must leave docs unowned, not owned by \"\"")
 
     [<Test>]
@@ -1014,7 +1016,9 @@ type ScannerFallbackAttributionTests() =
 
     [<Test>]
     member _.``fallbackOwner attributes only when exactly one session is registered``() =
-        let entry sid : SessionEntry =
+        let now = DateTime(2026, 9, 5, 5, 0, 0, DateTimeKind.Utc)
+
+        let entry registeredAt sid : SessionEntry =
             let processId = Interlocked.Increment(&nextBridgeProcessId)
             let identity =
                 ProcessIdentity.create processId (int64 processId * 1000L + 1L)
@@ -1025,17 +1029,31 @@ type ScannerFallbackAttributionTests() =
               InjectUrl = "http://localhost/inject"
               SessionId = sid
               TerminalSessionId = None
-              RegisteredAt = DateTime.UtcNow }
+              RegisteredAt = registeredAt }
 
-        Assert.That(fallbackOwner [], Is.EqualTo None, "Zero sessions -> no fallback owner")
-        Assert.That(fallbackOwner [ entry (Some "solo") ], Is.EqualTo(Some "solo"), "Exactly one session -> it is the owner")
-        Assert.That(fallbackOwner [ entry None ], Is.EqualTo None, "A single anonymous session has no id to attribute")
+        Assert.That(fallbackOwner now [], Is.EqualTo None, "Zero sessions -> no fallback owner")
         Assert.That(
-            fallbackOwner [ entry (Some "same"); entry (Some "same") ],
+            fallbackOwner now [ entry now (Some "solo") ],
+            Is.EqualTo(Some "solo"),
+            "Exactly one session -> it is the owner")
+        Assert.That(
+            fallbackOwner now [ entry now None ],
+            Is.EqualTo None,
+            "A single anonymous session has no id to attribute")
+        Assert.That(
+            fallbackOwner now [ entry now (Some "same"); entry now (Some "same") ],
             Is.EqualTo(Some "same"),
             "Duplicate physical registrations for one durable session remain one canvas owner")
-        Assert.That(fallbackOwner [ entry (Some "a"); entry (Some "b") ], Is.EqualTo None,
+        Assert.That(fallbackOwner now [ entry now (Some "a"); entry now (Some "b") ], Is.EqualTo None,
             "Two sessions are ambiguous -> leave unowned (the misattribution guard)")
+        Assert.That(
+            fallbackOwner now [ entry (now.AddMilliseconds -59_999.0) (Some "inside") ],
+            Is.EqualTo(Some "inside"),
+            "A registration just inside the 60-second liveness window remains eligible")
+        Assert.That(
+            fallbackOwner now [ entry (now.AddSeconds -60.0) (Some "boundary") ],
+            Is.EqualTo None,
+            "A registration exactly 60 seconds old is no longer live")
 
     [<Test>]
     member _.``Two registered sessions leave a no-owner changed doc UNOWNED (misattribution regression)``() =

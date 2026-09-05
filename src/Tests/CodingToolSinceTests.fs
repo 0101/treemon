@@ -17,7 +17,8 @@ let private makeWorktree path branch : WorktreeInfo =
 // CodingToolSince is the transition time of the collapsed worktree status. Exact-instance
 // heartbeats and sibling updates preserve it while the aggregate status is unchanged.
 
-let private wtA = "C:/wt/a"
+let private wtA = Server.PathUtils.normalizePath "C:/wt/a"
+let private wtB = Server.PathUtils.normalizePath "C:/wt/b"
 
 let private identity sid =
     sid
@@ -52,6 +53,57 @@ let private postInstance
             instance.LastSeen
         )
     )
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type GroupInstancesByWorktreeTests() =
+
+    [<Test>]
+    member _.``Grouping visits each exact instance once across a scale fixture``() =
+        let observedAt = DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)
+        let worktreeCount = 128
+        let instancesPerWorktree = 4
+
+        let instances =
+            [ 1 .. worktreeCount ]
+            |> List.collect (fun worktreeIndex ->
+                let path =
+                    System.IO.Path.Combine(
+                        System.IO.Path.GetTempPath(),
+                        "treemon-scheduler-grouping",
+                        $"wt-{worktreeIndex}"
+                    )
+
+                [ 1 .. instancesPerWorktree ]
+                |> List.map (fun instanceIndex ->
+                    storedWt
+                        $"session-{worktreeIndex}-{instanceIndex}"
+                        path
+                        SessionLevelStatus.Idle
+                        observedAt))
+
+        let visited =
+            System.Collections.Concurrent.ConcurrentQueue<ProcessIdentity>()
+
+        let grouped =
+            instances
+            |> Seq.map (fun instance ->
+                visited.Enqueue(instance.ProcessIdentity)
+                instance)
+            |> groupInstancesByWorktree
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                visited.Count,
+                Is.EqualTo(instances.Length),
+                "grouping must enumerate the source once")
+            Assert.That(grouped.Count, Is.EqualTo(worktreeCount))
+            Assert.That(
+                grouped
+                |> Map.forall (fun _ group ->
+                    List.length group = instancesPerWorktree),
+                Is.True))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -196,6 +248,37 @@ type CodingToolSinceByWorktreeTests() =
                 Is.EqualTo(Some representedAt),
                 "the previous exact instance was no longer open at this observation"
             )
+        }
+        |> Async.RunSynchronously
+
+    [<Test>]
+    member _.``An unrelated heartbeat expires every worktree at the exact openness boundary``() =
+        async {
+            let agent = createAgent ()
+            postInstance agent (storedWt "a" wtA SessionLevelStatus.Idle t0)
+            postInstance agent (storedWt "b" wtB SessionLevelStatus.Idle t0)
+
+            let boundary = t0 + openWindow
+            postInstance agent (storedWt "b" wtB SessionLevelStatus.Idle boundary)
+
+            let! state = agent.PostAndAsyncReply(GetState)
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    state.CodingToolStatusByWorktree |> Map.containsKey wtA,
+                    Is.False,
+                    "the untouched worktree reaches NoSession at the strict open-window boundary")
+                Assert.That(
+                    state.CodingToolSinceByWorktree |> Map.containsKey wtA,
+                    Is.False,
+                    "the untouched worktree's transition stamp is removed")
+                Assert.That(
+                    state.CodingToolStatusByWorktree |> Map.tryFind wtB,
+                    Is.EqualTo(Some Idle))
+                Assert.That(
+                    state.CodingToolSinceByWorktree |> Map.tryFind wtB,
+                    Is.EqualTo(Some boundary),
+                    "the refreshed worktree starts a new open transition"))
         }
         |> Async.RunSynchronously
 

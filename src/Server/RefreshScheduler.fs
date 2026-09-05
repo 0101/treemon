@@ -672,10 +672,13 @@ module CanvasWatchers =
     /// durable session owns a live registration for the worktree. Duplicate physical processes
     /// for that same durable session collapse to their freshest registration; zero or several
     /// durable sessions (or one anonymous registration) leave the doc unowned.
-    let fallbackOwner (sessions: SessionBridge.SessionEntry list) : string option =
+    let fallbackOwner
+        (now: DateTime)
+        (sessions: SessionBridge.SessionEntry list)
+        : string option =
         match
             sessions
-            |> SessionBridge.collapseLiveRegistrations DateTime.UtcNow
+            |> SessionBridge.collapseLiveRegistrations now
         with
         | [ single ] -> single.SessionId
         | _ -> None
@@ -693,7 +696,9 @@ module CanvasWatchers =
         (previousDocs: CanvasDoc list)
         (currentDocs: CanvasDoc list)
         =
-        match fallbackOwner sessions with
+        let now = DateTime.UtcNow
+
+        match fallbackOwner now sessions with
         | None -> ()
         | Some sessionId ->
             let prevByName = previousDocs |> List.map (fun d -> d.Filename, d.ContentHash) |> Map.ofList

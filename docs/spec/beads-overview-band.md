@@ -59,7 +59,9 @@ the selection.
 
 Members are grouped by repository. Agent groups render one worktree chip carrying the matching
 sessions; task groups render one worktree row whose bar uses the same shared scale as the aggregate.
-Each group's count equals the sum of its member contributions.
+Each group's count equals the sum of its member contributions. An agent chip shows time in category
+only when its worktree has exactly one open physical instance; multi-instance chips omit duration
+rather than reuse the collapsed worktree transition time for unrelated sibling processes.
 
 Selecting a member expands its repository, focuses the worktree card, and scrolls it into view. It
 does not open the Canvas pane. Archived or no-longer-focusable worktrees are never selected.
@@ -93,6 +95,9 @@ logic owns selection clearing, worktree navigation, and persisted open state.
 - **Aggregate non-archived worktrees only:** archiving removes every task and agent contribution.
 - **Per-instance agent grouping:** concurrent physical processes in one worktree retain their own
   status, skill, context gauge, and marker identity.
+- **Conservative duration:** only a single-instance worktree may reuse its collapsed
+  `CodingToolSince`; multi-instance members omit duration until the session model carries a true
+  per-instance category-transition timestamp.
 - **One task scale:** aggregate and drill-down bars remain directly comparable.
 - **Membership with the aggregate:** counts and drill-down rows cannot use different predicates.
 - **Task state, not PR state, decides To land:** slower PR refreshes cannot make task buckets flap.

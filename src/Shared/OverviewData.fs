@@ -57,10 +57,9 @@ type GroupMember =
       Branch: string
       RepoId: RepoId
       RepoName: string
-      /// When the agent entered its current state — used to show the per-agent "time in category"
-      /// in the agent-group drill-down. Set (from the worktree's CodingToolSince) only for agent-group
-      /// members; always None for task-bucket members (passed explicitly, so the contract holds by
-      /// construction rather than convention).
+      /// When the agent entered its current state — used to show "time in category" in the
+      /// agent-group drill-down. The worktree-level CodingToolSince is safe only when exactly one
+      /// physical instance is open; multi-instance and task-bucket members carry None.
       Since: System.DateTimeOffset option
       /// The live physical instances that place this agent member in THIS group — each carrying its
       /// own exact marker identity, status, skill, and context usage. A worktree whose processes span
@@ -266,7 +265,13 @@ let aggregate (repos: RepoWorktrees list) : Overview =
         |> List.choose (fun (repoId, repoName, w) ->
             match w.Sessions |> List.filter (fun s -> agentGroupOf s.Status s.Skill = Some kind) with
             | [] -> None
-            | matched -> Some(memberOf repoId repoName w.CodingToolSince matched w (List.length matched)))
+            | matched ->
+                let since =
+                    match w.Sessions with
+                    | [ _ ] -> w.CodingToolSince
+                    | _ -> None
+
+                Some(memberOf repoId repoName since matched w (List.length matched)))
 
     let agents =
         agentGroupOrder

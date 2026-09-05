@@ -161,36 +161,36 @@ let internal evictStaleInstances
         let cutoff = newest - SessionActivity.idleWindow
         instances |> Map.filter (fun _ instance -> instance.LastSeen >= cutoff)
 
-let private instanceWorktreePaths
+let internal groupInstancesByWorktree
     (
         instances:
-            Map<
-                SessionActivity.ProcessIdentity,
-                SessionActivityStore.StoredInstance
-             >
+            seq<SessionActivityStore.StoredInstance>
     )
     =
     instances
-    |> Map.values
-    |> Seq.map (_.WorktreePath >> WorktreePath.value)
-    |> Set.ofSeq
+    |> Seq.groupBy (
+        _.WorktreePath
+        >> WorktreePath.value
+        >> PathUtils.normalizePath
+    )
+    |> Seq.map (fun (worktreePath, grouped) ->
+        worktreePath, grouped |> List.ofSeq)
+    |> Map.ofSeq
 
 let private collapsedStatusAt
     (observedAt: DateTimeOffset)
     (worktreePath: string)
     (
-        instances:
+        instancesByWorktree:
             Map<
-                SessionActivity.ProcessIdentity,
-                SessionActivityStore.StoredInstance
+                string,
+                SessionActivityStore.StoredInstance list
              >
     )
     =
-    instances
-    |> Map.values
-    |> Seq.filter (fun instance ->
-        WorktreePath.value instance.WorktreePath = worktreePath)
-    |> List.ofSeq
+    instancesByWorktree
+    |> Map.tryFind worktreePath
+    |> Option.defaultValue []
     |> CodingToolStatus.fromPushInstances observedAt None
     |> _.Status
 
@@ -234,9 +234,19 @@ let private refreshCodingToolTransitions
     (statuses: Map<string, CodingToolStatus>)
     (since: Map<string, DateTimeOffset>)
     =
+    let previousByWorktree =
+        previousInstances
+        |> Map.values
+        |> groupInstancesByWorktree
+
+    let currentByWorktree =
+        currentInstances
+        |> Map.values
+        |> groupInstancesByWorktree
+
     Set.unionMany
-        [ instanceWorktreePaths previousInstances
-          instanceWorktreePaths currentInstances
+        [ previousByWorktree |> Map.keys |> Set.ofSeq
+          currentByWorktree |> Map.keys |> Set.ofSeq
           statuses |> Map.keys |> Set.ofSeq ]
     |> Set.fold
         (fun transitionState worktreePath ->
@@ -244,13 +254,13 @@ let private refreshCodingToolTransitions
                 collapsedStatusAt
                     observedAt
                     worktreePath
-                    previousInstances
+                    previousByWorktree
 
             let currentStatus =
                 collapsedStatusAt
                     observedAt
                     worktreePath
-                    currentInstances
+                    currentByWorktree
 
             let preparedState =
                 if previousStatus = currentStatus then
