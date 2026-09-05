@@ -1743,7 +1743,7 @@ type EmbeddedTerminalControlClientTests() =
                 ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
             let cleanup =
-                SessionActivityRuntime.terminalSessionCleanupWithDiagnostics
+                TerminalSessionCleanup.terminalSessionCleanupWithDiagnostics
                     diagnostics.Enqueue
                     service
 

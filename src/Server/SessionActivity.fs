@@ -3,15 +3,14 @@ module Server.SessionActivity
 open System
 open Shared
 
-// The push-model status domain. The server owns this domain; the Copilot CLI extension is a thin
-// forwarder that maps SDK events onto the wire contract, and the handler maps that onto SessionEvent.
-// The domain transformations and fold here are pure — the resolver is only an injected contract,
-// while its operating-system implementation lives separately. The fold can therefore be unit-tested
-// in isolation and applied incrementally (a later batch onto an earlier result == the whole stream).
+// The server owns the event union, pure fold, and durable exact-instance state. The passive
+// reporting extension maps SDK facts to the wire contract and owns acknowledged presence,
+// per-endpoint retry and reconnect, heartbeat and shutdown signaling, and compact current-process
+// replay state. Server ingestion validates accepted reports and maps them to SessionEvent.
 //
-// This is the SAME state machine as the old CopilotDetector.foldForwardEvent, MINUS transport
-// classification. The extension drops sub-agent and <skill-context> events, while the server
-// ingestion boundary drops runtime <system_reminder> user-channel events before this fold.
+// The transformations here are pure. Process resolution is an injected contract whose operating-
+// system implementation lives separately, so the fold remains independently testable and can be
+// applied incrementally.
 
 // --- Value types ------------------------------------------------------------------------------
 

@@ -523,7 +523,7 @@ let main args =
                           SessionAgent = sessionAgent
                           EmbeddedTerminal = embeddedTerminal.Value
                           TerminalSessionCleanup =
-                            SessionActivityRuntime.terminalSessionCleanup
+                            TerminalSessionCleanup.terminalSessionCleanup
                                 activity.Components.Service
                           ActivityStore = Some store
                           SnapshotStore = Some activity.SnapshotStore

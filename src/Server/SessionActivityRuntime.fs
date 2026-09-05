@@ -1,10 +1,6 @@
 module Server.SessionActivityRuntime
 
-open System
 open Shared
-open Server.SessionActivity
-open Server.SessionActivityService
-open Server.TerminalSessionActivity
 
 type internal Components =
     { Store: SessionActivityStore.SessionActivityStore
@@ -72,119 +68,6 @@ let internal create dbPath scheduler rootPaths =
         dbPath
         scheduler
         rootPaths
-
-let internal terminalSessionCleanupWithDiagnostics
-    (diagnostics: LifecycleDiagnostics.Sink)
-    (service: SessionActivityService)
-    : WorktreeCleanup.PrepareSessionClose =
-    fun originPaths ->
-        let query terminalSessionIds =
-            queryOwnedSessions
-                (fun ids -> service.QueryTerminalActivity ids)
-                DateTimeOffset.UtcNow
-                terminalSessionIds
-            |> Result.map _.OpenSessions
-
-        let captured =
-            originPaths |> Map.keys |> Set.ofSeq |> query
-
-        let beforeHostClose (activeTerminalIds: Set<TerminalSessionId>) =
-            let requestShutdown (session: OwnedSessionState) =
-                async {
-                    match originPaths |> Map.tryFind session.TerminalSessionId with
-                    | None -> ()
-                    | Some worktreePath ->
-                        let! _ =
-                            SessionBridge.shutdownExactUsing
-                                diagnostics
-                                (fun identity ->
-                                    async {
-                                        return service.IsProcessClosed identity
-                                    })
-                                { WorktreePath = WorktreePath.value worktreePath
-                                  ProcessIdentity = session.ProcessIdentity }
-
-                        ()
-                }
-
-            captured
-            |> Result.defaultValue []
-            |> List.filter (fun session ->
-                activeTerminalIds.Contains session.TerminalSessionId)
-            |> List.map (fun session ->
-                requestShutdown session
-                |> Async.Catch)
-            |> Async.Parallel
-            |> Async.Ignore
-
-        let afterHostClose (closedTerminalIds: Set<TerminalSessionId>) =
-            if Set.isEmpty closedTerminalIds then
-                Ok()
-            else
-                let observedAfter = query closedTerminalIds
-
-                let sessions =
-                    [ captured; observedAfter ]
-                    |> List.choose Result.toOption
-                    |> List.collect id
-                    |> List.filter (fun session ->
-                        closedTerminalIds.Contains session.TerminalSessionId)
-                    |> List.distinctBy _.ProcessIdentity
-
-                let closedAt = DateTimeOffset.UtcNow
-
-                let closureErrors =
-                    sessions
-                    |> List.map (fun session ->
-                        let acknowledgement =
-                            service.CloseProcess(
-                                session.ProcessIdentity,
-                                closedAt
-                            )
-
-                        let outcome =
-                            match acknowledgement with
-                            | ClosureAcknowledge.Closed ->
-                                LifecycleDiagnostics.ExactClosureOutcome.Recorded
-                            | ClosureAcknowledge.Missing ->
-                                LifecycleDiagnostics.ExactClosureOutcome.Missing
-                            | ClosureAcknowledge.Failed _ ->
-                                LifecycleDiagnostics.ExactClosureOutcome.Failed
-
-                        diagnostics (
-                            LifecycleDiagnostics.Diagnostic.ExactClosure
-                                { ProcessIdentity =
-                                    session.ProcessIdentity
-                                  SessionId =
-                                    session.CopilotSessionId
-                                  TerminalSessionId =
-                                    session.TerminalSessionId
-                                  Outcome = outcome }
-                        )
-
-                        match acknowledgement with
-                        | ClosureAcknowledge.Closed -> None
-                        | ClosureAcknowledge.Missing ->
-                            Some "an exact session closure target was not found"
-                        | ClosureAcknowledge.Failed error -> Some error)
-                    |> List.choose id
-
-                match observedAfter, closureErrors with
-                | Error error, [] ->
-                    Error $"Could not reconcile exact terminal sessions: {error}"
-                | Error error, failures ->
-                    let failureText = String.concat "; " failures
-                    Error $"Could not reconcile exact terminal sessions: {error}; {failureText}"
-                | Ok _, [] -> Ok()
-                | Ok _, failures -> Error(String.concat "; " failures)
-
-        { BeforeHostClose = beforeHostClose
-          AfterHostClose = afterHostClose }
-
-let internal terminalSessionCleanup service =
-    terminalSessionCleanupWithDiagnostics
-        LifecycleDiagnostics.write
-        service
 
 let internal shutdownStoreUsers
     (disposeIngestion: unit -> unit)
