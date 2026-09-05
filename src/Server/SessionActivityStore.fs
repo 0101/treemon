@@ -85,7 +85,7 @@ let private parseStatus =
     | "working" -> SessionLevelStatus.Working
     | "waiting_for_user" -> SessionLevelStatus.WaitingForUser
     | "idle" -> SessionLevelStatus.Idle
-    | other -> failwith $"SessionActivityStore: unknown status text '{other}'"
+    | other -> failwith $"{nameof SessionLevelStatus}: unknown status text '{other}'"
 
 let private providerText =
     function
@@ -94,7 +94,7 @@ let private providerText =
 let private parseProvider =
     function
     | "copilot_cli" -> CopilotCli
-    | other -> failwith $"SessionActivityStore: unknown provider text '{other}'"
+    | other -> failwith $"{nameof CodingToolProvider}: unknown provider text '{other}'"
 
 let private optToDb =
     Option.map box >> Option.defaultValue (box DBNull.Value)
@@ -509,6 +509,7 @@ WHERE updated_at < $cutoff;
 
 // --- Bind/read helpers ------------------------------------------------------------------------
 
+// Microsoft.Data.Sqlite binds values through the mutable Parameters collection; this binder confines that interop mutation.
 let private bindIdentity (command: SqliteCommand) identity =
     command.Parameters.AddWithValue(
         "$processId",
@@ -522,6 +523,7 @@ let private bindIdentity (command: SqliteCommand) identity =
     )
     |> ignore
 
+// Microsoft.Data.Sqlite exposes only mutable parameter binding; this helper confines it to a fresh, single-use command.
 let private bindInstance (command: SqliteCommand) (stored: StoredInstance) =
     let status = stored.Status
     let userMessage, userMessageAt = msgToDb status.LastUserMessage
@@ -567,6 +569,7 @@ let private bindInstance (command: SqliteCommand) (stored: StoredInstance) =
     |> ignore
     command.Parameters.AddWithValue("$closedAt", timestampToDb stored.ClosedAt) |> ignore
 
+// Microsoft.Data.Sqlite requires imperative parameter population on the caller's locally scoped, disposable command.
 let private bindEvent (command: SqliteCommand) (row: ActivityEventRow) =
     bindIdentity command row.ProcessIdentity
     command.Parameters.AddWithValue("$eventId", EventId.value row.EventId) |> ignore
