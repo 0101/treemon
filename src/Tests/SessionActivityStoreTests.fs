@@ -10,8 +10,8 @@ open Server.SessionActivityStore
 open Shared
 open Tests.TestUtils
 
-// These exercise the SQLite (WAL) durable mirror behind the push-model live state: last-write-wins
-// upserts, INSERT OR IGNORE event dedupe, restart rebuild, durable resume lookup, and retention.
+// These exercise the SQLite (WAL) durable mirror behind the push-model live state: exact snapshot
+// replacement, process-scoped event dedupe, restart rebuild, durable resume lookup, and retention.
 // Each test runs against a fresh temp .db file that is disposed + deleted in teardown.
 
 /// Like withStore but hands the raw db path to the test so it can construct + dispose multiple store
@@ -40,6 +40,9 @@ let private withStoreAndPath (action: string -> SessionActivityStore -> unit) =
 /// afterwards. Store construction creates the schema, so the DB is ready to use inside `action`.
 let private withStore action =
     withStoreAndPath (fun _ store -> action store)
+
+let private seedInstance (store: SessionActivityStore) (stored: StoredInstance) =
+    store.UpsertInstance stored |> ignore
 
 let private eventCount dbPath =
     Tests.SqliteTestDatabase.scalarInt dbPath "SELECT count(*) FROM activity_events;"
@@ -165,42 +168,6 @@ let private exactFromRetained (stored: RetainedSession) =
       ClosedAt = None }
 
 type SessionActivityStore with
-    member store.UpsertStatus(stored: StoredInstance) =
-        let merged =
-            match store.InstanceByIdentity stored.ProcessIdentity with
-            | Some current when stored.UpdatedAt < current.UpdatedAt ->
-                current
-            | Some current ->
-                { stored with
-                    TerminalSessionId =
-                        stored.TerminalSessionId
-                        |> Option.orElse current.TerminalSessionId
-                    Status.ContextUsage =
-                        stored.Status.ContextUsage
-                        |> Option.orElse current.Status.ContextUsage
-                    ContextUsageAt =
-                        stored.ContextUsageAt
-                        |> Option.orElse current.ContextUsageAt }
-            | None -> stored
-
-        store.UpsertInstance merged |> ignore
-
-    member store.UpsertContextUsage(stored: StoredInstance) =
-        match store.InstanceByIdentity stored.ProcessIdentity with
-        | Some current
-            when current.ContextUsageAt > stored.ContextUsageAt ->
-            current
-        | Some current ->
-            { current with
-                TerminalSessionId =
-                    stored.TerminalSessionId
-                    |> Option.orElse current.TerminalSessionId
-                Status.ContextUsage = stored.Status.ContextUsage
-                ContextUsageAt = stored.ContextUsageAt
-                LastSeen = max current.LastSeen stored.LastSeen }
-            |> store.UpsertInstance
-        | None -> store.UpsertInstance stored
-
     member store.RecordLiveness
         (
             sessionId: SessionId,
@@ -220,66 +187,56 @@ type SessionActivityStore with
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
-type UpsertStatusTests() =
+type UpsertInstanceTests() =
 
     [<Test>]
-    member _.``A newer report overwrites the session row (last-write-wins)``() =
+    member _.``An exact instance is replaced by the supplied snapshot regardless of lifecycle clock``() =
         withStore (fun store ->
-            let older =
-                { emptyStatus with
-                    Status = SessionLevelStatus.Working
-                    Skill = Some "review" }
+            let initial =
+                storedOf
+                    "s1"
+                    "C:/wt/a"
+                    { emptyStatus with
+                        Status = SessionLevelStatus.WaitingForUser
+                        Skill = Some "investigate" }
+                    "2026-03-01T10:05:00Z"
+                    "2026-03-01T12:00:00Z"
 
-            let newer =
-                { emptyStatus with
-                    Status = SessionLevelStatus.WaitingForUser
-                    Skill = Some "investigate" }
+            let replacement =
+                storedOf
+                    "s1"
+                    "C:/wt/a"
+                    { emptyStatus with Status = SessionLevelStatus.Idle }
+                    "2026-03-01T10:02:00Z"
+                    "2026-03-01T12:30:00Z"
 
-            store.UpsertStatus(storedOf "s1" "C:/wt/a" older "2026-03-01T10:00:00Z" "2026-03-01T12:00:00Z")
-            store.UpsertStatus(storedOf "s1" "C:/wt/a" newer "2026-03-01T10:05:00Z" "2026-03-01T12:00:00Z")
+            seedInstance store initial
+            let persisted = store.UpsertInstance replacement
+            let loaded = store.LoadRecentInstances replacement.LastSeen |> find "s1"
 
-            let row = store.LoadRecentInstances(ts "2026-03-01T12:00:00Z") |> find "s1"
-            Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.WaitingForUser))
-            Assert.That(row.Status.Skill, Is.EqualTo(Some "investigate"))
-            Assert.That(row.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:05:00Z")))
+            Assert.Multiple(fun () ->
+                Assert.That(persisted, Is.EqualTo replacement)
+                Assert.That(loaded, Is.EqualTo replacement)))
 
     [<Test>]
-    member _.``A stale (older) report is ignored, leaving the newer row intact``() =
+    member _.``Replaying an exact snapshot leaves one identical row``() =
         withStore (fun store ->
-            let newer =
-                { emptyStatus with
-                    Status = SessionLevelStatus.WaitingForUser
-                    Skill = Some "investigate" }
+            let stored =
+                storedOf
+                    "s1"
+                    "C:/wt/a"
+                    { emptyStatus with
+                        Status = SessionLevelStatus.Working
+                        Skill = Some "review" }
+                    "2026-03-01T10:00:00Z"
+                    "2026-03-01T12:00:00Z"
 
-            let stale =
-                { emptyStatus with
-                    Status = SessionLevelStatus.Idle
-                    Skill = None }
-
-            store.UpsertStatus(storedOf "s1" "C:/wt/a" newer "2026-03-01T10:05:00Z" "2026-03-01T12:00:00Z")
-            // Older updated_at AND a would-be-newer last_seen: the whole upsert must be a no-op.
-            store.UpsertStatus(storedOf "s1" "C:/wt/a" stale "2026-03-01T10:02:00Z" "2026-03-01T12:30:00Z")
-
-            let row = store.LoadRecentInstances(ts "2026-03-01T12:30:00Z") |> find "s1"
-            Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.WaitingForUser))
-            Assert.That(row.Status.Skill, Is.EqualTo(Some "investigate"))
-            Assert.That(row.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:05:00Z"))
-            Assert.That(row.LastSeen, Is.EqualTo(ts "2026-03-01T12:00:00Z"), "stale upsert must not bump last_seen"))
-
-    [<Test>]
-    member _.``An equal-timestamp replay lands identically (>= is idempotent)``() =
-        withStore (fun store ->
-            let a =
-                { emptyStatus with
-                    Status = SessionLevelStatus.Working
-                    Skill = Some "review" }
-
-            store.UpsertStatus(storedOf "s1" "C:/wt/a" a "2026-03-01T10:00:00Z" "2026-03-01T12:00:00Z")
-            store.UpsertStatus(storedOf "s1" "C:/wt/a" a "2026-03-01T10:00:00Z" "2026-03-01T12:00:00Z")
+            seedInstance store stored
+            seedInstance store stored
 
             let rows = store.LoadRecentInstances(ts "2026-03-01T12:00:00Z")
             Assert.That(rows.Length, Is.EqualTo(1))
-            Assert.That((find "s1" rows).Status.Status, Is.EqualTo(SessionLevelStatus.Working)))
+            Assert.That(find "s1" rows, Is.EqualTo stored))
 
     [<Test>]
     member _.``Session content and user-input clocks round-trip through the store``() =
@@ -296,34 +253,13 @@ type UpsertStatusTests() =
                   UserInputCompletedAt = Some(ts "2026-03-01T10:00:00Z")
                   BackgroundAgentClocks = Map.empty }
 
-            store.UpsertStatus(storedOf "s1" "C:/wt/a" rich "2026-03-01T10:01:00Z" "2026-03-01T12:00:00Z")
+            seedInstance store (storedOf "s1" "C:/wt/a" rich "2026-03-01T10:01:00Z" "2026-03-01T12:00:00Z")
 
             let row = store.LoadRecentInstances(ts "2026-03-01T12:00:00Z") |> find "s1"
             Assert.That(row.Status, Is.EqualTo(rich))
             Assert.That(effectiveStatus row.Status, Is.EqualTo SessionLevelStatus.WaitingForUser)
             Assert.That(row.WorktreePath, Is.EqualTo(WorktreePath "C:/wt/a"))
             Assert.That(row.Provider, Is.EqualTo(CopilotCli)))
-
-    [<Test>]
-    member _.``A status upsert preserves persisted context usage``() =
-        withStore (fun store ->
-            let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
-            let working = { emptyStatus with Status = SessionLevelStatus.Working }
-            let idle = { emptyStatus with Status = SessionLevelStatus.Idle }
-
-            store.UpsertStatus(storedOf "s1" contextWorktree working "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z")
-
-            storedOf "s1" contextWorktree working "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
-            |> withUsage usage (ts "2026-03-01T10:00:05Z") (ts "2026-03-01T10:00:05Z")
-            |> store.UpsertContextUsage
-            |> ignore
-
-            store.UpsertStatus(storedOf "s1" contextWorktree idle "2026-03-01T10:00:10Z" "2026-03-01T10:00:10Z")
-
-            let row = store.LoadRecentInstances(ts "2026-03-01T10:10:00Z") |> find "s1"
-            Assert.That(row.Status.Status, Is.EqualTo(SessionLevelStatus.Idle))
-            Assert.That(row.Status.ContextUsage, Is.EqualTo(Some usage))
-            Assert.That(row.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:05Z"))))
 
 
 [<TestFixture>]
@@ -332,48 +268,36 @@ type UpsertStatusTests() =
 type ContextUsagePersistenceTests() =
 
     [<Test>]
-    member _.``An older usage update cannot replace a newer persisted snapshot``() =
+    member _.``A usage-only snapshot changes context fields without advancing liveness``() =
         withStore (fun store ->
-            let newer = { CurrentTokens = 150000; TokenLimit = 200000 }
-            let older = { CurrentTokens = 80000; TokenLimit = 200000 }
+            let usage = { CurrentTokens = 150000; TokenLimit = 200000 }
+            let usageAt = ts "2026-03-01T10:00:10Z"
+            let terminalSessionId =
+                TerminalSessionId "0123456789abcdef0123456789abcdef"
 
-            let stored = storedOf "s1" contextWorktree emptyStatus "2026-03-01T10:00:00Z" "2026-03-01T10:00:00Z"
-            store.UpsertStatus stored
+            let initial =
+                storedOf
+                    "s1"
+                    contextWorktree
+                    { emptyStatus with
+                        Status = SessionLevelStatus.Working
+                        Skill = Some "investigate" }
+                    "2026-03-01T10:00:00Z"
+                    "2026-03-01T10:00:05Z"
+                |> withTerminalOrigin terminalSessionId
 
-            stored
-            |> withUsage newer (ts "2026-03-01T10:00:10Z") (ts "2026-03-01T10:00:10Z")
-            |> store.UpsertContextUsage
-            |> ignore
+            let usageSnapshot =
+                initial
+                |> withUsage usage usageAt initial.LastSeen
 
-            let persisted =
-                stored
-                |> withUsage older (ts "2026-03-01T10:00:05Z") (ts "2026-03-01T10:00:05Z")
-                |> store.UpsertContextUsage
+            seedInstance store initial
+            let persisted = store.UpsertInstance usageSnapshot
+            let loaded = store.LoadRecentInstances usageAt |> find "s1"
 
-            let row = store.LoadRecentInstances(ts "2026-03-01T10:10:00Z") |> find "s1"
-            Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some newer))
-            Assert.That(row.Status.ContextUsage, Is.EqualTo(Some newer))
-            Assert.That(row.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:10Z")))
-            Assert.That(row.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:10Z")))
-
-    [<Test>]
-    member _.``A context update recreates a session row removed by retention``() =
-        withStore (fun store ->
-            let usage = { CurrentTokens = 90000; TokenLimit = 200000 }
-            let stored = storedOf "s1" contextWorktree emptyStatus "2026-03-01T08:00:00Z" "2026-03-01T08:00:00Z"
-            store.UpsertStatus stored
-            Assert.That(store.PruneOld(ts "2026-03-01T09:00:00Z"), Is.EqualTo(1))
-
-            let recreated =
-                stored
-                |> withUsage usage (ts "2026-03-01T10:00:00Z") (ts "2026-03-01T10:00:00Z")
-                |> store.UpsertContextUsage
-
-            Assert.That(recreated.Status.ContextUsage, Is.EqualTo(Some usage))
-            Assert.That(recreated.ContextUsageAt, Is.EqualTo(Some(ts "2026-03-01T10:00:00Z")))
-
-            let row = store.LoadRecentInstances(ts "2026-03-01T10:00:00Z") |> find "s1"
-            Assert.That(row, Is.EqualTo(recreated)))
+            Assert.Multiple(fun () ->
+                Assert.That(persisted, Is.EqualTo usageSnapshot)
+                Assert.That(loaded, Is.EqualTo usageSnapshot)
+                Assert.That(loaded.LastSeen, Is.EqualTo initial.LastSeen)))
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -430,8 +354,8 @@ type LoadRecentInstancesTests() =
         withStore (fun store ->
             let now = ts "2026-03-01T12:00:00Z"
             // idleWindow is 2h → cutoff 10:00. live: last_seen 11:00; stale: last_seen 09:00.
-            store.UpsertStatus(storedOf "live" "C:/wt/a" emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z")
-            store.UpsertStatus(storedOf "stale" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+            seedInstance store (storedOf "live" "C:/wt/a" emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z")
+            seedInstance store (storedOf "stale" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
 
             let rows = store.LoadRecentInstances now
             Assert.That(rows |> List.map (_.SessionId >> SessionId.value), Is.EquivalentTo([ "live" ])))
@@ -455,7 +379,7 @@ type LoadRecentInstancesTests() =
                  "2026-03-01T11:30:00Z"
                  "2026-03-01T11:30:00Z"
              |> withTerminalOrigin terminalSessionId
-             |> store.UpsertStatus)
+             |> seedInstance store)
 
             // A fresh instance over the same path rebuilds the live status with no new events.
             use reopened = new SessionActivityStore(dbPath)
@@ -465,11 +389,13 @@ type LoadRecentInstancesTests() =
             Assert.That(row.TerminalSessionId, Is.EqualTo(Some terminalSessionId)))
 
     [<Test>]
-    member _.``Omitted origin updates preserve terminal attribution across restart``() =
+    member _.``Terminal attribution survives heartbeat, snapshot replacement, and restart``() =
         withDbPath (fun dbPath ->
             let terminalSessionId =
                 TerminalSessionId "fedcba9876543210fedcba9876543210"
             let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+            let heartbeatAt = ts "2026-03-01T11:31:00Z"
+            let usageAt = ts "2026-03-01T11:32:00Z"
 
             (use store = new SessionActivityStore(dbPath)
              let attributed =
@@ -481,13 +407,17 @@ type LoadRecentInstancesTests() =
                      "2026-03-01T11:30:00Z"
                  |> withTerminalOrigin terminalSessionId
 
-             store.UpsertStatus attributed
-             store.RecordLiveness(SessionId "s1", ts "2026-03-01T11:31:00Z", None)
+             seedInstance store attributed
+             store.RecordLiveness(SessionId "s1", heartbeatAt, None)
+
+             let afterHeartbeat =
+                 store.InstanceByIdentity attributed.ProcessIdentity
+                 |> Option.get
 
              let afterUsage =
-                 { attributed with TerminalSessionId = None }
-                 |> withUsage usage (ts "2026-03-01T11:32:00Z") (ts "2026-03-01T11:32:00Z")
-                 |> store.UpsertContextUsage
+                 afterHeartbeat
+                 |> withUsage usage usageAt afterHeartbeat.LastSeen
+                 |> store.UpsertInstance
 
              let afterEvent =
                  { afterUsage with
@@ -510,6 +440,7 @@ type LoadRecentInstancesTests() =
 
              Assert.Multiple(fun () ->
                  Assert.That(afterUsage.TerminalSessionId, Is.EqualTo(Some terminalSessionId))
+                 Assert.That(afterUsage.LastSeen, Is.EqualTo heartbeatAt)
                  Assert.That(persisted.TerminalSessionId, Is.EqualTo(Some terminalSessionId))))
 
             use reopened = new SessionActivityStore(dbPath)
@@ -524,24 +455,28 @@ type LoadRecentInstancesTests() =
     member _.``Context usage survives a restart with its ordering timestamp``() =
         withDbPath (fun dbPath ->
             let usage = { CurrentTokens = 120000; TokenLimit = 200000 }
+            let lastSeen = ts "2026-03-01T11:30:00Z"
             let usageAt = ts "2026-03-01T11:30:05Z"
+            let initial =
+                storedOf
+                    "s1"
+                    contextWorktree
+                    { emptyStatus with Status = SessionLevelStatus.Working }
+                    "2026-03-01T11:30:00Z"
+                    "2026-03-01T11:30:00Z"
 
             (use store = new SessionActivityStore(dbPath)
-             storedOf
-                 "s1"
-                 contextWorktree
-                 { emptyStatus with Status = SessionLevelStatus.Working }
-                 "2026-03-01T11:30:00Z"
-                 "2026-03-01T11:30:00Z"
-             |> withUsage usage usageAt usageAt
-             |> store.UpsertContextUsage
+             seedInstance store initial
+             initial
+             |> withUsage usage usageAt lastSeen
+             |> store.UpsertInstance
              |> ignore)
 
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadRecentInstances(ts "2026-03-01T12:00:00Z") |> find "s1"
             Assert.That(row.Status.ContextUsage, Is.EqualTo(Some usage))
             Assert.That(row.ContextUsageAt, Is.EqualTo(Some usageAt))
-            Assert.That(row.LastSeen, Is.EqualTo(usageAt)))
+            Assert.That(row.LastSeen, Is.EqualTo(lastSeen)))
 
     [<Test>]
     member _.``An empty store loads no sessions``() =
@@ -557,7 +492,7 @@ type LoadRecentInstancesTests() =
                     (BackgroundAgentStarted("tool-active", ts "2026-03-01T11:31:00Z"))
 
             (use store = new SessionActivityStore(dbPath)
-             store.UpsertStatus(
+             seedInstance store (
                  storedOf
                      "active"
                      contextWorktree
@@ -587,8 +522,8 @@ type LatestSessionIdForWorktreeTests() =
         withDbPath (fun dbPath ->
             let now = ts "2026-03-01T12:00:00Z"
             (use store = new SessionActivityStore(dbPath)
-             store.UpsertStatus(storedOf "heartbeat" contextWorktree emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
-             store.UpsertStatus(storedOf "activity" contextWorktree emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+             seedInstance store (storedOf "heartbeat" contextWorktree emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
+             seedInstance store (storedOf "activity" contextWorktree emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
              Assert.That(store.LoadRecentInstances now, Is.Empty, "both sessions are outside the idle window"))
 
             use reopened = new SessionActivityStore(dbPath)
@@ -600,9 +535,9 @@ type LatestSessionIdForWorktreeTests() =
     [<Test>]
     member _.``Latest session query is scoped by worktree and uses session id as tie breaker``() =
         withStore (fun store ->
-            store.UpsertStatus(storedOf "a1" contextWorktree emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z")
-            store.UpsertStatus(storedOf "a2" contextWorktree emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T10:00:00Z")
-            store.UpsertStatus(storedOf "b1" otherWorktree emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z")
+            seedInstance store (storedOf "a1" contextWorktree emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T11:00:00Z")
+            seedInstance store (storedOf "a2" contextWorktree emptyStatus "2026-03-01T11:00:00Z" "2026-03-01T10:00:00Z")
+            seedInstance store (storedOf "b1" otherWorktree emptyStatus "2026-03-01T11:30:00Z" "2026-03-01T11:30:00Z")
 
             Assert.That(
                 store.LatestSessionIdForWorktree(WorktreePath contextWorktree),
@@ -623,7 +558,7 @@ type PersistedIdentityValidationTests() =
     [<Test>]
     member _.``Invalid persisted session identity fails instead of entering typed state``() =
         withStoreAndPath (fun dbPath store ->
-            store.UpsertStatus(
+            seedInstance store (
                 storedOf
                     "valid-session"
                     contextWorktree
@@ -658,7 +593,7 @@ type PersistedIdentityValidationTests() =
             |> withTerminalOrigin
                 (TerminalSessionId
                     "0123456789abcdef0123456789abcdef")
-            |> store.UpsertStatus
+            |> seedInstance store
 
             Tests.SqliteTestDatabase.execute
                 dbPath
@@ -683,9 +618,9 @@ type RetainedByWorktreeTests() =
     [<Test>]
     member _.``Returns the most recently active session per worktree``() =
         withStore (fun store ->
-            store.UpsertStatus(storedOf "a-heartbeat" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
-            store.UpsertStatus(storedOf "a-activity" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
-            store.UpsertStatus(storedOf "b1" "C:/wt/b" emptyStatus "2026-03-01T08:00:00Z" "2026-03-01T08:00:00Z")
+            seedInstance store (storedOf "a-heartbeat" "C:/wt/a" emptyStatus "2026-03-01T07:00:00Z" "2026-03-01T09:30:00Z")
+            seedInstance store (storedOf "a-activity" "C:/wt/a" emptyStatus "2026-03-01T09:00:00Z" "2026-03-01T09:00:00Z")
+            seedInstance store (storedOf "b1" "C:/wt/b" emptyStatus "2026-03-01T08:00:00Z" "2026-03-01T08:00:00Z")
 
             let retained = store.RetainedByWorktree()
             Assert.That(retained.Count, Is.EqualTo 2, "one row per worktree")
@@ -709,8 +644,8 @@ type RetainedByWorktreeTests() =
                     "2026-03-01T09:00:00Z"
                     "2026-03-01T09:00:00Z"
 
-            store.UpsertStatus original
-            store.UpsertStatus
+            seedInstance store original
+            seedInstance store
                 { original with
                     Status.Title =
                         Some(
@@ -812,8 +747,8 @@ type PruneOldTests() =
             insertEvent dbPath (eventOf "e2" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T02:00:00Z")
             insertEvent dbPath (eventOf "e3" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T03:00:00Z")
 
-            store.UpsertStatus(storedOf "old" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
-            store.UpsertStatus(storedOf "recent" "C:/wt/a" emptyStatus "2026-03-01T03:00:00Z" "2026-03-01T03:00:00Z")
+            seedInstance store (storedOf "old" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
+            seedInstance store (storedOf "recent" "C:/wt/a" emptyStatus "2026-03-01T03:00:00Z" "2026-03-01T03:00:00Z")
 
             // cutoff 02:30 → e1(01:00), e2(02:00), and old(01:00) go;
             // e3(03:00) and recent(03:00) stay.
@@ -837,7 +772,7 @@ type PruneOldTests() =
     [<Test>]
     member _.``pruneOld rebuilds a removed winner from surviving liveness history``() =
         withStore (fun store ->
-            store.UpsertStatus(
+            seedInstance store (
                 storedOf
                     "fallback"
                     "C:/wt/a"
@@ -845,7 +780,7 @@ type PruneOldTests() =
                     "2026-03-01T02:00:00Z"
                     "2026-03-01T05:00:00Z"
             )
-            store.UpsertStatus(
+            seedInstance store (
                 storedOf
                     "stale-winner"
                     "C:/wt/a"
@@ -879,7 +814,7 @@ type PruneOldTests() =
             let oldEvent = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2026-03-01T01:00:00Z"
 
             insertEvent dbPath oldEvent
-            store.UpsertStatus(storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
+            seedInstance store (storedOf "s1" "C:/wt/a" emptyStatus "2026-03-01T01:00:00Z" "2026-03-01T01:00:00Z")
 
             let connectionString =
                 SqliteConnectionStringBuilder(DataSource = dbPath, Pooling = false).ConnectionString
@@ -910,7 +845,7 @@ END;
         withStoreAndPath (fun dbPath store ->
             let oldEvent = eventOf "e1" "s1" "turn_started" SessionLevelStatus.Working None "2025-12-01T10:00:00Z"
             insertEvent dbPath oldEvent
-            store.UpsertStatus(
+            seedInstance store (
                 storedOf
                     "s1"
                     "C:/wt/a"
@@ -1093,7 +1028,7 @@ VALUES
                  Status.Title = Some title
                  UpdatedAt = ts "2026-03-01T11:46:00Z"
                  LastSeen = ts "2026-03-01T11:50:00Z" }
-             |> store.UpsertStatus)
+             |> seedInstance store)
 
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadRecentInstances(ts "2026-03-01T12:00:00Z") |> find "legacy"
@@ -1125,17 +1060,19 @@ VALUES
              Assert.That(legacy.Status.ContextUsage, Is.EqualTo(None))
              Assert.That(legacy.ContextUsageAt, Is.EqualTo(None))
 
+             let exact = exactFromRetained legacy
+
              let persisted =
-                 { exactFromRetained legacy with
-                     Status.ContextUsage = Some usage
-                     ContextUsageAt = Some usageAt
-                     LastSeen = usageAt }
-                 |> store.UpsertContextUsage
+                 exact
+                 |> withUsage usage usageAt exact.LastSeen
+                 |> store.UpsertInstance
 
              Assert.That(persisted.Status.ContextUsage, Is.EqualTo(Some usage))
-             Assert.That(persisted.ContextUsageAt, Is.EqualTo(Some usageAt)))
+             Assert.That(persisted.ContextUsageAt, Is.EqualTo(Some usageAt))
+             Assert.That(persisted.LastSeen, Is.EqualTo exact.LastSeen))
 
             use reopened = new SessionActivityStore(dbPath)
             let row = reopened.LoadRecentInstances(ts "2026-03-01T12:00:00Z") |> find "legacy"
             Assert.That(row.Status.ContextUsage, Is.EqualTo(Some usage))
-            Assert.That(row.ContextUsageAt, Is.EqualTo(Some usageAt)))
+            Assert.That(row.ContextUsageAt, Is.EqualTo(Some usageAt))
+            Assert.That(row.LastSeen, Is.EqualTo(ts "2026-03-01T11:30:00Z")))

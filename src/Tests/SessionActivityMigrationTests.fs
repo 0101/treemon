@@ -9,22 +9,6 @@ open Server.SessionActivityStore
 open Shared
 open Tests.TestUtils
 
-type private RetainedSnapshot =
-    { SessionId: string
-      WorktreePath: string
-      Status: string
-      Skill: string option
-      LastUserMessage: string option
-      LastAssistantMessage: string option
-      Intent: string option
-      Title: string option
-      UpdatedAt: string
-      ContextCurrent: int option
-      ContextLimit: int option
-      ContextUsageAt: string option
-      AwaitingUserSince: string option
-      UserInputCompletedAt: string option }
-
 let private withDbPath action =
     SqliteTestDatabase.withDbPath "treemon-session-migration" action
 
@@ -124,20 +108,20 @@ WHERE session_id = $sessionId;
     if not (reader.Read()) then
         failwith $"Missing retained session {sessionId}"
 
-    { SessionId = reader.GetString 0
-      WorktreePath = reader.GetString 1
-      Status = reader.GetString 2
-      Skill = readOptionalString reader 3
-      LastUserMessage = readOptionalString reader 4
-      LastAssistantMessage = readOptionalString reader 5
-      Intent = readOptionalString reader 6
-      Title = readOptionalString reader 7
-      UpdatedAt = reader.GetString 8
-      ContextCurrent = readOptionalInt reader 9
-      ContextLimit = readOptionalInt reader 10
-      ContextUsageAt = readOptionalString reader 11
-      AwaitingUserSince = readOptionalString reader 12
-      UserInputCompletedAt = readOptionalString reader 13 }
+    {| SessionId = reader.GetString 0
+       WorktreePath = reader.GetString 1
+       Status = reader.GetString 2
+       Skill = readOptionalString reader 3
+       LastUserMessage = readOptionalString reader 4
+       LastAssistantMessage = readOptionalString reader 5
+       Intent = readOptionalString reader 6
+       Title = readOptionalString reader 7
+       UpdatedAt = reader.GetString 8
+       ContextCurrent = readOptionalInt reader 9
+       ContextLimit = readOptionalInt reader 10
+       ContextUsageAt = readOptionalString reader 11
+       AwaitingUserSince = readOptionalString reader 12
+       UserInputCompletedAt = readOptionalString reader 13 |}
 
 let private createLegacyDatabase path =
     use connection = SqliteTestDatabase.openConnection path
