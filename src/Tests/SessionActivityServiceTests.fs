@@ -343,6 +343,11 @@ let private idleEvent kind =
 type ParseReportTests() =
 
     [<Test>]
+    member _.``a missing request body is rejected``() =
+        let request = Unchecked.defaultof<SessionActivityRequest>
+        Assert.That(parseErr request, Is.EqualTo "missing body")
+
+    [<Test>]
     member _.``turn_started maps to TurnStarted``() =
         Assert.That((parseOk (baseReq "turn_started")).Event, Is.EqualTo TurnStarted)
 
@@ -484,6 +489,16 @@ type ParseReportTests() =
     member _.``awaiting_user_input with no message maps to AwaitingUserInput None``() =
         Assert.That(
             (parseOk (baseReq "awaiting_user_input")).Event,
+            Is.EqualTo(AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
+
+    [<Test>]
+    member _.``awaiting_user_input with blank message text maps to AwaitingUserInput None``() =
+        let req =
+            { baseReq "awaiting_user_input" with
+                message = msgDto "   " "2026-03-01T10:00:00Z" }
+
+        Assert.That(
+            (parseOk req).Event,
             Is.EqualTo(AwaitingUserInput(None, ts "2026-03-01T10:00:00Z")))
 
     [<Test>]

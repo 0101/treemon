@@ -77,12 +77,12 @@ let internal clampFutureTimestamp
     =
     if timestamp > now + futureSkewAllowance then now else timestamp
 
-let private parseMessage (dto: MessageDto) =
-    if obj.ReferenceEquals(dto, null) then
-        Error "missing message"
-    elif String.IsNullOrWhiteSpace dto.text then
+let private parseMessage =
+    function
+    | None -> Error "missing message"
+    | Some dto when String.IsNullOrWhiteSpace dto.text ->
         Error "missing message text"
-    else
+    | Some dto ->
         tryParseTimestamp dto.at
         |> Result.map (fun timestamp ->
             { Text = capText dto.text
@@ -91,7 +91,7 @@ let private parseMessage (dto: MessageDto) =
 let internal parseEvent
     (occurredAt: DateTimeOffset)
     (kind: string)
-    (message: MessageDto)
+    (message: MessageDto option)
     (skillName: string)
     (toolCallId: string)
     (currentTokens: int)
@@ -128,17 +128,16 @@ let internal parseEvent
         else
             Ok(SkillInvoked(capText skillName))
     | "awaiting_user_input" ->
-        if
-            obj.ReferenceEquals(message, null)
-            || String.IsNullOrWhiteSpace message.text
-        then
+        match message with
+        | None -> Ok(AwaitingUserInput(None, occurredAt))
+        | Some dto when String.IsNullOrWhiteSpace dto.text ->
             Ok(AwaitingUserInput(None, occurredAt))
-        else
-            tryParseTimestamp message.at
+        | Some dto ->
+            tryParseTimestamp dto.at
             |> Result.map (fun timestamp ->
                 AwaitingUserInput(
                     Some
-                        { Text = capText message.text
+                        { Text = capText dto.text
                           At = timestamp },
                     occurredAt
                 ))
@@ -192,47 +191,50 @@ let parseReport
     (now: DateTimeOffset)
     (request: SessionActivityRequest)
     =
-    if obj.ReferenceEquals(box request, null) then
-        Error "missing body"
-    elif request.parentProcessId <= 0 then
-        Error "missing or invalid parentProcessId"
-    elif String.IsNullOrWhiteSpace request.worktreePath then
-        Error "missing worktreePath"
-    elif String.IsNullOrWhiteSpace request.eventId then
-        Error "missing eventId"
-    elif String.IsNullOrWhiteSpace request.occurredAt then
-        Error "missing occurredAt"
-    elif String.IsNullOrWhiteSpace request.kind then
-        Error "missing kind"
-    else
-        SessionId.create request.sessionId
-        |> Result.bind (fun sessionId ->
-            parseProvider request.provider
-            |> Result.bind (fun provider ->
-                parseTerminalSessionId (Option.ofObj request.terminalSessionId)
-                |> Result.bind (fun terminalSessionId ->
-                    tryParseTimestamp request.occurredAt
-                    |> Result.bind (fun rawOccurredAt ->
-                        let occurredAt =
-                            clampFutureTimestamp now rawOccurredAt
+    match Option.ofObj request with
+    | None -> Error "missing body"
+    | Some request ->
+        let message = Option.ofObj request.message
 
-                        parseEvent
-                            occurredAt
-                            request.kind
-                            request.message
-                            request.skillName
-                            request.toolCallId
-                            request.currentTokens
-                            request.tokenLimit
-                        |> Result.map (fun event ->
-                            { ParentProcessId = request.parentProcessId
-                              SessionId = sessionId
-                              TerminalSessionId = terminalSessionId
-                              WorktreePath =
-                                WorktreePath(
-                                    PathUtils.normalizePath request.worktreePath
-                                )
-                              Provider = provider
-                              EventId = EventId request.eventId
-                              OccurredAt = occurredAt
-                              Event = withMessageTimestamp occurredAt event })))))
+        if request.parentProcessId <= 0 then
+            Error "missing or invalid parentProcessId"
+        elif String.IsNullOrWhiteSpace request.worktreePath then
+            Error "missing worktreePath"
+        elif String.IsNullOrWhiteSpace request.eventId then
+            Error "missing eventId"
+        elif String.IsNullOrWhiteSpace request.occurredAt then
+            Error "missing occurredAt"
+        elif String.IsNullOrWhiteSpace request.kind then
+            Error "missing kind"
+        else
+            SessionId.create request.sessionId
+            |> Result.bind (fun sessionId ->
+                parseProvider request.provider
+                |> Result.bind (fun provider ->
+                    parseTerminalSessionId (Option.ofObj request.terminalSessionId)
+                    |> Result.bind (fun terminalSessionId ->
+                        tryParseTimestamp request.occurredAt
+                        |> Result.bind (fun rawOccurredAt ->
+                            let occurredAt =
+                                clampFutureTimestamp now rawOccurredAt
+
+                            parseEvent
+                                occurredAt
+                                request.kind
+                                message
+                                request.skillName
+                                request.toolCallId
+                                request.currentTokens
+                                request.tokenLimit
+                            |> Result.map (fun event ->
+                                { ParentProcessId = request.parentProcessId
+                                  SessionId = sessionId
+                                  TerminalSessionId = terminalSessionId
+                                  WorktreePath =
+                                    WorktreePath(
+                                        PathUtils.normalizePath request.worktreePath
+                                    )
+                                  Provider = provider
+                                  EventId = EventId request.eventId
+                                  OccurredAt = occurredAt
+                                  Event = withMessageTimestamp occurredAt event })))))
