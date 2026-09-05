@@ -27,24 +27,13 @@ let private registerBridgeSession path injectUrl sessionId =
     let identity =
         TestUtils.collisionResistantProcessIdentityForSessionId sessionId
 
-    let processId, startTicks = ProcessIdentity.sortKey identity
-    let suffix = $"{processId:x8}{startTicks:x16}"
-    let capability = String('C', 43 - suffix.Length) + suffix
-    let resolver =
-        ProcessIdentityResolver.create (fun requested ->
-            if requested = processId then Ok(Some identity) else Ok None)
-
-    let request: SessionBridge.RegistrationRequest =
-        { WorktreePath = path
-          InjectUrl = injectUrl
-          ShutdownUrl = "http://127.0.0.1:1/shutdown"
-          ShutdownCapability = capability
-          SessionId = Some sessionId
-          ParentProcessId = processId
-          TerminalSessionId = None }
-
-    SessionBridge.registerSession resolver request
-    |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
+    TestUtils.registerExactSession
+        'C'
+        identity
+        path
+        injectUrl
+        (Some sessionId)
+        None
     |> ignore
 
 let private tempDirectory () =

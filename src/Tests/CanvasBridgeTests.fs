@@ -30,31 +30,10 @@ let private freshProcessIdentity () =
     Interlocked.Increment(&nextBridgeProcessId)
     |> syntheticProcessIdentityForProcessId
 
-let private registerExactSession identity path injectUrl sessionId =
-    let processId = ProcessIdentity.processId identity
-    let _, startTicks = ProcessIdentity.sortKey identity
-    let suffix = $"{processId:x8}{startTicks:x16}"
-    let capability = String('B', 43 - suffix.Length) + suffix
-    let resolver =
-        ProcessIdentityResolver.create (fun requested ->
-            if requested = processId then Ok(Some identity) else Ok None)
-
-    let request: RegistrationRequest =
-        { WorktreePath = path
-          InjectUrl = injectUrl
-          ShutdownUrl = "http://127.0.0.1:1/shutdown"
-          ShutdownCapability = capability
-          SessionId = sessionId
-          ParentProcessId = processId
-          TerminalSessionId = None }
-
-    Server.SessionBridge.registerSession resolver request
-    |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
-
 let private registerSessionWithIdentity path injectUrl sessionId =
     let identity = freshProcessIdentity ()
 
-    registerExactSession identity path injectUrl sessionId
+    registerExactSession 'B' identity path injectUrl sessionId None
     |> ignore
 
     identity
@@ -591,9 +570,21 @@ type MultiSessionRegistryTests() =
         let sid = uniqueSid "same-process"
         let identity = freshProcessIdentity ()
 
-        registerExactSession identity path "http://localhost:1/inject" (Some sid)
+        registerExactSession
+            'B'
+            identity
+            path
+            "http://localhost:1/inject"
+            (Some sid)
+            None
         |> ignore
-        registerExactSession identity path "http://localhost:2/inject" (Some sid)
+        registerExactSession
+            'B'
+            identity
+            path
+            "http://localhost:2/inject"
+            (Some sid)
+            None
         |> ignore
 
         let sessions = sessionsForWorktree path

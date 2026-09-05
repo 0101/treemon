@@ -2577,29 +2577,16 @@ type EmbeddedTerminalReplacementTests() =
             let duplicateIdentity = exactIdentity 4102 5102L
             let secondIdentity = exactIdentity 4103 5103L
 
-            let target
-                (terminal: FakeTerminal)
-                copilotSessionId
-                identity
-                :
-                TerminalHostReplacement.ReplacementShutdownTarget =
-                { TerminalSessionId =
-                    typedTerminalSessionId terminal.SessionId
-                  WorktreePath = terminal.WorktreePath
-                  CopilotSessionId =
-                    typedSessionId copilotSessionId
-                  ProcessIdentity = identity }
-
             let shutdownTargets =
-                [ target
+                [ replacementTarget
                       firstTerminal
                       "shared-conversation"
                       firstIdentity
-                  target
+                  replacementTarget
                       firstTerminal
                       "shared-conversation"
                       duplicateIdentity
-                  target
+                  replacementTarget
                       secondTerminal
                       "second-conversation"
                       secondIdentity ]
@@ -3581,17 +3568,11 @@ type EmbeddedTerminalReplacementTests() =
             let terminal =
                 host.CurrentTerminals |> List.exactlyOne
 
-            let target processId:
-                TerminalHostReplacement.ReplacementShutdownTarget =
-                { TerminalSessionId =
-                    typedTerminalSessionId terminal.SessionId
-                  WorktreePath = terminal.WorktreePath
-                  CopilotSessionId =
-                    typedSessionId "duplicate-session"
-                  ProcessIdentity =
-                    exactIdentity
-                        processId
-                        (int64 processId * 10L) }
+            let target processId =
+                replacementTarget
+                    terminal
+                    "duplicate-session"
+                    (exactIdentity processId (int64 processId * 10L))
 
             let shutdownTargets =
                 [ target 4301

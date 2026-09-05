@@ -47,6 +47,54 @@ let collisionResistantProcessIdentityForSessionId (sessionId: string) =
     ProcessIdentity.create processId startTicks
     |> Result.defaultWith invalidOp
 
+let fakeShutdownCapability paddingChar identity =
+    let processId, startTicks = ProcessIdentity.sortKey identity
+    let suffix = $"{processId:x8}{startTicks:x16}"
+    String(paddingChar, 43 - suffix.Length) + suffix
+
+let exactIdentityResolver identity =
+    ProcessIdentityResolver.create (fun processId ->
+        if processId = ProcessIdentity.processId identity then
+            Ok(Some identity)
+        else
+            Ok None)
+
+let bridgeRegistrationRequest
+    identity
+    worktreePath
+    injectUrl
+    sessionId
+    terminalSessionId
+    shutdownCapability
+    :
+    SessionBridge.RegistrationRequest =
+    { WorktreePath = worktreePath
+      InjectUrl = injectUrl
+      ShutdownUrl = "http://127.0.0.1:1/shutdown"
+      ShutdownCapability = shutdownCapability
+      SessionId = sessionId
+      ParentProcessId = ProcessIdentity.processId identity
+      TerminalSessionId = terminalSessionId }
+
+let registerExactSession
+    paddingChar
+    identity
+    worktreePath
+    injectUrl
+    sessionId
+    terminalSessionId
+    =
+    bridgeRegistrationRequest
+        identity
+        worktreePath
+        injectUrl
+        sessionId
+        terminalSessionId
+        (fakeShutdownCapability paddingChar identity)
+    |> SessionBridge.registerSession (exactIdentityResolver identity)
+    |> Result.defaultWith (fun failure ->
+        invalidOp $"registration failed: {failure}")
+
 /// Parse an ISO-8601 timestamp string as a DateTimeOffset using the invariant culture. Shared by the
 /// SessionActivity domain/store/service tests, which all build fixtures from literal timestamps.
 let ts (s: string) : DateTimeOffset = DateTimeOffset.Parse(s, CultureInfo.InvariantCulture)

@@ -11,6 +11,7 @@ open NUnit.Framework
 open Server
 open Server.SessionBridge
 open Server.SessionActivity
+open Tests.TestUtils
 
 let private uniquePath prefix =
     Path.Combine(Path.GetTempPath(), "treemon-session-bridge-tests", prefix, $"{Guid.NewGuid():N}")
@@ -43,42 +44,14 @@ let private nextIdentity () =
     ProcessIdentity.create processId (int64 processId * 1000L + 1L)
     |> Result.defaultWith invalidOp
 
-let private capabilityFor identity =
-    let processId, startTicks = ProcessIdentity.sortKey identity
-    let suffix = $"{processId:x8}{startTicks:x16}"
-    String('A', 43 - suffix.Length) + suffix
-
-let private resolverFor identity =
-    ProcessIdentityResolver.create (fun processId ->
-        if processId = ProcessIdentity.processId identity then
-            Ok(Some identity)
-        else
-            Ok None)
-
-let private registrationRequest identity path injectUrl sessionId terminalSessionId capability =
-    { WorktreePath = path
-      InjectUrl = injectUrl
-      ShutdownUrl = "http://127.0.0.1:1/shutdown"
-      ShutdownCapability = capability
-      SessionId = sessionId
-      ParentProcessId = ProcessIdentity.processId identity
-      TerminalSessionId = terminalSessionId }
-
-let private registerExactSession identity path injectUrl sessionId =
-    let request =
-        registrationRequest
-            identity
-            path
-            injectUrl
-            sessionId
-            None
-            (capabilityFor identity)
-
-    registerSession (resolverFor identity) request
-    |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
-
 let private registerTestSession path injectUrl sessionId =
-    registerExactSession (nextIdentity ()) path injectUrl sessionId
+    registerExactSession
+        'A'
+        (nextIdentity ())
+        path
+        injectUrl
+        sessionId
+        None
     |> ignore
 
 let private assertRegistrationFailure
@@ -154,14 +127,14 @@ type ExactRegistrationTests() =
         let terminal = "ABCDEF0123456789ABCDEF0123456789"
 
         let entry =
-            registrationRequest
+            bridgeRegistrationRequest
                 identity
                 path
                 "http://127.0.0.1:1234/inject"
                 (Some "session.exact:1")
                 (Some terminal)
-                (capabilityFor identity)
-            |> registerSession (resolverFor identity)
+                (fakeShutdownCapability 'A' identity)
+            |> registerSession (exactIdentityResolver identity)
             |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
 
         Assert.Multiple(fun () ->
@@ -183,17 +156,17 @@ type ExactRegistrationTests() =
         let identity = nextIdentity ()
         let path = uniquePath "invalid-parent"
         let valid =
-            registrationRequest
+            bridgeRegistrationRequest
                 identity
                 path
                 "http://127.0.0.1:1234/inject"
                 (Some "session-parent")
                 None
-                (capabilityFor identity)
+                (fakeShutdownCapability 'A' identity)
 
         let missing =
             registerSession
-                (resolverFor identity)
+                (exactIdentityResolver identity)
                 { valid with ParentProcessId = 0 }
 
         let dead =
@@ -217,22 +190,22 @@ type ExactRegistrationTests() =
         let identity = nextIdentity ()
         let path = uniquePath "invalid-registration-metadata"
         let valid =
-            registrationRequest
+            bridgeRegistrationRequest
                 identity
                 path
                 "http://127.0.0.1:1234/inject"
                 (Some "session-metadata")
                 None
-                (capabilityFor identity)
+                (fakeShutdownCapability 'A' identity)
 
         let invalidTerminal =
             registerSession
-                (resolverFor identity)
+                (exactIdentityResolver identity)
                 { valid with TerminalSessionId = Some "not-a-terminal-id" }
 
         let invalidCapability =
             registerSession
-                (resolverFor identity)
+                (exactIdentityResolver identity)
                 { valid with ShutdownCapability = "too-short" }
 
         Assert.Multiple(fun () ->
@@ -257,9 +230,9 @@ type ExactRegistrationTests() =
                 if requested = processId then Ok(Some current) else Ok None)
 
         let path = uniquePath "pid-reuse"
-        let capability = capabilityFor original
+        let capability = fakeShutdownCapability 'A' original
         let request =
-            registrationRequest
+            bridgeRegistrationRequest
                 original
                 path
                 "http://127.0.0.1:1234/inject"
@@ -315,13 +288,13 @@ type ExactRegistrationTests() =
                 | false, _ -> Ok None)
 
         let register identity sessionId =
-            registrationRequest
+            bridgeRegistrationRequest
                 identity
                 path
                 "http://127.0.0.1:1234/inject"
                 (Some sessionId)
                 None
-                (capabilityFor identity)
+                (fakeShutdownCapability 'A' identity)
             |> registerSessionWithDiagnostics ignore resolver
             |> Result.defaultWith (fun failure ->
                 invalidOp $"registration failed: {failure}")
@@ -359,21 +332,21 @@ type ExactRegistrationTests() =
         let identity = nextIdentity ()
         let path = uniquePath "identity-mismatch"
         let request =
-            registrationRequest
+            bridgeRegistrationRequest
                 identity
                 path
                 "http://127.0.0.1:1234/inject"
                 (Some "session-original")
                 None
-                (capabilityFor identity)
+                (fakeShutdownCapability 'A' identity)
 
-        registerSession (resolverFor identity) request
+        registerSession (exactIdentityResolver identity) request
         |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
         |> ignore
 
         let mismatch =
             registerSession
-                (resolverFor identity)
+                (exactIdentityResolver identity)
                 { request with SessionId = Some "session-other" }
 
         assertRegistrationFailure RegistrationFailure.ParentIdentityMismatch mismatch
@@ -398,16 +371,16 @@ type ExactRegistrationTests() =
             ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
         let register identity sessionId terminalId =
-            registrationRequest
+            bridgeRegistrationRequest
                 identity
                 path
                 "http://127.0.0.1:1234/inject"
                 (Some sessionId)
                 (Some terminalId)
-                (capabilityFor identity)
+                (fakeShutdownCapability 'A' identity)
             |> registerSessionWithDiagnostics
                 diagnostics.Enqueue
-                (resolverFor identity)
+                (exactIdentityResolver identity)
             |> Result.defaultWith (fun failure ->
                 invalidOp $"registration failed: {failure}")
 
@@ -502,17 +475,21 @@ type ExactPromptRoutingTests() =
         second.Start()
 
         registerExactSession
+            'A'
             firstIdentity
             path
             $"http://127.0.0.1:{firstPort}/"
             (Some sessionId)
+            None
         |> ignore
 
         registerExactSession
+            'A'
             secondIdentity
             path
             $"http://127.0.0.1:{secondPort}/"
             (Some sessionId)
+            None
         |> ignore
 
         let firstRequest = first.GetContextAsync()
@@ -587,17 +564,21 @@ type ExactPromptRoutingTests() =
         recovered.Start()
 
         registerExactSession
+            'A'
             targetIdentity
             path
             $"http://127.0.0.1:{failedPort}/"
             (Some sessionId)
+            None
         |> ignore
 
         registerExactSession
+            'A'
             siblingIdentity
             path
             $"http://127.0.0.1:{siblingPort}/"
             (Some sessionId)
+            None
         |> ignore
 
         let failedRequest = failed.GetContextAsync()
@@ -625,17 +606,21 @@ type ExactPromptRoutingTests() =
         let recoveredRequest = recovered.GetContextAsync()
 
         registerExactSession
+            'A'
             siblingIdentity
             path
             $"http://127.0.0.1:{siblingPort}/"
             (Some sessionId)
+            None
         |> ignore
 
         registerExactSession
+            'A'
             targetIdentity
             path
             $"http://127.0.0.1:{recoveredPort}/"
             (Some sessionId)
+            None
         |> ignore
 
         let drained =
@@ -718,10 +703,12 @@ type ExactShutdownTests() =
     member _.``Stale and reused registrations are rejected before shutdown delivery``() =
         let entry =
             registerExactSession
+                'A'
                 (nextIdentity ())
                 (uniquePath "stale-shutdown")
                 "http://127.0.0.1:1/inject"
                 (Some "session-stale")
+                None
 
         let staleRuntime =
             dependencies
@@ -758,10 +745,12 @@ type ExactShutdownTests() =
     member _.``Endpoint rejection outcomes remain typed``() =
         let entry =
             registerExactSession
+                'A'
                 (nextIdentity ())
                 (uniquePath "shutdown-rejections")
                 "http://127.0.0.1:1/inject"
                 (Some "session-rejections")
+                None
 
         [ ShutdownRequestOutcome.InvalidCapability,
           ShutdownFailure.InvalidCapability,
@@ -818,10 +807,12 @@ type ExactShutdownTests() =
     member _.``Accepted shutdown completes from exact closure``() =
         let entry =
             registerExactSession
+                'A'
                 (nextIdentity ())
                 (uniquePath "shutdown-closure")
                 "http://127.0.0.1:1/inject"
                 (Some "session-closure")
+                None
 
         let runtime =
             dependencies
@@ -872,7 +863,7 @@ type ExactShutdownTests() =
     member _.``Production shutdown transport posts the opaque capability and then observes closure``() =
         let identity = nextIdentity ()
         let path = uniquePath "shutdown-http"
-        let capability = capabilityFor identity
+        let capability = fakeShutdownCapability 'A' identity
         let port = Tests.TestUtils.getFreeTcpPort ()
 
         use listener = new HttpListener()
@@ -880,7 +871,7 @@ type ExactShutdownTests() =
         listener.Start()
 
         let request =
-            { registrationRequest
+            { bridgeRegistrationRequest
                 identity
                 path
                 "http://127.0.0.1:1/inject"
@@ -890,7 +881,7 @@ type ExactShutdownTests() =
                 ShutdownUrl = $"http://127.0.0.1:{port}/" }
 
         let entry =
-            registerSession (resolverFor identity) request
+            registerSession (exactIdentityResolver identity) request
             |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
 
         let received = listener.GetContextAsync()
@@ -926,10 +917,12 @@ type ExactShutdownTests() =
     member _.``Accepted shutdown completes when the exact process exits``() =
         let entry =
             registerExactSession
+                'A'
                 (nextIdentity ())
                 (uniquePath "shutdown-exit")
                 "http://127.0.0.1:1/inject"
                 (Some "session-exit")
+                None
 
         // The first probe verifies the registration before delivery; the second observes exit.
         let mutable probeCount = 0
@@ -957,10 +950,12 @@ type ExactShutdownTests() =
     member _.``Accepted shutdown times out while closure and process exit remain absent``() =
         let entry =
             registerExactSession
+                'A'
                 (nextIdentity ())
                 (uniquePath "shutdown-timeout")
                 "http://127.0.0.1:1/inject"
                 (Some "session-timeout")
+                None
 
         // The injected clock advances only through Delay, making timeout behavior deterministic.
         let mutable now = entry.RegisteredAt
@@ -1013,16 +1008,16 @@ type ExactShutdownTests() =
             |> List.map (fun index ->
                 let identity = nextIdentity ()
 
-                registrationRequest
+                bridgeRegistrationRequest
                     identity
                     path
                     "http://127.0.0.1:1/inject"
                     (Some $"batch-session-{index}")
                     None
-                    (capabilityFor identity)
+                    (fakeShutdownCapability 'A' identity)
                 |> registerSessionWithDiagnostics
                     ignore
-                    (resolverFor identity)
+                    (exactIdentityResolver identity)
                 |> Result.defaultWith (fun failure ->
                     invalidOp $"registration failed: {failure}"))
 
@@ -1044,7 +1039,7 @@ type ExactShutdownTests() =
             entries
             |> List.indexed
             |> List.map (fun (index, entry) ->
-                capabilityFor entry.ProcessIdentity, index)
+                fakeShutdownCapability 'A' entry.ProcessIdentity, index)
             |> Map.ofList
 
         let closedProcesses =
