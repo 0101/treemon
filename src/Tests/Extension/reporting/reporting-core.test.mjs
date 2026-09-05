@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  BACKGROUND_AGENT_CLOCK_RETENTION_MS,
   buildNonBlankMessageReport,
   buildReport,
+  compareReportsByOccurrence,
   createCurrentProcessState,
   MAX_TOOL_CALL_ID_CHARS,
   mapSdkEvent,
@@ -311,6 +313,150 @@ test("current-process replay preserves waiting and background truth across recon
     mergeReplayReports([reports[0]], state.snapshot()).map((report) => report.eventId),
     ["turn-ended", "awaiting-user", "background-start"],
   );
+});
+
+test("report occurrence ordering handles invalid dates and timestamp ties", () => {
+  const report = (eventId, occurredAt) => buildReport({
+    ...context,
+    eventId,
+    occurredAt,
+  }, "turn_started");
+  const invalidA = report("invalid-a", "not-a-date");
+  const invalidB = report("invalid-b", "also-not-a-date");
+  const sameTimeA = report("same-a", "2026-09-04T16:00:00.000Z");
+  const sameTimeB = report("same-b", "2026-09-04T16:00:00.000Z");
+
+  assert.equal(compareReportsByOccurrence(invalidA, sameTimeA), -1);
+  assert.equal(compareReportsByOccurrence(invalidA, invalidB), -1);
+  assert.equal(compareReportsByOccurrence(sameTimeB, sameTimeA), 1);
+  assert.equal(compareReportsByOccurrence(sameTimeA, { ...sameTimeA }), 0);
+});
+
+test("current-process state keeps the next report on an exact occurrence tie", () => {
+  const state = createCurrentProcessState();
+  const first = {
+    ...buildReport(context, "intent_reported"),
+    message: { text: "First", at: context.occurredAt },
+  };
+  const next = {
+    ...first,
+    message: { text: "Next", at: context.occurredAt },
+  };
+
+  state.observe(first);
+  state.observe(next);
+
+  assert.equal(state.snapshot()[0].message.text, "Next");
+});
+
+test("current-process state prunes only old resolved background-agent pairs", () => {
+  const now = Date.parse("2026-09-04T16:10:00.000Z");
+  const state = createCurrentProcessState(() => now);
+  const at = (offsetMs) => new Date(now + offsetMs).toISOString();
+  const backgroundReport = (eventId, occurredAt, kind, toolCallId) => ({
+    ...buildReport({ ...context, eventId, occurredAt }, kind),
+    toolCallId,
+  });
+
+  Array.from({ length: 40 }, (_, index) => {
+    const toolCallId = `old-complete-${index}`;
+    return [
+      backgroundReport(
+        `${toolCallId}-start`,
+        at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 2000 - index),
+        "background_agent_started",
+        toolCallId,
+      ),
+      backgroundReport(
+        `${toolCallId}-finish`,
+        at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 1000 - index),
+        "background_agent_finished",
+        toolCallId,
+      ),
+    ];
+  }).flat().forEach(state.observe);
+
+  [
+    backgroundReport(
+      "active-finish",
+      at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 4000),
+      "background_agent_finished",
+      "active",
+    ),
+    backgroundReport(
+      "active-start",
+      at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 3000),
+      "background_agent_started",
+      "active",
+    ),
+    backgroundReport(
+      "finish-only",
+      at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 5000),
+      "background_agent_finished",
+      "finish-only",
+    ),
+    backgroundReport(
+      "start-only",
+      at(-BACKGROUND_AGENT_CLOCK_RETENTION_MS - 6000),
+      "background_agent_started",
+      "start-only",
+    ),
+    backgroundReport(
+      "recent-start",
+      at(-60000),
+      "background_agent_started",
+      "recent",
+    ),
+    backgroundReport(
+      "recent-finish",
+      at(-59000),
+      "background_agent_finished",
+      "recent",
+    ),
+  ].forEach(state.observe);
+
+  assert.deepEqual(
+    state.snapshot().map((report) => report.eventId),
+    [
+      "start-only",
+      "finish-only",
+      "active-finish",
+      "active-start",
+      "recent-start",
+      "recent-finish",
+    ],
+  );
+});
+
+test("current-process snapshot prunes resolved pairs after the retention window passes", () => {
+  let now = Date.parse("2026-09-04T16:00:00.000Z");
+  const state = createCurrentProcessState(() => now);
+  const started = {
+    ...buildReport({
+      ...context,
+      eventId: "aging-start",
+      occurredAt: "2026-09-04T15:59:00.000Z",
+    }, "background_agent_started"),
+    toolCallId: "aging",
+  };
+  const finished = {
+    ...buildReport({
+      ...context,
+      eventId: "aging-finish",
+      occurredAt: "2026-09-04T15:59:01.000Z",
+    }, "background_agent_finished"),
+    toolCallId: "aging",
+  };
+
+  state.observe(started);
+  state.observe(finished);
+  assert.deepEqual(state.snapshot().map((report) => report.eventId), [
+    "aging-start",
+    "aging-finish",
+  ]);
+
+  now += BACKGROUND_AGENT_CLOCK_RETENTION_MS + 61000;
+  assert.deepEqual(state.snapshot(), []);
 });
 
 test("blank metadata summary emits no title report", () => {

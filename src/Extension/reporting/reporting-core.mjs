@@ -1,5 +1,6 @@
 const MAX_MESSAGE_CHARS = 2000;
 export const MAX_TOOL_CALL_ID_CHARS = 512;
+export const BACKGROUND_AGENT_CLOCK_RETENTION_MS = 5 * 60 * 1000;
 
 /**
  * @typedef ReportBaseContext
@@ -25,7 +26,7 @@ export const MAX_TOOL_CALL_ID_CHARS = 512;
  * @param {unknown} value
  * @returns {value is Record<string, unknown>}
  */
-function isRecord(value) {
+export function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -205,20 +206,30 @@ export function reportForReplaySdkEvent(context, eventValue) {
     : reportForSdkEvent(context, eventValue);
 }
 
+/** @param {Record<string, unknown>} report */
+function reportOccurrenceTime(report) {
+  const parsed = Date.parse(stringValue(report.occurredAt) ?? "");
+  return Number.isNaN(parsed) ? -Infinity : parsed;
+}
+
+/**
+ * @param {Record<string, unknown>} left
+ * @param {Record<string, unknown>} right
+ */
+export function compareReportsByOccurrence(left, right) {
+  const leftTime = reportOccurrenceTime(left);
+  const rightTime = reportOccurrenceTime(right);
+  if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
+
+  const leftId = stringValue(left.eventId) ?? "";
+  const rightId = stringValue(right.eventId) ?? "";
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+}
+
 /** @param {Record<string, unknown> | null} current @param {Record<string, unknown>} next */
 function newestReport(current, next) {
   if (!current) return next;
-  const currentTime = Date.parse(stringValue(current.occurredAt) ?? "");
-  const nextTime = Date.parse(stringValue(next.occurredAt) ?? "");
-  const comparableCurrent = Number.isNaN(currentTime) ? -Infinity : currentTime;
-  const comparableNext = Number.isNaN(nextTime) ? -Infinity : nextTime;
-  if (comparableNext !== comparableCurrent) {
-    return comparableNext > comparableCurrent ? next : current;
-  }
-
-  const currentId = stringValue(current.eventId) ?? "";
-  const nextId = stringValue(next.eventId) ?? "";
-  return nextId >= currentId ? next : current;
+  return compareReportsByOccurrence(current, next) <= 0 ? next : current;
 }
 
 /**
@@ -226,7 +237,7 @@ function newestReport(current, next) {
  * snapshot. They are replayed after history on reconnect; matching event IDs make the overlap
  * idempotent.
  */
-export function createCurrentProcessState() {
+export function createCurrentProcessState(now = Date.now) {
   /** @type {Record<string, unknown> | null} */
   let lifecycle = null;
   /** @type {Record<string, unknown> | null} */
@@ -247,6 +258,17 @@ export function createCurrentProcessState() {
   let usage = null;
   /** @type {Map<string, { started: Record<string, unknown> | null, finished: Record<string, unknown> | null }>} */
   const backgroundAgents = new Map();
+
+  function pruneBackgroundAgents() {
+    const cutoff = now() - BACKGROUND_AGENT_CLOCK_RETENTION_MS;
+    for (const [toolCallId, { started, finished }] of backgroundAgents) {
+      if (!started || !finished) continue;
+
+      const isActive = reportOccurrenceTime(started) > reportOccurrenceTime(finished);
+      const isRecentCompletion = reportOccurrenceTime(finished) > cutoff;
+      if (!isActive && !isRecentCompletion) backgroundAgents.delete(toolCallId);
+    }
+  }
 
   /** @param {Record<string, unknown>} report */
   function observe(report) {
@@ -303,9 +325,12 @@ export function createCurrentProcessState() {
       default:
         break;
     }
+
+    pruneBackgroundAgents();
   }
 
   function snapshot() {
+    pruneBackgroundAgents();
     const reports = [
       lifecycle,
       skill,
@@ -340,15 +365,5 @@ export function mergeReplayReports(historical, current) {
     if (eventId) byEventId.set(eventId, report);
   }
 
-  return [...byEventId.values()].sort((left, right) => {
-    const leftTime = Date.parse(stringValue(left.occurredAt) ?? "");
-    const rightTime = Date.parse(stringValue(right.occurredAt) ?? "");
-    const comparableLeft = Number.isNaN(leftTime) ? -Infinity : leftTime;
-    const comparableRight = Number.isNaN(rightTime) ? -Infinity : rightTime;
-    if (comparableLeft !== comparableRight) return comparableLeft < comparableRight ? -1 : 1;
-
-    const leftId = stringValue(left.eventId) ?? "";
-    const rightId = stringValue(right.eventId) ?? "";
-    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
-  });
+  return [...byEventId.values()].sort(compareReportsByOccurrence);
 }

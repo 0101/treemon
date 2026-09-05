@@ -2,6 +2,7 @@ import {
   buildNonBlankMessageReport,
   buildReport,
   createCurrentProcessState,
+  isRecord,
   mergeReplayReports,
   reportForReplaySdkEvent,
   reportForSdkEvent,
@@ -35,11 +36,6 @@ export const SUBSCRIBED_TYPES = [
 /** @typedef {"idle" | "presence" | "retry_wait" | "replaying" | "ready" | "closing" | "terminal"} EndpointPhase */
 /** @typedef {{ kind: "acknowledged" } | { kind: "retry" | "terminal", reason: string }} PresenceOutcome */
 /** @typedef {{ kind: "sent" } | { kind: "transport" | "terminal", reason: string }} OrdinaryOutcome */
-
-/** @param {unknown} value @returns {value is Record<string, unknown>} */
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 /** @param {unknown} value */
 function errorText(value) {
