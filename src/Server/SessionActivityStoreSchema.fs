@@ -74,6 +74,30 @@ CREATE TABLE IF NOT EXISTS retained_sessions (
     user_input_completed_at    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS worktree_representatives (
+    worktree_path              TEXT PRIMARY KEY,
+    session_id                 TEXT NOT NULL,
+    provider                   TEXT NOT NULL,
+    status                     TEXT NOT NULL,
+    current_skill              TEXT,
+    last_user_msg              TEXT,
+    last_user_ts               TEXT,
+    last_asst_msg              TEXT,
+    last_asst_ts               TEXT,
+    intent_text                TEXT,
+    intent_ts                  TEXT,
+    title_text                 TEXT,
+    title_ts                   TEXT,
+    updated_at                 TEXT NOT NULL,
+    context_current_tokens     INTEGER,
+    context_token_limit        INTEGER,
+    context_usage_at           TEXT,
+    awaiting_user_since        TEXT,
+    user_input_completed_at    TEXT,
+    process_id                 INTEGER NOT NULL,
+    process_start_ticks        INTEGER NOT NULL
+);
+
 {activityEventsTableSql "CREATE TABLE IF NOT EXISTS" "activity_events"}
 """
 

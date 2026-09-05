@@ -691,6 +691,109 @@ type RetainedByWorktreeTests() =
             Assert.That(retained["C:/wt/b"].SessionId, Is.EqualTo(SessionId "b1")))
 
     [<Test>]
+    member _.``Winning representative refreshes payload without changing its ordering key``() =
+        withStore (fun store ->
+            let original =
+                storedOf
+                    "same-session"
+                    "C:/wt/a"
+                    { emptyStatus with
+                        Title =
+                            Some(
+                                msg
+                                    "Original title"
+                                    "2026-03-01T08:59:00Z"
+                            ) }
+                    "2026-03-01T09:00:00Z"
+                    "2026-03-01T09:00:00Z"
+
+            store.UpsertStatus original
+            store.UpsertStatus
+                { original with
+                    Status.Title =
+                        Some(
+                            msg
+                                "Bootstrapped title"
+                                "2026-03-01T08:58:00Z"
+                        ) }
+
+            let retained = store.RetainedByWorktree()
+
+            Assert.That(
+                retained["C:/wt/a"].Status.Title
+                |> Option.map _.Text,
+                Is.EqualTo(Some "Bootstrapped title")
+            ))
+
+    [<Test>]
+    member _.``Repeated retained reads use only bounded worktree representatives``() =
+        withDbPath (fun dbPath ->
+            (use _schema = new SessionActivityStore(dbPath)
+             ())
+
+            SqliteTestDatabase.execute
+                dbPath
+                """
+WITH digits(value) AS (
+    VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)
+),
+numbers(value) AS (
+    SELECT
+        ones.value
+        + 10 * tens.value
+        + 100 * hundreds.value
+        + 1000 * thousands.value
+    FROM digits AS ones
+    CROSS JOIN digits AS tens
+    CROSS JOIN digits AS hundreds
+    CROSS JOIN digits AS thousands
+)
+INSERT INTO session_instances
+    (process_id, process_start_ticks, session_id, worktree_path,
+     provider, status, updated_at, last_seen)
+SELECT
+    value + 1,
+    (value + 1) * 1000,
+    printf('session-%04d', value + 1),
+    printf('C:/wt/%02d', value % 25),
+    'copilot_cli',
+    'idle',
+    '2026-03-01T10:00:00.0000000+00:00',
+    '2026-03-01T10:00:00.0000000+00:00'
+FROM numbers
+WHERE value < 5000;
+"""
+
+            use store = new SessionActivityStore(dbPath)
+            let expected = store.RetainedByWorktree()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    SqliteTestDatabase.scalarInt
+                        dbPath
+                        "SELECT count(*) FROM session_instances;",
+                    Is.EqualTo 5000
+                )
+                Assert.That(
+                    SqliteTestDatabase.scalarInt
+                        dbPath
+                        "SELECT count(*) FROM worktree_representatives;",
+                    Is.EqualTo 25
+                )
+                Assert.That(expected.Count, Is.EqualTo 25))
+
+            SqliteTestDatabase.execute
+                dbPath
+                "DROP TABLE session_instances; DROP TABLE retained_sessions;"
+
+            [ 1 .. 10 ]
+            |> List.iter (fun _ ->
+                Assert.That(
+                    store.RetainedByWorktree(),
+                    Is.EqualTo expected
+                )))
+
+    [<Test>]
     member _.``An empty store yields no retained rows``() =
         withStore (fun store ->
             Assert.That(store.RetainedByWorktree() |> Map.isEmpty, Is.True))
@@ -728,6 +831,43 @@ type PruneOldTests() =
     [<Test>]
     member _.``pruneOld on an empty store deletes nothing``() =
         withStore (fun store -> Assert.That(store.PruneOld(ts "2026-03-01T12:00:00Z"), Is.EqualTo(0)))
+
+    [<Test>]
+    member _.``pruneOld rebuilds a removed winner from surviving liveness history``() =
+        withStore (fun store ->
+            store.UpsertStatus(
+                storedOf
+                    "fallback"
+                    "C:/wt/a"
+                    emptyStatus
+                    "2026-03-01T02:00:00Z"
+                    "2026-03-01T05:00:00Z"
+            )
+            store.UpsertStatus(
+                storedOf
+                    "stale-winner"
+                    "C:/wt/a"
+                    emptyStatus
+                    "2026-03-01T03:00:00Z"
+                    "2026-03-01T03:00:00Z"
+            )
+
+            let beforePrune = store.RetainedByWorktree()
+
+            Assert.That(
+                beforePrune["C:/wt/a"].SessionId,
+                Is.EqualTo(SessionId "stale-winner")
+            )
+
+            Assert.That(
+                store.PruneOld(ts "2026-03-01T04:00:00Z"),
+                Is.EqualTo 1
+            )
+            let afterPrune = store.RetainedByWorktree()
+            Assert.That(
+                afterPrune["C:/wt/a"].SessionId,
+                Is.EqualTo(SessionId "fallback")
+            ))
 
     [<Test>]
     member _.``pruneOld rolls back every delete when a later statement fails``() =

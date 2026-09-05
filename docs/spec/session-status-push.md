@@ -300,6 +300,8 @@ environment values, exception text, and raw reports are not diagnostic inputs.
   `SessionId`. These rows preserve footer and explicit Resume data but never represent a process,
   establish liveness, or participate in automatic replacement. The table is migration-only: new
   exact sessions remain in `session_instances`, and retention only removes old migrated history.
+- `worktree_representatives` stores one materialized footer row plus its ordering key per worktree.
+  It is the bounded read source for dashboard and auto-sync retained-session projection.
 - `activity_events` retains accepted history-bearing events under process-instance plus event ID so
   retrying one process remains idempotent while a resumed process can replay the same durable
   session history into its independent fold. Canonical Overview history uses direct 30-second
@@ -309,28 +311,32 @@ environment values, exception text, and raw reports are not diagnostic inputs.
 
 Store construction creates `session_instances`, copies legacy one-row-per-session history
 idempotently into `retained_sessions`, transactionally rebuilds `activity_events` with a
-process-instance key, and then drops the obsolete `session_status` table. Legacy event rows are
-discarded because their exact producer identity cannot be recovered and their folded state is
-already preserved in `retained_sessions`. Runtime writes target only exact instances; dependent
-indexes are created last. The terminal-origin index follows
+process-instance key, drops the obsolete `session_status` table, and rebuilds one materialized
+`worktree_representatives` row per worktree from exact and migration-only history. Legacy event rows
+are discarded because their exact producer identity cannot be recovered and their folded state is
+already preserved in `retained_sessions`. Runtime exact-instance writes update the winning
+representative in the same transaction. Source indexes are present before the startup
+representative rebuild. The terminal-origin index follows
 `(terminal_session_id, updated_at DESC, session_id DESC)`; its leading origin key supports
 retained-origin scans used when pruning process-local activity epochs.
 
 Event append/status upsert and context updates are transactional and reread the authoritative
-persisted row. Hourly retention bounds durable session and event data without coordinating with
-Overview history. `SqliteStorage` owns shared UTC timestamp encoding/parsing and immutable reader
-draining. Removed Overview rollup, liveness, task-snapshot, staging, and reconstruction
-infrastructure is not part of this store.
+persisted row. Hourly retention bounds durable session and event data, then rebuilds the
+representative table so a removed winner falls back to surviving history. Dashboard and auto-sync
+reads scan only that worktree-keyed table rather than ranking the 60-day process-instance history.
+Overview history remains independent. `SqliteStorage` owns shared UTC timestamp encoding/parsing and
+immutable reader draining. Removed Overview rollup, liveness, task-snapshot, staging, and
+reconstruction infrastructure is not part of this store.
 
 ### Worktree projection
 
 `SchedulerState.SessionInstances` is keyed by exact process identity and never deduplicates a
 durable `SessionId`. `CodingToolStatus.collapseByWorktree` is the single projection from those
 instances to card fields. `WorktreeApi` derives markers and aggregate status only from open exact
-instances, then separately joins each worktree's greatest durable
-`(UpdatedAt, SessionId, ProcessIdentity)` representative for footer content. `retained_sessions`
-and closed prior process instances remain eligible only for footer and explicit Resume history;
-they have no liveness, terminal-origin, or process-address fields in the application read model.
+instances, then separately joins each worktree's materialized greatest durable
+`(UpdatedAt, SessionId, ProcessIdentity)` representative for footer content. `retained_sessions` and
+closed prior process instances remain eligible only for footer and explicit Resume history; they
+have no liveness, terminal-origin, or process-address fields in the application read model.
 
 The remoting contract exposes `toggleAutoSync`. When enabled and the branch falls behind, `AutoSync`
 reads open exact instances separately from retained history. A session mid-turn — or one that went
@@ -364,7 +370,7 @@ into lifecycle status.
 | Ownership boundary | Session activity owns reporting, exact-instance state, liveness, and monotonic closure; embedded-terminal orchestration owns shutdown policy, authoritative teardown, rollback, and survivor cleanup. |
 | Startup reconciliation | Keep each recently open terminal-owned instance pending until that exact identity re-presents, dies, loses its terminal origin, or reaches `openWindow`; never use one global startup delay. |
 | Background agents | Persist per-tool start/finish clocks on each exact instance; WaitingForUser outranks background Working; stale-gap cleanup bounds abandoned clocks. |
-| Footer | Decouple from the status dot and merge a retained durable representative. |
+| Footer | Decouple from the status dot and merge a transactionally maintained, worktree-keyed durable representative. |
 | Activity | Use freshest source-tagged intent/title; bootstrap title from metadata, never infer intent. |
 | Context usage | Persist the last-known gauge and ordering timestamp; do not append it to activity events. |
 | Persistence | Store exact process-instance folds and instance-scoped events separately from bounded retained conversation history; rebuild legacy primary keys transactionally. |
@@ -391,8 +397,8 @@ into lifecycle status.
 | `src/Server/TerminalSessionActivity.fs` | Exact owned-session and startup-reconciliation projection for embedded-terminal tab activity and TerminalHost replacement policy. |
 | `src/Server/UserMessageFormatting.fs` | System-reminder classification and user/canvas footer projection. |
 | `src/Server/SqliteStorage.fs` | Shared SQLite UTC timestamp encoding/parsing and immutable reader draining. |
-| `src/Server/SessionActivityStoreSchema.fs` | Transactional exact-instance schema creation, retained-history migration, legacy retirement, and event-key rebuild. |
-| `src/Server/SessionActivityStore.fs` | Exact process-instance persistence, non-live retained footer/history reads, and retention. |
+| `src/Server/SessionActivityStoreSchema.fs` | Transactional exact-instance schema creation, retained-history migration, worktree-representative storage, legacy retirement, and event-key rebuild. |
+| `src/Server/SessionActivityStore.fs` | Exact process-instance persistence, bounded retained-footer reads, representative maintenance, and retention. |
 | `src/Server/CodingToolStatus.fs` | Per-worktree collapse, heartbeat-independent activity/footer projection, and resume lookup. |
 | `src/Server/SchedulerState.fs` | Exact live process-instance state and collapsed `CodingToolSince` transitions. |
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |

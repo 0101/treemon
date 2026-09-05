@@ -305,6 +305,19 @@ awaiting_user_since, user_input_completed_at, terminal_session_id,
 background_agent_clocks, closed_at
 """
 
+let private retainedColumns =
+    """
+session_id, worktree_path, provider, status, current_skill,
+last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
+intent_text, intent_ts, title_text, title_ts, updated_at,
+context_current_tokens, context_token_limit, context_usage_at,
+awaiting_user_since, user_input_completed_at
+"""
+
+let private representativeColumns =
+    retainedColumns.Trim()
+    + ", process_id, process_start_ticks"
+
 let private upsertInstanceSql =
     """
 INSERT INTO session_instances
@@ -346,6 +359,52 @@ ON CONFLICT(process_id, process_start_ticks) DO UPDATE SET
     terminal_session_id = excluded.terminal_session_id,
     background_agent_clocks = excluded.background_agent_clocks,
     closed_at = COALESCE(session_instances.closed_at, excluded.closed_at);
+"""
+
+let private upsertWorktreeRepresentativeSql =
+    $"""
+INSERT INTO worktree_representatives ({representativeColumns})
+SELECT {representativeColumns}
+FROM session_instances
+WHERE process_id = $processId
+  AND process_start_ticks = $processStartTicks
+ON CONFLICT(worktree_path) DO UPDATE SET
+    session_id = excluded.session_id,
+    provider = excluded.provider,
+    status = excluded.status,
+    current_skill = excluded.current_skill,
+    last_user_msg = excluded.last_user_msg,
+    last_user_ts = excluded.last_user_ts,
+    last_asst_msg = excluded.last_asst_msg,
+    last_asst_ts = excluded.last_asst_ts,
+    intent_text = excluded.intent_text,
+    intent_ts = excluded.intent_ts,
+    title_text = excluded.title_text,
+    title_ts = excluded.title_ts,
+    updated_at = excluded.updated_at,
+    context_current_tokens = excluded.context_current_tokens,
+    context_token_limit = excluded.context_token_limit,
+    context_usage_at = excluded.context_usage_at,
+    awaiting_user_since = excluded.awaiting_user_since,
+    user_input_completed_at = excluded.user_input_completed_at,
+    process_id = excluded.process_id,
+    process_start_ticks = excluded.process_start_ticks
+WHERE excluded.updated_at > worktree_representatives.updated_at
+   OR (
+       excluded.updated_at = worktree_representatives.updated_at
+       AND excluded.session_id > worktree_representatives.session_id
+   )
+   OR (
+       excluded.updated_at = worktree_representatives.updated_at
+       AND excluded.session_id = worktree_representatives.session_id
+       AND excluded.process_id > worktree_representatives.process_id
+   )
+   OR (
+       excluded.updated_at = worktree_representatives.updated_at
+       AND excluded.session_id = worktree_representatives.session_id
+       AND excluded.process_id = worktree_representatives.process_id
+       AND excluded.process_start_ticks >= worktree_representatives.process_start_ticks
+   );
 """
 
 let private appendSql =
@@ -405,25 +464,22 @@ ORDER BY last_seen, process_id, process_start_ticks;
 
 let private retainedByWorktreeSql =
     $"""
+SELECT {retainedColumns}
+FROM worktree_representatives;
+"""
+
+let private rebuildWorktreeRepresentativesSql =
+    $"""
+DELETE FROM worktree_representatives;
+
 WITH candidates AS (
-    SELECT
-        session_id, worktree_path, provider, status, current_skill,
-        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-        intent_text, intent_ts, title_text, title_ts, updated_at,
-        context_current_tokens, context_token_limit, context_usage_at,
-        awaiting_user_since, user_input_completed_at,
-        process_id, process_start_ticks
+    SELECT {representativeColumns}
     FROM session_instances
 
     UNION ALL
 
-    SELECT
-        session_id, worktree_path, provider, status, current_skill,
-        last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-        intent_text, intent_ts, title_text, title_ts, updated_at,
-        context_current_tokens, context_token_limit, context_usage_at,
-        awaiting_user_since, user_input_completed_at,
-        0 AS process_id, 0 AS process_start_ticks
+    SELECT {retainedColumns},
+           0 AS process_id, 0 AS process_start_ticks
     FROM retained_sessions
 ),
 ranked AS (
@@ -435,12 +491,8 @@ ranked AS (
            ) AS activity_rank
     FROM candidates
 )
-SELECT
-    session_id, worktree_path, provider, status, current_skill,
-    last_user_msg, last_user_ts, last_asst_msg, last_asst_ts,
-    intent_text, intent_ts, title_text, title_ts, updated_at,
-    context_current_tokens, context_token_limit, context_usage_at,
-    awaiting_user_since, user_input_completed_at
+INSERT INTO worktree_representatives ({representativeColumns})
+SELECT {representativeColumns}
 FROM ranked
 WHERE activity_rank = 1;
 """
@@ -604,6 +656,26 @@ let private upsertInstance
     bindInstance command stored
     command.ExecuteNonQuery() |> ignore
 
+let private upsertWorktreeRepresentative
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction option)
+    identity
+    =
+    use command = connection.CreateCommand()
+    transaction |> Option.iter (fun value -> command.Transaction <- value)
+    command.CommandText <- upsertWorktreeRepresentativeSql
+    bindIdentity command identity
+    command.ExecuteNonQuery() |> ignore
+
+let private rebuildWorktreeRepresentatives
+    (connection: SqliteConnection)
+    (transaction: SqliteTransaction option)
+    =
+    use command = connection.CreateCommand()
+    transaction |> Option.iter (fun value -> command.Transaction <- value)
+    command.CommandText <- rebuildWorktreeRepresentativesSql
+    command.ExecuteNonQuery() |> ignore
+
 // --- Store ------------------------------------------------------------------------------------
 
 type SessionActivityStore
@@ -647,6 +719,9 @@ type SessionActivityStore
 
         try
             initializeSchema connection
+            use transaction = connection.BeginTransaction()
+            rebuildWorktreeRepresentatives connection (Some transaction)
+            transaction.Commit()
             connection
         with _ ->
             connection.Dispose()
@@ -656,11 +731,23 @@ type SessionActivityStore
     /// boundary even if a caller accidentally supplies ClosedAt=None after the row was closed.
     member _.UpsertInstance(stored: StoredInstance) =
         use connection = openConnection ()
-        upsertInstance connection None stored
+        use transaction = connection.BeginTransaction()
+        upsertInstance connection (Some transaction) stored
+        upsertWorktreeRepresentative
+            connection
+            (Some transaction)
+            stored.ProcessIdentity
 
-        readInstanceByIdentity connection None stored.ProcessIdentity
-        |> Option.defaultWith (fun () ->
-            failwith $"{nameof StoredInstance}: persisted instance row missing")
+        let persisted =
+            readInstanceByIdentity
+                connection
+                (Some transaction)
+                stored.ProcessIdentity
+            |> Option.defaultWith (fun () ->
+                failwith $"{nameof StoredInstance}: persisted instance row missing")
+
+        transaction.Commit()
+        persisted
 
     /// Atomically append one process-scoped event and persist its folded exact-instance state.
     /// A duplicate event ID for the same process is a complete no-op.
@@ -678,6 +765,10 @@ type SessionActivityStore
         let persisted =
             if inserted then
                 upsertInstance connection (Some transaction) stored
+                upsertWorktreeRepresentative
+                    connection
+                    (Some transaction)
+                    stored.ProcessIdentity
 
                 readInstanceByIdentity
                     connection
@@ -776,8 +867,8 @@ type SessionActivityStore
         use reader = command.ExecuteReader()
         readRows reader readInstance []
 
-    /// One durable footer representative per worktree across exact and migration-only history.
-    /// The result has no process/liveness/origin fields and cannot participate in live ownership.
+    /// One materialized durable footer representative per worktree across exact and migration-only
+    /// history. The hot read is bounded by displayed worktrees rather than retained process rows.
     member _.RetainedByWorktree() =
         use connection = openConnection ()
         use command = connection.CreateCommand()
@@ -825,6 +916,7 @@ type SessionActivityStore
         command.CommandText <- pruneSql
         command.Parameters.AddWithValue("$cutoff", isoUtc cutoff) |> ignore
         let deleted = command.ExecuteNonQuery()
+        rebuildWorktreeRepresentatives connection (Some transaction)
         transaction.Commit()
         deleted
 
