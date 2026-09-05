@@ -654,6 +654,147 @@ type TerminalRegistryResilienceTests() =
                 ()
 
     [<Test>]
+    member _.``data plane failure is diagnostic after authoritative process cleanup``() =
+        let processCleanupAttempts = ConcurrentQueue<string>()
+        let dataPlaneStopAttempts = ConcurrentQueue<string>()
+        let applicationStopAttempts = ConcurrentQueue<string>()
+        let applicationDisposeAttempts = ConcurrentQueue<string>()
+        let clientDisposeAttempts = ConcurrentQueue<string>()
+        let dataPlanes = ConcurrentQueue<string * TerminalDataPlane>()
+
+        let countFor sessionId (attempts: ConcurrentQueue<string>) =
+            attempts
+            |> Seq.filter ((=) sessionId)
+            |> Seq.length
+
+        let starter sessionId _ =
+            async {
+                return
+                    Ok
+                        { ProcessId = 23_150
+                          ProcessStartTimeUtcTicks = 33_150L
+                          TtydPort = 43_150
+                          HasExited = fun () -> false
+                          BeginClose =
+                            fun () ->
+                                Ok(fun () ->
+                                    processCleanupAttempts.Enqueue sessionId
+                                    Ok()) }
+            }
+
+        let dataPlaneStarter sessionId _ _ =
+            async {
+                let stopOperations: TerminalProxy.ProxyStopOperations =
+                    { StopDataPlane =
+                        fun () ->
+                            (task {
+                                let firstAttempt =
+                                    countFor sessionId dataPlaneStopAttempts = 0
+
+                                dataPlaneStopAttempts.Enqueue sessionId
+
+                                if firstAttempt then
+                                    invalidOp "deterministic data-plane stop failure"
+                             } :> Task)
+                      StopApplication =
+                        fun _ ->
+                            applicationStopAttempts.Enqueue sessionId
+                            Task.CompletedTask
+                      DisposeApplication =
+                        fun () ->
+                            applicationDisposeAttempts.Enqueue sessionId
+                            Task.CompletedTask
+                      DisposeClient =
+                        fun () ->
+                            clientDisposeAttempts.Enqueue sessionId }
+
+                let dataPlane =
+                    { inertDataPlane
+                        $"http://127.0.0.1:43150/_treemon/{sessionId}/test-token/" with
+                        Stop = TerminalProxy.stopProxy stopOperations }
+
+                dataPlanes.Enqueue((sessionId, dataPlane))
+                return Ok dataPlane
+            }
+
+        let registry = TerminalRegistry.create starter dataPlaneStarter
+
+        try
+            let first =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-data-plane-failure-close")
+                |> runWithin timeout
+                |> requireOk
+
+            let firstSessionId =
+                first.Terminals
+                |> List.exactlyOne
+                |> _.SessionId
+
+            let firstDataPlane =
+                dataPlanes.ToArray()
+                |> Array.find (fst >> (=) firstSessionId)
+                |> snd
+
+            let closed =
+                TerminalRegistry.close registry firstSessionId
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(closed.Terminals, Is.Empty)
+                Assert.That(countFor firstSessionId processCleanupAttempts, Is.EqualTo(1))
+                Assert.That(countFor firstSessionId dataPlaneStopAttempts, Is.EqualTo(1))
+                Assert.That(countFor firstSessionId applicationStopAttempts, Is.EqualTo(1))
+                Assert.That(countFor firstSessionId applicationDisposeAttempts, Is.EqualTo(1))
+                Assert.That(countFor firstSessionId clientDisposeAttempts, Is.EqualTo(1)))
+
+            firstDataPlane.Stop()
+            |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(countFor firstSessionId dataPlaneStopAttempts, Is.EqualTo(2))
+                Assert.That(countFor firstSessionId applicationStopAttempts, Is.EqualTo(2))
+                Assert.That(countFor firstSessionId applicationDisposeAttempts, Is.EqualTo(2))
+                Assert.That(countFor firstSessionId clientDisposeAttempts, Is.EqualTo(2)))
+
+            let second =
+                TerminalRegistry.start
+                    registry
+                    (worktree "terminal-registry-data-plane-failure-shutdown")
+                |> runWithin timeout
+                |> requireOk
+
+            let secondSessionId =
+                second.Terminals
+                |> List.exactlyOne
+                |> _.SessionId
+
+            let clean =
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+
+            let afterShutdown =
+                TerminalRegistry.list registry
+                |> runWithin timeout
+
+            Assert.Multiple(fun () ->
+                Assert.That(clean, Is.True)
+                Assert.That(afterShutdown.Terminals, Is.Empty)
+                Assert.That(countFor secondSessionId processCleanupAttempts, Is.EqualTo(1))
+                Assert.That(countFor secondSessionId dataPlaneStopAttempts, Is.EqualTo(1))
+                Assert.That(countFor secondSessionId applicationStopAttempts, Is.EqualTo(1))
+                Assert.That(countFor secondSessionId applicationDisposeAttempts, Is.EqualTo(1))
+                Assert.That(countFor secondSessionId clientDisposeAttempts, Is.EqualTo(1)))
+        finally
+            try
+                TerminalRegistry.shutdown registry
+                |> runWithin timeout
+                |> ignore
+            with _ ->
+                ()
+
+    [<Test>]
     member _.``launcher cleanup failure remains owned until registry maintenance succeeds``() =
         use allowCleanup = new ManualResetEventSlim()
         let cleanupAttempts = ConcurrentQueue<unit>()
@@ -1152,7 +1293,7 @@ type TerminalHostControlApiTests() =
         :> Task
 
     [<Test>]
-    member _.``shutdown keeps the host and failed terminal registry entry alive``() =
+    member _.``failed shutdown keeps the host available and later retry closes all terminals``() =
         task {
             use allowCleanup = new ManualResetEventSlim()
             use fixture =
@@ -1185,6 +1326,22 @@ type TerminalHostControlApiTests() =
                 Assert.That(shutdown.IsCompleted, Is.False)
                 Assert.That(terminalIds retainedDocument, Is.EqualTo([ sessionId ])))
 
+            use! subsequentStart =
+                fixture.Client.PostAsJsonAsync(
+                    "/api/v2/terminals",
+                    {| worktreePath = fixture.Worktree |}
+                )
+
+            use subsequentDocument = responseDocument subsequentStart
+            let runningIds = terminalIds subsequentDocument
+
+            Assert.Multiple(fun () ->
+                Assert.That(subsequentStart.StatusCode, Is.EqualTo(HttpStatusCode.OK))
+                Assert.That(shutdown.IsCompleted, Is.False)
+                Assert.That(runningIds.Length, Is.EqualTo(2))
+                Assert.That(runningIds.Head, Is.EqualTo(sessionId))
+                Assert.That(fixture.StartCount, Is.EqualTo(2)))
+
             allowCleanup.Set()
             use retryBody = new ByteArrayContent(Array.empty)
             use! retried = fixture.Client.PostAsync("/api/v2/shutdown", retryBody)
@@ -1192,7 +1349,8 @@ type TerminalHostControlApiTests() =
 
             Assert.Multiple(fun () ->
                 Assert.That(retried.StatusCode, Is.EqualTo(HttpStatusCode.Accepted))
-                Assert.That(completed, Is.SameAs(shutdown)))
+                Assert.That(completed, Is.SameAs(shutdown))
+                Assert.That(fixture.CloseCount, Is.EqualTo(3)))
         }
         :> Task
 

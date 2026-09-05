@@ -19,7 +19,6 @@ type TerminalRegistry = private | TerminalRegistry of MailboxProcessor<RegistryM
 module TerminalRegistry =
     type private TerminalCloseFailure =
         | ProcessPreparationFailed of string
-        | DataPlaneFailed
         | ProcessCleanupFailed of string
 
     type private HostedStartResult =
@@ -38,13 +37,13 @@ module TerminalRegistry =
 
     let private closeTerminal sessionId (dataPlane: TerminalDataPlane option) (terminalProcess: TerminalProcess) =
         async {
-            let! result =
+            let! result, dataPlaneFailed =
                 match
                     try terminalProcess.BeginClose()
                     with _ -> Error "terminal process cleanup preparation failed"
                 with
                 | Error error ->
-                    async.Return(Error(ProcessPreparationFailed error))
+                    async.Return(Error(ProcessPreparationFailed error), false)
                 | Ok complete ->
                     async {
                         let! dataPlaneStopped =
@@ -65,24 +64,24 @@ module TerminalRegistry =
                             with _ -> Error "process cleanup failed"
 
                         return
-                            match dataPlaneStopped, cleanup with
-                            | true, Ok() -> Ok()
-                            | false, Ok() -> Error DataPlaneFailed
-                            | _, Error error -> Error(ProcessCleanupFailed error)
+                            (match cleanup with
+                             | Ok() -> Ok()
+                             | Error error -> Error(ProcessCleanupFailed error)),
+                            not dataPlaneStopped
                     }
 
             TerminalHostDiagnostics.write (
                 TerminalHostDiagnostic.TerminalClose
                     { TerminalSessionId = sessionId
                       Outcome =
-                        match result with
-                        | Ok() ->
+                        match result, dataPlaneFailed with
+                        | Ok(), false ->
                             TerminalCloseOutcome.Completed
-                        | Error(ProcessPreparationFailed _) ->
-                            TerminalCloseOutcome.ProcessPreparationFailed
-                        | Error DataPlaneFailed ->
+                        | Ok(), true ->
                             TerminalCloseOutcome.DataPlaneFailed
-                        | Error(ProcessCleanupFailed _) ->
+                        | Error(ProcessPreparationFailed _), _ ->
+                            TerminalCloseOutcome.ProcessPreparationFailed
+                        | Error(ProcessCleanupFailed _), _ ->
                             TerminalCloseOutcome.ProcessCleanupFailed }
             )
 
@@ -96,7 +95,6 @@ module TerminalRegistry =
         function
         | ProcessPreparationFailed error
         | ProcessCleanupFailed error -> error
-        | DataPlaneFailed -> "terminal data-plane cleanup failed"
 
     let private pendingCleanupMessage startupError cleanupError =
         $"{startupError}; terminal cleanup remains pending: {cleanupError}"
@@ -331,16 +329,20 @@ module TerminalRegistry =
                         afterPendingCleanup.Entries
                         |> Map.filter (fun key _ -> not (Set.contains key closed))
 
+                    let clean =
+                        remaining.IsEmpty
+                        && Map.isEmpty afterPendingCleanup.PendingCleanups
+
                     let updated =
                         { afterPendingCleanup with
                             Entries = remaining
                             Revision = afterPendingCleanup.Revision + if closed.IsEmpty then 0L else 1L
-                            Stopped = true }
+                            Stopped = clean }
 
                     return
                         respond
                             reply
-                            (remaining.IsEmpty && Map.isEmpty updated.PendingCleanups)
+                            clean
                             updated
                 | UpstreamExited sessionId ->
                     match Map.tryFind sessionId current.Entries with

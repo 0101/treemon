@@ -373,8 +373,11 @@ terminal teardown captures exact Job membership before stopping the data plane, 
 membership and bounded observed descendants after that graceful stop and before closing the Job
 handle. It waits for captured identities, terminates only survivors whose PID and start ticks still
 match, and retains those identities for a retry when cleanup remains incomplete. The registry
-removes only successfully cleaned terminals; host shutdown requests application exit only after the
-registry is empty. Process names alone are never cleanup authority.
+removes a terminal whenever exact process cleanup succeeds; a data-plane stop failure remains a
+diagnostic, while proxy application and client cleanup are still attempted. Host shutdown requests
+application exit only after the registry and pending cleanup set are empty. A failed shutdown keeps
+the live host start-capable and may be retried against retained entries. Process names alone are
+never cleanup authority.
 
 PowerShell explicitly sets its location from `TREEMON_TERMINAL_WORKTREE` at startup because ttyd's
 Windows working-directory option alone does not establish the child shell's location.
