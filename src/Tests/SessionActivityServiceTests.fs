@@ -132,27 +132,15 @@ let private requireReplacementReady =
 
 // --- Service / store fixture -------------------------------------------------------------------
 
-let private processIdForSession sessionId =
-    sessionId
-    |> Seq.fold (fun value character ->
-        (value * 31 + int character) % 1_000_000) 10_000
-
-let private identityForProcessId processId =
-    ProcessIdentity.create processId (int64 processId * 1_000L + 1L)
-    |> Result.defaultWith invalidOp
-
-let private identityForSession sessionId =
-    sessionId |> processIdForSession |> identityForProcessId
-
 let private processIdentityResolver =
     ProcessIdentityResolver.create (fun processId ->
         processId
-        |> identityForProcessId
+        |> syntheticProcessIdentityForProcessId
         |> Some
         |> Ok)
 
 let private mkReport sid wt eid (t: string) ev : SessionActivityReport =
-    { ParentProcessId = processIdForSession sid
+    { ParentProcessId = syntheticProcessIdForSessionId sid
       SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath(PathUtils.normalizePath wt)
@@ -184,7 +172,7 @@ let private present
 let private storedWithUsage sid worktree status updatedAt usage usageAt =
     let sessionId = SessionId sid
 
-    { ProcessIdentity = identityForSession sid
+    { ProcessIdentity = syntheticProcessIdentityForSessionId sid
       SessionId = sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
@@ -1351,7 +1339,7 @@ type IngestTests() =
     [<Test>]
     member _.``background lifecycle preserves parent activity and footer fields``() =
         let parent =
-            { ProcessIdentity = identityForSession "s1"
+            { ProcessIdentity = syntheticProcessIdentityForSessionId "s1"
               SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
@@ -1498,7 +1486,7 @@ type IngestTests() =
     [<Test>]
     member _.``title bootstrap revives a retained durable session without losing footer state``() =
         let retained =
-            { ProcessIdentity = identityForSession "s1"
+            { ProcessIdentity = syntheticProcessIdentityForSessionId "s1"
               SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
@@ -1677,7 +1665,7 @@ type IngestTests() =
     [<Test>]
     member _.``a heartbeat rehydrates a retained durable session after restart``() =
         let retained =
-            { ProcessIdentity = identityForSession "s1"
+            { ProcessIdentity = syntheticProcessIdentityForSessionId "s1"
               SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
@@ -1781,7 +1769,7 @@ type IngestTests() =
     [<Test>]
     member _.``usage rehydrates a retained durable session after restart``() =
         let retained =
-            { ProcessIdentity = identityForSession "s1"
+            { ProcessIdentity = syntheticProcessIdentityForSessionId "s1"
               SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = WorktreePath(PathUtils.normalizePath "C:/wt/a")
@@ -1882,7 +1870,7 @@ type IngestTests() =
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-pruned-context-worktree")
         let normalizedWorktree = WorktreePath(PathUtils.normalizePath worktree)
         let report eventId occurredAt event =
-            { ParentProcessId = processIdForSession "s1"
+            { ParentProcessId = syntheticProcessIdForSessionId "s1"
               SessionId = SessionId "s1"
               TerminalSessionId = None
               WorktreePath = normalizedWorktree
@@ -1951,7 +1939,7 @@ type RestartRebuildTests() =
 
         let seed (store: SessionActivityStore) =
             store.UpsertStatus
-                { ProcessIdentity = identityForSession "s1"
+                { ProcessIdentity = syntheticProcessIdentityForSessionId "s1"
                   SessionId = SessionId "s1"
                   TerminalSessionId = None
                   WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
@@ -1992,7 +1980,7 @@ type RestartRebuildTests() =
         withServiceSeeded worktree seed (fun (svc, _, _) ->
             svc.Start()
             svc.Submit
-                { ParentProcessId = processIdForSession "s1"
+                { ParentProcessId = syntheticProcessIdForSessionId "s1"
                   SessionId = SessionId "s1"
                   TerminalSessionId = None
                   WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
@@ -2034,7 +2022,7 @@ type RestartRebuildTests() =
             Assert.That((svc.LiveSnapshot()).ContainsKey(SessionId "s1"), Is.False)
 
             svc.Submit
-                { ParentProcessId = processIdForSession "s1"
+                { ParentProcessId = syntheticProcessIdForSessionId "s1"
                   SessionId = SessionId "s1"
                   TerminalSessionId = None
                   WorktreePath = normalizedWorktree
@@ -2060,7 +2048,7 @@ type RestartRebuildTests() =
 
         let seed (store: SessionActivityStore) =
             store.UpsertStatus
-                { ProcessIdentity = identityForSession "stale"
+                { ProcessIdentity = syntheticProcessIdentityForSessionId "stale"
                   SessionId = SessionId "stale"
                   TerminalSessionId = None
                   WorktreePath = WorktreePath "C:/wt/a"
@@ -2085,7 +2073,7 @@ type RestartRebuildTests() =
 type TerminalOwnershipQueryTests() =
 
     let ownedStored terminalSessionId sessionId lastSeen =
-        { ProcessIdentity = identityForSession sessionId
+        { ProcessIdentity = syntheticProcessIdentityForSessionId sessionId
           SessionId = SessionId sessionId
           TerminalSessionId = Some terminalSessionId
           WorktreePath = WorktreePath "C:/wt/a"
@@ -2380,7 +2368,7 @@ type TerminalOwnershipQueryTests() =
             { ActivityEpoch = 17L
               OpenSessions =
                 [ { ProcessIdentity =
-                        identityForSession "provider-owned-session"
+                        syntheticProcessIdentityForSessionId "provider-owned-session"
                     TerminalSessionId = ownedTerminal
                     CopilotSessionId = SessionId "provider-owned-session"
                     Status = SessionLevelStatus.Idle } ]
@@ -2410,7 +2398,7 @@ type TerminalOwnershipQueryTests() =
               CopilotSessionId =
                 SessionId "provider-owned-session"
               ProcessIdentity =
-                identityForSession
+                syntheticProcessIdentityForSessionId
                     "provider-owned-session" }
 
         Assert.Multiple(fun () ->
@@ -2644,7 +2632,8 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(
                     working.OpenSessions,
                     Is.EqualTo(
-                        [ { ProcessIdentity = identityForSession "owned"
+                        [ { ProcessIdentity =
+                                syntheticProcessIdentityForSessionId "owned"
                             TerminalSessionId = terminalA
                             CopilotSessionId = SessionId "owned"
                             Status = SessionLevelStatus.Working } ]
@@ -2748,7 +2737,8 @@ type TerminalOwnershipQueryTests() =
                 Assert.That(
                     retained.OpenSessions,
                     Is.EqualTo(
-                        [ { ProcessIdentity = identityForSession "owned"
+                        [ { ProcessIdentity =
+                                syntheticProcessIdentityForSessionId "owned"
                             TerminalSessionId = terminalA
                             CopilotSessionId = SessionId "owned"
                             Status = SessionLevelStatus.Idle } ]
@@ -2786,7 +2776,7 @@ type TerminalOwnershipQueryTests() =
         let now = DateTimeOffset.UtcNow
         let worktree = Path.Combine(Path.GetTempPath(), "treemon-owned-resume-worktree")
         let retained updatedAt lastSeen sessionId =
-            { ProcessIdentity = identityForSession sessionId
+            { ProcessIdentity = syntheticProcessIdentityForSessionId sessionId
               SessionId = SessionId sessionId
               TerminalSessionId = Some terminalSessionId
               WorktreePath = WorktreePath(PathUtils.normalizePath worktree)
@@ -2857,7 +2847,7 @@ type TerminalOwnershipQueryTests() =
                     snapshot.OpenSessions,
                     Is.EqualTo(
                         [ { ProcessIdentity =
-                                identityForSession "surviving"
+                                syntheticProcessIdentityForSessionId "surviving"
                             TerminalSessionId = terminalSessionId
                             CopilotSessionId = SessionId "surviving"
                             Status = SessionLevelStatus.Idle } ]

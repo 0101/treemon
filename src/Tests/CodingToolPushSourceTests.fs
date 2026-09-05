@@ -20,16 +20,6 @@ let private footerMessage text t : UserFooterMessage =
       Text = text
       Timestamp = ts t }
 
-let private identity sid =
-    sid
-    |> Seq.fold (fun value character ->
-        (value * 31 + int character) % 1_000_000) 10_000
-    |> fun processId ->
-        ProcessIdentity.create
-            processId
-            (int64 processId * 1_000L + 1L)
-    |> Result.defaultWith invalidOp
-
 let private storedWithClocks
     (sid: string)
     (wt: string)
@@ -40,7 +30,7 @@ let private storedWithClocks
     (updatedAt: string)
     (lastSeen: string)
     : StoredInstance =
-    { ProcessIdentity = identity sid
+    { ProcessIdentity = TestUtils.syntheticProcessIdentityForSessionId sid
       SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath wt

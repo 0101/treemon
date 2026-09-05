@@ -21,18 +21,8 @@ let private makeWorktree path branch : WorktreeInfo =
 let private wtA = Server.PathUtils.normalizePath "C:/wt/a"
 let private wtB = Server.PathUtils.normalizePath "C:/wt/b"
 
-let private identity sid =
-    sid
-    |> Seq.fold (fun value character ->
-        (value * 31 + int character) % 1_000_000) 10_000
-    |> fun processId ->
-        ProcessIdentity.create
-            processId
-            (int64 processId * 1_000L + 1L)
-    |> Result.defaultWith invalidOp
-
 let private storedWt (sid: string) (wt: string) (status: SessionLevelStatus) (seen: DateTimeOffset) : StoredInstance =
-    { ProcessIdentity = identity sid
+    { ProcessIdentity = TestUtils.syntheticProcessIdentityForSessionId sid
       SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath wt
@@ -542,7 +532,8 @@ type SeedSessionInstancesTests() =
             let first = storedWt "shared" wtA SessionLevelStatus.Idle staleAt
             let second =
                 { storedWt "shared" wtA SessionLevelStatus.Idle currentAt with
-                    ProcessIdentity = identity "shared-second" }
+                    ProcessIdentity =
+                        TestUtils.syntheticProcessIdentityForSessionId "shared-second" }
 
             agent.Post(
                 SeedSessionInstances(

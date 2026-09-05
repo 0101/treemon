@@ -3,8 +3,6 @@ module Tests.AutoSyncTests
 open System
 open System.IO
 open System.Net
-open System.Security.Cryptography
-open System.Text
 open System.Threading.Tasks
 open NUnit.Framework
 open Shared
@@ -15,34 +13,20 @@ open Server.SchedulerState
 open Server.SessionActivity
 open Server.SessionActivityStore
 
-let private identityForSessionId (sessionId: string) =
-    let hash =
-        sessionId
-        |> Encoding.UTF8.GetBytes
-        |> SHA256.HashData
-
-    let processId =
-        BitConverter.ToInt32(hash, 0)
-        |> fun value -> value &&& Int32.MaxValue
-        |> max 1
-
-    let startTicks =
-        BitConverter.ToInt64(hash, 8)
-        |> fun value -> value &&& Int64.MaxValue
-        |> max 1L
-
-    ProcessIdentity.create processId startTicks
-    |> Result.defaultWith invalidOp
-
 let private typedSessionId value =
     SessionId.create value
     |> Result.defaultWith invalidOp
 
 let private idleTarget sessionId =
-    IdleSession(identityForSessionId sessionId, typedSessionId sessionId)
+    IdleSession(
+        TestUtils.collisionResistantProcessIdentityForSessionId sessionId,
+        typedSessionId sessionId
+    )
 
 let private registerBridgeSession path injectUrl sessionId =
-    let identity = identityForSessionId sessionId
+    let identity =
+        TestUtils.collisionResistantProcessIdentityForSessionId sessionId
+
     let processId, startTicks = ProcessIdentity.sortKey identity
     let suffix = $"{processId:x8}{startTicks:x16}"
     let capability = String('C', 43 - suffix.Length) + suffix
@@ -69,7 +53,8 @@ let private tempDirectory () =
     path
 
 let private storedSession sessionId worktreePath status updatedAt lastSeen =
-    { ProcessIdentity = identityForSessionId sessionId
+    { ProcessIdentity =
+        TestUtils.collisionResistantProcessIdentityForSessionId sessionId
       SessionId = SessionId sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath worktreePath
@@ -1584,7 +1569,7 @@ type AutoSyncDeliveryTests() =
             { WorktreePath = "/repo/wt"
               Target =
                 SessionBridge.SendTarget.ExactProcess(
-                    identityForSessionId "session-a"
+                    TestUtils.collisionResistantProcessIdentityForSessionId "session-a"
                 )
               Prompt = SessionBridge.Prompt.agentPrompt "Sync with upstream/main." }
 
@@ -1664,7 +1649,7 @@ type AutoSyncDeliveryTests() =
                         value.Target,
                         Is.EqualTo(
                             SessionBridge.SendTarget.ExactProcess(
-                                identityForSessionId "open-idle"
+                                TestUtils.collisionResistantProcessIdentityForSessionId "open-idle"
                             )
                         )
                     )

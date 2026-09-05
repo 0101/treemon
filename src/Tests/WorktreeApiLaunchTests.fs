@@ -43,16 +43,8 @@ let private startResult path id =
       TerminalId = id }
 
 let private liveSession now path terminalId sessionId : SessionActivityStore.StoredInstance =
-    let processId =
-        sessionId
-        |> Seq.fold (fun value character ->
-            (value * 31 + int character) % 1_000_000) 10_000
-
     { ProcessIdentity =
-        ProcessIdentity.create
-            processId
-            (int64 processId * 1_000L + 1L)
-        |> Result.defaultWith invalidOp
+        syntheticProcessIdentityForSessionId sessionId
       SessionId = SessionActivity.SessionId sessionId
       TerminalSessionId =
         terminalId

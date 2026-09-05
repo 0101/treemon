@@ -32,18 +32,9 @@ let private worktree path branch : GitWorktree.WorktreeInfo =
       Head = "abc123"
       Branch = Some branch }
 
-let private identity sessionId =
-    sessionId
-    |> Seq.fold (fun value character ->
-        (value * 31 + int character) % 1_000_000) 10_000
-    |> fun processId ->
-        ProcessIdentity.create
-            processId
-            (int64 processId * 1_000L + 1L)
-    |> Result.defaultWith invalidOp
-
 let private storedStatus sessionId path status skill lastUser seen : SessionActivityStore.StoredInstance =
-    { ProcessIdentity = identity sessionId
+    { ProcessIdentity =
+        TestUtils.syntheticProcessIdentityForSessionId sessionId
       SessionId = SessionActivity.SessionId sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath path

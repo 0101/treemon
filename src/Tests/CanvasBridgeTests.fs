@@ -26,6 +26,10 @@ let private uniqueSid prefix =
 // three-argument registration shape while assigning each synthetic physical process a unique key.
 let mutable private nextBridgeProcessId = 93000
 
+let private freshProcessIdentity () =
+    Interlocked.Increment(&nextBridgeProcessId)
+    |> syntheticProcessIdentityForProcessId
+
 let private registerExactSession identity path injectUrl sessionId =
     let processId = ProcessIdentity.processId identity
     let _, startTicks = ProcessIdentity.sortKey identity
@@ -48,10 +52,7 @@ let private registerExactSession identity path injectUrl sessionId =
     |> Result.defaultWith (fun failure -> invalidOp $"registration failed: {failure}")
 
 let private registerSessionWithIdentity path injectUrl sessionId =
-    let processId = Interlocked.Increment(&nextBridgeProcessId)
-    let identity =
-        ProcessIdentity.create processId (int64 processId * 1000L + 1L)
-        |> Result.defaultWith invalidOp
+    let identity = freshProcessIdentity ()
 
     registerExactSession identity path injectUrl sessionId
     |> ignore
@@ -588,10 +589,7 @@ type MultiSessionRegistryTests() =
     member _.``Re-registering one exact process updates its single slot``() =
         let path = uniquePath "multi-exact-upsert"
         let sid = uniqueSid "same-process"
-        let processId = Interlocked.Increment(&nextBridgeProcessId)
-        let identity =
-            ProcessIdentity.create processId (int64 processId * 1000L + 1L)
-            |> Result.defaultWith invalidOp
+        let identity = freshProcessIdentity ()
 
         registerExactSession identity path "http://localhost:1/inject" (Some sid)
         |> ignore
@@ -1044,10 +1042,7 @@ type ScannerFallbackAttributionTests() =
         let now = DateTime(2026, 9, 5, 5, 0, 0, DateTimeKind.Utc)
 
         let entry registeredAt sid : SessionEntry =
-            let processId = Interlocked.Increment(&nextBridgeProcessId)
-            let identity =
-                ProcessIdentity.create processId (int64 processId * 1000L + 1L)
-                |> Result.defaultWith invalidOp
+            let identity = freshProcessIdentity ()
 
             { ProcessIdentity = identity
               WorktreePath = "/w"

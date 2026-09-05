@@ -1874,16 +1874,8 @@ type ExpediteRefreshTests() =
 // LastSeen in the map, on every exact update.
 
 let private storedSeen (sid: string) (seen: DateTimeOffset) : StoredInstance =
-    let processId =
-        sid
-        |> Seq.fold (fun value character ->
-            (value * 31 + int character) % 1_000_000) 10_000
-
     { ProcessIdentity =
-        ProcessIdentity.create
-            processId
-            (int64 processId * 1_000L + 1L)
-        |> Result.defaultWith invalidOp
+        TestUtils.syntheticProcessIdentityForSessionId sid
       SessionId = SessionId sid
       TerminalSessionId = None
       WorktreePath = WorktreePath "C:/wt/a"

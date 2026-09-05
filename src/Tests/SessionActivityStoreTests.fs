@@ -87,20 +87,14 @@ VALUES ($processId, $processStartTicks, $eventId, $sessionId, $worktreePath,
 let private contextWorktree = Path.Combine(Path.GetTempPath(), "treemon-context-worktree")
 let private otherWorktree = Path.Combine(Path.GetTempPath(), "treemon-other-worktree")
 
-let private identityForSessionId (SessionId sessionId) =
-    let processId =
-        sessionId
-        |> Seq.fold (fun value character ->
-            (value * 31 + int character) % 1_000_000) 10_000
-
-    ProcessIdentity.create processId (int64 processId * 1_000L + 1L)
-    |> Result.defaultWith invalidOp
-
 let private storedOf sid wt (status: SessionStatus) updatedAt lastSeen : StoredInstance =
     let sessionId = SessionId sid
     let updated = ts updatedAt
 
-    { ProcessIdentity = identityForSessionId sessionId
+    { ProcessIdentity =
+        sessionId
+        |> SessionId.value
+        |> collisionResistantProcessIdentityForSessionId
       SessionId = sessionId
       TerminalSessionId = None
       WorktreePath = WorktreePath wt
@@ -129,7 +123,10 @@ let private withUsage
 let private eventOf eid sid kind status skill t : ActivityEventRow =
     let sessionId = SessionId sid
 
-    { ProcessIdentity = identityForSessionId sessionId
+    { ProcessIdentity =
+        sessionId
+        |> SessionId.value
+        |> collisionResistantProcessIdentityForSessionId
       EventId = EventId eid
       SessionId = sessionId
       WorktreePath = WorktreePath "C:/wt/a"
@@ -152,7 +149,10 @@ let private retainedBySession
         retained.SessionId = sessionId)
 
 let private exactFromRetained (stored: RetainedSession) =
-    { ProcessIdentity = identityForSessionId stored.SessionId
+    { ProcessIdentity =
+        stored.SessionId
+        |> SessionId.value
+        |> collisionResistantProcessIdentityForSessionId
       SessionId = stored.SessionId
       TerminalSessionId = None
       WorktreePath = stored.WorktreePath
@@ -208,7 +208,9 @@ type SessionActivityStore with
             terminalSessionId: TerminalSessionId option
         ) =
         store.RecordHeartbeat(
-            identityForSessionId sessionId,
+            sessionId
+            |> SessionId.value
+            |> collisionResistantProcessIdentityForSessionId,
             lastSeen,
             terminalSessionId
         )
