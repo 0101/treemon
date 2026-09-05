@@ -509,6 +509,13 @@ let internal knownHostIsStillLive config = function
     | None -> Ok false
     | Some host -> processIdentityMatches config host
 
+let internal validateMissingHostGone config lastHost =
+    match knownHostIsStillLive config lastHost with
+    | Ok false -> Ok()
+    | Ok true ->
+        Error "The TerminalHost discovery manifest disappeared while the exact recorded host is still running"
+    | Error error -> Error error
+
 let private launchAndDiscover config =
     asyncResult {
         do! startHostProcess config
@@ -523,11 +530,9 @@ let internal ensureHost config lastHost =
         | IncompatibleHost(_, error)
         | UnusableHost error -> return Error error
         | MissingHost ->
-            match knownHostIsStillLive config lastHost with
+            match validateMissingHostGone config lastHost with
             | Error error -> return Error error
-            | Ok true ->
-                return Error "The TerminalHost discovery manifest disappeared while the exact recorded host is still running"
-            | Ok false -> return! launchAndDiscover config
+            | Ok() -> return! launchAndDiscover config
     }
 
 let internal startTerminalOnHost (config: Config) (manifest: DiscoveryManifest) (path: string) =

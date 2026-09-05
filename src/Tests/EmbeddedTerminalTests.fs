@@ -407,6 +407,9 @@ type private FakeControlHost
         let manifest = createManifest ()
         File.WriteAllText(manifestPath, manifest.ToJsonString())
 
+    member _.RemoveManifest() =
+        File.Delete manifestPath
+
     member _.PublishManifestWithJsonField(fieldName: string, jsonValue: string) =
         let manifest = createManifest ()
         manifest[fieldName] <- JsonNode.Parse jsonValue
@@ -477,6 +480,9 @@ type private FakeControlHost
             Ok(lock gate (fun () -> currentExecutable))
         else
             Error "Fake TerminalHost identity is not live"
+
+    member _.SimulateProcessExit() =
+        lock gate (fun () -> online <- false)
 
     member _.PublishMalformedManifest() =
         File.WriteAllText(
@@ -2290,6 +2296,129 @@ type EmbeddedTerminalControlClientTests() =
                 Assert.That((requireOk closed).Tabs, Is.Empty)
                 Assert.That(host.CurrentTerminals, Is.Empty)
                 Assert.That(host.CloseRequestCount, Is.EqualTo(1)))
+        }
+
+    [<Test>]
+    member _.``missing manifest while the exact recorded host is live blocks start and cleanup with one error``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+
+            let manager =
+                EmbeddedTerminal.createWithConfig(
+                    replacementManagerConfig
+                        host
+                        noLaunch
+                        noTerminalCommand
+                )
+
+            let target = worktree host.Root "missing-live-host"
+            let other = worktree host.Root "missing-live-host-other"
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let terminalId = requireOk started |> _.TerminalId
+            host.RemoveManifest()
+
+            let! startResult =
+                EmbeddedTerminal.start manager other
+                |> Async.StartAsTask
+
+            let! closeResult =
+                closeManagedTerminal manager terminalId
+                |> Async.StartAsTask
+
+            let! cached =
+                EmbeddedTerminal.getCached manager
+                |> Async.StartAsTask
+
+            let expected =
+                "The TerminalHost discovery manifest disappeared while the exact recorded host is still running"
+
+            Assert.Multiple(fun () ->
+                Assert.That(requireError startResult, Is.EqualTo expected)
+                Assert.That(requireError closeResult, Is.EqualTo expected)
+                Assert.That(host.StartRequestCount, Is.EqualTo(1))
+                Assert.That(host.CloseRequestCount, Is.Zero)
+                Assert.That(cached.Tabs |> List.map _.Id, Is.EqualTo [ terminalId ])
+
+                match cached.Tabs |> List.exactlyOne |> _.Lifecycle with
+                | EmbeddedTerminalLifecycle.Interrupted error ->
+                    Assert.That(error, Is.EqualTo expected)
+                | lifecycle ->
+                    Assert.Fail(
+                        $"Expected interrupted terminal, got {lifecycle}"
+                    ))
+        }
+
+    [<TestCase(false)>]
+    [<TestCase(true)>]
+    member _.``unavailable host cleanup carries its classified reason into the remaining tabs``(removeManifest: bool) =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+
+            let manager =
+                EmbeddedTerminal.createWithConfig(
+                    replacementManagerConfig
+                        host
+                        noLaunch
+                        noTerminalCommand
+                )
+
+            let target = worktree host.Root "unavailable-host-target"
+            let sibling = worktree host.Root "unavailable-host-sibling"
+
+            let! targetStarted =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let! siblingStarted =
+                EmbeddedTerminal.start manager sibling
+                |> Async.StartAsTask
+
+            let targetId = requireOk targetStarted |> _.TerminalId
+            let siblingId = requireOk siblingStarted |> _.TerminalId
+
+            host.SimulateProcessExit()
+
+            if removeManifest then
+                host.RemoveManifest()
+
+            let! closed =
+                closeManagedTerminal manager targetId
+                |> Async.StartAsTask
+
+            let snapshot = requireOk closed
+            let remaining = snapshot.Tabs |> List.exactlyOne
+
+            Assert.Multiple(fun () ->
+                Assert.That(remaining.Id, Is.EqualTo siblingId)
+                Assert.That(host.CloseRequestCount, Is.Zero)
+
+                match remaining.Lifecycle with
+                | EmbeddedTerminalLifecycle.Interrupted reason when removeManifest ->
+                    Assert.That(
+                        reason,
+                        Is.EqualTo(
+                            "TerminalHost is not running; no live terminal remains to close."
+                        )
+                    )
+                | EmbeddedTerminalLifecycle.Interrupted reason ->
+                    Assert.That(
+                        reason,
+                        Does.Contain(
+                            "is no longer the exact live process"
+                        ).And.EndWith(
+                            ". Its terminals were interrupted."
+                        )
+                    )
+                | lifecycle ->
+                    Assert.Fail(
+                        $"Expected interrupted sibling terminal, got {lifecycle}"
+                    ))
         }
 
     [<Test>]

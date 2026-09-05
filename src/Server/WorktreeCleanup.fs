@@ -138,12 +138,11 @@ let private cleanupResult snapshot hostError sessionResult =
     | Some host, Error session -> Error $"{host}; {session}"
 
 let private safeWithoutHealthyHost config lastHost = function
-    | DeadHost _ -> Ok()
+    | DeadHost error -> Ok $"{error}. Its terminals were interrupted."
     | MissingHost ->
-        match knownHostIsStillLive config lastHost with
-        | Ok false -> Ok()
-        | Ok true -> Error "The TerminalHost manifest is missing while the exact recorded host is still running"
-        | Error error -> Error error
+        validateMissingHostGone config lastHost
+        |> Result.map (fun () ->
+            "TerminalHost is not running; no live terminal remains to close.")
     | IncompatibleHost(_, error)
     | UnusableHost error -> Error error
     | HealthyHost _ -> failwith "unreachable"
@@ -417,13 +416,7 @@ let private closeReserved
                         (FailedCleanup error)
 
                 return Error error
-            | Ok() ->
-                let reason =
-                    match discovery with
-                    | DeadHost error -> $"{error}. Its terminals were interrupted."
-                    | MissingHost -> "TerminalHost is not running; no live terminal remains to close."
-                    | _ -> failwith "unreachable"
-
+            | Ok reason ->
                 let prepared =
                     originPaths lease []
                     |> prepareSessionClose prepare
