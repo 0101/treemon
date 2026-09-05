@@ -106,14 +106,9 @@ type internal ReplacementRecovery =
       Failure: ReplacementFailure }
 
 type internal ReplacementOperations =
-    { ShutdownSession:
-        ReplacementShutdownTarget
-            -> Async<
-                Result<
-                    SessionBridge.ShutdownCompletion,
-                    SessionBridge.ShutdownFailure
-                 >
-             >
+    { ShutdownSessions:
+        ReplacementShutdownTarget list
+            -> Async<ReplacementShutdownAttempt list>
       StopHost:
         Config -> DiscoveryManifest -> Async<Result<unit, string>>
       LaunchHost: Config -> Async<HostLaunchOutcome>
@@ -183,14 +178,29 @@ let private launchHostAt config =
     }
 
 let internal defaultOperations
-    (isClosed: ProcessIdentity -> Async<Result<bool, string>>)
+    closureSnapshot
     =
-    { ShutdownSession =
-        fun target ->
-            SessionBridge.shutdownExact
-                isClosed
-                { WorktreePath = target.WorktreePath
-                  ProcessIdentity = target.ProcessIdentity }
+    { ShutdownSessions =
+        fun targets ->
+            async {
+                let bridgeTargets =
+                    targets
+                    |> List.map (fun target ->
+                        ({ WorktreePath = target.WorktreePath
+                           ProcessIdentity = target.ProcessIdentity }
+                         : SessionBridge.ShutdownTarget))
+
+                let! attempts =
+                    SessionBridge.shutdownExactBatch
+                        closureSnapshot
+                        bridgeTargets
+
+                return
+                    (targets, attempts)
+                    ||> List.map2 (fun target attempt ->
+                        { Target = target
+                          Outcome = attempt.Outcome })
+            }
       StopHost = shutdownAndWait
       LaunchHost = launchHostAt
       RecreateTerminal =
@@ -462,27 +472,6 @@ let private recordReplacementCapture
                         |> List.map _.ProcessIdentity }
             ))
 
-let private shutdownSessions
-    (operations: ReplacementOperations)
-    targets
-    =
-    async {
-        let! attempts =
-            targets
-            |> List.map (fun target ->
-                async {
-                    let! outcome =
-                        operations.ShutdownSession target
-
-                    return
-                        { Target = target
-                          Outcome = outcome }
-                })
-            |> Async.Parallel
-
-        return attempts |> Array.toList
-    }
-
 let private recreateTerminals
     (operations: ReplacementOperations)
     (config: Config)
@@ -693,7 +682,7 @@ let internal commitReplacementWithDiagnostics
             )
 
             let! shutdownAttempts =
-                shutdownSessions operations plan.ShutdownTargets
+                operations.ShutdownSessions plan.ShutdownTargets
 
             let failedShutdowns =
                 shutdownAttempts

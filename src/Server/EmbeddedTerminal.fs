@@ -503,11 +503,11 @@ let internal tryReplaceHostWithOperations
 let internal runReplacementCoordinator
     manager
     query
-    isClosed
+    closureSnapshot
     (cancellationToken: System.Threading.CancellationToken)
     =
     let operations =
-        TerminalHostReplacement.defaultOperations isClosed
+        TerminalHostReplacement.defaultOperations closureSnapshot
 
     TerminalHostReplacement.runCoordinator (fun ignoredStagedVersion ->
         tryReplaceHostIgnoringWith

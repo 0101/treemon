@@ -282,6 +282,79 @@ type ExactRegistrationTests() =
         )
 
     [<Test>]
+    member _.``Liveness lookup prunes exited and reused exact registrations once``() =
+        let path = uniquePath "terminal-registration-pruning"
+        let exited = nextIdentity ()
+        let original = nextIdentity ()
+        let reused =
+            ProcessIdentity.create
+                (ProcessIdentity.processId original)
+                (ProcessIdentity.processStartTimeUtcTicks original + 1L)
+            |> Result.defaultWith invalidOp
+
+        let states =
+            ConcurrentDictionary<int, ProcessIdentity option>()
+
+        let probes = ConcurrentDictionary<int, int>()
+
+        [ exited; original ]
+        |> List.iter (fun identity ->
+            states[ProcessIdentity.processId identity] <- Some identity)
+
+        let resolver =
+            ProcessIdentityResolver.create (fun processId ->
+                probes.AddOrUpdate(
+                    processId,
+                    1,
+                    fun _ count -> count + 1
+                )
+                |> ignore
+
+                match states.TryGetValue processId with
+                | true, current -> Ok current
+                | false, _ -> Ok None)
+
+        let register identity sessionId =
+            registrationRequest
+                identity
+                path
+                "http://127.0.0.1:1234/inject"
+                (Some sessionId)
+                None
+                (capabilityFor identity)
+            |> registerSessionWithDiagnostics ignore resolver
+            |> Result.defaultWith (fun failure ->
+                invalidOp $"registration failed: {failure}")
+            |> ignore
+
+        register exited "session-exited"
+        register original "session-reused"
+
+        states[ProcessIdentity.processId exited] <- None
+        states[ProcessIdentity.processId original] <- Some reused
+
+        Assert.That(sessionsForWorktree path, Is.Empty)
+
+        let probesAfterPrune =
+            [ exited; original ]
+            |> List.map (fun identity ->
+                let processId = ProcessIdentity.processId identity
+                processId, probes[processId])
+            |> Map.ofList
+
+        Assert.That(sessionsForWorktree path, Is.Empty)
+
+        [ exited; original ]
+        |> List.iter (fun identity ->
+            let processId = ProcessIdentity.processId identity
+
+            Assert.That(
+                probes[processId],
+                Is.EqualTo probesAfterPrune[processId],
+                "A later lookup must not retain or probe a terminal exact registration"
+            ))
+
+    [<Test>]
     member _.``One exact process cannot change durable identity or worktree on heartbeat``() =
         let identity = nextIdentity ()
         let path = uniquePath "identity-mismatch"
@@ -595,10 +668,14 @@ type ExactShutdownTests() =
         { WorktreePath = entry.WorktreePath
           ProcessIdentity = entry.ProcessIdentity }
 
-    let dependencies send isClosed probe now delay : ShutdownDependencies =
+    let dependencies send closureSnapshot probe now delay : ShutdownDependencies =
         { SendShutdown = fun _ _ -> async { return send }
-          IsClosed = isClosed
-          ProbeProcess = fun _ _ -> probe ()
+          ClosureSnapshot = closureSnapshot
+          ProbeProcess =
+            fun _ _ ->
+                async {
+                    return probe ()
+                }
           Delay = delay
           UtcNow = now }
 
@@ -614,9 +691,13 @@ type ExactShutdownTests() =
                         sent <- true
                         return ShutdownRequestOutcome.Accepted
                     }
-              IsClosed = fun _ -> async { return Ok false }
+              ClosureSnapshot =
+                fun () -> async { return Ok Set.empty }
               ProbeProcess =
-                fun _ _ -> Ok ExactProcessState.Running
+                fun _ _ ->
+                    async {
+                        return Ok ExactProcessState.Running
+                    }
               Delay = fun _ -> async { return () }
               UtcNow = fun () -> DateTime.UtcNow }
 
@@ -645,14 +726,18 @@ type ExactShutdownTests() =
         let staleRuntime =
             dependencies
                 ShutdownRequestOutcome.Accepted
-                (fun _ -> async { return Ok false })
+                (fun () -> async { return Ok Set.empty })
                 (fun () -> Ok ExactProcessState.Running)
                 (fun () -> entry.RegisteredAt + TimeSpan.FromSeconds 60.0)
                 (fun _ -> async { return () })
 
         let reusedRuntime =
             { staleRuntime with
-                ProbeProcess = fun _ _ -> Ok ExactProcessState.Reused
+                ProbeProcess =
+                    fun _ _ ->
+                        async {
+                            return Ok ExactProcessState.Reused
+                        }
                 UtcNow = fun () -> entry.RegisteredAt }
 
         Assert.Multiple(fun () ->
@@ -694,7 +779,7 @@ type ExactShutdownTests() =
             let runtime =
                 dependencies
                     outcome
-                    (fun _ -> async { return Ok false })
+                    (fun () -> async { return Ok Set.empty })
                     (fun () -> Ok ExactProcessState.Running)
                     (fun () -> entry.RegisteredAt)
                     (fun _ -> async { return () })
@@ -741,10 +826,13 @@ type ExactShutdownTests() =
         let runtime =
             dependencies
                 ShutdownRequestOutcome.Accepted
-                (fun identity ->
+                (fun () ->
                     async {
-                        Assert.That(identity, Is.EqualTo entry.ProcessIdentity)
-                        return Ok true
+                        return
+                            Ok(
+                                Set.singleton
+                                    entry.ProcessIdentity
+                            )
                     })
                 (fun () -> Ok ExactProcessState.Running)
                 (fun () -> entry.RegisteredAt)
@@ -808,10 +896,9 @@ type ExactShutdownTests() =
         let received = listener.GetContextAsync()
         let shutdown =
             shutdownExact
-                (fun closedIdentity ->
+                (fun () ->
                     async {
-                        Assert.That(closedIdentity, Is.EqualTo identity)
-                        return Ok true
+                        return Ok(Set.singleton identity)
                     })
                 (targetFor entry)
             |> Async.StartAsTask
@@ -849,7 +936,7 @@ type ExactShutdownTests() =
         let runtime =
             dependencies
                 ShutdownRequestOutcome.Accepted
-                (fun _ -> async { return Ok false })
+                (fun () -> async { return Ok Set.empty })
                 (fun () ->
                     probeCount <- probeCount + 1
                     if probeCount = 1 then
@@ -880,7 +967,7 @@ type ExactShutdownTests() =
         let runtime =
             dependencies
                 ShutdownRequestOutcome.Accepted
-                (fun _ -> async { return Ok false })
+                (fun () -> async { return Ok Set.empty })
                 (fun () -> Ok ExactProcessState.Running)
                 (fun () -> now)
                 (fun interval ->
@@ -917,6 +1004,228 @@ type ExactShutdownTests() =
                    LifecycleDiagnostics.ShutdownStage.TimedOut |]
             )
         )
+
+    [<Test>]
+    member _.``Bulk shutdown shares polling and bounds request and process operations``() =
+        let path = uniquePath "bulk-shutdown"
+        let entries =
+            [ 0..99 ]
+            |> List.map (fun index ->
+                let identity = nextIdentity ()
+
+                registrationRequest
+                    identity
+                    path
+                    "http://127.0.0.1:1/inject"
+                    (Some $"batch-session-{index}")
+                    None
+                    (capabilityFor identity)
+                |> registerSessionWithDiagnostics
+                    ignore
+                    (resolverFor identity)
+                |> Result.defaultWith (fun failure ->
+                    invalidOp $"registration failed: {failure}"))
+
+        let startedAt =
+            entries
+            |> List.maxBy _.RegisteredAt
+            |> _.RegisteredAt
+
+        let targets = entries |> List.map targetFor
+
+        let indexByIdentity =
+            entries
+            |> List.indexed
+            |> List.map (fun (index, entry) ->
+                entry.ProcessIdentity, index)
+            |> Map.ofList
+
+        let indexByCapability =
+            entries
+            |> List.indexed
+            |> List.map (fun (index, entry) ->
+                capabilityFor entry.ProcessIdentity, index)
+            |> Map.ofList
+
+        let closedProcesses =
+            entries
+            |> List.take 30
+            |> List.map _.ProcessIdentity
+            |> Set.ofList
+
+        let probeCounts =
+            ConcurrentDictionary<ProcessIdentity, int>()
+
+        let probeRelease =
+            TaskCompletionSource<unit>(
+                TaskCreationOptions.RunContinuationsAsynchronously
+            )
+
+        let requestRelease =
+            TaskCompletionSource<unit>(
+                TaskCreationOptions.RunContinuationsAsynchronously
+            )
+
+        let probeGate, requestGate, clockGate =
+            obj (), obj (), obj ()
+
+        // Mutable counters and clock expose the injected concurrency and timing boundaries.
+        let mutable activeProbes = 0
+        let mutable maxProbes = 0
+        let mutable activeRequests = 0
+        let mutable maxRequests = 0
+        let mutable closureSnapshots = 0
+        let mutable delays = 0
+        let mutable now = startedAt
+
+        let track
+            (gate: obj)
+            (release: TaskCompletionSource<unit>)
+            (increment: unit -> int)
+            (decrement: unit -> unit)
+            (updateMaximum: int -> unit)
+            result
+            =
+            async {
+                let active =
+                    lock gate (fun () ->
+                        let current = increment ()
+                        updateMaximum current
+                        current)
+
+                if active = maxConcurrentShutdownOperations then
+                    release.TrySetResult() |> ignore
+
+                do!
+                    release.Task
+                        .WaitAsync(TimeSpan.FromSeconds 5.0)
+                    |> Async.AwaitTask
+
+                let completed = result ()
+
+                lock gate decrement
+                return completed
+            }
+
+        let runtime: ShutdownDependencies =
+            { SendShutdown =
+                fun _ capability ->
+                    track
+                        requestGate
+                        requestRelease
+                        (fun () ->
+                            activeRequests <- activeRequests + 1
+                            activeRequests)
+                        (fun () ->
+                            activeRequests <- activeRequests - 1)
+                        (fun active ->
+                            maxRequests <- max maxRequests active)
+                        (fun () ->
+                            match indexByCapability[capability] with
+                            | index when index < 80 ->
+                                ShutdownRequestOutcome.Accepted
+                            | index when index < 90 ->
+                                ShutdownRequestOutcome.Rejected
+                            | _ ->
+                                ShutdownRequestOutcome.TransportFailed)
+              ClosureSnapshot =
+                fun () ->
+                    async {
+                        lock clockGate (fun () ->
+                            closureSnapshots <- closureSnapshots + 1)
+
+                        return Ok closedProcesses
+                    }
+              ProbeProcess =
+                fun _ identity ->
+                    track
+                        probeGate
+                        probeRelease
+                        (fun () ->
+                            activeProbes <- activeProbes + 1
+                            activeProbes)
+                        (fun () ->
+                            activeProbes <- activeProbes - 1)
+                        (fun active ->
+                            maxProbes <- max maxProbes active)
+                        (fun () ->
+                            let count =
+                                probeCounts.AddOrUpdate(
+                                    identity,
+                                    1,
+                                    fun _ current -> current + 1
+                                )
+
+                            let index = indexByIdentity[identity]
+
+                            if
+                                count > 1
+                                && index >= 30
+                                && index < 60
+                            then
+                                Ok ExactProcessState.Exited
+                            else
+                                Ok ExactProcessState.Running)
+              Delay =
+                fun interval ->
+                    async {
+                        Assert.That(
+                            interval,
+                            Is.EqualTo(
+                                TimeSpan.FromMilliseconds 100.0
+                            )
+                        )
+
+                        lock clockGate (fun () ->
+                            delays <- delays + 1
+                            now <- startedAt + TimeSpan.FromSeconds 30.0)
+                    }
+              UtcNow =
+                fun () ->
+                    lock clockGate (fun () -> now) }
+
+        let attempts =
+            shutdownExactBatchWithDiagnostics
+                ignore
+                runtime
+                { Timeout = TimeSpan.FromSeconds 30.0
+                  PollInterval = TimeSpan.FromMilliseconds 100.0 }
+                targets
+            |> Async.RunSynchronously
+
+        let expected =
+            [ 0..99 ]
+            |> List.map (function
+                | index when index < 30 ->
+                    Ok ShutdownCompletion.ExactClosure
+                | index when index < 60 ->
+                    Ok ShutdownCompletion.ProcessExit
+                | index when index < 80 ->
+                    Error ShutdownFailure.TimedOut
+                | index when index < 90 ->
+                    Error ShutdownFailure.Rejected
+                | _ ->
+                    Error ShutdownFailure.RequestFailed)
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                attempts |> List.map _.Outcome,
+                Is.EqualTo expected
+            )
+            Assert.That(closureSnapshots, Is.EqualTo 2)
+            Assert.That(delays, Is.EqualTo 1)
+            Assert.That(
+                maxProbes,
+                Is.EqualTo maxConcurrentShutdownOperations
+            )
+            Assert.That(
+                maxRequests,
+                Is.EqualTo maxConcurrentShutdownOperations
+            )
+            Assert.That(
+                now,
+                Is.EqualTo(startedAt + TimeSpan.FromSeconds 30.0)
+            ))
 
 [<TestFixture>]
 [<Category("Unit")>]

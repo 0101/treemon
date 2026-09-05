@@ -2,6 +2,7 @@ module Server.SessionBridge
 
 open System
 open System.Collections.Concurrent
+open System.Collections.Generic
 open System.IO
 open System.Net.Http
 open System.Text
@@ -143,13 +144,17 @@ type ShutdownWaitOptions =
     { Timeout: TimeSpan
       PollInterval: TimeSpan }
 
+type ShutdownAttempt =
+    { Target: ShutdownTarget
+      Outcome: Result<ShutdownCompletion, ShutdownFailure> }
+
 type internal ShutdownDependencies =
     { SendShutdown: string -> string -> Async<ShutdownRequestOutcome>
-      IsClosed: ProcessIdentity -> Async<Result<bool, string>>
+      ClosureSnapshot: unit -> Async<Result<Set<ProcessIdentity>, string>>
       ProbeProcess:
         ProcessIdentityResolver
             -> ProcessIdentity
-            -> Result<ExactProcessState, string>
+            -> Async<Result<ExactProcessState, string>>
       Delay: TimeSpan -> Async<unit>
       UtcNow: unit -> DateTime }
 
@@ -176,6 +181,7 @@ let private maxQueueSize = 10
 let private queueTtl = TimeSpan.FromMinutes 5.0
 let private livenessTtl = TimeSpan.FromSeconds 60.0
 let private shutdownRequestTimeout = TimeSpan.FromSeconds 5.0
+let internal maxConcurrentShutdownOperations = 8
 
 let private defaultShutdownWaitOptions =
     { Timeout = TimeSpan.FromSeconds 30.0
@@ -348,6 +354,43 @@ let private probeExactProcess resolver identity =
         | Some resolved when resolved = identity -> ExactProcessState.Running
         | Some _ -> ExactProcessState.Reused)
 
+let private removeObservedRegistration
+    identity
+    (registration: RegisteredSession)
+    =
+    KeyValuePair(identity, registration)
+    |> sessionRegistry.TryRemove
+    |> ignore
+
+let private probeObservedRegistration
+    (observed: KeyValuePair<ProcessIdentity, RegisteredSession>)
+    =
+    let registration = observed.Value
+
+    let state =
+        probeExactProcess
+            registration.ProcessIdentityResolver
+            observed.Key
+
+    match state with
+    | Ok ExactProcessState.Exited
+    | Ok ExactProcessState.Reused ->
+        removeObservedRegistration observed.Key registration
+    | _ -> ()
+
+    state
+
+let private isRunningInWorktree
+    worktreeKey
+    (observed: KeyValuePair<ProcessIdentity, RegisteredSession>)
+    =
+    String.Equals(
+        observed.Value.Entry.WorktreePath,
+        worktreeKey,
+        StringComparison.OrdinalIgnoreCase
+    )
+    && probeObservedRegistration observed = Ok ExactProcessState.Running
+
 let private sameBridgeSource
     (request: RegistrationRequest)
     (registration: RegisteredSession)
@@ -387,18 +430,11 @@ let private recordRegistration
     )
 
     let liveRegistrations =
-        sessionRegistry.Values
-        |> Seq.filter (fun registration ->
-            String.Equals(
-                registration.Entry.WorktreePath,
-                entry.WorktreePath,
-                StringComparison.OrdinalIgnoreCase
-            )
-            && now - registration.Entry.RegisteredAt < livenessTtl
-            && probeExactProcess
-                registration.ProcessIdentityResolver
-                registration.Entry.ProcessIdentity
-               = Ok ExactProcessState.Running)
+        sessionRegistry
+        |> Seq.filter (fun observed ->
+            now - observed.Value.Entry.RegisteredAt < livenessTtl
+            && isRunningInWorktree entry.WorktreePath observed)
+        |> Seq.map _.Value
         |> Seq.toList
 
     let sessionIds =
@@ -526,18 +562,9 @@ let registerPoll (worktreePath: string) =
 let sessionsForWorktree (worktreePath: string) : SessionEntry list =
     let worktreeKey = normalizePath worktreePath
 
-    sessionRegistry.Values
-    |> Seq.filter (fun registration ->
-        String.Equals(
-            registration.Entry.WorktreePath,
-            worktreeKey,
-            StringComparison.OrdinalIgnoreCase
-        )
-        && probeExactProcess
-            registration.ProcessIdentityResolver
-            registration.Entry.ProcessIdentity
-           = Ok ExactProcessState.Running)
-    |> Seq.map _.Entry
+    sessionRegistry
+    |> Seq.filter (isRunningInWorktree worktreeKey)
+    |> Seq.map _.Value.Entry
     |> Seq.toList
 
 let internal isSessionAlive now (entry: SessionEntry) =
@@ -691,10 +718,14 @@ let private sendShutdownRequest
             return ShutdownRequestOutcome.TransportFailed
     }
 
-let private defaultShutdownDependencies isClosed =
+let private defaultShutdownDependencies closureSnapshot =
     { SendShutdown = sendShutdownRequest
-      IsClosed = isClosed
-      ProbeProcess = fun resolver identity -> probeExactProcess resolver identity
+      ClosureSnapshot = closureSnapshot
+      ProbeProcess =
+        fun resolver identity ->
+            async {
+                return probeExactProcess resolver identity
+            }
       Delay =
         fun interval ->
             let milliseconds =
@@ -727,41 +758,100 @@ let private shutdownDiagnostic target registration stage =
             |> Option.bind _.Entry.TerminalSessionId
           Stage = stage }
 
-let internal shutdownExactWithDiagnostics
+type private PendingShutdown =
+    { Index: int
+      Target: ShutdownTarget
+      Registration: RegisteredSession }
+
+type private ShutdownPreparation =
+    | Completed of int * ShutdownAttempt
+    | Accepted of PendingShutdown
+
+type private ShutdownProbe =
+    | ProbeCompleted of int * ShutdownAttempt
+    | ProbePending of PendingShutdown
+
+let private mapAsyncBounded operation items =
+    let rec run completed remaining =
+        async {
+            match remaining with
+            | [] ->
+                return
+                    completed
+                    |> List.rev
+                    |> List.collect Array.toList
+            | _ ->
+                let batchSize =
+                    min
+                        maxConcurrentShutdownOperations
+                        (List.length remaining)
+
+                let batch, rest =
+                    remaining |> List.splitAt batchSize
+
+                let! results =
+                    batch
+                    |> List.map operation
+                    |> Async.Parallel
+
+                return! run (results :: completed) rest
+        }
+
+    run [] items
+
+let private attempt target outcome =
+    { Target = target
+      Outcome = outcome }
+
+let private recordShutdown
+    (diagnostics: LifecycleDiagnostics.Sink)
+    target
+    registration
+    stage
+    =
+    diagnostics (
+        shutdownDiagnostic
+            target
+            registration
+            stage
+    )
+
+let private prepareShutdown
     (diagnostics: LifecycleDiagnostics.Sink)
     (dependencies: ShutdownDependencies)
-    (options: ShutdownWaitOptions)
-    (target: ShutdownTarget)
-    : Async<Result<ShutdownCompletion, ShutdownFailure>> =
+    (index, target)
+    =
     async {
-        diagnostics (
-            shutdownDiagnostic
-                target
-                None
-                LifecycleDiagnostics.ShutdownStage.Requested
-        )
+        let complete outcome =
+            Completed(index, attempt target outcome)
+
+        recordShutdown
+            diagnostics
+            target
+            None
+            LifecycleDiagnostics.ShutdownStage.Requested
 
         match shutdownRegistration target with
         | None ->
-            diagnostics (
-                shutdownDiagnostic
-                    target
-                    None
-                    (LifecycleDiagnostics.ShutdownStage.Rejected
-                        LifecycleDiagnostics.ShutdownRejection.MissingRegistration)
-            )
+            recordShutdown
+                diagnostics
+                target
+                None
+                (LifecycleDiagnostics.ShutdownStage.Rejected
+                    LifecycleDiagnostics.ShutdownRejection.MissingRegistration)
 
-            return Error ShutdownFailure.MissingRegistration
-        | Some registration ->
-            let record stage =
-                diagnostics (
-                    shutdownDiagnostic
-                        target
-                        (Some registration)
-                        stage
+            return
+                complete (
+                    Error ShutdownFailure.MissingRegistration
                 )
+        | Some registration ->
+            let record =
+                recordShutdown
+                    diagnostics
+                    target
+                    (Some registration)
 
-            match
+            match!
                 dependencies.ProbeProcess
                     registration.ProcessIdentityResolver
                     target.ProcessIdentity
@@ -772,17 +862,31 @@ let internal shutdownExactWithDiagnostics
                         LifecycleDiagnostics.ShutdownRejection.VerificationFailed
                 )
 
-                return Error ShutdownFailure.VerificationFailed
+                return
+                    complete (
+                        Error ShutdownFailure.VerificationFailed
+                    )
             | Ok ExactProcessState.Exited ->
+                removeObservedRegistration
+                    target.ProcessIdentity
+                    registration
+
                 record LifecycleDiagnostics.ShutdownStage.CompletedProcessExit
-                return Ok ShutdownCompletion.ProcessExit
+                return complete (Ok ShutdownCompletion.ProcessExit)
             | Ok ExactProcessState.Reused ->
+                removeObservedRegistration
+                    target.ProcessIdentity
+                    registration
+
                 record (
                     LifecycleDiagnostics.ShutdownStage.Rejected
                         LifecycleDiagnostics.ShutdownRejection.StaleRegistration
                 )
 
-                return Error ShutdownFailure.StaleRegistration
+                return
+                    complete (
+                        Error ShutdownFailure.StaleRegistration
+                    )
             | Ok ExactProcessState.Running
                 when not (
                     isSessionAlive
@@ -794,7 +898,10 @@ let internal shutdownExactWithDiagnostics
                         LifecycleDiagnostics.ShutdownRejection.StaleRegistration
                 )
 
-                return Error ShutdownFailure.StaleRegistration
+                return
+                    complete (
+                        Error ShutdownFailure.StaleRegistration
+                    )
             | Ok ExactProcessState.Running ->
                 match!
                     dependencies.SendShutdown
@@ -807,86 +914,292 @@ let internal shutdownExactWithDiagnostics
                             LifecycleDiagnostics.ShutdownRejection.InvalidCapability
                     )
 
-                    return Error ShutdownFailure.InvalidCapability
+                    return
+                        complete (
+                            Error ShutdownFailure.InvalidCapability
+                        )
                 | ShutdownRequestOutcome.NonLoopbackRequest ->
                     record (
                         LifecycleDiagnostics.ShutdownStage.Rejected
                             LifecycleDiagnostics.ShutdownRejection.NonLoopbackRequest
                     )
 
-                    return Error ShutdownFailure.NonLoopbackRequest
+                    return
+                        complete (
+                            Error ShutdownFailure.NonLoopbackRequest
+                        )
                 | ShutdownRequestOutcome.Rejected ->
                     record (
                         LifecycleDiagnostics.ShutdownStage.Rejected
                             LifecycleDiagnostics.ShutdownRejection.Rejected
                     )
 
-                    return Error ShutdownFailure.Rejected
+                    return
+                        complete (
+                            Error ShutdownFailure.Rejected
+                        )
                 | ShutdownRequestOutcome.TransportFailed ->
                     record (
                         LifecycleDiagnostics.ShutdownStage.Rejected
                             LifecycleDiagnostics.ShutdownRejection.RequestFailed
                     )
 
-                    return Error ShutdownFailure.RequestFailed
+                    return
+                        complete (
+                            Error ShutdownFailure.RequestFailed
+                        )
                 | ShutdownRequestOutcome.Accepted ->
                     record LifecycleDiagnostics.ShutdownStage.RequestAccepted
 
-                    let deadline =
-                        dependencies.UtcNow () + options.Timeout
+                    return
+                        Accepted
+                            { Index = index
+                              Target = target
+                              Registration = registration }
+    }
 
-                    let rec waitForCompletion () =
-                        async {
-                            match! dependencies.IsClosed target.ProcessIdentity with
-                            | Error _ ->
-                                record (
-                                    LifecycleDiagnostics.ShutdownStage.Rejected
-                                        LifecycleDiagnostics.ShutdownRejection.VerificationFailed
-                                )
+let private completeClosed
+    (diagnostics: LifecycleDiagnostics.Sink)
+    (pending: PendingShutdown)
+    =
+    recordShutdown
+        diagnostics
+        pending.Target
+        (Some pending.Registration)
+        LifecycleDiagnostics.ShutdownStage.CompletedExactClosure
 
-                                return Error ShutdownFailure.VerificationFailed
-                            | Ok true ->
-                                record LifecycleDiagnostics.ShutdownStage.CompletedExactClosure
-                                return Ok ShutdownCompletion.ExactClosure
-                            | Ok false ->
-                                match
-                                    dependencies.ProbeProcess
-                                        registration.ProcessIdentityResolver
-                                        target.ProcessIdentity
-                                with
-                                | Error _ ->
-                                    record (
-                                        LifecycleDiagnostics.ShutdownStage.Rejected
-                                            LifecycleDiagnostics.ShutdownRejection.VerificationFailed
-                                    )
+    pending.Index,
+    attempt
+        pending.Target
+        (Ok ShutdownCompletion.ExactClosure)
 
-                                    return Error ShutdownFailure.VerificationFailed
-                                | Ok ExactProcessState.Exited
-                                | Ok ExactProcessState.Reused ->
-                                    record LifecycleDiagnostics.ShutdownStage.CompletedProcessExit
-                                    return Ok ShutdownCompletion.ProcessExit
-                                | Ok ExactProcessState.Running
-                                    when dependencies.UtcNow () >= deadline ->
-                                    record LifecycleDiagnostics.ShutdownStage.TimedOut
-                                    return Error ShutdownFailure.TimedOut
-                                | Ok ExactProcessState.Running ->
-                                    do! dependencies.Delay options.PollInterval
-                                    return! waitForCompletion ()
-                        }
+let private completeVerificationFailure
+    (diagnostics: LifecycleDiagnostics.Sink)
+    (pending: PendingShutdown)
+    =
+    recordShutdown
+        diagnostics
+        pending.Target
+        (Some pending.Registration)
+        (LifecycleDiagnostics.ShutdownStage.Rejected
+            LifecycleDiagnostics.ShutdownRejection.VerificationFailed)
 
-                    return! waitForCompletion ()
+    pending.Index,
+    attempt
+        pending.Target
+        (Error ShutdownFailure.VerificationFailed)
+
+let private probePending
+    (diagnostics: LifecycleDiagnostics.Sink)
+    (dependencies: ShutdownDependencies)
+    deadline
+    now
+    (pending: PendingShutdown)
+    =
+    async {
+        let complete stage outcome =
+            recordShutdown
+                diagnostics
+                pending.Target
+                (Some pending.Registration)
+                stage
+
+            ProbeCompleted(
+                pending.Index,
+                attempt pending.Target outcome
+            )
+
+        match!
+            dependencies.ProbeProcess
+                pending.Registration.ProcessIdentityResolver
+                pending.Target.ProcessIdentity
+        with
+        | Error _ ->
+            return
+                complete
+                    (LifecycleDiagnostics.ShutdownStage.Rejected
+                        LifecycleDiagnostics.ShutdownRejection.VerificationFailed)
+                    (Error ShutdownFailure.VerificationFailed)
+        | Ok ExactProcessState.Exited
+        | Ok ExactProcessState.Reused ->
+            removeObservedRegistration
+                pending.Target.ProcessIdentity
+                pending.Registration
+
+            return
+                complete
+                    LifecycleDiagnostics.ShutdownStage.CompletedProcessExit
+                    (Ok ShutdownCompletion.ProcessExit)
+        | Ok ExactProcessState.Running when now >= deadline ->
+            return
+                complete
+                    LifecycleDiagnostics.ShutdownStage.TimedOut
+                    (Error ShutdownFailure.TimedOut)
+        | Ok ExactProcessState.Running ->
+            return ProbePending pending
+    }
+
+let rec private waitForShutdowns
+    (diagnostics: LifecycleDiagnostics.Sink)
+    (dependencies: ShutdownDependencies)
+    (options: ShutdownWaitOptions)
+    deadline
+    pending
+    completed
+    =
+    async {
+        match pending with
+        | [] -> return completed
+        | _ ->
+            match! dependencies.ClosureSnapshot () with
+            | Error _ ->
+                return
+                    pending
+                    |> List.map (completeVerificationFailure diagnostics)
+                    |> fun failures -> failures @ completed
+            | Ok closedProcesses ->
+                let closed, unresolved =
+                    pending
+                    |> List.partition (fun current ->
+                        closedProcesses.Contains current.Target.ProcessIdentity)
+
+                let closedResults =
+                    closed
+                    |> List.map (completeClosed diagnostics)
+
+                let now = dependencies.UtcNow ()
+
+                let! probes =
+                    unresolved
+                    |> mapAsyncBounded (
+                        probePending
+                            diagnostics
+                            dependencies
+                            deadline
+                            now
+                    )
+
+                let probeResults =
+                    probes
+                    |> List.choose (function
+                        | ProbeCompleted(index, completed) ->
+                            Some(index, completed)
+                        | ProbePending _ -> None)
+
+                let stillPending =
+                    probes
+                    |> List.choose (function
+                        | ProbeCompleted _ -> None
+                        | ProbePending current -> Some current)
+
+                let nextCompleted =
+                    probeResults @ closedResults @ completed
+
+                match stillPending with
+                | [] -> return nextCompleted
+                | _ ->
+                    do! dependencies.Delay options.PollInterval
+
+                    return!
+                        waitForShutdowns
+                            diagnostics
+                            dependencies
+                            options
+                            deadline
+                            stillPending
+                            nextCompleted
+    }
+
+let internal shutdownExactBatchWithDiagnostics
+    (diagnostics: LifecycleDiagnostics.Sink)
+    (dependencies: ShutdownDependencies)
+    (options: ShutdownWaitOptions)
+    (targets: ShutdownTarget list)
+    : Async<ShutdownAttempt list> =
+    async {
+        let! preparations =
+            targets
+            |> List.indexed
+            |> mapAsyncBounded (
+                prepareShutdown
+                    diagnostics
+                    dependencies
+            )
+
+        let completed =
+            preparations
+            |> List.choose (function
+                | Completed(index, completed) ->
+                    Some(index, completed)
+                | Accepted _ -> None)
+
+        let pending =
+            preparations
+            |> List.choose (function
+                | Completed _ -> None
+                | Accepted current -> Some current)
+
+        let! outcomes =
+            match pending with
+            | [] -> async.Return completed
+            | _ ->
+                let deadline =
+                    dependencies.UtcNow () + options.Timeout
+
+                waitForShutdowns
+                    diagnostics
+                    dependencies
+                    options
+                    deadline
+                    pending
+                    completed
+
+        return
+            outcomes
+            |> List.sortBy fst
+            |> List.map snd
+    }
+
+let internal shutdownExactWithDiagnostics
+    (diagnostics: LifecycleDiagnostics.Sink)
+    (dependencies: ShutdownDependencies)
+    (options: ShutdownWaitOptions)
+    (target: ShutdownTarget)
+    : Async<Result<ShutdownCompletion, ShutdownFailure>> =
+    async {
+        let! attempts =
+            shutdownExactBatchWithDiagnostics
+                diagnostics
+                dependencies
+                options
+                [ target ]
+
+        return
+            attempts
+            |> List.exactlyOne
+            |> fun completed -> completed.Outcome
     }
 
 let internal shutdownExactWith =
     shutdownExactWithDiagnostics LifecycleDiagnostics.write
 
+let internal shutdownExactBatchUsing diagnostics closureSnapshot targets =
+    shutdownExactBatchWithDiagnostics
+        diagnostics
+        (defaultShutdownDependencies closureSnapshot)
+        defaultShutdownWaitOptions
+        targets
+
+let shutdownExactBatch =
+    shutdownExactBatchUsing LifecycleDiagnostics.write
+
 /// Request routine SDK shutdown for one exact registered process. Endpoint acceptance only starts
 /// the wait; success requires the activity owner to report exact closure or the shared process
 /// resolver to prove that exact PID/start identity exited.
-let internal shutdownExactUsing diagnostics isClosed target =
+let internal shutdownExactUsing diagnostics closureSnapshot target =
     shutdownExactWithDiagnostics
         diagnostics
-        (defaultShutdownDependencies isClosed)
+        (defaultShutdownDependencies closureSnapshot)
         defaultShutdownWaitOptions
         target
 

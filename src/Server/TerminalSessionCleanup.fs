@@ -22,33 +22,30 @@ let internal terminalSessionCleanupWithDiagnostics
             originPaths |> Map.keys |> Set.ofSeq |> query
 
         let beforeHostClose (activeTerminalIds: Set<TerminalSessionId>) =
-            let requestShutdown (session: OwnedSessionState) =
-                async {
-                    match originPaths |> Map.tryFind session.TerminalSessionId with
-                    | None -> ()
-                    | Some worktreePath ->
-                        let! _ =
-                            SessionBridge.shutdownExactUsing
-                                diagnostics
-                                (fun identity ->
-                                    async {
-                                        return service.IsProcessClosed identity
-                                    })
-                                { WorktreePath = WorktreePath.value worktreePath
-                                  ProcessIdentity = session.ProcessIdentity }
+            async {
+                let targets =
+                    captured
+                    |> Result.defaultValue []
+                    |> List.filter (fun session ->
+                        activeTerminalIds.Contains session.TerminalSessionId)
+                    |> List.choose (fun session ->
+                        originPaths
+                        |> Map.tryFind session.TerminalSessionId
+                        |> Option.map (fun worktreePath ->
+                            ({ WorktreePath =
+                                WorktreePath.value worktreePath
+                               ProcessIdentity =
+                                session.ProcessIdentity }
+                             : SessionBridge.ShutdownTarget)))
 
-                        ()
-                }
+                let! _ =
+                    SessionBridge.shutdownExactBatchUsing
+                        diagnostics
+                        service.ClosedProcessSnapshot
+                        targets
 
-            captured
-            |> Result.defaultValue []
-            |> List.filter (fun session ->
-                activeTerminalIds.Contains session.TerminalSessionId)
-            |> List.map (fun session ->
-                requestShutdown session
-                |> Async.Catch)
-            |> Async.Parallel
-            |> Async.Ignore
+                return ()
+            }
 
         let afterHostClose (closedTerminalIds: Set<TerminalSessionId>) =
             if Set.isEmpty closedTerminalIds then

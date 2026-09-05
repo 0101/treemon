@@ -546,6 +546,11 @@ type ExactInstanceIsolationTests() =
                 Is.EqualTo ClosureAcknowledge.Closed
             )
 
+            let closedProcesses =
+                service.ClosedProcessSnapshot()
+                |> Async.RunSynchronously
+                |> Result.defaultWith invalidOp
+
             let closed = store.InstanceByIdentity first |> Option.get
             let secondBefore = store.InstanceByIdentity second |> Option.get
 
@@ -564,6 +569,8 @@ type ExactInstanceIsolationTests() =
             let secondAfter = store.InstanceByIdentity second |> Option.get
 
             Assert.Multiple(fun () ->
+                Assert.That(closedProcesses, Does.Contain first)
+                Assert.That(closedProcesses, Does.Not.Contain second)
                 Assert.That(closedAfter.ClosedAt, Is.EqualTo closed.ClosedAt)
                 Assert.That(closedAfter.LastSeen, Is.EqualTo closed.LastSeen)
                 Assert.That(secondAfter, Is.EqualTo secondBefore))

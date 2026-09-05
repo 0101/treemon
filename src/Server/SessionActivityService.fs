@@ -98,6 +98,7 @@ type private ServiceMsg =
         StoredInstance list *
         AsyncReplyChannel<unit>
     | Snapshot of AsyncReplyChannel<Map<ProcessIdentity, StoredInstance>>
+    | ClosedProcessSnapshot of AsyncReplyChannel<Set<ProcessIdentity>>
     | QueryTerminalActivity of
         DateTimeOffset *
         Set<TerminalSessionId> *
@@ -380,6 +381,15 @@ type SessionActivityService internal
                                     PendingReconciliation = pending }
                     | Snapshot reply ->
                         reply.Reply state.Live
+                        return! loop state
+                    | ClosedProcessSnapshot reply ->
+                        state.Live
+                        |> Map.values
+                        |> Seq.filter _.ClosedAt.IsSome
+                        |> Seq.map _.ProcessIdentity
+                        |> Set.ofSeq
+                        |> reply.Reply
+
                         return! loop state
                     | QueryTerminalActivity(
                         now,
@@ -716,16 +726,24 @@ type SessionActivityService internal
                 ClosureAcknowledge.Failed
                     "exact session closure failed"
 
-    member internal _.IsProcessClosed(identity: ProcessIdentity) =
-        if isDisposed () then
-            Error "session activity service is stopped"
-        else
-            try
-                store.InstanceByIdentity identity
-                |> Option.exists _.ClosedAt.IsSome
-                |> Ok
-            with _ ->
-                Error "exact session closure state could not be read"
+    member internal _.ClosedProcessSnapshot() =
+        async {
+            if isDisposed () then
+                return Error "session activity service is stopped"
+            else
+                try
+                    return
+                        mailbox.PostAndReply(
+                            (fun reply ->
+                                ClosedProcessSnapshot reply),
+                            timeout = acknowledgedWriteTimeout
+                        )
+                        |> Ok
+                with _ ->
+                    return
+                        Error
+                            "exact session closure state could not be read"
+        }
 
     member internal _.StartAt(now: DateTimeOffset) =
         if isDisposed () then

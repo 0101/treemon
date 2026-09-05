@@ -588,9 +588,24 @@ let private replacementManagerConfig
                 host.ResolveExactProcessExecutable(pid, startTicks)
         SendTerminalCommand = sendTerminalCommand }
 
+let private shutdownSessionsUsing shutdown targets =
+    async {
+        let! outcomes =
+            targets
+            |> List.map shutdown
+            |> Async.Parallel
+
+        return
+            (targets, outcomes |> Array.toList)
+            ||> List.map2 (fun target outcome ->
+                ({ Target = target
+                   Outcome = outcome }
+                 : TerminalHostReplacement.ReplacementShutdownAttempt))
+    }
+
 let private defaultReplacementOperations =
     TerminalHostReplacement.defaultOperations
-        (fun _ -> async { return Ok false })
+        (fun () -> async { return Ok Set.empty })
 
 let private exactIdentity processId startTicks =
     ProcessIdentity.create processId startTicks
@@ -2496,14 +2511,13 @@ type EmbeddedTerminalReplacementTests() =
 
             let events = ConcurrentQueue<string>()
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun target ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun target ->
                             async {
                                 events.Enqueue(
                                     $"session-stop:{ProcessIdentity.processId target.ProcessIdentity}"
@@ -2860,9 +2874,7 @@ type EmbeddedTerminalReplacementTests() =
                     TaskCreationOptions.RunContinuationsAsynchronously
                 )
 
-            let operations =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let operations = defaultReplacementOperations
 
             let commitCompleted =
                 TaskCompletionSource<TerminalHostReplacement.ReplacementOutcome>(
@@ -3337,10 +3349,10 @@ type EmbeddedTerminalReplacementTests() =
                 )
 
             let operations =
-                { TerminalHostReplacement.defaultOperations
-                      (fun _ -> async { return Ok false }) with
-                    ShutdownSession =
-                        fun _ ->
+                { defaultReplacementOperations with
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun _ ->
                             async {
                                 return
                                     Ok
@@ -3478,14 +3490,13 @@ type EmbeddedTerminalReplacementTests() =
             let diagnostics =
                 ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun exactTarget ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun exactTarget ->
                             async {
                                 let processId =
                                     ProcessIdentity.processId
@@ -3667,9 +3678,7 @@ type EmbeddedTerminalReplacementTests() =
 
             let stagedLaunches = ConcurrentQueue<unit>()
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
@@ -3800,14 +3809,13 @@ type EmbeddedTerminalReplacementTests() =
                     )
                 )
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun _ ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun _ ->
                             async {
                                 return
                                     Ok
@@ -3953,9 +3961,7 @@ type EmbeddedTerminalReplacementTests() =
             let attempted =
                 ConcurrentQueue<TerminalHostReplacement.ReplacementTerminal>()
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
@@ -4120,14 +4126,13 @@ type EmbeddedTerminalReplacementTests() =
 
             let deliveries = ConcurrentQueue<string>()
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun _ ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun _ ->
                             async {
                                 return
                                     Ok
@@ -4294,14 +4299,13 @@ type EmbeddedTerminalReplacementTests() =
             let diagnostics =
                 ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun target ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun target ->
                             async {
                                 return
                                     if
@@ -4519,14 +4523,13 @@ type EmbeddedTerminalReplacementTests() =
             let deliveries = ConcurrentQueue<string>()
             let launches = ConcurrentQueue<unit>()
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun _ ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun _ ->
                             async {
                                 return
                                     Ok
@@ -4656,14 +4659,13 @@ type EmbeddedTerminalReplacementTests() =
                     )
                 )
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun _ ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun _ ->
                             async {
                                 return
                                     Ok
@@ -4790,14 +4792,13 @@ type EmbeddedTerminalReplacementTests() =
                     )
                 )
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun _ ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun _ ->
                             async {
                                 return
                                     Ok
@@ -4941,9 +4942,7 @@ type EmbeddedTerminalReplacementTests() =
                     )
                 )
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
@@ -5107,14 +5106,13 @@ type EmbeddedTerminalReplacementTests() =
                     )
                 )
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun _ ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun _ ->
                             async {
                                 return
                                     Ok
@@ -5249,14 +5247,13 @@ type EmbeddedTerminalReplacementTests() =
                     )
                 )
 
-            let defaults =
-                TerminalHostReplacement.defaultOperations
-                    (fun _ -> async { return Ok false })
+            let defaults = defaultReplacementOperations
 
             let operations =
                 { defaults with
-                    ShutdownSession =
-                        fun _ ->
+                    ShutdownSessions =
+                        shutdownSessionsUsing
+                        <| fun _ ->
                             async {
                                 return
                                     Ok

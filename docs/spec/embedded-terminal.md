@@ -514,6 +514,10 @@ shutdown waiting, and survivor verification. The loopback endpoint acknowledges 
 request before invoking
 `session.rpc.shutdown({ type: "routine" })`; the server then waits for exact closure or process exit
 and distinguishes unavailable registration, rejection, and timeout without logging the capability.
+Observed exited or PID-reused registrations are removed conditionally against the exact value that
+was probed, so a concurrent heartbeat cannot be deleted. Bulk shutdown bounds request and process
+probe concurrency, then waits through one 100-millisecond batch loop backed by one in-memory activity
+closure snapshot per interval and one shared 30-second deadline.
 The live `session.shutdown` event stops reporting heartbeats and closes that exact process instance.
 
 Replacement snapshots terminal presentation, every exact shutdown target, and the single selected
