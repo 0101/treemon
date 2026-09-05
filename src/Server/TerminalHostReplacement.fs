@@ -353,12 +353,6 @@ let private recoveryRequired capture progress failure =
           Progress = progress
           Failure = failure }
 
-let private diagnosticHostIdentity (manifest: DiscoveryManifest) =
-    ProcessIdentity.create
-        manifest.Pid
-        manifest.ProcessStartTimeUtcTicks
-    |> Result.toOption
-
 let private diagnosticFailureKind =
     function
     | ReplacementFailure.GracefulShutdownFailed _ ->
@@ -743,7 +737,7 @@ let internal commitReplacementWithDiagnostics
                             shutdownAttempts)
             else
                 let oldHostIdentity =
-                    diagnosticHostIdentity connection
+                    tryProcessIdentity connection
 
                 diagnostics (
                     LifecycleDiagnostics.Diagnostic.ReplacementTransition(
@@ -817,7 +811,7 @@ let internal commitReplacementWithDiagnostics
                         diagnostics (
                             LifecycleDiagnostics.Diagnostic.ReplacementTransition(
                                 LifecycleDiagnostics.ReplacementStage.StagedHostRunning(
-                                    diagnosticHostIdentity replacement
+                                    tryProcessIdentity replacement
                                 )
                             )
                         )
@@ -906,18 +900,6 @@ let internal commitReplacementWithDiagnostics
 let internal commitReplacementWith =
     commitReplacementWithDiagnostics
         LifecycleDiagnostics.write
-
-let private unavailableClosureQuery _ =
-    async {
-        return Error "Exact closure state is unavailable"
-    }
-
-let internal commitReplacement config plan query =
-    commitReplacementWith
-        (defaultOperations unavailableClosureQuery)
-        config
-        plan
-        query
 
 let internal tryReplaceHostIgnoring
     ignoredStagedVersion

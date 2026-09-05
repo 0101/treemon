@@ -438,8 +438,11 @@ authenticated control and attachment requests; `TerminalHostReplacement` coordin
 replacement attempt; `TerminalHostRecovery` resolves failed attempts back to one reported host
 generation; and `TerminalSessionActivity` derives the exact owned-session replacement policy from
 raw activity facts. `Server.EmbeddedTerminal` retains the mailbox, cleanup reservation,
-authoritative snapshot reconciliation, and public start/get surface. `WorktreeCleanup` owns
-user-authorized close policy:
+authoritative snapshot reconciliation, and public start/get surface. `TerminalHostRecovery`
+collapses its detailed result into a mailbox directive to apply the recovered
+registry, interrupt while retaining a known host, or interrupt with no known host; the mailbox
+executes that directive without interpreting recovery state combinations.
+`WorktreeCleanup` owns user-authorized close policy:
 it acquires the canonical-path reservation, queries and gracefully stops exact sessions, performs
 host I/O outside the mailbox, applies the authoritative registry transition, records exact closure,
 and only then invokes delete/archive mutation. A `finally` release prevents failed or cancelled

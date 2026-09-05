@@ -36,6 +36,12 @@ let internal hostIdentityMatches left right =
     left.Pid = right.Pid
     && left.ProcessStartTimeUtcTicks = right.ProcessStartTimeUtcTicks
 
+let internal tryProcessIdentity (manifest: DiscoveryManifest) =
+    SessionActivity.ProcessIdentity.create
+        manifest.Pid
+        manifest.ProcessStartTimeUtcTicks
+    |> Result.toOption
+
 let internal validBoundedText maximum (value: string) =
     not (String.IsNullOrWhiteSpace value)
     && value.Length <= maximum

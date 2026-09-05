@@ -57,7 +57,9 @@ type internal ReplacementRecoveryResult =
 type internal ReplacementResolution =
     | KeepState of ReplacementOutcome
     | ApplyRegistry of DiscoveryManifest * RegistrySnapshot * ReplacementOutcome
-    | ApplyRecovery of ReplacementRecovery * ReplacementRecoveryResult
+    | ApplyRecoveredRegistry of DiscoveryManifest * RegistrySnapshot * ReplacementOutcome
+    | InterruptWithHost of DiscoveryManifest * string * ReplacementOutcome
+    | InterruptWithoutHost of string * ReplacementOutcome
 
 let private emptyRegistry =
     { Revision = 0L
@@ -106,6 +108,37 @@ let private selectedSessionsNotAttempted
               Outcome =
                 RecoverySelectedSessionOutcome.ResumeNotAttempted
                     reason }))
+
+let private deliverResumeAndSelect
+    (operations: ReplacementOperations)
+    (config: Config)
+    (terminal: ReplacementTerminal)
+    (current: TerminalRecord)
+    (resume: ReplacementResumeCommand)
+    =
+    async {
+        let! delivery =
+            operations.DeliverCommand
+                config
+                current
+                resume.Command
+
+        let outcome =
+            match delivery with
+            | Ok() ->
+                RecoverySelectedSessionOutcome.ResumeDelivered
+            | Error error ->
+                RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed
+                    error
+
+        return
+            { OriginalTerminalSessionId =
+                terminal.TerminalSessionId
+              CurrentTerminalSessionId =
+                Some current.SessionId
+              CopilotSessionId = resume.CopilotSessionId
+              Outcome = outcome }
+    }
 
 let private rejectUnavailable
     (recovery: ReplacementRecovery)
@@ -324,28 +357,13 @@ let private recoverSelectedOnExistingOldHost
                                 (selected :: accumulated)
                                 remaining
                     | Some current ->
-                        let! delivery =
-                            operations.DeliverCommand
+                        let! selected =
+                            deliverResumeAndSelect
+                                operations
                                 config
+                                terminal
                                 current
-                                resume.Command
-
-                        let outcome =
-                            match delivery with
-                            | Ok() ->
-                                RecoverySelectedSessionOutcome.ResumeDelivered
-                            | Error error ->
-                                RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed
-                                    error
-
-                        let selected =
-                            { OriginalTerminalSessionId =
-                                terminal.TerminalSessionId
-                              CurrentTerminalSessionId =
-                                Some current.SessionId
-                              CopilotSessionId =
-                                resume.CopilotSessionId
-                              Outcome = outcome }
+                                resume
 
                         return!
                             deliver
@@ -608,28 +626,13 @@ let private restoreTerminalsOnOldHost
                     | None ->
                         return! restore accumulated remaining
                     | Some resume ->
-                        let! delivery =
-                            operations.DeliverCommand
+                        let! selected =
+                            deliverResumeAndSelect
+                                operations
                                 config
+                                terminal
                                 recreated
-                                resume.Command
-
-                        let outcome =
-                            match delivery with
-                            | Ok() ->
-                                RecoverySelectedSessionOutcome.ResumeDelivered
-                            | Error error ->
-                                RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed
-                                    error
-
-                        let selected =
-                            { OriginalTerminalSessionId =
-                                terminal.TerminalSessionId
-                              CurrentTerminalSessionId =
-                                Some recreated.SessionId
-                              CopilotSessionId =
-                                resume.CopilotSessionId
-                              Outcome = outcome }
+                                resume
 
                         return!
                             restore
@@ -1161,6 +1164,43 @@ let internal recoveryFailureMessage recovery result =
     | RecoveryStatus.Rejected recoveryError ->
         $"{originalFailure}; recovery was incomplete: {recoveryError}"
 
+let private resolutionForRecovery recovery result =
+    let error =
+        recoveryFailureMessage
+            recovery
+            result
+
+    let outcome =
+        ReplacementOutcome.Failed(
+            recovery.Capture.StagedVersion,
+            error
+        )
+
+    let message = $"TerminalHost replacement failed: {error}"
+
+    match result.HostState, result.TerminalRegistry with
+    | RecoveryHostState.Running(_, manifest),
+      RecoveryTerminalRegistry.Exact registry ->
+        ReplacementResolution.ApplyRecoveredRegistry(
+            manifest,
+            registry,
+            outcome
+        )
+    | RecoveryHostState.Running(_, manifest),
+      RecoveryTerminalRegistry.Unavailable _
+    | RecoveryHostState.Unresolved(_, Some manifest), _ ->
+        ReplacementResolution.InterruptWithHost(
+            manifest,
+            message,
+            outcome
+        )
+    | RecoveryHostState.Stopped, _
+    | RecoveryHostState.Unresolved(_, None), _ ->
+        ReplacementResolution.InterruptWithoutHost(
+            message,
+            outcome
+        )
+
 let private diagnosticHostGeneration =
     function
     | RecoveryHostGeneration.Old ->
@@ -1170,12 +1210,6 @@ let private diagnosticHostGeneration =
     | RecoveryHostGeneration.Unknown ->
         LifecycleDiagnostics.HostGeneration.Unknown
 
-let private diagnosticHostIdentity (manifest: DiscoveryManifest) =
-    ProcessIdentity.create
-        manifest.Pid
-        manifest.ProcessStartTimeUtcTicks
-    |> Result.toOption
-
 let internal diagnosticSummary
     (result: ReplacementRecoveryResult)
     =
@@ -1184,14 +1218,14 @@ let internal diagnosticSummary
         | RecoveryHostState.Running(generation, manifest) ->
             LifecycleDiagnostics.RecoveryHostOutcome.Running(
                 diagnosticHostGeneration generation,
-                diagnosticHostIdentity manifest
+                tryProcessIdentity manifest
             )
         | RecoveryHostState.Stopped ->
             LifecycleDiagnostics.RecoveryHostOutcome.Stopped
         | RecoveryHostState.Unresolved(generation, manifest) ->
             LifecycleDiagnostics.RecoveryHostOutcome.Unresolved(
                 diagnosticHostGeneration generation,
-                manifest |> Option.bind diagnosticHostIdentity
+                manifest |> Option.bind tryProcessIdentity
             )
 
     let registry =
@@ -1264,6 +1298,30 @@ let internal diagnosticSummary
 
     diagnostic
 
+let internal recoverWithDiagnostics
+    (diagnostics: LifecycleDiagnostics.Sink)
+    operations
+    config
+    recovery
+    =
+    async {
+        diagnostics (
+            LifecycleDiagnostics.Diagnostic.ReplacementTransition
+                LifecycleDiagnostics.ReplacementStage.RecoveryStarted
+        )
+
+        let! result =
+            recoverWith operations config recovery
+
+        diagnostics (
+            result
+            |> diagnosticSummary
+            |> LifecycleDiagnostics.Diagnostic.RecoveryCompleted
+        )
+
+        return result
+    }
+
 let internal resolveWithDiagnostics
     (diagnostics: LifecycleDiagnostics.Sink)
     operations
@@ -1286,25 +1344,17 @@ let internal resolveWithDiagnostics
                     outcome
                 )
         | ReplacementCommit.RecoveryRequired recovery ->
-            diagnostics (
-                LifecycleDiagnostics.Diagnostic.ReplacementTransition
-                    LifecycleDiagnostics.ReplacementStage.RecoveryStarted
-            )
-
             let! recoveryResult =
-                recoverWith operations config recovery
-
-            diagnostics (
-                recoveryResult
-                |> diagnosticSummary
-                |> LifecycleDiagnostics.Diagnostic.RecoveryCompleted
-            )
+                recoverWithDiagnostics
+                    diagnostics
+                    operations
+                    config
+                    recovery
 
             return
-                ReplacementResolution.ApplyRecovery(
-                    recovery,
+                resolutionForRecovery
+                    recovery
                     recoveryResult
-                )
     }
 
 let internal resolveWith =

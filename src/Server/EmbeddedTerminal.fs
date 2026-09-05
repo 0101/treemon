@@ -296,35 +296,24 @@ let private applyReplacementResolution (state: ManagerState) = function
             manifest
             registry,
         outcome
-    | ReplacementResolution.ApplyRecovery(recovery, result) ->
-        let error =
-            TerminalHostRecovery.recoveryFailureMessage
-                recovery
-                result
-
-        let outcome =
-            ReplacementOutcome.Failed(
-                recovery.Capture.StagedVersion,
-                error
-            )
-
-        let message = $"TerminalHost replacement failed: {error}"
-
-        match result.HostState, result.TerminalRegistry with
-        | RecoveryHostState.Running(_, manifest),
-          RecoveryTerminalRegistry.Exact registry ->
-            applyRegistry state manifest registry, outcome
-        | RecoveryHostState.Running(_, manifest),
-          RecoveryTerminalRegistry.Unavailable _
-        | RecoveryHostState.Unresolved(_, Some manifest), _ ->
-            { withHostFailure message state with
-                LastHost = Some manifest },
-            outcome
-        | RecoveryHostState.Stopped, _
-        | RecoveryHostState.Unresolved(_, None), _ ->
-            { withHostFailure message state with
-                LastHost = None },
-            outcome
+    | ReplacementResolution.ApplyRecoveredRegistry(
+        manifest,
+        registry,
+        outcome
+      ) ->
+        applyRegistry state manifest registry, outcome
+    | ReplacementResolution.InterruptWithHost(
+        manifest,
+        message,
+        outcome
+      ) ->
+        { withHostFailure message state with
+            LastHost = Some manifest },
+        outcome
+    | ReplacementResolution.InterruptWithoutHost(message, outcome) ->
+        { withHostFailure message state with
+            LastHost = None },
+        outcome
 
 let private replacementInProgressError = "TerminalHost replacement is in progress; try again when it completes."
 let private cleanupInProgressError = "Terminal cleanup is in progress for this worktree; try again when it completes."

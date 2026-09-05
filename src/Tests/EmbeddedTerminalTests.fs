@@ -657,34 +657,29 @@ let private runReplacementRecoveryWithDiagnostics
                 query
                 operations
 
-        let! resolution =
-            TerminalHostRecovery.resolveWithDiagnostics
+        let recovery =
+            requireReplacementRecovery commit
+
+        let! result =
+            TerminalHostRecovery.recoverWithDiagnostics
                 diagnostics
                 operations
                 config
-                commit
+                recovery
             |> Async.StartAsTask
 
-        match resolution with
-        | TerminalHostRecovery.ReplacementResolution.ApplyRecovery(
-            recovery,
-            result
-          ) ->
-            let error =
-                TerminalHostRecovery.recoveryFailureMessage
-                    recovery
-                    result
+        let error =
+            TerminalHostRecovery.recoveryFailureMessage
+                recovery
+                result
 
-            return
-                recovery,
-                result,
-                TerminalHostReplacement.ReplacementOutcome.Failed(
-                    recovery.Capture.StagedVersion,
-                    error
-                )
-        | other ->
-            Assert.Fail($"Expected applied replacement recovery, got {other}")
-            return Unchecked.defaultof<_>
+        return
+            recovery,
+            result,
+            TerminalHostReplacement.ReplacementOutcome.Failed(
+                recovery.Capture.StagedVersion,
+                error
+            )
     }
 
 let private runReplacementRecovery =
@@ -2841,6 +2836,10 @@ type EmbeddedTerminalReplacementTests() =
                     TaskCreationOptions.RunContinuationsAsynchronously
                 )
 
+            let operations =
+                TerminalHostReplacement.defaultOperations
+                    (fun _ -> async { return Ok false })
+
             let commitCompleted =
                 TaskCompletionSource<TerminalHostReplacement.ReplacementOutcome>(
                     TaskCreationOptions.RunContinuationsAsynchronously
@@ -2854,7 +2853,8 @@ type EmbeddedTerminalReplacementTests() =
                         do! releaseCommit.Task |> Async.AwaitTask
 
                         let! commit =
-                            TerminalHostReplacement.commitReplacement
+                            TerminalHostReplacement.commitReplacementWith
+                                operations
                                 config
                                 plan
                                 activityQuery
