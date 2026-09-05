@@ -11,6 +11,12 @@ open Server.TerminalHostRecovery
 [<RequireQualifiedAccess>]
 type private ManagerPhase = Steady | Replacing
 
+[<RequireQualifiedAccess>]
+type private ReconciliationMode =
+    | RefreshOnly
+    | RebindAfterHostChange
+    | PreserveDuringCleanup
+
 type private ManagerState =
     { LastSnapshot: EmbeddedTerminalSnapshot
       LastHost: DiscoveryManifest option
@@ -68,7 +74,13 @@ let private tabForRecord (terminal: TerminalHostClient.TerminalRecord) =
       ReportedActivity = None
       Lifecycle = EmbeddedTerminalLifecycle.Running terminal.AttachmentEndpoint }
 
-let private reconcileSnapshot resetTabs preserveMissing previousHost currentHost (records: TerminalHostClient.TerminalRecord list) (snapshot: EmbeddedTerminalSnapshot) =
+let private reconcileSnapshot mode previousHost currentHost (records: TerminalHostClient.TerminalRecord list) (snapshot: EmbeddedTerminalSnapshot) =
+    let resetTabs, preserveMissing =
+        match mode with
+        | ReconciliationMode.RefreshOnly -> false, false
+        | ReconciliationMode.RebindAfterHostChange -> true, false
+        | ReconciliationMode.PreserveDuringCleanup -> false, true
+
     let resetTabs =
         resetTabs
         || (previousHost |> Option.exists (fun previous -> not (hostIdentityMatches previous currentHost)))
@@ -98,13 +110,14 @@ let private reconcileSnapshot resetTabs preserveMissing previousHost currentHost
                    not (Set.contains (EmbeddedTerminalId terminal.SessionId) previousIds))
                |> List.map tabForRecord) }
 
-let private applyRegistryWith rebindTerminals preserveMissing (state: ManagerState) (manifest: DiscoveryManifest) (registry: RegistrySnapshot) =
+let private applyRegistryWith mode (state: ManagerState) (manifest: DiscoveryManifest) (registry: RegistrySnapshot) =
     { state with
         LastSnapshot =
-            reconcileSnapshot rebindTerminals preserveMissing state.LastHost manifest registry.Terminals state.LastSnapshot
+            reconcileSnapshot mode state.LastHost manifest registry.Terminals state.LastSnapshot
         LastHost = Some manifest }
 
-let private applyRegistry = applyRegistryWith false false
+let private applyRegistry =
+    applyRegistryWith ReconciliationMode.RefreshOnly
 
 let private withHostFailure error (state: ManagerState) =
     { state with LastSnapshot = interruptSnapshot error state.LastSnapshot }
@@ -188,7 +201,11 @@ let private applyCleanupRemoval removal (state: ManagerState) =
 
 let private applyCleanupUpdate (state: ManagerState) = function
     | ReconcileCleanup(connection, registry, removal) ->
-        applyRegistryWith false true (applyCleanupRemoval removal state) connection registry
+        applyRegistryWith
+            ReconciliationMode.PreserveDuringCleanup
+            (applyCleanupRemoval removal state)
+            connection
+            registry
     | UnverifiedCleanup(connection, registry, closedTerminalIds, error) ->
         MutationUnverified(registry, error)
         |> mutationFailure (removeTerminalIds closedTerminalIds state) connection
@@ -269,24 +286,31 @@ let private startTerminal config (state: ManagerState) worktreePath command =
                                 return! fail current error
     }
 
-let private applyReplacementResolution (state: ManagerState) resolution =
-    let outcome =
-        TerminalHostRecovery.resolutionOutcome resolution
-
-    match resolution with
-    | ReplacementResolution.KeepState _ ->
+let private applyReplacementResolution (state: ManagerState) = function
+    | ReplacementResolution.KeepState outcome ->
         state, outcome
-    | ReplacementResolution.ApplyRegistry(manifest, registry, _) ->
-        applyRegistryWith true false state manifest registry, outcome
-    | ReplacementResolution.ApplyRecovery(_, recovery) ->
-        let message =
-            match outcome with
-            | ReplacementOutcome.Failed(_, error) ->
-                $"TerminalHost replacement failed: {error}"
-            | _ ->
-                "TerminalHost replacement recovery did not produce a failed outcome"
+    | ReplacementResolution.ApplyRegistry(manifest, registry, outcome) ->
+        applyRegistryWith
+            ReconciliationMode.RebindAfterHostChange
+            state
+            manifest
+            registry,
+        outcome
+    | ReplacementResolution.ApplyRecovery(recovery, result) ->
+        let error =
+            TerminalHostRecovery.recoveryFailureMessage
+                recovery
+                result
 
-        match recovery.HostState, recovery.TerminalRegistry with
+        let outcome =
+            ReplacementOutcome.Failed(
+                recovery.Capture.StagedVersion,
+                error
+            )
+
+        let message = $"TerminalHost replacement failed: {error}"
+
+        match result.HostState, result.TerminalRegistry with
         | RecoveryHostState.Running(_, manifest),
           RecoveryTerminalRegistry.Exact registry ->
             applyRegistry state manifest registry, outcome
@@ -469,25 +493,6 @@ let private tryReplaceHostIgnoringWith
 
     TerminalHostReplacement.tryReplaceHostIgnoring ignoredStagedVersion beforeRecheck query config commit
 
-let private unavailableClosureQuery _ =
-    async {
-        return Error "Exact closure state is unavailable"
-    }
-
-let private tryReplaceHostIgnoring
-    ignoredStagedVersion
-    beforeRecheck
-    query
-    manager
-    =
-    tryReplaceHostIgnoringWith
-        (TerminalHostReplacement.defaultOperations
-            unavailableClosureQuery)
-        ignoredStagedVersion
-        beforeRecheck
-        query
-        manager
-
 let internal tryReplaceHostWithOperations
     beforeRecheck
     query
@@ -500,12 +505,6 @@ let internal tryReplaceHostWithOperations
         beforeRecheck
         query
         manager
-
-let internal tryReplaceHostWith beforeRecheck query manager =
-    tryReplaceHostIgnoring None beforeRecheck query manager
-
-let internal tryReplaceHost query manager =
-    tryReplaceHostWith (fun () -> async.Return()) query manager
 
 let internal runReplacementCoordinator
     manager

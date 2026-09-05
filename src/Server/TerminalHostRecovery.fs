@@ -1151,21 +1151,15 @@ let internal recoverWith
                 reason
         )
 
-let internal recoveryOutcome recovery result =
+let internal recoveryFailureMessage recovery result =
     let originalFailure =
         replacementFailureMessage recovery.Failure
 
-    let error =
-        match result.Status with
-        | RecoveryStatus.Recovered ->
-            $"{originalFailure}; recovery restored one authoritative TerminalHost state"
-        | RecoveryStatus.Rejected recoveryError ->
-            $"{originalFailure}; recovery was incomplete: {recoveryError}"
-
-    ReplacementOutcome.Failed(
-        recovery.Capture.StagedVersion,
-        error
-    )
+    match result.Status with
+    | RecoveryStatus.Recovered ->
+        $"{originalFailure}; recovery restored one authoritative TerminalHost state"
+    | RecoveryStatus.Rejected recoveryError ->
+        $"{originalFailure}; recovery was incomplete: {recoveryError}"
 
 let private diagnosticHostGeneration =
     function
@@ -1315,10 +1309,3 @@ let internal resolveWithDiagnostics
 
 let internal resolveWith =
     resolveWithDiagnostics LifecycleDiagnostics.write
-
-let internal resolutionOutcome = function
-    | ReplacementResolution.KeepState outcome
-    | ReplacementResolution.ApplyRegistry(_, _, outcome) ->
-        outcome
-    | ReplacementResolution.ApplyRecovery(recovery, result) ->
-        recoveryOutcome recovery result

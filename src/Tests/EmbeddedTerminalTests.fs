@@ -580,6 +580,10 @@ let private replacementManagerConfig
                 host.ResolveExactProcessExecutable(pid, startTicks)
         SendTerminalCommand = sendTerminalCommand }
 
+let private defaultReplacementOperations =
+    TerminalHostReplacement.defaultOperations
+        (fun _ -> async { return Ok false })
+
 let private exactIdentity processId startTicks =
     ProcessIdentity.create processId startTicks
     |> Result.defaultWith invalidOp
@@ -666,10 +670,18 @@ let private runReplacementRecoveryWithDiagnostics
             recovery,
             result
           ) ->
+            let error =
+                TerminalHostRecovery.recoveryFailureMessage
+                    recovery
+                    result
+
             return
                 recovery,
                 result,
-                TerminalHostRecovery.resolutionOutcome resolution
+                TerminalHostReplacement.ReplacementOutcome.Failed(
+                    recovery.Capture.StagedVersion,
+                    error
+                )
         | other ->
             Assert.Fail($"Expected applied replacement recovery, got {other}")
             return Unchecked.defaultof<_>
@@ -2629,8 +2641,10 @@ type EmbeddedTerminalReplacementTests() =
                     TerminalHostReplacement.ReplacementSessionPlan.WaitingForIdle
 
             let! outcome =
-                EmbeddedTerminal.tryReplaceHost
+                EmbeddedTerminal.tryReplaceHostWithOperations
+                    (fun () -> async.Return())
                     query
+                    defaultReplacementOperations
                     manager
                 |> Async.StartAsTask
 
@@ -2690,9 +2704,10 @@ type EmbeddedTerminalReplacementTests() =
                 }
 
             let! outcome =
-                EmbeddedTerminal.tryReplaceHostWith
+                EmbeddedTerminal.tryReplaceHostWithOperations
                     beforeRecheck
                     query
+                    defaultReplacementOperations
                     manager
                 |> Async.StartAsTask
 
@@ -2760,9 +2775,10 @@ type EmbeddedTerminalReplacementTests() =
                 )
 
             let! outcome =
-                EmbeddedTerminal.tryReplaceHostWith
+                EmbeddedTerminal.tryReplaceHostWithOperations
                     (fun () -> async.Return())
                     query
+                    defaultReplacementOperations
                     manager
                 |> Async.StartAsTask
 
@@ -2974,7 +2990,11 @@ type EmbeddedTerminalReplacementTests() =
                 )
 
             let replacement =
-                EmbeddedTerminal.tryReplaceHost query manager
+                EmbeddedTerminal.tryReplaceHostWithOperations
+                    (fun () -> async.Return())
+                    query
+                    defaultReplacementOperations
+                    manager
                 |> Async.StartAsTask
 
             do!
@@ -3190,7 +3210,11 @@ type EmbeddedTerminalReplacementTests() =
                     terminals
 
             let! outcome =
-                EmbeddedTerminal.tryReplaceHost query manager
+                EmbeddedTerminal.tryReplaceHostWithOperations
+                    (fun () -> async.Return())
+                    query
+                    defaultReplacementOperations
+                    manager
                 |> Async.StartAsTask
 
             Assert.Multiple(fun () ->
@@ -5339,7 +5363,11 @@ type EmbeddedTerminalReplacementTests() =
                 )
 
             let! outcome =
-                EmbeddedTerminal.tryReplaceHost query manager
+                EmbeddedTerminal.tryReplaceHostWithOperations
+                    (fun () -> async.Return())
+                    query
+                    defaultReplacementOperations
+                    manager
                 |> Async.StartAsTask
 
             let failure =
@@ -5404,7 +5432,11 @@ type EmbeddedTerminalReplacementTests() =
                 )
 
             let! outcome =
-                EmbeddedTerminal.tryReplaceHost query manager
+                EmbeddedTerminal.tryReplaceHostWithOperations
+                    (fun () -> async.Return())
+                    query
+                    defaultReplacementOperations
+                    manager
                 |> Async.StartAsTask
 
             let! cached =
@@ -6096,7 +6128,11 @@ type EmbeddedTerminalWorktreeCleanupTests() =
                 )
 
             let replacement =
-                EmbeddedTerminal.tryReplaceHost query manager
+                EmbeddedTerminal.tryReplaceHostWithOperations
+                    (fun () -> async.Return())
+                    query
+                    defaultReplacementOperations
+                    manager
                 |> Async.StartAsTask
 
             do!
