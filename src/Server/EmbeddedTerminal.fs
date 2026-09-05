@@ -6,6 +6,7 @@ open Server.TerminalHostClient
 open Server.TerminalHostManifest
 open Server.TerminalHostProcess
 open Server.TerminalHostReplacement
+open Server.TerminalHostRecovery
 
 [<RequireQualifiedAccess>]
 type private ManagerPhase = Steady | Replacing
@@ -46,7 +47,7 @@ type private Message =
         ReplacementPolicyQuery *
         ReplacementOperations *
         AsyncReplyChannel<ReplacementOutcome>
-    | FinishReplacement of ReplacementCommit * AsyncReplyChannel<ReplacementOutcome>
+    | FinishReplacement of ReplacementResolution * AsyncReplyChannel<ReplacementOutcome>
 
 type Manager = private | Manager of Config * MailboxProcessor<Message>
 
@@ -268,26 +269,38 @@ let private startTerminal config (state: ManagerState) worktreePath command =
                                 return! fail current error
     }
 
-let private applyReplacementCommit (state: ManagerState) commit =
-    match commit with
-    | ReplacementCommit.KeepState outcome -> state, outcome
-    | ReplacementCommit.RecoveryRequired recovery ->
-        let outcome =
-            TerminalHostReplacement.replacementRecoveryOutcome
-                recovery
+let private applyReplacementResolution (state: ManagerState) resolution =
+    let outcome =
+        TerminalHostRecovery.resolutionOutcome resolution
 
-        match recovery.Progress.HostState with
-        | ReplacementHostState.OldHostHealthy
-        | ReplacementHostState.OldHostStopUnconfirmed ->
-            state, outcome
-        | ReplacementHostState.NoConfirmedHost
-        | ReplacementHostState.StagedHostRunning _ ->
-            let message =
-                $"TerminalHost replacement failed: {TerminalHostReplacement.replacementFailureMessage recovery.Failure}"
-
-            withHostFailure message state, outcome
-    | ReplacementCommit.ApplyRegistry(manifest, registry, outcome) ->
+    match resolution with
+    | ReplacementResolution.KeepState _ ->
+        state, outcome
+    | ReplacementResolution.ApplyRegistry(manifest, registry, _) ->
         applyRegistryWith true false state manifest registry, outcome
+    | ReplacementResolution.ApplyRecovery(_, recovery) ->
+        let message =
+            match outcome with
+            | ReplacementOutcome.Failed(_, error) ->
+                $"TerminalHost replacement failed: {error}"
+            | _ ->
+                "TerminalHost replacement recovery did not produce a failed outcome"
+
+        match recovery.HostState, recovery.TerminalRegistry with
+        | RecoveryHostState.Running(_, manifest),
+          RecoveryTerminalRegistry.Exact registry ->
+            applyRegistry state manifest registry, outcome
+        | RecoveryHostState.Running(_, manifest),
+          RecoveryTerminalRegistry.Unavailable _
+        | RecoveryHostState.Unresolved(_, Some manifest), _ ->
+            { withHostFailure message state with
+                LastHost = Some manifest },
+            outcome
+        | RecoveryHostState.Stopped, _
+        | RecoveryHostState.Unresolved(_, None), _ ->
+            { withHostFailure message state with
+                LastHost = None },
+            outcome
 
 let private replacementInProgressError = "TerminalHost replacement is in progress; try again when it completes."
 let private cleanupInProgressError = "Terminal cleanup is in progress for this worktree; try again when it completes."
@@ -385,13 +398,27 @@ let internal createWithConfig config =
                                     plan
                                     query
 
-                            inbox.Post(FinishReplacement(commit, reply))
+                            let! resolution =
+                                TerminalHostRecovery.resolveWith
+                                    operations
+                                    config
+                                    commit
+
+                            inbox.Post(
+                                FinishReplacement(
+                                    resolution,
+                                    reply
+                                )
+                            )
                         }
                         |> Async.Start
 
                         return! loop { state with Phase = ManagerPhase.Replacing }
-                    | FinishReplacement(commit, reply) ->
-                        let next, outcome = applyReplacementCommit state commit
+                    | FinishReplacement(resolution, reply) ->
+                        let next, outcome =
+                            applyReplacementResolution
+                                state
+                                resolution
 
                         return!
                             { next with Phase = ManagerPhase.Steady }

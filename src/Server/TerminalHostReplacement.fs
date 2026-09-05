@@ -114,9 +114,9 @@ type internal ReplacementOperations =
                     SessionBridge.ShutdownFailure
                  >
              >
-      StopOldHost:
+      StopHost:
         Config -> DiscoveryManifest -> Async<Result<unit, string>>
-      LaunchStagedHost: Config -> Async<HostLaunchOutcome>
+      LaunchHost: Config -> Async<HostLaunchOutcome>
       RecreateTerminal:
         Config
             -> DiscoveryManifest
@@ -156,7 +156,7 @@ let private queryReplacementPolicy
     with error ->
         Error $"Could not query the terminal replacement policy: {error.Message}"
 
-let private configForExecutable config executablePath =
+let internal configForExecutable config executablePath =
     { config with
         HostExecutablePath = executablePath
         TtydExecutablePath =
@@ -183,8 +183,8 @@ let internal defaultOperations
                 isClosed
                 { WorktreePath = target.WorktreePath
                   ProcessIdentity = target.ProcessIdentity }
-      StopOldHost = shutdownAndWait
-      LaunchStagedHost = launchHostAt
+      StopHost = shutdownAndWait
+      LaunchHost = launchHostAt
       RecreateTerminal =
         fun config connection terminal ->
             startTerminalOnHost
@@ -267,7 +267,7 @@ let private validateReplacementPolicy
     else
         Ok()
 
-let private mutationFailureReason = function
+let internal mutationFailureReason = function
     | MutationRejected(_, reason)
     | MutationUnverified(_, reason) -> reason
 
@@ -560,7 +560,7 @@ let internal commitReplacementWith
                         (ReplacementFailure.GracefulShutdownFailed
                             shutdownAttempts)
             else
-                match! operations.StopOldHost config connection with
+                match! operations.StopHost config connection with
                 | Error error ->
                     return
                         recoveryRequired
@@ -581,7 +581,7 @@ let internal commitReplacementWith
                             plan.StagedExecutablePath
 
                     match!
-                        operations.LaunchStagedHost stagedConfig
+                        operations.LaunchHost stagedConfig
                     with
                     | HostLaunchFailed failure ->
                         return

@@ -256,6 +256,18 @@ terminal. A terminal without one restarts as a plain PowerShell shell. This auto
 policy is intentionally narrower than explicit worktree Resume, which can select retained durable
 history as defined in `docs/spec/resume-last-session.md`.
 
+Recovery consumes the immutable replacement capture. A graceful-shutdown failure reuses only the
+verified old host and submits the selected Resume command once for a terminal only when every exact
+shutdown target in that terminal completed. An old-host stop failure reuses the healthy exact old
+host or relaunches its captured executable only after the old identity is proven gone. Once a staged
+host identity is known, recovery must stop and recheck that exact host before launching the old
+executable. If staged-host stop remains unresolved, the staged host stays the sole reported
+generation, its exact registry and unresolved identity are retained, and no rollback host starts.
+Rollback recreates the complete captured terminal presentation in opening order and submits each
+selected command at most once per recovered terminal. Ambiguous command delivery is not retried
+while its host generation remains live; after that exact generation is stopped, rollback may submit
+the captured command once to the recovered old terminal.
+
 Stopping the old host may discard arbitrary non-Copilot shell state, running commands, raw replay,
 and scrollback. Recreated terminals keep the captured opening order, and the client remaps each
 worktree's selected tab to the same sibling ordinal where possible. Process state and scrollback do
@@ -422,10 +434,12 @@ separate origin, so the dashboard cannot apply this styling itself.
 The server terminal runtime has one-way module boundaries: `TerminalHostProcess` owns process
 configuration, launch, and exact identity defaults; `TerminalHostEndpoint` owns the common
 loopback-HTTP endpoint shape; `TerminalHostManifest` validates discovery; `TerminalHostClient` owns
-authenticated control and attachment requests; `TerminalHostReplacement` coordinates replacement;
-and `TerminalSessionActivity` derives the exact owned-session replacement policy from raw activity
-facts. `Server.EmbeddedTerminal` retains the mailbox, cleanup reservation, authoritative snapshot
-reconciliation, and public start/get surface. `WorktreeCleanup` owns user-authorized close policy:
+authenticated control and attachment requests; `TerminalHostReplacement` coordinates the forward
+replacement attempt; `TerminalHostRecovery` resolves failed attempts back to one reported host
+generation; and `TerminalSessionActivity` derives the exact owned-session replacement policy from
+raw activity facts. `Server.EmbeddedTerminal` retains the mailbox, cleanup reservation,
+authoritative snapshot reconciliation, and public start/get surface. `WorktreeCleanup` owns
+user-authorized close policy:
 it acquires the canonical-path reservation, queries and gracefully stops exact sessions, performs
 host I/O outside the mailbox, applies the authoritative registry transition, records exact closure,
 and only then invokes delete/archive mutation. A `finally` release prevents failed or cancelled
@@ -696,7 +710,7 @@ isolated server and fails on incomplete exact process cleanup.
 |---|---|
 | `src/TerminalHostLayout/Layout.fs` | Shared state/staging paths, version-directory grammar, executable names, and required host bundle members |
 | `src/TerminalHost/TerminalHost.fsproj` and `src/TerminalHost/*.fs` | F#/.NET host project: Job Object launch, ttyd ownership, proxy, replay, registry, and control API |
-| `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, and `TerminalHostReplacement.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, and replacement coordination |
+| `src/Server/TerminalHostProcess.fs`, `TerminalHostEndpoint.fs`, `TerminalHostManifest.fs`, `TerminalHostClient.fs`, `TerminalHostReplacement.fs`, and `TerminalHostRecovery.fs` | Host process/identity, shared loopback endpoint shape, discovery validation, authenticated control client and compatibility preflight, forward replacement, and compensating recovery |
 | `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, cleanup reservation, command-capable start, and authoritative snapshot reconciliation |
 | `src/Server/WorktreeCleanup.fs` | Product-level explicit terminal/worktree teardown, graceful exact-session coordination, host close, and closure publication |
