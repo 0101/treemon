@@ -5,6 +5,7 @@
   },
   "include": [
     "injection-request.mjs",
+    "request-body.mjs",
     "reporting/reporting-core.mjs",
     "reporting/reporting-runtime.mjs",
     "send-queue.mjs",

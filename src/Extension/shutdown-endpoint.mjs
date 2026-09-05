@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { isTrustedInjectionHeaders } from "./injection-request.mjs";
+import { readBody } from "./request-body.mjs";
 
 const MAX_SHUTDOWN_BODY_BYTES = 4096;
 
@@ -30,26 +31,6 @@ function capabilityMatches(expected, actual) {
     expectedBytes.length === actualBytes.length
     && timingSafeEqual(expectedBytes, actualBytes)
   );
-}
-
-/** @param {import("node:http").IncomingMessage} req */
-function readShutdownBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    let size = 0;
-
-    req.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > MAX_SHUTDOWN_BODY_BYTES) {
-        req.destroy();
-        reject(new Error("body too large"));
-        return;
-      }
-      body += chunk;
-    });
-    req.on("end", () => resolve(body));
-    req.on("error", reject);
-  });
 }
 
 /**
@@ -97,7 +78,7 @@ export function createShutdownHandler(options) {
 
     let body;
     try {
-      body = JSON.parse(await readShutdownBody(req));
+      body = JSON.parse(await readBody(req, MAX_SHUTDOWN_BODY_BYTES));
     } catch {
       respond(res, 400, false);
       return true;

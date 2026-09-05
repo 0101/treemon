@@ -159,7 +159,8 @@ The passive reporting package joins the current Copilot session and sends the pa
 live shutdown. It forwards `subagent.started`, `subagent.completed`, and `subagent.failed` as
 explicit background lifecycle, then drops all other sub-agent content. It also drops skill-context
 injections, blank messages, invalid usage gauges, and invalid or overlong background tool-call IDs
-before sending.
+before sending. The canvas bridge's shared `request-body.mjs` reader caps `/inject` and `/_message`
+at 1 MiB and `/shutdown` at 4 KiB, and rejects request-stream errors.
 
 The extension maps lifecycle, skill, message, `assistant.intent`, `session.title_changed`, ask-user,
 background-agent, and usage events onto the closed wire contract. Background reports use
@@ -375,7 +376,7 @@ into lifecycle status.
 | `src/Server/WorktreeApi.fs` | Card assembly, retained-session merge, direct snapshot history API, and resume command wiring. |
 | `src/Server/SessionBridge.fs` | Process-keyed session registration, durable-session/worktree lookup, separate poll registration, exact prompt/shutdown delivery, retry queue, and bridge liveness. |
 | `src/Server/WorktreeCleanup.fs` | User-authorized terminal/worktree teardown ordering from exact graceful shutdown through host cleanup and monotonic closure. |
-| `src/Extension/extension.mjs` and `shutdown-endpoint.mjs` | Exact bridge identity registration and capability-guarded loopback routine shutdown. |
+| `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `request-body.mjs` | Exact bridge identity registration, shared bounded request reading, and capability-guarded loopback routine shutdown. |
 | `src/Server/AutoSync.fs` | Delivery-aware session selection and guarded sync-prompt fallback launch. |
 | `src/Shared/Types.fs` | `AgentActivity`, context usage, exact-instance marker IDs, and worktree wire types. |
 | `src/Shared/WorktreeApi.fs` | Remoting contract, including `toggleAutoSync` and direct Overview history. |

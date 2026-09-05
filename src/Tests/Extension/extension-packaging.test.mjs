@@ -56,3 +56,26 @@ test("canvas bridge registration carries exact process and opaque shutdown metad
     "shutdown capabilities and URLs must never enter extension diagnostics",
   );
 });
+
+test("extension endpoints share the canonical request-body reader", () => {
+  const canvas =
+    readFileSync(new URL("../../Extension/extension.mjs", import.meta.url), "utf8");
+  const shutdown =
+    readFileSync(new URL("../../Extension/shutdown-endpoint.mjs", import.meta.url), "utf8");
+
+  assert.match(canvas, /import \{ readBody \} from "\.\/request-body\.mjs";/);
+  assert.match(shutdown, /import \{ readBody \} from "\.\/request-body\.mjs";/);
+  assert.doesNotMatch(canvas, /function readBody\(/);
+  assert.doesNotMatch(shutdown, /function readShutdownBody\(/);
+  assert.match(shutdown, /readBody\(req, MAX_SHUTDOWN_BODY_BYTES\)/);
+});
+
+test("unmonitored registration logs the browser-fallback outcome truthfully", () => {
+  const canvas =
+    readFileSync(new URL("../../Extension/extension.mjs", import.meta.url), "utf8");
+
+  assert.match(
+    canvas,
+    /monitored\s*\?\s*`registered \$\{registration\.worktreePath\} \(monitored=true\)`\s*:\s*`not registered \$\{registration\.worktreePath\} \(unmonitored; using browser fallback\)`/,
+  );
+});

@@ -10,6 +10,7 @@ import {
   watchCanvasWrites,
 } from "./canvas-ownership.mjs";
 import { isTrustedInjectionHeaders } from "./injection-request.mjs";
+import { readBody } from "./request-body.mjs";
 import {
   promptForBrowserFallback,
   promptForCanvasMessage,
@@ -68,19 +69,6 @@ const CONTENT_POLL_SCRIPT = `<script>
 const CANVAS_DIR = resolve(process.cwd(), ".agents", "canvas");
 
 const { enqueue: enqueueSend } = createSendQueue({ log });
-
-function readBody(req, maxBytes = 1024 * 1024) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    let size = 0;
-    req.on("data", (chunk) => {
-      size += chunk.length;
-      if (size > maxBytes) { req.destroy(); reject(new Error("body too large")); return; }
-      body += chunk;
-    });
-    req.on("end", () => resolve(body));
-  });
-}
 
 async function readCanvasFile(filename) {
   const filePath = resolve(CANVAS_DIR, filename);
@@ -264,7 +252,11 @@ async function registerWithTreemon(registration) {
     } catch {
       // older Treemon returns a non-JSON body — assume monitored to preserve prior behavior
     }
-    log(`registered ${registration.worktreePath} (monitored=${monitored})`);
+    log(
+      monitored
+        ? `registered ${registration.worktreePath} (monitored=true)`
+        : `not registered ${registration.worktreePath} (unmonitored; using browser fallback)`,
+    );
     return { reachable: true, monitored };
   } catch (err) {
     log(`could not reach Treemon: ${err.message}`);
