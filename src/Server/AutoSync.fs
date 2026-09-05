@@ -231,9 +231,7 @@ let internal ownershipFromSessions
     =
     let openInstances =
         instances
-        |> List.filter (fun instance ->
-            instance.ClosedAt.IsNone
-            && now - instance.LastSeen < openWindow)
+        |> List.filter (StoredInstance.isOpenAt now)
 
     match
         openInstances

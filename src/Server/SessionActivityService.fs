@@ -182,8 +182,7 @@ type SessionActivityService internal
             |> Map.values
             |> Seq.filter (fun instance ->
                 instance.WorktreePath = persisted.WorktreePath
-                && instance.ClosedAt.IsNone
-                && observedAt - instance.LastSeen < openWindow)
+                && StoredInstance.isOpenAt observedAt instance)
             |> Seq.toList
 
         let sessionIds =
@@ -366,9 +365,8 @@ type SessionActivityService internal
                             live
                             |> Map.values
                             |> Seq.filter (fun instance ->
-                                instance.ClosedAt.IsNone
-                                && instance.TerminalSessionId.IsSome
-                                && now - instance.LastSeen < openWindow)
+                                instance.TerminalSessionId.IsSome
+                                && StoredInstance.isOpenAt now instance)
                             |> Seq.map _.ProcessIdentity
                             |> Set.ofSeq
 

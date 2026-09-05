@@ -47,9 +47,7 @@ let internal ownedSessionSnapshot
     let liveOwnedInstances =
         instances
         |> joinOwnedInstances terminalSessionIds
-        |> List.filter (fun (_, instance) ->
-            instance.ClosedAt.IsNone
-            && now - instance.LastSeen < openWindow)
+        |> List.filter (snd >> StoredInstance.isOpenAt now)
 
     let openSessions =
         liveOwnedInstances
@@ -72,8 +70,7 @@ let internal ownedSessionSnapshot
         |> List.choose (fun (terminalId, terminalInstances) ->
             terminalInstances
             |> List.map snd
-            |> List.sortByDescending StoredInstance.activityOrderKey
-            |> List.tryHead
+            |> StoredInstance.tryMostRecentActivity
             |> Option.map (fun latest -> terminalId, latest.SessionId))
         |> Map.ofList
 
@@ -117,8 +114,7 @@ let internal tryFindLiveTerminalId
     |> Seq.filter (fun instance ->
         instance.WorktreePath = worktreePath
         && instance.SessionId = copilotSessionId
-        && instance.ClosedAt.IsNone
-        && now - instance.LastSeen < openWindow)
+        && StoredInstance.isOpenAt now instance)
     |> joinOwnedInstances
         (runningTerminals |> Map.keys |> Set.ofSeq)
     |> List.sortByDescending (snd >> StoredInstance.activityOrderKey)
@@ -134,9 +130,7 @@ let internal withReportedActivity
 
     let reportedActivity =
         instances
-        |> Seq.filter (fun instance ->
-            instance.ClosedAt.IsNone
-            && now - instance.LastSeen < openWindow)
+        |> Seq.filter (StoredInstance.isOpenAt now)
         |> joinOwnedInstances terminalSessionIds
         |> List.groupBy fst
         |> List.choose (fun (terminalSessionId, ownedSessions) ->

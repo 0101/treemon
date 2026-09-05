@@ -142,9 +142,7 @@ type private SessionSelection =
 let private selectInstances (now: DateTimeOffset) (instances: StoredInstance list) =
     let openInstances =
         instances
-        |> List.filter (fun instance ->
-            instance.ClosedAt.IsNone
-            && now - instance.LastSeen < SessionActivity.openWindow)
+        |> List.filter (StoredInstance.isOpenAt now)
 
     let adjustedOpen =
         openInstances

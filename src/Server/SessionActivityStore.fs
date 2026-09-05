@@ -54,6 +54,10 @@ module StoredInstance =
         stored.SessionId,
         ProcessIdentity.sortKey stored.ProcessIdentity
 
+    let isOpenAt (now: DateTimeOffset) (stored: StoredInstance) =
+        stored.ClosedAt.IsNone
+        && now - stored.LastSeen < openWindow
+
     /// LastSeen is liveness-only, so it must never decide which instance owns shared content.
     let tryMostRecentActivity instances =
         instances
