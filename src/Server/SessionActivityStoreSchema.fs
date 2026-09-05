@@ -201,44 +201,6 @@ let private activityEventsUsesProcessKey
     readPrimaryKeyColumns reader []
     = [ "process_id"; "process_start_ticks"; "event_id" ]
 
-let private activityEventsRequiresExactRebuild
-    (connection: SqliteConnection)
-    (transaction: SqliteTransaction)
-    =
-    use definition = connection.CreateCommand()
-    definition.Transaction <- transaction
-    definition.CommandText <-
-        "SELECT sql FROM sqlite_master
-         WHERE type = 'table' AND name = 'activity_events';"
-
-    let tableSql =
-        definition.ExecuteScalar()
-        |> string
-
-    use invalidRows = connection.CreateCommand()
-    invalidRows.Transaction <- transaction
-    invalidRows.CommandText <-
-        "SELECT count(*) FROM activity_events
-         WHERE process_id <= 0 OR process_start_ticks <= 0;"
-
-    let hasStrictIdentityChecks =
-        tableSql.Contains(
-            "CHECK (process_id > 0)",
-            StringComparison.OrdinalIgnoreCase
-        )
-        && tableSql.Contains(
-            "CHECK (process_start_ticks > 0)",
-            StringComparison.OrdinalIgnoreCase
-        )
-
-    not hasStrictIdentityChecks
-    || tableSql.Contains("DEFAULT 0", StringComparison.OrdinalIgnoreCase)
-    || tableSql.Contains(
-        "process_id = 0",
-        StringComparison.OrdinalIgnoreCase
-    )
-    || Convert.ToInt32(invalidRows.ExecuteScalar()) > 0
-
 let private executeMigrationSql
     (connection: SqliteConnection)
     (transaction: SqliteTransaction)
@@ -255,37 +217,18 @@ let private rebuildActivityEventsIfNeeded
     =
     let migrationTable = "activity_events_migration"
 
-    if
-        activityEventsUsesProcessKey connection transaction
-        && not (activityEventsRequiresExactRebuild connection transaction)
-    then
+    if activityEventsUsesProcessKey connection transaction then
         executeMigrationSql
             connection
             transaction
             $"DROP TABLE IF EXISTS {migrationTable};"
     else
-        let preserveExactRows =
-            if activityEventsUsesProcessKey connection transaction then
-                """
-INSERT INTO activity_events_migration
-    (process_id, process_start_ticks, event_id, session_id, worktree_path,
-     provider, kind, status, skill, ts)
-SELECT
-    process_id, process_start_ticks, event_id, session_id, worktree_path,
-    provider, kind, status, skill, ts
-FROM activity_events
-WHERE process_id > 0 AND process_start_ticks > 0;
-"""
-            else
-                ""
-
         executeMigrationSql
             connection
             transaction
             $"""
 DROP TABLE IF EXISTS {migrationTable};
 {activityEventsTableSql "CREATE TABLE" migrationTable}
-{preserveExactRows}
 DROP TABLE activity_events;
 ALTER TABLE {migrationTable} RENAME TO activity_events;
 """
