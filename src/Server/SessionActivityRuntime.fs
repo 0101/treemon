@@ -73,7 +73,8 @@ let internal create dbPath scheduler rootPaths =
         scheduler
         rootPaths
 
-let internal terminalSessionCleanup
+let internal terminalSessionCleanupWithDiagnostics
+    (diagnostics: LifecycleDiagnostics.Sink)
     (service: SessionActivityService)
     : WorktreeCleanup.PrepareSessionClose =
     fun originPaths ->
@@ -94,7 +95,8 @@ let internal terminalSessionCleanup
                     | None -> ()
                     | Some worktreePath ->
                         let! _ =
-                            SessionBridge.shutdownExact
+                            SessionBridge.shutdownExactUsing
+                                diagnostics
                                 (fun identity ->
                                     async {
                                         return service.IsProcessClosed identity
@@ -134,12 +136,33 @@ let internal terminalSessionCleanup
                 let closureErrors =
                     sessions
                     |> List.map (fun session ->
-                        match
+                        let acknowledgement =
                             service.CloseProcess(
                                 session.ProcessIdentity,
                                 closedAt
                             )
-                        with
+
+                        let outcome =
+                            match acknowledgement with
+                            | ClosureAcknowledge.Closed ->
+                                LifecycleDiagnostics.ExactClosureOutcome.Recorded
+                            | ClosureAcknowledge.Missing ->
+                                LifecycleDiagnostics.ExactClosureOutcome.Missing
+                            | ClosureAcknowledge.Failed _ ->
+                                LifecycleDiagnostics.ExactClosureOutcome.Failed
+
+                        diagnostics (
+                            LifecycleDiagnostics.Diagnostic.ExactClosure
+                                { ProcessIdentity =
+                                    session.ProcessIdentity
+                                  SessionId =
+                                    session.CopilotSessionId
+                                  TerminalSessionId =
+                                    session.TerminalSessionId
+                                  Outcome = outcome }
+                        )
+
+                        match acknowledgement with
                         | ClosureAcknowledge.Closed -> None
                         | ClosureAcknowledge.Missing ->
                             Some "an exact session closure target was not found"
@@ -157,6 +180,11 @@ let internal terminalSessionCleanup
 
         { BeforeHostClose = beforeHostClose
           AfterHostClose = afterHostClose }
+
+let internal terminalSessionCleanup service =
+    terminalSessionCleanupWithDiagnostics
+        LifecycleDiagnostics.write
+        service
 
 let internal shutdownStoreUsers
     (disposeIngestion: unit -> unit)

@@ -70,8 +70,9 @@ let private storedInstance
       ContextUsageAt = None
       ClosedAt = None }
 
-let private withService
+let private withServiceDiagnostics
     resolver
+    diagnostics
     (action:
         SessionActivityService
             * SessionActivityStore
@@ -93,7 +94,8 @@ let private withService
         new SessionActivityService(
             store,
             scheduler,
-            resolver
+            resolver,
+            diagnostics
         )
 
     try
@@ -103,6 +105,12 @@ let private withService
             Directory.Delete(directory, recursive = true)
         with _ ->
             ()
+
+let private withService resolver action =
+    withServiceDiagnostics
+        resolver
+        LifecycleDiagnostics.ignore
+        action
 
 let private requirePresence =
     function
@@ -186,6 +194,128 @@ type PresenceAcknowledgementTests() =
                     "SELECT count(*) FROM session_instances;",
                 Is.EqualTo 1,
                 "presence is idempotent for one exact identity"
+            ))
+
+    [<Test>]
+    member _.``presence diagnostics distinguish reconnects normal sessions and duplicate processes``() =
+        let first = exactIdentity 4151 5151L
+        let second = exactIdentity 4152 5152L
+        let third = exactIdentity 4153 5153L
+
+        let identities =
+            [ first; second; third ]
+            |> List.map (fun identity ->
+                ProcessIdentity.processId identity,
+                identity)
+            |> Map.ofList
+
+        let resolver =
+            ProcessIdentityResolver.create (fun processId ->
+                Ok(identities |> Map.tryFind processId))
+
+        let firstTerminal =
+            TerminalSessionId.create
+                "00000000000000000000000000000051"
+            |> Result.defaultWith invalidOp
+
+        let secondTerminal =
+            TerminalSessionId.create
+                "00000000000000000000000000000052"
+            |> Result.defaultWith invalidOp
+
+        let diagnostics =
+            ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
+
+        withServiceDiagnostics
+            resolver
+            diagnostics.Enqueue
+            (fun (service, _, _) ->
+                let at = ts "2026-09-04T10:00:00Z"
+
+                present service 4151 "shared-session" (Some firstTerminal) at
+                |> requirePresence
+                |> ignore
+
+                present
+                    service
+                    4152
+                    "shared-session"
+                    (Some secondTerminal)
+                    (at.AddSeconds(1.0))
+                |> requirePresence
+                |> ignore
+
+                present
+                    service
+                    4153
+                    "independent-session"
+                    (Some firstTerminal)
+                    (at.AddSeconds(2.0))
+                |> requirePresence
+                |> ignore
+
+                present
+                    service
+                    4151
+                    "shared-session"
+                    (Some firstTerminal)
+                    (at.AddSeconds(3.0))
+                |> requirePresence
+                |> ignore)
+
+        let events = diagnostics.ToArray()
+
+        let presenceKinds =
+            events
+            |> Array.choose (function
+                | LifecycleDiagnostics.Diagnostic.PresenceAcknowledged presence ->
+                    Some presence.Kind
+                | _ -> None)
+
+        let sameSession =
+            events
+            |> Array.choose (function
+                | LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved multiplicity
+                    when multiplicity.Boundary =
+                         LifecycleDiagnostics.ObservationBoundary.Presence ->
+                    Some multiplicity
+                | _ -> None)
+            |> Array.last
+
+        let multipleSessions =
+            events
+            |> Array.choose (function
+                | LifecycleDiagnostics.Diagnostic.MultipleSessionsObserved multiple
+                    when multiple.Boundary =
+                         LifecycleDiagnostics.ObservationBoundary.Presence ->
+                    Some multiple
+                | _ -> None)
+            |> Array.last
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                presenceKinds,
+                Is.EqualTo(
+                    [| LifecycleDiagnostics.PresenceKind.FirstSeen
+                       LifecycleDiagnostics.PresenceKind.FirstSeen
+                       LifecycleDiagnostics.PresenceKind.FirstSeen
+                       LifecycleDiagnostics.PresenceKind.Reconnected |]
+                )
+            )
+            Assert.That(
+                sameSession.ProcessIdentities,
+                Is.EquivalentTo([ first; second ])
+            )
+            Assert.That(
+                sameSession.TerminalSessionIds,
+                Is.EquivalentTo([ firstTerminal; secondTerminal ])
+            )
+            Assert.That(
+                multipleSessions.SessionIds,
+                Is.EquivalentTo(
+                    [ SessionId "shared-session"
+                      SessionId "independent-session" ]
+                )
             ))
 
     [<Test>]

@@ -524,6 +524,16 @@ Several open process identities for one durable session are represented truthful
 treated as corruption; diagnostics distinguish that condition from a replacement attempt that
 created another process before its predecessor was confirmed stopped. Prompts, tokens, shutdown
 capabilities, terminal content, and raw external records are never logged.
+Replacement emits ordered capture, recheck, graceful-shutdown, old-host close, staged-host launch,
+terminal recreation, recovery-required, recovery-started, and completion transitions. Explicit
+teardown emits ordered graceful-attempt, host-close, exact-closure, and final outcome transitions.
+When several durable conversations share one terminal origin, the capture records the one selected
+for Resume and the others retained as history. Recovery records the authoritative host generation,
+registry availability, typed selected-session outcomes, and unresolved exact identities without
+including failure text. TerminalHost process cleanup separately records ownership capture and
+recapture, Job close, survivor observation, exact termination attempts, completion, or unresolved
+survivors. Every identity or session list shows at most eight sorted values plus full and omitted
+counts.
 
 ### Deliberate simplicity
 
@@ -715,6 +725,7 @@ isolated server and fails on incomplete exact process cleanup.
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, cleanup reservation, command-capable start, and authoritative snapshot reconciliation |
 | `src/Server/WorktreeCleanup.fs` | Product-level explicit terminal/worktree teardown, graceful exact-session coordination, host close, and closure publication |
 | `src/Server/SessionActivity.fs` | Per-process instance lifecycle fold, exact process identity, liveness, and closure |
+| `src/Server/LifecycleDiagnostics.fs` | Bounded structured presence, bridge, shutdown, replacement, recovery, and teardown diagnostics |
 | `src/Server/ProcessIdentityResolver.fs` | Shared default PID/start-time resolution used by activity ingress and exact process liveness checks |
 | `src/Server/SessionActivityProtocol.fs`, `SessionActivityIngestion.fs`, and `SessionActivityService.fs` | Exact activity wire parsing, fold application, acknowledged presence, bounded live state, startup reconciliation, and mailbox-serialized terminal ownership queries |
 | `src/Server/TerminalSessionActivity.fs` | Exact process-instance and startup-reconciliation projection for tab activity, all-target non-idle gating, graceful shutdown targets, and one-per-terminal resume policy |

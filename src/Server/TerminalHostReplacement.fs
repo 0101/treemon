@@ -353,6 +353,147 @@ let private recoveryRequired capture progress failure =
           Progress = progress
           Failure = failure }
 
+let private diagnosticHostIdentity (manifest: DiscoveryManifest) =
+    ProcessIdentity.create
+        manifest.Pid
+        manifest.ProcessStartTimeUtcTicks
+    |> Result.toOption
+
+let private diagnosticFailureKind =
+    function
+    | ReplacementFailure.GracefulShutdownFailed _ ->
+        LifecycleDiagnostics.ReplacementFailureKind.GracefulShutdown
+    | ReplacementFailure.OldHostStopFailed _ ->
+        LifecycleDiagnostics.ReplacementFailureKind.OldHostStop
+    | ReplacementFailure.StagedHostLaunchFailed _ ->
+        LifecycleDiagnostics.ReplacementFailureKind.StagedHostLaunch
+    | ReplacementFailure.StagedHostVerificationFailed _ ->
+        LifecycleDiagnostics.ReplacementFailureKind.StagedHostVerification
+    | ReplacementFailure.StagedRegistryReadFailed _
+    | ReplacementFailure.StagedRegistryNotEmpty _ ->
+        LifecycleDiagnostics.ReplacementFailureKind.StagedRegistry
+    | ReplacementFailure.TerminalRecreationFailed _ ->
+        LifecycleDiagnostics.ReplacementFailureKind.TerminalRecreation
+    | ReplacementFailure.CommandDeliveryFailed _ ->
+        LifecycleDiagnostics.ReplacementFailureKind.CommandDelivery
+
+let private recoveryRequiredWithDiagnostics
+    (diagnostics: LifecycleDiagnostics.Sink)
+    capture
+    progress
+    failure
+    =
+    diagnostics (
+        LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+            LifecycleDiagnostics.ReplacementStage.RecoveryRequired(
+                diagnosticFailureKind failure
+            )
+        )
+    )
+
+    recoveryRequired capture progress failure
+
+let private recordReplacementCapture
+    (diagnostics: LifecycleDiagnostics.Sink)
+    (plan: ReplacementPlan)
+    =
+    diagnostics (
+        LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+            LifecycleDiagnostics.ReplacementStage.Captured(
+                plan.Terminals.Length,
+                plan.ShutdownTargets.Length,
+                plan.ResumeCommands.Count
+            )
+        )
+    )
+
+    let typedTargets =
+        plan.ShutdownTargets
+        |> List.choose (fun target ->
+            target.CopilotSessionId
+            |> LifecycleDiagnostics.trySessionId
+            |> Option.map (fun sessionId ->
+                target,
+                sessionId,
+                LifecycleDiagnostics.tryTerminalSessionId
+                    target.TerminalSessionId))
+
+    let sessionIds =
+        typedTargets
+        |> List.map (fun (_, sessionId, _) -> sessionId)
+        |> List.distinct
+
+    if sessionIds.Length > 1 then
+        diagnostics (
+            LifecycleDiagnostics.Diagnostic.MultipleSessionsObserved
+                { Boundary =
+                    LifecycleDiagnostics.ObservationBoundary.Replacement
+                  ProcessCount = typedTargets.Length
+                  SessionIds = sessionIds }
+        )
+
+    typedTargets
+    |> List.groupBy (fun (_, sessionId, _) -> sessionId)
+    |> List.iter (fun (sessionId, targets) ->
+        if targets.Length > 1 then
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved
+                    { Boundary =
+                        LifecycleDiagnostics.ObservationBoundary.Replacement
+                      SessionId = sessionId
+                      ProcessIdentities =
+                        targets
+                        |> List.map (fun (target, _, _) ->
+                            target.ProcessIdentity)
+                      TerminalSessionIds =
+                        targets
+                        |> List.choose (fun (_, _, terminalSessionId) ->
+                            terminalSessionId)
+                        |> List.distinct
+                      UnattributedProcessCount =
+                        targets
+                        |> List.filter (fun (_, _, terminalSessionId) ->
+                            terminalSessionId.IsNone)
+                        |> List.length }
+            ))
+
+    typedTargets
+    |> List.choose (fun (target, sessionId, terminalSessionId) ->
+        terminalSessionId
+        |> Option.map (fun terminalId ->
+            terminalId, target, sessionId))
+    |> List.groupBy (fun (terminalId, _, _) -> terminalId)
+    |> List.iter (fun (terminalSessionId, targets) ->
+        let conversations =
+            targets
+            |> List.map (fun (_, _, sessionId) -> sessionId)
+            |> List.distinct
+
+        if conversations.Length > 1 then
+            let selected =
+                plan.ResumeCommands
+                |> Map.tryFind (
+                    TerminalSessionId.value
+                        terminalSessionId
+                )
+                |> Option.bind (fun resume ->
+                    LifecycleDiagnostics.trySessionId
+                        resume.CopilotSessionId)
+
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.TerminalConversationAnomalyObserved
+                    { TerminalSessionId = terminalSessionId
+                      SelectedSessionId = selected
+                      RetainedSessionIds =
+                        conversations
+                        |> List.filter (fun sessionId ->
+                            selected <> Some sessionId)
+                      ProcessIdentities =
+                        targets
+                        |> List.map (fun (_, target, _) ->
+                            target.ProcessIdentity) }
+            ))
+
 let private shutdownSessions
     (operations: ReplacementOperations)
     targets
@@ -521,27 +662,67 @@ let private recheckReplacement
             return RecheckFailed $"Could not recheck the exact TerminalHost: {error}"
     }
 
-let internal commitReplacementWith
+let internal commitReplacementWithDiagnostics
+    (diagnostics: LifecycleDiagnostics.Sink)
     (operations: ReplacementOperations)
     (config: Config)
     (plan: ReplacementPlan)
     (query: ReplacementPolicyQuery)
     =
     async {
+        recordReplacementCapture diagnostics plan
+
+        diagnostics (
+            LifecycleDiagnostics.Diagnostic.ReplacementTransition
+                LifecycleDiagnostics.ReplacementStage.RecheckStarted
+        )
+
         let failed error =
             ReplacementOutcome.Failed(plan.StagedVersion, error)
             |> ReplacementCommit.KeepState
 
         match! recheckReplacement config plan query with
         | RecheckChanged ->
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.ReplacementTransition
+                    LifecycleDiagnostics.ReplacementStage.RaceLost
+            )
+
             return
                 ReplacementCommit.KeepState
                     ReplacementOutcome.RaceLost
         | RecheckFailed error ->
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.ReplacementTransition
+                    LifecycleDiagnostics.ReplacementStage.RecheckFailed
+            )
+
             return failed error
         | ReadyToCommit connection ->
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                    LifecycleDiagnostics.ReplacementStage.GracefulShutdownStarted(
+                        plan.ShutdownTargets.Length
+                    )
+                )
+            )
+
             let! shutdownAttempts =
                 shutdownSessions operations plan.ShutdownTargets
+
+            let failedShutdowns =
+                shutdownAttempts
+                |> List.filter (_.Outcome >> Result.isError)
+                |> List.length
+
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                    LifecycleDiagnostics.ReplacementStage.GracefulShutdownCompleted(
+                        shutdownAttempts.Length - failedShutdowns,
+                        failedShutdowns
+                    )
+                )
+            )
 
             let afterShutdown =
                 { ShutdownAttempts = shutdownAttempts
@@ -554,22 +735,48 @@ let internal commitReplacementWith
                 |> List.exists (_.Outcome >> Result.isError)
             then
                 return
-                    recoveryRequired
+                    recoveryRequiredWithDiagnostics
+                        diagnostics
                         plan
                         afterShutdown
                         (ReplacementFailure.GracefulShutdownFailed
                             shutdownAttempts)
             else
+                let oldHostIdentity =
+                    diagnosticHostIdentity connection
+
+                diagnostics (
+                    LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                        LifecycleDiagnostics.ReplacementStage.OldHostCloseStarted
+                            oldHostIdentity
+                    )
+                )
+
                 match! operations.StopHost config connection with
                 | Error error ->
+                    diagnostics (
+                        LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                            LifecycleDiagnostics.ReplacementStage.OldHostCloseUnconfirmed
+                                oldHostIdentity
+                        )
+                    )
+
                     return
-                        recoveryRequired
+                        recoveryRequiredWithDiagnostics
+                            diagnostics
                             plan
                             { afterShutdown with
                                 HostState =
                                     ReplacementHostState.OldHostStopUnconfirmed }
                             (ReplacementFailure.OldHostStopFailed error)
                 | Ok() ->
+                    diagnostics (
+                        LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                            LifecycleDiagnostics.ReplacementStage.OldHostCloseConfirmed
+                                oldHostIdentity
+                        )
+                    )
+
                     let withoutHost =
                         { afterShutdown with
                             HostState =
@@ -580,17 +787,41 @@ let internal commitReplacementWith
                             config
                             plan.StagedExecutablePath
 
+                    diagnostics (
+                        LifecycleDiagnostics.Diagnostic.ReplacementTransition
+                            LifecycleDiagnostics.ReplacementStage.StagedHostLaunchStarted
+                    )
+
                     match!
                         operations.LaunchHost stagedConfig
                     with
                     | HostLaunchFailed failure ->
+                        diagnostics (
+                            LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                                match failure with
+                                | LaunchRejected _ ->
+                                    LifecycleDiagnostics.ReplacementStage.StagedHostLaunchRejected
+                                | LaunchStartedButUnhealthy _ ->
+                                    LifecycleDiagnostics.ReplacementStage.StagedHostStartedUnhealthy
+                            )
+                        )
+
                         return
-                            recoveryRequired
+                            recoveryRequiredWithDiagnostics
+                                diagnostics
                                 plan
                                 withoutHost
                                 (ReplacementFailure.StagedHostLaunchFailed
                                     failure)
                     | HostLaunched replacement ->
+                        diagnostics (
+                            LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                                LifecycleDiagnostics.ReplacementStage.StagedHostRunning(
+                                    diagnosticHostIdentity replacement
+                                )
+                            )
+                        )
+
                         let withStagedHost =
                             { withoutHost with
                                 HostState =
@@ -604,7 +835,8 @@ let internal commitReplacementWith
                         with
                         | Error error ->
                             return
-                                recoveryRequired
+                                recoveryRequiredWithDiagnostics
+                                    diagnostics
                                     plan
                                     withStagedHost
                                     (ReplacementFailure.StagedHostVerificationFailed
@@ -616,12 +848,22 @@ let internal commitReplacementWith
                                     plan.StagedExecutablePath
                             ) ->
                             return
-                                recoveryRequired
+                                recoveryRequiredWithDiagnostics
+                                    diagnostics
                                     plan
                                     withStagedHost
                                     (ReplacementFailure.StagedHostVerificationFailed
                                         "the launch published an unexpected TerminalHost executable")
                         | Ok _ ->
+                            diagnostics (
+                                LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                                    LifecycleDiagnostics.ReplacementStage.TerminalRecreationStarted(
+                                        plan.Terminals.Length,
+                                        plan.ResumeCommands.Count
+                                    )
+                                )
+                            )
+
                             match!
                                 recreateTerminals
                                     operations
@@ -632,11 +874,26 @@ let internal commitReplacementWith
                             with
                             | Error(progress, failure) ->
                                 return
-                                    recoveryRequired
+                                    recoveryRequiredWithDiagnostics
+                                        diagnostics
                                         plan
                                         progress
                                         failure
-                            | Ok(registry, _) ->
+                            | Ok(registry, progress) ->
+                                diagnostics (
+                                    LifecycleDiagnostics.Diagnostic.ReplacementTransition(
+                                        LifecycleDiagnostics.ReplacementStage.TerminalRecreationCompleted(
+                                            progress.RecreatedTerminals.Length,
+                                            progress.DeliveredCommandTerminalIds.Count
+                                        )
+                                    )
+                                )
+
+                                diagnostics (
+                                    LifecycleDiagnostics.Diagnostic.ReplacementTransition
+                                        LifecycleDiagnostics.ReplacementStage.Completed
+                                )
+
                                 return
                                     ReplacementCommit.ApplyRegistry(
                                         replacement,
@@ -645,6 +902,10 @@ let internal commitReplacementWith
                                             plan.StagedVersion
                                     )
     }
+
+let internal commitReplacementWith =
+    commitReplacementWithDiagnostics
+        LifecycleDiagnostics.write
 
 let private unavailableClosureQuery _ =
     async {

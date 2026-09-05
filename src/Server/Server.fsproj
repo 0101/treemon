@@ -35,6 +35,7 @@
     <Compile Include="BeadsStatus.fs" />
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
+    <Compile Include="LifecycleDiagnostics.fs" />
     <Compile Include="ProcessIdentityResolver.fs" />
     <Compile Include="SessionActivityProtocol.fs" />
     <Compile Include="SqliteStorage.fs" />

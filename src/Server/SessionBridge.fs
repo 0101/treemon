@@ -371,7 +371,84 @@ let private sameRegistrationMetadata
     && registration.Entry.SessionId = sessionId
     && registration.Entry.TerminalSessionId = terminalSessionId
 
-let registerSession
+let private recordRegistration
+    (diagnostics: LifecycleDiagnostics.Sink)
+    now
+    kind
+    (entry: SessionEntry)
+    =
+    let sessionId =
+        entry.SessionId
+        |> Option.bind LifecycleDiagnostics.trySessionId
+
+    diagnostics (
+        LifecycleDiagnostics.Diagnostic.BridgeRegistration
+            { Kind = kind
+              ProcessIdentity = entry.ProcessIdentity
+              SessionId = sessionId
+              TerminalSessionId = entry.TerminalSessionId }
+    )
+
+    let liveRegistrations =
+        sessionRegistry.Values
+        |> Seq.filter (fun registration ->
+            String.Equals(
+                registration.Entry.WorktreePath,
+                entry.WorktreePath,
+                StringComparison.OrdinalIgnoreCase
+            )
+            && now - registration.Entry.RegisteredAt < livenessTtl
+            && probeExactProcess
+                registration.ProcessIdentityResolver
+                registration.Entry.ProcessIdentity
+               = Ok ExactProcessState.Running)
+        |> Seq.toList
+
+    let sessionIds =
+        liveRegistrations
+        |> List.choose (fun registration ->
+            registration.Entry.SessionId
+            |> Option.bind LifecycleDiagnostics.trySessionId)
+        |> List.distinct
+
+    if sessionIds.Length > 1 then
+        diagnostics (
+            LifecycleDiagnostics.Diagnostic.MultipleSessionsObserved
+                { Boundary =
+                    LifecycleDiagnostics.ObservationBoundary.Bridge
+                  ProcessCount = liveRegistrations.Length
+                  SessionIds = sessionIds }
+        )
+
+    match sessionId with
+    | None -> ()
+    | Some durableSessionId ->
+        let sameSession =
+            liveRegistrations
+            |> List.filter (fun registration ->
+                registration.Entry.SessionId = entry.SessionId)
+
+        if sameSession.Length > 1 then
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved
+                    { Boundary =
+                        LifecycleDiagnostics.ObservationBoundary.Bridge
+                      SessionId = durableSessionId
+                      ProcessIdentities =
+                        sameSession
+                        |> List.map _.Entry.ProcessIdentity
+                      TerminalSessionIds =
+                        sameSession
+                        |> List.choose _.Entry.TerminalSessionId
+                        |> List.distinct
+                      UnattributedProcessCount =
+                        sameSession
+                        |> List.filter _.Entry.TerminalSessionId.IsNone
+                        |> List.length }
+            )
+
+let internal registerSessionWithDiagnostics
+    (diagnostics: LifecycleDiagnostics.Sink)
     (processIdentityResolver: ProcessIdentityResolver)
     (request: RegistrationRequest)
     : Result<SessionEntry, RegistrationFailure> =
@@ -414,7 +491,7 @@ let registerSession
                                 existing
                         ) ->
                         Error RegistrationFailure.ParentIdentityMismatch
-                    | _ ->
+                    | hadExisting, _ ->
                         let now = DateTime.UtcNow
 
                         let entry =
@@ -431,9 +508,20 @@ let registerSession
                               ShutdownCapability = request.ShutdownCapability
                               ProcessIdentityResolver = processIdentityResolver }
 
-                        Log.log "SessionBridge" $"Session registered for {Path.GetFileName worktreeKey}"
+                        recordRegistration
+                            diagnostics
+                            now
+                            (if hadExisting then
+                                 LifecycleDiagnostics.BridgeRegistrationKind.Refreshed
+                             else
+                                 LifecycleDiagnostics.BridgeRegistrationKind.Added)
+                            entry
+
                         drainQueue now worktreeKey entry
                         Ok entry
+
+let registerSession =
+    registerSessionWithDiagnostics LifecycleDiagnostics.write
 
 let registerPoll (worktreePath: string) =
     let now = DateTime.UtcNow
@@ -633,26 +721,73 @@ let private shutdownRegistration target =
         Some registration
     | _ -> None
 
-let internal shutdownExactWith
+let private shutdownDiagnostic target registration stage =
+    LifecycleDiagnostics.Diagnostic.ShutdownTransition
+        { ProcessIdentity = target.ProcessIdentity
+          SessionId =
+            registration
+            |> Option.bind _.Entry.SessionId
+            |> Option.bind LifecycleDiagnostics.trySessionId
+          TerminalSessionId =
+            registration
+            |> Option.bind _.Entry.TerminalSessionId
+          Stage = stage }
+
+let internal shutdownExactWithDiagnostics
+    (diagnostics: LifecycleDiagnostics.Sink)
     (dependencies: ShutdownDependencies)
     (options: ShutdownWaitOptions)
     (target: ShutdownTarget)
     : Async<Result<ShutdownCompletion, ShutdownFailure>> =
     async {
+        diagnostics (
+            shutdownDiagnostic
+                target
+                None
+                LifecycleDiagnostics.ShutdownStage.Requested
+        )
+
         match shutdownRegistration target with
         | None ->
+            diagnostics (
+                shutdownDiagnostic
+                    target
+                    None
+                    (LifecycleDiagnostics.ShutdownStage.Rejected
+                        LifecycleDiagnostics.ShutdownRejection.MissingRegistration)
+            )
+
             return Error ShutdownFailure.MissingRegistration
         | Some registration ->
+            let record stage =
+                diagnostics (
+                    shutdownDiagnostic
+                        target
+                        (Some registration)
+                        stage
+                )
+
             match
                 dependencies.ProbeProcess
                     registration.ProcessIdentityResolver
                     target.ProcessIdentity
             with
             | Error _ ->
+                record (
+                    LifecycleDiagnostics.ShutdownStage.Rejected
+                        LifecycleDiagnostics.ShutdownRejection.VerificationFailed
+                )
+
                 return Error ShutdownFailure.VerificationFailed
             | Ok ExactProcessState.Exited ->
+                record LifecycleDiagnostics.ShutdownStage.CompletedProcessExit
                 return Ok ShutdownCompletion.ProcessExit
             | Ok ExactProcessState.Reused ->
+                record (
+                    LifecycleDiagnostics.ShutdownStage.Rejected
+                        LifecycleDiagnostics.ShutdownRejection.StaleRegistration
+                )
+
                 return Error ShutdownFailure.StaleRegistration
             | Ok ExactProcessState.Running
                 when not (
@@ -660,6 +795,11 @@ let internal shutdownExactWith
                         (dependencies.UtcNow ())
                         registration.Entry
                 ) ->
+                record (
+                    LifecycleDiagnostics.ShutdownStage.Rejected
+                        LifecycleDiagnostics.ShutdownRejection.StaleRegistration
+                )
+
                 return Error ShutdownFailure.StaleRegistration
             | Ok ExactProcessState.Running ->
                 match!
@@ -668,14 +808,36 @@ let internal shutdownExactWith
                         registration.ShutdownCapability
                 with
                 | ShutdownRequestOutcome.InvalidCapability ->
+                    record (
+                        LifecycleDiagnostics.ShutdownStage.Rejected
+                            LifecycleDiagnostics.ShutdownRejection.InvalidCapability
+                    )
+
                     return Error ShutdownFailure.InvalidCapability
                 | ShutdownRequestOutcome.NonLoopbackRequest ->
+                    record (
+                        LifecycleDiagnostics.ShutdownStage.Rejected
+                            LifecycleDiagnostics.ShutdownRejection.NonLoopbackRequest
+                    )
+
                     return Error ShutdownFailure.NonLoopbackRequest
                 | ShutdownRequestOutcome.Rejected ->
+                    record (
+                        LifecycleDiagnostics.ShutdownStage.Rejected
+                            LifecycleDiagnostics.ShutdownRejection.Rejected
+                    )
+
                     return Error ShutdownFailure.Rejected
                 | ShutdownRequestOutcome.TransportFailed ->
+                    record (
+                        LifecycleDiagnostics.ShutdownStage.Rejected
+                            LifecycleDiagnostics.ShutdownRejection.RequestFailed
+                    )
+
                     return Error ShutdownFailure.RequestFailed
                 | ShutdownRequestOutcome.Accepted ->
+                    record LifecycleDiagnostics.ShutdownStage.RequestAccepted
+
                     let deadline =
                         dependencies.UtcNow () + options.Timeout
 
@@ -683,8 +845,14 @@ let internal shutdownExactWith
                         async {
                             match! dependencies.IsClosed target.ProcessIdentity with
                             | Error _ ->
+                                record (
+                                    LifecycleDiagnostics.ShutdownStage.Rejected
+                                        LifecycleDiagnostics.ShutdownRejection.VerificationFailed
+                                )
+
                                 return Error ShutdownFailure.VerificationFailed
                             | Ok true ->
+                                record LifecycleDiagnostics.ShutdownStage.CompletedExactClosure
                                 return Ok ShutdownCompletion.ExactClosure
                             | Ok false ->
                                 match
@@ -693,12 +861,19 @@ let internal shutdownExactWith
                                         target.ProcessIdentity
                                 with
                                 | Error _ ->
+                                    record (
+                                        LifecycleDiagnostics.ShutdownStage.Rejected
+                                            LifecycleDiagnostics.ShutdownRejection.VerificationFailed
+                                    )
+
                                     return Error ShutdownFailure.VerificationFailed
                                 | Ok ExactProcessState.Exited
                                 | Ok ExactProcessState.Reused ->
+                                    record LifecycleDiagnostics.ShutdownStage.CompletedProcessExit
                                     return Ok ShutdownCompletion.ProcessExit
                                 | Ok ExactProcessState.Running
                                     when dependencies.UtcNow () >= deadline ->
+                                    record LifecycleDiagnostics.ShutdownStage.TimedOut
                                     return Error ShutdownFailure.TimedOut
                                 | Ok ExactProcessState.Running ->
                                     do! dependencies.Delay options.PollInterval
@@ -708,14 +883,21 @@ let internal shutdownExactWith
                     return! waitForCompletion ()
     }
 
+let internal shutdownExactWith =
+    shutdownExactWithDiagnostics LifecycleDiagnostics.write
+
 /// Request routine SDK shutdown for one exact registered process. Endpoint acceptance only starts
 /// the wait; success requires the activity owner to report exact closure or the shared process
 /// resolver to prove that exact PID/start identity exited.
-let shutdownExact isClosed target =
-    shutdownExactWith
+let internal shutdownExactUsing diagnostics isClosed target =
+    shutdownExactWithDiagnostics
+        diagnostics
         (defaultShutdownDependencies isClosed)
         defaultShutdownWaitOptions
         target
+
+let shutdownExact =
+    shutdownExactUsing LifecycleDiagnostics.write
 
 let internal computeLiveness now (session: SessionEntry option) (poll: bool * DateTime) =
     match session, poll with

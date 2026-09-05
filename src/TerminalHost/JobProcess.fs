@@ -189,10 +189,28 @@ module JobProcess =
             |> List.map (fun identity -> $"{identity.ProcessId}@{identity.StartTimeUtcTicks}") |> String.concat ", "
         $"Terminal cleanup left {identities.Length} exact process identities: {shown}"
 
-    let internal createCleanup (operations: CleanupOperations) =
+    let private diagnosticIdentity (identity: ProcessIdentity) =
+        { DiagnosticProcessIdentity.ProcessId =
+            identity.ProcessId
+          StartTimeUtcTicks = identity.StartTimeUtcTicks }
+
+    let internal createCleanupWithDiagnostics
+        (diagnostics: TerminalHostDiagnostics.Sink)
+        (operations: CleanupOperations)
+        =
         let gate = obj()
         // Cleanup state is confined to this one-shot Win32 resource owner; retries must retain exact identities after the Job handle closes.
         let mutable state = Ready
+
+        let record stage (identities: ProcessIdentity seq) =
+            diagnostics (
+                TerminalHostDiagnostic.ProcessCleanup
+                    { Stage = stage
+                      ProcessIdentities =
+                        identities
+                        |> Seq.map diagnosticIdentity
+                        |> Seq.toList }
+            )
 
         let protect action =
             try action (); Ok()
@@ -202,12 +220,21 @@ module JobProcess =
 
         let finishClosed identities =
             match operations.WaitForExit(Set.toList identities) with
-            | [] -> state <- Complete
+            | [] ->
+                state <- Complete
+                record ProcessCleanupStage.Completed identities
             | survivors ->
+                record ProcessCleanupStage.SurvivorsObserved survivors
+                record ProcessCleanupStage.TerminationAttempted survivors
                 survivors |> List.iter (fun identity -> try operations.Terminate identity with _ -> ())
                 match operations.WaitForExit survivors with
-                | [] -> state <- Complete
-                | remaining -> raise (CleanupFailure(unresolvedMessage remaining))
+                | [] ->
+                    state <- Complete
+                    record ProcessCleanupStage.Completed identities
+                | remaining ->
+                    record ProcessCleanupStage.UnresolvedSurvivors remaining
+                    raise (CleanupFailure(unresolvedMessage remaining))
+
         let complete () =
             lock gate (fun () ->
                 protect (fun () ->
@@ -217,14 +244,26 @@ module JobProcess =
                     | Ready -> raise (CleanupFailure "Terminal cleanup was not prepared")
                     | Prepared initial ->
                         let identities = Set.union initial (operations.Capture initial)
-                        operations.CloseJob(); state <- JobClosed identities; operations.DisposeHandles()
+                        record ProcessCleanupStage.OwnershipRecaptured identities
+                        operations.CloseJob()
+                        state <- JobClosed identities
+                        operations.DisposeHandles()
+                        record ProcessCleanupStage.JobClosed identities
                         finishClosed identities))
         fun () ->
             lock gate (fun () ->
                 match state with
                 | Ready ->
-                    protect (fun () -> state <- Prepared(operations.Capture Set.empty)) |> Result.map (fun () -> complete)
+                    protect (fun () ->
+                        let identities = operations.Capture Set.empty
+                        state <- Prepared identities
+                        record ProcessCleanupStage.OwnershipCaptured identities)
+                    |> Result.map (fun () -> complete)
                 | Prepared _ | JobClosed _ | Complete -> Ok complete)
+
+    let internal createCleanup =
+        createCleanupWithDiagnostics
+            TerminalHostDiagnostics.write
 
     let private queryJobMembers (job: SafeFileHandle) =
         let rec query capacity =

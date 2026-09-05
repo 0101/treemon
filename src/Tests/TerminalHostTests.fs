@@ -2325,7 +2325,16 @@ type TerminalHostJobObjectTests() =
                 initialLive
             )
 
-        let finish = JobProcess.createCleanup boundary.Operations () |> requireOk
+        let diagnostics =
+            ConcurrentQueue<TerminalHostDiagnostic>()
+
+        let finish =
+            JobProcess.createCleanupWithDiagnostics
+                diagnostics.Enqueue
+                boundary.Operations
+                ()
+            |> requireOk
+
         let reused = identity 200 9_000L
         let finalExternal = identity 201 3_000L
 
@@ -2343,11 +2352,29 @@ type TerminalHostJobObjectTests() =
 
         finish () |> requireOk
 
+        let stages =
+            diagnostics.ToArray()
+            |> Array.choose (function
+                | TerminalHostDiagnostic.ProcessCleanup cleanup ->
+                    Some cleanup.Stage
+                | TerminalHostDiagnostic.TerminalClose _ -> None)
+
         Assert.Multiple(fun () ->
             Assert.That(boundary.CloseCount, Is.EqualTo(1))
             Assert.That(boundary.DisposeCount, Is.EqualTo(1))
             Assert.That(boundary.Terminated, Is.EqualTo([ finalExternal ]))
-            Assert.That(boundary.LiveProcess reused.ProcessId, Is.EqualTo(Some reused)))
+            Assert.That(boundary.LiveProcess reused.ProcessId, Is.EqualTo(Some reused))
+            Assert.That(
+                stages,
+                Is.EqualTo(
+                    [| ProcessCleanupStage.OwnershipCaptured
+                       ProcessCleanupStage.OwnershipRecaptured
+                       ProcessCleanupStage.JobClosed
+                       ProcessCleanupStage.SurvivorsObserved
+                       ProcessCleanupStage.TerminationAttempted
+                       ProcessCleanupStage.Completed |]
+                )
+            ))
 
     [<Test>]
     member _.``unresolved exact survivor remains retryable with safe identity metadata``() =
@@ -2366,13 +2393,40 @@ type TerminalHostJobObjectTests() =
             )
 
         boundary.KeepTerminatedProcessesAlive()
-        let beginClose = JobProcess.createCleanup boundary.Operations
+        let diagnostics =
+            ConcurrentQueue<TerminalHostDiagnostic>()
+
+        let beginClose =
+            JobProcess.createCleanupWithDiagnostics
+                diagnostics.Enqueue
+                boundary.Operations
+
         let finish = beginClose () |> requireOk
 
         match finish () with
         | Ok() -> Assert.Fail("The exact survivor must keep cleanup unresolved")
         | Error error ->
             Assert.That(error, Does.Contain($"{survivor.ProcessId}@{survivor.StartTimeUtcTicks}"))
+
+        let unresolved =
+            diagnostics.ToArray()
+            |> Array.choose (function
+                | TerminalHostDiagnostic.ProcessCleanup cleanup
+                    when cleanup.Stage =
+                         ProcessCleanupStage.UnresolvedSurvivors ->
+                    Some cleanup
+                | _ -> None)
+            |> Array.exactlyOne
+
+        Assert.That(
+            unresolved.ProcessIdentities,
+            Is.EqualTo(
+                [ { DiagnosticProcessIdentity.ProcessId =
+                        survivor.ProcessId
+                    StartTimeUtcTicks =
+                        survivor.StartTimeUtcTicks } ]
+            )
+        )
 
         boundary.SetState(
             (20_000L, []),
@@ -2381,6 +2435,37 @@ type TerminalHostJobObjectTests() =
         )
 
         beginClose () |> requireOk |> fun retry -> retry () |> requireOk
+
+        Assert.That(
+            diagnostics.ToArray()
+            |> Array.choose (function
+                | TerminalHostDiagnostic.ProcessCleanup cleanup ->
+                    Some cleanup.Stage
+                | _ -> None)
+            |> Array.last,
+            Is.EqualTo(ProcessCleanupStage.Completed)
+        )
+
+    [<Test>]
+    member _.``cleanup diagnostic formatting bounds exact survivor identities``() =
+        let diagnostic =
+            TerminalHostDiagnostic.ProcessCleanup
+                { Stage = ProcessCleanupStage.UnresolvedSurvivors
+                  ProcessIdentities =
+                    [ 1..12 ]
+                    |> List.map (fun index ->
+                        { ProcessId = 20_000 + index
+                          StartTimeUtcTicks =
+                            30_000L + int64 index }) }
+
+        let formatted =
+            TerminalHostDiagnostics.format diagnostic
+
+        Assert.Multiple(fun () ->
+            Assert.That(formatted, Does.Contain("stage=unresolved_survivors"))
+            Assert.That(formatted, Does.Contain("process_count=12"))
+            Assert.That(formatted, Does.Contain("processes_omitted=4"))
+            Assert.That(formatted.Length, Is.LessThan(512)))
 
     [<Test>]
     member _.``closing one retained Job Object kills its exact ttyd process tree``() =

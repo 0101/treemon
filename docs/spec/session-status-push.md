@@ -258,6 +258,14 @@ epoch sequence.
 Exact-instance ingestion accepts only a resolvable parent process identity. Reports without one are
 rejected rather than folded under a synthetic identity.
 
+`LifecycleDiagnostics` receives only validated `SessionId`, `TerminalSessionId`, exact
+`ProcessIdentity`, bounded counts, and closed outcome unions. A successful presence write emits
+`first_seen` or `reconnected` only after the exact row is durable. Presence and process-keyed bridge
+registration also report normal distinct-session concurrency separately from neutral
+same-`SessionId` physical multiplicity. Identity and session lists show at most eight sorted values
+while retaining full total and omitted counts. Paths, URLs, capabilities, prompts, messages, tokens,
+environment values, exception text, and raw reports are not diagnostic inputs.
+
 ### Persistence
 
 `SessionActivityStore` uses SQLite WAL with short-lived connections:
@@ -352,6 +360,7 @@ into lifecycle status.
 | `src/Extension/reporting/reporting-runtime.mjs` | Independent endpoint presence/retry state, reconnect replay, heartbeat, metadata bootstrap, and live shutdown. |
 | `src/Extension/reporting/reporting-core.mjs` | Pure wire mapping plus compact current-process replay state. |
 | `src/Server/SessionActivity.fs` | Exact identity contract, event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
+| `src/Server/LifecycleDiagnostics.fs` | Bounded structured lifecycle events over validated session, terminal, and process identities only. |
 | `src/Server/ProcessIdentityResolver.fs` | Default operating-system PID/start-time resolver shared by activity and exact process lifecycle checks. |
 | `src/Server/SessionActivityProtocol.fs` | Bounded activity wire DTO parsing and exact-instance event mapping. |
 | `src/Server/SessionActivityIngestion.fs` | Exact-instance fold application, independent ordering paths, scheduler publication, and startup reconciliation. |

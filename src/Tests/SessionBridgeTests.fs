@@ -1,12 +1,14 @@
 module Tests.SessionBridgeTests
 
 open System
+open System.Collections.Concurrent
 open System.IO
 open System.Net
 open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open NUnit.Framework
+open Server
 open Server.SessionBridge
 open Server.SessionActivity
 
@@ -304,6 +306,99 @@ type ExactRegistrationTests() =
             Is.EqualTo [ "session-original" ]
         )
 
+    [<Test>]
+    member _.``Bridge diagnostics distinguish refreshes normal sessions and duplicate physical registrations``() =
+        let path = uniquePath "registration-diagnostics"
+        let sharedSession = $"shared-{Guid.NewGuid():N}"
+        let independentSession = $"independent-{Guid.NewGuid():N}"
+        let firstIdentity = nextIdentity ()
+        let secondIdentity = nextIdentity ()
+        let thirdIdentity = nextIdentity ()
+        let firstTerminal = Guid.NewGuid().ToString("N")
+        let secondTerminal = Guid.NewGuid().ToString("N")
+        let diagnostics =
+            ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
+
+        let register identity sessionId terminalId =
+            registrationRequest
+                identity
+                path
+                "http://127.0.0.1:1234/inject"
+                (Some sessionId)
+                (Some terminalId)
+                (capabilityFor identity)
+            |> registerSessionWithDiagnostics
+                diagnostics.Enqueue
+                (resolverFor identity)
+            |> Result.defaultWith (fun failure ->
+                invalidOp $"registration failed: {failure}")
+
+        register firstIdentity sharedSession firstTerminal
+        |> ignore
+
+        register secondIdentity sharedSession secondTerminal
+        |> ignore
+
+        register firstIdentity sharedSession firstTerminal
+        |> ignore
+
+        register thirdIdentity independentSession firstTerminal
+        |> ignore
+
+        let events = diagnostics.ToArray()
+
+        let registrationKinds =
+            events
+            |> Array.choose (function
+                | LifecycleDiagnostics.Diagnostic.BridgeRegistration registration ->
+                    Some registration.Kind
+                | _ -> None)
+
+        let sameSession =
+            events
+            |> Array.choose (function
+                | LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved multiplicity
+                    when multiplicity.Boundary =
+                         LifecycleDiagnostics.ObservationBoundary.Bridge ->
+                    Some multiplicity
+                | _ -> None)
+            |> Array.last
+
+        let multipleSessions =
+            events
+            |> Array.choose (function
+                | LifecycleDiagnostics.Diagnostic.MultipleSessionsObserved multiple
+                    when multiple.Boundary =
+                         LifecycleDiagnostics.ObservationBoundary.Bridge ->
+                    Some multiple
+                | _ -> None)
+            |> Array.last
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                registrationKinds,
+                Is.EqualTo(
+                    [| LifecycleDiagnostics.BridgeRegistrationKind.Added
+                       LifecycleDiagnostics.BridgeRegistrationKind.Added
+                       LifecycleDiagnostics.BridgeRegistrationKind.Refreshed
+                       LifecycleDiagnostics.BridgeRegistrationKind.Added |]
+                )
+            )
+            Assert.That(
+                sameSession.ProcessIdentities,
+                Is.EquivalentTo([ firstIdentity; secondIdentity ])
+            )
+            Assert.That(
+                sameSession.TerminalSessionIds
+                |> List.map TerminalSessionId.value,
+                Is.EquivalentTo([ firstTerminal; secondTerminal ])
+            )
+            Assert.That(
+                multipleSessions.SessionIds
+                |> List.map SessionId.value,
+                Is.EquivalentTo([ sharedSession; independentSession ])
+            ))
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -579,14 +674,18 @@ type ExactShutdownTests() =
                 (Some "session-rejections")
 
         [ ShutdownRequestOutcome.InvalidCapability,
-          ShutdownFailure.InvalidCapability
+          ShutdownFailure.InvalidCapability,
+          LifecycleDiagnostics.ShutdownRejection.InvalidCapability
           ShutdownRequestOutcome.NonLoopbackRequest,
-          ShutdownFailure.NonLoopbackRequest
+          ShutdownFailure.NonLoopbackRequest,
+          LifecycleDiagnostics.ShutdownRejection.NonLoopbackRequest
           ShutdownRequestOutcome.Rejected,
-          ShutdownFailure.Rejected
+          ShutdownFailure.Rejected,
+          LifecycleDiagnostics.ShutdownRejection.Rejected
           ShutdownRequestOutcome.TransportFailed,
-          ShutdownFailure.RequestFailed ]
-        |> List.iter (fun (outcome, expected) ->
+          ShutdownFailure.RequestFailed,
+          LifecycleDiagnostics.ShutdownRejection.RequestFailed ]
+        |> List.iter (fun (outcome, expected, diagnosticOutcome) ->
             let runtime =
                 dependencies
                     outcome
@@ -595,12 +694,35 @@ type ExactShutdownTests() =
                     (fun () -> entry.RegisteredAt)
                     (fun _ -> async { return () })
 
+            let diagnostics =
+                ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
+
             assertShutdownResult
                 (Error expected)
                 (
-                shutdownExactWith runtime options (targetFor entry)
+                shutdownExactWithDiagnostics
+                    diagnostics.Enqueue
+                    runtime
+                    options
+                    (targetFor entry)
                 |> Async.RunSynchronously
-                ))
+                )
+
+            let stages =
+                diagnostics.ToArray()
+                |> Array.choose (function
+                    | LifecycleDiagnostics.Diagnostic.ShutdownTransition shutdown ->
+                        Some shutdown.Stage
+                    | _ -> None)
+
+            Assert.That(
+                stages,
+                Is.EqualTo(
+                    [| LifecycleDiagnostics.ShutdownStage.Requested
+                       LifecycleDiagnostics.ShutdownStage.Rejected
+                           diagnosticOutcome |]
+                )
+            ))
 
     [<Test>]
     member _.``Accepted shutdown completes from exact closure``() =
@@ -623,12 +745,35 @@ type ExactShutdownTests() =
                 (fun () -> entry.RegisteredAt)
                 (fun _ -> async { return () })
 
+        let diagnostics =
+            ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
+
         assertShutdownResult
             (Ok ShutdownCompletion.ExactClosure)
             (
-            shutdownExactWith runtime options (targetFor entry)
+            shutdownExactWithDiagnostics
+                diagnostics.Enqueue
+                runtime
+                options
+                (targetFor entry)
             |> Async.RunSynchronously
             )
+
+        let stages =
+            diagnostics.ToArray()
+            |> Array.choose (function
+                | LifecycleDiagnostics.Diagnostic.ShutdownTransition shutdown ->
+                    Some shutdown.Stage
+                | _ -> None)
+
+        Assert.That(
+            stages,
+            Is.EqualTo(
+                [| LifecycleDiagnostics.ShutdownStage.Requested
+                   LifecycleDiagnostics.ShutdownStage.RequestAccepted
+                   LifecycleDiagnostics.ShutdownStage.CompletedExactClosure |]
+            )
+        )
 
     [<Test>]
     member _.``Production shutdown transport posts the opaque capability and then observes closure``() =
@@ -738,12 +883,35 @@ type ExactShutdownTests() =
                         now <- now + interval
                     })
 
+        let diagnostics =
+            ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
+
         assertShutdownResult
             (Error ShutdownFailure.TimedOut)
             (
-            shutdownExactWith runtime options (targetFor entry)
+            shutdownExactWithDiagnostics
+                diagnostics.Enqueue
+                runtime
+                options
+                (targetFor entry)
             |> Async.RunSynchronously
             )
+
+        let stages =
+            diagnostics.ToArray()
+            |> Array.choose (function
+                | LifecycleDiagnostics.Diagnostic.ShutdownTransition shutdown ->
+                    Some shutdown.Stage
+                | _ -> None)
+
+        Assert.That(
+            stages,
+            Is.EqualTo(
+                [| LifecycleDiagnostics.ShutdownStage.Requested
+                   LifecycleDiagnostics.ShutdownStage.RequestAccepted
+                   LifecycleDiagnostics.ShutdownStage.TimedOut |]
+            )
+        )
 
 [<TestFixture>]
 [<Category("Unit")>]

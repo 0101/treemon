@@ -124,13 +124,17 @@ type SessionActivityService internal
     (
         store: SessionActivityStore,
         scheduler: MailboxProcessor<SchedulerState.StateMsg>,
-        ?processIdentityResolver: ProcessIdentityResolver
+        ?processIdentityResolver: ProcessIdentityResolver,
+        ?diagnosticSink: LifecycleDiagnostics.Sink
     ) =
 
     let resolver =
         defaultArg
             processIdentityResolver
             ProcessIdentityResolverRuntime.defaultResolver
+
+    let diagnostics =
+        defaultArg diagnosticSink LifecycleDiagnostics.write
 
     let dispositionGate = obj ()
     // Mailbox lifetime is the one unavoidable mutable service boundary.
@@ -158,6 +162,71 @@ type SessionActivityService internal
                 { ProcessIdentity = identity
                   ReceivedAt = receivedAt
                   Report = report }
+
+    let recordPresence
+        wasKnown
+        observedAt
+        (state: ServiceState)
+        (persisted: StoredInstance)
+        =
+        diagnostics (
+            LifecycleDiagnostics.Diagnostic.PresenceAcknowledged
+                { Kind =
+                    if wasKnown then
+                        LifecycleDiagnostics.PresenceKind.Reconnected
+                    else
+                        LifecycleDiagnostics.PresenceKind.FirstSeen
+                  ProcessIdentity = persisted.ProcessIdentity
+                  SessionId = persisted.SessionId
+                  TerminalSessionId = persisted.TerminalSessionId }
+        )
+
+        let openWorktreeInstances =
+            state.Live
+            |> Map.values
+            |> Seq.filter (fun instance ->
+                instance.WorktreePath = persisted.WorktreePath
+                && instance.ClosedAt.IsNone
+                && observedAt - instance.LastSeen < openWindow)
+            |> Seq.toList
+
+        let sessionIds =
+            openWorktreeInstances
+            |> List.map _.SessionId
+            |> List.distinct
+
+        if sessionIds.Length > 1 then
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.MultipleSessionsObserved
+                    { Boundary =
+                        LifecycleDiagnostics.ObservationBoundary.Presence
+                      ProcessCount = openWorktreeInstances.Length
+                      SessionIds = sessionIds }
+            )
+
+        let sameSessionInstances =
+            openWorktreeInstances
+            |> List.filter (fun instance ->
+                instance.SessionId = persisted.SessionId)
+
+        if sameSessionInstances.Length > 1 then
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved
+                    { Boundary =
+                        LifecycleDiagnostics.ObservationBoundary.Presence
+                      SessionId = persisted.SessionId
+                      ProcessIdentities =
+                        sameSessionInstances
+                        |> List.map _.ProcessIdentity
+                      TerminalSessionIds =
+                        sameSessionInstances
+                        |> List.choose _.TerminalSessionId
+                        |> List.distinct
+                      UnattributedProcessCount =
+                        sameSessionInstances
+                        |> List.filter _.TerminalSessionId.IsNone
+                        |> List.length }
+            )
 
     let mailbox =
         MailboxProcessor<ServiceMsg>.Start(fun inbox ->
@@ -216,6 +285,13 @@ type SessionActivityService internal
                         return! loop next
                     | PersistPresence(exact, reply) ->
                         try
+                            let wasKnown =
+                                tryPrior
+                                    store
+                                    state
+                                    exact.ProcessIdentity
+                                |> Option.isSome
+
                             match
                                 applyPresence
                                     store
@@ -228,6 +304,12 @@ type SessionActivityService internal
                                     PresenceAcknowledge.Recorded
                                         persisted.ProcessIdentity
                                 )
+
+                                recordPresence
+                                    wasKnown
+                                    exact.ReceivedAt
+                                    next
+                                    persisted
 
                                 return! loop next
                             | Error(retryable, reason) ->

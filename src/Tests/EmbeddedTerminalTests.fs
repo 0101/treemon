@@ -584,7 +584,8 @@ let private exactIdentity processId startTicks =
     ProcessIdentity.create processId startTicks
     |> Result.defaultWith invalidOp
 
-let private runReplacementCommit
+let private runReplacementCommitWithDiagnostics
+    diagnostics
     config
     query
     operations
@@ -598,7 +599,8 @@ let private runReplacementCommit
         let commit plan activityQuery =
             async {
                 let! result =
-                    TerminalHostReplacement.commitReplacementWith
+                    TerminalHostReplacement.commitReplacementWithDiagnostics
+                        diagnostics
                         operations
                         config
                         plan
@@ -626,6 +628,10 @@ let private runReplacementCommit
         return outcome, commitResult
     }
 
+let private runReplacementCommit =
+    runReplacementCommitWithDiagnostics
+        LifecycleDiagnostics.ignore
+
 let private requireReplacementRecovery = function
     | TerminalHostReplacement.ReplacementCommit.RecoveryRequired recovery ->
         recovery
@@ -633,20 +639,23 @@ let private requireReplacementRecovery = function
         Assert.Fail($"Expected replacement recovery input, got {other}")
         Unchecked.defaultof<_>
 
-let private runReplacementRecovery
+let private runReplacementRecoveryWithDiagnostics
+    diagnostics
     config
     query
     operations
     =
     task {
         let! _, commit =
-            runReplacementCommit
+            runReplacementCommitWithDiagnostics
+                diagnostics
                 config
                 query
                 operations
 
         let! resolution =
-            TerminalHostRecovery.resolveWith
+            TerminalHostRecovery.resolveWithDiagnostics
+                diagnostics
                 operations
                 config
                 commit
@@ -665,6 +674,10 @@ let private runReplacementRecovery
             Assert.Fail($"Expected applied replacement recovery, got {other}")
             return Unchecked.defaultof<_>
     }
+
+let private runReplacementRecovery =
+    runReplacementRecoveryWithDiagnostics
+        LifecycleDiagnostics.ignore
 
 let private requireExactRecoveryRegistry = function
     | TerminalHostRecovery.RecoveryTerminalRegistry.Exact registry ->
@@ -1719,8 +1732,13 @@ type EmbeddedTerminalControlClientTests() =
                     (fun _ -> TurnStarted)
 
             service.ExactSnapshot() |> ignore
+            let diagnostics =
+                ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
+
             let cleanup =
-                SessionActivityRuntime.terminalSessionCleanup service
+                SessionActivityRuntime.terminalSessionCleanupWithDiagnostics
+                    diagnostics.Enqueue
+                    service
 
             let! firstClose =
                 WorktreeCleanup.closeEmbeddedTerminalWith
@@ -1734,6 +1752,15 @@ type EmbeddedTerminalControlClientTests() =
             let! stateAfterFirst =
                 agent.PostAndAsyncReply(GetState)
                 |> Async.StartAsTask
+
+            let recordedClosures =
+                diagnostics.ToArray()
+                |> Array.choose (function
+                    | LifecycleDiagnostics.Diagnostic.ExactClosure closure
+                        when closure.Outcome =
+                             LifecycleDiagnostics.ExactClosureOutcome.Recorded ->
+                        Some closure.ProcessIdentity
+                    | _ -> None)
 
             Assert.Multiple(fun () ->
                 targetIdentities
@@ -1751,7 +1778,15 @@ type EmbeddedTerminalControlClientTests() =
                     "the same durable SessionId in another exact terminal must remain open"
                 )
                 Assert.That(stateAfterFirst.SessionInstances.Count, Is.EqualTo(1))
-                Assert.That(host.CurrentTerminals.Length, Is.EqualTo(1)))
+                Assert.That(host.CurrentTerminals.Length, Is.EqualTo(1))
+                Assert.That(
+                    recordedClosures,
+                    Is.EquivalentTo(targetIdentities)
+                )
+                Assert.That(
+                    recordedClosures,
+                    Does.Not.Contain(siblingIdentity)
+                ))
 
             let! secondClose =
                 WorktreeCleanup.closeEmbeddedTerminalWith
@@ -1815,6 +1850,8 @@ type EmbeddedTerminalControlClientTests() =
 
             let beforeCalls = ConcurrentQueue<Set<TerminalSessionId>>()
             let afterCalls = ConcurrentQueue<Set<TerminalSessionId>>()
+            let diagnostics =
+                ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
             let prepare
                 (_: Map<TerminalSessionId, WorktreePath>)
@@ -1837,7 +1874,8 @@ type EmbeddedTerminalControlClientTests() =
                         Ok() }
 
             let close =
-                WorktreeCleanup.closeEmbeddedTerminalWith
+                WorktreeCleanup.closeEmbeddedTerminalWithDiagnostics
+                    diagnostics.Enqueue
                     prepare
                     manager
                     terminalId
@@ -1875,6 +1913,13 @@ type EmbeddedTerminalControlClientTests() =
             let! result =
                 close.WaitAsync(TimeSpan.FromSeconds 5.0)
 
+            let teardownStages =
+                diagnostics.ToArray()
+                |> Array.choose (function
+                    | LifecycleDiagnostics.Diagnostic.TeardownTransition stage ->
+                        Some stage
+                    | _ -> None)
+
             Assert.Multiple(fun () ->
                 requireOk result |> ignore
                 Assert.That(
@@ -1889,6 +1934,34 @@ type EmbeddedTerminalControlClientTests() =
                 Assert.That(
                     host.CurrentTerminals |> List.map _.WorktreePath,
                     Is.EqualTo [ WorktreePath.value unrelated ]
+                )
+                Assert.That(
+                    teardownStages,
+                    Is.EqualTo(
+                        [| LifecycleDiagnostics.TeardownStage.Started(
+                               LifecycleDiagnostics.TeardownTarget.Terminal,
+                               [ terminalOrigin ]
+                           )
+                           LifecycleDiagnostics.TeardownStage.GracefulShutdownStarted
+                               1
+                           LifecycleDiagnostics.TeardownStage.GracefulShutdownCompleted
+                               1
+                           LifecycleDiagnostics.TeardownStage.HostCloseStarted
+                               1
+                           LifecycleDiagnostics.TeardownStage.HostCloseCompleted(
+                               LifecycleDiagnostics.HostCloseOutcome.Confirmed,
+                               1,
+                               1
+                           )
+                           LifecycleDiagnostics.TeardownStage.ExactClosureStarted
+                               1
+                           LifecycleDiagnostics.TeardownStage.ExactClosureCompleted(
+                               LifecycleDiagnostics.TeardownClosureOutcome.Recorded,
+                               1
+                           )
+                           LifecycleDiagnostics.TeardownStage.Completed
+                               1 |]
+                    )
                 ))
         }
 
@@ -3347,6 +3420,8 @@ type EmbeddedTerminalReplacementTests() =
             let addressed = ConcurrentQueue<int>()
             let oldHostStops = ConcurrentQueue<unit>()
             let stagedLaunches = ConcurrentQueue<unit>()
+            let diagnostics =
+                ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
             let defaults =
                 TerminalHostReplacement.defaultOperations
@@ -3389,13 +3464,31 @@ type EmbeddedTerminalReplacementTests() =
                             } }
 
             let! outcome, commit =
-                runReplacementCommit
+                runReplacementCommitWithDiagnostics
+                    diagnostics.Enqueue
                     config
                     query
                     operations
 
             let recovery =
                 requireReplacementRecovery commit
+
+            let replacementStages =
+                diagnostics.ToArray()
+                |> Array.choose (function
+                    | LifecycleDiagnostics.Diagnostic.ReplacementTransition stage ->
+                        Some stage
+                    | _ -> None)
+
+            let sameSession =
+                diagnostics.ToArray()
+                |> Array.choose (function
+                    | LifecycleDiagnostics.Diagnostic.SameSessionMultiplicityObserved multiplicity
+                        when multiplicity.Boundary =
+                             LifecycleDiagnostics.ObservationBoundary.Replacement ->
+                        Some multiplicity
+                    | _ -> None)
+                |> Array.exactlyOne
 
             Assert.Multiple(fun () ->
                 Assert.That(
@@ -3422,6 +3515,36 @@ type EmbeddedTerminalReplacementTests() =
                     recovery.Progress.HostState,
                     Is.EqualTo(
                         TerminalHostReplacement.ReplacementHostState.OldHostHealthy
+                    )
+                )
+                Assert.That(
+                    replacementStages,
+                    Is.EqualTo(
+                        [| LifecycleDiagnostics.ReplacementStage.Captured(
+                               1,
+                               2,
+                               1
+                           )
+                           LifecycleDiagnostics.ReplacementStage.RecheckStarted
+                           LifecycleDiagnostics.ReplacementStage.GracefulShutdownStarted
+                               2
+                           LifecycleDiagnostics.ReplacementStage.GracefulShutdownCompleted(
+                               1,
+                               1
+                           )
+                           LifecycleDiagnostics.ReplacementStage.RecoveryRequired
+                               LifecycleDiagnostics.ReplacementFailureKind.GracefulShutdown |]
+                    )
+                )
+                Assert.That(
+                    sameSession.SessionId,
+                    Is.EqualTo(SessionId "duplicate-session")
+                )
+                Assert.That(
+                    sameSession.ProcessIdentities,
+                    Is.EquivalentTo(
+                        shutdownTargets
+                        |> List.map _.ProcessIdentity
                     )
                 )
 
@@ -4096,6 +4219,8 @@ type EmbeddedTerminalReplacementTests() =
             let deliveries = ConcurrentQueue<string * string>()
             let hostStops = ConcurrentQueue<unit>()
             let hostLaunches = ConcurrentQueue<unit>()
+            let diagnostics =
+                ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
             let defaults =
                 TerminalHostReplacement.defaultOperations
@@ -4144,7 +4269,8 @@ type EmbeddedTerminalReplacementTests() =
                             } }
 
             let! _, recovery, outcome =
-                runReplacementRecovery
+                runReplacementRecoveryWithDiagnostics
+                    diagnostics.Enqueue
                     config
                     query
                     operations
@@ -4159,6 +4285,27 @@ type EmbeddedTerminalReplacementTests() =
                     selected.OriginalTerminalSessionId,
                     selected)
                 |> Map.ofList
+
+            let terminalMultiplicity =
+                diagnostics.ToArray()
+                |> Array.choose (function
+                    | LifecycleDiagnostics.Diagnostic.TerminalConversationAnomalyObserved multiplicity ->
+                        Some multiplicity
+                    | _ -> None)
+                |> Array.exactlyOne
+
+            let recoveryDiagnostic =
+                diagnostics.ToArray()
+                |> Array.choose (function
+                    | LifecycleDiagnostics.Diagnostic.RecoveryCompleted diagnostic ->
+                        Some diagnostic
+                    | _ -> None)
+                |> Array.exactlyOne
+
+            let formattedDiagnostics =
+                diagnostics.ToArray()
+                |> Array.map LifecycleDiagnostics.format
+                |> String.concat Environment.NewLine
 
             Assert.Multiple(fun () ->
                 Assert.That(
@@ -4188,6 +4335,37 @@ type EmbeddedTerminalReplacementTests() =
                         [ TerminalHostRecovery.RecoveryUnresolvedProcess.ExactProcess
                               secondUnselectedIdentity ]
                     )
+                )
+                Assert.That(
+                    terminalMultiplicity.TerminalSessionId
+                    |> TerminalSessionId.value,
+                    Is.EqualTo(second.SessionId)
+                )
+                Assert.That(
+                    terminalMultiplicity.SelectedSessionId,
+                    Is.EqualTo(Some(SessionId "second-selected"))
+                )
+                Assert.That(
+                    terminalMultiplicity.RetainedSessionIds,
+                    Is.EqualTo([ SessionId "retained-unselected" ])
+                )
+                Assert.That(
+                    recoveryDiagnostic.Status,
+                    Is.EqualTo(
+                        LifecycleDiagnostics.RecoveryStatus.Recovered
+                    )
+                )
+                Assert.That(
+                    recoveryDiagnostic.UnresolvedProcesses,
+                    Is.EqualTo([ secondUnselectedIdentity ])
+                )
+                Assert.That(
+                    formattedDiagnostics,
+                    Does.Not.Contain("resume-first-selected")
+                )
+                Assert.That(
+                    formattedDiagnostics,
+                    Does.Not.Contain("must not stop the old host")
                 )
 
                 match

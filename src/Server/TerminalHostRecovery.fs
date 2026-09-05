@@ -1167,7 +1167,115 @@ let internal recoveryOutcome recovery result =
         error
     )
 
-let internal resolveWith operations config commit =
+let private diagnosticHostGeneration =
+    function
+    | RecoveryHostGeneration.Old ->
+        LifecycleDiagnostics.HostGeneration.Old
+    | RecoveryHostGeneration.Staged ->
+        LifecycleDiagnostics.HostGeneration.Staged
+    | RecoveryHostGeneration.Unknown ->
+        LifecycleDiagnostics.HostGeneration.Unknown
+
+let private diagnosticHostIdentity (manifest: DiscoveryManifest) =
+    ProcessIdentity.create
+        manifest.Pid
+        manifest.ProcessStartTimeUtcTicks
+    |> Result.toOption
+
+let internal diagnosticSummary
+    (result: ReplacementRecoveryResult)
+    =
+    let host =
+        match result.HostState with
+        | RecoveryHostState.Running(generation, manifest) ->
+            LifecycleDiagnostics.RecoveryHostOutcome.Running(
+                diagnosticHostGeneration generation,
+                diagnosticHostIdentity manifest
+            )
+        | RecoveryHostState.Stopped ->
+            LifecycleDiagnostics.RecoveryHostOutcome.Stopped
+        | RecoveryHostState.Unresolved(generation, manifest) ->
+            LifecycleDiagnostics.RecoveryHostOutcome.Unresolved(
+                diagnosticHostGeneration generation,
+                manifest |> Option.bind diagnosticHostIdentity
+            )
+
+    let registry =
+        match result.TerminalRegistry with
+        | RecoveryTerminalRegistry.Exact exact ->
+            LifecycleDiagnostics.RecoveryRegistryOutcome.Exact
+                exact.Terminals.Length
+        | RecoveryTerminalRegistry.Unavailable _ ->
+            LifecycleDiagnostics.RecoveryRegistryOutcome.Unavailable
+
+    let selectedSessions =
+        result.SelectedSessions
+        |> List.choose (fun selected ->
+            match
+                LifecycleDiagnostics.tryTerminalSessionId
+                    selected.OriginalTerminalSessionId,
+                LifecycleDiagnostics.trySessionId
+                    selected.CopilotSessionId
+            with
+            | Some originalTerminalSessionId, Some sessionId ->
+                let outcome =
+                    match selected.Outcome with
+                    | RecoverySelectedSessionOutcome.ResumeDelivered ->
+                        LifecycleDiagnostics.RecoverySelectedOutcome.ResumeDelivered
+                    | RecoverySelectedSessionOutcome.ShutdownUnconfirmed _ ->
+                        LifecycleDiagnostics.RecoverySelectedOutcome.ShutdownUnconfirmed
+                    | RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed _ ->
+                        LifecycleDiagnostics.RecoverySelectedOutcome.ResumeDeliveryUnconfirmed
+                    | RecoverySelectedSessionOutcome.ResumeNotAttempted _ ->
+                        LifecycleDiagnostics.RecoverySelectedOutcome.ResumeNotAttempted
+
+                let diagnostic:
+                    LifecycleDiagnostics.RecoverySelectedSessionDiagnostic =
+                    { OriginalTerminalSessionId =
+                        originalTerminalSessionId
+                      CurrentTerminalSessionId =
+                        selected.CurrentTerminalSessionId
+                        |> Option.bind
+                            LifecycleDiagnostics.tryTerminalSessionId
+                      SessionId = sessionId
+                      Outcome = outcome }
+
+                Some diagnostic
+            | _ -> None)
+
+    let diagnostic: LifecycleDiagnostics.RecoveryDiagnostic =
+        { Status =
+            match result.Status with
+            | RecoveryStatus.Recovered ->
+                LifecycleDiagnostics.RecoveryStatus.Recovered
+            | RecoveryStatus.Rejected _ ->
+                LifecycleDiagnostics.RecoveryStatus.Rejected
+          Host = host
+          Registry = registry
+          SelectedSessions = selectedSessions
+          UnresolvedProcesses =
+            result.UnresolvedProcesses
+            |> List.choose (function
+                | RecoveryUnresolvedProcess.ExactProcess identity ->
+                    Some identity
+                | RecoveryUnresolvedProcess.StartedWithoutIdentity _ ->
+                    None)
+            |> List.distinct
+          UnidentifiedHostGenerations =
+            result.UnresolvedProcesses
+            |> List.choose (function
+                | RecoveryUnresolvedProcess.ExactProcess _ -> None
+                | RecoveryUnresolvedProcess.StartedWithoutIdentity generation ->
+                    Some(diagnosticHostGeneration generation)) }
+
+    diagnostic
+
+let internal resolveWithDiagnostics
+    (diagnostics: LifecycleDiagnostics.Sink)
+    operations
+    config
+    commit
+    =
     async {
         match commit with
         | ReplacementCommit.KeepState outcome ->
@@ -1184,8 +1292,19 @@ let internal resolveWith operations config commit =
                     outcome
                 )
         | ReplacementCommit.RecoveryRequired recovery ->
+            diagnostics (
+                LifecycleDiagnostics.Diagnostic.ReplacementTransition
+                    LifecycleDiagnostics.ReplacementStage.RecoveryStarted
+            )
+
             let! recoveryResult =
                 recoverWith operations config recovery
+
+            diagnostics (
+                recoveryResult
+                |> diagnosticSummary
+                |> LifecycleDiagnostics.Diagnostic.RecoveryCompleted
+            )
 
             return
                 ReplacementResolution.ApplyRecovery(
@@ -1193,6 +1312,9 @@ let internal resolveWith operations config commit =
                     recoveryResult
                 )
     }
+
+let internal resolveWith =
+    resolveWithDiagnostics LifecycleDiagnostics.write
 
 let internal resolutionOutcome = function
     | ReplacementResolution.KeepState outcome
