@@ -1,7 +1,7 @@
 import {
   buildNonBlankMessageReport,
   buildReport,
-  createCurrentProcessState,
+  createReplayAccumulator,
   isRecord,
   mergeReplayReports,
   reportForReplaySdkEvent,
@@ -136,9 +136,13 @@ export function presenceRetryDelay(attempt) {
  *   presenceReport: ActivityReport,
  *   loadReplayReports: () => Promise<ActivityReport[]>,
  *   post: (url: string, report: ActivityReport) => Promise<PostResult>,
+ *   createHeartbeatReport: () => ActivityReport,
  *   schedule?: (callback: () => void | Promise<void>, delayMs: number) => unknown,
  *   cancel?: (handle: unknown) => void,
  *   retryDelay?: (attempt: number) => number,
+ *   setInterval?: (callback: () => void | Promise<void>, intervalMs: number) => unknown,
+ *   clearInterval?: (handle: unknown) => void,
+ *   heartbeatIntervalMs?: number,
  *   log?: (message: string) => void,
  * }} options
  */
@@ -148,6 +152,12 @@ function createReportingFanout(options) {
     /** @type {ReturnType<typeof setTimeout>} */ (handle),
   ));
   const retryDelay = options.retryDelay ?? presenceRetryDelay;
+  const setIntervalFn = options.setInterval
+    ?? ((callback, intervalMs) => setInterval(callback, intervalMs));
+  const clearIntervalFn = options.clearInterval ?? ((handle) => clearInterval(
+    /** @type {ReturnType<typeof setInterval>} */ (handle),
+  ));
+  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
   const log = options.log ?? (() => {});
 
   /** @param {string} url */
@@ -157,6 +167,8 @@ function createReportingFanout(options) {
     let retryAttempt = 0;
     /** @type {unknown | undefined} */
     let retryHandle;
+    /** @type {unknown | undefined} */
+    let heartbeatHandle;
     /** @type {ActivityReport[]} */
     let replayBuffer = [];
     let stopped = false;
@@ -167,6 +179,8 @@ function createReportingFanout(options) {
     let activeTask = Promise.resolve();
     /** @type {Promise<void>} */
     let sendChain = Promise.resolve();
+    /** @type {Promise<void>} */
+    let heartbeatTask = Promise.resolve();
 
     function clearRetry() {
       if (retryHandle !== undefined) {
@@ -175,10 +189,26 @@ function createReportingFanout(options) {
       }
     }
 
+    function stopHeartbeat() {
+      if (heartbeatHandle !== undefined) {
+        clearIntervalFn(heartbeatHandle);
+        heartbeatHandle = undefined;
+      }
+    }
+
+    /** @param {string} reason */
+    function enterTerminal(reason) {
+      attemptVersion += 1;
+      stopHeartbeat();
+      phase = "terminal";
+      log(`Reporting ${url} stopped: ${reason}`);
+    }
+
     /** @param {string} reason */
     function schedulePresenceRetry(reason) {
       clearRetry();
       if (stopped || closing) {
+        stopHeartbeat();
         phase = "terminal";
         return;
       }
@@ -191,6 +221,14 @@ function createReportingFanout(options) {
         retryHandle = undefined;
         return beginPresence();
       }, delayMs);
+    }
+
+    /** @param {string} reason @param {number} version */
+    function restartPresence(reason, version) {
+      if (stopped || closing || version !== attemptVersion) return;
+      attemptVersion += 1;
+      stopHeartbeat();
+      schedulePresenceRetry(reason);
     }
 
     /** @param {ActivityReport} report @returns {Promise<OrdinaryOutcome>} */
@@ -207,6 +245,44 @@ function createReportingFanout(options) {
       }
     }
 
+    function heartbeatTick() {
+      const version = attemptVersion;
+      heartbeatTask = heartbeatTask.then(async () => {
+        if (
+          stopped
+          || closing
+          || version !== attemptVersion
+          || heartbeatHandle === undefined
+          || (phase !== "replaying" && phase !== "ready")
+        ) {
+          return;
+        }
+
+        const outcome = await sendOrdinary(options.createHeartbeatReport());
+        if (stopped || closing || version !== attemptVersion) return;
+
+        if (outcome.kind === "transport") {
+          restartPresence(outcome.reason, version);
+        } else if (outcome.kind === "terminal") {
+          enterTerminal(outcome.reason);
+        }
+      }).catch((error) => {
+        restartPresence(errorText(error), version);
+      });
+      return heartbeatTask;
+    }
+
+    function startHeartbeat() {
+      if (
+        heartbeatHandle === undefined
+        && !stopped
+        && !closing
+        && phase !== "terminal"
+      ) {
+        heartbeatHandle = setIntervalFn(heartbeatTick, heartbeatIntervalMs);
+      }
+    }
+
     /**
      * @param {ActivityReport[]} reports
      * @param {number} version
@@ -215,13 +291,13 @@ function createReportingFanout(options) {
       for (const report of reports) {
         if (stopped || version !== attemptVersion) return "cancelled";
         const outcome = await sendOrdinary(report);
+        if (stopped || version !== attemptVersion) return "cancelled";
         if (outcome.kind === "transport") {
-          schedulePresenceRetry(outcome.reason);
+          restartPresence(outcome.reason, version);
           return "stopped";
         }
         if (outcome.kind === "terminal") {
-          phase = "terminal";
-          log(`Reporting ${url} stopped: ${outcome.reason}`);
+          enterTerminal(outcome.reason);
           return "stopped";
         }
       }
@@ -232,6 +308,7 @@ function createReportingFanout(options) {
     async function replayAfterPresence(version) {
       phase = "replaying";
       replayBuffer = [];
+      startHeartbeat();
 
       /** @type {ActivityReport[]} */
       let reports = [];
@@ -292,8 +369,7 @@ function createReportingFanout(options) {
       } else if (outcome.kind === "retry") {
         schedulePresenceRetry(outcome.reason);
       } else {
-        phase = "terminal";
-        log(`Reporting ${url} stopped: ${outcome.reason}`);
+        enterTerminal(outcome.reason);
       }
     }
 
@@ -307,27 +383,38 @@ function createReportingFanout(options) {
      * @param {boolean} final
      */
     function enqueueReady(report, final) {
+      const version = attemptVersion;
       sendChain = sendChain.then(async () => {
-        if (stopped || (!final && phase !== "ready")) return;
+        if (
+          stopped
+          || version !== attemptVersion
+          || (!final && phase !== "ready")
+        ) {
+          return;
+        }
         if (final && !everAcknowledged) {
+          stopHeartbeat();
           phase = "terminal";
           return;
         }
 
         const outcome = await sendOrdinary(report);
+        if (stopped || version !== attemptVersion) return;
         if (final) {
+          stopHeartbeat();
           phase = "terminal";
         } else if (outcome.kind === "transport") {
-          schedulePresenceRetry(outcome.reason);
+          restartPresence(outcome.reason, version);
         } else if (outcome.kind === "terminal") {
-          phase = "terminal";
-          log(`Reporting ${url} stopped: ${outcome.reason}`);
+          enterTerminal(outcome.reason);
         }
       }).catch((error) => {
+        if (version !== attemptVersion) return;
         if (final || stopped || closing) {
+          stopHeartbeat();
           phase = "terminal";
         } else {
-          schedulePresenceRetry(errorText(error));
+          restartPresence(errorText(error), version);
         }
       });
       return sendChain;
@@ -350,6 +437,7 @@ function createReportingFanout(options) {
       if (stopped || closing || phase === "terminal") return activeTask;
       closing = true;
       clearRetry();
+      stopHeartbeat();
 
       if (phase === "replaying") {
         replayBuffer.push(report);
@@ -376,6 +464,7 @@ function createReportingFanout(options) {
       closing = true;
       attemptVersion += 1;
       clearRetry();
+      stopHeartbeat();
       replayBuffer = [];
       phase = "terminal";
     }
@@ -386,11 +475,12 @@ function createReportingFanout(options) {
         phase,
         everAcknowledged,
         retryAttempt,
+        heartbeatRunning: heartbeatHandle !== undefined,
       };
     }
 
     function pendingTasks() {
-      return [activeTask, sendChain];
+      return [activeTask, sendChain, heartbeatTask];
     }
 
     return {
@@ -444,49 +534,80 @@ function createReportingFanout(options) {
  *   activityUrls: string[],
  *   post: (url: string, report: ActivityReport) => Promise<PostResult>,
  *   randomId: () => string,
+ *   now?: () => number,
  *   nowIso?: () => string,
  *   schedule?: (callback: () => void | Promise<void>, delayMs: number) => unknown,
  *   cancel?: (handle: unknown) => void,
  *   retryDelay?: (attempt: number) => number,
- *   setInterval?: (callback: () => void, intervalMs: number) => unknown,
+ *   setInterval?: (callback: () => void | Promise<void>, intervalMs: number) => unknown,
  *   clearInterval?: (handle: unknown) => void,
  *   heartbeatIntervalMs?: number,
  *   log?: (message: string) => void,
  * }} options
  */
 export function createReportingRuntime(options) {
-  const nowIso = options.nowIso ?? (() => new Date().toISOString());
-  const setIntervalFn = options.setInterval
-    ?? ((callback, intervalMs) => setInterval(callback, intervalMs));
-  const clearIntervalFn = options.clearInterval ?? ((handle) => clearInterval(
-    /** @type {ReturnType<typeof setInterval>} */ (handle),
-  ));
-  const heartbeatIntervalMs = options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
+  const now = options.now ?? Date.now;
+  const nowIso = options.nowIso ?? (() => new Date(now()).toISOString());
   const log = options.log ?? (() => {});
-  const currentProcessState = createCurrentProcessState();
+  const currentProcessState = createReplayAccumulator(now);
   let liveTitleSeen = false;
   let started = false;
   let stopped = false;
   let closed = false;
-  /** @type {unknown | undefined} */
-  let heartbeatHandle;
+  /** @type {ActivityReport[] | undefined} */
+  let historicalReplayReports;
+  /** @type {Promise<ActivityReport[]> | undefined} */
+  let historicalReplayTask;
   /** @type {(() => void)[]} */
   const unsubscribes = [];
   /** @type {Promise<void>} */
   let metadataTask = Promise.resolve();
 
+  async function readHistoricalReplayReports() {
+    const events = await options.session.getEvents();
+    if (!Array.isArray(events)) {
+      throw new TypeError("getEvents returned a non-array result");
+    }
+
+    const accumulator = createReplayAccumulator(now);
+    for (const event of events) {
+      const report = reportForReplaySdkEvent(options.baseContext, event);
+      if (report) accumulator.observe(report);
+    }
+    return accumulator.snapshot();
+  }
+
+  function loadHistoricalReplayReports() {
+    if (historicalReplayReports !== undefined) {
+      return Promise.resolve(historicalReplayReports);
+    }
+
+    if (historicalReplayTask === undefined) {
+      historicalReplayTask = readHistoricalReplayReports().then(
+        (reports) => {
+          historicalReplayReports = reports;
+          historicalReplayTask = undefined;
+          return reports;
+        },
+        (error) => {
+          historicalReplayTask = undefined;
+          log(`getEvents replay failed: ${errorText(error)}`);
+          throw error;
+        },
+      );
+    }
+
+    return historicalReplayTask;
+  }
+
   async function loadReplayReports() {
     /** @type {ActivityReport[]} */
     let historical = [];
     try {
-      const events = await options.session.getEvents();
-      historical = events
-        .map((event) => reportForReplaySdkEvent(options.baseContext, event))
-        .filter((report) => report !== null);
-    } catch (error) {
-      log(`getEvents replay failed: ${errorText(error)}`);
+      historical = await loadHistoricalReplayReports();
+    } catch {
+      // A later endpoint reconnect retries the shared historical snapshot.
     }
-
     return mergeReplayReports(historical, currentProcessState.snapshot());
   }
 
@@ -504,18 +625,22 @@ export function createReportingRuntime(options) {
     presenceReport,
     loadReplayReports,
     post: options.post,
+    createHeartbeatReport: () => buildReport(
+      {
+        ...options.baseContext,
+        eventId: options.randomId(),
+        occurredAt: nowIso(),
+      },
+      "heartbeat",
+    ),
     schedule: options.schedule,
     cancel: options.cancel,
     retryDelay: options.retryDelay,
+    setInterval: options.setInterval,
+    clearInterval: options.clearInterval,
+    heartbeatIntervalMs: options.heartbeatIntervalMs,
     log,
   });
-
-  function stopHeartbeat() {
-    if (heartbeatHandle !== undefined) {
-      clearIntervalFn(heartbeatHandle);
-      heartbeatHandle = undefined;
-    }
-  }
 
   function unsubscribeAll() {
     while (unsubscribes.length > 0) {
@@ -536,7 +661,6 @@ export function createReportingRuntime(options) {
 
     if (report.kind === "session_closed") {
       closed = true;
-      stopHeartbeat();
       unsubscribeAll();
       void fanout.close(report);
       return;
@@ -545,18 +669,6 @@ export function createReportingRuntime(options) {
     if (report.kind === "title_reported") liveTitleSeen = true;
     currentProcessState.observe(report);
     void fanout.publish(report);
-  }
-
-  function heartbeatTick() {
-    if (stopped || closed) return;
-    void fanout.publish(buildReport(
-      {
-        ...options.baseContext,
-        eventId: options.randomId(),
-        occurredAt: nowIso(),
-      },
-      "heartbeat",
-    ));
   }
 
   async function bootstrapTitle() {
@@ -593,7 +705,6 @@ export function createReportingRuntime(options) {
     await fanout.start();
     if (stopped || closed) return;
 
-    heartbeatHandle = setIntervalFn(heartbeatTick, heartbeatIntervalMs);
     metadataTask = bootstrapTitle();
     void metadataTask;
   }
@@ -601,7 +712,6 @@ export function createReportingRuntime(options) {
   function stop() {
     if (stopped) return;
     stopped = true;
-    stopHeartbeat();
     unsubscribeAll();
     if (!closed) fanout.stop();
   }
@@ -615,11 +725,14 @@ export function createReportingRuntime(options) {
     start,
     stop,
     flush,
-    snapshot: () => ({
-      closed,
-      stopped,
-      heartbeatRunning: heartbeatHandle !== undefined,
-      endpoints: fanout.snapshot(),
-    }),
+    snapshot: () => {
+      const endpoints = fanout.snapshot();
+      return {
+        closed,
+        stopped,
+        heartbeatRunning: endpoints.some((endpoint) => endpoint.heartbeatRunning),
+        endpoints,
+      };
+    },
   };
 }

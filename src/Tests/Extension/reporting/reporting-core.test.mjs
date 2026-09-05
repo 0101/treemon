@@ -5,7 +5,7 @@ import {
   buildNonBlankMessageReport,
   buildReport,
   compareReportsByOccurrence,
-  createCurrentProcessState,
+  createReplayAccumulator,
   MAX_TOOL_CALL_ID_CHARS,
   mapSdkEvent,
   mergeReplayReports,
@@ -286,7 +286,7 @@ test("session shutdown is reported live but never replayed into a resumed proces
 });
 
 test("current-process replay preserves waiting and background truth across reconnect", () => {
-  const state = createCurrentProcessState();
+  const state = createReplayAccumulator();
   const reports = [
     buildReport({
       ...context,
@@ -333,7 +333,7 @@ test("report occurrence ordering handles invalid dates and timestamp ties", () =
 });
 
 test("current-process state keeps the next report on an exact occurrence tie", () => {
-  const state = createCurrentProcessState();
+  const state = createReplayAccumulator();
   const first = {
     ...buildReport(context, "intent_reported"),
     message: { text: "First", at: context.occurredAt },
@@ -351,7 +351,7 @@ test("current-process state keeps the next report on an exact occurrence tie", (
 
 test("current-process state prunes only old resolved background-agent pairs", () => {
   const now = Date.parse("2026-09-04T16:10:00.000Z");
-  const state = createCurrentProcessState(() => now);
+  const state = createReplayAccumulator(() => now);
   const at = (offsetMs) => new Date(now + offsetMs).toISOString();
   const backgroundReport = (eventId, occurredAt, kind, toolCallId) => ({
     ...buildReport({ ...context, eventId, occurredAt }, kind),
@@ -430,7 +430,7 @@ test("current-process state prunes only old resolved background-agent pairs", ()
 
 test("current-process snapshot prunes resolved pairs after the retention window passes", () => {
   let now = Date.parse("2026-09-04T16:00:00.000Z");
-  const state = createCurrentProcessState(() => now);
+  const state = createReplayAccumulator(() => now);
   const started = {
     ...buildReport({
       ...context,

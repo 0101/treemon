@@ -233,11 +233,10 @@ function newestReport(current, next) {
 }
 
 /**
- * Keep only the current-process facts that can be missing from an in-flight getEvents()
- * snapshot. They are replayed after history on reconnect; matching event IDs make the overlap
- * idempotent.
+ * Keep only the last-write-wins process facts needed to reconstruct current session state.
+ * Matching event IDs make overlap between historical and live snapshots idempotent.
  */
-export function createCurrentProcessState(now = Date.now) {
+export function createReplayAccumulator(now = Date.now) {
   /** @type {Record<string, unknown> | null} */
   let lifecycle = null;
   /** @type {Record<string, unknown> | null} */

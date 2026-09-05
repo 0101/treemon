@@ -60,7 +60,10 @@ shared state; no session-log parsing remains.
 - The extension sends an acknowledged, idempotent `session_present` bootstrap until the server has
   recorded the instance, then liveness-only heartbeats every 60 seconds. Presence creates the
   instance even when the session has no title or replayable lifecycle event; heartbeats update only
-  that instance's receipt-time liveness and never create an anonymous conversation.
+  that instance's receipt-time liveness and never create an anonymous conversation. Each endpoint
+  starts its own heartbeat cadence immediately after acknowledging presence; its replay and another
+  endpoint's presence or replay cannot delay that cadence. A heartbeat transport failure invalidates
+  that endpoint's in-flight replay generation and restarts its presence handshake.
 - A live `session.shutdown` stops heartbeats and closes its exact process instance. Terminal
   lifecycle orchestration also closes every exact instance whose terminal teardown and survivor
   verification completed, including when graceful SDK shutdown was unavailable, rejected, or timed
@@ -179,6 +182,15 @@ server acknowledges `session_present` only after its mailbox has persisted the e
 ordinary event delivery remains idempotent after that bootstrap. The live `session.shutdown` event
 stops heartbeat emission before reporting `session_closed` for the exact instance. Historical
 shutdown events are not replayed as current closure.
+
+Subscriptions are attached before replay. The first successful `getEvents()` result is mapped
+through one runtime-scoped compact last-write-wins accumulator and cached for the process lifetime.
+It retains the latest lifecycle, skill, usage, title, intent, user and assistant message facts;
+independent ask-user request/completion clocks; and active or recently completed background-agent
+clocks. Every endpoint replay merges that shared historical snapshot with a fresh compact
+current-process snapshot. A failed history read is not cached, so a later reconnect can retry it.
+Endpoint presence, retry, heartbeat, and delivery state remain independent, and heartbeat delivery
+uses a separate lane from historical replay.
 
 After subscriptions and replay are active, the extension reads
 `session.rpc.metadata.snapshot().summary` in a non-blocking background task and emits
@@ -338,7 +350,7 @@ into lifecycle status.
 | Session model | Working, WaitingForUser, Idle; NoSession only at worktree collapse. |
 | Synthetic messages | Filter server-side before ingestion with the shared user-message classifier. |
 | Ask-user ordering | Persist independent request/completion clocks; do not keep lifecycle state in the extension. |
-| Liveness | Acknowledged presence and heartbeats update one process instance using server receipt time; usage does not establish presence. |
+| Liveness | Acknowledged presence and heartbeats update one process instance using server receipt time; each endpoint starts heartbeat on acknowledgement and sends it independently of replay; usage does not establish presence. |
 | Representative ordering | Use instance `(UpdatedAt, SessionId, ProcessIdentity)`; liveness gates openness and automatic replacement eligibility but never replaces lifecycle ordering. |
 | Multiple instances | Preserve concurrent CLI processes for one durable session as separate full fold rows; never let one event or heartbeat replace another instance's status, origin, or closure. |
 | Ownership boundary | Session activity owns reporting, exact-instance state, liveness, and monotonic closure; embedded-terminal orchestration owns shutdown policy, authoritative teardown, rollback, and survivor cleanup. |
@@ -360,8 +372,8 @@ into lifecycle status.
 | File | Role |
 |---|---|
 | `src/Extension/reporting/extension.mjs` | Copilot SDK join, parent-PID/environment capture, and bounded HTTP transport. |
-| `src/Extension/reporting/reporting-runtime.mjs` | Independent endpoint presence/retry state, reconnect replay, heartbeat, metadata bootstrap, and live shutdown. |
-| `src/Extension/reporting/reporting-core.mjs` | Pure wire mapping plus compact current-process replay state. |
+| `src/Extension/reporting/reporting-runtime.mjs` | Independent endpoint presence/retry state, shared compact reconnect replay, per-endpoint heartbeat, metadata bootstrap, and live shutdown. |
+| `src/Extension/reporting/reporting-core.mjs` | Pure wire mapping plus the compact replay accumulator. |
 | `src/Server/SessionActivity.fs` | Exact identity contract, event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
 | `src/Server/LifecycleDiagnostics.fs` | Bounded structured lifecycle events over validated session, terminal, and process identities only. |
 | `src/Server/ProcessIdentityResolver.fs` | Default operating-system PID/start-time resolver shared by activity and exact process lifecycle checks. |
