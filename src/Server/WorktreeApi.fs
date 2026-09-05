@@ -9,6 +9,7 @@ open Shared.PathUtils
 open Newtonsoft.Json
 open FsToolkit.ErrorHandling
 open Server.GlobalConfig
+open Server.SessionActivity
 open Server.SessionActivityStore
 
 let loadFixtures (path: string) : Result<FixtureData, string> =
@@ -1086,7 +1087,11 @@ let internal worktreeApiWithLaunch
                           | CodingToolProvider.CopilotCli ->
                               activityStore
                               |> Option.bind _.LatestSessionIdForWorktree(PathUtils.toWorktreePath path)
-                      let inv = CodingToolCli.build provider (CodingToolCli.Resume sessionId)
+                      let inv =
+                          sessionId
+                          |> Option.map SessionId.value
+                          |> CodingToolCli.Resume
+                          |> CodingToolCli.build provider
                       let start () =
                           startEmbeddedCommand wtPath inv.AsShellString
                           |> terminalStart
@@ -1108,7 +1113,7 @@ let internal worktreeApiWithLaunch
                               TerminalSessionActivity.tryFindLiveTerminalId
                                   now
                                   wtPath
-                                  (SessionActivity.SessionId targetSessionId)
+                                  targetSessionId
                                   sessions
                                   snapshot
                           with

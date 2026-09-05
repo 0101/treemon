@@ -4,6 +4,7 @@ open System
 open System.Globalization
 open NUnit.Framework
 open Shared
+open Server
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Server.CodingToolStatus

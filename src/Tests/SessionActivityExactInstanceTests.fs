@@ -660,7 +660,7 @@ type StartupReconciliationTests() =
                     replacementSessionPlan
                         (fun _ -> Some CopilotCli)
                         [ { TerminalHostReplacement.ReplacementTerminal.TerminalSessionId =
-                                TerminalSessionId.value terminal
+                                terminal
                             WorktreePath = "C:/wt/exact" } ]
                         snapshot,
                     Is.EqualTo

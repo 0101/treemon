@@ -185,7 +185,7 @@ let private footerFromRetained (retained: RetainedSession) =
 let private mostRecentFooter sources =
     sources
     |> List.sortByDescending (fun source ->
-        source.UpdatedAt, SessionId.value source.SessionId)
+        source.UpdatedAt, source.SessionId)
     |> List.tryHead
 
 let internal representativeActivityText now instances =
@@ -235,7 +235,7 @@ let fromPushInstances
                 |> SessionActivity.toCodingToolStatus
               Skill = instance.Status.Skill
               ContextUsage = instance.Status.ContextUsage },
-            SessionId.value instance.SessionId,
+            instance.SessionId,
             ProcessIdentity.sortKey instance.ProcessIdentity)
         |> List.sortBy (fun (dot, sessionId, processIdentity) ->
             sessionStatusOrder dot.Status, sessionId, processIdentity)

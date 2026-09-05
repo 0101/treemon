@@ -2,6 +2,7 @@ module Tests.CodingToolSinceTests
 
 open System
 open NUnit.Framework
+open Server
 open Server.GitWorktree
 open Server.RefreshScheduler
 open Server.SchedulerState

@@ -9,6 +9,7 @@ open System.Net.Sockets
 open System.Collections.Concurrent
 open NUnit.Framework
 open Shared
+open Server
 open Server.SessionBridge
 open Server.CanvasBridge
 open Server.SessionActivity
@@ -283,7 +284,10 @@ type RegisterAndStatusTests() =
         let sessions = sessionsForWorktree path
         Assert.That(List.length sessions, Is.EqualTo 2, "Distinct sessionIds for one worktree must coexist")
         Assert.That(
-            sessions |> List.choose _.SessionId |> List.sort,
+            sessions
+            |> List.choose _.SessionId
+            |> List.map SessionId.value
+            |> List.sort,
             Is.EqualTo(List.sort [ sid1; sid2 ]))
 
         // The single-status view reports the most-recently-registered session.
@@ -541,7 +545,11 @@ type MultiSessionRegistryTests() =
         registerSession path "http://localhost:2/inject" (Some b)
         registerSession path "http://localhost:3/inject" (Some c)
 
-        let ids = sessionsForWorktree path |> List.choose _.SessionId |> List.sort
+        let ids =
+            sessionsForWorktree path
+            |> List.choose _.SessionId
+            |> List.map SessionId.value
+            |> List.sort
         Assert.That(ids, Is.EqualTo(List.sort [ a; b; c ]))
 
     [<Test>]
@@ -618,7 +626,12 @@ type MultiSessionRegistryTests() =
         let sessions = sessionsForWorktree path
         Assert.That(List.length sessions, Is.EqualTo 2, "Anonymous and identified sessions must coexist")
         Assert.That(sessions |> List.exists (fun e -> e.SessionId = None), Is.True)
-        Assert.That(sessions |> List.exists (fun e -> e.SessionId = Some sid), Is.True)
+        Assert.That(
+            sessions
+            |> List.exists (fun entry ->
+                entry.SessionId = Some(SessionId sid)),
+            Is.True
+        )
 
     [<Test>]
     member _.``sessionsForWorktree isolates sessions by worktree``() =
@@ -632,7 +645,12 @@ type MultiSessionRegistryTests() =
         registerSession pathB "http://localhost:3/inject" (Some b1)
 
         Assert.That(sessionsForWorktree pathA |> List.length, Is.EqualTo 2)
-        Assert.That(sessionsForWorktree pathB |> List.choose _.SessionId, Is.EqualTo [ b1 ])
+        Assert.That(
+            sessionsForWorktree pathB
+            |> List.choose _.SessionId
+            |> List.map SessionId.value,
+            Is.EqualTo [ b1 ]
+        )
         Assert.That(sessionsForWorktree (uniquePath "multi-iso-empty") |> List.isEmpty, Is.True)
 
     [<Test>]
@@ -643,7 +661,10 @@ type MultiSessionRegistryTests() =
         registerSession path "http://localhost:1/inject" (Some older)
         registerSession path "http://localhost:2/inject" (Some newer)
 
-        Assert.That(getSessionForWorktree path, Is.EqualTo(Some newer))
+        Assert.That(
+            getSessionForWorktree path,
+            Is.EqualTo(Some(SessionId newer))
+        )
 
     [<Test>]
     member _.``Multi-session liveness keeps every live session available to authored docs``() =
@@ -890,7 +911,7 @@ type SystemViewInteractionRoutingTests() =
                   storedAt newerIdentity newer path "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
-            Assert.That(target, Is.EqualTo(Some newer)))
+            Assert.That(target, Is.EqualTo(Some(SessionId newer))))
 
     [<Test>]
     member _.``A SystemView ignores a more recently active session that is not live``() =
@@ -908,7 +929,11 @@ type SystemViewInteractionRoutingTests() =
                   storedAt (unregisteredIdentity 98001) dead path "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
-            Assert.That(target, Is.EqualTo(Some live), "Reachability gates the choice; activity only orders it"))
+            Assert.That(
+                target,
+                Is.EqualTo(Some(SessionId live)),
+                "Reachability gates the choice; activity only orders it"
+            ))
 
     [<Test>]
     member _.``A SystemView with no live session resolves no target``() =
@@ -924,7 +949,7 @@ type SystemViewInteractionRoutingTests() =
                       "2026-03-01T12:00:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
-            Assert.That(target, Is.EqualTo(None: string option)))
+            Assert.That(target, Is.EqualTo(None: SessionId option)))
 
     [<Test>]
     member _.``A SystemView ignores sessions from another worktree``() =
@@ -943,7 +968,7 @@ type SystemViewInteractionRoutingTests() =
                 [ storedAt strangerIdentity stranger otherPath "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "diff.html")
-            Assert.That(target, Is.EqualTo(None: string option)))
+            Assert.That(target, Is.EqualTo(None: SessionId option)))
 
     [<Test>]
     member _.``An AgentDoc ignores activity and routes to its recorded owner``() =
@@ -962,7 +987,7 @@ type SystemViewInteractionRoutingTests() =
                   storedAt (unregisteredIdentity 98004) active path "2026-03-01T12:05:00Z" ]
 
             let target = runAsync (resolveTarget statuses path "notes.html")
-            Assert.That(target, Is.EqualTo(Some owner)))
+            Assert.That(target, Is.EqualTo(Some(SessionId owner))))
 
     [<Test>]
     member _.``A SystemView falls back to the freshest reachable session when none has reported activity``() =
@@ -979,7 +1004,7 @@ type SystemViewInteractionRoutingTests() =
             // reachable session may have no activity row at all. It is still a usable target —
             // treating it as "no target" would spawn a second session next to a working one.
             let target = runAsync (resolveTarget [] path "diff.html")
-            Assert.That(target, Is.EqualTo(Some newer)))
+            Assert.That(target, Is.EqualTo(Some(SessionId newer))))
 
     [<Test>]
     member _.``A SystemView never records an owner when it resolves a target``() =
@@ -1027,7 +1052,7 @@ type ScannerFallbackAttributionTests() =
             { ProcessIdentity = identity
               WorktreePath = "/w"
               InjectUrl = "http://localhost/inject"
-              SessionId = sid
+              SessionId = sid |> Option.map SessionId
               TerminalSessionId = None
               RegisteredAt = registeredAt }
 

@@ -12,9 +12,9 @@ open Server.SessionActivityStore
 type SyncTarget =
     /// A CLI is open and has settled — idle for `settleWindow`, or blocked on a user who is not
     /// there. Treemon syncs the worktree itself and prompts this session only if it could not finish.
-    | IdleSession of processIdentity: ProcessIdentity * sessionId: string
+    | IdleSession of processIdentity: ProcessIdentity * sessionId: SessionId
     /// No CLI is open. A retained/offline identity from a closed CLI may still be known.
-    | NoOpenSession of retainedSessionId: string option
+    | NoOpenSession of retainedSessionId: SessionId option
 
 module SyncTarget =
     /// The id a fallback prompt is addressed to, which is only ever a delivery hint — never evidence
@@ -249,13 +249,13 @@ let internal ownershipFromSessions
             Free(
                 IdleSession(
                     settled.ProcessIdentity,
-                    SessionId.value settled.SessionId
+                    settled.SessionId
                 )
             )
         | Some _ -> Busy
         | None ->
             retained
-            |> Option.map (_.SessionId >> SessionId.value)
+            |> Option.map _.SessionId
             |> NoOpenSession
             |> Free
 

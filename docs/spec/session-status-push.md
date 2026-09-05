@@ -206,11 +206,13 @@ port 5000, allowing production and validation instances to observe the same sess
 
 ### Domain and ingestion
 
-`SessionActivity` defines the closed event union and pure fold. The fold retains status, skill,
-intent, title, last messages, context usage, and independent ask-user request/completion clocks.
-Repeated identical intent/title text keeps its original change timestamp; older values cannot
-replace newer ones. `effectiveActivity` chooses the newer intent or title while preserving its
-`AgentActivity` source.
+`ProcessIdentity.fs` owns the generic PID/start-tick identity, its opaque client encoding, the
+injectable resolver contract, and the default operating-system resolver. `SessionActivity` owns
+validated durable session and terminal-origin identities, the closed event union, and the pure
+fold. The fold retains status, skill, intent, title, last messages, context usage, and independent
+ask-user request/completion clocks. Repeated identical intent/title text keeps its original change
+timestamp; older values cannot replace newer ones. `effectiveActivity` chooses the newer intent or
+title while preserving its `AgentActivity` source.
 
 The fold also retains process-local background lifecycle clocks per `toolCallId`. A background
 agent is active only when its latest start is newer than its latest terminal event. Active clocks
@@ -380,9 +382,9 @@ into lifecycle status.
 | `src/Extension/reporting/extension.mjs` | Copilot SDK join, parent-PID/environment capture, and bounded HTTP transport. |
 | `src/Extension/reporting/reporting-runtime.mjs` | Independent endpoint presence/retry state, shared compact reconnect replay, per-endpoint heartbeat, metadata bootstrap, and live shutdown. |
 | `src/Extension/reporting/reporting-core.mjs` | Pure wire mapping plus the compact replay accumulator. |
-| `src/Server/SessionActivity.fs` | Exact identity contract, event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
+| `src/Server/ProcessIdentity.fs` | Generic exact PID/start-tick identity, opaque client encoding, injectable resolver contract, and default operating-system resolver. |
+| `src/Server/SessionActivity.fs` | Validated session and terminal-origin identities, event domain, pure fold, terminal-origin epoch state, background lifecycle, effective activity/status, freshness, and active selection. |
 | `src/Server/LifecycleDiagnostics.fs` | Bounded structured lifecycle events over validated session, terminal, and process identities only. |
-| `src/Server/ProcessIdentityResolver.fs` | Default operating-system PID/start-time resolver shared by activity and exact process lifecycle checks. |
 | `src/Server/SessionActivityProtocol.fs` | Bounded activity wire DTO parsing and exact-instance event mapping. |
 | `src/Server/SessionActivityIngestion.fs` | Exact-instance fold application, independent ordering paths, scheduler publication, and startup reconciliation. |
 | `src/Server/SessionActivityService.fs` | Known-worktree filtering, acknowledged presence, mailbox lifecycle, retention, and raw exact-origin queries. |

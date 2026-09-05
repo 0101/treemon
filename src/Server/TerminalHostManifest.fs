@@ -37,7 +37,7 @@ let internal hostIdentityMatches left right =
     && left.ProcessStartTimeUtcTicks = right.ProcessStartTimeUtcTicks
 
 let internal tryProcessIdentity (manifest: DiscoveryManifest) =
-    SessionActivity.ProcessIdentity.create
+    ProcessIdentity.create
         manifest.Pid
         manifest.ProcessStartTimeUtcTicks
     |> Result.toOption
@@ -200,11 +200,11 @@ let internal readManifest config =
         Error $"Could not read the TerminalHost discovery manifest: {error.Message}"
 
 let internal processIdentityMatches config (manifest: DiscoveryManifest) =
-    SessionActivity.ProcessIdentity.create
+    ProcessIdentity.create
         manifest.Pid
         manifest.ProcessStartTimeUtcTicks
     |> Result.bind (
-        SessionActivity.ProcessIdentityResolver.isAlive
+        ProcessIdentityResolver.isAlive
             config.ProcessIdentityResolver
     )
 

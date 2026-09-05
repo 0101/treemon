@@ -85,7 +85,7 @@ let private queryActivityOk
         failwith "unreachable"
 
 let private replacementTerminal
-    (TerminalSessionId terminalSessionId)
+    terminalSessionId
     worktreePath
     : TerminalHostReplacement.ReplacementTerminal =
     { TerminalSessionId = terminalSessionId
@@ -93,7 +93,7 @@ let private replacementTerminal
 
 let private replacementResume sessionId command:
     TerminalHostReplacement.ReplacementResumeCommand =
-    { CopilotSessionId = sessionId
+    { CopilotSessionId = SessionId sessionId
       Command = command }
 
 let private queryReplacementPlanOk
@@ -846,7 +846,7 @@ type IngestTests() =
                 Assert.That(live.UpdatedAt, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(live.LastSeen, Is.EqualTo(ts "2026-03-01T10:00:00Z"))
                 Assert.That(persisted, Is.EqualTo live)
-                Assert.That(latestSessionId, Is.EqualTo(Some "s1"))
+                Assert.That(latestSessionId, Is.EqualTo(Some(SessionId "s1")))
                 Assert.That(retained.SessionId, Is.EqualTo persisted.SessionId)
                 Assert.That(retained.UpdatedAt, Is.EqualTo persisted.UpdatedAt)
                 Assert.That(retained.Status.BackgroundAgentClocks, Is.Empty)
@@ -2243,10 +2243,10 @@ type TerminalOwnershipQueryTests() =
 
         let expectedShutdownTarget:
             TerminalHostReplacement.ReplacementShutdownTarget =
-            { TerminalSessionId =
-                TerminalSessionId.value ownedTerminal
+            { TerminalSessionId = ownedTerminal
               WorktreePath = ownedPath
-              CopilotSessionId = "provider-owned-session"
+              CopilotSessionId =
+                SessionId "provider-owned-session"
               ProcessIdentity =
                 identityForSession
                     "provider-owned-session" }
@@ -2261,7 +2261,7 @@ type TerminalOwnershipQueryTests() =
                 commands,
                 Is.EqualTo(
                     Map.ofList
-                        [ TerminalSessionId.value ownedTerminal,
+                        [ ownedTerminal,
                           replacementResume
                               "provider-owned-session"
                               "copilot --yolo --resume 'provider-owned-session'" ]
@@ -2330,7 +2330,7 @@ type TerminalOwnershipQueryTests() =
                 resumeCommands,
                 Is.EqualTo(
                     Map.ofList
-                        [ TerminalSessionId.value terminal,
+                        [ terminal,
                           replacementResume
                               "newer-conversation"
                               "copilot --yolo --resume 'newer-conversation'" ]
@@ -2437,7 +2437,7 @@ type TerminalOwnershipQueryTests() =
                 resumeCommands,
                 Is.EqualTo(
                     Map.ofList
-                        [ TerminalSessionId.value terminalSessionId,
+                        [ terminalSessionId,
                           replacementResume
                               "newer-idle"
                               "copilot --yolo --resume 'newer-idle'" ]
@@ -2551,7 +2551,7 @@ type TerminalOwnershipQueryTests() =
                     resumeCommands,
                     Is.EqualTo(
                         Map.ofList
-                            [ TerminalSessionId.value terminalA,
+                            [ terminalA,
                               replacementResume
                                   "owned"
                                   "copilot --yolo --resume 'owned'" ]
@@ -2602,7 +2602,7 @@ type TerminalOwnershipQueryTests() =
                     retainedCommands,
                     Is.EqualTo(
                         Map.ofList
-                            [ TerminalSessionId.value terminalA,
+                            [ terminalA,
                               replacementResume
                                   "owned"
                                   "copilot --yolo --resume 'owned'" ]
@@ -2714,7 +2714,7 @@ type TerminalOwnershipQueryTests() =
                     resumeCommands,
                     Is.EqualTo(
                         Map.ofList
-                            [ TerminalSessionId.value terminalSessionId,
+                            [ terminalSessionId,
                               replacementResume
                                   "surviving"
                                   "copilot --yolo --resume 'surviving'" ]

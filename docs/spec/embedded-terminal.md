@@ -729,9 +729,9 @@ isolated server and fails on incomplete exact process cleanup.
 | `src/Server/TerminalLaunch.fs` | Sole product-level launch policy and native-versus-embedded backend selection |
 | `src/Server/EmbeddedTerminal.fs` | Terminal lifecycle mailbox, cleanup reservation, command-capable start, and authoritative snapshot reconciliation |
 | `src/Server/WorktreeCleanup.fs` | Product-level explicit terminal/worktree teardown, graceful exact-session coordination, host close, and closure publication |
-| `src/Server/SessionActivity.fs` | Per-process instance lifecycle fold, exact process identity, liveness, and closure |
+| `src/Server/ProcessIdentity.fs` | Shared exact PID/start-tick identity and resolver used by activity ingress and process lifecycle checks |
+| `src/Server/SessionActivity.fs` | Per-process instance lifecycle fold, validated session/origin identities, liveness, and closure |
 | `src/Server/LifecycleDiagnostics.fs` | Bounded structured presence, bridge, shutdown, replacement, recovery, and teardown diagnostics |
-| `src/Server/ProcessIdentityResolver.fs` | Shared default PID/start-time resolution used by activity ingress and exact process liveness checks |
 | `src/Server/SessionActivityProtocol.fs`, `SessionActivityIngestion.fs`, and `SessionActivityService.fs` | Exact activity wire parsing, fold application, acknowledged presence, bounded live state, startup reconciliation, and mailbox-serialized terminal ownership queries |
 | `src/Server/TerminalSessionActivity.fs` | Exact process-instance and startup-reconciliation projection for tab activity, all-target non-idle gating, graceful shutdown targets, and one-per-terminal resume policy |
 | `src/Server/SessionActivityStoreSchema.fs` and `SessionActivityStore.fs` | Durable process-instance schema/migration, retained history, event idempotency, and retention |

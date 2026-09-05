@@ -208,12 +208,6 @@ type internal Sink = Diagnostic -> unit
 
 let internal ignore: Sink = fun _ -> ()
 
-let internal trySessionId value =
-    SessionId.create value |> Result.toOption
-
-let internal tryTerminalSessionId value =
-    TerminalSessionId.create value |> Result.toOption
-
 let private processIdentityText identity =
     let processId, startTicks = ProcessIdentity.sortKey identity
     $"{processId}@{startTicks}"

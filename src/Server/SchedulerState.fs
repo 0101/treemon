@@ -47,7 +47,7 @@ type DashboardState =
       /// stays bounded by the activity idle window and never collapses duplicate durable SessionIds.
       SessionInstances:
           Map<
-              SessionActivity.ProcessIdentity,
+              ProcessIdentity,
               SessionActivityStore.StoredInstance
            >
       /// Last observed collapsed status per worktree. This is paired with
@@ -149,7 +149,7 @@ let internal evictStaleInstances
     (
         instances:
             Map<
-                SessionActivity.ProcessIdentity,
+                ProcessIdentity,
                 SessionActivityStore.StoredInstance
              >
     )
@@ -220,14 +220,14 @@ let private refreshCodingToolTransitions
     (
         previousInstances:
             Map<
-                SessionActivity.ProcessIdentity,
+                ProcessIdentity,
                 SessionActivityStore.StoredInstance
              >
     )
     (
         currentInstances:
             Map<
-                SessionActivity.ProcessIdentity,
+                ProcessIdentity,
                 SessionActivityStore.StoredInstance
              >
     )

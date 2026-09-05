@@ -9,17 +9,17 @@ open Server.TerminalHostProcess
 open Treemon.TerminalHosting
 
 type internal ReplacementTerminal =
-    { TerminalSessionId: string
+    { TerminalSessionId: TerminalSessionId
       WorktreePath: string }
 
 type internal ReplacementShutdownTarget =
-    { TerminalSessionId: string
+    { TerminalSessionId: TerminalSessionId
       WorktreePath: string
-      CopilotSessionId: string
+      CopilotSessionId: SessionId
       ProcessIdentity: ProcessIdentity }
 
 type internal ReplacementResumeCommand =
-    { CopilotSessionId: string
+    { CopilotSessionId: SessionId
       Command: string }
 
 [<RequireQualifiedAccess>]
@@ -28,7 +28,7 @@ type internal ReplacementSessionPlan =
     | Ready of
         activityEpoch: int64 *
         shutdownTargets: ReplacementShutdownTarget list *
-        resumeCommands: Map<string, ReplacementResumeCommand>
+        resumeCommands: Map<TerminalSessionId, ReplacementResumeCommand>
 
 type internal ReplacementPolicyQuery = DateTimeOffset -> ReplacementTerminal list -> Result<ReplacementSessionPlan, string>
 
@@ -49,7 +49,7 @@ type internal ReplacementPlan =
       Terminals: ReplacementTerminal list
       ActivityEpoch: int64
       ShutdownTargets: ReplacementShutdownTarget list
-      ResumeCommands: Map<string, ReplacementResumeCommand> }
+      ResumeCommands: Map<TerminalSessionId, ReplacementResumeCommand> }
 
 type private FailedVersionCooldown =
     { StagedVersion: string
@@ -79,15 +79,15 @@ type internal ReplacementHostState =
     | StagedHostRunning of DiscoveryManifest
 
 type internal RecreatedTerminal =
-    { OriginalTerminalSessionId: string
-      NewTerminalSessionId: string
+    { OriginalTerminalSessionId: TerminalSessionId
+      NewTerminalSessionId: TerminalSessionId
       WorktreePath: string }
 
 type internal ReplacementProgress =
     { ShutdownAttempts: ReplacementShutdownAttempt list
       HostState: ReplacementHostState
       RecreatedTerminals: RecreatedTerminal list
-      DeliveredCommandTerminalIds: Set<string> }
+      DeliveredCommandTerminalIds: Set<TerminalSessionId> }
 
 [<RequireQualifiedAccess>]
 type internal ReplacementFailure =
@@ -144,15 +144,23 @@ type internal ReplacementCommit =
     | RecoveryRequired of ReplacementRecovery
     | ApplyRegistry of DiscoveryManifest * RegistrySnapshot * ReplacementOutcome
 
+let private terminalPresentation (terminal: TerminalRecord) =
+    terminal.SessionId
+    |> TerminalSessionId.create
+    |> Result.map (fun terminalSessionId ->
+        { TerminalSessionId = terminalSessionId
+          WorktreePath = terminal.WorktreePath })
+
+let private terminalPresentations terminals =
+    terminals
+    |> List.traverseResultM terminalPresentation
+
 let private queryReplacementPolicy
     (query: ReplacementPolicyQuery)
-    (terminals: TerminalRecord list)
+    (terminals: ReplacementTerminal list)
     : Result<ReplacementSessionPlan, string> =
     try
-        terminals
-        |> List.map (fun terminal ->
-            { TerminalSessionId = terminal.SessionId; WorktreePath = terminal.WorktreePath })
-        |> query DateTimeOffset.UtcNow
+        query DateTimeOffset.UtcNow terminals
     with error ->
         Error $"Could not query the terminal replacement policy: {error.Message}"
 
@@ -203,17 +211,10 @@ let internal defaultOperations
                     return Error "Could not submit the terminal command"
             } }
 
-let private terminalPresentation (terminal: TerminalRecord) =
-    { TerminalSessionId = terminal.SessionId
-      WorktreePath = terminal.WorktreePath }
-
-let private terminalPresentations terminals =
-    terminals |> List.map terminalPresentation
-
 let private validateReplacementPolicy
     (terminals: ReplacementTerminal list)
     (shutdownTargets: ReplacementShutdownTarget list)
-    (resumeCommands: Map<string, ReplacementResumeCommand>)
+    (resumeCommands: Map<TerminalSessionId, ReplacementResumeCommand>)
     =
     let terminalsById =
         terminals
@@ -331,9 +332,9 @@ let internal replacementFailureMessage = function
     | ReplacementFailure.StagedRegistryNotEmpty terminalCount ->
         $"The replacement TerminalHost started with {terminalCount} unexpected terminals"
     | ReplacementFailure.TerminalRecreationFailed(terminal, failure) ->
-        $"Could not recreate terminal {terminal.TerminalSessionId}: {mutationFailureReason failure}"
+        $"Could not recreate terminal {TerminalSessionId.value terminal.TerminalSessionId}: {mutationFailureReason failure}"
     | ReplacementFailure.CommandDeliveryFailed(terminal, error) ->
-        $"Could not deliver the replacement command for terminal {terminal.TerminalSessionId}: {error}"
+        $"Could not deliver the replacement command for terminal {TerminalSessionId.value terminal.TerminalSessionId}: {error}"
 
 let internal replacementRecoveryOutcome recovery =
     ReplacementOutcome.Failed(
@@ -401,20 +402,9 @@ let private recordReplacementCapture
         )
     )
 
-    let typedTargets =
-        plan.ShutdownTargets
-        |> List.choose (fun target ->
-            target.CopilotSessionId
-            |> LifecycleDiagnostics.trySessionId
-            |> Option.map (fun sessionId ->
-                target,
-                sessionId,
-                LifecycleDiagnostics.tryTerminalSessionId
-                    target.TerminalSessionId))
-
     let sessionIds =
-        typedTargets
-        |> List.map (fun (_, sessionId, _) -> sessionId)
+        plan.ShutdownTargets
+        |> List.map _.CopilotSessionId
         |> List.distinct
 
     if sessionIds.Length > 1 then
@@ -422,12 +412,12 @@ let private recordReplacementCapture
             LifecycleDiagnostics.Diagnostic.MultipleSessionsObserved
                 { Boundary =
                     LifecycleDiagnostics.ObservationBoundary.Replacement
-                  ProcessCount = typedTargets.Length
+                  ProcessCount = plan.ShutdownTargets.Length
                   SessionIds = sessionIds }
         )
 
-    typedTargets
-    |> List.groupBy (fun (_, sessionId, _) -> sessionId)
+    plan.ShutdownTargets
+    |> List.groupBy _.CopilotSessionId
     |> List.iter (fun (sessionId, targets) ->
         if targets.Length > 1 then
             diagnostics (
@@ -437,42 +427,27 @@ let private recordReplacementCapture
                       SessionId = sessionId
                       ProcessIdentities =
                         targets
-                        |> List.map (fun (target, _, _) ->
-                            target.ProcessIdentity)
+                        |> List.map _.ProcessIdentity
                       TerminalSessionIds =
                         targets
-                        |> List.choose (fun (_, _, terminalSessionId) ->
-                            terminalSessionId)
+                        |> List.map _.TerminalSessionId
                         |> List.distinct
-                      UnattributedProcessCount =
-                        targets
-                        |> List.filter (fun (_, _, terminalSessionId) ->
-                            terminalSessionId.IsNone)
-                        |> List.length }
+                      UnattributedProcessCount = 0 }
             ))
 
-    typedTargets
-    |> List.choose (fun (target, sessionId, terminalSessionId) ->
-        terminalSessionId
-        |> Option.map (fun terminalId ->
-            terminalId, target, sessionId))
-    |> List.groupBy (fun (terminalId, _, _) -> terminalId)
+    plan.ShutdownTargets
+    |> List.groupBy _.TerminalSessionId
     |> List.iter (fun (terminalSessionId, targets) ->
         let conversations =
             targets
-            |> List.map (fun (_, _, sessionId) -> sessionId)
+            |> List.map _.CopilotSessionId
             |> List.distinct
 
         if conversations.Length > 1 then
             let selected =
                 plan.ResumeCommands
-                |> Map.tryFind (
-                    TerminalSessionId.value
-                        terminalSessionId
-                )
-                |> Option.bind (fun resume ->
-                    LifecycleDiagnostics.trySessionId
-                        resume.CopilotSessionId)
+                |> Map.tryFind terminalSessionId
+                |> Option.map _.CopilotSessionId
 
             diagnostics (
                 LifecycleDiagnostics.Diagnostic.TerminalConversationAnomalyObserved
@@ -484,8 +459,7 @@ let private recordReplacementCapture
                             selected <> Some sessionId)
                       ProcessIdentities =
                         targets
-                        |> List.map (fun (_, target, _) ->
-                            target.ProcessIdentity) }
+                        |> List.map _.ProcessIdentity }
             ))
 
 let private shutdownSessions
@@ -536,58 +510,72 @@ let private recreateTerminals
                             )
                         )
                 | Ok(nextRegistry, recreated) ->
-                    let recreatedTerminal =
-                        { OriginalTerminalSessionId =
-                            terminal.TerminalSessionId
-                          NewTerminalSessionId =
-                            recreated.SessionId
-                          WorktreePath = terminal.WorktreePath }
-
-                    let afterRecreation =
-                        { currentProgress with
-                            RecreatedTerminals =
-                                currentProgress.RecreatedTerminals
-                                @ [ recreatedTerminal ] }
-
-                    match
-                        plan.ResumeCommands
-                        |> Map.tryFind terminal.TerminalSessionId
-                    with
-                    | None ->
-                        return!
-                            recreate
-                                nextRegistry
-                                afterRecreation
-                                remaining
-                    | Some resume ->
-                        match!
-                            operations.DeliverCommand
-                                config
-                                recreated
-                                resume.Command
-                        with
-                        | Error error ->
-                            return
-                                Error(
-                                    afterRecreation,
-                                    ReplacementFailure.CommandDeliveryFailed(
-                                        terminal,
-                                        error
+                    match TerminalSessionId.create recreated.SessionId with
+                    | Error _ ->
+                        return
+                            Error(
+                                currentProgress,
+                                ReplacementFailure.TerminalRecreationFailed(
+                                    terminal,
+                                    MutationUnverified(
+                                        Some nextRegistry,
+                                        "TerminalHost returned an invalid terminal session identity"
                                     )
                                 )
-                        | Ok() ->
-                            let afterDelivery =
-                                { afterRecreation with
-                                    DeliveredCommandTerminalIds =
-                                        afterRecreation.DeliveredCommandTerminalIds
-                                        |> Set.add
-                                            terminal.TerminalSessionId }
+                            )
+                    | Ok newTerminalSessionId ->
+                        let recreatedTerminal =
+                            { OriginalTerminalSessionId =
+                                terminal.TerminalSessionId
+                              NewTerminalSessionId =
+                                newTerminalSessionId
+                              WorktreePath = terminal.WorktreePath }
 
+                        let afterRecreation =
+                            { currentProgress with
+                                RecreatedTerminals =
+                                    currentProgress.RecreatedTerminals
+                                    @ [ recreatedTerminal ] }
+
+                        match
+                            plan.ResumeCommands
+                            |> Map.tryFind terminal.TerminalSessionId
+                        with
+                        | None ->
                             return!
                                 recreate
                                     nextRegistry
-                                    afterDelivery
+                                    afterRecreation
                                     remaining
+                        | Some resume ->
+                            match!
+                                operations.DeliverCommand
+                                    config
+                                    recreated
+                                    resume.Command
+                            with
+                            | Error error ->
+                                return
+                                    Error(
+                                        afterRecreation,
+                                        ReplacementFailure.CommandDeliveryFailed(
+                                            terminal,
+                                            error
+                                        )
+                                    )
+                            | Ok() ->
+                                let afterDelivery =
+                                    { afterRecreation with
+                                        DeliveredCommandTerminalIds =
+                                            afterRecreation.DeliveredCommandTerminalIds
+                                            |> Set.add
+                                                terminal.TerminalSessionId }
+
+                                return!
+                                    recreate
+                                        nextRegistry
+                                        afterDelivery
+                                        remaining
             }
 
     async {
@@ -622,32 +610,35 @@ let private recheckReplacement
             match! listTerminals config connection with
             | Error error ->
                 return RecheckFailed $"Could not recheck the authoritative terminal registry: {error}"
-            | Ok registry
-                when registry.Revision <> plan.RegistryRevision
-                     || terminalPresentations registry.Terminals <> plan.Terminals ->
-                return RecheckChanged
             | Ok registry ->
-                match queryReplacementPolicy query registry.Terminals with
+                match terminalPresentations registry.Terminals with
                 | Error error -> return RecheckFailed error
-                | Ok ReplacementSessionPlan.WaitingForIdle -> return RecheckChanged
-                | Ok(
-                    ReplacementSessionPlan.Ready(
-                        activityEpoch,
-                        shutdownTargets,
-                        resumeCommands
-                    )
-                  )
-                    when activityEpoch <> plan.ActivityEpoch
-                         || shutdownTargets <> plan.ShutdownTargets
-                         || resumeCommands <> plan.ResumeCommands ->
+                | Ok terminals
+                    when registry.Revision <> plan.RegistryRevision
+                         || terminals <> plan.Terminals ->
                     return RecheckChanged
-                | Ok(ReplacementSessionPlan.Ready _) ->
-                    match resolveProcessExecutable config connection with
+                | Ok terminals ->
+                    match queryReplacementPolicy query terminals with
                     | Error error -> return RecheckFailed error
-                    | Ok executablePath
-                        when samePath executablePath plan.OldExecutablePath ->
-                        return ReadyToCommit connection
-                    | Ok _ -> return RecheckChanged
+                    | Ok ReplacementSessionPlan.WaitingForIdle -> return RecheckChanged
+                    | Ok(
+                        ReplacementSessionPlan.Ready(
+                            activityEpoch,
+                            shutdownTargets,
+                            resumeCommands
+                        )
+                      )
+                        when activityEpoch <> plan.ActivityEpoch
+                             || shutdownTargets <> plan.ShutdownTargets
+                             || resumeCommands <> plan.ResumeCommands ->
+                        return RecheckChanged
+                    | Ok(ReplacementSessionPlan.Ready _) ->
+                        match resolveProcessExecutable config connection with
+                        | Error error -> return RecheckFailed error
+                        | Ok executablePath
+                            when samePath executablePath plan.OldExecutablePath ->
+                            return ReadyToCommit connection
+                        | Ok _ -> return RecheckChanged
         | HealthyHost _
         | MissingHost
         | DeadHost _ -> return RecheckChanged
@@ -939,63 +930,63 @@ let internal tryReplaceHostIgnoring
                         return
                             ReplacementOutcome.Failed(stagedVersion, $"Could not capture the authoritative terminal registry: {error}")
                     | Ok registry ->
-                        match queryReplacementPolicy query registry.Terminals with
+                        match terminalPresentations registry.Terminals with
                         | Error error ->
                             return ReplacementOutcome.Failed(stagedVersion, error)
-                        | Ok ReplacementSessionPlan.WaitingForIdle ->
-                            return ReplacementOutcome.WaitingForIdle
-                        | Ok(
-                            ReplacementSessionPlan.Ready(
-                                activityEpoch,
-                                shutdownTargets,
-                                resumeCommands
-                            )
-                          ) ->
-                            let terminals =
-                                terminalPresentations
-                                    registry.Terminals
-
-                            match
-                                validateReplacementPolicy
-                                    terminals
-                                    shutdownTargets
-                                    resumeCommands
-                            with
+                        | Ok terminals ->
+                            match queryReplacementPolicy query terminals with
                             | Error error ->
-                                return
-                                    ReplacementOutcome.Failed(
-                                        stagedVersion,
-                                        error
-                                    )
-                            | Ok() ->
-                                let plan: ReplacementPlan =
-                                    { OldHost = connection
-                                      OldExecutablePath = oldExecutable
-                                      StagedVersion = stagedVersion
-                                      StagedExecutablePath =
-                                        stagedExecutable
-                                      RegistryRevision =
-                                        registry.Revision
-                                      Terminals = terminals
-                                      ActivityEpoch = activityEpoch
-                                      ShutdownTargets =
+                                return ReplacementOutcome.Failed(stagedVersion, error)
+                            | Ok ReplacementSessionPlan.WaitingForIdle ->
+                                return ReplacementOutcome.WaitingForIdle
+                            | Ok(
+                                ReplacementSessionPlan.Ready(
+                                    activityEpoch,
+                                    shutdownTargets,
+                                    resumeCommands
+                                )
+                              ) ->
+                                match
+                                    validateReplacementPolicy
+                                        terminals
                                         shutdownTargets
-                                      ResumeCommands = resumeCommands }
-
-                                try
-                                    do! beforeRecheck ()
-
-                                    try
-                                        return! commit plan query
-                                    with :? TimeoutException ->
-                                        return
-                                            ReplacementOutcome.RaceLost
-                                with error ->
+                                        resumeCommands
+                                with
+                                | Error error ->
                                     return
                                         ReplacementOutcome.Failed(
                                             stagedVersion,
-                                            $"Could not coordinate TerminalHost replacement: {error.Message}"
+                                            error
                                         )
+                                | Ok() ->
+                                    let plan: ReplacementPlan =
+                                        { OldHost = connection
+                                          OldExecutablePath = oldExecutable
+                                          StagedVersion = stagedVersion
+                                          StagedExecutablePath =
+                                            stagedExecutable
+                                          RegistryRevision =
+                                            registry.Revision
+                                          Terminals = terminals
+                                          ActivityEpoch = activityEpoch
+                                          ShutdownTargets =
+                                            shutdownTargets
+                                          ResumeCommands = resumeCommands }
+
+                                    try
+                                        do! beforeRecheck ()
+
+                                        try
+                                            return! commit plan query
+                                        with :? TimeoutException ->
+                                            return
+                                                ReplacementOutcome.RaceLost
+                                    with error ->
+                                        return
+                                            ReplacementOutcome.Failed(
+                                                stagedVersion,
+                                                $"Could not coordinate TerminalHost replacement: {error.Message}"
+                                            )
         | MissingHost
         | DeadHost _
         | IncompatibleHost _

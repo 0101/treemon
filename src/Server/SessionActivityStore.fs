@@ -51,7 +51,7 @@ type StoredInstance =
 module StoredInstance =
     let activityOrderKey (stored: StoredInstance) =
         stored.UpdatedAt,
-        SessionId.value stored.SessionId,
+        stored.SessionId,
         ProcessIdentity.sortKey stored.ProcessIdentity
 
     /// LastSeen is liveness-only, so it must never decide which instance owns shared content.
@@ -119,6 +119,16 @@ let private contextToDb (stored: StoredInstance) =
 
 let private readOptStr (reader: SqliteDataReader) index =
     if reader.IsDBNull index then None else Some(reader.GetString index)
+
+let private persistedSessionId value =
+    SessionId.create value
+    |> Result.defaultWith (fun error ->
+        invalidOp $"SessionActivityStore: invalid persisted session id: {error}")
+
+let private persistedTerminalSessionId value =
+    TerminalSessionId.create value
+    |> Result.defaultWith (fun error ->
+        invalidOp $"SessionActivityStore: invalid persisted terminal session id: {error}")
 
 let private readOptTimestamp
     (reader: SqliteDataReader)
@@ -238,9 +248,10 @@ let private readInstance (reader: SqliteDataReader) =
         readContextUsage reader 18 19 20
 
     { ProcessIdentity = identity
-      SessionId = SessionId(reader.GetString 2)
+      SessionId = reader.GetString 2 |> persistedSessionId
       TerminalSessionId =
-        readOptStr reader 23 |> Option.map TerminalSessionId
+        readOptStr reader 23
+        |> Option.map persistedTerminalSessionId
       WorktreePath = WorktreePath(reader.GetString 3)
       Provider = parseProvider (reader.GetString 4)
       Status =
@@ -265,7 +276,7 @@ let private readRetainedSession (reader: SqliteDataReader) =
     let contextUsage, contextUsageAt =
         readContextUsage reader 14 15 16
 
-    { SessionId = SessionId(reader.GetString 0)
+    { SessionId = reader.GetString 0 |> persistedSessionId
       WorktreePath = WorktreePath(reader.GetString 1)
       Provider = parseProvider (reader.GetString 2)
       Status =
@@ -785,7 +796,12 @@ type SessionActivityStore
         )
         |> ignore
         use reader = command.ExecuteReader()
-        if reader.Read() then Some(reader.GetString 0) else None
+        if reader.Read() then
+            reader.GetString 0
+            |> persistedSessionId
+            |> Some
+        else
+            None
 
     member internal _.RetainedTerminalSessionIds() =
         use connection = openConnection ()
@@ -793,7 +809,9 @@ type SessionActivityStore
         command.CommandText <- retainedTerminalSessionIdsSql
         use reader = command.ExecuteReader()
 
-        readRows reader (fun row -> TerminalSessionId(row.GetString 0)) []
+        readRows reader (fun row ->
+            row.GetString 0
+            |> persistedTerminalSessionId) []
         |> Set.ofList
 
     member _.PruneOld(cutoff: DateTimeOffset) =

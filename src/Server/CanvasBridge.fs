@@ -82,7 +82,18 @@ let internal resolveTarget
     =
     async {
         match CanvasDocKinds.classify filename with
-        | AgentDoc -> return! CanvasDocOwnership.getOwner worktreePath filename
+        | AgentDoc ->
+            let! owner = CanvasDocOwnership.getOwner worktreePath filename
+
+            return
+                match owner with
+                | None -> None
+                | Some value ->
+                    match SessionId.create value with
+                    | Ok sessionId -> Some sessionId
+                    | Error error ->
+                        Log.log "CanvasBridge" $"Ignored invalid persisted canvas owner: {error}"
+                        None
         | SystemView ->
             let now = DateTime.UtcNow
 
@@ -99,10 +110,10 @@ let internal resolveTarget
                 |> Seq.filter (fun stored ->
                     stored.ClosedAt.IsNone
                     && WorktreePath.value stored.WorktreePath = worktreePath
-                    && liveSessionIds.Contains(SessionId.value stored.SessionId))
+                    && liveSessionIds.Contains stored.SessionId)
                 |> List.ofSeq
                 |> StoredInstance.tryMostRecentActivity
-                |> Option.map (_.SessionId >> SessionId.value)
+                |> Option.map _.SessionId
 
             let freshestReachable () =
                 liveSessions

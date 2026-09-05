@@ -4,6 +4,7 @@ open System
 open System.IO
 open NUnit.Framework
 open Microsoft.Data.Sqlite
+open Server
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Shared
@@ -591,7 +592,7 @@ type LatestSessionIdForWorktreeTests() =
             use reopened = new SessionActivityStore(dbPath)
             Assert.That(
                 reopened.LatestSessionIdForWorktree(WorktreePath contextWorktree),
-                Is.EqualTo(Some "activity")
+                Is.EqualTo(Some(SessionId "activity"))
             ))
 
     [<Test>]
@@ -603,7 +604,7 @@ type LatestSessionIdForWorktreeTests() =
 
             Assert.That(
                 store.LatestSessionIdForWorktree(WorktreePath contextWorktree),
-                Is.EqualTo(Some "a2")
+                Is.EqualTo(Some(SessionId "a2"))
             ))
 
     [<Test>]
@@ -611,6 +612,65 @@ type LatestSessionIdForWorktreeTests() =
         withStore (fun store ->
             let unknownWorktree = Path.Combine(Path.GetTempPath(), "treemon-unknown-worktree")
             Assert.That(store.LatestSessionIdForWorktree(WorktreePath unknownWorktree), Is.EqualTo None))
+
+[<TestFixture>]
+[<Category("Unit")>]
+[<Category("Fast")>]
+type PersistedIdentityValidationTests() =
+
+    [<Test>]
+    member _.``Invalid persisted session identity fails instead of entering typed state``() =
+        withStoreAndPath (fun dbPath store ->
+            store.UpsertStatus(
+                storedOf
+                    "valid-session"
+                    contextWorktree
+                    emptyStatus
+                    "2026-03-01T11:00:00Z"
+                    "2026-03-01T11:00:00Z"
+            )
+
+            Tests.SqliteTestDatabase.execute
+                dbPath
+                "UPDATE session_instances SET session_id = 'invalid session';"
+
+            let failure =
+                Assert.Throws<InvalidOperationException>(fun () ->
+                    store.LoadRecentInstances(ts "2026-03-01T12:00:00Z")
+                    |> ignore)
+
+            Assert.That(
+                failure.Message,
+                Does.Contain("invalid persisted session id")
+            ))
+
+    [<Test>]
+    member _.``Invalid persisted terminal identity fails instead of entering typed state``() =
+        withStoreAndPath (fun dbPath store ->
+            storedOf
+                "valid-session"
+                contextWorktree
+                emptyStatus
+                "2026-03-01T11:00:00Z"
+                "2026-03-01T11:00:00Z"
+            |> withTerminalOrigin
+                (TerminalSessionId
+                    "0123456789abcdef0123456789abcdef")
+            |> store.UpsertStatus
+
+            Tests.SqliteTestDatabase.execute
+                dbPath
+                "UPDATE session_instances SET terminal_session_id = 'invalid';"
+
+            let failure =
+                Assert.Throws<InvalidOperationException>(fun () ->
+                    store.LoadRecentInstances(ts "2026-03-01T12:00:00Z")
+                    |> ignore)
+
+            Assert.That(
+                failure.Message,
+                Does.Contain("invalid persisted terminal session id")
+            ))
 
 
 [<TestFixture>]

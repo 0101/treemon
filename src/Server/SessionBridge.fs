@@ -42,16 +42,14 @@ type SendTarget =
     /// One physical Copilot process. A same-SessionId sibling is never eligible.
     | ExactProcess of ProcessIdentity
     /// One durable conversation owner. Duplicate physical registrations collapse to the freshest.
-    | DurableSession of string
+    | DurableSession of SessionId
     /// No prior identity is known; generic prompt delivery requires one unambiguous live owner.
     | Unspecified
 
 module SendTarget =
     let ofSessionId =
-        function
-        | Some sessionId when not (String.IsNullOrWhiteSpace sessionId) ->
-            SendTarget.DurableSession sessionId
-        | _ -> SendTarget.Unspecified
+        Option.map SendTarget.DurableSession
+        >> Option.defaultValue SendTarget.Unspecified
 
 type SendRequest =
     { WorktreePath: string
@@ -68,7 +66,7 @@ type SessionEntry =
     { ProcessIdentity: ProcessIdentity
       WorktreePath: string
       InjectUrl: string
-      SessionId: string option
+      SessionId: SessionId option
       TerminalSessionId: TerminalSessionId option
       RegisteredAt: DateTime }
 
@@ -241,7 +239,10 @@ let private deliverableTo worktreeKey (entry: SessionEntry option) (queued: Queu
             | target -> targetMatches entry target
         | AgentDoc ->
             let owner = CanvasDocOwnership.getOwnerSync worktreeKey filename
-            entry |> Option.bind _.SessionId |> Option.exists (fun sessionId -> owner = Some sessionId)
+            entry
+            |> Option.bind _.SessionId
+            |> Option.map SessionId.value
+            |> Option.exists (fun sessionId -> owner = Some sessionId)
     | _ -> targetMatches entry queued.Target
 
 let private requeue now (worktreeKey: string) (survivors: QueuedPrompt list) =
@@ -316,7 +317,7 @@ let private normalizeSessionId =
     function
     | Some sessionId when not (String.IsNullOrWhiteSpace sessionId) ->
         SessionId.create sessionId
-        |> Result.map (SessionId.value >> Some)
+        |> Result.map Some
         |> Result.mapError (fun _ -> RegistrationFailure.InvalidSessionId)
     | _ -> Ok None
 
@@ -377,15 +378,11 @@ let private recordRegistration
     kind
     (entry: SessionEntry)
     =
-    let sessionId =
-        entry.SessionId
-        |> Option.bind LifecycleDiagnostics.trySessionId
-
     diagnostics (
         LifecycleDiagnostics.Diagnostic.BridgeRegistration
             { Kind = kind
               ProcessIdentity = entry.ProcessIdentity
-              SessionId = sessionId
+              SessionId = entry.SessionId
               TerminalSessionId = entry.TerminalSessionId }
     )
 
@@ -406,9 +403,7 @@ let private recordRegistration
 
     let sessionIds =
         liveRegistrations
-        |> List.choose (fun registration ->
-            registration.Entry.SessionId
-            |> Option.bind LifecycleDiagnostics.trySessionId)
+        |> List.choose _.Entry.SessionId
         |> List.distinct
 
     if sessionIds.Length > 1 then
@@ -420,7 +415,7 @@ let private recordRegistration
                   SessionIds = sessionIds }
         )
 
-    match sessionId with
+    match entry.SessionId with
     | None -> ()
     | Some durableSessionId ->
         let sameSession =
@@ -727,7 +722,6 @@ let private shutdownDiagnostic target registration stage =
           SessionId =
             registration
             |> Option.bind _.Entry.SessionId
-            |> Option.bind LifecycleDiagnostics.trySessionId
           TerminalSessionId =
             registration
             |> Option.bind _.Entry.TerminalSessionId
@@ -907,20 +901,30 @@ let internal computeLiveness now (session: SessionEntry option) (poll: bool * Da
                 (now - entry.RegisteredAt).TotalSeconds
                 (now - heartbeat).TotalSeconds
         let liveSessionIds =
-            if isSessionAlive now entry then entry.SessionId |> Option.toList else []
+            if isSessionAlive now entry then
+                entry.SessionId
+                |> Option.map SessionId.value
+                |> Option.toList
+            else
+                []
         Some (
             age,
             { IsAlive = isSessionAlive now entry || isPollAlive now heartbeat
-              SessionId = entry.SessionId
+              SessionId = entry.SessionId |> Option.map SessionId.value
               LiveSessionIds = liveSessionIds })
     | Some entry, (false, _) ->
         let age = (now - entry.RegisteredAt).TotalSeconds
         let liveSessionIds =
-            if isSessionAlive now entry then entry.SessionId |> Option.toList else []
+            if isSessionAlive now entry then
+                entry.SessionId
+                |> Option.map SessionId.value
+                |> Option.toList
+            else
+                []
         Some (
             age,
             { IsAlive = isSessionAlive now entry
-              SessionId = entry.SessionId
+              SessionId = entry.SessionId |> Option.map SessionId.value
               LiveSessionIds = liveSessionIds })
     | None, (true, heartbeat) ->
         let age = (now - heartbeat).TotalSeconds
@@ -968,6 +972,7 @@ let getAllLiveness (worktreePaths: string list) : Map<string, BridgeLiveness> =
         let liveSessionIds =
             sessions
             |> List.choose _.SessionId
+            |> List.map SessionId.value
             |> List.sort
 
         computeLiveness now session poll

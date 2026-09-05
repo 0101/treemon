@@ -62,8 +62,8 @@ let internal ownedSessionSnapshot
                 |> freshnessAdjusted now instance.LastSeen
                 |> effectiveStatus })
         |> List.sortBy (fun session ->
-            TerminalSessionId.value session.TerminalSessionId,
-            SessionId.value session.CopilotSessionId,
+            session.TerminalSessionId,
+            session.CopilotSessionId,
             ProcessIdentity.sortKey session.ProcessIdentity)
 
     let replacementSessionIds =
@@ -91,7 +91,11 @@ let internal queryOwnedSessions
     |> Result.map (ownedSessionSnapshot now terminalSessionIds)
 
 let private terminalOrigin (tab: EmbeddedTerminalTab) =
-    tab.Id |> EmbeddedTerminalId.value |> TerminalSessionId
+    tab.Id
+    |> EmbeddedTerminalId.value
+    |> TerminalSessionId.create
+    |> Result.defaultWith (fun error ->
+        invalidOp $"Invalid embedded terminal identity: {error}")
 
 let internal tryFindLiveTerminalId
     (now: DateTimeOffset)
@@ -164,7 +168,7 @@ let internal replacementSessionPlan
         let terminalsById =
             terminals
             |> List.map (fun terminal ->
-                TerminalSessionId terminal.TerminalSessionId,
+                terminal.TerminalSessionId,
                 terminal)
             |> Map.ofList
 
@@ -180,9 +184,7 @@ let internal replacementSessionPlan
                     { TerminalSessionId =
                         terminal.TerminalSessionId
                       WorktreePath = terminal.WorktreePath
-                      CopilotSessionId =
-                        SessionId.value
-                            session.CopilotSessionId
+                      CopilotSessionId = session.CopilotSessionId
                       ProcessIdentity =
                         session.ProcessIdentity }
 
@@ -192,20 +194,18 @@ let internal replacementSessionPlan
             terminals
             |> List.choose (fun terminal ->
                 snapshot.ReplacementSessionIds
-                |> Map.tryFind (TerminalSessionId terminal.TerminalSessionId)
+                |> Map.tryFind terminal.TerminalSessionId
                 |> Option.map (fun sessionId ->
                     let resume:
                         TerminalHostReplacement.ReplacementResumeCommand =
-                        { CopilotSessionId =
-                            SessionId.value sessionId
+                        { CopilotSessionId = sessionId
                           Command =
                             CodingToolCli.build
                                 (resolveProvider terminal.WorktreePath)
                                 (CodingToolCli.Resume(Some(SessionId.value sessionId)))
                             |> _.AsShellString }
 
-                    terminal.TerminalSessionId,
-                    resume))
+                    terminal.TerminalSessionId, resume))
             |> Map.ofList
 
         TerminalHostReplacement.ReplacementSessionPlan.Ready(
@@ -225,7 +225,7 @@ let internal queryReplacementPlan
     =
     let terminalSessionIds =
         terminals
-        |> List.map (_.TerminalSessionId >> TerminalSessionId)
+        |> List.map _.TerminalSessionId
         |> Set.ofList
 
     queryOwnedSessions queryActivity now terminalSessionIds

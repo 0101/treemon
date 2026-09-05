@@ -522,9 +522,17 @@ let private noTerminalCommand _ _ =
                 "The test did not expect a terminal command"
     }
 
+let private typedSessionId value =
+    SessionId.create value
+    |> Result.defaultWith invalidOp
+
+let private typedTerminalSessionId value =
+    TerminalSessionId.create value
+    |> Result.defaultWith invalidOp
+
 let private replacementResume sessionId command:
     TerminalHostReplacement.ReplacementResumeCommand =
-    { CopilotSessionId = sessionId
+    { CopilotSessionId = typedSessionId sessionId
       Command = command }
 
 let private argumentValue name (startInfo: ProcessStartInfo) =
@@ -699,9 +707,9 @@ let private replacementTarget
     processIdentity
     :
     TerminalHostReplacement.ReplacementShutdownTarget =
-    { TerminalSessionId = terminal.SessionId
+    { TerminalSessionId = typedTerminalSessionId terminal.SessionId
       WorktreePath = terminal.WorktreePath
-      CopilotSessionId = copilotSessionId
+      CopilotSessionId = typedSessionId copilotSessionId
       ProcessIdentity = processIdentity }
 
 let private worktree (root: string) (name: string) =
@@ -2431,9 +2439,11 @@ type EmbeddedTerminalReplacementTests() =
                 identity
                 :
                 TerminalHostReplacement.ReplacementShutdownTarget =
-                { TerminalSessionId = terminal.SessionId
+                { TerminalSessionId =
+                    typedTerminalSessionId terminal.SessionId
                   WorktreePath = terminal.WorktreePath
-                  CopilotSessionId = copilotSessionId
+                  CopilotSessionId =
+                    typedSessionId copilotSessionId
                   ProcessIdentity = identity }
 
             let shutdownTargets =
@@ -2452,11 +2462,11 @@ type EmbeddedTerminalReplacementTests() =
 
             let resumeCommands =
                 Map.ofList
-                    [ firstTerminal.SessionId,
+                    [ typedTerminalSessionId firstTerminal.SessionId,
                       replacementResume
                           "shared-conversation"
                           "resume-first"
-                      secondTerminal.SessionId,
+                      typedTerminalSessionId secondTerminal.SessionId,
                       replacementResume
                           "second-conversation"
                           "resume-second" ]
@@ -2465,7 +2475,8 @@ type EmbeddedTerminalReplacementTests() =
                 TerminalHostReplacement.ReplacementTerminal list =
                 previous
                 |> List.map (fun terminal ->
-                    { TerminalSessionId = terminal.SessionId
+                    { TerminalSessionId =
+                        typedTerminalSessionId terminal.SessionId
                       WorktreePath = terminal.WorktreePath })
 
             let query
@@ -2529,7 +2540,7 @@ type EmbeddedTerminalReplacementTests() =
                         fun recreateConfig connection terminal ->
                             async {
                                 events.Enqueue(
-                                    $"terminal-recreate:{terminal.TerminalSessionId}"
+                                    $"terminal-recreate:{TerminalSessionId.value terminal.TerminalSessionId}"
                                 )
 
                                 return!
@@ -3293,7 +3304,8 @@ type EmbeddedTerminalReplacementTests() =
                 TerminalHostReplacement.ReplacementTerminal list =
                 before
                 |> List.map (fun terminal ->
-                    { TerminalSessionId = terminal.SessionId
+                    { TerminalSessionId =
+                        typedTerminalSessionId terminal.SessionId
                       WorktreePath = terminal.WorktreePath })
 
             let replacementCommand = "opaque replacement command"
@@ -3302,9 +3314,11 @@ type EmbeddedTerminalReplacementTests() =
 
             let shutdownTarget:
                 TerminalHostReplacement.ReplacementShutdownTarget =
-                { TerminalSessionId = resumedTerminal.SessionId
+                { TerminalSessionId =
+                    typedTerminalSessionId resumedTerminal.SessionId
                   WorktreePath = resumedTerminal.WorktreePath
-                  CopilotSessionId = "replacement-session"
+                  CopilotSessionId =
+                    typedSessionId "replacement-session"
                   ProcessIdentity = exactIdentity 4401 5401L }
 
             let query _ terminals =
@@ -3315,7 +3329,7 @@ type EmbeddedTerminalReplacementTests() =
                         21L,
                         [ shutdownTarget ],
                         Map.ofList
-                            [ resumedTerminal.SessionId,
+                            [ typedTerminalSessionId resumedTerminal.SessionId,
                               replacementResume
                                   "replacement-session"
                                   replacementCommand ]
@@ -3428,9 +3442,11 @@ type EmbeddedTerminalReplacementTests() =
 
             let target processId:
                 TerminalHostReplacement.ReplacementShutdownTarget =
-                { TerminalSessionId = terminal.SessionId
+                { TerminalSessionId =
+                    typedTerminalSessionId terminal.SessionId
                   WorktreePath = terminal.WorktreePath
-                  CopilotSessionId = "duplicate-session"
+                  CopilotSessionId =
+                    typedSessionId "duplicate-session"
                   ProcessIdentity =
                     exactIdentity
                         processId
@@ -3450,7 +3466,9 @@ type EmbeddedTerminalReplacementTests() =
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         51L,
                         shutdownTargets,
-                        Map.ofList [ terminal.SessionId, resume ]
+                        Map.ofList
+                            [ typedTerminalSessionId terminal.SessionId,
+                              resume ]
                     )
                 )
 
@@ -3545,7 +3563,9 @@ type EmbeddedTerminalReplacementTests() =
                 Assert.That(
                     recovery.Capture.ResumeCommands,
                     Is.EqualTo(
-                        Map.ofList [ terminal.SessionId, resume ]
+                        Map.ofList
+                            [ typedTerminalSessionId terminal.SessionId,
+                              resume ]
                     )
                 )
                 Assert.That(
@@ -3747,9 +3767,11 @@ type EmbeddedTerminalReplacementTests() =
 
             let shutdownTarget:
                 TerminalHostReplacement.ReplacementShutdownTarget =
-                { TerminalSessionId = terminal.SessionId
+                { TerminalSessionId =
+                    typedTerminalSessionId terminal.SessionId
                   WorktreePath = terminal.WorktreePath
-                  CopilotSessionId = "selected-session"
+                  CopilotSessionId =
+                    typedSessionId "selected-session"
                   ProcessIdentity = processIdentity }
 
             let resume =
@@ -3764,7 +3786,7 @@ type EmbeddedTerminalReplacementTests() =
                 =
                 Assert.That(
                     terminals
-                    |> List.map _.TerminalSessionId,
+                    |> List.map (_.TerminalSessionId >> TerminalSessionId.value),
                     Is.EqualTo([ terminal.SessionId ])
                 )
 
@@ -3772,7 +3794,9 @@ type EmbeddedTerminalReplacementTests() =
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         12L,
                         [ shutdownTarget ],
-                        Map.ofList [ terminal.SessionId, resume ]
+                        Map.ofList
+                            [ typedTerminalSessionId terminal.SessionId,
+                              resume ]
                     )
                 )
 
@@ -3813,7 +3837,8 @@ type EmbeddedTerminalReplacementTests() =
 
             let capturedTerminal:
                 TerminalHostReplacement.ReplacementTerminal =
-                { TerminalSessionId = terminal.SessionId
+                { TerminalSessionId =
+                    typedTerminalSessionId terminal.SessionId
                   WorktreePath = terminal.WorktreePath }
 
             Assert.Multiple(fun () ->
@@ -3845,7 +3870,9 @@ type EmbeddedTerminalReplacementTests() =
                 Assert.That(
                     recovery.Capture.ResumeCommands,
                     Is.EqualTo(
-                        Map.ofList [ terminal.SessionId, resume ]
+                        Map.ofList
+                            [ typedTerminalSessionId terminal.SessionId,
+                              resume ]
                     )
                 )
                 Assert.That(
@@ -3961,7 +3988,8 @@ type EmbeddedTerminalReplacementTests() =
 
             let firstPresentation:
                 TerminalHostReplacement.ReplacementTerminal =
-                { TerminalSessionId = firstCaptured.SessionId
+                { TerminalSessionId =
+                    typedTerminalSessionId firstCaptured.SessionId
                   WorktreePath = firstCaptured.WorktreePath }
 
             Assert.Multiple(fun () ->
@@ -4026,7 +4054,9 @@ type EmbeddedTerminalReplacementTests() =
                   ) ->
                     Assert.That(
                         terminal.TerminalSessionId,
-                        Is.EqualTo firstCaptured.SessionId
+                        Is.EqualTo(
+                            typedTerminalSessionId firstCaptured.SessionId
+                        )
                     )
                     Assert.That(
                         error,
@@ -4071,7 +4101,8 @@ type EmbeddedTerminalReplacementTests() =
 
             let shutdownTarget:
                 TerminalHostReplacement.ReplacementShutdownTarget =
-                { TerminalSessionId = previous.SessionId
+                { TerminalSessionId =
+                    typedTerminalSessionId previous.SessionId
                   WorktreePath = previous.WorktreePath
                   CopilotSessionId = resume.CopilotSessionId
                   ProcessIdentity = exactIdentity 4501 5501L }
@@ -4081,7 +4112,9 @@ type EmbeddedTerminalReplacementTests() =
                     TerminalHostReplacement.ReplacementSessionPlan.Ready(
                         53L,
                         [ shutdownTarget ],
-                        Map.ofList [ previous.SessionId, resume ]
+                        Map.ofList
+                            [ typedTerminalSessionId previous.SessionId,
+                              resume ]
                     )
                 )
 
@@ -4136,7 +4169,7 @@ type EmbeddedTerminalReplacementTests() =
                 )
                 Assert.That(
                     recovery.Progress.RecreatedTerminals
-                    |> List.map _.OriginalTerminalSessionId,
+                    |> List.map (_.OriginalTerminalSessionId >> TerminalSessionId.value),
                     Is.EqualTo([ previous.SessionId ])
                 )
                 Assert.That(
@@ -4160,7 +4193,9 @@ type EmbeddedTerminalReplacementTests() =
                   ) ->
                     Assert.That(
                         terminal.TerminalSessionId,
-                        Is.EqualTo previous.SessionId
+                        Is.EqualTo(
+                            typedTerminalSessionId previous.SessionId
+                        )
                     )
                     Assert.That(
                         error,
@@ -4235,11 +4270,11 @@ type EmbeddedTerminalReplacementTests() =
 
             let resumeCommands =
                 Map.ofList
-                    [ first.SessionId,
+                    [ typedTerminalSessionId first.SessionId,
                       replacementResume
                           "first-selected"
                           "resume-first-selected"
-                      second.SessionId,
+                      typedTerminalSessionId second.SessionId,
                       replacementResume
                           "second-selected"
                           "resume-second-selected" ]
@@ -4406,8 +4441,8 @@ type EmbeddedTerminalReplacementTests() =
                 )
 
                 match
-                    selectedByTerminal[first.SessionId].Outcome,
-                    selectedByTerminal[second.SessionId].Outcome
+                    selectedByTerminal[typedTerminalSessionId first.SessionId].Outcome,
+                    selectedByTerminal[typedTerminalSessionId second.SessionId].Outcome
                 with
                 | TerminalHostRecovery.RecoverySelectedSessionOutcome.ResumeDelivered,
                   TerminalHostRecovery.RecoverySelectedSessionOutcome.ShutdownUnconfirmed
@@ -4474,7 +4509,7 @@ type EmbeddedTerminalReplacementTests() =
                         62L,
                         [ shutdownTarget ],
                         Map.ofList
-                            [ terminal.SessionId,
+                            [ typedTerminalSessionId terminal.SessionId,
                               replacementResume
                                   "old-stop-selected"
                                   "resume-old-stop-selected" ]
@@ -4614,7 +4649,7 @@ type EmbeddedTerminalReplacementTests() =
                               "launch-selected"
                               (exactIdentity 4801 5801L) ],
                         Map.ofList
-                            [ terminal.SessionId,
+                            [ typedTerminalSessionId terminal.SessionId,
                               replacementResume
                                   "launch-selected"
                                   "resume-launch-selected" ]
@@ -4748,7 +4783,7 @@ type EmbeddedTerminalReplacementTests() =
                               "unidentified-selected"
                               (exactIdentity 4851 5851L) ],
                         Map.ofList
-                            [ terminal.SessionId,
+                            [ typedTerminalSessionId terminal.SessionId,
                               replacementResume
                                   "unidentified-selected"
                                   "resume-unidentified-selected" ]
@@ -4917,7 +4952,8 @@ type EmbeddedTerminalReplacementTests() =
                             async {
                                 recreationAttempts.Enqueue(
                                     (recreateConfig.HostExecutablePath,
-                                     terminal.TerminalSessionId)
+                                     TerminalSessionId.value
+                                         terminal.TerminalSessionId)
                                 )
 
                                 if
@@ -4925,7 +4961,7 @@ type EmbeddedTerminalReplacementTests() =
                                         recreateConfig.HostExecutablePath
                                         stagedExecutable
                                     && terminal.TerminalSessionId =
-                                       second.SessionId
+                                       typedTerminalSessionId second.SessionId
                                 then
                                     let! registry =
                                         TerminalHostClient.listTerminals
@@ -5064,7 +5100,7 @@ type EmbeddedTerminalReplacementTests() =
                               "command-selected"
                               (exactIdentity 4901 5901L) ],
                         Map.ofList
-                            [ terminal.SessionId,
+                            [ typedTerminalSessionId terminal.SessionId,
                               replacementResume
                                   "command-selected"
                                   "resume-command-selected" ]
@@ -5206,7 +5242,7 @@ type EmbeddedTerminalReplacementTests() =
                               "survivor-selected"
                               (exactIdentity 5001 6001L) ],
                         Map.ofList
-                            [ terminal.SessionId,
+                            [ typedTerminalSessionId terminal.SessionId,
                               replacementResume
                                   "survivor-selected"
                                   "resume-survivor-selected" ]

@@ -6,6 +6,7 @@ open System.IO
 open System.Threading
 open System.Threading.Tasks
 open Shared
+open Server.SessionActivity
 open Server.SchedulerState
 
 type SchedulerServices =
@@ -680,7 +681,7 @@ module CanvasWatchers =
             sessions
             |> SessionBridge.collapseLiveRegistrations now
         with
-        | [ single ] -> single.SessionId
+        | [ single ] -> single.SessionId |> Option.map SessionId.value
         | _ -> None
 
     /// Apply fallback-only scanner attribution for a batch of (re-)scanned docs. An AgentDoc is

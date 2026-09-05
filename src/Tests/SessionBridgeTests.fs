@@ -25,7 +25,7 @@ let private sessionEntry registeredAt =
     { ProcessIdentity = clockIdentity
       WorktreePath = Path.Combine("test", "clock")
       InjectUrl = "http://localhost/inject"
-      SessionId = Some "clock-session"
+      SessionId = Some(SessionId "clock-session")
       TerminalSessionId = None
       RegisteredAt = registeredAt }
 
@@ -136,7 +136,10 @@ type ClockTests() =
 
         Assert.That(age, Is.EqualTo((clockSnapshot - liveHeartbeat).TotalSeconds))
         Assert.That(liveness.IsAlive, Is.True)
-        Assert.That(liveness.SessionId, Is.EqualTo(staleSession.SessionId))
+        Assert.That(
+            liveness.SessionId,
+            Is.EqualTo(staleSession.SessionId |> Option.map SessionId.value)
+        )
         Assert.That(liveness.LiveSessionIds, Is.Empty)
 
 [<TestFixture>]
@@ -163,7 +166,7 @@ type ExactRegistrationTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(entry.ProcessIdentity, Is.EqualTo identity)
-            Assert.That(entry.SessionId, Is.EqualTo(Some "session.exact:1"))
+            Assert.That(entry.SessionId, Is.EqualTo(Some(SessionId "session.exact:1")))
             Assert.That(
                 entry.TerminalSessionId,
                 Is.EqualTo(
@@ -302,7 +305,9 @@ type ExactRegistrationTests() =
 
         assertRegistrationFailure RegistrationFailure.ParentIdentityMismatch mismatch
         Assert.That(
-            sessionsForWorktree path |> List.choose _.SessionId,
+            sessionsForWorktree path
+            |> List.choose _.SessionId
+            |> List.map SessionId.value,
             Is.EqualTo [ "session-original" ]
         )
 

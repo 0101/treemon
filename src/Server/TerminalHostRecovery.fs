@@ -31,9 +31,9 @@ type internal RecoverySelectedSessionOutcome =
     | ResumeNotAttempted of string
 
 type internal RecoverySelectedSession =
-    { OriginalTerminalSessionId: string
-      CurrentTerminalSessionId: string option
-      CopilotSessionId: string
+    { OriginalTerminalSessionId: TerminalSessionId
+      CurrentTerminalSessionId: TerminalSessionId option
+      CopilotSessionId: SessionId
       Outcome: RecoverySelectedSessionOutcome }
 
 [<RequireQualifiedAccess>]
@@ -117,27 +117,38 @@ let private deliverResumeAndSelect
     (resume: ReplacementResumeCommand)
     =
     async {
-        let! delivery =
-            operations.DeliverCommand
-                config
-                current
-                resume.Command
+        match TerminalSessionId.create current.SessionId with
+        | Error _ ->
+            return
+                { OriginalTerminalSessionId =
+                    terminal.TerminalSessionId
+                  CurrentTerminalSessionId = None
+                  CopilotSessionId = resume.CopilotSessionId
+                  Outcome =
+                    RecoverySelectedSessionOutcome.ResumeNotAttempted
+                        "TerminalHost returned an invalid terminal session identity" }
+        | Ok currentTerminalSessionId ->
+            let! delivery =
+                operations.DeliverCommand
+                    config
+                    current
+                    resume.Command
 
-        let outcome =
-            match delivery with
-            | Ok() ->
-                RecoverySelectedSessionOutcome.ResumeDelivered
-            | Error error ->
-                RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed
-                    error
+            let outcome =
+                match delivery with
+                | Ok() ->
+                    RecoverySelectedSessionOutcome.ResumeDelivered
+                | Error error ->
+                    RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed
+                        error
 
-        return
-            { OriginalTerminalSessionId =
-                terminal.TerminalSessionId
-              CurrentTerminalSessionId =
-                Some current.SessionId
-              CopilotSessionId = resume.CopilotSessionId
-              Outcome = outcome }
+            return
+                { OriginalTerminalSessionId =
+                    terminal.TerminalSessionId
+                  CurrentTerminalSessionId =
+                    Some currentTerminalSessionId
+                  CopilotSessionId = resume.CopilotSessionId
+                  Outcome = outcome }
     }
 
 let private rejectUnavailable
@@ -179,7 +190,8 @@ let private originalRegistryMatches
             (expected: ReplacementTerminal)
             (actual: TerminalRecord)
             ->
-            expected.TerminalSessionId = actual.SessionId
+            TerminalSessionId.value expected.TerminalSessionId =
+                actual.SessionId
             && samePath expected.WorktreePath actual.WorktreePath)
         capture.Terminals
         registry.Terminals
@@ -335,12 +347,13 @@ let private recoverSelectedOnExistingOldHost
                 | Some resume, None ->
                     match
                         findTerminalById
-                            terminal.TerminalSessionId
+                            (TerminalSessionId.value
+                                terminal.TerminalSessionId)
                             registry.Terminals
                     with
                     | None ->
                         let error =
-                            $"Original terminal {terminal.TerminalSessionId} is missing during recovery"
+                            $"Original terminal {TerminalSessionId.value terminal.TerminalSessionId} is missing during recovery"
 
                         let selected =
                             { OriginalTerminalSessionId =
@@ -1238,38 +1251,28 @@ let internal diagnosticSummary
 
     let selectedSessions =
         result.SelectedSessions
-        |> List.choose (fun selected ->
-            match
-                LifecycleDiagnostics.tryTerminalSessionId
-                    selected.OriginalTerminalSessionId,
-                LifecycleDiagnostics.trySessionId
-                    selected.CopilotSessionId
-            with
-            | Some originalTerminalSessionId, Some sessionId ->
-                let outcome =
-                    match selected.Outcome with
-                    | RecoverySelectedSessionOutcome.ResumeDelivered ->
-                        LifecycleDiagnostics.RecoverySelectedOutcome.ResumeDelivered
-                    | RecoverySelectedSessionOutcome.ShutdownUnconfirmed _ ->
-                        LifecycleDiagnostics.RecoverySelectedOutcome.ShutdownUnconfirmed
-                    | RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed _ ->
-                        LifecycleDiagnostics.RecoverySelectedOutcome.ResumeDeliveryUnconfirmed
-                    | RecoverySelectedSessionOutcome.ResumeNotAttempted _ ->
-                        LifecycleDiagnostics.RecoverySelectedOutcome.ResumeNotAttempted
+        |> List.map (fun selected ->
+            let outcome =
+                match selected.Outcome with
+                | RecoverySelectedSessionOutcome.ResumeDelivered ->
+                    LifecycleDiagnostics.RecoverySelectedOutcome.ResumeDelivered
+                | RecoverySelectedSessionOutcome.ShutdownUnconfirmed _ ->
+                    LifecycleDiagnostics.RecoverySelectedOutcome.ShutdownUnconfirmed
+                | RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed _ ->
+                    LifecycleDiagnostics.RecoverySelectedOutcome.ResumeDeliveryUnconfirmed
+                | RecoverySelectedSessionOutcome.ResumeNotAttempted _ ->
+                    LifecycleDiagnostics.RecoverySelectedOutcome.ResumeNotAttempted
 
-                let diagnostic:
-                    LifecycleDiagnostics.RecoverySelectedSessionDiagnostic =
-                    { OriginalTerminalSessionId =
-                        originalTerminalSessionId
-                      CurrentTerminalSessionId =
-                        selected.CurrentTerminalSessionId
-                        |> Option.bind
-                            LifecycleDiagnostics.tryTerminalSessionId
-                      SessionId = sessionId
-                      Outcome = outcome }
+            let diagnostic:
+                LifecycleDiagnostics.RecoverySelectedSessionDiagnostic =
+                { OriginalTerminalSessionId =
+                    selected.OriginalTerminalSessionId
+                  CurrentTerminalSessionId =
+                    selected.CurrentTerminalSessionId
+                  SessionId = selected.CopilotSessionId
+                  Outcome = outcome }
 
-                Some diagnostic
-            | _ -> None)
+            diagnostic)
 
     let diagnostic: LifecycleDiagnostics.RecoveryDiagnostic =
         { Status =

@@ -8,8 +8,7 @@ open Shared
 // per-endpoint retry and reconnect, heartbeat and shutdown signaling, and compact current-process
 // replay state. Server ingestion validates accepted reports and maps them to SessionEvent.
 //
-// The transformations here are pure. Process resolution is an injected contract whose operating-
-// system implementation lives separately, so the fold remains independently testable and can be
+// The transformations here are pure, so the fold remains independently testable and can be
 // applied incrementally.
 
 // --- Value types ------------------------------------------------------------------------------
@@ -42,56 +41,6 @@ module SessionId =
                 $"sessionId must be 1-{maxLength} characters from [A-Za-z0-9._:-]"
         else
             Ok(SessionId value)
-
-/// Exact identity of one operating-system process. The start timestamp distinguishes a reused PID
-/// from the process that previously owned it.
-[<Struct>]
-type ProcessIdentity =
-    private
-    | ProcessIdentity of processId: int * processStartTimeUtcTicks: int64
-
-module ProcessIdentity =
-    let create processId processStartTimeUtcTicks =
-        if processId <= 0 then
-            Error "processId must be positive"
-        elif processStartTimeUtcTicks <= 0L then
-            Error "processStartTimeUtcTicks must be positive"
-        else
-            Ok(ProcessIdentity(processId, processStartTimeUtcTicks))
-
-    let processId (ProcessIdentity(processId, _)) = processId
-
-    let processStartTimeUtcTicks (ProcessIdentity(_, processStartTimeUtcTicks)) =
-        processStartTimeUtcTicks
-
-    let sortKey identity =
-        processId identity, processStartTimeUtcTicks identity
-
-    let sessionInstanceId identity =
-        let processId, processStartTimeUtcTicks = sortKey identity
-        SessionInstanceId $"{processId:x8}:{processStartTimeUtcTicks:x16}"
-
-/// One injectable operating-system identity boundary. Resolving a PID returns the exact currently
-/// running process identity, or None when that PID is not running. Exact liveness checks deliberately
-/// reuse this same resolver so ingestion, shutdown waiting, and survivor verification cannot disagree
-/// about PID reuse.
-type ProcessIdentityResolver =
-    { Resolve: int -> Result<ProcessIdentity option, string> }
-
-module ProcessIdentityResolver =
-    let create resolve = { Resolve = resolve }
-
-    let resolve processId resolver =
-        if processId <= 0 then
-            Error "processId must be positive"
-        else
-            resolver.Resolve processId
-
-    let isAlive resolver identity =
-        identity
-        |> ProcessIdentity.processId
-        |> fun processId -> resolve processId resolver
-        |> Result.map (Option.contains identity)
 
 /// Exact identity of one TerminalHost-owned terminal. This is deliberately distinct from the
 /// Copilot SessionId because both identifiers are carried through the same ownership queries.

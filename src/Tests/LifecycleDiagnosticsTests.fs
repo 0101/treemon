@@ -51,9 +51,7 @@ type LifecycleDiagnosticFormattingTests() =
 
     [<Test>]
     member _.``Recovery diagnostics discard raw failure text and retain typed outcomes``() =
-        let terminalId =
-            terminalSessionId 21
-            |> TerminalSessionId.value
+        let terminalId = terminalSessionId 21
 
         let recovery:
             TerminalHostRecovery.ReplacementRecoveryResult =
@@ -65,7 +63,9 @@ type LifecycleDiagnosticFormattingTests() =
               SelectedSessions =
                 [ { OriginalTerminalSessionId = terminalId
                     CurrentTerminalSessionId = None
-                    CopilotSessionId = "selected-session"
+                    CopilotSessionId =
+                        SessionId.create "selected-session"
+                        |> Result.defaultWith invalidOp
                     Outcome =
                         TerminalHostRecovery.RecoverySelectedSessionOutcome.ResumeDeliveryUnconfirmed
                             "prompt=private command" } ]

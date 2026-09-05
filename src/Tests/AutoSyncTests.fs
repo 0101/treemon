@@ -34,8 +34,12 @@ let private identityForSessionId (sessionId: string) =
     ProcessIdentity.create processId startTicks
     |> Result.defaultWith invalidOp
 
+let private typedSessionId value =
+    SessionId.create value
+    |> Result.defaultWith invalidOp
+
 let private idleTarget sessionId =
-    IdleSession(identityForSessionId sessionId, sessionId)
+    IdleSession(identityForSessionId sessionId, typedSessionId sessionId)
 
 let private registerBridgeSession path injectUrl sessionId =
     let identity = identityForSessionId sessionId
@@ -341,7 +345,7 @@ type AutoSyncSelectionTests() =
                 Free(
                     IdleSession(
                         newerIdentity,
-                        "shared"
+                        typedSessionId "shared"
                     )
                 )
             )
@@ -382,7 +386,7 @@ type AutoSyncSelectionTests() =
                 Free(
                     IdleSession(
                         olderIdentity,
-                        "shared"
+                        typedSessionId "shared"
                     )
                 )
             )
@@ -408,7 +412,7 @@ type AutoSyncSelectionTests() =
 
         Assert.That(
             testOwnership now [ older; newer ],
-            Is.EqualTo(Free(NoOpenSession(Some "newer"))))
+            Is.EqualTo(Free(NoOpenSession(Some(typedSessionId "newer")))))
 
     [<Test>]
     [<Category("AutoSyncVerification")>]
@@ -426,7 +430,7 @@ type AutoSyncSelectionTests() =
                 "an idle CLI inside the openness window is still attached")
             Assert.That(
                 retainedOnly,
-                Is.EqualTo(Free(NoOpenSession(Some "shared-id"))),
+                Is.EqualTo(Free(NoOpenSession(Some(typedSessionId "shared-id")))),
                 "the same id from a closed CLI is retained identity, not an open session")
             Assert.That(openIdle, Is.Not.EqualTo retainedOnly)
 
@@ -2187,7 +2191,16 @@ type AutoSyncVerificationTests() =
                                         worktreePath
                                         (acceptedRecord baseRevision DateTimeOffset.UtcNow)
                             }
-                    ReadOwnership = fun _ -> async { return Free(NoOpenSession(Some "retained-session")) }
+                    ReadOwnership =
+                        fun _ ->
+                            async {
+                                return
+                                    Free(
+                                        NoOpenSession(
+                                            Some(typedSessionId "retained-session")
+                                        )
+                                    )
+                            }
                     // The observation is dirty, so Treemon's own sync refuses it and the worktree
                     // reaches the agent path the way production would send it there.
                     MechanicalSync = fun _ -> async { return Error DirtyWorktree }

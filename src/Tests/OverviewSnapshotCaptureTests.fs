@@ -37,7 +37,7 @@ let private identity sessionId =
     |> Seq.fold (fun value character ->
         (value * 31 + int character) % 1_000_000) 10_000
     |> fun processId ->
-        SessionActivity.ProcessIdentity.create
+        ProcessIdentity.create
             processId
             (int64 processId * 1_000L + 1L)
     |> Result.defaultWith invalidOp

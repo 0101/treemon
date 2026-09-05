@@ -4,6 +4,7 @@ open System
 open System.IO
 open System.Runtime.InteropServices
 open NUnit.Framework
+open Server
 open Server.GitWorktree
 open Server.RefreshScheduler
 open Server.SchedulerState

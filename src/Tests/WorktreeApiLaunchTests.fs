@@ -49,7 +49,7 @@ let private liveSession now path terminalId sessionId : SessionActivityStore.Sto
             (value * 31 + int character) % 1_000_000) 10_000
 
     { ProcessIdentity =
-        SessionActivity.ProcessIdentity.create
+        ProcessIdentity.create
             processId
             (int64 processId * 1_000L + 1L)
         |> Result.defaultWith invalidOp
@@ -221,11 +221,11 @@ type WorktreeApiLaunchTests() =
                 |> List.concat }
 
         let firstIdentity =
-            SessionActivity.ProcessIdentity.create 6401 7401L
+            ProcessIdentity.create 6401 7401L
             |> Result.defaultWith invalidOp
 
         let secondIdentity =
-            SessionActivity.ProcessIdentity.create 6402 7402L
+            ProcessIdentity.create 6402 7402L
             |> Result.defaultWith invalidOp
 
         let first =

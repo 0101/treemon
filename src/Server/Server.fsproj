@@ -19,6 +19,7 @@
     <Compile Include="JsonStore.fs" />
     <Compile Include="PersistentStore.fs" />
     <Compile Include="PathUtils.fs" />
+    <Compile Include="ProcessIdentity.fs" />
     <Compile Include="ProcessRunner.fs" />
     <Compile Include="Win32.fs" />
     <Compile Include="SystemMetrics.fs" />
@@ -36,7 +37,6 @@
     <Compile Include="FileUtils.fs" />
     <Compile Include="SessionActivity.fs" />
     <Compile Include="LifecycleDiagnostics.fs" />
-    <Compile Include="ProcessIdentityResolver.fs" />
     <Compile Include="SessionActivityProtocol.fs" />
     <Compile Include="SqliteStorage.fs" />
     <Compile Include="OverviewSnapshotBoundary.fs" />

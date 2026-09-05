@@ -9,6 +9,7 @@ open System.Runtime.InteropServices
 open System.Text.RegularExpressions
 open System.Threading.Tasks
 open NUnit.Framework
+open Server
 open Server.SessionActivity
 
 /// Parse an ISO-8601 timestamp string as a DateTimeOffset using the invariant culture. Shared by the

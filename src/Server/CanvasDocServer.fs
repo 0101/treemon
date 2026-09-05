@@ -114,7 +114,7 @@ let private registrationFailureText =
         "invalid shutdown capability"
 
 let canvasRegisterHandler
-    (processIdentityResolver: SessionActivity.ProcessIdentityResolver)
+    (processIdentityResolver: ProcessIdentityResolver)
     (agent: MailboxProcessor<SchedulerState.StateMsg>)
     : HttpHandler =
     fun next ctx -> task {

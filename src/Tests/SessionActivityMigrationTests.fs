@@ -3,6 +3,7 @@ module Tests.SessionActivityMigrationTests
 open System
 open Microsoft.Data.Sqlite
 open NUnit.Framework
+open Server
 open Server.SessionActivity
 open Server.SessionActivityStore
 open Shared
