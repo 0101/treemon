@@ -33,6 +33,11 @@ type internal CleanupLease =
 
 type internal CleanupPreparation = NoCleanupNeeded of EmbeddedTerminalSnapshot | CleanupReserved of CleanupLease
 
+type internal CleanupLeaseAcquirer =
+    CloseTarget
+        -> WorktreePath option
+        -> Async<Result<CleanupPreparation, string>>
+
 type internal CleanupRemoval = KeepCleanupTargets | RemoveCleanupTarget of CloseTarget | RemoveClosedTerminals of Set<EmbeddedTerminalId>
 
 type internal CleanupUpdate =
@@ -537,7 +542,7 @@ let internal clientConfig (Manager(config, _)) = config
 
 let internal applyCleanup (Manager(_, agent)) update = ask agent (fun reply -> ApplyCleanup(update, reply))
 
-let internal reserveCleanup (Manager(_, agent)) target fallback =
+let private reserveCleanup (Manager(_, agent)) target fallback =
     async {
         let token = Guid.NewGuid()
 
@@ -548,4 +553,38 @@ let internal reserveCleanup (Manager(_, agent)) target fallback =
             return Error "Terminal cleanup could not start within 60 seconds; try again."
     }
 
-let internal releaseCleanup (Manager(_, agent)) lease = agent.Post(ReleaseCleanup lease.Token)
+let internal withCleanupLease
+    ((Manager(_, agent)) as manager)
+    (
+        acquire:
+            CleanupLeaseAcquirer
+                -> Async<Result<CleanupPreparation, string>>
+    )
+    (
+        operation:
+            Result<CleanupPreparation, string>
+                -> Threading.Tasks.Task<'value>
+    )
+    : Async<'value>
+    =
+    async {
+        let reservation =
+            Async.StartAsTask(
+                acquire (reserveCleanup manager),
+                cancellationToken = Threading.CancellationToken.None
+            )
+
+        return!
+            task {
+                let! acquired = reservation
+
+                match acquired with
+                | Ok(CleanupReserved lease) ->
+                    try
+                        return! operation acquired
+                    finally
+                        agent.Post(ReleaseCleanup lease.Token)
+                | _ -> return! operation acquired
+            }
+            |> Async.AwaitTask
+    }

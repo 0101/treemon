@@ -302,7 +302,8 @@ are unaffected.
 The lifecycle mailbox holds a short-lived in-memory reservation for the canonical worktree path
 from before its terminal closes through the delete/archive mutation. Another cleanup, terminal
 start for that path receives a retryable busy error, while unrelated worktrees remain available;
-the reservation is released after both successful and failed mutations.
+the reservation is acquired only when the cleanup workflow starts and is released after both
+successful and failed mutations. Constructing an async close or cleanup workflow is inert.
 An attempt made during committed host replacement fails without mutating the worktree or archive
 state; the client reconciles from the authoritative worktree snapshot and leaves the action
 available to retry after replacement.
@@ -443,10 +444,11 @@ collapses its detailed result into a mailbox directive to apply the recovered
 registry, interrupt while retaining a known host, or interrupt with no known host; the mailbox
 executes that directive without interpreting recovery state combinations.
 `WorktreeCleanup` owns user-authorized close policy:
-it acquires the canonical-path reservation, queries and gracefully stops exact sessions, performs
+it enters `EmbeddedTerminal.withCleanupLease`, queries and gracefully stops exact sessions, performs
 host I/O outside the mailbox, applies the authoritative registry transition, records exact closure,
-and only then invokes delete/archive mutation. A `finally` release prevents failed or cancelled
-mutations from leaving a path busy while unrelated paths remain concurrent.
+and only then invokes delete/archive mutation. The helper starts acquisition with the returned
+async workflow and owns the `finally` release, so failed or cancelled mutations cannot leave a path
+busy while unrelated paths remain concurrent.
 The mailbox grants one replacement phase, keeps serving cached reads and bounded rejection replies
 while replacement runs asynchronously, then alone applies the replacement's registry transition.
 The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes

@@ -1988,76 +1988,89 @@ type EmbeddedTerminalControlClientTests() =
 
             let terminalId = requireOk started |> _.TerminalId
 
-            let! reservation =
-                EmbeddedTerminal.reserveCleanup
+            do!
+                EmbeddedTerminal.withCleanupLease
                     manager
-                    (EmbeddedTerminal.OneTerminal terminalId)
-                    None
-                |> Async.StartAsTask
+                    (fun reserveCleanup ->
+                        reserveCleanup
+                            (EmbeddedTerminal.OneTerminal terminalId)
+                            None)
+                    (fun reservation ->
+                        task {
+                            let lease =
+                                match reservation with
+                                | Ok(EmbeddedTerminal.CleanupReserved lease) ->
+                                    lease
+                                | other ->
+                                    Assert.Fail(
+                                        $"Expected cleanup reservation, got {other}"
+                                    )
 
-            let lease =
-                match reservation with
-                | Ok(EmbeddedTerminal.CleanupReserved lease) -> lease
-                | other ->
-                    Assert.Fail($"Expected cleanup reservation, got {other}")
-                    Unchecked.defaultof<_>
+                                    Unchecked.defaultof<_>
 
-            try
-                let! connection =
-                    async {
-                        match! TerminalHostClient.discoverHost config with
-                        | TerminalHostClient.HealthyHost connection -> return connection
-                        | discovery ->
-                            return
-                                failwith
-                                    $"Expected healthy fixture host, got {discovery}"
-                    }
-                    |> Async.StartAsTask
+                            let! connection =
+                                async {
+                                    match! TerminalHostClient.discoverHost config with
+                                    | TerminalHostClient.HealthyHost connection ->
+                                        return connection
+                                    | discovery ->
+                                        return
+                                            failwith
+                                                $"Expected healthy fixture host, got {discovery}"
+                                }
+                                |> Async.StartAsTask
 
-                host.RemoveTerminal(EmbeddedTerminalId.value terminalId)
-
-                let! staleRegistry =
-                    TerminalHostClient.listTerminals config connection
-                    |> Async.StartAsTask
-
-                let staleRegistry = requireOk staleRegistry
-
-                let! unrelatedStart =
-                    EmbeddedTerminal.start manager unrelated
-                    |> Async.StartAsTask
-
-                let unrelatedId = requireOk unrelatedStart |> _.TerminalId
-
-                let! reconciled =
-                    EmbeddedTerminal.applyCleanup
-                        manager
-                        (EmbeddedTerminal.ReconcileCleanup(
-                            connection,
-                            staleRegistry,
-                            EmbeddedTerminal.RemoveCleanupTarget(
-                                EmbeddedTerminal.OneTerminal terminalId
+                            host.RemoveTerminal(
+                                EmbeddedTerminalId.value terminalId
                             )
-                        ))
-                    |> Async.StartAsTask
 
-                let unrelatedTab =
-                    reconciled.Tabs
-                    |> List.find (fun tab -> tab.Id = unrelatedId)
+                            let! staleRegistry =
+                                TerminalHostClient.listTerminals
+                                    config
+                                    connection
+                                |> Async.StartAsTask
 
-                Assert.Multiple(fun () ->
-                    Assert.That(
-                        reconciled.Tabs |> List.map _.Id,
-                        Is.EqualTo [ unrelatedId ]
-                    )
+                            let staleRegistry = requireOk staleRegistry
 
-                    match unrelatedTab.Lifecycle with
-                    | EmbeddedTerminalLifecycle.Running _ -> ()
-                    | lifecycle ->
-                        Assert.Fail(
-                            $"The newer unrelated terminal was regressed to {lifecycle}"
-                        ))
-            finally
-                EmbeddedTerminal.releaseCleanup manager lease
+                            let! unrelatedStart =
+                                EmbeddedTerminal.start manager unrelated
+                                |> Async.StartAsTask
+
+                            let unrelatedId =
+                                requireOk unrelatedStart
+                                |> _.TerminalId
+
+                            let! reconciled =
+                                EmbeddedTerminal.applyCleanup
+                                    manager
+                                    (EmbeddedTerminal.ReconcileCleanup(
+                                        connection,
+                                        staleRegistry,
+                                        EmbeddedTerminal.RemoveCleanupTarget(
+                                            lease.Target
+                                        )
+                                    ))
+                                |> Async.StartAsTask
+
+                            let unrelatedTab =
+                                reconciled.Tabs
+                                |> List.find (fun tab ->
+                                    tab.Id = unrelatedId)
+
+                            Assert.Multiple(fun () ->
+                                Assert.That(
+                                    reconciled.Tabs |> List.map _.Id,
+                                    Is.EqualTo [ unrelatedId ]
+                                )
+
+                                match unrelatedTab.Lifecycle with
+                                | EmbeddedTerminalLifecycle.Running _ -> ()
+                                | lifecycle ->
+                                    Assert.Fail(
+                                        $"The newer unrelated terminal was regressed to {lifecycle}"
+                                    ))
+                        })
+                |> Async.StartAsTask
         }
 
     [<Test>]
@@ -5476,6 +5489,34 @@ type EmbeddedTerminalReplacementTests() =
 [<Category("Unit")>]
 [<Category("Fast")>]
 type EmbeddedTerminalWorktreeCleanupTests() =
+    [<Test>]
+    member _.``constructing terminal close without starting it leaves the path available``() =
+        task {
+            use host = new FakeControlHost()
+            host.PublishManifest()
+            let manager =
+                EmbeddedTerminal.createWithConfig(managerConfig host noLaunch)
+            let target = worktree host.Root "unstarted-cleanup"
+
+            let! initial =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+
+            let terminalId = requireOk initial |> _.TerminalId
+
+            let _unstartedClose =
+                closeManagedTerminal manager terminalId
+
+            do! Task.Delay(TimeSpan.FromMilliseconds 250.0)
+
+            let! started =
+                EmbeddedTerminal.start manager target
+                |> Async.StartAsTask
+                |> _.WaitAsync(TimeSpan.FromSeconds 2.0)
+
+            requireOk started |> ignore
+        }
+
     [<Test>]
     member _.``cleanup reservation rejects the same canonical path while unrelated starts remain available``() =
         task {

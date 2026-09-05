@@ -493,9 +493,9 @@ let private closeReserved
 let private asTask cancellation workflow =
     Async.StartAsTask(workflow, cancellationToken = cancellation)
 
-let private reserveTarget manager target =
+let private reserveTarget reserveCleanup manager target =
     async {
-        match! EmbeddedTerminal.reserveCleanup manager target None with
+        match! reserveCleanup target None with
         | Ok(NoCleanupNeeded snapshot) ->
             match target with
             | WorktreeTerminals _ -> return Ok(NoCleanupNeeded snapshot)
@@ -514,8 +514,7 @@ let private reserveTarget manager target =
                         | None -> return Ok(NoCleanupNeeded snapshot)
                         | Some terminal ->
                             return!
-                                EmbeddedTerminal.reserveCleanup
-                                    manager
+                                reserveCleanup
                                     target
                                     (Some(
                                         PathUtils.toWorktreePath
@@ -541,15 +540,12 @@ let private withTerminalCleanupResult
     )
     : Async<Result<'value, string>>
     =
-    let reservation =
-        reserveTarget manager target
-        |> asTask Threading.CancellationToken.None
-
-    async {
-        return!
+    EmbeddedTerminal.withCleanupLease
+        manager
+        (fun reserveCleanup ->
+            reserveTarget reserveCleanup manager target)
+        (fun reservation ->
             task {
-                let! reservation = reservation
-
                 match reservation with
                 | Error error -> return Error error
                 | Ok(NoCleanupNeeded snapshot) ->
@@ -557,25 +553,20 @@ let private withTerminalCleanupResult
                         operation snapshot
                         |> asTask cancellation
                 | Ok(CleanupReserved lease) ->
-                    try
-                        match!
-                            closeReserved
-                                diagnostics
-                                prepare
-                                manager
-                                lease
-                            |> asTask Threading.CancellationToken.None
-                        with
-                        | Error error -> return Error error
-                        | Ok snapshot ->
-                            return!
-                                operation snapshot
-                                |> asTask cancellation
-                    finally
-                        EmbeddedTerminal.releaseCleanup manager lease
-            }
-            |> Async.AwaitTask
-    }
+                    match!
+                        closeReserved
+                            diagnostics
+                            prepare
+                            manager
+                            lease
+                        |> asTask Threading.CancellationToken.None
+                    with
+                    | Error error -> return Error error
+                    | Ok snapshot ->
+                        return!
+                            operation snapshot
+                            |> asTask cancellation
+            })
 
 let internal closeEmbeddedTerminalWithDiagnostics
     diagnostics
