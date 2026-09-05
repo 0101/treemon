@@ -387,7 +387,7 @@ type SessionActivityService internal
                             |> List.map (fun instance ->
                                 instance.ProcessIdentity, instance)
                             |> Map.ofList
-                            |> evictStaleInstances
+                            |> SchedulerState.evictStaleInstances
 
                         let pending =
                             live

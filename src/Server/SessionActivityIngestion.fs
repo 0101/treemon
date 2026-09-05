@@ -29,6 +29,17 @@ let private exactMetadataMatches
     && prior.WorktreePath = report.WorktreePath
     && prior.Provider = report.Provider
 
+let private withMatchingMetadata
+    (prior: StoredInstance)
+    (report: SessionActivityReport)
+    onMatch
+    =
+    if exactMetadataMatches prior report then
+        onMatch ()
+    else
+        Error
+            "the exact process identity is registered to different session metadata"
+
 let private resolvedTerminalOrigin
     (prior: StoredInstance)
     (report: SessionActivityReport)
@@ -61,16 +72,6 @@ let internal tryPrior
     |> Option.orElseWith (fun () ->
         store.InstanceByIdentity identity)
 
-let internal evictStaleInstances instances =
-    if Map.isEmpty instances then
-        instances
-    else
-        let newest =
-            instances |> Map.values |> Seq.map _.LastSeen |> Seq.max
-
-        let cutoff = newest - idleWindow
-        instances |> Map.filter (fun _ instance -> instance.LastSeen >= cutoff)
-
 let private originsChanged prior current =
     [ prior |> Option.bind _.TerminalSessionId
       current.TerminalSessionId ]
@@ -87,7 +88,7 @@ let internal publishInstance
     let live =
         state.Live
         |> Map.add persisted.ProcessIdentity persisted
-        |> evictStaleInstances
+        |> SchedulerState.evictStaleInstances
 
     scheduler.Post(
         SchedulerState.UpdateSessionInstance(
@@ -387,25 +388,23 @@ let private applyHeartbeat
     =
     if prior.ClosedAt.IsSome then
         Ok state
-    elif not (exactMetadataMatches prior exact.Report) then
-        Error
-            "the exact process identity is registered to different session metadata"
     else
-        resolvedTerminalOrigin prior exact.Report
-        |> Result.map (fun terminalSessionId ->
-            let next =
-                { prior with
-                    TerminalSessionId = terminalSessionId
-                    LastSeen = max prior.LastSeen exact.ReceivedAt }
+        withMatchingMetadata prior exact.Report (fun () ->
+            resolvedTerminalOrigin prior exact.Report
+            |> Result.map (fun terminalSessionId ->
+                let next =
+                    { prior with
+                        TerminalSessionId = terminalSessionId
+                        LastSeen = max prior.LastSeen exact.ReceivedAt }
 
-            let persisted = store.UpsertInstance next
+                let persisted = store.UpsertInstance next
 
-            publishInstance
-                scheduler
-                exact.ReceivedAt
-                (Some prior)
-                state
-                persisted)
+                publishInstance
+                    scheduler
+                    exact.ReceivedAt
+                    (Some prior)
+                    state
+                    persisted))
 
 let private applyClosure
     (store: SessionActivityStore)
@@ -414,10 +413,7 @@ let private applyClosure
     (exact: ExactReport)
     (prior: StoredInstance)
     =
-    if not (exactMetadataMatches prior exact.Report) then
-        Error
-            "the exact process identity is registered to different session metadata"
-    else
+    withMatchingMetadata prior exact.Report (fun () ->
         resolvedTerminalOrigin prior exact.Report
         |> Result.map (fun terminalSessionId ->
             match
@@ -440,7 +436,7 @@ let private applyClosure
                 { published with
                     PendingReconciliation =
                         state.PendingReconciliation
-                        |> Set.remove exact.ProcessIdentity })
+                        |> Set.remove exact.ProcessIdentity }))
 
 let internal applyKnownReport
     (store: SessionActivityStore)
@@ -463,7 +459,7 @@ let internal applyKnownReport
     | SessionClosed, Some current ->
         applyClosure store scheduler state exact current
     | UsageInfo(currentTokens, tokenLimit), Some current ->
-        if exactMetadataMatches current exact.Report then
+        withMatchingMetadata current exact.Report (fun () ->
             applyUsage
                 store
                 scheduler
@@ -471,43 +467,31 @@ let internal applyKnownReport
                 exact
                 current
                 currentTokens
-                tokenLimit
-        else
-            Error
-                "the exact process identity is registered to different session metadata"
+                tokenLimit)
     | TitleBootstrap _, Some current ->
-        if exactMetadataMatches current exact.Report then
+        withMatchingMetadata current exact.Report (fun () ->
             applyTitleBootstrap
                 store
                 scheduler
                 state
                 exact
-                current
-        else
-            Error
-                "the exact process identity is registered to different session metadata"
+                current)
     | event, Some current when isBaseLifecycle event ->
-        if exactMetadataMatches current exact.Report then
+        withMatchingMetadata current exact.Report (fun () ->
             applyLifecycleEvent
                 store
                 scheduler
                 state
                 exact
-                current
-        else
-            Error
-                "the exact process identity is registered to different session metadata"
+                current)
     | event, Some current when isIndependentHistory event ->
-        if exactMetadataMatches current exact.Report then
+        withMatchingMetadata current exact.Report (fun () ->
             applyIndependentHistoryEvent
                 store
                 scheduler
                 state
                 exact
-                current
-        else
-            Error
-                "the exact process identity is registered to different session metadata"
+                current)
     | event, Some _ ->
         Error $"unexpected session activity event: {event}"
 
@@ -529,9 +513,7 @@ let internal ensureTestPresence
             let presence =
                 { exact with
                     ReceivedAt = exact.Report.OccurredAt
-                    Report =
-                        { exact.Report with
-                            Event = SessionPresent } }
+                    Report.Event = SessionPresent }
 
             match applyPresence store scheduler state presence with
             | Ok(next, _) -> next
