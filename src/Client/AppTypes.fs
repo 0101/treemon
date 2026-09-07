@@ -84,6 +84,7 @@ type Msg =
         Result<EmbeddedTerminalStartResult, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | SelectEmbeddedTerminal of EmbeddedTerminalId
+    | CycleEmbeddedTerminal of TerminalPane.CycleDirection
     | CloseEmbeddedTerminal of EmbeddedTerminalId
     | EmbeddedTerminalCloseFailed
     | ToggleTerminalPane

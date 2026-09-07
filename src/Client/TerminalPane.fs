@@ -26,6 +26,16 @@ type TerminalPaneCallbacks =
       CloseTab: EmbeddedTerminalId -> unit
       StartTerminal: WorktreePath -> unit }
 
+[<RequireQualifiedAccess>]
+type CycleDirection =
+    | Next
+    | Previous
+
+[<RequireQualifiedAccess>]
+type TerminalShortcut =
+    | OpenWorktreeSearch of EmbeddedTerminalId
+    | CycleTerminal of CycleDirection
+
 let private samePath left right =
     Shared.PathUtils.pathEquals
         (WorktreePath.value left)
@@ -72,6 +82,29 @@ let selectTerminal terminalId snapshot selections =
     tryFindTab terminalId snapshot
     |> Option.map (fun tab ->
         setPathValue tab.Worktree terminalId selections)
+    |> Option.defaultValue selections
+
+let cycleTerminal direction selectedWorktree snapshot selections =
+    selectedWorktree
+    |> Option.bind (fun path ->
+        let tabs = tabsForWorktree path snapshot
+
+        if tabs.Length < 2 then
+            None
+        else
+            let currentIndex =
+                activeTerminalId (Some path) selections snapshot
+                |> Option.bind (fun terminalId ->
+                    tabs |> List.tryFindIndex (fun tab -> tab.Id = terminalId))
+                |> Option.defaultValue 0
+
+            let offset =
+                match direction with
+                | CycleDirection.Next -> 1
+                | CycleDirection.Previous -> -1
+
+            let nextIndex = (currentIndex + offset + tabs.Length) % tabs.Length
+            Some(selectTerminal tabs[nextIndex].Id snapshot selections))
     |> Option.defaultValue selections
 
 let private replacementSelection path terminalId before after =
@@ -155,20 +188,29 @@ let private withTerminalFrame terminalId action =
                 Dom.document.getElementById(terminalFrameId terminalId)
                 |> Option.ofObj
             with
-            | Some frame -> action frame
+            | Some frame
+                when frame.classList.contains("terminal-iframe-active") ->
+                action frame
+            | Some _ when remainingAttempts > 1 ->
+                tryResolve (remainingAttempts - 1)
             | None when remainingAttempts > 1 ->
                 tryResolve (remainingAttempts - 1)
-            | None -> ())
+            | _ -> ())
         |> ignore
 
     tryResolve 2
 
+let private focusTerminalFrame frame =
+    emitJsExpr<unit>
+        frame
+        "(function(f){f.focus();f.contentWindow.postMessage({action:'focus-terminal'},new URL(f.src,document.baseURI).origin)})($0)"
+
 let focusTerminal terminalId =
-    withTerminalFrame terminalId _.focus()
+    withTerminalFrame terminalId focusTerminalFrame
 
 let focusTerminalWhenReady terminalId =
     withTerminalFrame terminalId (fun frame ->
-        let focusOnLoad (_: Event) = frame.focus ()
+        let focusOnLoad (_: Event) = focusTerminalFrame frame
 
         frame?addEventListener(
             "load",
@@ -181,7 +223,57 @@ let focusTerminalWhenReady terminalId =
             10_000
         |> ignore
 
-        frame.focus ())
+        focusTerminalFrame frame)
+
+let messageListener (dispatch: TerminalShortcut -> unit) =
+    let tryActiveTerminalId (message: MessageEvent) =
+        let value =
+            emitJsExpr<string>
+                message
+                "(function(f){return f&&f.contentWindow===$0.source&&new URL(f.src,document.baseURI).origin===$0.origin?(f.getAttribute('data-terminal-id')||''):''})(document.querySelector('.terminal-iframe-active'))"
+
+        if String.IsNullOrWhiteSpace value then
+            None
+        else
+            Some(EmbeddedTerminalId value)
+
+    let handler =
+        fun (event: Event) ->
+            let message = event :?> MessageEvent
+            let isObject =
+                Fable.Core.JsInterop.emitJsExpr<bool>
+                    message.data
+                    "$0 != null && typeof $0 === 'object'"
+
+            match safeEndpoint message.origin, isObject, tryActiveTerminalId message with
+            | Some _, true, Some terminalId ->
+                let action =
+                    emitJsExpr<string>
+                        message.data
+                        "typeof $0.action === 'string' ? $0.action : ''"
+
+                match action with
+                | "open-worktree-search" ->
+                    dispatch (TerminalShortcut.OpenWorktreeSearch terminalId)
+                | "cycle-terminal" ->
+                    match
+                        emitJsExpr<string>
+                            message.data
+                            "typeof $0.direction === 'string' ? $0.direction : ''"
+                    with
+                    | "next" ->
+                        dispatch (TerminalShortcut.CycleTerminal CycleDirection.Next)
+                    | "previous" ->
+                        dispatch (TerminalShortcut.CycleTerminal CycleDirection.Previous)
+                    | _ -> ()
+                | _ -> ()
+            | _ -> ()
+
+    Browser.Dom.window.addEventListener ("message", handler)
+
+    { new IDisposable with
+        member _.Dispose() =
+            Browser.Dom.window.removeEventListener ("message", handler) }
 
 let private lifecyclePresentation lifecycle =
     match lifecycle with

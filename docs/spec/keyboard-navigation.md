@@ -47,10 +47,12 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Repo header | Enter | Toggle collapse/expand |
 | Repo header | + | Create new worktree |
 | Global | Ctrl+P | Open fuzzy worktree search |
+| Embedded terminal | Ctrl+Tab | Select the next terminal for the current worktree |
+| Embedded terminal | Ctrl+Shift+Tab | Select the previous terminal for the current worktree |
 | Global | Escape | Reclaim keyboard focus to the worktree navigation (also closes an open modal) |
 
 Focused card/header bindings live in `keyBinding`; global bindings live in the document keyboard
-subscription and the canvas iframe bridge.
+subscription and the cross-origin iframe bridges.
 
 ### Edge Cases
 
@@ -69,11 +71,17 @@ fields, while a compact term can continue from repository into branch in display
 (`tremokb` matches `treemon` / `kb-navigation`). Results show repository above a compact
 branch-and-path row and highlight the matched characters.
 
+With an empty query, worktrees with session history are ordered by their greatest real session
+activity timestamp, newest first. Heartbeat-only liveness and usage reports do not move this order;
+worktrees with no session history follow in their existing dashboard order. Once any query text is
+present, fuzzy-match score alone orders the results.
+
 Up/Down wraps through results; hover also changes selection. Enter or click closes the palette,
 expands a collapsed owning repository, focuses the card through the normal focus chokepoint, and
-scrolls it into view without launching a terminal. Escape closes without changing card focus.
-Selection is stored by `WorktreePath`, not list index, so polling-driven reorder does not move the
-user to a different worktree.
+scrolls it into view without launching a terminal. Escape closes without changing card focus and
+returns DOM focus to the surface that opened the palette; a palette opened from an embedded
+terminal restores that exact terminal input. Selection is stored by `WorktreePath`, not list index,
+so polling-driven reorder does not move the user to a different worktree.
 
 ### Global Shortcut Reach
 
@@ -87,6 +95,15 @@ It posts `open-worktree-search` for Ctrl+P (including from editable fields) and 
 Escape outside an editable. `CanvasPane.messageListener` accepts either action only from the active
 canvas iframe before routing it into the same Elmish messages as top-level shortcuts.
 
+Embedded terminals also run in cross-origin iframes. `TerminalProxy` injects a capture-phase listener
+into ttyd's root page so Ctrl+P, Ctrl+Tab, and Ctrl+Shift+Tab are intercepted before xterm handles
+them. The iframe posts either `open-worktree-search` or `cycle-terminal`; `TerminalPane.messageListener`
+accepts the message only when its loopback origin and source window match the active terminal iframe.
+Cycling wraps within the terminals for the currently selected worktree and preserves each other
+worktree's independent terminal selection. After a cycle, and after Escape closes worktree search
+opened from a terminal, the dashboard sends an origin-scoped focus request to the active iframe and
+the injected bridge restores xterm's helper textarea.
+
 ## Technical Approach
 
 `Navigation.FocusTarget` stores stable repository or worktree identity rather than a rendered index.
@@ -96,8 +113,8 @@ event handler owns only keyboard plumbing and dispatch.
 
 The client reads `.card-grid` computed columns when navigation runs, then focuses and scrolls the
 resolved element after React has rendered the new model state. A document-level Escape subscription
-reclaims focus from sibling dashboard UI, and the Canvas doc server injects the cross-origin iframe
-bridge needed for the same action inside a document.
+reclaims focus from sibling dashboard UI. Canvas and terminal pages inject the narrowly scoped
+cross-origin bridges needed for global shortcuts while either iframe owns keyboard focus.
 
 ## Key Files
 
@@ -106,4 +123,6 @@ bridge needed for the same action inside a document.
 - `src/Client/Navigation.fs` — `FocusTarget` DU, `navigateSpatial`, `reclaimFocusTarget` (focus target to restore on Escape)
 - `src/Server/CanvasDocServer.fs` — global keyboard bridge injected into every canvas doc
 - `src/Client/CanvasPane.fs` — validates and routes active-canvas global shortcut messages
+- `src/TerminalHost/TerminalProxy.fs` — capture-phase global shortcut bridge injected into ttyd
+- `src/Client/TerminalPane.fs` — validates active-terminal messages and owns terminal cycling
 - `src/Client/index.html` — focused-card, command-palette, and keyboard-hint styling

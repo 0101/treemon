@@ -1,5 +1,6 @@
 module Tests.WorktreeSearchTests
 
+open System
 open NUnit.Framework
 open Shared
 open Navigation
@@ -74,6 +75,37 @@ type WorktreeSearchMatchingTests() =
 
         Assert.That(search repos "", Is.Empty)
 
+    [<Test>]
+    member _.``empty query orders worktrees by recent session activity``() =
+        let sessionAt hour worktree =
+            { worktree with
+                SessionActivityAt =
+                    Some(DateTimeOffset(2026, 9, 4, hour, 0, 0, TimeSpan.Zero)) }
+
+        let repos =
+            [ repo
+                "first"
+                [ worktree "/first/no-session" "no-session-first"
+                  worktree "/first/older" "older"
+                  |> sessionAt 10 ]
+                []
+              repo
+                "second"
+                [ worktree "/second/newer" "newer"
+                  |> sessionAt 12
+                  worktree "/second/no-session" "no-session-second" ]
+                [] ]
+
+        Assert.That(
+            search repos "" |> List.map _.Worktree.Branch,
+            Is.EqualTo(
+                [ "newer"
+                  "older"
+                  "no-session-first"
+                  "no-session-second" ]
+            )
+        )
+
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -123,6 +155,29 @@ type WorktreeSearchStateTests() =
             Assert.That(path, Is.EqualTo(WorktreePath "/treemon/embed-terminal"))
         | _ ->
             Assert.Fail("Choosing a result should request focus for that worktree")
+
+    [<Test>]
+    member _.``closing search restores the surface that opened it``() =
+        let terminalId = EmbeddedTerminalId "search-origin"
+        let dashboardOpen, _ = update repos Msg.Open State.Closed
+        let terminalOpen, _ =
+            update repos (Msg.OpenFromTerminal terminalId) State.Closed
+        let _, dashboardAction = update repos Msg.Close dashboardOpen
+        let _, terminalAction = update repos Msg.Close terminalOpen
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                dashboardAction,
+                Is.EqualTo(Action.RestoreFocus ReturnFocus.Dashboard)
+            )
+            Assert.That(
+                terminalAction,
+                Is.EqualTo(
+                    Action.RestoreFocus (
+                        ReturnFocus.EmbeddedTerminal terminalId
+                    )
+                )
+            ))
 
     [<Test>]
     member _.``selection remains attached to the same worktree when live data reorders``() =

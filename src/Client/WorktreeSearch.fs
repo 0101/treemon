@@ -16,9 +16,15 @@ type SearchResult =
       Matches: MatchIndexes
       Score: int }
 
+[<RequireQualifiedAccess>]
+type ReturnFocus =
+    | Dashboard
+    | EmbeddedTerminal of EmbeddedTerminalId
+
 type OpenState =
     { Query: string
-      SelectedPath: WorktreePath option }
+      SelectedPath: WorktreePath option
+      ReturnFocus: ReturnFocus }
 
 [<RequireQualifiedAccess>]
 type State =
@@ -28,6 +34,7 @@ type State =
 [<RequireQualifiedAccess>]
 type Msg =
     | Open
+    | OpenFromTerminal of EmbeddedTerminalId
     | Close
     | QueryChanged of string
     | MoveSelection of int
@@ -38,7 +45,7 @@ type Msg =
 [<RequireQualifiedAccess>]
 type Action =
     | NoAction
-    | RefocusDashboard
+    | RestoreFocus of ReturnFocus
     | FocusWorktree of WorktreePath
 
 type private SearchField =
@@ -68,6 +75,12 @@ let isOpen =
 
 let isOpenShortcut (key: string) (ctrl: bool) (meta: bool) (alt: bool) =
     (ctrl || meta) && not alt && key.ToLowerInvariant() = "p"
+
+let isOpenRequest =
+    function
+    | Msg.Open
+    | Msg.OpenFromTerminal _ -> true
+    | _ -> false
 
 let private emptyMatches =
     { Repository = Set.empty
@@ -242,21 +255,29 @@ let private toSearchResult (entry: SearchEntry) (scored: ScoredMatch) : SearchRe
       Matches = scored.Matches
       Score = scored.Score }
 
+let private recentSessionsFirst entries =
+    entries
+    |> List.mapi (fun index entry -> index, entry)
+    |> List.sortByDescending (fun (index, entry) ->
+        entry.Worktree.SessionActivityAt, -index)
+    |> List.map snd
+
 let search (repos: RepoModel list) query : SearchResult list =
     let tokens = queryTokens query
 
-    entries repos
-    |> List.choose (fun entry ->
-        match tokens with
-        | [] ->
-            Some(toSearchResult entry { Score = 0; Matches = emptyMatches })
-        | _ ->
+    match tokens with
+    | [] ->
+        entries repos
+        |> recentSessionsFirst
+        |> List.map (fun entry ->
+            toSearchResult entry { Score = 0; Matches = emptyMatches })
+    | _ ->
+        entries repos
+        |> List.choose (fun entry ->
             collectFieldMatches entry tokens
             |> Option.map combineScoredMatches
             |> Option.map (toSearchResult entry))
-    |> fun results ->
-        if List.isEmpty tokens then results
-        else results |> List.sortByDescending _.Score
+        |> List.sortByDescending _.Score
 
 let private selectedResultIndex (results: SearchResult list) selectedPath =
     selectedPath
@@ -270,19 +291,29 @@ let private trySelectedResult repos openState =
     results
     |> List.tryItem (selectedResultIndex results openState.SelectedPath)
 
+let private openSearch repos returnFocus =
+    let selectedPath =
+        search repos ""
+        |> List.tryHead
+        |> Option.map _.Worktree.Path
+
+    State.Open
+        { Query = ""
+          SelectedPath = selectedPath
+          ReturnFocus = returnFocus },
+    Action.NoAction
+
 let update repos message state =
     match message, state with
     | Msg.Open, State.Closed ->
-        let selectedPath =
-            search repos ""
-            |> List.tryHead
-            |> Option.map _.Worktree.Path
-
-        State.Open { Query = ""; SelectedPath = selectedPath }, Action.NoAction
-    | Msg.Open, State.Open _ ->
+        openSearch repos ReturnFocus.Dashboard
+    | Msg.OpenFromTerminal terminalId, State.Closed ->
+        openSearch repos (ReturnFocus.EmbeddedTerminal terminalId)
+    | Msg.Open, State.Open _
+    | Msg.OpenFromTerminal _, State.Open _ ->
         state, Action.NoAction
-    | Msg.Close, State.Open _ ->
-        State.Closed, Action.RefocusDashboard
+    | Msg.Close, State.Open openState ->
+        State.Closed, Action.RestoreFocus openState.ReturnFocus
     | Msg.Close, State.Closed ->
         state, Action.NoAction
     | Msg.QueryChanged query, State.Open openState ->

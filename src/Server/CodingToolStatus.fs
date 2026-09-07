@@ -42,8 +42,8 @@ type CodingToolResult =
       AgentActivity: AgentActivity option
       LastUserMessage: UserFooterMessage option
       LastAssistantMessage: (string * DateTimeOffset) option
-      /// `LastSeen` of the active session that won status resolution. None when every session is Idle.
-      LastActivity: DateTimeOffset option }
+      /// Greatest `UpdatedAt` across retained and live sessions. Heartbeats and usage do not move it.
+      SessionActivityAt: DateTimeOffset option }
 
 /// Wraps an arbitrary argument in a provider-aware skill invocation. The Copilot CLI uses the
 /// natural-language "use {skill} skill with {arg}" form. Shared by actionPrompt (FixPr/FixBuild) and
@@ -85,7 +85,7 @@ let noSessionPushResult: CodingToolResult =
       AgentActivity = None
       LastUserMessage = None
       LastAssistantMessage = None
-      LastActivity = None }
+      SessionActivityAt = None }
 
 let private toFooterMessage maxLength (message: Message) =
     FileUtils.truncateMessage maxLength message.Text, message.At
@@ -137,6 +137,7 @@ type private SessionSelection =
     { OpenSessions: StoredStatus list
       AdjustedOpen: StoredStatus list
       ActiveWinner: StoredStatus option
+      MostRecentActivity: StoredStatus option
       Footer: StoredStatus option }
 
 let private selectSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
@@ -152,12 +153,16 @@ let private selectSessions (now: DateTimeOffset) (sessions: StoredStatus list) =
         adjustedOpen
         |> SessionActivity.pickActive _.Status StoredStatus.activityOrderKey
 
+    let mostRecentActivity =
+        sessions |> StoredStatus.tryMostRecentActivity
+
     { OpenSessions = openSessions
       AdjustedOpen = adjustedOpen
       ActiveWinner = activeWinner
+      MostRecentActivity = mostRecentActivity
       Footer =
         activeWinner
-        |> Option.orElse (sessions |> StoredStatus.tryMostRecentActivity) }
+        |> Option.orElse mostRecentActivity }
 
 let internal representativeActivityText now sessions =
     (selectSessions now sessions).Footer
@@ -219,7 +224,10 @@ let fromPushSessions (now: DateTimeOffset) (sessions: StoredStatus list) : Codin
         footer
         |> Option.bind _.LastAssistantMessage
         |> Option.map (toFooterMessage 80)
-      LastActivity = selection.ActiveWinner |> Option.map _.LastSeen }
+      SessionActivityAt =
+        selection.MostRecentActivity
+        |> Option.map _.UpdatedAt
+        |> Option.filter ((<>) DateTimeOffset.MinValue) }
 
 /// Add each worktree's durable representative to the live candidate set. Live rows win duplicate
 /// session ids; retained rows with distinct ids remain available for footer and auto-sync fallback

@@ -2268,6 +2268,213 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Embedded terminal forwards global search and tab switching shortcuts``() =
+        task {
+            let! page = this.Context.NewPageAsync()
+            let converter = Fable.Remoting.Json.FableJsonConverter()
+            let worktreePath = WorktreePath "Q:/code/TestProject/feature-recent"
+            let firstTerminal = EmbeddedTerminalId "shortcut-first"
+            let secondTerminal = EmbeddedTerminalId "shortcut-second"
+
+            let terminalPage label =
+                TerminalHost.TerminalProxy.customizeTerminalPage (
+                    "<!doctype html><html><head><title>"
+                    + label
+                    + "</title></head><body><textarea class=\"xterm-helper-textarea\" id=\"terminal-target\">"
+                    + label
+                    + "</textarea><script>window.__terminalKeydowns=0;"
+                    + "document.addEventListener('keydown',function(e){"
+                    + "var key=e.key.toLowerCase();"
+                    + "if(key==='p'||key==='tab')window.__terminalKeydowns++})"
+                    + "</script></body></html>"
+                )
+
+            let snapshot =
+                { Tabs =
+                    [ { Id = firstTerminal
+                        Worktree = worktreePath
+                        ReportedActivity = Some "First terminal"
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Running
+                                $"{ServerFixture.canvasUrl}/fixture-terminal-first" }
+                      { Id = secondTerminal
+                        Worktree = worktreePath
+                        ReportedActivity = Some "Second terminal"
+                        Lifecycle =
+                            EmbeddedTerminalLifecycle.Running
+                                $"{ServerFixture.canvasUrl}/fixture-terminal-second" } ] }
+
+            let body = JsonConvert.SerializeObject(snapshot, converter)
+
+            do!
+                page.RouteAsync(
+                    "**/IWorktreeApi/getEmbeddedTerminals",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "application/json",
+                                Body = body
+                            )
+                        )
+                )
+
+            do!
+                page.RouteAsync(
+                    "**/fixture-terminal-first",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "text/html; charset=utf-8",
+                                Body = terminalPage "first"
+                            )
+                        )
+                )
+
+            do!
+                page.RouteAsync(
+                    "**/fixture-terminal-second",
+                    fun route ->
+                        route.FulfillAsync(
+                            RouteFulfillOptions(
+                                ContentType = "text/html; charset=utf-8",
+                                Body = terminalPage "second"
+                            )
+                        )
+                )
+
+            let! _ = page.GotoAsync(baseUrl)
+            let targetCard =
+                page.Locator(
+                    ".wt-card:has(.branch-name:text-is('feature-recent'))"
+                )
+            do! targetCard.WaitForAsync(LocatorWaitForOptions(Timeout = 15000.0f))
+            do! targetCard.ClickAsync()
+
+            let terminalToggle =
+                page.Locator(
+                    ".header-controls .ctrl-btn",
+                    PageLocatorOptions(HasText = "Terminal")
+                )
+            do! terminalToggle.ClickAsync()
+
+            let firstIframe =
+                page.Locator(
+                    $"iframe[data-terminal-id='{EmbeddedTerminalId.value firstTerminal}']"
+                )
+            let secondIframe =
+                page.Locator(
+                    $"iframe[data-terminal-id='{EmbeddedTerminalId.value secondTerminal}']"
+                )
+            do! firstIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do!
+                secondIframe.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Attached,
+                        Timeout = 5000.0f
+                    )
+                )
+            let firstActiveIframe =
+                page.Locator(
+                    $"iframe.terminal-iframe-active[data-terminal-id='{EmbeddedTerminalId.value firstTerminal}']"
+                )
+            let secondActiveIframe =
+                page.Locator(
+                    $"iframe.terminal-iframe-active[data-terminal-id='{EmbeddedTerminalId.value secondTerminal}']"
+                )
+            do! firstActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let firstTarget =
+                page
+                    .FrameLocator(
+                        $"iframe[data-terminal-id='{EmbeddedTerminalId.value firstTerminal}']"
+                    )
+                    .Locator("#terminal-target")
+
+            let secondTarget =
+                page
+                    .FrameLocator(
+                        $"iframe[data-terminal-id='{EmbeddedTerminalId.value secondTerminal}']"
+                    )
+                    .Locator("#terminal-target")
+
+            let! _ =
+                secondTarget.EvaluateAsync<obj>(
+                    "element => window.parent.postMessage({action:'cycle-terminal',direction:'next'},'*')"
+                )
+            let! _ = settleBrowserEvents page
+
+            let! activeAfterHiddenMessage =
+                page.Locator(".terminal-iframe-active").GetAttributeAsync("data-terminal-id")
+            Assert.That(
+                activeAfterHiddenMessage,
+                Is.EqualTo(EmbeddedTerminalId.value firstTerminal),
+                "A hidden terminal iframe must not switch the active terminal"
+            )
+
+            do! firstTarget.FocusAsync()
+            do! firstTarget.PressAsync("Control+P")
+
+            let searchInput = page.Locator("#worktree-search-input")
+            do! searchInput.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! searchFocused =
+                searchInput.EvaluateAsync<bool>(
+                    "element => document.activeElement === element"
+                )
+            let! terminalKeydownsAfterSearch =
+                firstTarget.EvaluateAsync<int>(
+                    "element => window.__terminalKeydowns"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(searchFocused, Is.True)
+                Assert.That(
+                    terminalKeydownsAfterSearch,
+                    Is.Zero,
+                    "Ctrl+P must be stopped before terminal-local handlers run"
+                ))
+
+            do! searchInput.PressAsync("Escape")
+            do!
+                searchInput.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+
+            do! Assertions.Expect(firstTarget).ToBeFocusedAsync()
+
+            do! page.Keyboard.PressAsync("Control+Tab")
+            do! secondActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(secondTarget).ToBeFocusedAsync()
+
+            do! page.Keyboard.PressAsync("Control+Shift+Tab")
+            do! firstActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(firstTarget).ToBeFocusedAsync()
+
+            do! page.Keyboard.PressAsync("Control+Tab")
+            do! secondActiveIframe.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+            do! Assertions.Expect(secondTarget).ToBeFocusedAsync()
+
+            let! firstTerminalKeydowns =
+                firstTarget.EvaluateAsync<int>(
+                    "element => window.__terminalKeydowns"
+                )
+            let! secondTerminalKeydowns =
+                secondTarget.EvaluateAsync<int>(
+                    "element => window.__terminalKeydowns"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(firstTerminalKeydowns, Is.Zero)
+                Assert.That(secondTerminalKeydowns, Is.Zero))
+
+            do! page.CloseAsync()
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Empty terminal snapshot discovers a background terminal without stealing focus``() =
         task {
             let! page = this.Context.NewPageAsync()

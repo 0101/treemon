@@ -586,6 +586,28 @@ let update msg model =
                     model.EmbeddedTerminals
                     model.ActiveEmbeddedTerminals },
         Cmd.none
+    | CycleEmbeddedTerminal direction ->
+        let selectedWorktree =
+            TerminalPane.selectedWorktree
+                model.TerminalPaneTarget
+                model.FocusedElement
+
+        let selections =
+            TerminalPane.cycleTerminal
+                direction
+                selectedWorktree
+                model.EmbeddedTerminals
+                model.ActiveEmbeddedTerminals
+
+        let focusCmd =
+            TerminalPane.activeTerminalId
+                selectedWorktree
+                selections
+                model.EmbeddedTerminals
+            |> Option.map focusEmbeddedTerminalCmd
+            |> Option.defaultValue Cmd.none
+
+        { model with ActiveEmbeddedTerminals = selections }, focusCmd
     | CloseEmbeddedTerminal terminalId ->
         let before = model.EmbeddedTerminals
 
@@ -843,9 +865,10 @@ let update msg model =
         { model with CreateModal = result.Modal; FocusedElement = focus },
         Cmd.batch [ Cmd.map ModalMsg modalCmd; refreshCmd; refocusCmd ]
 
-    | WorktreeSearchMsg WorktreeSearch.Msg.Open
-        when model.ConfirmModal <> ConfirmModal.NoConfirm
-             || CreateWorktreeModal.isOpen model.CreateModal ->
+    | WorktreeSearchMsg searchMsg
+        when WorktreeSearch.isOpenRequest searchMsg
+             && (model.ConfirmModal <> ConfirmModal.NoConfirm
+                 || CreateWorktreeModal.isOpen model.CreateModal) ->
         model, Cmd.none
 
     | WorktreeSearchMsg searchMsg ->
@@ -857,8 +880,11 @@ let update msg model =
         match action with
         | WorktreeSearch.Action.NoAction ->
             updated, Cmd.none
-        | WorktreeSearch.Action.RefocusDashboard ->
+        | WorktreeSearch.Action.RestoreFocus WorktreeSearch.ReturnFocus.Dashboard ->
             updated, focusDashboard
+        | WorktreeSearch.Action.RestoreFocus
+            (WorktreeSearch.ReturnFocus.EmbeddedTerminal terminalId) ->
+            updated, focusEmbeddedTerminalCmd terminalId
         | WorktreeSearch.Action.FocusWorktree path ->
             let focused, focusCmd =
                 focusWorktreeCard (WorktreePath.value path) updated
@@ -1128,6 +1154,17 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         { new System.IDisposable with
             member _.Dispose() = Dom.document.removeEventListener ("keydown", handler) }
 
+    let terminalShortcuts (dispatch: Dispatch<Msg>) =
+        TerminalPane.messageListener (function
+            | TerminalPane.TerminalShortcut.OpenWorktreeSearch terminalId ->
+                dispatch (
+                    WorktreeSearchMsg (
+                        WorktreeSearch.Msg.OpenFromTerminal terminalId
+                    )
+                )
+            | TerminalPane.TerminalShortcut.CycleTerminal direction ->
+                dispatch (CycleEmbeddedTerminal direction))
+
     let overviewSticky (dispatch: Dispatch<Msg>) =
         OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
 
@@ -1135,6 +1172,7 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
           [ "canvas-messages" ], CanvasUpdate.messageListener
+          [ "terminal-shortcuts" ], terminalShortcuts
           [ "global-keyboard" ], globalKeyboard ]
 
     let subs =

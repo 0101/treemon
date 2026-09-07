@@ -21,6 +21,7 @@ let private makeWorktree branch hasSession : WorktreeStatus =
       CodingTool = CodingToolStatus.Idle
       CodingToolProvider = None
       CodingToolSince = None
+      SessionActivityAt = None
       CurrentSkill = None
       AgentActivity = None
       Sessions = []

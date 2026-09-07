@@ -133,6 +133,92 @@ type TerminalPaneStateTests() =
         )
 
     [<Test>]
+    member _.``Cycling terminals changes only the selected worktree``() =
+        let snapshot =
+            { Tabs =
+                [ running firstOne first 61231
+                  running firstTwo first 61232
+                  running secondOne second 61233 ] }
+
+        let selections =
+            Map.ofList [
+                first, firstOne
+                second, secondOne
+            ]
+
+        let updated =
+            selections
+            |> cycleTerminal
+                CycleDirection.Next
+                (Some first)
+                snapshot
+
+        Assert.That(
+            updated,
+            Is.EqualTo(
+                Map.ofList [
+                    first, firstTwo
+                    second, secondOne
+                ])
+        )
+
+    [<Test>]
+    member _.``Cycling terminals wraps in both directions``() =
+        let snapshot =
+            { Tabs =
+                [ running firstOne first 61231
+                  running firstTwo first 61232 ] }
+
+        let forward =
+            Map.empty
+            |> cycleTerminal
+                CycleDirection.Next
+                (Some first)
+                snapshot
+
+        let backward =
+            Map.empty
+            |> cycleTerminal
+                CycleDirection.Previous
+                (Some first)
+                snapshot
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                activeTerminalId (Some first) forward snapshot,
+                Is.EqualTo(Some firstTwo)
+            )
+            Assert.That(
+                activeTerminalId (Some first) backward snapshot,
+                Is.EqualTo(Some firstTwo)
+            ))
+
+    [<Test>]
+    member _.``Cycling with fewer than two visible terminals is a no-op``() =
+        let snapshot =
+            { Tabs = [ running firstOne first 61231 ] }
+
+        let selections = Map.ofList [ first, firstOne ]
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                selections
+                |> cycleTerminal
+                    CycleDirection.Next
+                    (Some first)
+                    snapshot,
+                Is.EqualTo(selections)
+            )
+            Assert.That(
+                selections
+                |> cycleTerminal
+                    CycleDirection.Previous
+                    None
+                    snapshot,
+                Is.EqualTo(selections)
+            ))
+
+    [<Test>]
     member _.``Closing the active tab selects its same-worktree neighbour``() =
         let before =
             { Tabs =
@@ -322,6 +408,34 @@ type TerminalFocusTests() =
                 focusModel,
             Is.EqualTo(Some(OpenEmbeddedTerminal first))
         )
+
+    [<Test>]
+    member _.``Cycle message updates the current worktree terminal only``() =
+        let updated, cmd =
+            App.update
+                (CycleEmbeddedTerminal CycleDirection.Next)
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                activeTerminalId
+                    (Some first)
+                    updated.ActiveEmbeddedTerminals
+                    updated.EmbeddedTerminals,
+                Is.EqualTo(Some firstOne)
+            )
+            Assert.That(
+                activeTerminalId
+                    (Some second)
+                    updated.ActiveEmbeddedTerminals
+                    updated.EmbeddedTerminals,
+                Is.EqualTo(Some secondOne)
+            )
+            Assert.That(
+                List.length cmd,
+                Is.EqualTo(1),
+                "cycling should refocus the newly active terminal"
+            ))
 
     [<Test>]
     member _.``Terminal pane toggle preserves its target while changing visibility``() =
