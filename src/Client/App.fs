@@ -1102,19 +1102,46 @@ let appSubscriptions (model: Model) : Sub<Msg> =
     let overviewSticky (dispatch: Dispatch<Msg>) =
         OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
 
+    let visibleTerminal =
+        let selectedWorktree =
+            TerminalPane.selectedWorktree
+                model.TerminalPaneTarget
+                model.FocusedElement
+
+        let activeTerminal =
+            TerminalPane.activeTerminalId
+                selectedWorktree
+                model.ActiveEmbeddedTerminals
+                model.EmbeddedTerminals
+
+        TerminalPane.visibleRunningTerminal
+            model.TerminalPaneOpen
+            activeTerminal
+            model.EmbeddedTerminals
+
     let baseSubs =
         [ [ "polling"; activityLevelKey ], worktreePolling
           [ "activity" ], ActivityUpdate.activityDetection
           [ "canvas-messages" ], CanvasUpdate.messageListener
           [ "focus-reclaim" ], focusReclaim ]
 
-    let subs =
+    let panelSubs =
         if model.OverviewPanelOpen && OverviewBand.hasAgentGroups model.Repos then
             ([ "overview-sticky" ], overviewSticky) :: baseSubs
         else
             baseSubs
 
-    subs
+    match visibleTerminal with
+    | Some (terminalId, origin) ->
+        ([ "terminal-visible"
+           EmbeddedTerminalId.value terminalId
+           origin ],
+         fun _ ->
+             TerminalPane.observeVisibleTerminal
+                 terminalId
+                 origin)
+        :: panelSubs
+    | None -> panelSubs
 
 let hasAnyActive (repos: RepoModel list) =
     repos |> List.exists (fun r ->

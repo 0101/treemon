@@ -78,6 +78,14 @@ the persistent top-bar **Terminal** control hides or shows the pane, using the s
 as the **Canvas** control. Middle-clicking a tab invokes the same exact-terminal close action as its
 close button.
 
+When a running terminal becomes visible through pane open, tab selection, or worktree selection,
+the client sends one exact-origin activation message to that iframe. It repeats the signal when the
+top-level document becomes visible or focused after an interruption such as RDP reconnect. The
+terminal page accepts the message only from its parent and a configured dashboard origin, then
+reloads only while ttyd's exact manual reconnect overlay is present. Healthy shell prompts,
+partially typed commands, password prompts, and full-screen applications receive no input and are
+not reloaded.
+
 ### Launch routing and command startup
 
 The card's `>` / Enter action remains the explicit native Windows Terminal choice, and its `+`
@@ -353,9 +361,10 @@ loopback, exact Host/Origin, bearer, and request-size checks as the control API.
 Every attachment HTTP response limits framing through a `Content-Security-Policy: frame-ancestors`
 directive built from the validated dashboard origins, or `'none'` when none are configured. A
 missing `Origin` remains valid for authenticated loopback non-browser protocol requests.
-The proxy injects a small style into ttyd's root HTML response that hides the native
-`.xterm-viewport` scrollbar without changing its overflow or scrollback. The terminal document is a
-separate origin, so the dashboard cannot apply this styling itself.
+The proxy decorates ttyd's root HTML response with a small style that hides the native
+`.xterm-viewport` scrollbar without changing its overflow or scrollback, plus the activation
+listener that recognizes ttyd 1.7.7's manual reconnect overlay. The terminal document is a separate
+origin, so the dashboard cannot inspect the overlay or apply this behavior directly.
 
 ### Treemon integration
 
@@ -374,7 +383,10 @@ The mailbox grants one replacement phase, keeps serving cached reads and bounded
 while replacement runs asynchronously, then alone applies the replacement's registry transition.
 The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes
 retain exact selections while IDs remain valid, choose the same-worktree neighbor after a close,
-and preserve the selected sibling ordinal across replacement.
+and preserve the selected sibling ordinal across replacement. A subscription keyed by the active
+terminal ID and safe endpoint origin owns browser activation. It exists only while a running
+terminal is visible, resolves the iframe after React commits it, and rechecks that it is still the
+active unhidden frame before posting.
 Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
 port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
 option and allows only the configured server origin aliases, so the terminal client never infers a
@@ -524,6 +536,11 @@ ports, and state.
 - **Proxy-owned terminal scrollbar chrome:** the attachment proxy adds one CSS override to ttyd's
   root page instead of carrying a forked custom index. It hides the rendered xterm scrollbar while
   preserving wheel, keyboard, and programmatic scrollback.
+- **Overlay-gated browser reconnect:** terminal visibility alone never sends Enter or reloads a live
+  page. The cross-origin iframe reloads only after its injected listener positively identifies
+  ttyd 1.7.7's manual reconnect overlay, then the existing replaceable-attachment and bounded-replay
+  path restores recent output. This avoids a ttyd frontend fork while keeping normal shell and TUI
+  input untouched.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the opaque command
   selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no

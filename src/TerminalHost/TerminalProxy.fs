@@ -5,6 +5,7 @@ open System.Net
 open System.Net.Http
 open System.Net.WebSockets
 open System.Text
+open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
 open Microsoft.AspNetCore.Builder
@@ -21,11 +22,35 @@ module internal TerminalProxy =
     let [<Literal>] private CommandSubprotocol = "treemon-command"
     let [<Literal>] private HiddenViewportScrollbarStyle =
         "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
+    let [<Literal>] private TerminalVisibleAction = "treemon-terminal-visible"
+    let [<Literal>] private ReconnectPrompt = "Press \\u23ce to Reconnect"
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
-    let internal hideViewportScrollbar (html: string) =
-        html.Replace("</head>", HiddenViewportScrollbarStyle + "</head>", StringComparison.OrdinalIgnoreCase)
+    let private reconnectWhenVisibleScript allowedOrigins =
+        let serializedOrigins = JsonSerializer.Serialize allowedOrigins
+
+        [ "<script>(function(){"
+          $"var allowedOrigins={serializedOrigins};"
+          $"var action='{TerminalVisibleAction}';"
+          $"var reconnectPrompt='{ReconnectPrompt}';"
+          "function isWaitingForReconnect(){"
+          "var terminal=document.querySelector('.xterm');"
+          "return !!terminal&&Array.prototype.some.call(terminal.children,function(child){"
+          "return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt});}"
+          "window.addEventListener('message',function(event){"
+          "if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;"
+          "if(isWaitingForReconnect())window.location.reload();"
+          "});"
+          "})();</script>" ]
+        |> String.concat ""
+
+    let internal decorateTerminalPage allowedOrigins (html: string) =
+        let injection =
+            HiddenViewportScrollbarStyle
+            + reconnectWhenVisibleScript allowedOrigins
+
+        html.Replace("</head>", injection + "</head>", StringComparison.OrdinalIgnoreCase)
 
     let private receiveMessage mode (socket: WebSocket) =
         let buffer = Array.zeroCreate<byte> 8_192
@@ -194,6 +219,7 @@ module internal TerminalProxy =
         context.Response.Headers.Pragma <- "no-cache"
 
     let private proxyHttp
+        allowedOrigins
         ttydPort
         targetPath
         (client: HttpClient)
@@ -222,7 +248,10 @@ module internal TerminalProxy =
 
                         let! html = response.Content.ReadAsStringAsync(context.RequestAborted)
 
-                        let bytes = html |> hideViewportScrollbar |> Encoding.UTF8.GetBytes
+                        let bytes =
+                            html
+                            |> decorateTerminalPage allowedOrigins
+                            |> Encoding.UTF8.GetBytes
 
                         context.Response.ContentLength <- int64 bytes.Length
                         do! context.Response.Body.WriteAsync(bytes, context.RequestAborted)
@@ -280,7 +309,13 @@ module internal TerminalProxy =
                         | Some attachmentId ->
                             do! runBrowser plane attachmentId socket |> Async.StartAsTask
                 else
-                    return! proxyHttp ttydPort targetPath client context
+                    return!
+                        proxyHttp
+                            allowedOrigins
+                            ttydPort
+                            targetPath
+                            client
+                            context
         }
 
     let private ignoreTaskFailure (operation: unit -> Task) =

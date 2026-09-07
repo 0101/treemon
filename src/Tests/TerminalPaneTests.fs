@@ -244,6 +244,51 @@ type TerminalPaneStateTests() =
             Is.EqualTo(expectedSafe)
         )
 
+    [<Test>]
+    member _.``Only the visible running terminal exposes its message origin``() =
+        let endpoint =
+            "http://127.0.0.1:61231/_treemon/session/token/"
+        let snapshot =
+            { Tabs =
+                [ tab
+                      firstOne
+                      first
+                      (EmbeddedTerminalLifecycle.Running endpoint)
+                  tab
+                      firstTwo
+                      first
+                      (EmbeddedTerminalLifecycle.Interrupted "closed") ] }
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                visibleRunningTerminal
+                    true
+                    (Some firstOne)
+                    snapshot,
+                Is.EqualTo(
+                    Some(
+                        firstOne,
+                        "http://127.0.0.1:61231"
+                    )
+                )
+            )
+
+            Assert.That(
+                visibleRunningTerminal
+                    false
+                    (Some firstOne)
+                    snapshot,
+                Is.EqualTo(None)
+            )
+
+            Assert.That(
+                visibleRunningTerminal
+                    true
+                    (Some firstTwo)
+                    snapshot,
+                Is.EqualTo(None)
+            ))
+
 let private focusModel : Model =
     let worktree path =
         { Tests.WorktreeFixtures.baseWt with
@@ -312,6 +357,10 @@ let private focusModel : Model =
 [<Category("Fast")>]
 type TerminalFocusTests() =
 
+    let subscriptionKeys model =
+        App.appSubscriptions model
+        |> List.map (fst >> String.concat "/")
+
     [<Test>]
     member _.``T key opens or focuses the embedded terminal for the focused card``() =
         Assert.That(
@@ -341,6 +390,40 @@ type TerminalFocusTests() =
             Assert.That(shown.TerminalPaneOpen, Is.True)
             Assert.That(shown.TerminalPaneTarget, Is.EqualTo(Some second))
             Assert.That(List.length showCmd, Is.EqualTo(1)))
+
+    [<Test>]
+    member _.``Terminal visibility subscription follows the active safe iframe``() =
+        let initial = subscriptionKeys focusModel
+
+        let targeted =
+            subscriptionKeys
+                { focusModel with
+                    TerminalPaneTarget = Some second }
+
+        let closed =
+            subscriptionKeys
+                { focusModel with
+                    TerminalPaneOpen = false }
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                initial,
+                Does.Contain(
+                    $"terminal-visible/{EmbeddedTerminalId.value firstTwo}/http://127.0.0.1:61232"
+                )
+            )
+
+            Assert.That(
+                targeted,
+                Does.Contain(
+                    $"terminal-visible/{EmbeddedTerminalId.value secondOne}/http://127.0.0.1:61233"
+                )
+            )
+
+            Assert.That(
+                closed,
+                Has.None.StartsWith("terminal-visible/")
+            ))
 
     [<Test>]
     member _.``Open embedded terminal reuses the selected worktree terminal``() =

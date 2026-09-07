@@ -275,12 +275,23 @@ let private terminalDocument (marker: string) =
     .xterm-viewport { width: 100%; height: 80px; overflow-y: auto; }
     .scrollback { height: 600px; }
   </style>
+  <script>
+    window.__terminalVisibleMessages = 0;
+    window.addEventListener('message', function(event) {
+      if (event.data && event.data.action === '__ACTION__') window.__terminalVisibleMessages++;
+    });
+  </script>
 </head>
 <body>
   <div data-terminal-marker="__MARKER__" class="xterm-viewport"><div class="scrollback"></div></div>
 </body>
 </html>"""
         .Replace("__MARKER__", marker, StringComparison.Ordinal)
+        .Replace(
+            "__ACTION__",
+            TerminalPane.TerminalVisibleAction,
+            StringComparison.Ordinal
+        )
 
 [<TestFixture>]
 [<Category("E2E")>]
@@ -747,6 +758,104 @@ type TerminalPaneDomTests() =
                 Assert.That(visibleTabsAfterNew, Is.EqualTo(2))
                 Assert.That(selectedAfterNew, Is.EqualTo("Terminal 2"))
                 Assert.That(originalFramePreserved, Is.True))
+        }
+
+    [<Test>]
+    member this.``Terminal activation follows visibility and the active iframe``() =
+        task {
+            let firstBrowserFrame =
+                this.Page.Frames
+                |> Seq.find _.Url.StartsWith(
+                    "http://127.0.0.1:61234/",
+                    StringComparison.Ordinal
+                )
+
+            let secondBrowserFrame =
+                this.Page.Frames
+                |> Seq.find _.Url.StartsWith(
+                    "http://127.0.0.1:61235/",
+                    StringComparison.Ordinal
+                )
+
+            let! _ =
+                firstBrowserFrame.WaitForFunctionAsync(
+                    "() => window.__terminalVisibleMessages >= 1",
+                    (null :> obj),
+                    FrameWaitForFunctionOptions(Timeout = 5000.0f)
+                )
+
+            let! firstBefore =
+                firstBrowserFrame.EvaluateAsync<int>(
+                    "() => window.__terminalVisibleMessages"
+                )
+            let! secondBefore =
+                secondBrowserFrame.EvaluateAsync<int>(
+                    "() => window.__terminalVisibleMessages"
+                )
+
+            do! focusCanvasCard this.Page "feature-recent"
+
+            let waitForNext expected =
+                secondBrowserFrame.WaitForFunctionAsync(
+                    $"() => window.__terminalVisibleMessages > {expected}",
+                    (null :> obj),
+                    FrameWaitForFunctionOptions(Timeout = 5000.0f)
+                )
+
+            let! _ = waitForNext secondBefore
+            let! afterSelection =
+                secondBrowserFrame.EvaluateAsync<int>(
+                    "() => window.__terminalVisibleMessages"
+                )
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => document.dispatchEvent(new Event('visibilitychange'))"
+                )
+
+            let! _ = waitForNext afterSelection
+            let! afterVisibility =
+                secondBrowserFrame.EvaluateAsync<int>(
+                    "() => window.__terminalVisibleMessages"
+                )
+
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => window.dispatchEvent(new Event('focus'))"
+                )
+
+            let! _ = waitForNext afterVisibility
+            let! afterFocus =
+                secondBrowserFrame.EvaluateAsync<int>(
+                    "() => window.__terminalVisibleMessages"
+                )
+
+            let terminalToggle =
+                this.Page.Locator(
+                    ".header-controls .ctrl-btn",
+                    PageLocatorOptions(HasText = "Terminal")
+                )
+
+            do! terminalToggle.ClickAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.querySelector('.terminal-pane').hidden"
+                )
+
+            do! terminalToggle.ClickAsync()
+
+            let! _ = waitForNext afterFocus
+            let! firstAfter =
+                firstBrowserFrame.EvaluateAsync<int>(
+                    "() => window.__terminalVisibleMessages"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(secondBefore, Is.Zero)
+                Assert.That(firstAfter, Is.EqualTo(firstBefore))
+                Assert.That(afterSelection, Is.GreaterThan(secondBefore))
+                Assert.That(afterVisibility, Is.GreaterThan(afterSelection))
+                Assert.That(afterFocus, Is.GreaterThan(afterVisibility)))
         }
 
     [<Test>]

@@ -26,6 +26,8 @@ type TerminalPaneCallbacks =
       CloseTab: EmbeddedTerminalId -> unit
       StartTerminal: WorktreePath -> unit }
 
+let [<Literal>] TerminalVisibleAction = "treemon-terminal-visible"
+
 let private samePath left right =
     Shared.PathUtils.pathEquals
         (WorktreePath.value left)
@@ -128,7 +130,7 @@ let selectedWorktree targetWorktree focusedElement =
         | Some (Card scopedKey) -> Some (WorktreePath scopedKey)
         | _ -> None)
 
-let safeEndpoint (endpoint: string) =
+let private trySafeEndpoint (endpoint: string) =
     let prefix = "http://127.0.0.1:"
 
     if not (endpoint.StartsWith(prefix, StringComparison.Ordinal)) then
@@ -142,8 +144,27 @@ let safeEndpoint (endpoint: string) =
 
         match Int32.TryParse portText with
         | true, port when port > 0 && port <= 65535 && port <> 5000 ->
-            Some endpoint
+            Some(endpoint, prefix + portText)
         | _ -> None
+
+let safeEndpoint endpoint =
+    trySafeEndpoint endpoint |> Option.map fst
+
+let visibleRunningTerminal isOpen activeTerminal snapshot =
+    if not isOpen then
+        None
+    else
+        activeTerminal
+        |> Option.bind (fun terminalId ->
+            snapshot
+            |> tryFindTab terminalId
+            |> Option.bind (fun tab ->
+                match tab.Lifecycle with
+                | EmbeddedTerminalLifecycle.Running endpoint ->
+                    endpoint
+                    |> trySafeEndpoint
+                    |> Option.map (fun (_, origin) -> terminalId, origin)
+                | EmbeddedTerminalLifecycle.Interrupted _ -> None))
 
 let private terminalFrameId terminalId =
     $"terminal-iframe-{EmbeddedTerminalId.value terminalId}"
@@ -182,6 +203,44 @@ let focusTerminalWhenReady terminalId =
         |> ignore
 
         frame.focus ())
+
+let private notifyVisibleTerminal terminalId origin =
+    withTerminalFrame terminalId (fun frame ->
+        Fable.Core.JsInterop.emitJsExpr
+            (frame, origin, TerminalVisibleAction)
+            "(function(f,origin,action){var pane=f.closest('.terminal-pane');if(f.contentWindow&&!f.hidden&&f.classList.contains('terminal-iframe-active')&&pane&&!pane.hidden){f.contentWindow.postMessage({action:action},origin)}})($0,$1,$2)")
+
+let observeVisibleTerminal terminalId origin =
+    let notify () = notifyVisibleTerminal terminalId origin
+
+    let loadHandler =
+        fun (event: Event) ->
+            let loadedFrameId =
+                Fable.Core.JsInterop.emitJsExpr<string> event
+                    "($0.target&&$0.target.id)||''"
+
+            if loadedFrameId = terminalFrameId terminalId then
+                notify ()
+
+    let visibilityHandler =
+        fun (_: Event) ->
+            if Fable.Core.JsInterop.emitJsExpr<bool> () "document.visibilityState==='visible'" then
+                notify ()
+
+    let focusHandler =
+        fun (_: Event) -> notify ()
+
+    notify ()
+
+    Dom.document.addEventListener("load", loadHandler, true)
+    Dom.document.addEventListener("visibilitychange", visibilityHandler)
+    Dom.window.addEventListener("focus", focusHandler)
+
+    { new IDisposable with
+        member _.Dispose() =
+            Dom.document.removeEventListener("load", loadHandler, true)
+            Dom.document.removeEventListener("visibilitychange", visibilityHandler)
+            Dom.window.removeEventListener("focus", focusHandler) }
 
 let private lifecyclePresentation lifecycle =
     match lifecycle with

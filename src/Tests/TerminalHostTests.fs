@@ -1566,28 +1566,60 @@ type TerminalHostProxyTests() =
                     ))))
 
     [<Test>]
-    member _.``terminal page hides viewport scrollbar without disabling scrolling``() =
+    member _.``terminal page decoration hides the scrollbar and gates reconnect reload``() =
         let html =
             "<html><head><style>.xterm-viewport{overflow-y:scroll}</style></head><body></body></html>"
+        let allowedOrigins =
+            [ "http://localhost:5174"
+              "http://127.0.0.1:5174" ]
 
-        let styled = TerminalProxy.hideViewportScrollbar html
+        let decorated =
+            TerminalProxy.decorateTerminalPage allowedOrigins html
 
         Assert.Multiple(fun () ->
             Assert.That(
-                styled,
+                decorated,
                 Does.Contain(".xterm-viewport{scrollbar-width:none}")
             )
 
             Assert.That(
-                styled,
+                decorated,
                 Does.Contain(".xterm-viewport::-webkit-scrollbar{display:none}")
             )
 
-            Assert.That(styled, Does.Contain("overflow-y:scroll"))
+            Assert.That(decorated, Does.Contain("overflow-y:scroll"))
+            Assert.That(
+                decorated,
+                Does.Contain(TerminalPane.TerminalVisibleAction)
+            )
+            Assert.That(
+                decorated,
+                Does.Contain(JsonSerializer.Serialize allowedOrigins)
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("event.source!==window.parent")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("allowedOrigins.indexOf(event.origin)<0")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("child.style.position==='absolute'")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("child.textContent===reconnectPrompt")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("if(isWaitingForReconnect())window.location.reload()")
+            )
 
             Assert.That(
-                styled.IndexOf("scrollbar-width:none", StringComparison.Ordinal),
-                Is.LessThan(styled.IndexOf("</head>", StringComparison.Ordinal))
+                decorated.IndexOf("scrollbar-width:none", StringComparison.Ordinal),
+                Is.LessThan(decorated.IndexOf("</head>", StringComparison.Ordinal))
             ))
 
     [<Test>]

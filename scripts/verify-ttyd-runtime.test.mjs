@@ -2,21 +2,25 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { cleanupRuntimeResources } from "./verify-ttyd-runtime.mjs";
 
-test("verifier cleanup closes browser and isolated TerminalHost", async () => {
+test("verifier cleanup closes browser, dashboard, and isolated TerminalHost", async () => {
   const events = [];
   await cleanupRuntimeResources({
     browser: {
       close: async () => events.push("browser"),
+    },
+    dashboard: {
+      terminate: async () => events.push("dashboard-stopped"),
     },
     host: {
       terminate: async () => events.push("host-stopped"),
     },
   });
 
-  assert.deepEqual(events, ["browser", "host-stopped"]);
+  assert.deepEqual(events, ["browser", "dashboard-stopped", "host-stopped"]);
 });
 
-test("browser cleanup failure cannot skip TerminalHost termination", async () => {
+test("browser cleanup failure cannot skip dashboard or TerminalHost termination", async () => {
+  let dashboardTerminated = false;
   let terminated = false;
 
   await assert.rejects(
@@ -24,6 +28,11 @@ test("browser cleanup failure cannot skip TerminalHost termination", async () =>
       browser: {
         close: async () => {
           throw new Error("browser close failed");
+        },
+      },
+      dashboard: {
+        terminate: async () => {
+          dashboardTerminated = true;
         },
       },
       host: {
@@ -35,6 +44,7 @@ test("browser cleanup failure cannot skip TerminalHost termination", async () =>
     /browser close failed/,
   );
 
+  assert.equal(dashboardTerminated, true);
   assert.equal(terminated, true);
 });
 
