@@ -2,7 +2,7 @@
 
 ## Goals
 
-- Enable full keyboard-driven workflow: alt-tab to treemon, arrow-key to a card, press a key to act
+- Enable keyboard-driven workflow for common actions: alt-tab to treemon, arrow-key to a card, press a key to act
 - Navigation covers both repo headers (collapsible) and worktree cards
 - Extensible key binding system so new shortcuts are trivial to add
 
@@ -36,15 +36,17 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Context | Key | Action |
 |---------|-----|--------|
 | Card | Enter | Open terminal / focus active session |
+| Card | t | Open or focus embedded terminal input |
 | Card | s | Toggle auto-sync |
 | Card | r | Resume last session (when resumable) |
 | Card | + | Open new tab (when session active) |
 | Card | e | Open editor |
-| Card | a | Archive worktree |
 | Card | Delete | Delete worktree (non-main only) |
 | Repo header | Enter | Toggle collapse/expand |
 | Repo header | + | Create new worktree |
 | Global | Escape | Reclaim keyboard focus to the worktree navigation (also closes an open modal) |
+
+Archive is intentionally mouse-only so an accidental letter key cannot archive a worktree.
 
 Adding new bindings = adding a match arm in `keyBinding`.
 

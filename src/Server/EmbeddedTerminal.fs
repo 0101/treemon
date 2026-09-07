@@ -103,13 +103,11 @@ let private reconcileSnapshot mode previousHost currentHost (records: TerminalHo
 
         { Tabs =
             (snapshot.Tabs
-             |> List.map (fun tab ->
-                 recordsById
-                 |> Map.tryFind tab.Id
-                 |> Option.map tabForRecord
-                 |> Option.defaultWith (fun () ->
-                     if preserveMissing then tab
-                     else interrupted "The terminal is no longer present in the authoritative TerminalHost registry." tab)))
+             |> List.choose (fun tab ->
+                 match Map.tryFind tab.Id recordsById with
+                 | Some terminal -> Some(tabForRecord terminal)
+                 | None when preserveMissing -> Some tab
+                 | None -> None))
             @ (records
                |> List.filter (fun terminal ->
                    not (Set.contains (EmbeddedTerminalId terminal.SessionId) previousIds))

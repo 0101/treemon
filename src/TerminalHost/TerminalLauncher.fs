@@ -51,15 +51,25 @@ module TerminalLauncher =
                 return false
         }
 
-    let private waitUntilReady timeout port owned =
+    let private waitUntilReady executable timeout port owned =
         let deadline = DateTimeOffset.UtcNow + timeout
 
         let rec wait () =
             async {
                 if JobProcess.hasExited owned then
-                    return Error "ttyd exited before its loopback endpoint became ready"
+                    match JobProcess.exitCode owned with
+                    | Ok exitCode ->
+                        return
+                            Error
+                                $"ttyd '{executable}' exited with code {exitCode} before binding loopback port {port}"
+                    | Error error ->
+                        return
+                            Error
+                                $"ttyd '{executable}' exited before binding loopback port {port}: {error}"
                 elif DateTimeOffset.UtcNow >= deadline then
-                    return Error "Timed out waiting for ttyd to bind its loopback endpoint"
+                    return
+                        Error
+                            $"Timed out waiting for ttyd '{executable}' to bind loopback port {port}"
                 else
                     let! ready = canConnect port |> Async.AwaitTask
 
@@ -91,7 +101,13 @@ module TerminalLauncher =
             | Ok owned ->
                 let terminalProcess = toTerminalProcess port owned
 
-                match! waitUntilReady config.StartupTimeout port owned with
+                match!
+                    waitUntilReady
+                        config.TtydExecutable
+                        config.StartupTimeout
+                        port
+                        owned
+                with
                 | Error error ->
                     return
                         match JobProcess.close owned with

@@ -176,9 +176,8 @@ type CardFooterRenderingTests() =
                 Assert.That(canvasEventCount, Is.EqualTo(1), "Canvas event should be a sibling entry in the same footer"))
         }
 
-/// isVisibleCardEvent decides which events reach a card. Post-fork setup is routine noise while it
-/// runs or when it succeeds, so only its failures (a genuine failure or a timeout, both `Failed`)
-/// stay on the card.
+/// Running post-fork setup stays visible so users can see why launch is waiting. Success is hidden,
+/// while failures (including timeouts) remain visible.
 [<TestFixture>]
 [<Category("Unit")>]
 [<Category("Fast")>]
@@ -192,8 +191,8 @@ type VisibleCardEventTests() =
           Duration = None }
 
     [<Test>]
-    member _.``A running post-fork event is hidden``() =
-        Assert.That(isVisibleCardEvent (event EventSource.PostFork (Some StepStatus.Running)), Is.False)
+    member _.``A running post-fork event is kept``() =
+        Assert.That(isVisibleCardEvent (event EventSource.PostFork (Some StepStatus.Running)), Is.True)
 
     [<Test>]
     member _.``A succeeded post-fork event is hidden``() =
@@ -206,6 +205,7 @@ type VisibleCardEventTests() =
     [<Test>]
     member _.``A timed-out post-fork event is kept (timeout surfaces as a failure)``() =
         Assert.That(isVisibleCardEvent (event EventSource.PostFork (Some(StepStatus.Failed "Timed out after 300000ms"))), Is.True)
+
     [<Test>]
     member _.``A succeeded non-post-fork event is always kept``() =
         Assert.That(isVisibleCardEvent (event "sync" (Some StepStatus.Succeeded)), Is.True)

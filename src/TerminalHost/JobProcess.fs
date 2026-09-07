@@ -16,6 +16,7 @@ type OwnedJobProcess = private { ProcessHandle: SafeFileHandle; ThreadHandle: Sa
 [<RequireQualifiedAccess>]
 module JobProcess =
     let private CreateSuspended, CreateUnicodeEnvironment = 0x00000004u, 0x00000400u
+    let private CreateNoWindow = 0x08000000u
     let private JobObjectBasicProcessIdListClass, JobObjectExtendedLimitInformationClass = 3, 9
     let private JobObjectLimitKillOnJobClose = 0x00002000u
     let private ProcessQueryLimitedInformation, ProcessSynchronize, ProcessTerminate =
@@ -67,13 +68,16 @@ module JobProcess =
     [<DllImport("kernel32.dll", SetLastError = true)>] extern uint32 private ResumeThread(SafeFileHandle thread)
     [<DllImport("kernel32.dll", SetLastError = true)>] extern bool private TerminateProcess(SafeFileHandle processHandle, uint32 exitCode)
     [<DllImport("kernel32.dll", SetLastError = true)>] extern bool private GetProcessTimes(SafeFileHandle processHandle, FileTime& creationTime, FileTime& exitTime, FileTime& kernelTime, FileTime& userTime)
+    [<DllImport("kernel32.dll", SetLastError = true)>] extern bool private GetExitCodeProcess(SafeFileHandle processHandle, uint32& exitCode)
     [<DllImport("kernel32.dll", SetLastError = true)>] extern uint32 private WaitForSingleObject(SafeFileHandle handle, uint32 milliseconds)
     [<DllImport("kernel32.dll", SetLastError = true)>] extern SafeFileHandle private OpenProcess(uint32 desiredAccess, bool inheritHandle, uint32 processId)
     [<DllImport("kernel32.dll", SetLastError = true)>] extern SafeFileHandle private CreateToolhelp32Snapshot(uint32 flags, uint32 processId)
     [<DllImport("kernel32.dll", EntryPoint = "Process32FirstW", CharSet = CharSet.Unicode, SetLastError = true)>] extern bool private Process32First(SafeFileHandle snapshot, ProcessEntry32& entry)
     [<DllImport("kernel32.dll", EntryPoint = "Process32NextW", CharSet = CharSet.Unicode, SetLastError = true)>] extern bool private Process32Next(SafeFileHandle snapshot, ProcessEntry32& entry)
 
-    let private win32Error operation = $"{operation} failed with Win32 error {Marshal.GetLastWin32Error()}"
+    let private win32Error operation =
+        let code = Marshal.GetLastWin32Error()
+        $"{operation} failed with Win32 error {code}"
 
     let private quoteArgument (argument: string) =
         if argument.Length > 0 && not (argument |> Seq.exists (fun character -> Char.IsWhiteSpace character || character = '"')) then argument
@@ -413,9 +417,25 @@ module JobProcess =
                         startup.Cb <- uint32 (Marshal.SizeOf<StartupInfo>())
                         let mutable processInformation = ProcessInformation()
                         let command = StringBuilder(commandLine specification.Executable specification.Arguments)
-                        if not (CreateProcess(specification.Executable, command, 0n, 0n, false,
-                            CreateSuspended ||| CreateUnicodeEnvironment, environment,
-                            specification.WorkingDirectory, &startup, &processInformation)) then
+
+                        if
+                            not (
+                                CreateProcess(
+                                    specification.Executable,
+                                    command,
+                                    0n,
+                                    0n,
+                                    false,
+                                    CreateSuspended
+                                    ||| CreateUnicodeEnvironment
+                                    ||| CreateNoWindow,
+                                    environment,
+                                    specification.WorkingDirectory,
+                                    &startup,
+                                    &processInformation
+                                )
+                            )
+                        then
                             Error(win32Error (nameof CreateProcess))
                         else
                             let processHandle = new SafeFileHandle(processInformation.ProcessHandle, true)
@@ -440,6 +460,15 @@ module JobProcess =
 
     let processId (owned: OwnedJobProcess) = owned.Pid
     let processStartTimeUtcTicks (owned: OwnedJobProcess) = owned.StartTimeUtcTicks
+
+    let internal exitCode (owned: OwnedJobProcess) =
+        // GetExitCodeProcess writes the result through a Win32 byref.
+        let mutable exitCode = 0u
+
+        if GetExitCodeProcess(owned.ProcessHandle, &exitCode) then
+            Ok exitCode
+        else
+            Error(win32Error (nameof GetExitCodeProcess))
 
     let hasExited (owned: OwnedJobProcess) =
         try

@@ -313,6 +313,16 @@ let private focusModel : Model =
 type TerminalFocusTests() =
 
     [<Test>]
+    member _.``T key opens or focuses the embedded terminal for the focused card``() =
+        Assert.That(
+            App.keyBinding
+                (Card (WorktreePath.value first))
+                "t"
+                focusModel,
+            Is.EqualTo(Some(OpenEmbeddedTerminal first))
+        )
+
+    [<Test>]
     member _.``Terminal pane toggle preserves its target while changing visibility``() =
         let model =
             { focusModel with
@@ -331,6 +341,142 @@ type TerminalFocusTests() =
             Assert.That(shown.TerminalPaneOpen, Is.True)
             Assert.That(shown.TerminalPaneTarget, Is.EqualTo(Some second))
             Assert.That(List.length showCmd, Is.EqualTo(1)))
+
+    [<Test>]
+    member _.``Open embedded terminal reuses the selected worktree terminal``() =
+        let model =
+            { focusModel with
+                TerminalPaneOpen = false
+                TerminalPaneTarget = None }
+
+        let updated, cmd =
+            App.update
+                (OpenEmbeddedTerminal first)
+                model
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneOpen, Is.True)
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(updated.EmbeddedTerminals, Is.EqualTo(model.EmbeddedTerminals))
+            Assert.That(updated.ActiveEmbeddedTerminals, Is.EqualTo(model.ActiveEmbeddedTerminals))
+            Assert.That(isStarting first updated.EmbeddedTerminalStarts, Is.False)
+            Assert.That(List.length cmd, Is.EqualTo(2)))
+
+    [<Test>]
+    member _.``Open embedded terminal starts one when the worktree has none``() =
+        let updated, cmd =
+            App.update
+                (OpenEmbeddedTerminal third)
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneOpen, Is.True)
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some third))
+            Assert.That(isStarting third updated.EmbeddedTerminalStarts, Is.True)
+            Assert.That(
+                tryStartState third updated.EmbeddedTerminalStarts,
+                Is.EqualTo(Some TerminalStartState.StartingAndFocus)
+            )
+            Assert.That(List.length cmd, Is.EqualTo(2)))
+
+    [<Test>]
+    member _.``Start embedded terminal always creates another tab``() =
+        let updated, cmd =
+            App.update
+                (StartEmbeddedTerminal first)
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated.TerminalPaneOpen, Is.True)
+            Assert.That(updated.TerminalPaneTarget, Is.EqualTo(Some first))
+            Assert.That(isStarting first updated.EmbeddedTerminalStarts, Is.True)
+            Assert.That(
+                tryStartState first updated.EmbeddedTerminalStarts,
+                Is.EqualTo(Some TerminalStartState.StartingAndFocus)
+            )
+            Assert.That(List.length cmd, Is.EqualTo(2)))
+
+    [<Test>]
+    member _.``Polled terminal before start response still schedules exact focus``() =
+        let exact = terminalId "focused-start"
+        let snapshot =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                @ [ running exact third 61241 ] }
+        let starting =
+            { focusModel with
+                TerminalPaneTarget = Some third
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        third, TerminalStartState.StartingAndFocus
+                    ] }
+
+        let polled, pollCmd =
+            App.update
+                (EmbeddedTerminalSnapshotChanged snapshot)
+                starting
+
+        let started, startCmd =
+            App.update
+                (EmbeddedTerminalStarted(
+                    third,
+                    Ok
+                        { Snapshot = snapshot
+                          TerminalId = exact }
+                ))
+                polled
+
+        Assert.Multiple(fun () ->
+            Assert.That(pollCmd, Is.Empty)
+            Assert.That(
+                tryStartState third started.EmbeddedTerminalStarts,
+                Is.EqualTo(None)
+            )
+            Assert.That(List.length startCmd, Is.EqualTo(1)))
+
+    [<Test>]
+    member _.``Terminal disappearance after focused start leaves no pending state``() =
+        let exact = terminalId "disappearing-start"
+        let snapshot =
+            { Tabs =
+                focusModel.EmbeddedTerminals.Tabs
+                @ [ running exact third 61241 ] }
+        let starting =
+            { focusModel with
+                TerminalPaneTarget = Some third
+                EmbeddedTerminalStarts =
+                    Map.ofList [
+                        third, TerminalStartState.StartingAndFocus
+                    ] }
+
+        let started, _ =
+            App.update
+                (EmbeddedTerminalStarted(
+                    third,
+                    Ok
+                        { Snapshot = snapshot
+                          TerminalId = exact }
+                ))
+                starting
+
+        let removed, cmd =
+            App.update
+                (EmbeddedTerminalSnapshotChanged focusModel.EmbeddedTerminals)
+                started
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                tryStartState third removed.EmbeddedTerminalStarts,
+                Is.EqualTo(None)
+            )
+            Assert.That(
+                activeTerminalId
+                    (Some third)
+                    removed.ActiveEmbeddedTerminals
+                    removed.EmbeddedTerminals,
+                Is.EqualTo(None)
+            )
+            Assert.That(cmd, Is.Empty))
 
     [<Test>]
     member _.``Repeated Resume keeps one in-flight launch without an action cooldown``() =

@@ -51,6 +51,7 @@ if (Get-Command bd -ErrorAction SilentlyContinue) {
 }
 
 Write-Host "Installing npm dependencies..."
-npm install
+npm install --no-audit --no-fund
+if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
 
 Write-Host "Done! Worktree ready at: $WorktreePath"

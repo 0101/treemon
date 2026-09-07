@@ -55,6 +55,10 @@ let private selectionProcessingMarker = "canvas-selection-processing-pulse"
 
 // ── Item 3: injected JS error overlay marker ──────────────────────────────────
 let private errorOverlayMarker = "canvas-doc-error"   // the action the overlay posts (unique to errorOverlayScript)
+let private runtimeScriptMarker = "<script data-treemon-runtime>"
+
+let private withoutRuntimeScriptMarkers (injection: string) =
+    injection.Replace(" data-treemon-runtime", "")
 
 // The cap the client enforces (MaxPayloadBytes in src/Client/CanvasPane.fs, which is `private` so it
 // can't be referenced directly). The injected helper must carry the identical literal so the
@@ -162,11 +166,20 @@ type BuildInjectionTests() =
     [<Test>]
     member _.``AgentDoc injection includes the full morph + bridge machinery``() =
         let injection = buildInjection AgentDoc "status.html"
-        Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs), "Agent docs keep the idiomorph runtime")
-        Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script), "Agent docs keep the morph controller")
+        let unmarkedInjection = withoutRuntimeScriptMarkers injection
+        Assert.That(unmarkedInjection, Does.Contain(Server.IdiomorphScript.idiomorphJs), "Agent docs keep the idiomorph runtime")
+        Assert.That(unmarkedInjection, Does.Contain(Server.CanvasMorphScript.script), "Agent docs keep the morph controller")
         Assert.That(injection, Does.Contain(bridgeMarker), "Agent docs keep the message-bridge heartbeat")
         Assert.That(injection, Does.Contain(baseStyleMarker))
         Assert.That(injection, Does.Contain(linkInterceptorMarker))
+
+    [<Test>]
+    member _.``live injection marks every Treemon-owned script``() =
+        [ SystemView; AgentDoc ]
+        |> List.iter (fun kind ->
+            let injection = buildInjection kind "status.html"
+            Assert.That(injection, Does.Contain(runtimeScriptMarker), $"{kind}: runtime scripts must carry the authored-script exclusion marker")
+            Assert.That(injection, Does.Not.Contain("<script>"), $"{kind}: no injected runtime script may look authored to the morph controller"))
 
     // ── Changed-content highlight ─────────────────────────────────────────────
     // The morph marks what it changed with `canvas-updated`. Style and behaviour ship together and
@@ -446,12 +459,68 @@ type BuildInjectionTests() =
 
     [<Test>]
     member _.``an agent .html classifies as an AgentDoc and gets the full injection``() =
-        let injection = buildInjection (CanvasDocKinds.classify "status.html") "status.html"
+        let injection =
+            buildInjection (CanvasDocKinds.classify "status.html") "status.html"
+            |> withoutRuntimeScriptMarkers
         Assert.That(injection, Does.Contain(Server.IdiomorphScript.idiomorphJs))
         Assert.That(injection, Does.Contain(Server.CanvasMorphScript.script))
 
     [<Test>]
-    member _.``served AgentDoc reports the hash of the exact raw bytes read``() =
+    member _.``document shell hash ignores body contents but includes head and root attributes``() =
+        let doc htmlAttributes head bodyAttributes body =
+            $"<!doctype html><html{htmlAttributes}><head>{head}</head><body{bodyAttributes}>{body}</body></html>"
+        let compactBody = " data-rule=\"a>b\" class=\"compact\""
+        let baseline =
+            doc " lang=\"en\"" "<style>body{color:red}</style>" compactBody "<p>Before</p>"
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                CanvasExport.documentShellHash (doc " lang=\"en\"" "<style>body{color:red}</style>" compactBody "<p>After</p>"),
+                Is.EqualTo(CanvasExport.documentShellHash baseline),
+                "body descendants are the Idiomorph target and must not change the shell hash")
+            Assert.That(
+                CanvasExport.documentShellHash (doc " lang=\"en\"" "<style>body{color:blue}</style>" compactBody "<p>Before</p>"),
+                Is.Not.EqualTo(CanvasExport.documentShellHash baseline),
+                "authored head changes require reload")
+            Assert.That(
+                CanvasExport.documentShellHash (doc " lang=\"fr\"" "<style>body{color:red}</style>" compactBody "<p>Before</p>"),
+                Is.Not.EqualTo(CanvasExport.documentShellHash baseline),
+                "html attributes require reload")
+            Assert.That(
+                CanvasExport.documentShellHash (doc " lang=\"en\"" "<style>body{color:red}</style>" " data-rule=\"a>b\" class=\"wide\"" "<p>Before</p>"),
+                Is.Not.EqualTo(CanvasExport.documentShellHash baseline),
+                "body attributes require reload")
+            Assert.That(
+                CanvasExport.documentShellHash "<style>body{color:blue}</style><h1>Fragment</h1>",
+                Is.Not.EqualTo(CanvasExport.documentShellHash "<style>body{color:red}</style><h1>Fragment</h1>"),
+                "a fragment with no explicit head or body must conservatively reload when its leading style changes")
+            Assert.That(
+                CanvasExport.documentShellHash "<html><head></head><!-- <body class=\"fake\"> --><body class=\"wide\">x</body></html>",
+                Is.Not.EqualTo(
+                    CanvasExport.documentShellHash "<html><head></head><!-- <body class=\"fake\"> --><body class=\"compact\">x</body></html>"),
+                "a body-looking token inside a comment must not hide a real body attribute change"))
+
+    [<Test>]
+    member _.``body script detection preserves browser-processed source state``() =
+        Assert.Multiple(fun () ->
+            Assert.That(
+                CanvasExport.hasBrowserProcessedBodyScript
+                    "<html><body><script type=\"application/json\">{\"value\":\"<script>\"}</script></body></html>",
+                Is.False,
+                "JSON data blocks remain eligible for the body morph path")
+            Assert.That(
+                CanvasExport.hasBrowserProcessedBodyScript
+                    "<html><body><!-- <script>ignored()</script> --><script type=\"module\">run()</script></body></html>",
+                Is.True,
+                "comments are ignored and module scripts require reload")
+            Assert.That(
+                CanvasExport.hasBrowserProcessedBodyScript
+                    "<html><head><script>headOnly()</script></head><body><p>static</p></body></html>",
+                Is.False,
+                "head scripts are represented by the shell hash, not the body-script flag"))
+
+    [<Test>]
+    member _.``served AgentDoc exposes the exact raw-byte hash to the response and loaded document``() =
         withTempDir "canvas-served-content-hash" (fun worktreePath ->
             let canvasDir = Path.Combine(worktreePath, ".agents", "canvas")
             Directory.CreateDirectory(canvasDir) |> ignore
@@ -471,10 +540,31 @@ type BuildInjectionTests() =
                 System.Security.Cryptography.SHA256.HashData(rawBytes)
                 |> System.Convert.ToHexString
                 |> _.ToLowerInvariant()
-            Assert.That(
-                context.Response.Headers[contentHashHeaderName].ToString(),
-                Is.EqualTo(expectedHash),
-                "The morph completion identity must describe the raw file bytes this response actually served"))
+            let expectedShellHash =
+                rawBytes
+                |> System.Text.Encoding.UTF8.GetString
+                |> CanvasExport.documentShellHash
+            responseBody.Position <- 0
+            use reader = new StreamReader(responseBody)
+            let servedHtml = reader.ReadToEnd()
+
+            Assert.Multiple(fun () ->
+                Assert.That(
+                    context.Response.Headers[contentHashHeaderName].ToString(),
+                    Is.EqualTo(expectedHash),
+                    "The refetch response must identify the raw file bytes it served")
+                Assert.That(
+                    servedHtml,
+                    Does.Contain($"<meta data-treemon-runtime name=\"{contentHashMetaName}\" content=\"{expectedHash}\">"),
+                    "A reloaded document must report the hash of the bytes that produced that document instance")
+                Assert.That(
+                    servedHtml,
+                    Does.Contain($"<meta data-treemon-runtime name=\"{shellHashMetaName}\" content=\"{expectedShellHash}\">"),
+                    "The reload decision must use an authored source hash rather than the live browser head")
+                Assert.That(
+                    servedHtml,
+                    Does.Contain($"<meta data-treemon-runtime name=\"{bodyScriptMetaName}\" content=\"false\">"),
+                    "The loaded document must preserve whether its authored body source had an active script")))
 
 // ── injectUrl loopback guard (Finding 10 / SSRF) ──────────────────────────────
 // injectUrl is registered then used as a POST target by SessionBridge, so a non-loopback value

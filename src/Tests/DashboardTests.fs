@@ -593,7 +593,7 @@ type DashboardTests() =
         }
 
     [<TestCase("terminal-btn", ">", "Focus session window (Enter)")>]
-    [<TestCase("embedded-terminal-btn", "", "Open embedded terminal")>]
+    [<TestCase("embedded-terminal-btn", "", "Open or focus embedded terminal (T)")>]
     [<TestCase("delete-btn", "", "Remove worktree (Del)")>]
     member this.``Header button has correct text and title``(btnClass: string, expectedText: string, expectedTitle: string) =
         task {
