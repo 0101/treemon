@@ -1160,29 +1160,6 @@ let internal shutdownExactBatchWithDiagnostics
             |> List.map snd
     }
 
-let internal shutdownExactWithDiagnostics
-    (diagnostics: LifecycleDiagnostics.Sink)
-    (dependencies: ShutdownDependencies)
-    (options: ShutdownWaitOptions)
-    (target: ShutdownTarget)
-    : Async<Result<ShutdownCompletion, ShutdownFailure>> =
-    async {
-        let! attempts =
-            shutdownExactBatchWithDiagnostics
-                diagnostics
-                dependencies
-                options
-                [ target ]
-
-        return
-            attempts
-            |> List.exactlyOne
-            |> fun completed -> completed.Outcome
-    }
-
-let internal shutdownExactWith =
-    shutdownExactWithDiagnostics LifecycleDiagnostics.write
-
 let internal shutdownExactBatchUsing diagnostics closureSnapshot targets =
     shutdownExactBatchWithDiagnostics
         diagnostics
@@ -1192,19 +1169,6 @@ let internal shutdownExactBatchUsing diagnostics closureSnapshot targets =
 
 let shutdownExactBatch =
     shutdownExactBatchUsing LifecycleDiagnostics.write
-
-/// Request routine SDK shutdown for one exact registered process. Endpoint acceptance only starts
-/// the wait; success requires the activity owner to report exact closure or the shared process
-/// resolver to prove that exact PID/start identity exited.
-let internal shutdownExactUsing diagnostics closureSnapshot target =
-    shutdownExactWithDiagnostics
-        diagnostics
-        (defaultShutdownDependencies closureSnapshot)
-        defaultShutdownWaitOptions
-        target
-
-let shutdownExact =
-    shutdownExactUsing LifecycleDiagnostics.write
 
 let internal computeLiveness now (session: SessionEntry option) (poll: bool * DateTime) =
     match session, poll with

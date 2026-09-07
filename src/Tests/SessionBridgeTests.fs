@@ -65,11 +65,14 @@ let private assertRegistrationFailure
             $"Expected registration failure {expected}, but registered {entry.ProcessIdentity}"
         )
 
-let private assertShutdownResult
+let private assertSingleShutdownOutcome
     (expected: Result<ShutdownCompletion, ShutdownFailure>)
-    (actual: Result<ShutdownCompletion, ShutdownFailure>)
+    (attempts: ShutdownAttempt list)
     =
-    Assert.That(actual, Is.EqualTo expected)
+    attempts
+    |> List.exactlyOne
+    |> _.Outcome
+    |> fun actual -> Assert.That(actual, Is.EqualTo expected)
 
 [<TestFixture>]
 [<Category("Unit")>]
@@ -686,17 +689,18 @@ type ExactShutdownTests() =
               Delay = fun _ -> async { return () }
               UtcNow = fun () -> DateTime.UtcNow }
 
-        let result =
-            shutdownExactWith
+        let attempts =
+            shutdownExactBatchWithDiagnostics
+                ignore
                 runtime
                 options
-                { WorktreePath = uniquePath "missing-shutdown"
-                  ProcessIdentity = identity }
+                [ { WorktreePath = uniquePath "missing-shutdown"
+                    ProcessIdentity = identity } ]
             |> Async.RunSynchronously
 
-        assertShutdownResult
+        assertSingleShutdownOutcome
             (Error ShutdownFailure.MissingRegistration)
-            result
+            attempts
         Assert.That(sent, Is.False)
 
     [<Test>]
@@ -727,19 +731,29 @@ type ExactShutdownTests() =
                         }
                 UtcNow = fun () -> entry.RegisteredAt }
 
+        let staleAttempts =
+            shutdownExactBatchWithDiagnostics
+                ignore
+                staleRuntime
+                options
+                [ targetFor entry ]
+            |> Async.RunSynchronously
+
+        let reusedAttempts =
+            shutdownExactBatchWithDiagnostics
+                ignore
+                reusedRuntime
+                options
+                [ targetFor entry ]
+            |> Async.RunSynchronously
+
         Assert.Multiple(fun () ->
-            assertShutdownResult
+            assertSingleShutdownOutcome
                 (Error ShutdownFailure.StaleRegistration)
-                (
-                shutdownExactWith staleRuntime options (targetFor entry)
-                |> Async.RunSynchronously
-                )
-            assertShutdownResult
+                staleAttempts
+            assertSingleShutdownOutcome
                 (Error ShutdownFailure.StaleRegistration)
-                (
-                shutdownExactWith reusedRuntime options (targetFor entry)
-                |> Async.RunSynchronously
-                ))
+                reusedAttempts)
 
     [<Test>]
     member _.``Endpoint rejection outcomes remain typed``() =
@@ -776,16 +790,17 @@ type ExactShutdownTests() =
             let diagnostics =
                 ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
-            assertShutdownResult
-                (Error expected)
-                (
-                shutdownExactWithDiagnostics
+            let attempts =
+                shutdownExactBatchWithDiagnostics
                     diagnostics.Enqueue
                     runtime
                     options
-                    (targetFor entry)
+                    [ targetFor entry ]
                 |> Async.RunSynchronously
-                )
+
+            assertSingleShutdownOutcome
+                (Error expected)
+                attempts
 
             let stages =
                 diagnostics.ToArray()
@@ -832,16 +847,17 @@ type ExactShutdownTests() =
         let diagnostics =
             ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
-        assertShutdownResult
-            (Ok ShutdownCompletion.ExactClosure)
-            (
-            shutdownExactWithDiagnostics
+        let attempts =
+            shutdownExactBatchWithDiagnostics
                 diagnostics.Enqueue
                 runtime
                 options
-                (targetFor entry)
+                [ targetFor entry ]
             |> Async.RunSynchronously
-            )
+
+        assertSingleShutdownOutcome
+            (Ok ShutdownCompletion.ExactClosure)
+            attempts
 
         let stages =
             diagnostics.ToArray()
@@ -886,12 +902,12 @@ type ExactShutdownTests() =
 
         let received = listener.GetContextAsync()
         let shutdown =
-            shutdownExact
+            shutdownExactBatch
                 (fun () ->
                     async {
                         return Ok(Set.singleton identity)
                     })
-                (targetFor entry)
+                [ targetFor entry ]
             |> Async.StartAsTask
 
         let context =
@@ -909,7 +925,7 @@ type ExactShutdownTests() =
             body.RootElement.GetProperty("capability").GetString(),
             Is.EqualTo capability
         )
-        assertShutdownResult
+        assertSingleShutdownOutcome
             (Ok ShutdownCompletion.ExactClosure)
             (shutdown.GetAwaiter().GetResult())
 
@@ -939,12 +955,17 @@ type ExactShutdownTests() =
                 (fun () -> entry.RegisteredAt)
                 (fun _ -> async { return () })
 
-        assertShutdownResult
-            (Ok ShutdownCompletion.ProcessExit)
-            (
-            shutdownExactWith runtime options (targetFor entry)
+        let attempts =
+            shutdownExactBatchWithDiagnostics
+                ignore
+                runtime
+                options
+                [ targetFor entry ]
             |> Async.RunSynchronously
-            )
+
+        assertSingleShutdownOutcome
+            (Ok ShutdownCompletion.ProcessExit)
+            attempts
 
     [<Test>]
     member _.``Accepted shutdown times out while closure and process exit remain absent``() =
@@ -973,16 +994,17 @@ type ExactShutdownTests() =
         let diagnostics =
             ConcurrentQueue<LifecycleDiagnostics.Diagnostic>()
 
-        assertShutdownResult
-            (Error ShutdownFailure.TimedOut)
-            (
-            shutdownExactWithDiagnostics
+        let attempts =
+            shutdownExactBatchWithDiagnostics
                 diagnostics.Enqueue
                 runtime
                 options
-                (targetFor entry)
+                [ targetFor entry ]
             |> Async.RunSynchronously
-            )
+
+        assertSingleShutdownOutcome
+            (Error ShutdownFailure.TimedOut)
+            attempts
 
         let stages =
             diagnostics.ToArray()
