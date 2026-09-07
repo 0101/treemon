@@ -23,9 +23,11 @@ dotnet test src/Tests/Tests.fsproj --filter "Category=Unit" # unit tests only
 
 ## Pull Requests
 
-- Keep PR descriptions minimal: a short change summary and relevant verification are enough.
-- Skip repository-specific prose polishing, preview, and adversarial-review ceremony. Mandatory
-  higher-priority publication and encoding rules still apply.
+- Treemon is effectively a single-owner repository with little outside contribution, so PR
+  descriptions normally have no external reader. Keep them to a short change summary and relevant
+  verification.
+- Do not spend repository-local time or tokens on PR prose polishing, previews, or adversarial-review
+  ceremony. Mandatory higher-priority publication and encoding rules still apply.
 
 ## F# Style Guide
 
