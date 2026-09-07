@@ -329,6 +329,7 @@ module JobProcess =
     let processStartTimeUtcTicks owned = owned.StartTimeUtcTicks
 
     let internal exitCode owned =
+        // GetExitCodeProcess writes the result through a Win32 byref.
         let mutable exitCode = 0u
 
         if GetExitCodeProcess(owned.ProcessHandle, &exitCode) then
