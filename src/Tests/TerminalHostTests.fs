@@ -1638,7 +1638,19 @@ type TerminalHostProxyTests() =
             )
             Assert.That(
                 decorated,
-                Does.Contain("sessionStorage.setItem(cooldownKey,String(Date.now()))")
+                Does.Contain("sessionStorage.setItem(reloadMarker,'1')")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("if(loaded&&suppressReloadLoad())return")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("if(event.data.active===false){clearPending();return}")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("document.visibilityState!=='visible'")
             )
 
             Assert.That(
@@ -1898,6 +1910,7 @@ type TerminalHostSecurityTests() =
         )
 
     [<TestCase("http://user@localhost:5174/")>]
+    [<TestCase("http://@localhost:5174/")>]
     [<TestCase("http://localhost:5174/path")>]
     [<TestCase("http://localhost:5174/?query=true")>]
     member _.``allowed origins reject non-origin URI components``(value: string) =

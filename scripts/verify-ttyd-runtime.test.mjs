@@ -90,6 +90,7 @@ test("verification dashboard rejects an unexpected Host without exposing the ter
   dashboard.setTerminalEndpoint(terminalEndpoint);
 
   try {
+    assert.notEqual(new URL(dashboard.origin).port, "5000");
     const accepted = await fetch(dashboard.origin);
     assert.equal(accepted.status, 200);
     assert.match(await accepted.text(), /sensitive-token/);

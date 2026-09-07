@@ -37,11 +37,19 @@ module RequestSecurity =
                 | false, _ ->
                     String.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
 
+        let hasUserInfoDelimiter =
+            let start =
+                value.IndexOf("://", StringComparison.OrdinalIgnoreCase) + 3
+
+            start >= 3
+            && (value.Substring(start).Split([| '/'; '?'; '#' |], 2)[0]).Contains('@')
+
         if
             parsed
             && (uri.Scheme = Uri.UriSchemeHttp || uri.Scheme = Uri.UriSchemeHttps)
             && loopbackHost
             && String.IsNullOrEmpty uri.UserInfo
+            && not hasUserInfoDelimiter
             && uri.AbsolutePath = "/"
             && String.IsNullOrEmpty uri.Query
             && String.IsNullOrEmpty uri.Fragment

@@ -429,9 +429,10 @@ type TerminalFocusTests() =
     member _.``Terminal visibility notification is routed through one command``() =
         let updated, cmd =
             App.update
-                (NotifyEmbeddedTerminalVisible(
+                (NotifyEmbeddedTerminalVisibility(
                     firstTwo,
-                    "http://127.0.0.1:61232"
+                    "http://127.0.0.1:61232",
+                    TerminalVisibilitySignal.Activate
                 ))
                 focusModel
 

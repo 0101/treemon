@@ -277,8 +277,11 @@ let private terminalDocument (marker: string) =
   </style>
   <script>
     window.__terminalVisibleMessages = 0;
+    window.__terminalInactiveMessages = 0;
     window.addEventListener('message', function(event) {
-      if (event.data && event.data.action === '__ACTION__') window.__terminalVisibleMessages++;
+      if (!event.data || event.data.action !== '__ACTION__') return;
+      if (event.data.active === true) window.__terminalVisibleMessages++;
+      if (event.data.active === false) window.__terminalInactiveMessages++;
     });
   </script>
 </head>
@@ -864,6 +867,12 @@ type TerminalPaneDomTests() =
             let! _ =
                 this.Page.WaitForFunctionAsync(
                     "() => document.querySelector('.terminal-pane').hidden"
+                )
+            let! _ =
+                alternateBrowserFrame.WaitForFunctionAsync(
+                    "() => window.__terminalInactiveMessages >= 1",
+                    (null :> obj),
+                    FrameWaitForFunctionOptions(Timeout = 5000.0f)
                 )
 
             do! terminalToggle.ClickAsync()

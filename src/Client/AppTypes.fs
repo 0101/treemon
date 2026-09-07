@@ -83,9 +83,10 @@ type Msg =
         Result<EmbeddedTerminalStartResult, string>
     | EmbeddedTerminalRequestFailed of WorktreePath * error: string
     | SelectEmbeddedTerminal of EmbeddedTerminalId
-    | NotifyEmbeddedTerminalVisible of
+    | NotifyEmbeddedTerminalVisibility of
         terminalId: EmbeddedTerminalId *
-        origin: string
+        origin: string *
+        signal: TerminalPane.TerminalVisibilitySignal
     | CloseEmbeddedTerminal of EmbeddedTerminalId
     | EmbeddedTerminalCloseFailed
     | ToggleTerminalPane

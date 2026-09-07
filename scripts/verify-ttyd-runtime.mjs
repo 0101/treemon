@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
@@ -28,6 +28,35 @@ async function freePort() {
       server.close(() => resolvePort(port));
     });
   });
+}
+
+async function listenDashboard(server, remainingAttempts = 20) {
+  const port = randomInt(49_152, 65_536);
+
+  try {
+    await new Promise((resolveListen, reject) => {
+      const onError = (error) => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        resolveListen();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(port, "127.0.0.1");
+    });
+    return port;
+  } catch (error) {
+    if (
+      (error.code === "EADDRINUSE" || error.code === "EACCES") &&
+      remainingAttempts > 1
+    ) {
+      return listenDashboard(server, remainingAttempts - 1);
+    }
+    throw error;
+  }
 }
 
 export async function launchDashboardServer() {
@@ -60,19 +89,15 @@ export async function launchDashboardServer() {
     }
 
     response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    const endpoint = JSON.stringify(terminalEndpoint);
+    const action = JSON.stringify(terminalVisibleAction);
     response.end(
-      `<!doctype html><html><head><style>html,body,#terminal{width:100%;height:100%;margin:0;border:0}body{overflow:hidden}</style></head><body><iframe id="terminal" src="${terminalEndpoint}"></iframe></body></html>`,
+      `<!doctype html><html><head><style>html,body,#terminal{width:100%;height:100%;margin:0;border:0}body{overflow:hidden}</style></head><body><iframe id="terminal"></iframe><script>(function(){var endpoint=${endpoint},frame=document.querySelector('#terminal');frame.addEventListener('load',function(){frame.contentWindow.postMessage({action:${action},active:true,loaded:true},new URL(endpoint).origin)});frame.src=endpoint})()</script></body></html>`,
     );
   });
 
-  const port = await new Promise((resolveListen, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      expectedHost = `127.0.0.1:${address.port}`;
-      resolveListen(address.port);
-    });
-  });
+  const port = await listenDashboard(server);
+  expectedHost = `127.0.0.1:${port}`;
 
   return {
     origin: `http://127.0.0.1:${port}`,
@@ -281,7 +306,10 @@ async function postTerminalVisible(page, endpoint) {
     ({ action, origin }) => {
       document
         .querySelector("#terminal")
-        .contentWindow.postMessage({ action }, origin);
+        .contentWindow.postMessage(
+          { action, active: true, loaded: false },
+          origin,
+        );
     },
     {
       action: terminalVisibleAction,
@@ -473,9 +501,8 @@ export async function runTtydRuntimeVerification() {
       waitUntil: "load",
       timeout: 10_000,
     });
-    await postTerminalVisible(page, terminal.attachmentEndpoint);
-    await delay(2_500);
     const replacementPage = await browser.newPage();
+    await postTerminalVisible(page, terminal.attachmentEndpoint);
     await replacementPage.goto(terminal.attachmentEndpoint);
     await replacementPage.waitForFunction(
       () => Boolean(window.term && document.querySelector(".xterm-helper-textarea")),

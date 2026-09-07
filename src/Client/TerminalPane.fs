@@ -14,6 +14,12 @@ type TerminalStartState =
     | StartingAndFocus
     | Failed of error: string
 
+[<RequireQualifiedAccess>]
+type TerminalVisibilitySignal =
+    | Activate
+    | Loaded
+    | Deactivate
+
 type TerminalPaneState =
     { IsOpen: bool
       Snapshot: EmbeddedTerminalSnapshot
@@ -207,11 +213,20 @@ let focusTerminalWhenReady terminalId =
         frame.focus ()
         true)
 
-let notifyVisibleTerminal terminalId origin =
-    retryWithTerminalFrame 3 terminalId (fun frame ->
+let notifyTerminalVisibility terminalId origin signal =
+    let active, loaded =
+        match signal with
+        | TerminalVisibilitySignal.Activate -> true, false
+        | TerminalVisibilitySignal.Loaded -> true, true
+        | TerminalVisibilitySignal.Deactivate -> false, false
+
+    let attempts =
+        if active then 3 else 2
+
+    retryWithTerminalFrame attempts terminalId (fun frame ->
         Fable.Core.JsInterop.emitJsExpr<bool>
-            (frame, origin, TerminalVisibleAction)
-            "(function(f,origin,action){var pane=f.closest('.terminal-pane');if(!f.contentWindow||f.hidden||!f.classList.contains('terminal-iframe-active')||!pane||pane.hidden)return false;f.contentWindow.postMessage({action:action},origin);return true})($0,$1,$2)")
+            (frame, origin, TerminalVisibleAction, active, loaded)
+            "(function(f,origin,action,active,loaded){if(!f.contentWindow)return false;if(!active){f.contentWindow.postMessage({action:action,active:false,loaded:false},origin);return true}var pane=f.closest('.terminal-pane');if(document.visibilityState!=='visible'||!document.hasFocus()||f.hidden||!f.classList.contains('terminal-iframe-active')||!pane||pane.hidden)return false;f.contentWindow.postMessage({action:action,active:true,loaded:loaded},origin);return true})($0,$1,$2,$3,$4)")
 
 let observeVisibleTerminal terminalId notify =
     let loadHandler =
@@ -221,27 +236,37 @@ let observeVisibleTerminal terminalId notify =
                     "($0.target&&$0.target.id)||''"
 
             if loadedFrameId = terminalFrameId terminalId then
-                notify ()
+                notify TerminalVisibilitySignal.Loaded
 
     let visibilityHandler =
         fun (_: Event) ->
             if Fable.Core.JsInterop.emitJsExpr<bool> () "document.visibilityState==='visible'" then
-                notify ()
+                notify TerminalVisibilitySignal.Activate
+            else
+                notify TerminalVisibilitySignal.Deactivate
 
     let focusHandler =
-        fun (_: Event) -> notify ()
+        fun (_: Event) ->
+            notify TerminalVisibilitySignal.Activate
 
-    notify ()
+    let blurHandler =
+        fun (_: Event) ->
+            notify TerminalVisibilitySignal.Deactivate
+
+    notify TerminalVisibilitySignal.Activate
 
     Dom.document.addEventListener("load", loadHandler, true)
     Dom.document.addEventListener("visibilitychange", visibilityHandler)
     Dom.window.addEventListener("focus", focusHandler)
+    Dom.window.addEventListener("blur", blurHandler)
 
     { new IDisposable with
         member _.Dispose() =
             Dom.document.removeEventListener("load", loadHandler, true)
             Dom.document.removeEventListener("visibilitychange", visibilityHandler)
-            Dom.window.removeEventListener("focus", focusHandler) }
+            Dom.window.removeEventListener("focus", focusHandler)
+            Dom.window.removeEventListener("blur", blurHandler)
+            notify TerminalVisibilitySignal.Deactivate }
 
 let private lifecyclePresentation lifecycle =
     match lifecycle with

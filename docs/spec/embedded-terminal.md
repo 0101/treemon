@@ -85,9 +85,13 @@ visible or focused after an interruption such as RDP reconnect. The terminal pag
 message only from its parent and a configured dashboard origin. It reloads immediately when ttyd's
 exact manual reconnect overlay is present, or checks for that exact overlay during one coalesced,
 bounded recovery window when page initialization or the transport-close event trails the visibility
-signal. Repeated visibility signals refresh that window, while a short reload cooldown prevents
-paired browser events from replacing the same attachment twice. Healthy shell prompts, partially
-typed commands, password prompts, and full-screen applications receive no input and are not reloaded.
+signal. Repeated visibility signals refresh that window, while a document-local reload latch
+prevents paired browser events from replacing the same attachment twice. A receiver-initiated
+reload is marked so its iframe-load notification cannot start another recovery generation; when
+browser storage is unavailable, load-driven recovery fails closed rather than looping. Deactivation
+clears the child recovery window so a hidden pane, terminal, worktree, or browser tab cannot reclaim
+the single attachment. Healthy shell prompts, partially typed commands, password prompts, and
+full-screen applications receive no input and are not reloaded.
 
 ### Launch routing and command startup
 
@@ -394,7 +398,9 @@ terminal ID and safe endpoint origin reports visibility triggers through Elmish.
 command retries for a small bounded number of animation frames until React has committed the active
 unhidden iframe, then posts only while that terminal and pane remain visible. A matching iframe load
 replays the same Elmish notification so a visibility signal sent to the initial document cannot be
-lost before the terminal page installs its receiver.
+lost before the terminal page installs its receiver. The parent activates only from a visible,
+focused dashboard and sends deactivation on blur, top-level hiding, pane/tab/worktree changes, and
+subscription disposal.
 Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
 port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
 option and allows only the configured server origin aliases, so the terminal client never infers a

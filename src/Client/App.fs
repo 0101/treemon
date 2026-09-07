@@ -565,10 +565,13 @@ let update msg model =
                     model.EmbeddedTerminals
                     model.ActiveEmbeddedTerminals },
         Cmd.none
-    | NotifyEmbeddedTerminalVisible(terminalId, origin) ->
+    | NotifyEmbeddedTerminalVisibility(terminalId, origin, signal) ->
         model,
         Cmd.ofEffect (fun _ ->
-            TerminalPane.notifyVisibleTerminal terminalId origin)
+            TerminalPane.notifyTerminalVisibility
+                terminalId
+                origin
+                signal)
     | CloseEmbeddedTerminal terminalId ->
         let before = model.EmbeddedTerminals
 
@@ -1141,11 +1144,12 @@ let appSubscriptions (model: Model) : Sub<Msg> =
            EmbeddedTerminalId.value terminalId
            origin ],
          fun dispatch ->
-             TerminalPane.observeVisibleTerminal terminalId (fun () ->
+             TerminalPane.observeVisibleTerminal terminalId (fun signal ->
                  dispatch (
-                     NotifyEmbeddedTerminalVisible(
+                     NotifyEmbeddedTerminalVisibility(
                          terminalId,
-                         origin
+                         origin,
+                         signal
                      )
                  )))
         :: panelSubs
