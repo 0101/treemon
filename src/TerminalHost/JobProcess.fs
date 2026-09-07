@@ -25,6 +25,7 @@ type OwnedJobProcess =
 module JobProcess =
     let [<Literal>] private CreateSuspended = 0x00000004u
     let [<Literal>] private CreateUnicodeEnvironment = 0x00000400u
+    let [<Literal>] private CreateNoWindow = 0x08000000u
     let [<Literal>] private JobObjectExtendedLimitInformationClass = 9
     let [<Literal>] private JobObjectLimitKillOnJobClose = 0x00002000u
     let [<Literal>] private WaitObject0 = 0u
@@ -276,7 +277,9 @@ module JobProcess =
                                     0n,
                                     0n,
                                     false,
-                                    CreateSuspended ||| CreateUnicodeEnvironment,
+                                    CreateSuspended
+                                    ||| CreateUnicodeEnvironment
+                                    ||| CreateNoWindow,
                                     environment,
                                     specification.WorkingDirectory,
                                     &startup,

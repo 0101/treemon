@@ -2183,6 +2183,40 @@ type TerminalHostJobObjectTests() =
     let powershell = executableOnPath "pwsh.exe"
 
     [<Test>]
+    member _.``owned console process starts without an attached console``() =
+        withTempDir "terminal-host-no-console" (fun root ->
+            let consoleHandleFile = Path.Combine(root, "console-handle.txt")
+
+            let owned =
+                JobProcess.start
+                    { Executable = powershell
+                      Arguments =
+                        [ "-NoLogo"
+                          "-NoProfile"
+                          "-NonInteractive"
+                          "-Command"
+                          """Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; [ConsoleProbe]::GetConsoleWindow().ToInt64() | Set-Content -LiteralPath $env:TM_CONSOLE_HANDLE_FILE; Start-Sleep -Seconds 300""" ]
+                      WorkingDirectory = root
+                      Environment = [ "TM_CONSOLE_HANDLE_FILE", consoleHandleFile ] }
+                |> requireOk
+
+            try
+                Assert.That(
+                    waitUntil (TimeSpan.FromSeconds 10.0) (fun () ->
+                        File.Exists consoleHandleFile),
+                    Is.True,
+                    "owned process did not publish its console handle"
+                )
+
+                Assert.That(
+                    File.ReadAllText(consoleHandleFile).Trim(),
+                    Is.EqualTo("0"),
+                    "background process unexpectedly attached to a console"
+                )
+            finally
+                JobProcess.close owned)
+
+    [<Test>]
     member _.``closing one retained Job Object kills its exact ttyd process tree``() =
         withTempDir "terminal-host-job-close" (fun root ->
             let pidFile = Path.Combine(root, "child.pid")
@@ -2198,7 +2232,7 @@ type TerminalHostJobObjectTests() =
                           "-NoProfile"
                           "-NonInteractive"
                           "-Command"
-                          "$descendant = Start-Process -FilePath $env:TM_POWERSHELL -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 300') -PassThru; $PID | Set-Content -LiteralPath $env:TM_PID_FILE; $descendant.Id | Set-Content -LiteralPath $env:TM_DESCENDANT_PID_FILE; $env:TREEMON_TERMINAL_SESSION_ID | Set-Content -LiteralPath $env:TM_SESSION_FILE; Start-Sleep -Seconds 300" ]
+                          "$descendant = Start-Process -FilePath $env:TM_POWERSHELL -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 300') -NoNewWindow -PassThru; $PID | Set-Content -LiteralPath $env:TM_PID_FILE; $descendant.Id | Set-Content -LiteralPath $env:TM_DESCENDANT_PID_FILE; $env:TREEMON_TERMINAL_SESSION_ID | Set-Content -LiteralPath $env:TM_SESSION_FILE; Start-Sleep -Seconds 300" ]
                       WorkingDirectory = root
                       Environment =
                         [ "TM_POWERSHELL", powershell
