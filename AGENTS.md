@@ -21,6 +21,12 @@ dotnet test src/Tests/Tests.fsproj --filter "Category=Unit" # unit tests only
 .\treemon.ps1 remove "Q:\code\OtherProject"                 # embedded terminals save the change but defer restart
 ```
 
+## Pull Requests
+
+- Keep PR descriptions minimal: a short change summary and relevant verification are enough.
+- Skip repository-specific prose polishing, preview, and adversarial-review ceremony. Mandatory
+  higher-priority publication and encoding rules still apply.
+
 ## F# Style Guide
 
 This project uses strict functional F# style. These rules are non-negotiable.
