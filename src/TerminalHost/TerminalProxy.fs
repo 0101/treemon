@@ -24,7 +24,9 @@ module internal TerminalProxy =
         "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
     let [<Literal>] private TerminalVisibleAction = "treemon-terminal-visible"
     let [<Literal>] private ReconnectPrompt = "Press \u23ce to Reconnect"
-    let [<Literal>] private ReconnectObservationMilliseconds = 2_000
+    let [<Literal>] private ReconnectObservationMilliseconds = 10_000
+    let [<Literal>] private ReconnectPollMilliseconds = 100
+    let [<Literal>] private ReconnectCooldownMilliseconds = 1_000
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
@@ -33,7 +35,7 @@ module internal TerminalProxy =
         let serializedAction = JsonSerializer.Serialize TerminalVisibleAction
         let serializedPrompt = JsonSerializer.Serialize ReconnectPrompt
 
-        $"<script>(function(){{var allowedOrigins={serializedOrigins},action={serializedAction},reconnectPrompt={serializedPrompt},observer=null,deadline=null;function clearPending(){{if(observer){{observer.disconnect();observer=null}}if(deadline!==null){{clearTimeout(deadline);deadline=null}}}}function isWaitingForReconnect(){{var terminal=document.querySelector('.xterm');return !!terminal&&Array.prototype.some.call(terminal.children,function(child){{return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt}})}}function reconnectIfWaiting(){{if(!isWaitingForReconnect())return false;clearPending();window.location.reload();return true}}function activate(){{if(reconnectIfWaiting()||observer)return;var terminal=document.querySelector('.xterm');if(!terminal)return;observer=new MutationObserver(reconnectIfWaiting);observer.observe(terminal,{{childList:true}});deadline=setTimeout(clearPending,{ReconnectObservationMilliseconds})}}window.addEventListener('message',function(event){{if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;activate()}})}})();</script>"
+        $"<script>(function(){{var allowedOrigins={serializedOrigins},action={serializedAction},reconnectPrompt={serializedPrompt},poll=null,deadline=null,reloading=false,cooldownKey='treemon-terminal-reconnect-at';function clearPending(){{if(poll!==null){{clearInterval(poll);poll=null}}if(deadline!==null){{clearTimeout(deadline);deadline=null}}}}function coolingDown(){{try{{return Date.now()-Number(sessionStorage.getItem(cooldownKey)||0)<{ReconnectCooldownMilliseconds}}}catch(_){{return false}}}}function isWaitingForReconnect(){{var terminal=document.querySelector('.xterm');return !!terminal&&Array.prototype.some.call(terminal.children,function(child){{return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt}})}}function reconnectIfWaiting(){{if(reloading||coolingDown()||!isWaitingForReconnect())return false;reloading=true;clearPending();try{{sessionStorage.setItem(cooldownKey,String(Date.now()))}}catch(_){{}}window.location.reload();return true}}function activate(){{if(reconnectIfWaiting())return;if(poll===null)poll=setInterval(reconnectIfWaiting,{ReconnectPollMilliseconds});if(deadline!==null)clearTimeout(deadline);deadline=setTimeout(clearPending,{ReconnectObservationMilliseconds})}}window.addEventListener('message',function(event){{if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;activate()}})}})();</script>"
 
     let internal decorateTerminalPage (allowedOrigins: string list) (html: string) =
         let injection =

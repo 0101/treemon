@@ -169,26 +169,28 @@ let visibleRunningTerminal isOpen activeTerminal snapshot =
 let private terminalFrameId terminalId =
     $"terminal-iframe-{EmbeddedTerminalId.value terminalId}"
 
-let private withTerminalFrame terminalId action =
+let private retryWithTerminalFrame attempts terminalId tryHandle =
     let rec tryResolve remainingAttempts =
         Dom.window?requestAnimationFrame(fun (_: float) ->
-            match
+            let handled =
                 Dom.document.getElementById(terminalFrameId terminalId)
                 |> Option.ofObj
-            with
-            | Some frame -> action frame
-            | None when remainingAttempts > 1 ->
+                |> Option.exists tryHandle
+
+            if not handled && remainingAttempts > 1 then
                 tryResolve (remainingAttempts - 1)
-            | None -> ())
+        )
         |> ignore
 
-    tryResolve 2
+    tryResolve attempts
 
 let focusTerminal terminalId =
-    withTerminalFrame terminalId _.focus()
+    retryWithTerminalFrame 2 terminalId (fun frame ->
+        frame.focus ()
+        true)
 
 let focusTerminalWhenReady terminalId =
-    withTerminalFrame terminalId (fun frame ->
+    retryWithTerminalFrame 2 terminalId (fun frame ->
         let focusOnLoad (_: Event) = frame.focus ()
 
         frame?addEventListener(
@@ -202,26 +204,24 @@ let focusTerminalWhenReady terminalId =
             10_000
         |> ignore
 
-        frame.focus ())
+        frame.focus ()
+        true)
 
 let notifyVisibleTerminal terminalId origin =
-    let rec tryNotify remainingAttempts =
-        Dom.window?requestAnimationFrame(fun (_: float) ->
-            let notified =
-                Dom.document.getElementById(terminalFrameId terminalId)
-                |> Option.ofObj
-                |> Option.exists (fun frame ->
-                    Fable.Core.JsInterop.emitJsExpr<bool>
-                        (frame, origin, TerminalVisibleAction)
-                        "(function(f,origin,action){var pane=f.closest('.terminal-pane');if(!f.contentWindow||f.hidden||!f.classList.contains('terminal-iframe-active')||!pane||pane.hidden)return false;f.contentWindow.postMessage({action:action},origin);return true})($0,$1,$2)")
+    retryWithTerminalFrame 3 terminalId (fun frame ->
+        Fable.Core.JsInterop.emitJsExpr<bool>
+            (frame, origin, TerminalVisibleAction)
+            "(function(f,origin,action){var pane=f.closest('.terminal-pane');if(!f.contentWindow||f.hidden||!f.classList.contains('terminal-iframe-active')||!pane||pane.hidden)return false;f.contentWindow.postMessage({action:action},origin);return true})($0,$1,$2)")
 
-            if not notified && remainingAttempts > 1 then
-                tryNotify (remainingAttempts - 1))
-        |> ignore
+let observeVisibleTerminal terminalId notify =
+    let loadHandler =
+        fun (event: Event) ->
+            let loadedFrameId =
+                Fable.Core.JsInterop.emitJsExpr<string> event
+                    "($0.target&&$0.target.id)||''"
 
-    tryNotify 3
-
-let observeVisibleTerminal notify =
+            if loadedFrameId = terminalFrameId terminalId then
+                notify ()
 
     let visibilityHandler =
         fun (_: Event) ->
@@ -233,11 +233,13 @@ let observeVisibleTerminal notify =
 
     notify ()
 
+    Dom.document.addEventListener("load", loadHandler, true)
     Dom.document.addEventListener("visibilitychange", visibilityHandler)
     Dom.window.addEventListener("focus", focusHandler)
 
     { new IDisposable with
         member _.Dispose() =
+            Dom.document.removeEventListener("load", loadHandler, true)
             Dom.document.removeEventListener("visibilitychange", visibilityHandler)
             Dom.window.removeEventListener("focus", focusHandler) }
 

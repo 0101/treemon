@@ -11,7 +11,6 @@ const repo = resolve(import.meta.dirname, "..");
 const ttyd = join(repo, ".tools", "ttyd", "1.7.7", "ttyd.exe");
 const marker = "TREEMON_TTYD_RUNTIME_OK";
 const terminalVisibleAction = "treemon-terminal-visible";
-const reconnectPrompt = "Press \u23ce to Reconnect";
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
@@ -264,7 +263,8 @@ function terminalText() {
 async function waitForTerminalText(frame, expectedText) {
   await frame.waitForFunction(
     (expected) => {
-      const buffer = window.term.buffer.active;
+      const buffer = window.term?.buffer?.active;
+      if (!buffer) return false;
       return Array.from(
         { length: buffer.length },
         (_, index) => buffer.getLine(index)?.translateToString(true) ?? "",
@@ -474,6 +474,7 @@ export async function runTtydRuntimeVerification() {
       timeout: 10_000,
     });
     await postTerminalVisible(page, terminal.attachmentEndpoint);
+    await delay(2_500);
     const replacementPage = await browser.newPage();
     await replacementPage.goto(terminal.attachmentEndpoint);
     await replacementPage.waitForFunction(

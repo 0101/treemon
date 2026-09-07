@@ -1622,15 +1622,23 @@ type TerminalHostProxyTests() =
             )
             Assert.That(
                 decorated,
-                Does.Contain("observer=new MutationObserver(reconnectIfWaiting)")
+                Does.Contain("poll=setInterval(reconnectIfWaiting,100)")
             )
             Assert.That(
                 decorated,
-                Does.Contain("deadline=setTimeout(clearPending,2000)")
+                Does.Contain("deadline=setTimeout(clearPending,10000)")
             )
             Assert.That(
                 decorated,
-                Does.Contain("clearPending();window.location.reload();return true")
+                Does.Contain("if(deadline!==null)clearTimeout(deadline)")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("reloading=true;clearPending()")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("sessionStorage.setItem(cooldownKey,String(Date.now()))")
             )
 
             Assert.That(
