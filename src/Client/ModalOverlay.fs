@@ -3,10 +3,10 @@ module ModalOverlay
 open Feliz
 
 let private withClass baseClass extraClass =
-    if System.String.IsNullOrWhiteSpace extraClass then
-        baseClass
-    else
-        $"{baseClass} {extraClass}"
+    extraClass
+    |> Option.filter (System.String.IsNullOrWhiteSpace >> not)
+    |> Option.map (fun value -> $"{baseClass} {value}")
+    |> Option.defaultValue baseClass
 
 let modalOverlayWithClasses overlayClass dialogClass (onDismiss: (unit -> unit) option) (children: ReactElement list) =
     Html.div [
@@ -24,4 +24,4 @@ let modalOverlayWithClasses overlayClass dialogClass (onDismiss: (unit -> unit) 
     ]
 
 let modalOverlay onDismiss children =
-    modalOverlayWithClasses "" "" onDismiss children
+    modalOverlayWithClasses None None onDismiss children

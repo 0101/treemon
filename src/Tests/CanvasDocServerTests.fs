@@ -118,6 +118,16 @@ type BuildInjectionTests() =
                     injection,
                     Does.Contain(worktreeSearchMarker),
                     $"{kind}: Ctrl+P inside a canvas doc must post an open-worktree-search message"
+                )
+                Assert.That(
+                    injection,
+                    Does.Contain("stopImmediatePropagation()"),
+                    $"{kind}: handled Ctrl+P must not reach doc-local handlers"
+                )
+                Assert.That(
+                    injection,
+                    Does.Contain("},true)"),
+                    $"{kind}: the global keyboard bridge must run in capture phase"
                 )))
 
     // ── Item 1: dark-theme base reset, injected for BOTH kinds, zero specificity ──

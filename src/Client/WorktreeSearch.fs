@@ -4,6 +4,8 @@ open System
 open Shared
 open Navigation
 open Feliz
+open Browser
+open Fable.Core.JsInterop
 
 type MatchIndexes =
     { Repository: Set<int>
@@ -17,8 +19,14 @@ type SearchResult =
       Score: int }
 
 [<RequireQualifiedAccess>]
+type SelectionDirection =
+    | Up
+    | Down
+
+[<RequireQualifiedAccess>]
 type ReturnFocus =
     | Dashboard
+    | Canvas
     | EmbeddedTerminal of EmbeddedTerminalId
 
 type OpenState =
@@ -34,17 +42,19 @@ type State =
 [<RequireQualifiedAccess>]
 type Msg =
     | Open
+    | OpenFromCanvas
     | OpenFromTerminal of EmbeddedTerminalId
     | Close
     | QueryChanged of string
-    | MoveSelection of int
-    | SelectIndex of int
+    | MoveSelection of SelectionDirection
+    | SelectResult of WorktreePath
     | ChooseSelection
     | ChooseResult of WorktreePath
 
 [<RequireQualifiedAccess>]
 type Action =
     | NoAction
+    | RevealSelection
     | RestoreFocus of ReturnFocus
     | FocusWorktree of WorktreePath
 
@@ -79,6 +89,7 @@ let isOpenShortcut (key: string) (ctrl: bool) (meta: bool) (alt: bool) =
 let isOpenRequest =
     function
     | Msg.Open
+    | Msg.OpenFromCanvas
     | Msg.OpenFromTerminal _ -> true
     | _ -> false
 
@@ -115,6 +126,9 @@ let private queryTokens (query: string) =
 
     normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries)
     |> Array.toList
+
+let private hasEffectiveQuery query =
+    queryTokens query |> List.isEmpty |> not
 
 let private charactersToString (characters: char list) =
     characters
@@ -307,9 +321,12 @@ let update repos message state =
     match message, state with
     | Msg.Open, State.Closed ->
         openSearch repos ReturnFocus.Dashboard
+    | Msg.OpenFromCanvas, State.Closed ->
+        openSearch repos ReturnFocus.Canvas
     | Msg.OpenFromTerminal terminalId, State.Closed ->
         openSearch repos (ReturnFocus.EmbeddedTerminal terminalId)
     | Msg.Open, State.Open _
+    | Msg.OpenFromCanvas, State.Open _
     | Msg.OpenFromTerminal _, State.Open _ ->
         state, Action.NoAction
     | Msg.Close, State.Open openState ->
@@ -322,12 +339,17 @@ let update repos message state =
             |> List.tryHead
             |> Option.map _.Worktree.Path
 
-        State.Open { openState with Query = query; SelectedPath = selectedPath }, Action.NoAction
+        State.Open { openState with Query = query; SelectedPath = selectedPath },
+        if selectedPath.IsSome then Action.RevealSelection else Action.NoAction
     | Msg.QueryChanged _, State.Closed ->
         state, Action.NoAction
-    | Msg.MoveSelection offset, State.Open openState ->
+    | Msg.MoveSelection direction, State.Open openState ->
         let results = search repos openState.Query
         let count = results.Length
+        let offset =
+            match direction with
+            | SelectionDirection.Up -> -1
+            | SelectionDirection.Down -> 1
 
         let selectedPath =
             if count = 0 then
@@ -337,17 +359,14 @@ let update repos message state =
                 let next = (current + offset + count) % count
                 results |> List.tryItem next |> Option.map _.Worktree.Path
 
-        State.Open { openState with SelectedPath = selectedPath }, Action.NoAction
+        State.Open { openState with SelectedPath = selectedPath },
+        if selectedPath.IsSome then Action.RevealSelection else Action.NoAction
     | Msg.MoveSelection _, State.Closed ->
         state, Action.NoAction
-    | Msg.SelectIndex index, State.Open openState ->
-        let selectedPath =
-            search repos openState.Query
-            |> List.tryItem index
-            |> Option.map _.Worktree.Path
-
-        State.Open { openState with SelectedPath = selectedPath }, Action.NoAction
-    | Msg.SelectIndex _, State.Closed ->
+    | Msg.SelectResult path, State.Open openState when openState.SelectedPath <> Some path ->
+        State.Open { openState with SelectedPath = Some path }, Action.NoAction
+    | Msg.SelectResult _, State.Open _
+    | Msg.SelectResult _, State.Closed ->
         state, Action.NoAction
     | Msg.ChooseSelection, State.Open openState ->
         match trySelectedResult repos openState with
@@ -355,15 +374,8 @@ let update repos message state =
         | None -> state, Action.NoAction
     | Msg.ChooseSelection, State.Closed ->
         state, Action.NoAction
-    | Msg.ChooseResult path, State.Open openState ->
-        let isVisibleResult =
-            search repos openState.Query
-            |> List.exists (fun result -> result.Worktree.Path = path)
-
-        if isVisibleResult then
-            State.Closed, Action.FocusWorktree path
-        else
-            state, Action.NoAction
+    | Msg.ChooseResult path, State.Open _ ->
+        State.Closed, Action.FocusWorktree path
     | Msg.ChooseResult _, State.Closed ->
         state, Action.NoAction
 
@@ -426,7 +438,7 @@ let private resultView dispatch selected index (result: SearchResult) =
         prop.role "option"
         prop.ariaSelected selected
         prop.tabIndex -1
-        prop.onMouseEnter (fun _ -> dispatch (Msg.SelectIndex index))
+        prop.onMouseMove (fun _ -> dispatch (Msg.SelectResult result.Worktree.Path))
         prop.onClick (fun _ -> dispatch (Msg.ChooseResult result.Worktree.Path))
         prop.children [
             Html.span [
@@ -475,12 +487,29 @@ let private inputKeyDown dispatch (event: Browser.Types.KeyboardEvent) =
         event.stopPropagation()
         dispatch message
 
-    match event.key with
-    | "ArrowDown" -> handle (Msg.MoveSelection 1)
-    | "ArrowUp" -> handle (Msg.MoveSelection -1)
-    | "Enter" -> handle Msg.ChooseSelection
-    | "Escape" -> handle Msg.Close
-    | _ -> ()
+    if
+        not (
+            emitJsExpr<bool>
+                event
+                "$0.isComposing === true || ($0.nativeEvent && $0.nativeEvent.isComposing === true)"
+        )
+    then
+        match event.key with
+        | "ArrowDown" -> handle (Msg.MoveSelection SelectionDirection.Down)
+        | "ArrowUp" -> handle (Msg.MoveSelection SelectionDirection.Up)
+        | "Enter" -> handle Msg.ChooseSelection
+        | "Escape" -> handle Msg.Close
+        | _ -> ()
+
+let scrollSelectedIntoView () =
+    Dom.window?requestAnimationFrame(fun (_: float) ->
+        Dom.document.querySelector ".worktree-search-result.selected"
+        |> Option.ofObj
+        |> Option.iter (fun element ->
+            emitJsExpr<unit>
+                element
+                "$0.scrollIntoView({block:'nearest'})"))
+    |> ignore
 
 let view dispatch repos state =
     match state with
@@ -488,11 +517,12 @@ let view dispatch repos state =
     | State.Open openState ->
         let results = search repos openState.Query
         let selectedIndex = selectedResultIndex results openState.SelectedPath
-        let hasQuery = not (String.IsNullOrWhiteSpace openState.Query)
+        let hasInput = not (String.IsNullOrWhiteSpace openState.Query)
+        let hasQuery = hasEffectiveQuery openState.Query
 
         ModalOverlay.modalOverlayWithClasses
-            "worktree-search-overlay"
-            "worktree-search-dialog"
+            (Some "worktree-search-overlay")
+            (Some "worktree-search-dialog")
             (Some(fun () -> dispatch Msg.Close))
             [
                 Html.div [
@@ -538,13 +568,13 @@ let view dispatch repos state =
                                     prop.onChange (Msg.QueryChanged >> dispatch)
                                     prop.onKeyDown (inputKeyDown dispatch)
                                 ]
-                                if hasQuery then
+                                if hasInput then
                                     Html.button [
                                         prop.className "worktree-search-clear"
                                         prop.type'.button
                                         prop.tabIndex -1
                                         prop.ariaLabel "Clear search"
-                                        prop.onMouseDown (fun event -> event.preventDefault())
+                                        prop.onMouseDown _.preventDefault()
                                         prop.onClick (fun _ -> dispatch (Msg.QueryChanged ""))
                                         prop.text "\u00D7"
                                     ]

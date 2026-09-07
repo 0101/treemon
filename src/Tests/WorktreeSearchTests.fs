@@ -122,7 +122,11 @@ type WorktreeSearchStateTests() =
     member _.``selection wraps and a new query resets it``() =
         let opened, _ = update repos Msg.Open State.Closed
         let queried, _ = update repos (Msg.QueryChanged "tremo") opened
-        let wrapped, _ = update repos (Msg.MoveSelection -1) queried
+        let wrapped, action =
+            update
+                repos
+                (Msg.MoveSelection SelectionDirection.Up)
+                queried
 
         match wrapped with
         | State.Open state ->
@@ -131,6 +135,8 @@ type WorktreeSearchStateTests() =
                 Is.EqualTo(Some(WorktreePath "/treemon/embed-terminal"))
             )
         | State.Closed -> Assert.Fail("Search should remain open while moving selection")
+
+        Assert.That(action, Is.EqualTo(Action.RevealSelection))
 
         let reset, _ = update repos (Msg.QueryChanged "embed") wrapped
 
@@ -160,15 +166,21 @@ type WorktreeSearchStateTests() =
     member _.``closing search restores the surface that opened it``() =
         let terminalId = EmbeddedTerminalId "search-origin"
         let dashboardOpen, _ = update repos Msg.Open State.Closed
+        let canvasOpen, _ = update repos Msg.OpenFromCanvas State.Closed
         let terminalOpen, _ =
             update repos (Msg.OpenFromTerminal terminalId) State.Closed
         let _, dashboardAction = update repos Msg.Close dashboardOpen
+        let _, canvasAction = update repos Msg.Close canvasOpen
         let _, terminalAction = update repos Msg.Close terminalOpen
 
         Assert.Multiple(fun () ->
             Assert.That(
                 dashboardAction,
                 Is.EqualTo(Action.RestoreFocus ReturnFocus.Dashboard)
+            )
+            Assert.That(
+                canvasAction,
+                Is.EqualTo(Action.RestoreFocus ReturnFocus.Canvas)
             )
             Assert.That(
                 terminalAction,
@@ -198,3 +210,34 @@ type WorktreeSearchStateTests() =
             Assert.That(path, Is.EqualTo(WorktreePath "/treemon/kb-navigation"))
         | _ ->
             Assert.Fail("Live refreshes should not move selection to a different worktree")
+
+    [<Test>]
+    member _.``pointer selection carries worktree identity across live reordering``() =
+        let selectedPath = WorktreePath "/treemon/embed-terminal"
+        let opened, _ = update repos Msg.Open State.Closed
+        let selected, _ = update repos (Msg.SelectResult selectedPath) opened
+
+        let reordered =
+            [ repo
+                "treemon"
+                [ worktree "/treemon/embed-terminal" "embed-terminal"
+                  worktree "/treemon/kb-navigation" "kb-navigation" ]
+                [] ]
+
+        let _, action = update reordered Msg.ChooseSelection selected
+
+        Assert.That(action, Is.EqualTo(Action.FocusWorktree selectedPath))
+
+    [<Test>]
+    member _.``clicking a rendered result does not revalidate stale membership``() =
+        let selectedPath = WorktreePath "/treemon/embed-terminal"
+        let opened, _ = update repos Msg.Open State.Closed
+        let closed, action =
+            update
+                []
+                (Msg.ChooseResult selectedPath)
+                opened
+
+        Assert.Multiple(fun () ->
+            Assert.That(closed, Is.EqualTo(State.Closed))
+            Assert.That(action, Is.EqualTo(Action.FocusWorktree selectedPath)))

@@ -4447,6 +4447,93 @@ type DashboardTests() =
 
     [<Test>]
     [<Category("Fast")>]
+    member this.``Blocked Ctrl P leaves the browser shortcut unconsumed``() =
+        task {
+            let plusBtn = this.Page.Locator(".repo-header .create-wt-btn").First
+            do! plusBtn.ClickAsync()
+
+            let overlay = this.Page.Locator(".modal-overlay")
+            do! overlay.WaitForAsync(LocatorWaitForOptions(Timeout = 5000.0f))
+
+            let! defaultPrevented =
+                this.Page.EvaluateAsync<bool>(
+                    "() => { const event = new KeyboardEvent('keydown',{key:'p',ctrlKey:true,bubbles:true,cancelable:true}); document.dispatchEvent(event); return event.defaultPrevented; }"
+                )
+            let! searchCount = this.Page.Locator(".worktree-search-dialog").CountAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(defaultPrevented, Is.False)
+                Assert.That(searchCount, Is.Zero))
+
+            do! this.Page.Locator(".modal-btn.cancel").ClickAsync()
+            do!
+                overlay.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
+    member this.``Worktree search keeps composed input and selected results visible``() =
+        task {
+            let dashboard = this.Page.Locator(".dashboard")
+            do! dashboard.FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Control+P")
+
+            let dialog = this.Page.Locator(".worktree-search-dialog")
+            let input = this.Page.Locator("#worktree-search-input")
+            let results = this.Page.Locator("#worktree-search-results")
+            do! dialog.WaitForAsync(LocatorWaitForOptions(Timeout = 3000.0f))
+
+            do! input.FillAsync("-")
+            let! heading =
+                this.Page.Locator(".worktree-search-meta span").First.TextContentAsync()
+            let! selectedBefore = input.GetAttributeAsync("aria-activedescendant")
+
+            let! _ =
+                input.EvaluateAsync(
+                    "element => { const send = key => { const event = new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true}); Object.defineProperty(event,'isComposing',{value:true}); element.dispatchEvent(event); }; send('ArrowDown'); send('Enter'); }"
+                )
+            let! _ = settleBrowserEvents this.Page
+            let! selectedAfterComposition =
+                input.GetAttributeAsync("aria-activedescendant")
+            let! dialogVisibleAfterComposition = dialog.IsVisibleAsync()
+
+            Assert.Multiple(fun () ->
+                Assert.That(heading, Is.EqualTo("All worktrees"))
+                Assert.That(selectedAfterComposition, Is.EqualTo(selectedBefore))
+                Assert.That(dialogVisibleAfterComposition, Is.True))
+
+            let! scrolls =
+                results.EvaluateAsync<bool>(
+                    "element => element.scrollHeight > element.clientHeight"
+                )
+            Assert.That(scrolls, Is.True, "The fixture must overflow the search result viewport")
+
+            let! _ = results.EvaluateAsync("element => { element.scrollTop = 0; }")
+            do! input.PressAsync("ArrowUp")
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => { const list = document.getElementById('worktree-search-results'); const selected = list && list.querySelector('.worktree-search-result.selected'); if (!list || !selected) return false; const l = list.getBoundingClientRect(); const s = selected.getBoundingClientRect(); return s.top >= l.top && s.bottom <= l.bottom; }",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 3000.0f)
+                )
+
+            do! input.PressAsync("Escape")
+            do!
+                dialog.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+        }
+
+    [<Test>]
+    [<Category("Fast")>]
     member this.``Cancel button closes modal and restores focus for arrow key nav``() =
         task {
             let dashboard = this.Page.Locator(".dashboard")

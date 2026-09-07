@@ -413,7 +413,7 @@ type TerminalFocusTests() =
     member _.``Cycle message updates the current worktree terminal only``() =
         let updated, cmd =
             App.update
-                (CycleEmbeddedTerminal CycleDirection.Next)
+                (CycleEmbeddedTerminal(firstTwo, CycleDirection.Next))
                 focusModel
 
         Assert.Multiple(fun () ->
@@ -436,6 +436,20 @@ type TerminalFocusTests() =
                 Is.EqualTo(1),
                 "cycling should refocus the newly active terminal"
             ))
+
+    [<Test>]
+    member _.``Cycle message from a stale terminal is ignored``() =
+        let updated, cmd =
+            App.update
+                (CycleEmbeddedTerminal(firstOne, CycleDirection.Next))
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(
+                updated.ActiveEmbeddedTerminals,
+                Is.EqualTo(focusModel.ActiveEmbeddedTerminals)
+            )
+            Assert.That(cmd, Is.Empty))
 
     [<Test>]
     member _.``Terminal pane toggle preserves its target while changing visibility``() =

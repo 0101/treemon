@@ -34,7 +34,7 @@ type CycleDirection =
 [<RequireQualifiedAccess>]
 type TerminalShortcut =
     | OpenWorktreeSearch of EmbeddedTerminalId
-    | CycleTerminal of CycleDirection
+    | CycleTerminal of EmbeddedTerminalId * CycleDirection
 
 let private samePath left right =
     Shared.PathUtils.pathEquals
@@ -106,6 +106,33 @@ let cycleTerminal direction selectedWorktree snapshot selections =
             let nextIndex = (currentIndex + offset + tabs.Length) % tabs.Length
             Some(selectTerminal tabs[nextIndex].Id snapshot selections))
     |> Option.defaultValue selections
+
+let cycleTerminalFrom terminalId direction snapshot selections =
+    tryFindTab terminalId snapshot
+    |> Option.bind (fun tab ->
+        if
+            activeTerminalId
+                (Some tab.Worktree)
+                selections
+                snapshot
+            = Some terminalId
+        then
+            let updated =
+                cycleTerminal
+                    direction
+                    (Some tab.Worktree)
+                    snapshot
+                    selections
+
+            Some(
+                updated,
+                activeTerminalId
+                    (Some tab.Worktree)
+                    updated
+                    snapshot
+            )
+        else
+            None)
 
 let private replacementSelection path terminalId before after =
     let afterTabs = tabsForWorktree path after
@@ -181,7 +208,7 @@ let safeEndpoint (endpoint: string) =
 let private terminalFrameId terminalId =
     $"terminal-iframe-{EmbeddedTerminalId.value terminalId}"
 
-let private withTerminalFrame terminalId action =
+let private withTerminalFrame terminalId action onMissing =
     let rec tryResolve remainingAttempts =
         Dom.window?requestAnimationFrame(fun (_: float) ->
             match
@@ -195,7 +222,7 @@ let private withTerminalFrame terminalId action =
                 tryResolve (remainingAttempts - 1)
             | None when remainingAttempts > 1 ->
                 tryResolve (remainingAttempts - 1)
-            | _ -> ())
+            | _ -> onMissing ())
         |> ignore
 
     tryResolve 2
@@ -206,7 +233,10 @@ let private focusTerminalFrame frame =
         "(function(f){f.focus();f.contentWindow.postMessage({action:'focus-terminal'},new URL(f.src,document.baseURI).origin)})($0)"
 
 let focusTerminal terminalId =
-    withTerminalFrame terminalId focusTerminalFrame
+    withTerminalFrame terminalId focusTerminalFrame ignore
+
+let focusTerminalOrElse terminalId onMissing =
+    withTerminalFrame terminalId focusTerminalFrame onMissing
 
 let focusTerminalWhenReady terminalId =
     withTerminalFrame terminalId (fun frame ->
@@ -224,6 +254,7 @@ let focusTerminalWhenReady terminalId =
         |> ignore
 
         focusTerminalFrame frame)
+        ignore
 
 let messageListener (dispatch: TerminalShortcut -> unit) =
     let tryActiveTerminalId (message: MessageEvent) =
@@ -245,8 +276,8 @@ let messageListener (dispatch: TerminalShortcut -> unit) =
                     message.data
                     "$0 != null && typeof $0 === 'object'"
 
-            match safeEndpoint message.origin, isObject, tryActiveTerminalId message with
-            | Some _, true, Some terminalId ->
+            match isObject, tryActiveTerminalId message with
+            | true, Some terminalId ->
                 let action =
                     emitJsExpr<string>
                         message.data
@@ -262,9 +293,19 @@ let messageListener (dispatch: TerminalShortcut -> unit) =
                             "typeof $0.direction === 'string' ? $0.direction : ''"
                     with
                     | "next" ->
-                        dispatch (TerminalShortcut.CycleTerminal CycleDirection.Next)
+                        dispatch (
+                            TerminalShortcut.CycleTerminal(
+                                terminalId,
+                                CycleDirection.Next
+                            )
+                        )
                     | "previous" ->
-                        dispatch (TerminalShortcut.CycleTerminal CycleDirection.Previous)
+                        dispatch (
+                            TerminalShortcut.CycleTerminal(
+                                terminalId,
+                                CycleDirection.Previous
+                            )
+                        )
                     | _ -> ()
                 | _ -> ()
             | _ -> ()

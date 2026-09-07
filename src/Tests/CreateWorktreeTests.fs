@@ -786,6 +786,21 @@ type EnterKeySuppressedWhileModalOpenTests() =
             Assert.That(model.CreateModal, Is.EqualTo(openForm)))
 
     [<Test>]
+    member _.``Create modal does not stack over worktree search``() =
+        let searchOpen =
+            updateModel
+                (WorktreeSearchMsg WorktreeSearch.Msg.Open)
+                defaultModel
+        let model =
+            updateModel
+                (ModalMsg (Modal.OpenCreateWorktree (repoId, [])))
+                searchOpen
+
+        Assert.Multiple(fun () ->
+            Assert.That(WorktreeSearch.isOpen model.WorktreeSearch, Is.True)
+            Assert.That(model.CreateModal, Is.EqualTo(Modal.Closed)))
+
+    [<Test>]
     member _.``Home key while modal is open is suppressed``() =
         let model, _ = update (KeyPressed ("Home", false)) modelWithRepoAndModal
 

@@ -263,11 +263,43 @@ let keyBinding (focused: FocusTarget) (key: string) (model: Model) : Msg option 
     | RepoHeader repoId, "+" -> Some (ModalMsg (CreateWorktreeModal.OpenCreateWorktree (repoId, model.WorktreeSkills)))
     | _ -> None
 
+let private focusDashboardElement () =
+    Dom.document.querySelector ".dashboard"
+    |> Option.ofObj
+    |> Option.iter (fun element -> element?focus())
+
 let private focusDashboard: Cmd<Msg> =
+    Cmd.ofEffect (fun _ -> focusDashboardElement ())
+
+let private focusCanvasOrDashboard: Cmd<Msg> =
     Cmd.ofEffect (fun _ ->
-        Dom.document.querySelector ".dashboard"
-        |> Option.ofObj
-        |> Option.iter (fun el -> el?focus()))
+        if not (CanvasPane.focusActiveDoc ()) then
+            focusDashboardElement ())
+
+let private focusEmbeddedTerminalOrDashboardCmd terminalId =
+    Cmd.ofEffect (fun _ ->
+        TerminalPane.focusTerminalOrElse
+            terminalId
+            focusDashboardElement)
+
+[<RequireQualifiedAccess>]
+type private ActiveOverlay =
+    | WorktreeSearch
+    | Confirmation
+    | CreateWorktree
+
+let private activeOverlay model =
+    if WorktreeSearch.isOpen model.WorktreeSearch then
+        Some ActiveOverlay.WorktreeSearch
+    elif model.ConfirmModal <> ConfirmModal.NoConfirm then
+        Some ActiveOverlay.Confirmation
+    elif CreateWorktreeModal.isOpen model.CreateModal then
+        Some ActiveOverlay.CreateWorktree
+    else
+        None
+
+let private canOpenOverlay model =
+    activeOverlay model |> Option.isNone
 
 /// Expands the owning repository before focus so hidden cards become valid targets; archived paths
 /// remain no-ops because they do not render as focusable dashboard cards.
@@ -585,28 +617,23 @@ let update msg model =
                     model.EmbeddedTerminals
                     model.ActiveEmbeddedTerminals },
         Cmd.none
-    | CycleEmbeddedTerminal direction ->
-        let selectedWorktree =
-            TerminalPane.selectedWorktree
-                model.TerminalPaneTarget
-                model.FocusedElement
-
-        let selections =
-            TerminalPane.cycleTerminal
+    | CycleEmbeddedTerminal (terminalId, direction) ->
+        match
+            TerminalPane.cycleTerminalFrom
+                terminalId
                 direction
-                selectedWorktree
                 model.EmbeddedTerminals
                 model.ActiveEmbeddedTerminals
+        with
+        | Some (selections, terminalToFocus) ->
+            let focusCmd =
+                terminalToFocus
+                |> Option.map focusEmbeddedTerminalCmd
+                |> Option.defaultValue Cmd.none
 
-        let focusCmd =
-            TerminalPane.activeTerminalId
-                selectedWorktree
-                selections
-                model.EmbeddedTerminals
-            |> Option.map focusEmbeddedTerminalCmd
-            |> Option.defaultValue Cmd.none
-
-        { model with ActiveEmbeddedTerminals = selections }, focusCmd
+            { model with ActiveEmbeddedTerminals = selections }, focusCmd
+        | None ->
+            model, Cmd.none
     | CloseEmbeddedTerminal terminalId ->
         let before = model.EmbeddedTerminals
 
@@ -730,6 +757,11 @@ let update msg model =
     | SyncStatusUpdate events ->
         { model with BranchEvents = events }, Cmd.none
 
+    | ConfirmDeleteWorktree _
+    | ConfirmArchiveWorktree _
+        when not (canOpenOverlay model) ->
+        model, Cmd.none
+
     | ConfirmDeleteWorktree scopedKey ->
         match findWorktree scopedKey model with
         | Some wt ->
@@ -743,6 +775,9 @@ let update msg model =
         | Some wt ->
             model, Cmd.ofMsg (ArchiveMsg (ArchiveViews.Archive wt.Path))
         | None -> model, Cmd.none
+
+    | ConfirmMsg _ when activeOverlay model <> Some ActiveOverlay.Confirmation ->
+        model, Cmd.none
 
     | ConfirmMsg confirmMsg ->
         let confirmModal, action = ConfirmModal.update confirmMsg
@@ -853,6 +888,11 @@ let update msg model =
         let refreshCmd = if result.RefreshWorktrees then fetchWorktrees () else Cmd.none
         model, Cmd.batch [ Cmd.map ArchiveMsg archiveCmd; refreshCmd ]
 
+    | ModalMsg modalMsg
+        when CreateWorktreeModal.isOpenRequest modalMsg
+             && not (canOpenOverlay model) ->
+        model, Cmd.none
+
     | ModalMsg modalMsg ->
         let result, modalCmd = CreateWorktreeModal.update worktreeApi modalMsg model.CreateModal
         let focus = result.RestoredFocus |> Option.orElse model.FocusedElement
@@ -866,8 +906,7 @@ let update msg model =
 
     | WorktreeSearchMsg searchMsg
         when WorktreeSearch.isOpenRequest searchMsg
-             && (model.ConfirmModal <> ConfirmModal.NoConfirm
-                 || CreateWorktreeModal.isOpen model.CreateModal) ->
+             && not (canOpenOverlay model) ->
         model, Cmd.none
 
     | WorktreeSearchMsg searchMsg ->
@@ -879,11 +918,17 @@ let update msg model =
         match action with
         | WorktreeSearch.Action.NoAction ->
             updated, Cmd.none
+        | WorktreeSearch.Action.RevealSelection ->
+            updated,
+            Cmd.ofEffect (fun _ ->
+                WorktreeSearch.scrollSelectedIntoView ())
         | WorktreeSearch.Action.RestoreFocus WorktreeSearch.ReturnFocus.Dashboard ->
             updated, focusDashboard
+        | WorktreeSearch.Action.RestoreFocus WorktreeSearch.ReturnFocus.Canvas ->
+            updated, focusCanvasOrDashboard
         | WorktreeSearch.Action.RestoreFocus
             (WorktreeSearch.ReturnFocus.EmbeddedTerminal terminalId) ->
-            updated, focusEmbeddedTerminalCmd terminalId
+            updated, focusEmbeddedTerminalOrDashboardCmd terminalId
         | WorktreeSearch.Action.FocusWorktree path ->
             let focused, focusCmd =
                 focusWorktreeCard (WorktreePath.value path) updated
@@ -893,18 +938,20 @@ let update msg model =
     | KeyPressed (key, hasModifier) ->
         let scrollToFocus hint newFocus =
             Cmd.ofEffect (fun _ -> scrollFocusedIntoView hint newFocus)
-        if WorktreeSearch.isOpen model.WorktreeSearch then
+
+        match activeOverlay model with
+        | Some ActiveOverlay.WorktreeSearch ->
             match key with
             | "Escape" ->
                 model,
                 Cmd.ofMsg (WorktreeSearchMsg WorktreeSearch.Msg.Close)
             | _ -> model, Cmd.none
-        elif model.ConfirmModal <> ConfirmModal.NoConfirm then
+        | Some ActiveOverlay.Confirmation ->
             match key with
             | "Escape" ->
                 { model with ConfirmModal = ConfirmModal.NoConfirm }, focusDashboard
             | _ -> model, Cmd.none
-        elif CreateWorktreeModal.isOpen model.CreateModal then
+        | Some ActiveOverlay.CreateWorktree ->
             match key with
             | "Escape" ->
                 let restoredFocus =
@@ -914,40 +961,41 @@ let update msg model =
                 { model with CreateModal = CreateWorktreeModal.Closed; FocusedElement = restoredFocus },
                 focusDashboard
             | _ -> model, Cmd.none
-        else
-        let focusWithRetarget newFocus scrollHint extra =
-            let m, retargetCmd = CanvasUpdate.applyFocus true newFocus model
-            m, Cmd.batch (extra @ [ retargetCmd; scrollToFocus scrollHint newFocus ])
-        match key with
-        | "Escape" when Option.isSome model.SelectedOverviewGroup ->
-            // Esc closes the drill-down breakdown panel when a group is selected.
-            { model with SelectedOverviewGroup = None }, Cmd.none
-        | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
-            let cols = getColumnCount ()
-            let newFocus, navAction, scrollHint = navigateSpatial key cols model.Repos model.FocusedElement
-            let actionCmd =
-                match navAction with
-                | NoAction -> Cmd.none
-                | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
-                | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
-            focusWithRetarget newFocus scrollHint [ actionCmd ]
-        | "Home" ->
-            focusWithRetarget (navigateToFirst model.Repos) ScrollToTop []
-        | "End" ->
-            focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
-        | "Escape" ->
-            let newFocus = reclaimFocusTarget model.Repos model.FocusedElement
-            { model with FocusedElement = newFocus },
-            Cmd.batch [ focusDashboard; scrollToFocus Normal newFocus ]
-        | _ when hasModifier ->
-            model, Cmd.none
-        | _ ->
-            match model.FocusedElement with
-            | None -> model, Cmd.none
-            | Some focused ->
-                match keyBinding focused key model with
-                | Some action -> model, Cmd.ofMsg action
+        | None ->
+            let focusWithRetarget newFocus scrollHint extra =
+                let m, retargetCmd = CanvasUpdate.applyFocus true newFocus model
+                m, Cmd.batch (extra @ [ retargetCmd; scrollToFocus scrollHint newFocus ])
+
+            match key with
+            | "Escape" when Option.isSome model.SelectedOverviewGroup ->
+                // Esc closes the drill-down breakdown panel when a group is selected.
+                { model with SelectedOverviewGroup = None }, Cmd.none
+            | "ArrowDown" | "ArrowUp" | "ArrowLeft" | "ArrowRight" ->
+                let cols = getColumnCount ()
+                let newFocus, navAction, scrollHint = navigateSpatial key cols model.Repos model.FocusedElement
+                let actionCmd =
+                    match navAction with
+                    | NoAction -> Cmd.none
+                    | CollapseRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
+                    | ExpandRepo repoId -> Cmd.ofMsg (ToggleCollapse repoId)
+                focusWithRetarget newFocus scrollHint [ actionCmd ]
+            | "Home" ->
+                focusWithRetarget (navigateToFirst model.Repos) ScrollToTop []
+            | "End" ->
+                focusWithRetarget (navigateToLast model.Repos) ScrollToBottom []
+            | "Escape" ->
+                let newFocus = reclaimFocusTarget model.Repos model.FocusedElement
+                { model with FocusedElement = newFocus },
+                Cmd.batch [ focusDashboard; scrollToFocus Normal newFocus ]
+            | _ when hasModifier ->
+                model, Cmd.none
+            | _ ->
+                match model.FocusedElement with
                 | None -> model, Cmd.none
+                | Some focused ->
+                    match keyBinding focused key model with
+                    | Some action -> model, Cmd.ofMsg action
+                    | None -> model, Cmd.none
 
     | ToggleCanvasPane -> CanvasUpdate.toggleCanvasPane model
 
@@ -1142,7 +1190,14 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         let handler =
             fun (e: Browser.Types.Event) ->
                 let ke = e :?> Browser.Types.KeyboardEvent
-                if WorktreeSearch.isOpenShortcut ke.key ke.ctrlKey ke.metaKey ke.altKey then
+                if
+                    canOpenOverlay model
+                    && WorktreeSearch.isOpenShortcut
+                        ke.key
+                        ke.ctrlKey
+                        ke.metaKey
+                        ke.altKey
+                then
                     ke.preventDefault()
                     dispatch (WorktreeSearchMsg WorktreeSearch.Msg.Open)
                 elif ke.key = "Escape" then
@@ -1161,8 +1216,8 @@ let appSubscriptions (model: Model) : Sub<Msg> =
                         WorktreeSearch.Msg.OpenFromTerminal terminalId
                     )
                 )
-            | TerminalPane.TerminalShortcut.CycleTerminal direction ->
-                dispatch (CycleEmbeddedTerminal direction))
+            | TerminalPane.TerminalShortcut.CycleTerminal (terminalId, direction) ->
+                dispatch (CycleEmbeddedTerminal(terminalId, direction)))
 
     let overviewSticky (dispatch: Dispatch<Msg>) =
         OverviewBand.observePinnedState (SetOverviewAgentsStuck >> dispatch)
@@ -1172,7 +1227,8 @@ let appSubscriptions (model: Model) : Sub<Msg> =
           [ "activity" ], ActivityUpdate.activityDetection
           [ "canvas-messages" ], CanvasUpdate.messageListener
           [ "terminal-shortcuts" ], terminalShortcuts
-          [ "global-keyboard" ], globalKeyboard ]
+          [ "global-keyboard"; if canOpenOverlay model then "enabled" else "blocked" ],
+          globalKeyboard ]
 
     let subs =
         if model.OverviewPanelOpen && OverviewBand.hasAgentGroups model.Repos then
@@ -1416,12 +1472,18 @@ let view model dispatch =
 
                 OverviewViews.schedulerFooter model.Repos model.SchedulerEvents model.LatestByCategory
 
-                WorktreeSearch.view
-                    (WorktreeSearchMsg >> dispatch)
-                    model.Repos
-                    model.WorktreeSearch
-                CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
-                ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
+                match activeOverlay model with
+                | Some ActiveOverlay.WorktreeSearch ->
+                    WorktreeSearch.view
+                        (WorktreeSearchMsg >> dispatch)
+                        model.Repos
+                        model.WorktreeSearch
+                | Some ActiveOverlay.CreateWorktree ->
+                    CreateWorktreeModal.view (ModalMsg >> dispatch) model.CreateModal
+                | Some ActiveOverlay.Confirmation ->
+                    ConfirmModal.view (ConfirmMsg >> dispatch) model.ConfirmModal
+                | None ->
+                    Html.none
             ]
         ]
 

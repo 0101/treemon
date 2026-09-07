@@ -278,12 +278,12 @@ let private linkInterceptor =
 let private globalKeyboardScript =
     [ "<script>document.addEventListener('keydown',function(e){"
       "var search=(e.ctrlKey||e.metaKey)&&!e.altKey&&e.key.toLowerCase()==='p';"
-      "if(search){e.preventDefault();parent.postMessage({action:'open-worktree-search'},'*');return}"
+      "if(search){e.preventDefault();e.stopImmediatePropagation();parent.postMessage({action:'open-worktree-search'},'*');return}"
       "if(e.key!=='Escape')return;"
       "var p=e.composedPath?e.composedPath():[e.target];"
       "if(p.some(function(t){if(!t)return false;var n=(t.tagName||'').toUpperCase();"
       "return n==='INPUT'||n==='TEXTAREA'||n==='SELECT'||t.isContentEditable}))return;"
-      "parent.postMessage({action:'reclaim-focus'},'*')})</script>" ]
+      "parent.postMessage({action:'reclaim-focus'},'*')},true)</script>" ]
     |> String.concat ""
     |> markTreemonRuntimeScript
 
@@ -368,8 +368,8 @@ let private errorOverlayScript (filename: string) =
     |> markTreemonRuntimeScript
 
 /// Choose the style/script injection for a served canvas doc based on its kind.
-/// Both kinds get baseStyle, link interception, Escape focus reclaim, canvasSend, and the generic
-/// selected-text contextual actions. AgentDocs additionally get the message-bridge heartbeat,
+/// Both kinds get baseStyle, link interception, the global Ctrl+P/Escape keyboard bridge,
+/// canvasSend, and the generic selected-text contextual actions. AgentDocs additionally get the message-bridge heartbeat,
 /// canvasExpand helper, JS error overlay, and the idiomorph runtime + morph controller.
 /// Every Treemon-owned script carries data-treemon-runtime so the morph controller can distinguish
 /// injected helpers from authored executable scripts when choosing between a body morph and reload.

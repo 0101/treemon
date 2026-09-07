@@ -590,4 +590,4 @@ let messageListener (dispatch: Dispatch<Msg>) =
           OnMalformedMessage = fun () -> dispatch CanvasMalformedDocMessage
           OnReclaimFocus = fun () -> dispatch (KeyPressed ("Escape", false))
           OnOpenWorktreeSearch = fun () ->
-              dispatch (WorktreeSearchMsg WorktreeSearch.Msg.Open) }
+              dispatch (WorktreeSearchMsg WorktreeSearch.Msg.OpenFromCanvas) }

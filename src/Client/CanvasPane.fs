@@ -86,6 +86,16 @@ let iframeSrc (wt: WorktreeStatus) (doc: CanvasDoc) =
 let openDocInBrowserTab (wt: WorktreeStatus) (doc: CanvasDoc) : unit =
     Fable.Core.JsInterop.emitJsExpr (iframeSrc wt doc) "window.open($0,'_blank','noopener')"
 
+let focusActiveDoc () =
+    Dom.document.querySelector ".canvas-iframe-active"
+    |> Option.ofObj
+    |> Option.map (fun iframe ->
+        Fable.Core.JsInterop.emitJsExpr<unit>
+            iframe
+            "(function(f){f.focus();if(f.contentWindow)f.contentWindow.focus()})($0)"
+        true)
+    |> Option.defaultValue false
+
 /// Render a SystemView entry for the tab strip. SystemViews are deliberately not normal AgentDoc
 /// tabs: they use a distinct class, carry no liveness dot, and retain the shared double-click
 /// affordance for opening the exact iframe URL in a standalone browser tab.

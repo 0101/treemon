@@ -790,6 +790,20 @@ type CanvasAuthoringDxPaneE2ETests() =
                 )
 
             Assert.That(focused, Is.True, "The active canvas doc should open and focus worktree search")
+
+            do! searchInput.PressAsync("Escape")
+            do!
+                searchInput.WaitForAsync(
+                    LocatorWaitForOptions(
+                        State = WaitForSelectorState.Hidden,
+                        Timeout = 3000.0f
+                    )
+                )
+            let! canvasFocused =
+                this.Page.EvaluateAsync<bool>(
+                    "() => document.activeElement === document.querySelector('.canvas-iframe-active')"
+                )
+            Assert.That(canvasFocused, Is.True, "Closing Canvas-originated search should restore Canvas focus")
         }
 
 
@@ -873,6 +887,32 @@ type CanvasGlobalKeyboardBridgeE2ETests() =
             Assert.Multiple(fun () ->
                 Assert.That(searches, Is.EqualTo(1), "Ctrl+P must remain global inside canvas inputs")
                 Assert.That(reclaims, Is.Zero, "Ctrl+P must not also trigger focus reclaim"))
+        }
+
+    [<Test>]
+    member this.``Canvas-local handlers cannot block global Ctrl P``() =
+        task {
+            do! this.ServeDoc()
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => { window.__localKeys = []; document.getElementById('field').addEventListener('keydown', function(e){ window.__localKeys.push(e.key); e.stopPropagation(); }); }"
+                )
+            do! this.Page.Locator("#field").FocusAsync()
+            do! this.Page.Keyboard.PressAsync("Control+P")
+            do! this.Settle()
+            let! searches = this.Page.EvaluateAsync<int>("() => window.__searches")
+            let! localHandledSearch =
+                this.Page.EvaluateAsync<bool>(
+                    "() => window.__localKeys.some(key => key.toLowerCase() === 'p')"
+                )
+
+            Assert.Multiple(fun () ->
+                Assert.That(searches, Is.EqualTo(1))
+                Assert.That(
+                    localHandledSearch,
+                    Is.False,
+                    "The capture-phase bridge should stop handled Ctrl+P before local handlers"
+                ))
         }
 
     [<Test>]
