@@ -23,29 +23,19 @@ module internal TerminalProxy =
     let [<Literal>] private HiddenViewportScrollbarStyle =
         "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
     let [<Literal>] private TerminalVisibleAction = "treemon-terminal-visible"
-    let [<Literal>] private ReconnectPrompt = "Press \\u23ce to Reconnect"
+    let [<Literal>] private ReconnectPrompt = "Press \u23ce to Reconnect"
+    let [<Literal>] private ReconnectObservationMilliseconds = 2_000
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
-    let private reconnectWhenVisibleScript allowedOrigins =
+    let private reconnectWhenVisibleScript (allowedOrigins: string list) =
         let serializedOrigins = JsonSerializer.Serialize allowedOrigins
+        let serializedAction = JsonSerializer.Serialize TerminalVisibleAction
+        let serializedPrompt = JsonSerializer.Serialize ReconnectPrompt
 
-        [ "<script>(function(){"
-          $"var allowedOrigins={serializedOrigins};"
-          $"var action='{TerminalVisibleAction}';"
-          $"var reconnectPrompt='{ReconnectPrompt}';"
-          "function isWaitingForReconnect(){"
-          "var terminal=document.querySelector('.xterm');"
-          "return !!terminal&&Array.prototype.some.call(terminal.children,function(child){"
-          "return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt});}"
-          "window.addEventListener('message',function(event){"
-          "if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;"
-          "if(isWaitingForReconnect())window.location.reload();"
-          "});"
-          "})();</script>" ]
-        |> String.concat ""
+        $"<script>(function(){{var allowedOrigins={serializedOrigins},action={serializedAction},reconnectPrompt={serializedPrompt},observer=null,deadline=null;function clearPending(){{if(observer){{observer.disconnect();observer=null}}if(deadline!==null){{clearTimeout(deadline);deadline=null}}}}function isWaitingForReconnect(){{var terminal=document.querySelector('.xterm');return !!terminal&&Array.prototype.some.call(terminal.children,function(child){{return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt}})}}function reconnectIfWaiting(){{if(!isWaitingForReconnect())return false;clearPending();window.location.reload();return true}}function activate(){{if(reconnectIfWaiting()||observer)return;var terminal=document.querySelector('.xterm');if(!terminal)return;observer=new MutationObserver(reconnectIfWaiting);observer.observe(terminal,{{childList:true}});deadline=setTimeout(clearPending,{ReconnectObservationMilliseconds})}}window.addEventListener('message',function(event){{if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;activate()}})}})();</script>"
 
-    let internal decorateTerminalPage allowedOrigins (html: string) =
+    let internal decorateTerminalPage (allowedOrigins: string list) (html: string) =
         let injection =
             HiddenViewportScrollbarStyle
             + reconnectWhenVisibleScript allowedOrigins

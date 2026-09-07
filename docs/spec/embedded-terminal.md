@@ -79,12 +79,13 @@ as the **Canvas** control. Middle-clicking a tab invokes the same exact-terminal
 close button.
 
 When a running terminal becomes visible through pane open, tab selection, or worktree selection,
-the client sends one exact-origin activation message to that iframe. It repeats the signal when the
-top-level document becomes visible or focused after an interruption such as RDP reconnect. The
-terminal page accepts the message only from its parent and a configured dashboard origin, then
-reloads only while ttyd's exact manual reconnect overlay is present. Healthy shell prompts,
-partially typed commands, password prompts, and full-screen applications receive no input and are
-not reloaded.
+the client routes one activation through Elmish and sends an exact-origin message to that iframe
+after its visible DOM state has committed. It repeats the signal when the top-level document becomes
+visible or focused after an interruption such as RDP reconnect. The terminal page accepts the
+message only from its parent and a configured dashboard origin. It reloads immediately when ttyd's
+exact manual reconnect overlay is present, or observes that exact overlay for a short bounded period
+when the transport-close event trails the visibility signal. Healthy shell prompts, partially typed
+commands, password prompts, and full-screen applications receive no input and are not reloaded.
 
 ### Launch routing and command startup
 
@@ -361,6 +362,9 @@ loopback, exact Host/Origin, bearer, and request-size checks as the control API.
 Every attachment HTTP response limits framing through a `Content-Security-Policy: frame-ancestors`
 directive built from the validated dashboard origins, or `'none'` when none are configured. A
 missing `Origin` remains valid for authenticated loopback non-browser protocol requests.
+Allowed dashboard values are canonical browser origins: loopback HTTP(S) authorities with no user
+information, path, query, or fragment. The same normalized values drive request checks, CSP, and
+the terminal document's exact message-origin comparison.
 The proxy decorates ttyd's root HTML response with a small style that hides the native
 `.xterm-viewport` scrollbar without changing its overflow or scrollback, plus the activation
 listener that recognizes ttyd 1.7.7's manual reconnect overlay. The terminal document is a separate
@@ -384,9 +388,9 @@ while replacement runs asynchronously, then alone applies the replacement's regi
 The client stores active terminal IDs and in-flight start state per worktree. Registry refreshes
 retain exact selections while IDs remain valid, choose the same-worktree neighbor after a close,
 and preserve the selected sibling ordinal across replacement. A subscription keyed by the active
-terminal ID and safe endpoint origin owns browser activation. It exists only while a running
-terminal is visible, resolves the iframe after React commits it, and rechecks that it is still the
-active unhidden frame before posting.
+terminal ID and safe endpoint origin reports visibility triggers through Elmish. The resulting
+command retries for a small bounded number of animation frames until React has committed the active
+unhidden iframe, then posts only while that terminal and pane remain visible.
 Development startup passes its actual Vite port through `--dashboard-port`; `Program` expands that
 port into the loopback dashboard origins supplied to `EmbeddedTerminal`. Production omits the
 option and allows only the configured server origin aliases, so the terminal client never infers a

@@ -31,10 +31,29 @@ async function freePort() {
   });
 }
 
-async function launchDashboardServer() {
+export async function launchDashboardServer() {
   let terminalEndpoint;
+  let expectedHost;
 
-  const server = createHttpServer((_, response) => {
+  const server = createHttpServer((request, response) => {
+    if (request.headers.host !== expectedHost) {
+      response.writeHead(400, { "Content-Type": "text/plain" });
+      response.end("Invalid Host");
+      return;
+    }
+    if (request.method !== "GET") {
+      response.writeHead(405, {
+        "Content-Type": "text/plain",
+        Allow: "GET",
+      });
+      response.end("Method Not Allowed");
+      return;
+    }
+    if (request.url !== "/") {
+      response.writeHead(404, { "Content-Type": "text/plain" });
+      response.end("Not Found");
+      return;
+    }
     if (!terminalEndpoint) {
       response.writeHead(503, { "Content-Type": "text/plain" });
       response.end("Terminal endpoint is not ready");
@@ -47,12 +66,14 @@ async function launchDashboardServer() {
     );
   });
 
-  await new Promise((resolveListen, reject) => {
+  const port = await new Promise((resolveListen, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolveListen);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      expectedHost = `127.0.0.1:${address.port}`;
+      resolveListen(address.port);
+    });
   });
-
-  const { port } = server.address();
 
   return {
     origin: `http://127.0.0.1:${port}`,
@@ -240,6 +261,21 @@ function terminalText() {
   ).join("\n");
 }
 
+async function waitForTerminalText(frame, expectedText) {
+  await frame.waitForFunction(
+    (expected) => {
+      const buffer = window.term.buffer.active;
+      return Array.from(
+        { length: buffer.length },
+        (_, index) => buffer.getLine(index)?.translateToString(true) ?? "",
+      )
+        .join("\n")
+        .includes(expected);
+    },
+    expectedText,
+  );
+}
+
 async function postTerminalVisible(page, endpoint) {
   await page.evaluate(
     ({ action, origin }) => {
@@ -391,18 +427,7 @@ export async function runTtydRuntimeVerification() {
       { encodedMarker: Buffer.from(marker, "utf8").toString("base64") },
     );
 
-    await terminalFrame.waitForFunction(
-      (expectedMarker) => {
-        const buffer = window.term.buffer.active;
-        return Array.from(
-          { length: buffer.length },
-          (_, index) => buffer.getLine(index)?.translateToString(true) ?? "",
-        )
-          .join("\n")
-          .includes(expectedMarker);
-      },
-      marker,
-    );
+    await waitForTerminalText(terminalFrame, marker);
     const text = await terminalFrame.evaluate(terminalText);
     assert(
       text.includes(basename(fixture)),
@@ -444,37 +469,18 @@ export async function runTtydRuntimeVerification() {
       () => document.querySelector(".xterm-viewport").scrollTop > 0,
     );
 
-    const replacementPage = await browser.newPage();
-    await replacementPage.goto(terminal.attachmentEndpoint);
-    await replacementPage.waitForFunction(
-      () => Boolean(window.term && document.querySelector(".xterm-helper-textarea")),
-    );
-
-    await terminalFrame.waitForFunction(
-      (prompt) => {
-        const terminalElement = document.querySelector(".xterm");
-        return (
-          terminalElement &&
-          Array.from(terminalElement.children).some(
-            (child) =>
-              child.tagName === "DIV" &&
-              child.style.position === "absolute" &&
-              child.textContent === prompt,
-          )
-        );
-      },
-      reconnectPrompt,
-    );
-
     const reconnectNavigation = terminalFrame.waitForNavigation({
       waitUntil: "load",
       timeout: 10_000,
     });
     await postTerminalVisible(page, terminal.attachmentEndpoint);
-    await reconnectNavigation;
-    await terminalFrame.waitForFunction(
+    const replacementPage = await browser.newPage();
+    await replacementPage.goto(terminal.attachmentEndpoint);
+    await replacementPage.waitForFunction(
       () => Boolean(window.term && document.querySelector(".xterm-helper-textarea")),
     );
+    await reconnectNavigation;
+    await waitForTerminalText(terminalFrame, marker);
     const replayedText = await terminalFrame.evaluate(terminalText);
     assert(
       replayedText.includes(marker),

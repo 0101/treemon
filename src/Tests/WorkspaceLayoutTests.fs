@@ -770,7 +770,14 @@ type TerminalPaneDomTests() =
                     StringComparison.Ordinal
                 )
 
-            let secondBrowserFrame =
+            let alternateBrowserFrame =
+                this.Page.Frames
+                |> Seq.find _.Url.StartsWith(
+                    "http://127.0.0.1:61237/",
+                    StringComparison.Ordinal
+                )
+
+            let otherWorktreeFrame =
                 this.Page.Frames
                 |> Seq.find _.Url.StartsWith(
                     "http://127.0.0.1:61235/",
@@ -788,23 +795,40 @@ type TerminalPaneDomTests() =
                 firstBrowserFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
                 )
-            let! secondBefore =
-                secondBrowserFrame.EvaluateAsync<int>(
+            let! alternateBefore =
+                alternateBrowserFrame.EvaluateAsync<int>(
+                    "() => window.__terminalVisibleMessages"
+                )
+            let! otherWorktreeBefore =
+                otherWorktreeFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
                 )
 
-            do! focusCanvasCard this.Page "feature-recent"
+            registry <-
+                { Tabs =
+                    registry.Tabs
+                    |> List.filter (fun tab ->
+                        tab.Id <> firstTerminalId) }
 
             let waitForNext expected =
-                secondBrowserFrame.WaitForFunctionAsync(
+                alternateBrowserFrame.WaitForFunctionAsync(
                     $"() => window.__terminalVisibleMessages > {expected}",
                     (null :> obj),
                     FrameWaitForFunctionOptions(Timeout = 5000.0f)
                 )
 
-            let! _ = waitForNext secondBefore
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    $"""() => document.querySelector('.terminal-iframe-active')
+                        ?.getAttribute('data-terminal-id') ===
+                        '{EmbeddedTerminalId.value firstAlternateTerminalId}'""",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f)
+                )
+
+            let! _ = waitForNext alternateBefore
             let! afterSelection =
-                secondBrowserFrame.EvaluateAsync<int>(
+                alternateBrowserFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
                 )
 
@@ -815,7 +839,7 @@ type TerminalPaneDomTests() =
 
             let! _ = waitForNext afterSelection
             let! afterVisibility =
-                secondBrowserFrame.EvaluateAsync<int>(
+                alternateBrowserFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
                 )
 
@@ -826,7 +850,7 @@ type TerminalPaneDomTests() =
 
             let! _ = waitForNext afterVisibility
             let! afterFocus =
-                secondBrowserFrame.EvaluateAsync<int>(
+                alternateBrowserFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
                 )
 
@@ -845,15 +869,17 @@ type TerminalPaneDomTests() =
             do! terminalToggle.ClickAsync()
 
             let! _ = waitForNext afterFocus
-            let! firstAfter =
-                firstBrowserFrame.EvaluateAsync<int>(
+            let! otherWorktreeAfter =
+                otherWorktreeFrame.EvaluateAsync<int>(
                     "() => window.__terminalVisibleMessages"
                 )
 
             Assert.Multiple(fun () ->
-                Assert.That(secondBefore, Is.Zero)
-                Assert.That(firstAfter, Is.EqualTo(firstBefore))
-                Assert.That(afterSelection, Is.GreaterThan(secondBefore))
+                Assert.That(firstBefore, Is.GreaterThanOrEqualTo(1))
+                Assert.That(alternateBefore, Is.Zero)
+                Assert.That(otherWorktreeBefore, Is.Zero)
+                Assert.That(otherWorktreeAfter, Is.EqualTo(otherWorktreeBefore))
+                Assert.That(afterSelection, Is.GreaterThan(alternateBefore))
                 Assert.That(afterVisibility, Is.GreaterThan(afterSelection))
                 Assert.That(afterFocus, Is.GreaterThan(afterVisibility)))
         }

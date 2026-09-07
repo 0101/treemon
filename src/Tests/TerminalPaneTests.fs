@@ -426,6 +426,20 @@ type TerminalFocusTests() =
             ))
 
     [<Test>]
+    member _.``Terminal visibility notification is routed through one command``() =
+        let updated, cmd =
+            App.update
+                (NotifyEmbeddedTerminalVisible(
+                    firstTwo,
+                    "http://127.0.0.1:61232"
+                ))
+                focusModel
+
+        Assert.Multiple(fun () ->
+            Assert.That(updated, Is.EqualTo(focusModel))
+            Assert.That(List.length cmd, Is.EqualTo(1)))
+
+    [<Test>]
     member _.``Open embedded terminal reuses the selected worktree terminal``() =
         let model =
             { focusModel with

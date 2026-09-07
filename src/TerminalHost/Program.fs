@@ -3,7 +3,6 @@ namespace TerminalHost
 open System
 open System.Diagnostics
 open System.IO
-open System.Net
 open System.Reflection
 open System.Threading
 open System.Threading.Tasks
@@ -16,32 +15,6 @@ type private HostConfig =
 
 [<RequireQualifiedAccess>]
 module private HostConfig =
-    let private parseOrigin value =
-        // Uri.TryCreate is a byref-only framework parser; mutation stays at this boundary.
-        let mutable uri = Unchecked.defaultof<Uri>
-        let parsed = Uri.TryCreate(value, UriKind.Absolute, &uri)
-
-        let loopbackHost =
-            if not parsed then
-                false
-            else
-                match IPAddress.TryParse uri.Host with
-                | true, address -> IPAddress.IsLoopback address
-                | false, _ ->
-                    String.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
-
-        if
-            parsed
-            && (uri.Scheme = Uri.UriSchemeHttp || uri.Scheme = Uri.UriSchemeHttps)
-            && loopbackHost
-            && uri.AbsolutePath = "/"
-            && String.IsNullOrEmpty uri.Query
-            && String.IsNullOrEmpty uri.Fragment
-        then
-            Ok(uri.GetLeftPart(UriPartial.Authority))
-        else
-            Error $"Invalid allowed origin '{value}'"
-
     let parse arguments =
         let initial =
             { Control =
@@ -79,9 +52,9 @@ module private HostConfig =
             | "--shell" :: value :: tail when not (String.IsNullOrWhiteSpace value) ->
                 collect { config with TerminalLaunch.ShellCommand = value } tail
             | "--allowed-origin" :: value :: tail ->
-                match parseOrigin value with
-                | Error error -> Error error
-                | Ok origin ->
+                match RequestSecurity.tryAllowedOrigin value with
+                | None -> Error $"Invalid allowed origin '{value}'"
+                | Some origin ->
                     collect
                         { config with
                             Control.AllowedOrigins =

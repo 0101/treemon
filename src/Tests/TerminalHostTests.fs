@@ -1575,6 +1575,10 @@ type TerminalHostProxyTests() =
 
         let decorated =
             TerminalProxy.decorateTerminalPage allowedOrigins html
+        let serializedAction =
+            JsonSerializer.Serialize TerminalPane.TerminalVisibleAction
+        let serializedPrompt =
+            JsonSerializer.Serialize "Press \u23ce to Reconnect"
 
         Assert.Multiple(fun () ->
             Assert.That(
@@ -1590,7 +1594,11 @@ type TerminalHostProxyTests() =
             Assert.That(decorated, Does.Contain("overflow-y:scroll"))
             Assert.That(
                 decorated,
-                Does.Contain(TerminalPane.TerminalVisibleAction)
+                Does.Contain($"action={serializedAction}")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain($"reconnectPrompt={serializedPrompt}")
             )
             Assert.That(
                 decorated,
@@ -1614,7 +1622,15 @@ type TerminalHostProxyTests() =
             )
             Assert.That(
                 decorated,
-                Does.Contain("if(isWaitingForReconnect())window.location.reload()")
+                Does.Contain("observer=new MutationObserver(reconnectIfWaiting)")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("deadline=setTimeout(clearPending,2000)")
+            )
+            Assert.That(
+                decorated,
+                Does.Contain("clearPending();window.location.reload();return true")
             )
 
             Assert.That(
@@ -1862,6 +1878,26 @@ type TerminalHostCommandLifetimeTests() =
 [<Category("Fast")>]
 [<Category("TerminalHost")>]
 type TerminalHostSecurityTests() =
+    [<TestCase("http://localhost:5174/", "http://localhost:5174")>]
+    [<TestCase("http://127.0.0.1:5174", "http://127.0.0.1:5174")>]
+    member _.``allowed origins normalize to exact browser origins``(
+        value: string,
+        expected: string
+    ) =
+        Assert.That(
+            RequestSecurity.tryAllowedOrigin value,
+            Is.EqualTo(Some expected)
+        )
+
+    [<TestCase("http://user@localhost:5174/")>]
+    [<TestCase("http://localhost:5174/path")>]
+    [<TestCase("http://localhost:5174/?query=true")>]
+    member _.``allowed origins reject non-origin URI components``(value: string) =
+        Assert.That(
+            RequestSecurity.tryAllowedOrigin value,
+            Is.EqualTo(None)
+        )
+
     [<Test>]
     member _.``non-loopback peer is rejected even with valid host origin and token``() =
         let metadata =

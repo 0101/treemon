@@ -204,23 +204,24 @@ let focusTerminalWhenReady terminalId =
 
         frame.focus ())
 
-let private notifyVisibleTerminal terminalId origin =
-    withTerminalFrame terminalId (fun frame ->
-        Fable.Core.JsInterop.emitJsExpr
-            (frame, origin, TerminalVisibleAction)
-            "(function(f,origin,action){var pane=f.closest('.terminal-pane');if(f.contentWindow&&!f.hidden&&f.classList.contains('terminal-iframe-active')&&pane&&!pane.hidden){f.contentWindow.postMessage({action:action},origin)}})($0,$1,$2)")
+let notifyVisibleTerminal terminalId origin =
+    let rec tryNotify remainingAttempts =
+        Dom.window?requestAnimationFrame(fun (_: float) ->
+            let notified =
+                Dom.document.getElementById(terminalFrameId terminalId)
+                |> Option.ofObj
+                |> Option.exists (fun frame ->
+                    Fable.Core.JsInterop.emitJsExpr<bool>
+                        (frame, origin, TerminalVisibleAction)
+                        "(function(f,origin,action){var pane=f.closest('.terminal-pane');if(!f.contentWindow||f.hidden||!f.classList.contains('terminal-iframe-active')||!pane||pane.hidden)return false;f.contentWindow.postMessage({action:action},origin);return true})($0,$1,$2)")
 
-let observeVisibleTerminal terminalId origin =
-    let notify () = notifyVisibleTerminal terminalId origin
+            if not notified && remainingAttempts > 1 then
+                tryNotify (remainingAttempts - 1))
+        |> ignore
 
-    let loadHandler =
-        fun (event: Event) ->
-            let loadedFrameId =
-                Fable.Core.JsInterop.emitJsExpr<string> event
-                    "($0.target&&$0.target.id)||''"
+    tryNotify 3
 
-            if loadedFrameId = terminalFrameId terminalId then
-                notify ()
+let observeVisibleTerminal notify =
 
     let visibilityHandler =
         fun (_: Event) ->
@@ -232,13 +233,11 @@ let observeVisibleTerminal terminalId origin =
 
     notify ()
 
-    Dom.document.addEventListener("load", loadHandler, true)
     Dom.document.addEventListener("visibilitychange", visibilityHandler)
     Dom.window.addEventListener("focus", focusHandler)
 
     { new IDisposable with
         member _.Dispose() =
-            Dom.document.removeEventListener("load", loadHandler, true)
             Dom.document.removeEventListener("visibilitychange", visibilityHandler)
             Dom.window.removeEventListener("focus", focusHandler) }
 

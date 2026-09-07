@@ -238,6 +238,10 @@ let private focusEmbeddedTerminalWhenReadyCmd terminalId =
     Cmd.ofEffect (fun _ ->
         TerminalPane.focusTerminalWhenReady terminalId)
 
+let private notifyEmbeddedTerminalVisibleCmd terminalId origin =
+    Cmd.ofEffect (fun _ ->
+        TerminalPane.notifyVisibleTerminal terminalId origin)
+
 let private launchEmbeddedTerminalCmd path start =
     Cmd.batch [
         Cmd.OfAsync.either
@@ -565,6 +569,11 @@ let update msg model =
                     model.EmbeddedTerminals
                     model.ActiveEmbeddedTerminals },
         Cmd.none
+    | NotifyEmbeddedTerminalVisible(terminalId, origin) ->
+        model,
+        notifyEmbeddedTerminalVisibleCmd
+            terminalId
+            origin
     | CloseEmbeddedTerminal terminalId ->
         let before = model.EmbeddedTerminals
 
@@ -1136,10 +1145,14 @@ let appSubscriptions (model: Model) : Sub<Msg> =
         ([ "terminal-visible"
            EmbeddedTerminalId.value terminalId
            origin ],
-         fun _ ->
-             TerminalPane.observeVisibleTerminal
-                 terminalId
-                 origin)
+         fun dispatch ->
+             TerminalPane.observeVisibleTerminal (fun () ->
+                 dispatch (
+                     NotifyEmbeddedTerminalVisible(
+                         terminalId,
+                         origin
+                     )
+                 )))
         :: panelSubs
     | None -> panelSubs
 
