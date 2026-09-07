@@ -38,16 +38,16 @@ type BuildInteractiveCommandTests() =
 type ResumeCommandTests() =
 
     [<Test>]
-    member _.``Resume with id includes yolo flag``() =
+    member _.``Resume with id uses the exact session selector``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (Resume (Some "abc-123"))
-        Assert.That(inv.AsShellString, Is.EqualTo("copilot --experimental --yolo --resume 'abc-123'"))
+        Assert.That(inv.AsShellString, Is.EqualTo("copilot --experimental --yolo --session-id='abc-123'"))
 
     // The resume id is interpolated into the PowerShell command submitted to the terminal, so a
     // hostile owner sessionId must remain inside the single-quoted argument.
     [<Test>]
     member _.``Resume single-quotes and escapes the id (no command injection)``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (Resume (Some "$(calc); '"))
-        Assert.That(inv.AsShellString, Is.EqualTo("copilot --experimental --yolo --resume '$(calc); '''"))
+        Assert.That(inv.AsShellString, Is.EqualTo("copilot --experimental --yolo --session-id='$(calc); '''"))
 
     [<Test>]
     member _.``Resume without id uses --continue with yolo flag``() =

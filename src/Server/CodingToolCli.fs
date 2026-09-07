@@ -40,7 +40,7 @@ let build (provider: CodingToolProvider option) (mode: InvocationMode) : CliInvo
           Args = withExtensionDiscovery $"--yolo -i {promptArgument prompt}" }
     | CodingToolProvider.CopilotCli, Resume (Some id) ->
         { Executable = "copilot"
-          Args = withExtensionDiscovery $"--yolo --resume {quoted id}" }
+          Args = withExtensionDiscovery $"--yolo --session-id={quoted id}" }
     | CodingToolProvider.CopilotCli, Resume None ->
         { Executable = "copilot"
           Args = withExtensionDiscovery "--yolo --continue" }

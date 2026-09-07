@@ -40,7 +40,7 @@ type AttributeOutcome =
     | Invalid of reason: string   // missing/blank field — nothing recorded
 
 /// Defense-in-depth for the F9 command-injection class: a declared owner sessionId is eventually
-/// interpolated into a launched `--resume {id}` command (via CanvasDocOwnership.getOwner ->
+/// interpolated into a launched `--session-id=<id>` command (via CanvasDocOwnership.getOwner ->
 /// CodingToolCli.build Resume). CodingToolCli now single-quote-escapes that value at the sink, but
 /// we additionally refuse to *store* an owner id outside the safe set real provider session ids use
 /// (ASCII alphanumerics, '-', '_' — GUIDs and provider UUIDs all qualify), so a hostile id carrying

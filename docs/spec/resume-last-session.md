@@ -16,8 +16,9 @@ When invoked, Treemon:
 1. Reads the configured coding-tool provider.
 2. Selects the durable session with the greatest `(UpdatedAt, SessionId)` for the worktree.
 3. Returns the running embedded terminal already owning that exact session, when one exists.
-4. Otherwise starts an embedded terminal and submits `copilot --yolo --resume <session-id>`.
-5. Falls back to `copilot --yolo --continue` when no durable session ID remains.
+4. Otherwise starts an embedded terminal and submits
+   `copilot --experimental --yolo --session-id=<session-id>`.
+5. Falls back to `copilot --experimental --yolo --continue` when no durable session ID remains.
 6. Opens the terminal pane and selects the exact returned terminal.
 
 A different live session or terminal in the same worktree does not suppress Resume. Repeated input
@@ -31,15 +32,18 @@ of heartbeat recency and the live-session window. `TerminalSessionActivity.tryFi
 joins that selected Copilot session to a running terminal through its exact
 `TREEMON_TERMINAL_SESSION_ID` origin.
 
-`CodingToolCli` builds the provider-specific resume command. `WorktreeApi.resumeSession` either
-returns the matching terminal or uses the shared embedded command-launch operation.
+`CodingToolCli` builds the provider-specific resume command with the CLI's exact startup selector,
+`--session-id=<id>`, so extensions join the durable target identity from process start.
+`WorktreeApi.resumeSession` either returns the matching terminal or uses the shared embedded
+command-launch operation.
 `CardViews.canResumeSession` is the single visibility predicate used by both mouse and keyboard
 entry points.
 
 ## Decisions
 
-- **Exact ID over directory-based continue:** `--resume <id>` avoids resuming a session from another
-  worktree; `--continue` is only the missing-ID fallback.
+- **Exact session selector over resume matching:** `--session-id=<id>` starts directly under the
+  durable identity instead of switching from a bootstrap session; `--continue` is only the
+  missing-ID fallback.
 - **Idempotent exact-session resume:** an already-live target returns its terminal instead of
   starting a second Copilot process.
 - **Hidden over disabled:** Resume represents a narrow applicable state rather than a generally

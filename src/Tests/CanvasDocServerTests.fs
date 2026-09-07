@@ -726,7 +726,7 @@ type AttributeOwnershipTests() =
 
     // F9 (security, defense-in-depth): a sessionId carrying shell/PowerShell metacharacters must be
     // rejected before it is stored, because a stored owner id is later interpolated into a launched
-    // `--resume {id}` command. The worktree IS known, so only the hostile sessionId can reject.
+    // `--session-id=<id>` command. The worktree IS known, so only the hostile sessionId can reject.
     [<TestCase("abc'; rm -rf ~ #")>]
     [<TestCase("$(calc)")>]
     [<TestCase("a b")>]
