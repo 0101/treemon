@@ -2,7 +2,7 @@
 
 ## Goals
 
-- Enable full keyboard-driven workflow: alt-tab to treemon, arrow-key to a card, press a key to act
+- Enable keyboard-driven workflow for common actions: alt-tab to treemon, arrow-key to a card, press a key to act
 - Navigation covers both repo headers (collapsible) and worktree cards
 - Find and reveal any active worktree across repositories without first navigating the grid
 - Extensible key binding system so new shortcuts are trivial to add
@@ -42,7 +42,6 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Card | r | Resume last session (when resumable) |
 | Card | + | Open new tab (when session active) |
 | Card | e | Open editor |
-| Card | a | Archive worktree |
 | Card | Delete | Delete worktree (non-main only) |
 | Repo header | Enter | Toggle collapse/expand |
 | Repo header | + | Create new worktree |
@@ -50,6 +49,8 @@ Cards are in a CSS Grid (1-4 columns by viewport width). Arrow keys navigate spa
 | Embedded terminal | Ctrl+Tab | Select the next terminal for the current worktree |
 | Embedded terminal | Ctrl+Shift+Tab | Select the previous terminal for the current worktree |
 | Global | Escape | Reclaim keyboard focus to the worktree navigation (also closes an open modal) |
+
+Archive is intentionally mouse-only so an accidental letter key cannot archive a worktree.
 
 Focused card/header bindings live in `keyBinding`; global bindings live in the document keyboard
 subscription and the cross-origin iframe bridges.

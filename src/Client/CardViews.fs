@@ -493,7 +493,7 @@ let deleteButton (callbacks: CardCallbacks) scopedKey (wt: WorktreeStatus) =
 let archiveButton (callbacks: CardCallbacks) scopedKey (wt: WorktreeStatus) =
     Html.button [
         prop.className "archive-btn"
-        prop.title "Archive worktree (A)"
+        prop.title "Archive worktree"
         yield! noFocusProps
         prop.onClick (fun e -> e.stopPropagation(); callbacks.ArchiveWorktree scopedKey)
         prop.children [ ArchiveViews.archiveIcon ]
