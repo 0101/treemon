@@ -116,6 +116,9 @@ module JobProcess =
     extern bool private GetProcessTimes(SafeFileHandle processHandle, FileTime& creationTime, FileTime& exitTime, FileTime& kernelTime, FileTime& userTime)
 
     [<DllImport("kernel32.dll", SetLastError = true)>]
+    extern bool private GetExitCodeProcess(SafeFileHandle processHandle, uint32& exitCode)
+
+    [<DllImport("kernel32.dll", SetLastError = true)>]
     extern uint32 private WaitForSingleObject(SafeFileHandle handle, uint32 milliseconds)
 
     let private win32Error operation =
@@ -324,6 +327,14 @@ module JobProcess =
 
     let processId owned = owned.Pid
     let processStartTimeUtcTicks owned = owned.StartTimeUtcTicks
+
+    let internal exitCode owned =
+        let mutable exitCode = 0u
+
+        if GetExitCodeProcess(owned.ProcessHandle, &exitCode) then
+            Ok exitCode
+        else
+            Error(win32Error (nameof GetExitCodeProcess))
 
     let hasExited owned =
         try
