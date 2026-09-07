@@ -78,6 +78,11 @@ jobs:
       - name: Test terminal runtime
         run: dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "Category=Unit&FullyQualifiedName~EmbeddedTerminal" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "TestCategory=TerminalHost" --verbosity normal && dotnet test src/Tests/Tests.fsproj --configuration Release --no-build --filter "FullyQualifiedName~WorktreePathResolutionTests" --verbosity normal
 
+      - name: Verify same-session process isolation
+        run: npm run test:session-isolation
+        env:
+          TREEMON_VERIFY_CONFIGURATION: Release
+
       - name: Test Treemon deployment preflight
         run: npm run test:treemon-deployment
 

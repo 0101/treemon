@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Tests" />
+    <InternalsVisibleTo Include="SessionIsolationVerifier" />
   </ItemGroup>
 
   <ItemGroup>

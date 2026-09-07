@@ -575,9 +575,15 @@ and dynamically allocated non-production ports. Port allocation retries on colli
 never binds production port 5000, and every harness closes tracked sessions before stopping its
 isolated server and fails on incomplete exact process cleanup.
 
-- A process-instance integration harness runs two parent processes with the same durable
-  `SessionId` and different exact identities/origins, proving independent status, liveness,
-  idempotency, closure, PID-reuse handling, and restart recovery.
+- `pwsh -NoProfile -File scripts\verify-session-isolation.ps1` builds and runs the checked-in
+  `src/Tests/SessionIsolationVerifier` harness. It runs five explicit phases with two live parent
+  processes sharing one durable `SessionId`, different exact identities/origins, the real activity
+  HTTP handler and SQLite store, PID remapping, and a same-port service restart. Its raw output
+  includes every identity/origin and snapshot, per-instance idempotency counts, closure isolation,
+  PID-reuse and restart/presence results, isolated paths and dynamic non-5000 port, then
+  zero-survivor/zero-leftover cleanup. The runner installs the pinned gitignored ttyd build
+  prerequisite when absent, so the command runs verbatim from a clean checkout without production
+  state or lifecycle actions.
 - A real-CLI outage harness starts reporting before its activity endpoint, then proves acknowledged
   presence and idempotent replay recover the exact process after the server becomes available. It
   first requires a running extension process and a startup log proving the inherited terminal
@@ -768,6 +774,7 @@ isolated server and fails on incomplete exact process cleanup.
 | `treemon.ps1` | Published host staging, deployment compatibility preflight, and embedded-terminal production-lifecycle guard |
 | `src/Client/TerminalPane.fs` | Terminal tabs, mounted iframes, labels, order, selection, and interruption UI |
 | `src/Tests/EmbeddedTerminalTests.fs` and `src/Tests/TerminalHostTests.fs` | Isolated host lifecycle plus real proxy command delivery, control rejection, UTF-8 frame boundaries, replacement, crash, security, and cleanup coverage |
+| `src/Tests/SessionIsolationVerifier/` and `scripts/verify-session-isolation.ps1` | Durable five-phase concurrent same-session process-isolation harness and clean-checkout runner |
 | `src/Tests/WorktreeApiLaunchTests.fs` | Worktree API typed-operation routing, exact result identity, control-free AgentDoc/SystemView/create-worktree prompt commands, and post-fork launch ordering |
 | `src/Tests/EmbeddedLaunchEndToEndTests.fs`, `src/Tests/TestAgentRecorder`, and `scripts/verify-embedded-launch-routing.ps1` | Reproducible isolated real-host launch matrix, exact argv recorder, raw route evidence, forced-delivery rollback, native HWND preservation, and exact cleanup |
 | `src/Tests/TerminalPaneTests.fs` | Exact server-returned terminal selection and direct Canvas launch routing |

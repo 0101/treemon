@@ -296,6 +296,11 @@ epoch sequence.
 Exact-instance ingestion accepts only a resolvable parent process identity. Reports without one are
 rejected rather than folded under a synthetic identity.
 
+The checked-in `SessionIsolationVerifier` exercises this boundary through the real loopback HTTP
+handler and SQLite store. It self-spawns two live parent processes, remaps one PID through the
+injectable resolver, restarts the service on the same dynamic non-production port, and fails unless
+all exact rows, fixture processes, and isolated filesystem state are closed or removed.
+
 `LifecycleDiagnostics` receives only validated `SessionId`, `TerminalSessionId`, exact
 `ProcessIdentity`, bounded counts, and closed outcome unions. A successful presence write emits
 `first_seen` or `reconnected` only after the exact row is durable. Presence and process-keyed bridge
@@ -422,6 +427,7 @@ into lifecycle status.
 | `src/Server/WorktreeCleanup.fs` | User-authorized terminal/worktree teardown sequencing, host cleanup, and exact survivor verification. |
 | `src/Server/TerminalSessionCleanup.fs` | Session-activity-backed exact shutdown requests, post-host reconciliation, monotonic closure recording, and lifecycle diagnostics for terminal cleanup. |
 | `src/Extension/extension.mjs`, `shutdown-endpoint.mjs`, and `request-body.mjs` | Exact bridge identity registration, shared bounded request reading, and capability-guarded loopback routine shutdown. |
+| `src/Tests/SessionIsolationVerifier/` and `scripts/verify-session-isolation.ps1` | Durable five-phase same-session exact-process isolation verifier and clean-checkout runner. |
 | `src/Server/AutoSync.fs` | Delivery-aware session selection and guarded sync-prompt fallback launch. |
 | `src/Shared/Types.fs` | `AgentActivity`, context usage, exact-instance marker IDs, and worktree wire types. |
 | `src/Shared/WorktreeApi.fs` | Remoting contract, including `toggleAutoSync` and direct Overview history. |
@@ -438,3 +444,12 @@ into lifecycle status.
 - `docs/spec/overview-activity-history.md` - durable canonical Overview snapshots.
 - `docs/spec/resume-last-session.md` - resume command behavior.
 - `docs/spec/native-session-management.md` - terminal/window liveness, distinct from push openness.
+
+## Verification
+
+Run `pwsh -NoProfile -File scripts\verify-session-isolation.ps1` from the repository root. The
+runner installs the pinned gitignored ttyd build prerequisite when absent, builds the checked-in
+verifier, and executes all five phases without production state or lifecycle commands. The verifier
+prints the dynamic port and isolated paths, every exact PID/start identity and terminal origin,
+independent snapshots, per-instance idempotency counts, closure and PID-reuse results,
+restart/presence recovery, and final zero-survivor/zero-leftover cleanup.
