@@ -945,14 +945,46 @@ test("shutdown retries ambiguous presence with the same event before exact closu
   assert.equal(runtime.snapshot().endpoints[0].phase, "terminal");
 });
 
-test("live shutdown stops heartbeats before exact closure and historical shutdown is ignored", async () => {
-  const order = [];
+test("resumed startup reports the selected identity first and ignores historical shutdown", async () => {
+  const selectedSessionId = "selected-durable-session";
   const fake = createFakeSession(async () => [
     sdkEvent("old-shutdown", "2026-09-04T15:59:00.000Z", "session.shutdown", {
       shutdownType: "routine",
     }),
-    sdkEvent("resumed-working", "2026-09-04T16:00:00.000Z", "assistant.turn_start"),
+    sdkEvent("resumed-idle", "2026-09-04T16:00:00.000Z", "session.idle"),
   ]);
+  const scheduler = createManualScheduler();
+  const heartbeat = createManualHeartbeat();
+  const url = "http://127.0.0.1:5301/api/session/activity";
+  const calls = [];
+
+  const post = async (target, report) => {
+    calls.push({ url: target, report });
+    return acknowledged;
+  };
+
+  const options = runtimeOptions(fake, post, scheduler, heartbeat, [url]);
+  options.baseContext = { ...baseContext, sessionId: selectedSessionId };
+  const runtime = createReportingRuntime(options);
+
+  await runtime.start();
+  await runtime.flush();
+
+  assert.deepEqual(
+    calls.map(({ report }) => report.kind),
+    ["session_present", "went_idle"],
+  );
+  assert.equal(calls[0].report.sessionId, selectedSessionId);
+  assert.ok(calls.every(({ report }) => report.sessionId === selectedSessionId));
+  assert.equal(runtime.snapshot().closed, false);
+  assert.equal(runtime.snapshot().heartbeatRunning, true);
+
+  runtime.stop();
+});
+
+test("live shutdown stops heartbeats before exact closure", async () => {
+  const order = [];
+  const fake = createFakeSession();
   const scheduler = createManualScheduler();
   const heartbeat = createManualHeartbeat(order);
   const url = "http://127.0.0.1:5301/api/session/activity";
@@ -974,7 +1006,6 @@ test("live shutdown stops heartbeats before exact closure and historical shutdow
   await runtime.start();
   await runtime.flush();
 
-  assert.equal(calls.some(({ report }) => report.eventId === "old-shutdown"), false);
   order.length = 0;
 
   fake.emit(sdkEvent(

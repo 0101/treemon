@@ -38,7 +38,7 @@ type BuildInteractiveCommandTests() =
 type ResumeCommandTests() =
 
     [<Test>]
-    member _.``Resume with id uses the exact session selector``() =
+    member _.``Resume with id uses the direct startup session selector``() =
         let inv = build (Some CodingToolProvider.CopilotCli) (Resume (Some "abc-123"))
         Assert.That(inv.AsShellString, Is.EqualTo("copilot --experimental --yolo --session-id='abc-123'"))
 

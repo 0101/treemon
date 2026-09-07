@@ -32,7 +32,7 @@ of heartbeat recency and the live-session window. `TerminalSessionActivity.tryFi
 joins that selected Copilot session to a running terminal through its exact
 `TREEMON_TERMINAL_SESSION_ID` origin.
 
-`CodingToolCli` builds the provider-specific resume command with the CLI's exact startup selector,
+`CodingToolCli` builds the provider-specific resume command with the CLI's direct startup selector,
 `--session-id=<id>`, so extensions join the durable target identity from process start.
 `WorktreeApi.resumeSession` either returns the matching terminal or uses the shared embedded
 command-launch operation.
@@ -41,9 +41,8 @@ entry points.
 
 ## Decisions
 
-- **Exact session selector over resume matching:** `--session-id=<id>` starts directly under the
-  durable identity instead of switching from a bootstrap session; `--continue` is only the
-  missing-ID fallback.
+- **Direct session selector over foreground switching:** `--session-id=<id>` starts under the
+  durable identity before extensions join; `--continue` is only the missing-ID fallback.
 - **Idempotent exact-session resume:** an already-live target returns its terminal instead of
   starting a second Copilot process.
 - **Hidden over disabled:** Resume represents a narrow applicable state rather than a generally

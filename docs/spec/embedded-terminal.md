@@ -117,6 +117,8 @@ isolated `COPILOT_HOME` therefore uses the same deterministic extension path as 
 rather than relying on a project extension or a persisted experimental setting. The isolated
 harness accepts the CLI's disposable folder-trust confirmation before evaluating extension
 startup.
+Exact durable Resume uses `--session-id=<id>` so the selected durable identity is established before
+extension startup rather than through a foreground-session switch.
 
 The raw terminal-input boundary rejects blank or control-character-bearing commands and commands
 whose complete UTF-8 ttyd input frame (`0` prefix, command, and carriage return) exceeds 16,384

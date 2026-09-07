@@ -192,6 +192,8 @@ from pre-deploy extensions that omit the parent PID are rejected and do not gate
 server acknowledges `session_present` only after its mailbox has persisted the exact instance;
 ordinary event delivery remains idempotent after that bootstrap. The live `session.shutdown` event
 stops heartbeat emission and retains `session_closed` behind any in-flight unacknowledged presence.
+Exact Resume uses the CLI's direct `--session-id=<id>` selector, so the first acknowledged presence
+for the new process carries the selected durable identity before historical activity is replayed.
 Acknowledged presence is followed immediately by closure; transport or retryable outcomes continue
 the same idempotent presence report until definitive, while a permanent or unmonitored rejection
 terminates that destination without closure. Historical shutdown events are not replayed as current

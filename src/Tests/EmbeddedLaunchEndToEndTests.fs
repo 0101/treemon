@@ -669,6 +669,40 @@ let private runRoute
         return addedId
     }
 
+let private seedDurableResumeSession
+    (fixture: FixturePaths)
+    port
+    sessionId
+    =
+    let now = DateTimeOffset.UtcNow
+    let dbPath =
+        Path.Combine(
+            fixture.RuntimeDirectory,
+            "data",
+            $"session-activity-{port}.db"
+        )
+
+    use store =
+        new SessionActivityStore.SessionActivityStore(dbPath)
+
+    let stored: SessionActivityStore.StoredInstance =
+        { ProcessIdentity =
+            Tests.TestUtils.collisionResistantProcessIdentityForSessionId
+                sessionId
+          SessionId = SessionActivity.SessionId sessionId
+          TerminalSessionId = None
+          WorktreePath =
+            WorktreePath(PathUtils.normalizePath fixture.RoutesWorktree)
+          Provider = CodingToolProvider.CopilotCli
+          Status = SessionActivity.emptyStatus
+          UpdatedAt = now
+          LifecycleAt = None
+          LastSeen = now
+          ContextUsageAt = None
+          ClosedAt = Some now }
+
+    store.UpsertInstance(stored) |> ignore
+
 let private createFixturePaths () =
     let suffix = Guid.NewGuid().ToString("N")[..9]
     let root =
@@ -1566,6 +1600,36 @@ let private runScenario client fixture server api port =
                             Some(
                                 startResultId
                                     "resumeSession"
+                                    result
+                            )
+                    })
+            |> Async.Ignore
+
+        let durableSessionId = Guid.NewGuid().ToString()
+        seedDurableResumeSession fixture port durableSessionId
+
+        do!
+            runRoute
+                client
+                manifest
+                fixture.RecorderPath
+                server
+                "resumeSessionWithDurableId"
+                fixture.RoutesWorktree
+                [ "--experimental"
+                  "--yolo"
+                  $"--session-id={durableSessionId}" ]
+                (fun () ->
+                    async {
+                        let! result =
+                            api.resumeSession(
+                                WorktreePath fixture.RoutesWorktree
+                            )
+
+                        return
+                            Some(
+                                startResultId
+                                    "resumeSessionWithDurableId"
                                     result
                             )
                     })
