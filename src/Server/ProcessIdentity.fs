@@ -54,6 +54,45 @@ module ProcessIdentityResolver =
         |> fun processId -> resolve processId resolver
         |> Result.map (Option.contains identity)
 
+    let internal waitForExit
+        (timeout: TimeSpan)
+        (pollInterval: TimeSpan)
+        (resolver: ProcessIdentityResolver)
+        (identities: ProcessIdentity list)
+        =
+        let rec live accumulated = function
+            | [] -> Ok(List.rev accumulated)
+            | identity :: remaining ->
+                match isAlive resolver identity with
+                | Error error -> Error error
+                | Ok true ->
+                    live
+                        (identity :: accumulated)
+                        remaining
+                | Ok false -> live accumulated remaining
+
+        let delayMilliseconds =
+            pollInterval.TotalMilliseconds
+            |> max 1.0
+            |> min (float Int32.MaxValue)
+            |> int
+
+        let elapsed = Stopwatch.StartNew()
+
+        let rec wait remaining =
+            async {
+                match live [] remaining with
+                | Error error -> return Error error
+                | Ok [] -> return Ok []
+                | Ok survivors when elapsed.Elapsed >= timeout ->
+                    return Ok survivors
+                | Ok survivors ->
+                    do! Async.Sleep delayMilliseconds
+                    return! wait survivors
+            }
+
+        wait identities
+
 module ProcessIdentityResolverRuntime =
     let defaultResolver =
         ProcessIdentityResolver.create (fun processId ->

@@ -267,9 +267,14 @@ history as defined in `docs/spec/resume-last-session.md`.
 
 Recovery consumes the immutable replacement capture. A graceful-shutdown failure reuses only the
 verified old host and submits the selected Resume command once for a terminal only when every exact
-shutdown target in that terminal completed. An old-host stop failure reuses the healthy exact old
-host or relaunches its captured executable only after the old identity is proven gone. Once a staged
-host identity is known, recovery must stop and recheck that exact host before launching the old
+shutdown target in that terminal completed. Exact activity closure does not prove that the
+foreground CLI process has vacated the shell, so recovery gives every exactly closed process in a
+terminal selected for Resume one bounded exit grace. If an exact process remains or its exit cannot
+be verified, recovery closes only that fully stopped terminal through the TerminalHost's exact
+survivor cleanup, recreates it, and only then submits the selected command once. A terminal with any
+failed shutdown target remains untouched. An old-host stop failure reuses the healthy exact old host
+or relaunches its captured executable only after the old identity is proven gone. Once a staged host
+identity is known, recovery must stop and recheck that exact host before launching the old
 executable. If staged-host stop remains unresolved, the staged host stays the sole reported
 generation, its exact registry and unresolved identity are retained, and no rollback host starts.
 Rollback recreates the complete captured terminal presentation in opening order and submits each
@@ -680,8 +685,10 @@ isolated server and fails on incomplete exact process cleanup.
   for every exact target before terminal teardown and aborts while the old host is healthy if any
   shutdown is unavailable, rejected, or times out. Endpoint acceptance is not completion; exact
   closure or process exit confirms success. No selected Resume command runs until the old host
-  closed and survivor verification is clean; recovery restores at most the selected stopped session
-  per terminal before reporting a failed replacement.
+  closed and survivor verification is clean. Recovery likewise never writes Resume behind a closed
+  foreground CLI: it waits for exact process exit, then uses exact terminal close/recreation when a
+  closed process remains, and restores at most the selected stopped session per terminal before
+  reporting a failed replacement.
 - **Shared bridge registry remains generic:** graceful shutdown extends the exact live-session
   registration by re-keying physical sessions while preserving the separate poll map and
   durable-session canvas queueing, liveness, and reconnect behavior.

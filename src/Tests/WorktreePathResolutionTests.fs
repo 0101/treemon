@@ -68,6 +68,7 @@ let private createApi agent roots =
               StartupTimeout = TimeSpan.FromSeconds 5.0
               ControlRequestTimeout = TimeSpan.FromSeconds 5.0
               ProbeInterval = TimeSpan.FromMilliseconds 25.0
+              ProcessExitTimeout = TimeSpan.FromSeconds 30.0
               LaunchHost =
                 fun _ ->
                     Error

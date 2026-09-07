@@ -561,6 +561,7 @@ let private managerConfig
       StartupTimeout = TimeSpan.FromSeconds 2.0
       ControlRequestTimeout = TimeSpan.FromMilliseconds 500.0
       ProbeInterval = TimeSpan.FromMilliseconds 20.0
+      ProcessExitTimeout = TimeSpan.FromSeconds 30.0
       LaunchHost = launchHost
       ProcessIdentityResolver =
         ProcessIdentityResolverRuntime.defaultResolver
@@ -616,6 +617,25 @@ let private defaultReplacementOperations =
 let private exactIdentity processId startTicks =
     ProcessIdentity.create processId startTicks
     |> Result.defaultWith invalidOp
+
+let private processResolverWithLive
+    (host: FakeControlHost)
+    observed
+    identities
+    =
+    let byProcessId =
+        identities
+        |> List.map (fun identity ->
+            ProcessIdentity.processId identity,
+            identity)
+        |> Map.ofList
+
+    ProcessIdentityResolver.create (fun processId ->
+        match byProcessId |> Map.tryFind processId with
+        | Some identity ->
+            observed identity
+            Ok(Some identity)
+        | None -> host.ResolveProcessIdentity processId)
 
 let private runReplacementCommitWithDiagnostics
     diagnostics
@@ -4331,18 +4351,41 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
-    member _.``partial graceful failure resumes only terminals whose exact shutdowns completed``() =
+    member _.``shutdown rejection after accepted closure vacates only the completed terminal before Resume``() =
         task {
-            use host = new FakeControlHost()
+            let recoveryEvents = ConcurrentQueue<string>()
+
+            use host =
+                new FakeControlHost(
+                    onTerminalClosing = fun _ ->
+                        recoveryEvents.Enqueue "close-terminal"
+                )
+
             host.EnableLogicalReplacement()
             let stagedVersion = "2.0.0-partial-graceful-recovery"
             host.Stage stagedVersion |> ignore
 
+            let firstIdentity = exactIdentity 2_000_004_601 5601L
+            let secondSelectedIdentity =
+                exactIdentity 2_000_004_602 5602L
+            let secondUnselectedIdentity =
+                exactIdentity 2_000_004_603 5603L
+
             let config =
-                replacementManagerConfig
+                { replacementManagerConfig
                     host
                     noLaunch
-                    noTerminalCommand
+                    noTerminalCommand with
+                    ProcessExitTimeout = TimeSpan.Zero
+                    ProcessIdentityResolver =
+                        processResolverWithLive
+                            host
+                            (fun _ ->
+                                recoveryEvents.Enqueue
+                                    "probe-process")
+                            [ firstIdentity
+                              secondSelectedIdentity
+                              secondUnselectedIdentity ] }
 
             let manager = EmbeddedTerminal.createWithConfig config
             let firstPath = worktree host.Root "recover-first"
@@ -4364,10 +4407,6 @@ type EmbeddedTerminalReplacementTests() =
                     )
 
                     Unchecked.defaultof<_>
-
-            let firstIdentity = exactIdentity 4601 5601L
-            let secondSelectedIdentity = exactIdentity 4602 5602L
-            let secondUnselectedIdentity = exactIdentity 4603 5603L
 
             let shutdownTargets =
                 [ replacementTarget
@@ -4423,7 +4462,7 @@ type EmbeddedTerminalReplacementTests() =
                                         secondUnselectedIdentity
                                     then
                                         Error
-                                            SessionBridge.ShutdownFailure.TimedOut
+                                            SessionBridge.ShutdownFailure.Rejected
                                     else
                                         Ok
                                             SessionBridge.ShutdownCompletion.ExactClosure
@@ -4444,9 +4483,21 @@ type EmbeddedTerminalReplacementTests() =
                                             "must not launch a host"
                                     )
                             }
+                    RecreateTerminal =
+                        fun recreateConfig manifest terminal ->
+                            async {
+                                recoveryEvents.Enqueue "recreate-terminal"
+
+                                return!
+                                    defaults.RecreateTerminal
+                                        recreateConfig
+                                        manifest
+                                        terminal
+                            }
                     DeliverCommand =
                         fun _ terminal command ->
                             async {
+                                recoveryEvents.Enqueue "deliver-resume"
                                 deliveries.Enqueue(
                                     (terminal.SessionId, command)
                                 )
@@ -4464,6 +4515,20 @@ type EmbeddedTerminalReplacementTests() =
             let registry =
                 requireExactRecoveryRegistry
                     recovery.TerminalRegistry
+
+            let recoveredFirst =
+                registry.Terminals
+                |> List.find (fun terminal ->
+                    TerminalHostManifest.samePath
+                        terminal.WorktreePath
+                        first.WorktreePath)
+
+            let unchangedSecond =
+                registry.Terminals
+                |> List.find (fun terminal ->
+                    TerminalHostManifest.samePath
+                        terminal.WorktreePath
+                        second.WorktreePath)
 
             let selectedByTerminal =
                 recovery.SelectedSessions
@@ -4501,16 +4566,35 @@ type EmbeddedTerminalReplacementTests() =
                     )
                 )
                 Assert.That(
-                    registry.Terminals
-                    |> List.map _.SessionId,
-                    Is.EqualTo([ first.SessionId; second.SessionId ])
+                    recoveredFirst.SessionId,
+                    Is.Not.EqualTo(first.SessionId),
+                    "the exact terminal cleanup must replace the terminal that retained the closed CLI"
+                )
+                Assert.That(
+                    unchangedSecond.SessionId,
+                    Is.EqualTo(second.SessionId),
+                    "the terminal with the rejected shutdown must remain untouched"
                 )
                 Assert.That(
                     deliveries.ToArray(),
                     Is.EqualTo(
-                        [| (first.SessionId,
+                        [| (recoveredFirst.SessionId,
                             "resume-first-selected") |]
                     )
+                )
+                Assert.That(
+                    recoveryEvents.ToArray(),
+                    Is.EqualTo(
+                        [| "probe-process"
+                           "close-terminal"
+                           "recreate-terminal"
+                           "deliver-resume" |]
+                    ),
+                    "Resume must follow exact terminal cleanup"
+                )
+                Assert.That(
+                    host.ClosedSessionIds,
+                    Is.EqualTo([ first.SessionId ])
                 )
                 Assert.That(hostStops, Is.Empty)
                 Assert.That(hostLaunches, Is.Empty)
@@ -4565,6 +4649,15 @@ type EmbeddedTerminalReplacementTests() =
                         identity,
                         Is.EqualTo secondUnselectedIdentity
                     )
+                    Assert.That(
+                        selectedByTerminal[typedTerminalSessionId first.SessionId].CurrentTerminalSessionId,
+                        Is.EqualTo(
+                            Some(
+                                typedTerminalSessionId
+                                    recoveredFirst.SessionId
+                            )
+                        )
+                    )
                 | observed ->
                     Assert.Fail(
                         $"Expected one resumed and one unresolved selected session, got {observed}"
@@ -4587,17 +4680,35 @@ type EmbeddedTerminalReplacementTests() =
         }
 
     [<Test>]
-    member _.``old host stop failure keeps one old host and restores its selected session``() =
+    member _.``old host stop failure keeps one old host and vacates its selected session before Resume``() =
         task {
-            use host = new FakeControlHost()
+            let recoveryEvents = ConcurrentQueue<string>()
+
+            use host =
+                new FakeControlHost(
+                    onTerminalClosing = fun _ ->
+                        recoveryEvents.Enqueue "close-terminal"
+                )
+
             let stagedVersion = "2.0.0-old-stop-recovery"
             host.Stage stagedVersion |> ignore
 
+            let processIdentity =
+                exactIdentity 2_000_004_701 5701L
+
             let config =
-                replacementManagerConfig
+                { replacementManagerConfig
                     host
                     noLaunch
-                    noTerminalCommand
+                    noTerminalCommand with
+                    ProcessExitTimeout = TimeSpan.Zero
+                    ProcessIdentityResolver =
+                        processResolverWithLive
+                            host
+                            (fun _ ->
+                                recoveryEvents.Enqueue
+                                    "probe-process")
+                            [ processIdentity ] }
 
             let manager = EmbeddedTerminal.createWithConfig config
             let targetPath = worktree host.Root "recover-old-stop"
@@ -4615,7 +4726,7 @@ type EmbeddedTerminalReplacementTests() =
                 replacementTarget
                     terminal
                     "old-stop-selected"
-                    (exactIdentity 4701 5701L)
+                    processIdentity
 
             let query _ _ =
                 Ok(
@@ -4648,6 +4759,7 @@ type EmbeddedTerminalReplacementTests() =
                     StopHost =
                         fun _ _ ->
                             async {
+                                recoveryEvents.Enqueue "old-host-stop"
                                 return
                                     Error
                                         "simulated old-host survivor"
@@ -4662,61 +4774,111 @@ type EmbeddedTerminalReplacementTests() =
                                             "must not launch"
                                     )
                             }
+                    RecreateTerminal =
+                        fun recreateConfig manifest captured ->
+                            async {
+                                recoveryEvents.Enqueue "recreate-terminal"
+
+                                return!
+                                    defaults.RecreateTerminal
+                                        recreateConfig
+                                        manifest
+                                        captured
+                            }
                     DeliverCommand =
                         fun _ _ command ->
                             async {
+                                recoveryEvents.Enqueue "deliver-resume"
                                 deliveries.Enqueue command
                                 return Ok()
                             } }
 
-            let! capturedRecovery, recovery, _ =
-                runReplacementRecovery
-                    config
+            let! outcome =
+                EmbeddedTerminal.tryReplaceHostWithOperations
+                    (fun () -> async.Return())
                     query
                     operations
+                    manager
+                |> Async.StartAsTask
 
-            let registry =
-                requireExactRecoveryRegistry
-                    recovery.TerminalRegistry
+            let! cached =
+                EmbeddedTerminal.getCached manager
+                |> Async.StartAsTask
+
+            let recoveredTerminal =
+                host.CurrentTerminals |> List.exactlyOne
+
+            let recoveredTab =
+                cached.Tabs |> List.exactlyOne
 
             Assert.Multiple(fun () ->
-                match recovery.HostState with
-                | TerminalHostRecovery.RecoveryHostState.Running(
-                    TerminalHostRecovery.RecoveryHostGeneration.Old,
-                    manifest
-                  ) ->
-                    Assert.That(
-                        manifest.Pid,
-                        Is.EqualTo
-                            capturedRecovery.Capture.OldHost.Pid
-                    )
-                | other ->
-                    Assert.Fail($"Expected the old host to remain authoritative, got {other}")
-
                 Assert.That(
-                    registry.Terminals
-                    |> List.map _.SessionId,
-                    Is.EqualTo([ terminal.SessionId ])
+                    recoveredTerminal.SessionId,
+                    Is.Not.EqualTo(terminal.SessionId)
                 )
                 Assert.That(
-                    recovery.SelectedSessions
-                    |> List.map _.Outcome,
+                    recoveredTab.Id,
                     Is.EqualTo(
-                        [ TerminalHostRecovery.RecoverySelectedSessionOutcome.ResumeDelivered ]
-                    )
+                        EmbeddedTerminalId
+                            recoveredTerminal.SessionId
+                    ),
+                    "the cached registry must replace the closed terminal rather than retain an interrupted duplicate"
                 )
                 Assert.That(
                     deliveries.ToArray(),
                     Is.EqualTo([| "resume-old-stop-selected" |])
                 )
+                Assert.That(
+                    recoveryEvents.ToArray(),
+                    Is.EqualTo(
+                        [| "old-host-stop"
+                           "probe-process"
+                           "close-terminal"
+                           "recreate-terminal"
+                           "deliver-resume" |]
+                    ),
+                    "Resume must follow exact terminal cleanup"
+                )
+                Assert.That(
+                    host.ClosedSessionIds,
+                    Is.EqualTo([ terminal.SessionId ])
+                )
                 Assert.That(launches, Is.Empty)
                 Assert.That(host.IsOnline, Is.True)
                 Assert.That(
-                    recovery.Status,
-                    Is.EqualTo(
-                        TerminalHostRecovery.RecoveryStatus.Recovered
+                    host.CurrentExecutable,
+                    Is.EqualTo(host.OldExecutable)
+                )
+
+                match recoveredTab.Lifecycle with
+                | EmbeddedTerminalLifecycle.Running endpoint ->
+                    Assert.That(
+                        endpoint,
+                        Is.EqualTo(
+                            recoveredTerminal.AttachmentEndpoint
+                        )
                     )
-                ))
+                | other ->
+                    Assert.Fail(
+                        $"Expected the recreated terminal to remain running, got {other}"
+                    )
+
+                match outcome with
+                | TerminalHostReplacement.ReplacementOutcome.Failed(
+                    version,
+                    error
+                  ) ->
+                    Assert.That(version, Is.EqualTo stagedVersion)
+                    Assert.That(
+                        error,
+                        Does.Contain(
+                            "recovery restored one authoritative TerminalHost state"
+                        )
+                    )
+                | other ->
+                    Assert.Fail(
+                        $"Expected a recovered replacement failure, got {other}"
+                    ))
         }
 
     [<Test>]

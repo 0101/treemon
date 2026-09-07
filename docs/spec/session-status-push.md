@@ -69,6 +69,9 @@ shared state; no session-log parsing remains.
   verification completed, including when graceful SDK shutdown was unavailable, rejected, or timed
   out. Both paths are monotonic: later reports from that closed process cannot reopen it. Resuming
   the same durable session creates a new process identity and therefore a new open instance.
+  Exact activity closure is not proof that the operating-system process has left its foreground
+  terminal; replacement recovery waits for exact process exit or completes exact terminal cleanup
+  before submitting Resume into that shell.
 - Accepted usage reports preserve conversation state without becoming lifecycle events; instance
   presence remains on the dedicated presence path.
 
@@ -270,7 +273,9 @@ use independent ordering paths:
   terminal-authoritative teardown. A report from that same closed process remains closed even when
   it arrives later; only a different process identity can create a new instance. Graceful,
   timeout, and survivor-cleanup outcomes remain terminal-orchestration diagnostics rather than
-  changing the lifecycle fold.
+  changing the lifecycle fold. Recovery therefore treats closure and process vacancy as separate
+  facts: a closed foreground process must exit or be removed by exact TerminalHost cleanup before
+  the selected durable session can be resumed in that terminal.
 
 Ingestion paths consult the exact process-instance row whenever prior state is needed. This
 preserves concurrent process state without allowing one CLI to steal another process's terminal

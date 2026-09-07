@@ -15,6 +15,7 @@ type internal Config =
       StartupTimeout: TimeSpan
       ControlRequestTimeout: TimeSpan
       ProbeInterval: TimeSpan
+      ProcessExitTimeout: TimeSpan
       LaunchHost: ProcessStartInfo -> Result<unit, string>
       ProcessIdentityResolver: ProcessIdentityResolver
       ResolveProcessExecutable: int -> int64 -> Result<string, string>
@@ -147,6 +148,7 @@ let internal defaultConfigWithProcessIdentityResolver
       StartupTimeout = TimeSpan.FromSeconds 30.0
       ControlRequestTimeout = TimeSpan.FromSeconds 10.0
       ProbeInterval = TimeSpan.FromMilliseconds 100.0
+      ProcessExitTimeout = TimeSpan.FromSeconds 30.0
       LaunchHost = launchDetached
       ProcessIdentityResolver = processIdentityResolver
       ResolveProcessExecutable = resolveProcessExecutableDefault

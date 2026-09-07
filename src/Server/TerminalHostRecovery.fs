@@ -303,6 +303,53 @@ let private unresolvedShutdownProcesses
                     attempt.Target.ProcessIdentity
             ))
 
+let private exactClosuresByTerminal
+    (recovery: ReplacementRecovery)
+    =
+    recovery.Progress.ShutdownAttempts
+    |> List.choose (fun attempt ->
+        match attempt.Outcome with
+        | Ok SessionBridge.ShutdownCompletion.ExactClosure ->
+            Some(
+                attempt.Target.TerminalSessionId,
+                attempt.Target.ProcessIdentity
+            )
+        | Ok SessionBridge.ShutdownCompletion.ProcessExit
+        | Error _ ->
+            None)
+    |> List.groupBy fst
+    |> List.map (fun (terminalSessionId, closures) ->
+        terminalSessionId,
+        (closures |> List.map snd))
+    |> Map.ofList
+
+let private unresolvedExactProcesses identities =
+    identities
+    |> Seq.map RecoveryUnresolvedProcess.ExactProcess
+    |> Seq.toList
+
+let private registryAfterMutationFailure
+    config
+    manifest
+    reason
+    failure
+    =
+    async {
+        let! currentRegistry =
+            listTerminals config manifest
+
+        match currentRegistry, failure with
+        | Ok exact, _ ->
+            return RecoveryTerminalRegistry.Exact exact
+        | Error _, MutationRejected(exact, _) ->
+            return RecoveryTerminalRegistry.Exact exact
+        | Error error, MutationUnverified _ ->
+            return
+                RecoveryTerminalRegistry.Unavailable(
+                    $"{reason}; authoritative relist failed: {error}"
+                )
+    }
+
 let private recoverSelectedOnExistingOldHost
     (operations: ReplacementOperations)
     (config: Config)
@@ -313,13 +360,137 @@ let private recoverSelectedOnExistingOldHost
     let failedByTerminal =
         failedShutdownsByTerminal recovery
 
+    let exactClosures =
+        exactClosuresByTerminal recovery
+
+    let exactClosuresEligibleForCleanup =
+        exactClosures
+        |> Map.toList
+        |> List.filter (fun (terminalSessionId, _) ->
+            not (failedByTerminal.ContainsKey terminalSessionId)
+            && recovery.Capture.ResumeCommands.ContainsKey
+                terminalSessionId)
+        |> List.collect snd
+        |> List.distinct
+
+    let cleanupForTerminal terminalSessionId cleanupPending =
+        exactClosures
+        |> Map.tryFind terminalSessionId
+        |> Option.defaultValue []
+        |> Set.ofList
+        |> Set.intersect cleanupPending
+
+    let prepareTerminal
+        (latestRegistry: RegistrySnapshot)
+        (cleanupPending: Set<ProcessIdentity>)
+        (terminal: ReplacementTerminal)
+        =
+        async {
+            match
+                findTerminalById
+                    (TerminalSessionId.value terminal.TerminalSessionId)
+                    latestRegistry.Terminals
+            with
+            | None ->
+                let reason =
+                    $"Original terminal {TerminalSessionId.value terminal.TerminalSessionId} is missing during recovery"
+
+                return
+                    Error(
+                        RecoveryTerminalRegistry.Exact latestRegistry,
+                        cleanupPending,
+                        reason
+                    )
+            | Some current ->
+                let terminalCleanup =
+                    cleanupForTerminal
+                        terminal.TerminalSessionId
+                        cleanupPending
+
+                if Set.isEmpty terminalCleanup then
+                    return
+                        Ok(
+                            latestRegistry,
+                            current,
+                            cleanupPending
+                        )
+                else
+                    match!
+                        closeTerminalOnHost
+                            config
+                            manifest
+                            (TerminalSessionId.value
+                                terminal.TerminalSessionId)
+                    with
+                    | Error failure ->
+                        let reason =
+                            $"Closed Copilot processes did not exit and terminal cleanup failed: {mutationFailureReason failure}"
+
+                        let! currentRegistry =
+                            registryAfterMutationFailure
+                                config
+                                manifest
+                                reason
+                                failure
+
+                        return
+                            Error(
+                                currentRegistry,
+                                cleanupPending,
+                                reason
+                            )
+                    | Ok _ ->
+                        match!
+                            operations.RecreateTerminal
+                                config
+                                manifest
+                                terminal
+                        with
+                        | Error failure ->
+                            let reason =
+                                $"Could not recreate a terminal after exact closed-process cleanup: {mutationFailureReason failure}"
+
+                            let! currentRegistry =
+                                registryAfterMutationFailure
+                                    config
+                                    manifest
+                                    reason
+                                    failure
+
+                            return
+                                Error(
+                                    currentRegistry,
+                                    Set.difference
+                                        cleanupPending
+                                        terminalCleanup,
+                                    reason
+                                )
+                        | Ok(nextRegistry, recreated) ->
+                            return
+                                Ok(
+                                    nextRegistry,
+                                    recreated,
+                                    Set.difference
+                                        cleanupPending
+                                        terminalCleanup
+                                )
+        }
+
     let rec deliver
+        (latestRegistry: RegistrySnapshot)
+        (cleanupPending: Set<ProcessIdentity>)
         (accumulated: RecoverySelectedSession list)
         (terminals: ReplacementTerminal list)
         =
         async {
             match terminals with
-            | [] -> return List.rev accumulated
+            | [] ->
+                return
+                    Ok(
+                        latestRegistry,
+                        cleanupPending,
+                        List.rev accumulated
+                    )
             | terminal :: remaining ->
                 match
                     recovery.Capture.ResumeCommands
@@ -328,7 +499,12 @@ let private recoverSelectedOnExistingOldHost
                     |> Map.tryFind terminal.TerminalSessionId
                 with
                 | None, _ ->
-                    return! deliver accumulated remaining
+                    return!
+                        deliver
+                            latestRegistry
+                            cleanupPending
+                            accumulated
+                            remaining
                 | Some resume, Some unresolved ->
                     let selected =
                         { OriginalTerminalSessionId =
@@ -342,98 +518,149 @@ let private recoverSelectedOnExistingOldHost
 
                     return!
                         deliver
+                            latestRegistry
+                            cleanupPending
                             (selected :: accumulated)
                             remaining
                 | Some resume, None ->
-                    match
-                        findTerminalById
-                            (TerminalSessionId.value
-                                terminal.TerminalSessionId)
-                            registry.Terminals
+                    match!
+                        prepareTerminal
+                            latestRegistry
+                            cleanupPending
+                            terminal
                     with
-                    | None ->
-                        let error =
-                            $"Original terminal {TerminalSessionId.value terminal.TerminalSessionId} is missing during recovery"
-
-                        let selected =
-                            { OriginalTerminalSessionId =
-                                terminal.TerminalSessionId
-                              CurrentTerminalSessionId = None
-                              CopilotSessionId =
-                                resume.CopilotSessionId
-                              Outcome =
-                                RecoverySelectedSessionOutcome.ResumeNotAttempted
-                                    error }
-
-                        return!
-                            deliver
-                                (selected :: accumulated)
-                                remaining
-                    | Some current ->
+                    | Error(currentRegistry, pending, reason) ->
+                        return
+                            Error(
+                                currentRegistry,
+                                List.rev accumulated
+                                @ selectedSessionsNotAttempted
+                                    recovery.Capture
+                                    reason
+                                    (terminal :: remaining),
+                                pending,
+                                reason
+                            )
+                    | Ok(nextRegistry, ready, pending) ->
                         let! selected =
                             deliverResumeAndSelect
                                 operations
                                 config
                                 terminal
-                                current
+                                ready
                                 resume
 
                         return!
                             deliver
+                                nextRegistry
+                                pending
                                 (selected :: accumulated)
                                 remaining
         }
 
     async {
-        let! selected =
-            deliver [] recovery.Capture.Terminals
+        let! exitWait =
+            match exactClosuresEligibleForCleanup with
+            | [] -> async.Return(Ok [])
+            | identities ->
+                ProcessIdentityResolver.waitForExit
+                    config.ProcessExitTimeout
+                    config.ProbeInterval
+                    config.ProcessIdentityResolver
+                    identities
 
-        match! listTerminals config manifest with
-        | Error error ->
-            let reason =
-                $"Could not confirm the old TerminalHost registry after recovery: {error}"
+        let cleanupPending =
+            match exitWait with
+            | Ok survivors ->
+                Set.intersect
+                    (Set.ofList exactClosuresEligibleForCleanup)
+                    (Set.ofList survivors)
+            | Error _ ->
+                Set.ofList exactClosuresEligibleForCleanup
 
-            return
-                rejected
-                    (RecoveryHostState.Unresolved(
+        match!
+            deliver
+                registry
+                cleanupPending
+                []
+                recovery.Capture.Terminals
+        with
+        | Error(
+            currentRegistry,
+            selected,
+            pending,
+            reason
+          ) ->
+            let hostState, hostUnresolved =
+                match currentRegistry with
+                | RecoveryTerminalRegistry.Exact _ ->
+                    RecoveryHostState.Running(
+                        RecoveryHostGeneration.Old,
+                        manifest
+                    ),
+                    []
+                | RecoveryTerminalRegistry.Unavailable _ ->
+                    RecoveryHostState.Unresolved(
                         RecoveryHostGeneration.Old,
                         Some manifest
-                    ))
-                    (RecoveryTerminalRegistry.Unavailable reason)
-                    selected
-                    (unresolvedShutdownProcesses recovery
-                     @ exactHostUnresolved manifest)
-                    reason
-        | Ok finalRegistry
-            when not (
-                originalRegistryMatches
-                    recovery.Capture
-                    finalRegistry
-            ) ->
-            let reason =
-                "The old TerminalHost registry changed during recovery"
+                    ),
+                    exactHostUnresolved manifest
 
             return
                 rejected
-                    (RecoveryHostState.Running(
-                        RecoveryHostGeneration.Old,
-                        manifest
-                    ))
-                    (RecoveryTerminalRegistry.Exact finalRegistry)
+                    hostState
+                    currentRegistry
                     selected
-                    (unresolvedShutdownProcesses recovery)
+                    (unresolvedShutdownProcesses recovery
+                     @ unresolvedExactProcesses pending
+                     @ hostUnresolved)
                     reason
-        | Ok finalRegistry ->
-            return
-                result
-                    (RecoveryHostState.Running(
-                        RecoveryHostGeneration.Old,
-                        manifest
-                    ))
-                    (RecoveryTerminalRegistry.Exact finalRegistry)
-                    selected
-                    (unresolvedShutdownProcesses recovery)
-                    (statusFor selected None)
+        | Ok(expectedRegistry, pending, selected) ->
+            match! listTerminals config manifest with
+            | Error error ->
+                let reason =
+                    $"Could not confirm the old TerminalHost registry after recovery: {error}"
+
+                return
+                    rejected
+                        (RecoveryHostState.Unresolved(
+                            RecoveryHostGeneration.Old,
+                            Some manifest
+                        ))
+                        (RecoveryTerminalRegistry.Unavailable reason)
+                        selected
+                        (unresolvedShutdownProcesses recovery
+                         @ unresolvedExactProcesses pending
+                         @ exactHostUnresolved manifest)
+                        reason
+            | Ok finalRegistry
+                when finalRegistry <> expectedRegistry ->
+                let reason =
+                    "The old TerminalHost registry changed during recovery"
+
+                return
+                    rejected
+                        (RecoveryHostState.Running(
+                            RecoveryHostGeneration.Old,
+                            manifest
+                        ))
+                        (RecoveryTerminalRegistry.Exact finalRegistry)
+                        selected
+                        (unresolvedShutdownProcesses recovery
+                         @ unresolvedExactProcesses pending)
+                        reason
+            | Ok finalRegistry ->
+                return
+                    result
+                        (RecoveryHostState.Running(
+                            RecoveryHostGeneration.Old,
+                            manifest
+                        ))
+                        (RecoveryTerminalRegistry.Exact finalRegistry)
+                        selected
+                        (unresolvedShutdownProcesses recovery
+                         @ unresolvedExactProcesses pending)
+                        (statusFor selected None)
     }
 
 let private recoverExistingOldHost
@@ -609,19 +836,12 @@ let private restoreTerminalsOnOldHost
                     let reason =
                         mutationFailureReason failure
 
-                    let! currentRegistry =
-                        listTerminals config manifest
-
-                    let registry =
-                        match currentRegistry, failure with
-                        | Ok exact, _ ->
-                            RecoveryTerminalRegistry.Exact exact
-                        | Error _, MutationRejected(exact, _) ->
-                            RecoveryTerminalRegistry.Exact exact
-                        | Error error, MutationUnverified _ ->
-                            RecoveryTerminalRegistry.Unavailable(
-                                $"{reason}; authoritative relist failed: {error}"
-                            )
+                    let! registry =
+                        registryAfterMutationFailure
+                            config
+                            manifest
+                            reason
+                            failure
 
                     return
                         registry,
@@ -1191,7 +1411,25 @@ let private resolutionForRecovery recovery result =
 
     let message = $"TerminalHost replacement failed: {error}"
 
+    let selectedTerminalChanged =
+        result.SelectedSessions
+        |> List.exists (fun selected ->
+            selected.CurrentTerminalSessionId
+            |> Option.exists (fun current ->
+                current <> selected.OriginalTerminalSessionId))
+
     match result.HostState, result.TerminalRegistry with
+    | RecoveryHostState.Running(
+        RecoveryHostGeneration.Old,
+        manifest
+      ),
+      RecoveryTerminalRegistry.Exact registry
+        when selectedTerminalChanged ->
+        ReplacementResolution.ApplyRegistry(
+            manifest,
+            registry,
+            outcome
+        )
     | RecoveryHostState.Running(_, manifest),
       RecoveryTerminalRegistry.Exact registry ->
         ReplacementResolution.ApplyRecoveredRegistry(
