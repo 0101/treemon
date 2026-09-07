@@ -111,6 +111,13 @@ UTF-8/base64 encoded as inert data and decoded by a fixed PowerShell expression.
 shell command is one control-free line while the coding tool receives the original prompt text
 unchanged.
 
+Every Copilot command submitted through the host includes `--experimental`, so the CLI discovers
+Treemon's user-scoped reporting extension from the active Copilot config directory. A fresh
+isolated `COPILOT_HOME` therefore uses the same deterministic extension path as a normal launch
+rather than relying on a project extension or a persisted experimental setting. The isolated
+harness accepts the CLI's disposable folder-trust confirmation before evaluating extension
+startup.
+
 The raw terminal-input boundary rejects blank or control-character-bearing commands and commands
 whose complete UTF-8 ttyd input frame (`0` prefix, command, and carriage return) exceeds 16,384
 bytes, before creating a terminal. It then creates one terminal through the existing lifecycle API
@@ -565,7 +572,10 @@ isolated server and fails on incomplete exact process cleanup.
   `SessionId` and different exact identities/origins, proving independent status, liveness,
   idempotency, closure, PID-reuse handling, and restart recovery.
 - A real-CLI outage harness starts reporting before its activity endpoint, then proves acknowledged
-  presence and idempotent replay recover the exact process after the server becomes available.
+  presence and idempotent replay recover the exact process after the server becomes available. It
+  first requires a running extension process and a startup log proving the inherited terminal
+  origin and configured endpoint count; failure reports the isolated install path, loader log
+  lines, and captured TerminalHost process tree instead of waiting for downstream HTTP evidence.
 - A real-CLI close harness proves SDK shutdown precedes terminal teardown when available, explicit
   close remains authoritative on graceful failure, card state refreshes immediately, and no
   captured descendant survives. A forced-cleanup subcase resumes the durable session, permits a

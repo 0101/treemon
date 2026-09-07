@@ -1432,7 +1432,7 @@ let private runScenario client fixture server api port =
                 server
                 "launchSession"
                 fixture.RoutesWorktree
-                [ "--yolo"; "-i"; directPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; directPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1457,7 +1457,7 @@ let private runScenario client fixture server api port =
                 server
                 "tm-launch"
                 fixture.CliWorktree
-                [ "--yolo"; "-i"; Cli.Program.metaPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; Cli.Program.metaPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1529,7 +1529,7 @@ let private runScenario client fixture server api port =
                 server
                 "launchAction"
                 fixture.RoutesWorktree
-                [ "--yolo"; "-i"; actionPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; actionPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1554,7 +1554,7 @@ let private runScenario client fixture server api port =
                 server
                 "resumeSession"
                 fixture.RoutesWorktree
-                [ "--yolo"; "--continue" ]
+                [ "--experimental"; "--yolo"; "--continue" ]
                 (fun () ->
                     async {
                         let! result =
@@ -1585,7 +1585,7 @@ let private runScenario client fixture server api port =
                 server
                 "explicit-canvas-session"
                 fixture.CanvasWorktree
-                [ "--yolo"; "-i"; canvasPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; canvasPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1613,7 +1613,7 @@ let private runScenario client fixture server api port =
                 server
                 "create-worktree-with-prompt"
                 fixture.CreatedWorktree
-                [ "--yolo"; "-i"; createPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; createPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1650,7 +1650,7 @@ let private runScenario client fixture server api port =
                 server
                 "queued-canvas-fallback"
                 fixture.CanvasWorktree
-                [ "--yolo"; "-i"; queuedPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; queuedPrompt ]
                 (fun () ->
                     async {
                         let! result =
@@ -1708,7 +1708,7 @@ let private runScenario client fixture server api port =
                 server
                 "autosync-fallback"
                 fixture.AutoSyncWorktree
-                [ "--yolo"; "-i"; autoSyncPrompt ]
+                [ "--experimental"; "--yolo"; "-i"; autoSyncPrompt ]
                 (fun () ->
                     async {
                         let! result =

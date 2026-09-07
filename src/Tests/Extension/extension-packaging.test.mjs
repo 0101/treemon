@@ -38,6 +38,21 @@ test("each installed extension keeps its session-id compatibility boundary local
   assert.doesNotMatch(reporting, /session-identity\.mjs/);
 });
 
+test("reporting startup diagnostics expose process and inherited-origin presence without the origin value", () => {
+  const reporting =
+    readFileSync(new URL("../../Extension/reporting/extension.mjs", import.meta.url), "utf8");
+
+  assert.match(
+    reporting,
+    /startup pid=\$\{process\.pid\} parentPid=\$\{parentProcessId\} terminalOrigin=\$\{terminalSessionId \? "present" : "absent"\} endpoints=\$\{activityUrls\.length\}/,
+  );
+  assert.doesNotMatch(
+    reporting,
+    /startup[^`]*\$\{terminalSessionId\}/,
+    "the exact terminal origin must not enter extension diagnostics",
+  );
+});
+
 test("canvas bridge registration carries exact process and opaque shutdown metadata", () => {
   const canvas =
     readFileSync(new URL("../../Extension/extension.mjs", import.meta.url), "utf8");

@@ -168,6 +168,14 @@ injections, blank messages, invalid usage gauges, and invalid or overlong backgr
 before sending. The canvas bridge's shared `request-body.mjs` reader caps `/inject` and `/_message`
 at 1 MiB and `/shutdown` at 4 KiB, and rejects request-stream errors.
 
+Treemon installs the package as a user extension at
+`$COPILOT_HOME/extensions/treemon-reporting` when `COPILOT_HOME` is set, otherwise at
+`~/.copilot/extensions/treemon-reporting`. Every Copilot command built by Treemon enables the
+CLI's experimental extension loader explicitly; discovery never depends on a project extension
+or a previously persisted experimental setting. Isolated verification uses a fresh `COPILOT_HOME`
+with the same user-extension layout and explicitly accepts the CLI's disposable folder-trust
+confirmation before requiring loader and process evidence.
+
 The extension maps lifecycle, skill, message, `assistant.intent`, `session.title_changed`, ask-user,
 background-agent, and usage events onto the closed wire contract. Background reports use
 `background_agent_started` / `background_agent_finished` with an opaque `toolCallId` of at most 512
@@ -361,6 +369,7 @@ into lifecycle status.
 | Decision | Choice |
 |---|---|
 | Source of truth | Push events only; log-parsing detectors are removed. |
+| Extension discovery | Install one user extension under the active Copilot config root and pass `--experimental` on every Treemon-built Copilot invocation. |
 | Session model | Working, WaitingForUser, Idle; NoSession only at worktree collapse. |
 | Synthetic messages | Filter server-side before ingestion with the shared user-message classifier. |
 | Ask-user ordering | Persist independent request/completion clocks; do not keep lifecycle state in the extension. |

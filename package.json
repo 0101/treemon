@@ -7,6 +7,8 @@
     "check:extension": "tsc --project src/Extension/tsconfig.json && tsc --project src/Extension/tsconfig.contracts.json",
     "test:extension": "npm run check:extension && node --test src/Tests/Extension/*.test.mjs src/Tests/Extension/reporting/*.test.mjs",
     "test:reporting": "node --test src/Tests/Extension/reporting/*.test.mjs",
+    "test:copilot-extension-install": "pwsh -NoProfile -File scripts/copilot-extension-install.test.ps1",
+    "test:real-cli-reporting": "pwsh -NoProfile -File scripts/verify-real-cli-reporting.ps1",
     "test:treemon-deployment": "pwsh -NoProfile -File scripts/treemon-deployment.test.ps1",
     "test:embedded-launch-routing": "pwsh -NoProfile -File scripts/verify-embedded-launch-routing.ps1",
     "test:ttyd-runtime-unit": "node --test scripts/verify-ttyd-runtime.test.mjs",

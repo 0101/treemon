@@ -2414,7 +2414,7 @@ type TerminalOwnershipQueryTests() =
                         [ ownedTerminal,
                           replacementResume
                               "provider-owned-session"
-                              "copilot --yolo --resume 'provider-owned-session'" ]
+                              "copilot --experimental --yolo --resume 'provider-owned-session'" ]
                 ),
                 "the unrelated terminal remains a plain shell"
             ))
@@ -2483,7 +2483,7 @@ type TerminalOwnershipQueryTests() =
                         [ terminal,
                           replacementResume
                               "newer-conversation"
-                              "copilot --yolo --resume 'newer-conversation'" ]
+                              "copilot --experimental --yolo --resume 'newer-conversation'" ]
                 ),
                 "only the selected durable conversation receives an automatic Resume command"
             ))
@@ -2590,7 +2590,7 @@ type TerminalOwnershipQueryTests() =
                         [ terminalSessionId,
                           replacementResume
                               "newer-idle"
-                              "copilot --yolo --resume 'newer-idle'" ]
+                              "copilot --experimental --yolo --resume 'newer-idle'" ]
                 )
             ))
 
@@ -2713,7 +2713,7 @@ type TerminalOwnershipQueryTests() =
                             [ terminalA,
                               replacementResume
                                   "owned"
-                                  "copilot --yolo --resume 'owned'" ]
+                                  "copilot --experimental --yolo --resume 'owned'" ]
                     ),
                     "the session orchestration layer selects the provider-specific resume command"
                 )
@@ -2765,7 +2765,7 @@ type TerminalOwnershipQueryTests() =
                             [ terminalA,
                               replacementResume
                                   "owned"
-                                  "copilot --yolo --resume 'owned'" ]
+                                  "copilot --experimental --yolo --resume 'owned'" ]
                     )
                 )))
 
@@ -2877,6 +2877,6 @@ type TerminalOwnershipQueryTests() =
                             [ terminalSessionId,
                               replacementResume
                                   "surviving"
-                                  "copilot --yolo --resume 'surviving'" ]
+                                  "copilot --experimental --yolo --resume 'surviving'" ]
                     )
                 )))

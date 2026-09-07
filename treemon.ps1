@@ -1152,13 +1152,21 @@ function Install-Skill {
     }
 }
 
+function Get-CopilotConfigDirectory {
+    if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HOME)) {
+        return [IO.Path]::GetFullPath($env:COPILOT_HOME)
+    }
+
+    return [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE ".copilot"))
+}
+
 function Install-CopilotExtension(
     [string]$SrcDir,
     [string]$DestName,
     [string]$FriendlyName,
     [string[]]$RequiredFiles
 ) {
-    $dest = Join-Path $env:USERPROFILE ".copilot" "extensions" $DestName
+    $dest = Join-Path (Get-CopilotConfigDirectory) "extensions" $DestName
     if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
     Get-ChildItem -Path $SrcDir -Filter "*.mjs" -File |
         Copy-Item -Destination $dest -Force

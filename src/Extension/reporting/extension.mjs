@@ -93,5 +93,8 @@ const cleanup = () => runtime.stop();
 process.on("SIGTERM", cleanup);
 process.on("SIGINT", cleanup);
 
+log(
+  `startup pid=${process.pid} parentPid=${parentProcessId} terminalOrigin=${terminalSessionId ? "present" : "absent"} endpoints=${activityUrls.length}`,
+);
 await runtime.start();
 log(`joined ${sessionId} — reporting to ${activityUrls.join(", ")}`);
