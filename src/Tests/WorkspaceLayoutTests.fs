@@ -404,7 +404,10 @@ type TerminalPaneDomTests() =
                     frame.WaitForFunctionAsync(
                         expression,
                         (null :> obj),
-                        FrameWaitForFunctionOptions(Timeout = 5000.0f)
+                        FrameWaitForFunctionOptions(
+                            PollingInterval = 50.0f,
+                            Timeout = 5000.0f
+                        )
                     )
 
                 return ()
