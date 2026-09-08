@@ -215,6 +215,7 @@ let internal assembleFromState
       CodingTool = fields.CodingTool
       CodingToolProvider = fields.CodingToolData.Provider
       CodingToolSince = fields.CodingToolSince
+      SessionActivityAt = fields.CodingToolData.SessionActivityAt
       CurrentSkill = fields.CodingToolData.CurrentSkill
       AgentActivity = fields.CodingToolData.AgentActivity
       Sessions = fields.CodingToolData.SessionStatuses
@@ -432,6 +433,7 @@ let internal assembleOverviewFromState
       CodingTool = fields.CodingTool
       CodingToolProvider = fields.CodingToolData.Provider
       CodingToolSince = fields.CodingToolSince
+      SessionActivityAt = fields.CodingToolData.SessionActivityAt
       CurrentSkill = fields.CodingToolData.CurrentSkill
       AgentActivity = fields.CodingToolData.AgentActivity
       Sessions = fields.CodingToolData.SessionStatuses

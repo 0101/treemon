@@ -19,7 +19,7 @@
 - Scheduler footer: one row per refresh category, persistent status (never reverts to "pending")
 - Loading skeleton on cold start until first worktree list completes
 - Fixed header bar with system metrics and deploy branch badge
-- Keyboard navigation: arrow keys move focus spatially across cards and repo headers (see `docs/spec/keyboard-navigation.md`)
+- Keyboard navigation: arrow keys move focus spatially, while Ctrl+P fuzzy-searches worktrees across repositories (see `docs/spec/keyboard-navigation.md`)
 - Canvas pane: per-worktree interactive HTML documents for agent-to-user rich content (see `docs/spec/canvas-pane.md`)
 
 ### Multi-Repo
@@ -365,7 +365,7 @@ After the burst, `lastRuns` is pre-populated and the normal sequential loop take
 ## Related Specs
 
 - `docs/spec/user-idle-detection.md` — adaptive refresh cadence based on user activity level
-- `docs/spec/keyboard-navigation.md` — spatial arrow-key navigation and key bindings
+- `docs/spec/keyboard-navigation.md` — spatial navigation, global shortcuts, and fuzzy worktree search
 - `docs/spec/native-session-management.md` — explicit native card-terminal spawn/focus/new-tab/kill
   via HWND tracking
 - `docs/spec/embedded-terminal.md` — embedded agent launches, command delivery, and terminal

@@ -1566,15 +1566,15 @@ type TerminalHostProxyTests() =
                     ))))
 
     [<Test>]
-    member _.``terminal page decoration hides the scrollbar and gates reconnect reload``() =
+    member _.``terminal page adds shortcuts and gates reconnect reload``() =
         let html =
             "<html><head><style>.xterm-viewport{overflow-y:scroll}</style></head><body></body></html>"
         let allowedOrigins =
             [ "http://localhost:5174"
               "http://127.0.0.1:5174" ]
 
-        let decorated =
-            TerminalProxy.decorateTerminalPage allowedOrigins html
+        let customized =
+            TerminalProxy.customizeTerminalPage allowedOrigins html
         let serializedAction =
             JsonSerializer.Serialize TerminalPane.TerminalVisibleAction
         let serializedPrompt =
@@ -1582,80 +1582,84 @@ type TerminalHostProxyTests() =
 
         Assert.Multiple(fun () ->
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain(".xterm-viewport{scrollbar-width:none}")
             )
 
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain(".xterm-viewport::-webkit-scrollbar{display:none}")
             )
 
-            Assert.That(decorated, Does.Contain("overflow-y:scroll"))
+            Assert.That(customized, Does.Contain("overflow-y:scroll"))
+            Assert.That(customized, Does.Contain("open-worktree-search"))
+            Assert.That(customized, Does.Contain("cycle-terminal"))
+            Assert.That(customized, Does.Contain("focus-terminal"))
+            Assert.That(customized, Does.Contain(".xterm-helper-textarea"))
+            Assert.That(customized, Does.Contain("e.source!==parent"))
+            Assert.That(customized, Does.Contain("e.stopImmediatePropagation()"))
+            Assert.That(customized, Does.Contain("},true)"))
+            Assert.That(customized, Does.Contain($"action={serializedAction}"))
             Assert.That(
-                decorated,
-                Does.Contain($"action={serializedAction}")
-            )
-            Assert.That(
-                decorated,
+                customized,
                 Does.Contain($"reconnectPrompt={serializedPrompt}")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain(JsonSerializer.Serialize allowedOrigins)
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("event.source!==window.parent")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("allowedOrigins.indexOf(event.origin)<0")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("child.style.position==='absolute'")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("child.textContent===reconnectPrompt")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("poll=setInterval(reconnectIfWaiting,100)")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("deadline=setTimeout(clearPending,10000)")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("if(deadline!==null)clearTimeout(deadline)")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("reloading=true;clearPending()")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("sessionStorage.setItem(reloadMarker,'1')")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("if(loaded&&suppressReloadLoad())return")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("if(event.data.active===false){clearPending();return}")
             )
             Assert.That(
-                decorated,
+                customized,
                 Does.Contain("document.visibilityState!=='visible'")
             )
 
             Assert.That(
-                decorated.IndexOf("scrollbar-width:none", StringComparison.Ordinal),
-                Is.LessThan(decorated.IndexOf("</head>", StringComparison.Ordinal))
+                customized.IndexOf("open-worktree-search", StringComparison.Ordinal),
+                Is.LessThan(customized.IndexOf("</head>", StringComparison.Ordinal))
             ))
 
     [<Test>]
@@ -2270,6 +2274,16 @@ type TerminalHostManifestTests() =
 [<Platform("Win")>]
 type TerminalHostJobObjectTests() =
     let powershell = executableOnPath "pwsh.exe"
+    let testOutput = DirectoryInfo AppContext.BaseDirectory
+    let consoleProbe =
+        Path.Combine(
+            __SOURCE_DIRECTORY__,
+            "TestAgentRecorder",
+            "bin",
+            testOutput.Parent.Name,
+            testOutput.Name,
+            "copilot.exe"
+        )
 
     [<Test>]
     member _.``owned console process starts without an attached console``() =
@@ -2284,13 +2298,8 @@ type TerminalHostJobObjectTests() =
 
             let owned =
                 JobProcess.start
-                    { Executable = powershell
-                      Arguments =
-                        [ "-NoLogo"
-                          "-NoProfile"
-                          "-NonInteractive"
-                          "-Command"
-                          """Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; [ConsoleProbe]::GetConsoleWindow().ToInt64() | Set-Content -LiteralPath $env:TM_CONSOLE_HANDLE_FILE; Start-Sleep -Seconds 300""" ]
+                    { Executable = consoleProbe
+                      Arguments = []
                       WorkingDirectory = root
                       Environment = [ "TM_CONSOLE_HANDLE_FILE", consoleHandleFile ] }
                 |> requireOk

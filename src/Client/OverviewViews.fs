@@ -121,6 +121,9 @@ let schedulerFooter (repos: RepoModel list) (events: CardEvent list) (latestByCa
             Html.div [
                 prop.className "nav-hint"
                 prop.children [
+                    Html.kbd "Ctrl+P"
+                    Html.span " to find a worktree"
+                    Html.span " \u00B7 "
                     Html.kbd "Esc"
                     Html.span " to refocus worktree navigation"
                 ]
