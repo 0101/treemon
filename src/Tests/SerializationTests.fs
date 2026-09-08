@@ -45,6 +45,19 @@ type WrapperTypeSerializationTests() =
         Assert.That(result.HasDiff, Is.True)
 
     [<Test>]
+    member _.``Session activity timestamp survives WorktreeStatus JSON round-trip``() =
+        let expected =
+            DateTimeOffset(2026, 9, 4, 14, 0, 0, TimeSpan.Zero)
+        let original =
+            { Tests.WorktreeFixtures.baseWt with
+                SessionActivityAt = Some expected }
+
+        Assert.That(
+            (roundTrip original).SessionActivityAt,
+            Is.EqualTo(Some expected)
+        )
+
+    [<Test>]
     member _.``UserFooterMessage with canvas glyph survives JSON round-trip``() =
         let original =
             { Glyph = Some MessageGlyph.Canvas

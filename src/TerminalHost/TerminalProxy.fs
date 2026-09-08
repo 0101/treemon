@@ -19,13 +19,13 @@ module internal TerminalProxy =
     let [<Literal>] private AttachmentPathRoot = "/_treemon/"
     let [<Literal>] private TtySubprotocol = "tty"
     let [<Literal>] private CommandSubprotocol = "treemon-command"
-    let [<Literal>] private HiddenViewportScrollbarStyle =
-        "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
+    let [<Literal>] private TerminalPageHeadInjection =
+        "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style><script>(function(){function focusTerminal(){var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.action!=='focus-terminal')return;focusTerminal()});document.addEventListener('keydown',function(e){if(!(e.ctrlKey||e.metaKey)||e.altKey)return;var key=e.key.toLowerCase();var action=key==='p'?'open-worktree-search':key==='tab'?'cycle-terminal':'';if(!action)return;e.preventDefault();e.stopImmediatePropagation();if(action==='cycle-terminal')parent.postMessage({action:action,direction:e.shiftKey?'previous':'next'},'*');else parent.postMessage({action:action},'*')},true)})()</script>"
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
-    let internal hideViewportScrollbar (html: string) =
-        html.Replace("</head>", HiddenViewportScrollbarStyle + "</head>", StringComparison.OrdinalIgnoreCase)
+    let internal customizeTerminalPage (html: string) =
+        html.Replace("</head>", TerminalPageHeadInjection + "</head>", StringComparison.OrdinalIgnoreCase)
 
     let private receiveMessage mode (socket: WebSocket) =
         let buffer = Array.zeroCreate<byte> 8_192
@@ -222,7 +222,7 @@ module internal TerminalProxy =
 
                         let! html = response.Content.ReadAsStringAsync(context.RequestAborted)
 
-                        let bytes = html |> hideViewportScrollbar |> Encoding.UTF8.GetBytes
+                        let bytes = html |> customizeTerminalPage |> Encoding.UTF8.GetBytes
 
                         context.Response.ContentLength <- int64 bytes.Length
                         do! context.Response.Body.WriteAsync(bytes, context.RequestAborted)

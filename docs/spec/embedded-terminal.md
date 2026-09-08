@@ -298,10 +298,11 @@ restores ttyd's protocol prefix on continuation chunks instead of buffering a wh
 message under the replay limit. Browser attachments use ttyd's `tty` subprotocol and receive replay;
 server command attachments use the authenticated `treemon-command` subprotocol and are input-only.
 
-Windows process creation uses `CREATE_SUSPENDED`, immediate `AssignProcessToJobObject`, and
-`ResumeThread` in the host process. The Job Object uses kill-on-close without a breakaway policy, so
-host loss and explicit close have the same exact ownership boundary. No supervisor script or
-descendant enumeration participates.
+Windows process creation uses `CREATE_SUSPENDED`, `CREATE_UNICODE_ENVIRONMENT`, and
+`CREATE_NO_WINDOW`, followed by immediate `AssignProcessToJobObject` and `ResumeThread` in the host
+process. The Job Object uses kill-on-close without a breakaway policy, so host loss and explicit
+close have the same exact ownership boundary. No supervisor script or descendant enumeration
+participates.
 
 PowerShell explicitly sets its location from `TREEMON_TERMINAL_WORKTREE` at startup because ttyd's
 Windows working-directory option alone does not establish the child shell's location.
@@ -453,6 +454,9 @@ ports, and state.
   the implementation has one language, one process owner, and no script/runtime handoff.
 - **Job Object before execution:** kernel membership established before ttyd resumes is the only
   terminal-tree ownership authority.
+- **Windowless terminal infrastructure:** ttyd is created with `CREATE_NO_WINDOW`, so the background
+  host never allocates a native console or default-terminal surface; shell I/O exists only inside
+  ttyd's PTY.
 - **External production ownership:** production launch and restart require a caller outside an
   embedded terminal because the terminal Job Object deliberately has no breakaway policy. The
   inherited terminal session ID blocks self-owned production before destructive work; this is
@@ -521,9 +525,13 @@ ports, and state.
 - **Origin-scoped attachment framing:** attachment responses use CSP `frame-ancestors` with every
   configured dashboard origin, rather than same-origin framing that would reject the legitimate
   cross-port dashboard iframe.
-- **Proxy-owned terminal scrollbar chrome:** the attachment proxy adds one CSS override to ttyd's
-  root page instead of carrying a forked custom index. It hides the rendered xterm scrollbar while
-  preserving wheel, keyboard, and programmatic scrollback.
+- **Proxy-owned terminal page integration:** the attachment proxy adds one CSS override and one
+  capture-phase global-shortcut bridge to ttyd's root page instead of carrying a forked custom
+  index. It hides the rendered xterm scrollbar while preserving scrollback, forwards Ctrl+P to
+  worktree search, and forwards Ctrl+Tab / Ctrl+Shift+Tab to next/previous terminal selection before
+  xterm consumes those keys. The dashboard accepts a forwarded shortcut only from the active
+  loopback terminal iframe, then sends an exact-origin focus request back after terminal selection
+  or worktree-search dismissal so the active xterm input keeps keyboard ownership.
 - **Resume without widening control API:** after each replacement terminal is recreated, Treemon
   briefly attaches through the existing authenticated ttyd protocol and submits the opaque command
   selected by `TerminalSessionActivity`. A terminal without an exact resumable session receives no

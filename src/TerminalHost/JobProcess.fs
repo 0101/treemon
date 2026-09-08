@@ -25,6 +25,7 @@ type OwnedJobProcess =
 module JobProcess =
     let [<Literal>] private CreateSuspended = 0x00000004u
     let [<Literal>] private CreateUnicodeEnvironment = 0x00000400u
+    let [<Literal>] private CreateNoWindow = 0x08000000u
     let [<Literal>] private JobObjectExtendedLimitInformationClass = 9
     let [<Literal>] private JobObjectLimitKillOnJobClose = 0x00002000u
     let [<Literal>] private WaitObject0 = 0u
@@ -113,6 +114,9 @@ module JobProcess =
 
     [<DllImport("kernel32.dll", SetLastError = true)>]
     extern bool private GetProcessTimes(SafeFileHandle processHandle, FileTime& creationTime, FileTime& exitTime, FileTime& kernelTime, FileTime& userTime)
+
+    [<DllImport("kernel32.dll", SetLastError = true)>]
+    extern bool private GetExitCodeProcess(SafeFileHandle processHandle, uint32& exitCode)
 
     [<DllImport("kernel32.dll", SetLastError = true)>]
     extern uint32 private WaitForSingleObject(SafeFileHandle handle, uint32 milliseconds)
@@ -276,7 +280,9 @@ module JobProcess =
                                     0n,
                                     0n,
                                     false,
-                                    CreateSuspended ||| CreateUnicodeEnvironment,
+                                    CreateSuspended
+                                    ||| CreateUnicodeEnvironment
+                                    ||| CreateNoWindow,
                                     environment,
                                     specification.WorkingDirectory,
                                     &startup,
@@ -321,6 +327,15 @@ module JobProcess =
 
     let processId owned = owned.Pid
     let processStartTimeUtcTicks owned = owned.StartTimeUtcTicks
+
+    let internal exitCode owned =
+        // GetExitCodeProcess writes the result through a Win32 byref.
+        let mutable exitCode = 0u
+
+        if GetExitCodeProcess(owned.ProcessHandle, &exitCode) then
+            Ok exitCode
+        else
+            Error(win32Error (nameof GetExitCodeProcess))
 
     let hasExited owned =
         try

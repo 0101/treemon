@@ -20,7 +20,7 @@
 When orchestrating massive parallel work by agents (like Claude Code or Copilot), Treemon provides:
 
 - 🦅 **Bird's-eye view:** See exactly which agent is waiting for input, which PR is failing tests, and which branch has unpushed commits.
-- ⚡ **Lightning-fast context switching:** Spatial keyboard navigation lets you instantly jump to the exact Windows Terminal tab for any active worktree.
+- ⚡ **Lightning-fast context switching:** `Ctrl+P` fuzzy search and spatial keyboard navigation jump to any worktree; `Enter` opens or focuses its terminal.
 - 🧹 **Zero configuration:** No hooks or agents to install inside your repos. Just point it at a folder and it works.
 
 ### Dashboard Capabilities

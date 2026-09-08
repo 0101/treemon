@@ -87,13 +87,15 @@ type CanvasPaneTests() =
             let navigationDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
             let actionDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
             let focusDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
+            let searchDropped = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
             let sent = TaskCompletionSource<unit>(TaskCreationOptions.RunContinuationsAsynchronously)
             // The request counter is confined to this browser's observable transport boundary.
             let mutable sends = 0
             this.Page.Console.Add(fun message ->
                 if message.Text.Contains("navigate-canvas-doc DROPPED") then navigationDropped.TrySetResult(()) |> ignore
                 if message.Text.Contains("postMessage DROPPED") && message.Text.Contains("one-pane-probe") then actionDropped.TrySetResult(()) |> ignore
-                if message.Text.Contains("reclaim-focus DROPPED") then focusDropped.TrySetResult(()) |> ignore)
+                if message.Text.Contains("reclaim-focus DROPPED") then focusDropped.TrySetResult(()) |> ignore
+                if message.Text.Contains("open-worktree-search DROPPED") then searchDropped.TrySetResult(()) |> ignore)
             do!
                 this.Page.RouteAsync(
                     "**/IWorktreeApi/sendCanvasMessage",
@@ -112,9 +114,10 @@ type CanvasPaneTests() =
                         parent.postMessage({ action: 'navigate-canvas-doc', filename: 'metrics.html' }, '*');
                         parent.postMessage({ action: 'one-pane-probe' }, '*');
                         parent.postMessage({ action: 'reclaim-focus' }, '*');
+                        parent.postMessage({ action: 'open-worktree-search' }, '*');
                     }""")
             let! _ =
-                Task.WhenAll([| navigationDropped.Task; actionDropped.Task; focusDropped.Task |])
+                Task.WhenAll([| navigationDropped.Task; actionDropped.Task; focusDropped.Task; searchDropped.Task |])
                     .WaitAsync(TimeSpan.FromSeconds(10.0))
             let! focusId = this.Page.EvaluateAsync<string>("() => document.activeElement.id")
             let! hiddenSrc = this.Page.Locator(".canvas-iframe-active").GetAttributeAsync("src")

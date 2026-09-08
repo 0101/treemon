@@ -47,6 +47,11 @@ let isOpen =
     | Closed -> false
     | _ -> true
 
+let isOpenRequest =
+    function
+    | OpenCreateWorktree _ -> true
+    | _ -> false
+
 type UpdateResult =
     { Modal: ModalState
       RestoredFocus: FocusTarget option

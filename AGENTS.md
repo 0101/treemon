@@ -21,6 +21,14 @@ dotnet test src/Tests/Tests.fsproj --filter "Category=Unit" # unit tests only
 .\treemon.ps1 remove "Q:\code\OtherProject"                 # embedded terminals save the change but defer restart
 ```
 
+## Pull Requests
+
+- Treemon is effectively a single-owner repository with little outside contribution, so PR
+  descriptions normally have no external reader. Keep them to a short change summary and relevant
+  verification.
+- Do not spend repository-local time or tokens on PR prose polishing, previews, or adversarial-review
+  ceremony. Mandatory higher-priority publication and encoding rules still apply.
+
 ## F# Style Guide
 
 This project uses strict functional F# style. These rules are non-negotiable.

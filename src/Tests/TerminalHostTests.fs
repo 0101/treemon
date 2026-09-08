@@ -1566,28 +1566,35 @@ type TerminalHostProxyTests() =
                     ))))
 
     [<Test>]
-    member _.``terminal page hides viewport scrollbar without disabling scrolling``() =
+    member _.``terminal page adds chrome and global shortcut interception``() =
         let html =
             "<html><head><style>.xterm-viewport{overflow-y:scroll}</style></head><body></body></html>"
 
-        let styled = TerminalProxy.hideViewportScrollbar html
+        let customized = TerminalProxy.customizeTerminalPage html
 
         Assert.Multiple(fun () ->
             Assert.That(
-                styled,
+                customized,
                 Does.Contain(".xterm-viewport{scrollbar-width:none}")
             )
 
             Assert.That(
-                styled,
+                customized,
                 Does.Contain(".xterm-viewport::-webkit-scrollbar{display:none}")
             )
 
-            Assert.That(styled, Does.Contain("overflow-y:scroll"))
+            Assert.That(customized, Does.Contain("overflow-y:scroll"))
+            Assert.That(customized, Does.Contain("open-worktree-search"))
+            Assert.That(customized, Does.Contain("cycle-terminal"))
+            Assert.That(customized, Does.Contain("focus-terminal"))
+            Assert.That(customized, Does.Contain(".xterm-helper-textarea"))
+            Assert.That(customized, Does.Contain("e.source!==parent"))
+            Assert.That(customized, Does.Contain("e.stopImmediatePropagation()"))
+            Assert.That(customized, Does.Contain("},true)"))
 
             Assert.That(
-                styled.IndexOf("scrollbar-width:none", StringComparison.Ordinal),
-                Is.LessThan(styled.IndexOf("</head>", StringComparison.Ordinal))
+                customized.IndexOf("open-worktree-search", StringComparison.Ordinal),
+                Is.LessThan(customized.IndexOf("</head>", StringComparison.Ordinal))
             ))
 
     [<Test>]
@@ -2181,6 +2188,78 @@ type TerminalHostManifestTests() =
 [<Platform("Win")>]
 type TerminalHostJobObjectTests() =
     let powershell = executableOnPath "pwsh.exe"
+    let testOutput = DirectoryInfo AppContext.BaseDirectory
+    let consoleProbe =
+        Path.Combine(
+            __SOURCE_DIRECTORY__,
+            "TestAgentRecorder",
+            "bin",
+            testOutput.Parent.Name,
+            testOutput.Name,
+            "copilot.exe"
+        )
+
+    [<Test>]
+    member _.``owned console process starts without an attached console``() =
+        withTempDir "terminal-host-no-console" (fun root ->
+            let consoleHandleFile = Path.Combine(root, "console-handle.txt")
+
+            let tryReadConsoleHandle () =
+                try
+                    File.ReadAllText(consoleHandleFile).Trim() |> Some
+                with :? IOException ->
+                    None
+
+            let owned =
+                JobProcess.start
+                    { Executable = consoleProbe
+                      Arguments = []
+                      WorkingDirectory = root
+                      Environment = [ "TM_CONSOLE_HANDLE_FILE", consoleHandleFile ] }
+                |> requireOk
+
+            try
+                Assert.That(
+                    waitUntil (TimeSpan.FromSeconds 10.0) (fun () ->
+                        tryReadConsoleHandle ()
+                        |> Option.exists (String.IsNullOrWhiteSpace >> not)),
+                    Is.True,
+                    "owned process did not publish its console handle"
+                )
+
+                Assert.That(
+                    tryReadConsoleHandle (),
+                    Is.EqualTo(Some "0"),
+                    "background process unexpectedly attached to a console"
+                )
+            finally
+                JobProcess.close owned)
+
+    [<Test>]
+    member _.``failed terminal process reports executable port and exit code``() =
+        withTempDir "terminal-host-launch-error" (fun root ->
+            let executable = Path.Combine(Environment.SystemDirectory, "hostname.exe")
+
+            let result =
+                TerminalLauncher.start
+                    { TtydExecutable = executable
+                      ShellCommand = powershell
+                      StartupTimeout = TimeSpan.FromSeconds 5.0 }
+                    "failed-terminal"
+                    (CanonicalWorktree.create root)
+                |> runWithin (TimeSpan.FromSeconds 10.0)
+
+            match result with
+            | Error error ->
+                Assert.Multiple(fun () ->
+                    Assert.That(error, Does.Contain(executable))
+                    Assert.That(error, Does.Contain("exited with code"))
+                    Assert.That(error, Does.Contain("before binding loopback port")))
+            | Ok terminal ->
+                try
+                    Assert.Fail("A non-server executable unexpectedly became terminal-ready")
+                finally
+                    terminal.Close())
 
     [<Test>]
     member _.``closing one retained Job Object kills its exact ttyd process tree``() =
@@ -2198,7 +2277,7 @@ type TerminalHostJobObjectTests() =
                           "-NoProfile"
                           "-NonInteractive"
                           "-Command"
-                          "$descendant = Start-Process -FilePath $env:TM_POWERSHELL -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 300') -PassThru; $PID | Set-Content -LiteralPath $env:TM_PID_FILE; $descendant.Id | Set-Content -LiteralPath $env:TM_DESCENDANT_PID_FILE; $env:TREEMON_TERMINAL_SESSION_ID | Set-Content -LiteralPath $env:TM_SESSION_FILE; Start-Sleep -Seconds 300" ]
+                          "$descendant = Start-Process -FilePath $env:TM_POWERSHELL -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 300') -WindowStyle Hidden -PassThru; $PID | Set-Content -LiteralPath $env:TM_PID_FILE; $descendant.Id | Set-Content -LiteralPath $env:TM_DESCENDANT_PID_FILE; $env:TREEMON_TERMINAL_SESSION_ID | Set-Content -LiteralPath $env:TM_SESSION_FILE; Start-Sleep -Seconds 300" ]
                       WorkingDirectory = root
                       Environment =
                         [ "TM_POWERSHELL", powershell
