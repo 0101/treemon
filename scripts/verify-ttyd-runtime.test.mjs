@@ -23,9 +23,10 @@ function requestWithHost(url, host) {
   });
 }
 
-test("verifier cleanup closes browser, dashboard, and isolated TerminalHost", async () => {
+test("verifier cleanup deletes tracked terminals before stopping TerminalHost", async () => {
   const events = [];
   await cleanupRuntimeResources({
+    terminalSessionIds: ["tracked-terminal"],
     browser: {
       close: async () => events.push("browser"),
     },
@@ -33,11 +34,20 @@ test("verifier cleanup closes browser, dashboard, and isolated TerminalHost", as
       terminate: async () => events.push("dashboard-stopped"),
     },
     host: {
+      deleteTerminal: async (sessionId) => {
+        events.push(`deleted:${sessionId}`);
+        return { terminals: [] };
+      },
       terminate: async () => events.push("host-stopped"),
     },
   });
 
-  assert.deepEqual(events, ["browser", "dashboard-stopped", "host-stopped"]);
+  assert.deepEqual(events, [
+    "browser",
+    "dashboard-stopped",
+    "deleted:tracked-terminal",
+    "host-stopped",
+  ]);
 });
 
 test("browser cleanup failure cannot skip dashboard or TerminalHost termination", async () => {
@@ -81,6 +91,57 @@ test("host shutdown failure is not hidden by successful browser cleanup", async 
     }),
     /host did not stop/,
   );
+});
+
+test("cleanup attempts every resource and surfaces every terminal failure", async () => {
+  const events = [];
+
+  await assert.rejects(
+    cleanupRuntimeResources({
+      terminalSessionIds: ["delete-fails", "remains-present"],
+      browser: {
+        close: async () => {
+          events.push("browser");
+          throw new Error("browser close failed");
+        },
+      },
+      dashboard: {
+        terminate: async () => {
+          events.push("dashboard");
+          throw new Error("dashboard close failed");
+        },
+      },
+      host: {
+        deleteTerminal: async (sessionId) => {
+          events.push(`delete:${sessionId}`);
+          if (sessionId === "delete-fails") {
+            throw new Error("terminal DELETE failed");
+          }
+          return { terminals: [{ sessionId }] };
+        },
+        terminate: async () => {
+          events.push("host");
+          throw new Error("host did not stop");
+        },
+      },
+    }),
+    (error) => {
+      assert.match(error.message, /browser close failed/);
+      assert.match(error.message, /dashboard close failed/);
+      assert.match(error.message, /terminal DELETE failed/);
+      assert.match(error.message, /left terminal remains-present in the registry/);
+      assert.match(error.message, /host did not stop/);
+      return true;
+    },
+  );
+
+  assert.deepEqual(events, [
+    "browser",
+    "dashboard",
+    "delete:delete-fails",
+    "delete:remains-present",
+    "host",
+  ]);
 });
 
 test("verification dashboard rejects an unexpected Host without exposing the terminal token", async () => {

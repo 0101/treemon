@@ -87,11 +87,12 @@ exact manual reconnect overlay is present, or checks for that exact overlay duri
 bounded recovery window when page initialization or the transport-close event trails the visibility
 signal. Repeated visibility signals refresh that window, while a document-local reload latch
 prevents paired browser events from replacing the same attachment twice. A receiver-initiated
-reload is marked so its iframe-load notification cannot start another recovery generation; when
-browser storage is unavailable, load-driven recovery fails closed rather than looping. Deactivation
-clears the child recovery window so a hidden pane, terminal, worktree, or browser tab cannot reclaim
-the single attachment. Healthy shell prompts, partially typed commands, password prompts, and
-full-screen applications receive no input and are not reloaded.
+reload writes a marker that the new terminal document consumes and removes during initialization.
+The resulting suppression decision stays document-local and can suppress at most one iframe-load
+activation; when browser storage is unavailable, that decision fails closed rather than looping.
+Deactivation clears the child recovery window so a hidden pane, terminal, worktree, or browser tab
+cannot reclaim the single attachment. Healthy shell prompts, partially typed commands, password
+prompts, and full-screen applications receive no input and are not reloaded.
 
 ### Launch routing and command startup
 

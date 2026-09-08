@@ -20,31 +20,16 @@ module internal TerminalProxy =
     let [<Literal>] private AttachmentPathRoot = "/_treemon/"
     let [<Literal>] private TtySubprotocol = "tty"
     let [<Literal>] private CommandSubprotocol = "treemon-command"
-    let [<Literal>] private HiddenViewportScrollbarStyle =
-        "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style>"
-    let [<Literal>] private TerminalShortcutScript =
-        "<script>(function(){function focusTerminal(){var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.action!=='focus-terminal')return;focusTerminal()});document.addEventListener('keydown',function(e){if(!(e.ctrlKey||e.metaKey)||e.altKey)return;var key=e.key.toLowerCase();var action=key==='p'?'open-worktree-search':key==='tab'?'cycle-terminal':'';if(!action)return;e.preventDefault();e.stopImmediatePropagation();if(action==='cycle-terminal')parent.postMessage({action:action,direction:e.shiftKey?'previous':'next'},'*');else parent.postMessage({action:action},'*')},true)})()</script>"
-    let [<Literal>] private TerminalVisibleAction = "treemon-terminal-visible"
-    let [<Literal>] private ReconnectPrompt = "Press \u23ce to Reconnect"
-    let [<Literal>] private ReconnectObservationMilliseconds = 10_000
-    let [<Literal>] private ReconnectPollMilliseconds = 100
+    let [<Literal>] private TerminalPageHeadInjection =
+        "<style>.xterm-viewport{scrollbar-width:none}.xterm-viewport::-webkit-scrollbar{display:none}</style><script>(function(){function focusTerminal(){var input=document.querySelector('.xterm-helper-textarea');if(input)input.focus()}window.addEventListener('message',function(e){if(e.source!==parent||!e.data||e.data.action!=='focus-terminal')return;focusTerminal()});document.addEventListener('keydown',function(e){if(!(e.ctrlKey||e.metaKey)||e.altKey)return;var key=e.key.toLowerCase();var action=key==='p'?'open-worktree-search':key==='tab'?'cycle-terminal':'';if(!action)return;e.preventDefault();e.stopImmediatePropagation();if(action==='cycle-terminal')parent.postMessage({action:action,direction:e.shiftKey?'previous':'next'},'*');else parent.postMessage({action:action},'*')},true)})()</script>"
 
     let private proxyShutdownTimeout = TimeSpan.FromSeconds 5.0
 
-    let private reconnectWhenVisibleScript (allowedOrigins: string list) =
-        let serializedOrigins = JsonSerializer.Serialize allowedOrigins
-        let serializedAction = JsonSerializer.Serialize TerminalVisibleAction
-        let serializedPrompt = JsonSerializer.Serialize ReconnectPrompt
-
-        $"<script>(function(){{var allowedOrigins={serializedOrigins},action={serializedAction},reconnectPrompt={serializedPrompt},poll=null,deadline=null,reloading=false,reloadMarker='treemon-terminal-reconnect-load';function clearPending(){{if(poll!==null){{clearInterval(poll);poll=null}}if(deadline!==null){{clearTimeout(deadline);deadline=null}}}}function suppressReloadLoad(){{try{{if(sessionStorage.getItem(reloadMarker)!=='1')return false;sessionStorage.removeItem(reloadMarker);return true}}catch(_){{return true}}}}function isWaitingForReconnect(){{var terminal=document.querySelector('.xterm');return !!terminal&&Array.prototype.some.call(terminal.children,function(child){{return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt}})}}function reconnectIfWaiting(){{if(reloading||document.visibilityState!=='visible'||!isWaitingForReconnect())return false;reloading=true;clearPending();try{{sessionStorage.setItem(reloadMarker,'1')}}catch(_){{}}window.location.reload();return true}}function activate(loaded){{if(document.visibilityState!=='visible'){{clearPending();return}}if(loaded&&suppressReloadLoad())return;if(reconnectIfWaiting())return;if(poll===null)poll=setInterval(reconnectIfWaiting,{ReconnectPollMilliseconds});if(deadline!==null)clearTimeout(deadline);deadline=setTimeout(clearPending,{ReconnectObservationMilliseconds})}}window.addEventListener('message',function(event){{if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;if(event.data.active===false){{clearPending();return}}if(event.data.active===true)activate(event.data.loaded===true)}});document.addEventListener('visibilitychange',function(){{if(document.visibilityState!=='visible')clearPending()}})}})();</script>"
-
     let internal customizeTerminalPage (allowedOrigins: string list) (html: string) =
-        let injection =
-            HiddenViewportScrollbarStyle
-            + TerminalShortcutScript
-            + reconnectWhenVisibleScript allowedOrigins
+        let reconnectScript =
+            $"<script>(function(){{var allowedOrigins={JsonSerializer.Serialize allowedOrigins},action=\"treemon-terminal-visible\",reconnectPrompt=\"Press \\u23CE to Reconnect\",poll=null,deadline=null,reloading=false,reloadMarker='treemon-terminal-reconnect-load',suppressNextLoadedActivation=(function(){{try{{var marked=sessionStorage.getItem(reloadMarker)==='1';sessionStorage.removeItem(reloadMarker);return marked}}catch(_){{return true}}}})();function clearPending(){{if(poll!==null){{clearInterval(poll);poll=null}}if(deadline!==null){{clearTimeout(deadline);deadline=null}}}}function isWaitingForReconnect(){{var terminal=document.querySelector('.xterm');return !!terminal&&Array.prototype.some.call(terminal.children,function(child){{return child.tagName==='DIV'&&child.style.position==='absolute'&&child.textContent===reconnectPrompt}})}}function reconnectIfWaiting(){{if(reloading||document.visibilityState!=='visible'||!isWaitingForReconnect())return false;reloading=true;clearPending();try{{sessionStorage.setItem(reloadMarker,'1')}}catch(_){{}}window.location.reload();return true}}function activate(loaded){{if(document.visibilityState!=='visible'){{clearPending();return}}if(loaded&&suppressNextLoadedActivation){{suppressNextLoadedActivation=false;return}}if(reconnectIfWaiting())return;if(poll===null)poll=setInterval(reconnectIfWaiting,100);if(deadline!==null)clearTimeout(deadline);deadline=setTimeout(clearPending,10000)}}window.addEventListener('message',function(event){{if(event.source!==window.parent||allowedOrigins.indexOf(event.origin)<0||!event.data||event.data.action!==action)return;if(event.data.active===false){{clearPending();return}}if(event.data.active===true)activate(event.data.loaded===true)}});document.addEventListener('visibilitychange',function(){{if(document.visibilityState!=='visible')clearPending()}})}})();</script>"
 
-        html.Replace("</head>", injection + "</head>", StringComparison.OrdinalIgnoreCase)
+        html.Replace("</head>", TerminalPageHeadInjection + reconnectScript + "</head>", StringComparison.OrdinalIgnoreCase)
 
     let private receiveMessage mode (socket: WebSocket) =
         let buffer = Array.zeroCreate<byte> 8_192

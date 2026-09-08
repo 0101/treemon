@@ -1646,7 +1646,15 @@ type TerminalHostProxyTests() =
             )
             Assert.That(
                 customized,
-                Does.Contain("if(loaded&&suppressReloadLoad())return")
+                Does.Contain(
+                    "suppressNextLoadedActivation=(function(){try{var marked=sessionStorage.getItem(reloadMarker)==='1';sessionStorage.removeItem(reloadMarker);return marked}catch(_){return true}})()"
+                )
+            )
+            Assert.That(
+                customized,
+                Does.Contain(
+                    "if(loaded&&suppressNextLoadedActivation){suppressNextLoadedActivation=false;return}"
+                )
             )
             Assert.That(
                 customized,

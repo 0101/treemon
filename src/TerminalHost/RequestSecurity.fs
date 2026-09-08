@@ -26,30 +26,18 @@ module RequestSecurity =
     let internal tryAllowedOrigin (value: string) =
         // Uri.TryCreate is a byref-only framework parser; mutation stays at this boundary.
         let mutable uri = Unchecked.defaultof<Uri>
-        let parsed = Uri.TryCreate(value, UriKind.Absolute, &uri)
 
-        let loopbackHost =
-            if not parsed then
-                false
-            else
-                match IPAddress.TryParse uri.Host with
-                | true, address -> IPAddress.IsLoopback address
-                | false, _ ->
-                    String.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
-
-        let hasUserInfoDelimiter =
-            let start =
-                value.IndexOf("://", StringComparison.OrdinalIgnoreCase) + 3
-
-            start >= 3
-            && (value.Substring(start).Split([| '/'; '?'; '#' |], 2)[0]).Contains('@')
+        let isLoopbackHost () =
+            match IPAddress.TryParse uri.Host with
+            | true, address -> IPAddress.IsLoopback address
+            | false, _ ->
+                String.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
 
         if
-            parsed
+            Uri.TryCreate(value, UriKind.Absolute, &uri)
             && (uri.Scheme = Uri.UriSchemeHttp || uri.Scheme = Uri.UriSchemeHttps)
-            && loopbackHost
-            && String.IsNullOrEmpty uri.UserInfo
-            && not hasUserInfoDelimiter
+            && isLoopbackHost ()
+            && not (value.Contains('@'))
             && uri.AbsolutePath = "/"
             && String.IsNullOrEmpty uri.Query
             && String.IsNullOrEmpty uri.Fragment
@@ -77,11 +65,6 @@ module RequestSecurity =
             fixedTimeEquals bearerToken supplied
         | _ -> false
 
-    let private matchesOne (expected: string) (values: string list) =
-        match values with
-        | [ value ] -> String.Equals(value, expected, StringComparison.OrdinalIgnoreCase)
-        | _ -> false
-
     let metadata authorizationHeaders (context: HttpContext) =
         { RemoteAddress = context.Connection.RemoteIpAddress |> Option.ofObj
           LocalAddress = context.Connection.LocalIpAddress |> Option.ofObj
@@ -92,30 +75,24 @@ module RequestSecurity =
           ContentLength = context.Request.ContentLength |> Option.ofNullable }
 
     let validate (allowedOrigins: string list) (bearerToken: string) (metadata: RequestMetadata) =
-        let controlOrigin = $"http://127.0.0.1:{metadata.LocalPort}"
-
         let validOrigin =
             match metadata.OriginHeaders with
             | [] -> true
             | [ origin ] ->
-                controlOrigin :: allowedOrigins
+                $"http://127.0.0.1:{metadata.LocalPort}" :: allowedOrigins
                 |> List.exists (fun allowed ->
                     String.Equals(origin, allowed, StringComparison.OrdinalIgnoreCase))
             | _ -> false
 
-        match metadata.RemoteAddress, metadata.LocalAddress with
-        | Some remoteAddress, Some localAddress
+        match metadata.RemoteAddress, metadata.LocalAddress, metadata.HostHeaders with
+        | Some remoteAddress, Some localAddress, [ host ]
             when IPAddress.IsLoopback remoteAddress && IPAddress.IsLoopback localAddress ->
-            let expectedHost = $"127.0.0.1:{metadata.LocalPort}"
-
-            if not (matchesOne expectedHost metadata.HostHeaders) then
-                Error RequestRejection.Forbidden
-            elif not validOrigin then
-                Error RequestRejection.Forbidden
-            elif
-                metadata.ContentLength
-                |> Option.exists (fun length -> length > Protocol.MaximumRequestBodyBytes)
+            if
+                not (String.Equals(host, $"127.0.0.1:{metadata.LocalPort}", StringComparison.OrdinalIgnoreCase))
+                || not validOrigin
             then
+                Error RequestRejection.Forbidden
+            elif metadata.ContentLength |> Option.exists (fun length -> length > Protocol.MaximumRequestBodyBytes) then
                 Error RequestRejection.TooLarge
             elif not (validAuthorization bearerToken metadata.AuthorizationHeaders) then
                 Error RequestRejection.Unauthorized

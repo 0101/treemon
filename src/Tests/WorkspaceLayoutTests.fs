@@ -789,6 +789,26 @@ type TerminalPaneDomTests() =
 
             let! _ =
                 firstBrowserFrame.WaitForFunctionAsync(
+                    "() => typeof window.__terminalVisibleMessages === 'number'",
+                    (null :> obj),
+                    FrameWaitForFunctionOptions(Timeout = 5000.0f)
+                )
+
+            do! this.Page.BringToFrontAsync()
+            do! this.Page.Locator(".dashboard").FocusAsync()
+            let! _ =
+                this.Page.WaitForFunctionAsync(
+                    "() => document.visibilityState === 'visible' && document.hasFocus()",
+                    null,
+                    PageWaitForFunctionOptions(Timeout = 5000.0f)
+                )
+            let! _ =
+                this.Page.EvaluateAsync(
+                    "() => window.dispatchEvent(new Event('focus'))"
+                )
+
+            let! _ =
+                firstBrowserFrame.WaitForFunctionAsync(
                     "() => window.__terminalVisibleMessages >= 1",
                     (null :> obj),
                     FrameWaitForFunctionOptions(Timeout = 5000.0f)

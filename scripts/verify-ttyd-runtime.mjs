@@ -199,6 +199,26 @@ async function launchTerminalHost(
 
     return {
       manifest,
+      deleteTerminal: async (sessionId) => {
+        const response = await fetch(
+          new URL(
+            `/api/v2/terminals/${encodeURIComponent(sessionId)}`,
+            manifest.endpoint,
+          ),
+          {
+            method: "DELETE",
+            headers: { Authorization: "Bearer " + manifest.bearerToken },
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(
+            `TerminalHost terminal DELETE returned HTTP ${response.status}`,
+          );
+        }
+
+        return await response.json();
+      },
       terminate: async (timeoutMs) => {
         let shutdownError;
 
@@ -248,30 +268,53 @@ async function launchTerminalHost(
   }
 }
 
-export async function cleanupRuntimeResources({ host, browser, dashboard }) {
-  let browserError;
-  let dashboardError;
-  let hostError;
+async function cleanupFailure(description, operation) {
   try {
-    if (browser) await browser.close();
+    await operation();
   } catch (error) {
-    browserError = error;
+    return `${description} failed: ${error.message}`;
   }
-  try {
-    if (dashboard) await dashboard.terminate();
-  } catch (error) {
-    dashboardError = error;
-  }
-  try {
-    if (host) await host.terminate(10_000);
-  } catch (error) {
-    hostError = error;
-  }
+}
 
+export async function cleanupRuntimeResources({
+  host,
+  browser,
+  dashboard,
+  terminalSessionIds = [],
+}) {
+  const browserFailure = browser
+    ? await cleanupFailure("Browser cleanup", () => browser.close())
+    : undefined;
+  const dashboardFailure = dashboard
+    ? await cleanupFailure("Dashboard cleanup", () => dashboard.terminate())
+    : undefined;
+  const terminalFailures = host
+    ? await Promise.all(
+        terminalSessionIds.map((sessionId) =>
+          cleanupFailure(`Terminal ${sessionId} cleanup`, async () => {
+            const snapshot = await host.deleteTerminal(sessionId);
+            assert(
+              Array.isArray(snapshot.terminals),
+              "TerminalHost DELETE returned an invalid registry snapshot",
+            );
+            assert(
+              !snapshot.terminals.some(
+                (terminal) => terminal.sessionId === sessionId,
+              ),
+              `TerminalHost DELETE left terminal ${sessionId} in the registry`,
+            );
+          }),
+        ),
+      )
+    : [];
+  const hostFailure = host
+    ? await cleanupFailure("Host cleanup", () => host.terminate(10_000))
+    : undefined;
   const failures = [
-    browserError && `Browser cleanup failed: ${browserError.message}`,
-    dashboardError && `dashboard cleanup failed: ${dashboardError.message}`,
-    hostError && `host cleanup failed: ${hostError.message}`,
+    browserFailure,
+    dashboardFailure,
+    ...terminalFailures,
+    hostFailure,
   ].filter(Boolean);
 
   if (failures.length) throw new Error(failures.join("; "));
@@ -328,6 +371,7 @@ export async function runTtydRuntimeVerification() {
   let host;
   let browser;
   let dashboard;
+  let terminalSessionId;
 
   try {
     assert(process.platform === "win32", "The pinned ttyd runtime requires Windows");
@@ -408,6 +452,7 @@ export async function runTtydRuntimeVerification() {
     const snapshot = await response.json();
     assert(snapshot.terminals.length === 1, "TerminalHost did not start one terminal");
     const terminal = snapshot.terminals[0];
+    terminalSessionId = terminal.sessionId;
     assert(
       new URL(terminal.attachmentEndpoint).port !== "5000",
       "ttyd bound production port 5000",
@@ -541,7 +586,12 @@ export async function runTtydRuntimeVerification() {
   } finally {
     let cleanupError;
     try {
-      await cleanupRuntimeResources({ host, browser, dashboard });
+      await cleanupRuntimeResources({
+        host,
+        browser,
+        dashboard,
+        terminalSessionIds: terminalSessionId ? [terminalSessionId] : [],
+      });
     } catch (error) {
       cleanupError = error;
     }
