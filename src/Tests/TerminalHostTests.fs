@@ -2188,6 +2188,16 @@ type TerminalHostManifestTests() =
 [<Platform("Win")>]
 type TerminalHostJobObjectTests() =
     let powershell = executableOnPath "pwsh.exe"
+    let testOutput = DirectoryInfo AppContext.BaseDirectory
+    let consoleProbe =
+        Path.Combine(
+            __SOURCE_DIRECTORY__,
+            "TestAgentRecorder",
+            "bin",
+            testOutput.Parent.Name,
+            testOutput.Name,
+            "copilot.exe"
+        )
 
     [<Test>]
     member _.``owned console process starts without an attached console``() =
@@ -2202,13 +2212,8 @@ type TerminalHostJobObjectTests() =
 
             let owned =
                 JobProcess.start
-                    { Executable = powershell
-                      Arguments =
-                        [ "-NoLogo"
-                          "-NoProfile"
-                          "-NonInteractive"
-                          "-Command"
-                          """Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; [ConsoleProbe]::GetConsoleWindow().ToInt64() | Set-Content -LiteralPath $env:TM_CONSOLE_HANDLE_FILE; Start-Sleep -Seconds 300""" ]
+                    { Executable = consoleProbe
+                      Arguments = []
                       WorkingDirectory = root
                       Environment = [ "TM_CONSOLE_HANDLE_FILE", consoleHandleFile ] }
                 |> requireOk
